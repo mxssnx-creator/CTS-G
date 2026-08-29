@@ -1052,6 +1052,8 @@ class Pulse:
             return
         if passed:
             self.qa_pass += 1
+            if prev is not None and not prev.get("pass"):
+                self.qa_fail = max(0, self.qa_fail - 1)
         else:
             self.qa_fail += 1
             log(f"TEST FAIL {name} {detail}"[:240], every=20.0, key=f"fail:{name}")
