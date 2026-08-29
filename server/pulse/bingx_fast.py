@@ -287,6 +287,17 @@ class FastBingX:
         self.on_event = None
         self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
         self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err)
+        self._ts_lock = threading.Lock()
+        self._last_ts = 0
+
+    def _next_ts(self) -> int:
+        """BingX rejects bursts that reuse the same millisecond timestamp."""
+        with self._ts_lock:
+            t = int(time.time() * 1000)
+            if t <= self._last_ts:
+                t = self._last_ts + 1
+            self._last_ts = t
+            return t
 
     def start_ws(self, symbols: List[str]) -> None:
         self.hub.start(symbols)
@@ -350,7 +361,7 @@ class FastBingX:
         lane = self._lane(path, method)
         if not self._take(lane, path):
             return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
-        params: Dict[str, Any] = {"timestamp": str(int(time.time() * 1000)), "recvWindow": str(RECV)}
+        params: Dict[str, Any] = {"timestamp": str(self._next_ts()), "recvWindow": str(RECV)}
         if extra:
             for k, v in extra.items():
                 if v is None:
