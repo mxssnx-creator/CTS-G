@@ -2418,7 +2418,7 @@ class Pulse:
         self.did_io = True
         if not self.ok(r) and attach:
             msg0 = str(r.get("msg") or "").lower()
-            if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype")):
+            if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
                 r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)))
                 self.did_io = True

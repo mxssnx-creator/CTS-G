@@ -270,6 +270,8 @@ class FastBingX:
         self.cooldown_until = 0.0
         self.path_cd: Dict[str, float] = {}
         self.http = None
+        import urllib.request
+        self._opener = urllib.request.build_opener(urllib.request.HTTPHandler())
         if httpx is not None:
             self.http = httpx.Client(
                 base_url=self.base,
@@ -278,9 +280,6 @@ class FastBingX:
                 http2=False,
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30),
             )
-        else:
-            import urllib.request
-            self._opener = urllib.request.build_opener(urllib.request.HTTPHandler())
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
@@ -384,16 +383,13 @@ class FastBingX:
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def _http(self, method: str, url: str) -> Dict[str, Any]:
-        if self.http is not None:
-            r = self.http.request(method, url)
-            try:
-                return loads(r.content)
-            except Exception:
-                return {"code": r.status_code, "msg": r.text[:400], "error": True}
+        # Always urllib for signed query strings. httpx re-encodes `?` params and
+        # BingX then reports "signature mismatch" on burst entries with attach JSON.
         import urllib.request
         import urllib.error
+        full = url if url.startswith("http") else self.base + url
         req = urllib.request.Request(
-            self.base + url,
+            full,
             method=method,
             data=None if method in ("GET", "DELETE") else b"",
             headers={"X-BX-APIKEY": self.key, "User-Agent": UA},
@@ -406,6 +402,8 @@ class FastBingX:
                 return loads(e.read())
             except Exception:
                 return {"code": e.code, "msg": str(e)[:400], "error": True}
+        except Exception as e:
+            return {"code": -1, "msg": str(e)[:400], "error": True}
 
     def get(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._req("GET", path, extra)
