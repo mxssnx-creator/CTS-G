@@ -31,7 +31,12 @@ Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They 
 
 ## Linux install
 
-On the VPS (`/opt/cts-g`, desk **:3102**):
+On the VPS (`/opt/cts-g`, desk **:3102**). Unattended — no prompts. `--port` and `--name` are optional. Packages are installed only if missing.
+
+```bash
+sudo /opt/cts-g/deploy/install-linux.sh
+sudo /opt/cts-g/deploy/install-linux.sh --port 3102 --name cts-g
+```
 
 ```bash
 git clone https://github.com/mxssnx-creator/CTS-G.git /opt/cts-g

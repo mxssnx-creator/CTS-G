@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# CTS-G first-time Linux install: packages, trees, systemd, Redis, desk + engines.
+# CTS-G Linux install — unattended, skip software already present, run to the end.
 #
 #   sudo ./deploy/install-linux.sh
-#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G
-#   sudo ./deploy/install-linux.sh --clone --branch main
-#   sudo ./deploy/install-linux.sh --start-live
+#   sudo ./deploy/install-linux.sh --port 3102 --name cts-g
+#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G --start-live
 #
 set -euo pipefail
 
@@ -16,36 +15,45 @@ FROM_DIR=""
 DO_CLONE=0
 START_LIVE=0
 NO_START=0
+PORT_EXPLICIT=0
+NAME_EXPLICIT=0
 
 usage() {
   cat <<'EOF'
-CTS-G Linux install
+CTS-G Linux install (unattended)
 
 Usage: sudo ./deploy/install-linux.sh [options]
 
-  --from-dir PATH   Copy this checkout into /opt/cts-g (default: this repo)
-  --clone           git clone REPO_URL into /opt/cts-g instead of copying
+  --name NAME       Install name (default: cts-g) → /opt/NAME, /etc/NAME
+  --port N          Desk listen port (default: 3102)
+  --desk-port N     Same as --port
+  --host HOST       Public hostname/IP for result URLs (default: 152.53.114.112)
+  --from-dir PATH   Copy this checkout into /opt/NAME (default: this repo)
+  --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
-  --branch NAME     Branch to clone/update (default: main)
-  --desk-port N     Desk listen port (default: 3102)
-  --start-live      Also start grok-pulse@bingx-x01 (Live)
+  --branch NAME     Branch (default: main)
+  --start-live      Start grok-pulse@bingx-x01
   --no-start        Install units but do not start services
-  -h, --help        Show this help
+  --yes             No-op (install never prompts)
+  -h, --help
 
-Env: CTS_G_ROOT=/opt/cts-g  PULSE_DIR=/opt/grok-x01-pulse
-     REPO_URL  BRANCH  DESK_PORT  GIT_USER_NAME  GIT_USER_EMAIL  REMOTE_HOST
+Packages and Node are installed only if missing. Overlay/open positions are
+never flattened. Prints a results block with URLs at the end.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --name|-n) apply_name "${2:-}"; NAME_EXPLICIT=1; shift 2 ;;
+    --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
+    --host) PUBLIC_HOST="${2:-}"; REMOTE_HOST="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --clone) DO_CLONE=1; shift ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
-    --desk-port) DESK_PORT="${2:-}"; shift 2 ;;
     --start-live) START_LIVE=1; shift ;;
     --no-start) NO_START=1; shift ;;
+    --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
@@ -54,26 +62,29 @@ done
 require_linux
 require_root
 
-log "CTS-G Linux install  root=$CTS_G_ROOT  pulse=$PULSE_DIR  branch=$BRANCH"
+log "install  name=$CTS_G_NAME  root=$CTS_G_ROOT  desk=:${DESK_PORT}  branch=$BRANCH"
+log "unattended — no prompts; skip software already present"
 
 ensure_base_packages
 ensure_node
 ensure_dirs
 ensure_redis
 
-SRC=""
 if [[ "$DO_CLONE" -eq 1 ]]; then
   if [[ -d "$CTS_G_ROOT/.git" ]]; then
     log "existing clone at $CTS_G_ROOT — fetch $BRANCH"
-    git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null || true
+    git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null \
+      || git -C "$CTS_G_ROOT" remote add origin "$REPO_URL"
     git -C "$CTS_G_ROOT" fetch --prune origin
-    git -C "$CTS_G_ROOT" checkout "$BRANCH"
+    git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
     git -C "$CTS_G_ROOT" reset --hard "origin/$BRANCH"
+    ok "git updated $CTS_G_ROOT"
+  elif [[ -f "$CTS_G_ROOT/server/pulse/pulse_trader.py" ]]; then
+    skip "tree already at $CTS_G_ROOT (not a clone)"
   else
-    if [[ -e "$CTS_G_ROOT" && -n "$(ls -A "$CTS_G_ROOT" 2>/dev/null || true)" ]]; then
-      die "$CTS_G_ROOT is not empty; move it aside or use --from-dir"
-    fi
+    mkdir -p "$(dirname "$CTS_G_ROOT")"
     git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$CTS_G_ROOT"
+    ok "git clone $CTS_G_ROOT"
   fi
 else
   SRC="${FROM_DIR:-$(script_repo_root)}"
@@ -81,7 +92,7 @@ else
   if [[ "$(cd "$SRC" && pwd)" != "$(cd "$CTS_G_ROOT" 2>/dev/null && pwd || true)" ]]; then
     sync_app_tree "$SRC"
   else
-    log "already running from $CTS_G_ROOT — skip copy"
+    skip "app tree (already $CTS_G_ROOT)"
   fi
 fi
 
@@ -96,11 +107,16 @@ install_units
 enable_stack
 
 if [[ "$NO_START" -eq 1 ]]; then
-  log "units enabled, not started (--no-start)"
+  skip "start ( --no-start )"
+  print_results
 else
   start_stack "$START_LIVE"
   health_report
 fi
 
-print_keys_help
+if [[ ${#STEPS_FAIL[@]} -gt 0 ]]; then
+  warn "finished with failures: ${STEPS_FAIL[*]}"
+  exit 1
+fi
 log "install complete"
+exit 0

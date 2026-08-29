@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
 # Shared helpers for CTS-G Linux install / update. Sourced, not executed.
+# Always non-interactive. Packages/software are installed only when missing.
 set -euo pipefail
 
-CTS_G_ROOT="${CTS_G_ROOT:-/opt/cts-g}"
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export APT_LISTCHANGES_FRONTEND=none
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
+export npm_config_fund=false
+export npm_config_audit=false
+export npm_config_update_notifier=false
+export npm_config_yes=true
+
+CTS_G_NAME="${CTS_G_NAME:-cts-g}"
+CTS_G_ROOT="${CTS_G_ROOT:-/opt/${CTS_G_NAME}}"
 PULSE_DIR="${PULSE_DIR:-/opt/grok-x01-pulse}"
-ETC_DIR="${ETC_DIR:-/etc/cts-g}"
-LOG_DIR="${LOG_DIR:-/var/log/cts-g}"
+ETC_DIR="${ETC_DIR:-/etc/${CTS_G_NAME}}"
+LOG_DIR="${LOG_DIR:-/var/log/${CTS_G_NAME}}"
 ENV_FILE="${ENV_FILE:-$ETC_DIR/cts-g.env}"
 REPO_URL="${REPO_URL:-https://github.com/mxssnx-creator/CTS-G.git}"
 BRANCH="${BRANCH:-main}"
@@ -14,20 +26,25 @@ GIT_USER_NAME="${GIT_USER_NAME:-xssnet}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-mxssnx@gmail.com}"
 DESK_HOST="${DESK_HOST:-0.0.0.0}"
 DESK_PORT="${DESK_PORT:-3102}"
+PULSE_PORT="${PULSE_PORT:-3015}"
 REMOTE_HOST="${REMOTE_HOST:-152.53.114.112}"
+PUBLIC_HOST="${PUBLIC_HOST:-}"
 LIVE_SLOT="${LIVE_SLOT:-bingx-x01}"
 VST_SLOT="${VST_SLOT:-bingx-x02}"
 
-LIVE_UNITS=(
-  grok-pulse-http.service
-  grok-desk.service
-  "grok-pulse@${VST_SLOT}.service"
-  "grok-pulse@${LIVE_SLOT}.service"
-)
+STEPS_OK=()
+STEPS_SKIP=()
+STEPS_FAIL=()
+PKG_INSTALLED=()
+PKG_SKIPPED=()
 
-log()  { printf '[cts-g] %s\n' "$*"; }
-warn() { printf '[cts-g] WARN %s\n' "$*" >&2; }
-die()  { printf '[cts-g] ERROR %s\n' "$*" >&2; exit 1; }
+log()  { printf '[%s] %s\n' "$CTS_G_NAME" "$*"; }
+warn() { printf '[%s] WARN %s\n' "$CTS_G_NAME" "$*" >&2; }
+die()  { printf '[%s] ERROR %s\n' "$CTS_G_NAME" "$*" >&2; exit 1; }
+
+ok()   { STEPS_OK+=("$1"); log "ok    $1"; }
+skip() { STEPS_SKIP+=("$1"); log "skip  $1"; }
+fail() { STEPS_FAIL+=("$1"); warn "fail  $1"; }
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo $0)"
@@ -46,40 +63,78 @@ script_repo_root() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+apply_name() {
+  # --name changes install root / etc / logs. Pulse dir stays hardcoded in the engine.
+  CTS_G_NAME="${1:-$CTS_G_NAME}"
+  CTS_G_NAME="${CTS_G_NAME//[^A-Za-z0-9._-]/}"
+  [[ -n "$CTS_G_NAME" ]] || CTS_G_NAME=cts-g
+  CTS_G_ROOT="/opt/${CTS_G_NAME}"
+  ETC_DIR="/etc/${CTS_G_NAME}"
+  LOG_DIR="/var/log/${CTS_G_NAME}"
+  ENV_FILE="$ETC_DIR/cts-g.env"
+}
+
 detect_pkg() {
   if have apt-get; then echo apt
   elif have dnf; then echo dnf
   elif have yum; then echo yum
-  else die "need apt-get or dnf"
+  else echo none
   fi
 }
 
-pkg_install() {
-  local kind
+pkg_is_installed() {
+  local p="$1" kind
   kind="$(detect_pkg)"
   case "$kind" in
-    apt)
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update -y
-      apt-get install -y --no-install-recommends "$@"
-      ;;
-    dnf) dnf install -y "$@" ;;
-    yum) yum install -y "$@" ;;
+    apt) dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' ;;
+    dnf|yum) rpm -q "$p" >/dev/null 2>&1 ;;
+    *) have "$p" ;;
   esac
 }
 
-ensure_base_packages() {
-  local kind py redis curl_pkg
+pkg_install_missing() {
+  local kind missing=() p
   kind="$(detect_pkg)"
-  py="python3"
-  curl_pkg="curl"
+  [[ "$kind" != none ]] || { fail "no package manager"; return 0; }
+  for p in "$@"; do
+    if pkg_is_installed "$p" || have "$p"; then
+      PKG_SKIPPED+=("$p")
+    else
+      missing+=("$p")
+    fi
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    skip "packages (already installed)"
+    return 0
+  fi
+  log "installing packages: ${missing[*]}"
+  case "$kind" in
+    apt)
+      apt-get update -y -qq
+      apt-get install -y -qq --no-install-recommends \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold \
+        "${missing[@]}"
+      ;;
+    dnf) dnf install -y "${missing[@]}" ;;
+    yum) yum install -y "${missing[@]}" ;;
+  esac
+  PKG_INSTALLED+=("${missing[@]}")
+  ok "packages ${missing[*]}"
+}
+
+ensure_base_packages() {
+  local kind redis
+  kind="$(detect_pkg)"
   redis="redis-server"
   [[ "$kind" != apt ]] && redis="redis"
-  log "installing packages ($kind)"
-  pkg_install ca-certificates curl git rsync gnupg "$py" "$redis" systemd
+  pkg_install_missing ca-certificates curl git rsync python3 "$redis"
   if [[ "$kind" == apt ]]; then
-    pkg_install python3-minimal redis-tools || true
+    pkg_install_missing gnupg redis-tools python3-venv || true
   fi
+  have python3 || die "python3 is required"
+  have git || die "git is required"
+  have rsync || die "rsync is required"
 }
 
 node_major() {
@@ -88,65 +143,90 @@ node_major() {
 }
 
 ensure_node() {
-  local major
+  local major kind
   major="$(node_major)"
-  if [[ "$major" -ge 20 ]]; then
-    log "node $(node -v) already ok"
-    have npm || die "npm missing next to node"
-    return
+  if [[ "$major" -ge 20 ]] && have npm; then
+    skip "node $(node -v) / npm $(npm -v)"
+    return 0
   fi
-  log "installing Node.js 22"
-  if [[ "$(detect_pkg)" == apt ]]; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    pkg_install nodejs
+  kind="$(detect_pkg)"
+  log "installing Node.js 22 (found major=$major)"
+  if [[ "$kind" == apt ]]; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+    pkg_install_missing nodejs
   else
-    pkg_install nodejs npm || {
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-      pkg_install nodejs
+    pkg_install_missing nodejs npm || {
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - >/dev/null
+      pkg_install_missing nodejs
     }
   fi
   have node && have npm || die "node/npm install failed"
-  log "node $(node -v) npm $(npm -v)"
+  ok "node $(node -v) npm $(npm -v)"
 }
 
 ensure_redis() {
-  systemctl enable --now redis-server.service 2>/dev/null \
-    || systemctl enable --now redis.service 2>/dev/null \
-    || warn "could not enable redis systemd unit — start it yourself"
+  local unit=""
+  if systemctl list-unit-files redis-server.service >/dev/null 2>&1; then
+    unit=redis-server.service
+  elif systemctl list-unit-files redis.service >/dev/null 2>&1; then
+    unit=redis.service
+  fi
+  if [[ -n "$unit" ]]; then
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null && systemctl is-active --quiet "$unit"; then
+      skip "redis ($unit running)"
+    else
+      systemctl enable --now "$unit" >/dev/null 2>&1 || warn "could not enable $unit"
+      ok "redis $unit"
+    fi
+  else
+    warn "no redis systemd unit — start redis yourself if needed"
+  fi
   if have redis-cli; then
-    redis-cli ping >/dev/null 2>&1 || warn "redis-cli ping failed (keys can still be set later)"
+    redis-cli ping >/dev/null 2>&1 && ok "redis ping" || fail "redis ping"
   fi
 }
 
 ensure_dirs() {
   mkdir -p "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
   chmod 755 "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
+  ok "dirs $CTS_G_ROOT $PULSE_DIR $ETC_DIR $LOG_DIR"
 }
 
-seed_env() {
+write_env_file() {
   mkdir -p "$ETC_DIR"
-  if [[ ! -f "$ENV_FILE" ]]; then
-    if [[ -f "$CTS_G_ROOT/deploy/cts-g.env.example" ]]; then
-      sed \
-        -e "s|^PULSE_URL=.*|PULSE_URL=http://127.0.0.1:3015|" \
-        -e "s|^CTS_URL=.*|CTS_URL=http://127.0.0.1|" \
-        -e "s|^HOST=.*|HOST=${DESK_HOST}|" \
-        -e "s|^PORT=.*|PORT=${DESK_PORT}|" \
-        "$CTS_G_ROOT/deploy/cts-g.env.example" >"$ENV_FILE"
-    else
-      cat >"$ENV_FILE" <<EOF
-PULSE_URL=http://127.0.0.1:3015
+  cat >"$ENV_FILE" <<EOF
+PULSE_URL=http://127.0.0.1:${PULSE_PORT}
 CTS_URL=http://127.0.0.1
 HOST=${DESK_HOST}
 PORT=${DESK_PORT}
 PYTHONUNBUFFERED=1
 PYTHONDONTWRITEBYTECODE=1
+CTS_G_NAME=${CTS_G_NAME}
+CTS_G_ROOT=${CTS_G_ROOT}
 EOF
-    fi
-    chmod 0644 "$ENV_FILE"
-    log "wrote $ENV_FILE (desk :$DESK_PORT)"
+  chmod 0644 "$ENV_FILE"
+}
+
+seed_env() {
+  mkdir -p "$ETC_DIR"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    write_env_file
+    ok "env $ENV_FILE (desk :$DESK_PORT)"
+  elif [[ "${FORCE_ENV:-0}" == "1" ]]; then
+    write_env_file
+    ok "env $ENV_FILE rewritten (desk :$DESK_PORT)"
   else
-    log "keeping existing $ENV_FILE"
+    # Keep keys/custom lines; still refresh PORT if --port was passed.
+    if [[ "${PORT_EXPLICIT:-0}" == "1" ]]; then
+      if grep -q '^PORT=' "$ENV_FILE"; then
+        sed -i "s|^PORT=.*|PORT=${DESK_PORT}|" "$ENV_FILE"
+      else
+        printf 'PORT=%s\n' "$DESK_PORT" >>"$ENV_FILE"
+      fi
+      ok "env PORT=${DESK_PORT}"
+    else
+      skip "env $ENV_FILE"
+    fi
   fi
 }
 
@@ -161,16 +241,16 @@ configure_git() {
   git -C "$root" config user.email "$GIT_USER_EMAIL"
   git -C "$root" config pull.ff only
   git -C "$root" config init.defaultBranch "$BRANCH"
+  git -C "$root" config advice.detachedHead false
   if git -C "$root" remote get-url "$GIT_REMOTE" >/dev/null 2>&1; then
     git -C "$root" remote set-url "$GIT_REMOTE" "$REPO_URL"
   else
     git -C "$root" remote add "$GIT_REMOTE" "$REPO_URL"
   fi
   git -C "$root" branch -M "$BRANCH" 2>/dev/null || true
-  log "git $GIT_REMOTE=$REPO_URL  user=$GIT_USER_NAME <$GIT_USER_EMAIL>"
+  ok "git $GIT_REMOTE=$REPO_URL  $GIT_USER_NAME <$GIT_USER_EMAIL>"
 }
 
-# Runtime files the engine writes — never clobber on update.
 pulse_rsync_excludes() {
   cat <<'EOF'
 --exclude=__pycache__/
@@ -211,11 +291,10 @@ sync_pulse_tree() {
       cp -a "$src/$f" "$PULSE_DIR/$f"
     fi
   done
-  # universe cache can refresh; overlays stay put once seeded
   [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py
-  log "pulse tree synced → $PULSE_DIR"
+  ok "pulse tree $PULSE_DIR"
 }
 
 sync_app_tree() {
@@ -236,29 +315,45 @@ sync_app_tree() {
     --exclude '__pycache__/' \
     "$from/" "$CTS_G_ROOT/"
   chmod 755 "$CTS_G_ROOT/deploy/"*.sh 2>/dev/null || true
-  log "app tree synced → $CTS_G_ROOT"
+  ok "app tree $CTS_G_ROOT"
+}
+
+render_unit() {
+  local src="$1" dest="$2"
+  sed \
+    -e "s|/opt/cts-g|${CTS_G_ROOT}|g" \
+    -e "s|/etc/cts-g|${ETC_DIR}|g" \
+    -e "s|:3102|:${DESK_PORT}|g" \
+    -e "s|PORT=3102|PORT=${DESK_PORT}|g" \
+    -e "s|CTS-G desk UI|${CTS_G_NAME} desk UI|g" \
+    "$src" >"$dest"
 }
 
 install_units() {
   local unit
   for unit in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target; do
-    install -m 0644 "$CTS_G_ROOT/deploy/$unit" "/etc/systemd/system/$unit"
+    render_unit "$CTS_G_ROOT/deploy/$unit" "/etc/systemd/system/$unit"
   done
   systemctl daemon-reload
-  log "systemd units installed"
+  ok "systemd units"
 }
 
 npm_install_desk() {
   [[ -f "$CTS_G_ROOT/package.json" ]] || die "package.json missing in $CTS_G_ROOT"
-  (
-    cd "$CTS_G_ROOT"
-    if [[ -f package-lock.json ]]; then
-      npm ci
-    else
-      npm install
-    fi
-  )
-  log "npm install complete"
+  local oldpwd="$PWD"
+  cd "$CTS_G_ROOT"
+  if [[ -d node_modules/vite && -f package-lock.json && ! package.json -nt node_modules ]]; then
+    skip "npm (node_modules current)"
+    cd "$oldpwd"
+    return 0
+  fi
+  if [[ -f package-lock.json ]]; then
+    npm ci --no-fund --no-audit --no-progress
+  else
+    npm install --no-fund --no-audit --no-progress
+  fi
+  cd "$oldpwd"
+  ok "npm install"
 }
 
 redis_has_keys() {
@@ -271,72 +366,126 @@ redis_has_keys() {
 }
 
 enable_stack() {
-  systemctl enable grok-pulse.target grok-pulse-http.service grok-desk.service
-  systemctl enable "grok-pulse@${VST_SLOT}.service"
-  systemctl enable "grok-pulse@${LIVE_SLOT}.service"
+  systemctl enable grok-pulse.target grok-pulse-http.service grok-desk.service >/dev/null 2>&1 || true
+  systemctl enable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1 || true
+  systemctl enable "grok-pulse@${LIVE_SLOT}.service" >/dev/null 2>&1 || true
+  ok "units enabled"
 }
 
 start_stack() {
   local start_live="${1:-0}"
-  systemctl restart grok-pulse-http.service
-  systemctl restart grok-desk.service
-  systemctl restart "grok-pulse@${VST_SLOT}.service"
+  systemctl restart grok-pulse-http.service || fail "start grok-pulse-http"
+  systemctl restart grok-desk.service || fail "start grok-desk"
+  systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst"
   if [[ "$start_live" == "1" ]]; then
-    systemctl restart "grok-pulse@${LIVE_SLOT}.service"
+    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
   elif redis_has_keys "$LIVE_SLOT"; then
     log "Live keys present — starting $LIVE_SLOT"
-    systemctl restart "grok-pulse@${LIVE_SLOT}.service"
+    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
   else
-    warn "Live $LIVE_SLOT not started (no Redis api_key/api_secret). VST is up."
+    skip "live engine (no Redis api_key/api_secret)"
   fi
-  systemctl start grok-pulse.target || true
+  systemctl start grok-pulse.target >/dev/null 2>&1 || true
 }
 
 wait_http() {
-  local url="$1" tries="${2:-30}" delay="${3:-1}"
+  local url="$1" tries="${2:-40}" delay="${3:-1}"
   local i
-  for i in $(seq 1 "$tries"); do
+  i=0
+  while [[ "$i" -lt "$tries" ]]; do
     if curl -sf -o /dev/null --max-time 2 "$url"; then
       return 0
     fi
+    i=$((i + 1))
     sleep "$delay"
   done
   return 1
 }
 
-health_report() {
-  local u
-  echo
-  log "unit status"
-  for u in grok-pulse-http.service grok-desk.service "grok-pulse@${VST_SLOT}.service" "grok-pulse@${LIVE_SLOT}.service"; do
-    printf '  %-36s %s\n' "$u" "$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
-  done
-  if wait_http "http://127.0.0.1:3015/stats.json?conn=overall" 8 1; then
-    log "pulse HTTP :3015 ok"
-  else
-    warn "pulse HTTP :3015 not answering yet"
+public_host() {
+  if [[ -n "${PUBLIC_HOST}" ]]; then
+    printf '%s\n' "$PUBLIC_HOST"
+    return
   fi
-  if wait_http "http://127.0.0.1:${DESK_PORT}/" 20 1; then
-    log "desk :${DESK_PORT} ok"
-  else
-    warn "desk :${DESK_PORT} not answering yet (first npm/vite boot can take a minute)"
-  fi
+  printf '%s\n' "$REMOTE_HOST"
 }
 
-print_keys_help() {
-  cat <<EOF
+local_ip() {
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
 
-Add BingX keys (never stored in the repo):
+unit_state() {
+  systemctl is-active "$1" 2>/dev/null || echo unknown
+}
 
-  redis-cli HSET connection:${LIVE_SLOT} api_key 'YOUR_LIVE_KEY' api_secret 'YOUR_LIVE_SECRET'
-  redis-cli HSET connection:${VST_SLOT} api_key 'YOUR_VST_KEY' api_secret 'YOUR_VST_SECRET'
-  systemctl restart grok-pulse@${LIVE_SLOT}
+git_head() {
+  git -C "$CTS_G_ROOT" rev-parse --short HEAD 2>/dev/null || echo none
+}
 
-Control:
-  systemctl status grok-pulse.target
-  journalctl -u grok-pulse@${LIVE_SLOT} -f
-  curl -s http://127.0.0.1:${DESK_PORT}/ | head
-  journalctl -u grok-desk -n 50
+print_results() {
+  local host ip desk pulse repo sha
+  host="$(public_host)"
+  ip="$(local_ip)"
+  desk="http://${host}:${DESK_PORT}/"
+  pulse="http://${host}:${PULSE_PORT}"
+  repo="$REPO_URL"
+  sha="$(git_head)"
+  echo
+  echo "======== ${CTS_G_NAME} install results ========"
+  echo "name        $CTS_G_NAME"
+  echo "root        $CTS_G_ROOT"
+  echo "pulse dir   $PULSE_DIR"
+  echo "env         $ENV_FILE"
+  echo "git         $repo"
+  echo "branch      $BRANCH"
+  echo "sha         $sha"
+  echo "user        $GIT_USER_NAME <$GIT_USER_EMAIL>"
+  echo "desk bind   ${DESK_HOST}:${DESK_PORT}"
+  echo
+  echo "units"
+  printf '  %-36s %s\n' grok-pulse-http.service "$(unit_state grok-pulse-http.service)"
+  printf '  %-36s %s\n' grok-desk.service "$(unit_state grok-desk.service)"
+  printf '  %-36s %s\n' "grok-pulse@${VST_SLOT}.service" "$(unit_state grok-pulse@${VST_SLOT}.service)"
+  printf '  %-36s %s\n' "grok-pulse@${LIVE_SLOT}.service" "$(unit_state grok-pulse@${LIVE_SLOT}.service)"
+  echo
+  echo "packages installed  ${PKG_INSTALLED[*]:-(none)}"
+  echo "packages skipped    ${PKG_SKIPPED[*]:-(none)}"
+  echo "steps ok            ${STEPS_OK[*]:-(none)}"
+  echo "steps skipped       ${STEPS_SKIP[*]:-(none)}"
+  echo "steps failed        ${STEPS_FAIL[*]:-(none)}"
+  echo
+  echo "URLs"
+  echo "  Desk UI           $desk"
+  echo "  Desk (local)      http://127.0.0.1:${DESK_PORT}/"
+  [[ -n "$ip" ]] && echo "  Desk (LAN)        http://${ip}:${DESK_PORT}/"
+  echo "  Pulse stats       ${pulse}/stats.json?conn=overall"
+  echo "  Pulse live        ${pulse}/stats.json?conn=live"
+  echo "  Pulse VST         ${pulse}/stats.json?conn=vst"
+  echo "  Pulse control     ${pulse}/control.json"
+  echo "  Pulse config      ${pulse}/config.json?conn=live"
+  echo "  GitHub            https://github.com/mxssnx-creator/CTS-G"
+  echo "  Commit            https://github.com/mxssnx-creator/CTS-G/commit/${sha}"
+  echo
+  if redis_has_keys "$LIVE_SLOT"; then
+    echo "Live keys           present in Redis connection:${LIVE_SLOT}"
+  else
+    echo "Live keys           missing — set then restart:"
+    echo "  redis-cli HSET connection:${LIVE_SLOT} api_key '…' api_secret '…'"
+    echo "  systemctl restart grok-pulse@${LIVE_SLOT}"
+  fi
+  echo "=============================================="
+}
 
-EOF
+health_report() {
+  if wait_http "http://127.0.0.1:${PULSE_PORT}/stats.json?conn=overall" 12 1; then
+    ok "pulse :${PULSE_PORT}"
+  else
+    fail "pulse :${PULSE_PORT} not answering"
+  fi
+  if wait_http "http://127.0.0.1:${DESK_PORT}/" 40 1; then
+    ok "desk :${DESK_PORT}"
+  else
+    fail "desk :${DESK_PORT} not answering yet"
+  fi
+  print_results
 }
