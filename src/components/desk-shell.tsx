@@ -154,7 +154,7 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex rounded-radius border border-border bg-surface p-1">
-        <button type="button" className={`${btn} ${active ? "text-muted" : "text-primary"}`} disabled={Boolean(busy)} onClick={() => run("start")}>
+        <button type="button" className={`${btn} ${active ? "text-muted" : "text-primary"}`} disabled={Boolean(busy)} onClick={() => run(paused ? "resume" : "start")}>
           <Play className="size-4" /> {paused ? "Resume" : "Start"}
         </button>
         <button type="button" className={`${btn}`} disabled={Boolean(busy) || !active} onClick={() => run("pause")}>
@@ -164,7 +164,7 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
           <Square className="size-4" /> Stop
         </button>
       </div>
-      {msg ? <span className="max-w-56 truncate font-mono text-[10px] text-muted">{busy ? busy : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
+      {msg ? <span className="max-w-72 text-right font-mono text-[10px] text-muted">{busy ? busy : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
     </div>
   );
 }

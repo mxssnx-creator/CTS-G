@@ -61,7 +61,16 @@ async function fromCts() {
   s.halted = !s.running;
   s.alive = s.running;
   s.paused = false;
-  s.haltReason = s.running ? "" : "sidecar-down";
+  s.haltReason = s.running ? "" : "engine-stopped";
+  s.lastError = "";
+  if (liveLane) {
+    liveLane.lastError = liveLane.running ? "" : liveLane.lastError || "";
+    liveLane.haltReason = liveLane.running ? "" : liveLane.haltReason || "engine-stopped";
+  }
+  if (vstLane) {
+    vstLane.lastError = vstLane.running ? "" : vstLane.lastError || "";
+    vstLane.haltReason = vstLane.running ? "" : vstLane.haltReason || "engine-stopped";
+  }
   if (liveLane) {
     s.progressPhase = liveLane.progressPhase;
     s.progressPct = liveLane.progressPct;

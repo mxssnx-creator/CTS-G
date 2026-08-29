@@ -35,8 +35,14 @@
   "dcaCooldownSeconds": 45,
   "dcaBreakevenProfitPct": 0.2,
   "dcaTakeProfitMode": "average",
-  "dcaStepDistancesPct": [0.5, 0.9],
-  "dcaStepVolumeMultipliers": [1.5, 2.0],
+  "dcaStepDistancesPct": [
+    0.5,
+    0.9
+  ],
+  "dcaStepVolumeMultipliers": [
+    1.5,
+    2
+  ],
   "dcaAutoDeact": true,
   "dcaMinPf": 1.1,
   "dcaPfWindow": 15,
