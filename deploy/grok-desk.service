@@ -20,6 +20,7 @@ Environment=HOST=0.0.0.0
 Environment=PORT=3102
 Environment=PULSE_URL=http://127.0.0.1:3015
 Environment=CTS_URL=http://127.0.0.1
+Environment=PATH=/opt/cts-g/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LimitNOFILE=8192
 StandardOutput=journal
 StandardError=journal
