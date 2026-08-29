@@ -792,13 +792,19 @@ class Pulse:
     def notional_cap(self) -> float:
         return max(self.sized_notional(), 2.0)
 
+    def avail_notional(self, c: Optional["Contract"] = None) -> float:
+        """USDT notional the remaining available balance can still carry at this pair's max lev."""
+        lev = max(1, self.leverage_for(c) if c is not None else int(LEVERAGE or 1))
+        return max(0.0, float(self.available or 0)) * lev * 0.90
+
     def max_book_notional(self) -> float:
-        """Per-position book room. 0 stack = unlimited (margin is the limiter). Never shrink on small equity."""
+        """Per-position book room. Unlimited stack: remaining available is the limiter."""
         stack = int(getattr(self.block, "max_stack", 0) or 0)
         if stack <= 0:
-            lev = max(1, int(LEVERAGE or 1))
-            room = float(self.available or 0) * lev
-            return max(self.notional_cap() * 8.0, room if room > 0 else 8.0)
+            room = self.avail_notional()
+            if room > 0:
+                return room
+            return self.notional_cap()
         inc = max(1, stack) * max(0.25, float(getattr(self.block, "volume_ratio", 1.0)))
         return self.notional_cap() * (1.0 + inc)
 
@@ -820,35 +826,25 @@ class Pulse:
         return q
 
     def size_qty(self, c: Contract, px: float) -> float:
+        """Size from remaining available first. Skip if the exchange min lot needs more margin than we have."""
         if px <= 0:
+            return 0.0
+        if float(self.available or 0) <= 0:
             return 0.0
         floor = self.min_order_qty(c, px)
         if floor <= 0:
             return 0.0
         floor_n = floor * px
-        want = max(self.sized_notional() / px, floor)
-        try:
-            want *= self.coord.size_mult(len(self.open))
-        except Exception:
-            pass
-        q = self.round_qty_up(c, want)
+        room = self.avail_notional(c)
+        if room <= 0 or floor_n > room * 1.02:
+            return 0.0
+        want_n = min(self.sized_notional(), room)
+        if want_n < floor_n:
+            want_n = floor_n
+        q = self.round_qty(c, want_n / px)
         if q < floor:
-            q = floor
-        n = q * px
-        lev = max(1, self.leverage_for(c))
-        if self.available > 0:
-            max_n = self.available * 0.90 * lev
-            if floor_n > max_n * 1.15:
-                return 0.0
-            if n > max_n:
-                q = self.round_qty(c, max_n / px)
-                if q < floor:
-                    return 0.0
-                n = q * px
-        book = self.max_book_notional()
-        if n > book:
-            if floor_n <= book * 1.35 or (self.available > 0 and floor_n / lev <= self.available * 0.32):
-                return floor
+            return 0.0
+        if q * px > room * 1.02:
             return 0.0
         return q
 
@@ -2329,6 +2325,8 @@ class Pulse:
             return
         if time.time() < self.cooldown.get("__book__", 0):
             return
+        if float(self.available or 0) <= 0:
+            return
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
         if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
@@ -2353,14 +2351,13 @@ class Pulse:
         qty = self.size_qty(c, px)
         if qty <= 0:
             return
-        if qty * px > self.max_book_notional():
-            log(f"SKIP {sym} book {qty*px:.1f}>{self.max_book_notional():.1f}", every=40.0, key=f"book:{sym}", quiet=True)
+        notional = qty * px
+        if notional > self.max_book_notional() * 1.02:
             return
         self.ensure_max_leverage(sym)
-        notional = qty * px
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
-        if self.available > 0 and (margin > self.available * 0.92):
+        if margin > float(self.available or 0) * 0.95:
             return
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
@@ -2458,6 +2455,9 @@ class Pulse:
                 log(f"ORDER FAIL {sym} {side} {msg}")
                 low = str(msg or "").lower()
                 self.cooldown[sym] = time.time() + (45.0 if "cooling" in low else 12.0)
+                if "insufficient" in low and "margin" in low:
+                    self.cooldown["__book__"] = time.time() + 20.0
+                    log(f"ENTRY wait available={self.available:.4f} after {sym}", every=15.0, key="avail-wait")
                 return
         data = (r.get("data") or {}).get("order") or r.get("data") or {}
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
@@ -3684,10 +3684,21 @@ class Pulse:
         prefer = -1 if n_s >= n_l + 3 else (1 if n_l >= n_s + 3 else 0)
         if prefer:
             ranked = [r for r in ranked if r[2] == prefer] + [r for r in ranked if r[2] != prefer]
+        if float(self.available or 0) < 8.0:
+            def _min_n(row: Tuple[float, str, int, str]) -> float:
+                s = row[1]
+                c = self.contracts.get(s)
+                px = self.px.get(s) or 0
+                if not c or px <= 0:
+                    return 1e9
+                return self.min_order_qty(c, px) * px
+            ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
         for conf, s, d, why in ranked:
             if self.entries_blocked():
+                break
+            if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
             pack = "indications" if str(why).startswith("ind:") else "general"
             if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
@@ -3705,11 +3716,14 @@ class Pulse:
                 placed += 1
             else:
                 skipped += 1
+            room = self.avail_notional()
             burst = 1 if int(getattr(self, "_order_est", 0) or 0) >= 180 else (16 if MAX_OPEN <= 0 else 6)
+            if room < 8:
+                burst = 1
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
-            log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)}", every=30.0, key="entry0")
+            log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
             self.skip_log["entry0"] = time.time()
         self.maybe_block_adds()
         self.maybe_dca_adds()
