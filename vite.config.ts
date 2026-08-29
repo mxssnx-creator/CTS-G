@@ -1,6 +1,6 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Plugin } from "vite";
+import type { Plugin, ProxyOptions } from "vite";
 import { defineConfig } from "vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
@@ -142,6 +142,42 @@ function authPopupPlugin(): Plugin {
   };
 }
 
+function pulseProxy(path: string): Record<string, ProxyOptions> {
+  return {
+    [path]: {
+      target: "http://152.53.114.112:3015",
+      changeOrigin: true,
+      configure(proxy) {
+        proxy.on("error", (_err, req, res) => {
+          const r = res as import("node:http").ServerResponse;
+          if (!r || r.headersSent) return;
+          if (String(req.url || "").startsWith("/stats.json")) {
+            try {
+              const body = readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8");
+              r.writeHead(200, { "Content-Type": "application/json" });
+              r.end(body);
+              return;
+            } catch {
+              /* fall through */
+            }
+          }
+          r.writeHead(503, { "Content-Type": "application/json" });
+          r.end(
+            JSON.stringify({
+              ok: false,
+              running: false,
+              halted: true,
+              haltReason: "sidecar-down",
+              detail:
+                "Live pulse sidecar unreachable. Restart grok-pulse@bingx-x01 on the VPS (SSH). Overlay is ready: all USDT-M, 0=unlimited, Block+DCA multi-add.",
+            }),
+          );
+        });
+      },
+    },
+  };
+}
+
 // `0.0.0.0:8080` is the live-preview contract — don't change host/port.
 // The dev server starts once `src/router.tsx` and `src/routes/` exist — see
 // AGENTS.md § "First scaffold".
@@ -151,34 +187,13 @@ export default defineConfig(({ command, isPreview }) => ({
     port: 8080,
     strictPort: true,
     proxy: {
-      "/connections.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/control.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/config.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/universe.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/stats.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/results-export.json": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
-      "/results-export.md": {
-        target: "http://152.53.114.112:3015",
-        changeOrigin: true,
-      },
+      ...pulseProxy("/connections.json"),
+      ...pulseProxy("/control.json"),
+      ...pulseProxy("/config.json"),
+      ...pulseProxy("/universe.json"),
+      ...pulseProxy("/stats.json"),
+      ...pulseProxy("/results-export.json"),
+      ...pulseProxy("/results-export.md"),
     },
   },
   preview: {
