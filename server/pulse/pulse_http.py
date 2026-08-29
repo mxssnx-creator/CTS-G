@@ -500,7 +500,10 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(blob)))
         self._cors()
         self.end_headers()
-        self.wfile.write(blob)
+        try:
+            self.wfile.write(blob)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def do_OPTIONS(self):
         self.send_response(204)

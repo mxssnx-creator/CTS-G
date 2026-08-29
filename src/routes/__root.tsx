@@ -7,6 +7,9 @@ import appCss from "../styles.css?url";
 const APP_NAME = "X01 Pulse Desk";
 
 export const Route = createRootRoute({
+  notFoundComponent: () => (
+    <p className="p-8 font-mono text-sm text-muted">Not found</p>
+  ),
   head: () => ({
     meta: [
       { charSet: "utf-8" },

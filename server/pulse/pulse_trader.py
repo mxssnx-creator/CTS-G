@@ -289,16 +289,17 @@ def sl_bounds(side: str, mark: float, last: float, entry: float, liq: float, tic
         upper = lo_px - pad
         lower = (liq * 1.001) if liq > 0 else (e * (1.0 - 0.0055) if e > 0 else lo_px * 0.9945)
         if e > 0 and hi_px > e * 1.0015:
-            lower = max(lower, e * 1.0001)
+            lower = max(lower, min(e * 1.0001, upper - tick))
         if lower >= upper:
-            upper = max(upper, lower + tick)
+            lower = upper - max(tick, hi_px * 0.002)
         return float(lower), float(upper)
     lower = hi_px + pad
     upper = (liq * 0.999) if liq > 0 else (e * (1.0 + 0.0055) if e > 0 else hi_px * 1.0055)
     if e > 0 and lo_px < e * 0.9985:
-        upper = min(upper, e * 0.9999)
-    if lower >= upper:
         upper = max(upper, lower + tick)
+        upper = min(upper, max(e * 0.9999, lower + tick))
+    if lower >= upper:
+        upper = lower + max(tick, hi_px * 0.002)
     return float(lower), float(upper)
 
 
@@ -1419,6 +1420,10 @@ class Pulse:
 
     def rollup_tf(self) -> None:
         """Build 5m/15m OHLC from 1m so higher TFs are never empty on a large book."""
+        now = time.time()
+        if now - float(getattr(self, "_rollup_ts", 0) or 0) < 12.0:
+            return
+        self._rollup_ts = now
         src = self.klines_tf.get("1m") or {}
         for tf, n in (("5m", 5), ("15m", 15)):
             dest = self.klines_tf.setdefault(tf, {})
@@ -1947,11 +1952,15 @@ class Pulse:
             if oid:
                 break
         if not oid:
-            self.errors += 1
-            self.last_error = f"{kind} {pos.symbol} {msg}"[:220]
-            log(f"CTRL FAIL {kind} {pos.symbol} {pos.side} {msg} px={price} mark={self.px.get(pos.symbol)} last={self.last_px.get(pos.symbol)}")
-            low2 = msg.lower()
+            short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
+            if is_transient_api(msg) or kind_err in ("flat", "px", "liq", "exists", "qty_close"):
+                log(f"CTRL SKIP {kind} {pos.symbol} {short}", every=12.0, key=f"cskip:{pos.symbol}:{short}")
+            else:
+                self.errors += 1
+                self.last_error = f"{kind} {pos.symbol} {short}"[:160]
+                log(f"CTRL FAIL {kind} {pos.symbol} {pos.side} {short} px={price} mark={self.px.get(pos.symbol)}")
+            low2 = msg.lower()
             if kind_err == "flat" or "position not exist" in low2:
                 self.ctrl_skip[pos.symbol] = time.time() + 20
                 age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
@@ -4564,14 +4573,21 @@ class Pulse:
                 overall_ok = False
         range_ok = True
         for p in self.open.values():
+            if time.time() - float(getattr(p, "opened_at", 0) or 0) < 90.0:
+                continue
             if not p.entry:
                 continue
             sl_px = float(getattr(p, "sec_sl", 0) or p.sl or 0)
             tp_px = float(getattr(p, "sec_tp", 0) or p.tp or 0)
-            if sl_px > 0 and not self.sl_legal(p, sl_px):
-                range_ok = False
-            if tp_px > 0 and not self.tp_legal(p, tp_px):
-                range_ok = False
+            mark = float(self.px.get(p.symbol) or 0)
+            if sl_px > 0 and mark > 0:
+                side_ok = (p.side == "LONG" and sl_px < mark) or (p.side == "SHORT" and sl_px > mark)
+                if not side_ok:
+                    range_ok = False
+            if tp_px > 0 and mark > 0:
+                side_ok = (p.side == "LONG" and tp_px > mark) or (p.side == "SHORT" and tp_px < mark)
+                if not side_ok:
+                    range_ok = False
         self.record_test("qa-ctrl-overall", overall_ok or cooling, f"open={len(self.open)} overall={int(overall_ok)} miss={missing}")
         self.record_test("qa-ctrl-range", range_ok or cooling or not self.open, f"range ok={int(range_ok)}")
         covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)

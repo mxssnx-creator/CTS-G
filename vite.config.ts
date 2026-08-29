@@ -513,6 +513,7 @@ export default defineConfig(({ command, isPreview }) => ({
     strictPort: true,
     proxy: {
       ...pulseProxy("/stats.json"),
+      ...pulseProxy("/stats"),
       ...pulseProxy("/results-export.json"),
       ...pulseProxy("/results-export.md"),
     },
