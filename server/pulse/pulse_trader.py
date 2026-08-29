@@ -837,8 +837,8 @@ class Pulse:
         n = q * px
         lev = max(1, self.leverage_for(c))
         if self.available > 0:
-            max_n = self.available * 0.32 * lev
-            if floor_n > max_n * 1.06:
+            max_n = self.available * 0.90 * lev
+            if floor_n > max_n * 1.15:
                 return 0.0
             if n > max_n:
                 q = self.round_qty(c, max_n / px)
@@ -2284,7 +2284,7 @@ class Pulse:
 
     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
-        if conf < 0.58:
+        if conf < 0.50:
             return "low-conf"
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
@@ -2329,7 +2329,7 @@ class Pulse:
             return
         if time.time() < self.cooldown.get("__book__", 0):
             return
-        if time.time() - self.last_entry_ts < STAGGER_S:
+        if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
         if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
             return
@@ -2360,7 +2360,7 @@ class Pulse:
         notional = qty * px
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
-        if margin > self.available * 0.38 or self.available < EQ_MIN:
+        if self.available > 0 and (margin > self.available * 0.92):
             return
         side = "LONG" if direction > 0 else "SHORT"
         order_side = "BUY" if direction > 0 else "SELL"
@@ -3164,7 +3164,7 @@ class Pulse:
             return
         if self.entries_blocked():
             return
-        if self.available < EQ_MIN:
+        if self.available <= 0:
             return
         if time.time() - self.block_last_emit < max(12.0, STAGGER_S * 8):
             return
@@ -3705,7 +3705,7 @@ class Pulse:
                 placed += 1
             else:
                 skipped += 1
-            burst = 1 if int(getattr(self, "_order_est", 0) or 0) >= 180 else (8 if MAX_OPEN <= 0 else 4)
+            burst = 1 if int(getattr(self, "_order_est", 0) or 0) >= 180 else (16 if MAX_OPEN <= 0 else 6)
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
