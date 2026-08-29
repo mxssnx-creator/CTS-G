@@ -132,6 +132,11 @@ export type LiveStats = {
   errors: number;
   lastError: string;
   cycle: number;
+  progressPct?: number;
+  progressPhase?: string;
+  progressDetail?: string;
+  progressReady?: boolean;
+  alive?: boolean;
   tests?: Array<{name:string;pass:boolean;detail:string}>;
   open: LiveOpen[];
   closed: LiveClosed[];
@@ -585,6 +590,12 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     scanMs: lane.scanMs ?? s.scanMs,
     lastError: lane.lastError ?? s.lastError,
     pf: lane.pf,
+    progressPct: lane.progressPct ?? s.progressPct,
+    progressPhase: lane.progressPhase ?? s.progressPhase,
+    progressDetail: lane.progressDetail ?? s.progressDetail,
+    progressReady: lane.progressReady ?? s.progressReady,
+    alive: lane.alive ?? s.alive,
+    cycle: lane.cycle ?? s.cycle,
   };
 }
 
