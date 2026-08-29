@@ -49,6 +49,7 @@ OPEN_PATH = os.path.join(DIR, f"open-{CONN_SHORT}.json")
 CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
 ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
 LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
+START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited
@@ -556,6 +557,11 @@ class Pulse:
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
+        try:
+            if os.path.exists(START_EQ_PATH):
+                self.start_eq = float((json.load(open(START_EQ_PATH)) or {}).get("startEquity") or 0)
+        except Exception:
+            self.start_eq = 0.0
         self.equity = 0.0
         self.available = 0.0
         self.used = 0.0
@@ -869,15 +875,26 @@ class Pulse:
         return max(0.0, float(self.available or 0)) * lev * 0.90
 
     def max_book_notional(self) -> float:
-        """Per-position book room. Unlimited stack: remaining available is the limiter."""
-        stack = int(getattr(self.block, "max_stack", 0) or 0)
-        if stack <= 0:
-            room = self.avail_notional()
-            if room > 0:
-                return room
-            return self.notional_cap()
-        inc = max(1, stack) * max(0.25, float(getattr(self.block, "volume_ratio", 1.0)))
-        return self.notional_cap() * (1.0 + inc)
+        """Per-position cap: base size × configured Block/DCA rungs. Never the whole wallet."""
+        base = self.notional_cap()
+        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if getattr(self.dca, "enabled", False) else 0
+        dca_extra = 0.0
+        if dca_n > 0:
+            try:
+                dca_extra = sum(float(self.dca._mult_at(i) or 0) for i in range(min(dca_n, 8)))
+            except Exception:
+                dca_extra = 4.0
+        stack = int(getattr(self.block, "max_stack", 0) or 0) if getattr(self.block, "enabled", False) else 0
+        vr = max(0.25, float(getattr(self.block, "volume_ratio", 1.0) or 1.0))
+        block_extra = 0.0
+        if stack > 0:
+            block_extra = sum(calculate_block_volume_increment_ratio(i, vr) for i in range(1, min(stack, 8) + 1))
+        extra = min(12.0, max(dca_extra, block_extra))
+        hard = base * (1.0 + extra)
+        room = self.avail_notional()
+        if room > 0:
+            hard = min(hard, room)
+        return max(base, hard)
 
     def cap_order_qty(self, c: Contract, px: float, qty: float, cap_usdt: Optional[float] = None) -> float:
         if px <= 0 or qty <= 0:
@@ -1117,6 +1134,13 @@ class Pulse:
         self.upnl = float(row.get("unrealizedProfit") or row.get("unrealized") or 0)
         if self.start_eq <= 0:
             self.start_eq = self.equity
+            try:
+                tmp = START_EQ_PATH + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
+                os.replace(tmp, START_EQ_PATH)
+            except Exception:
+                pass
         self.last_bal = time.time()
         if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
             if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
@@ -1845,7 +1869,7 @@ class Pulse:
         return pick_sl, pick_tp, sec_sl, sec_tp
 
     def clamp_ctrl_price(self, pos: Position, kind: str, price: float) -> float:
-        """Force SL/TP onto the exchange-legal side of last AND mark."""
+        """Keep SL at the intended stop. Never chase mark away from entry."""
         mark = float(self.px.get(pos.symbol) or 0)
         last = float((getattr(self, "last_px", None) or {}).get(pos.symbol) or 0)
         e = float(pos.entry or 0)
@@ -1858,12 +1882,26 @@ class Pulse:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         c = self.contracts.get(pos.symbol)
         tick = 10 ** -(c.pprec if c else 4)
-        pad = max(16 * tick, hi * 0.0050)
+        pad = max(8 * tick, hi * 0.0020)
         price = float(price or 0)
-        if pos.side == "LONG":
-            price = min(price or (lo - pad), lo - pad) if is_sl else max(price or (hi + pad), hi + pad)
+        if is_sl:
+            if pos.side == "LONG":
+                intended = price if price > 0 else (e * (1.0 - max(float(getattr(pos, "sl_pct", 0) or 0), 0.002)) if e else lo - pad)
+                if intended > 0 and intended <= lo - pad:
+                    price = intended
+                else:
+                    price = lo - pad
+            else:
+                intended = price if price > 0 else (e * (1.0 + max(float(getattr(pos, "sl_pct", 0) or 0), 0.002)) if e else hi + pad)
+                if intended > 0 and intended >= hi + pad:
+                    price = intended
+                else:
+                    price = hi + pad
         else:
-            price = max(price or (hi + pad), hi + pad) if is_sl else min(price or (lo - pad), lo - pad)
+            if pos.side == "LONG":
+                price = max(price or (hi + pad), hi + pad)
+            else:
+                price = min(price or (lo - pad), lo - pad)
         if c:
             tick = max(tick, 10 ** -(c.pprec if c.pprec >= 0 else 6))
             price = self.round_px(c, price)
@@ -1882,28 +1920,6 @@ class Pulse:
                 else:
                     price = price + step if is_sl else price - step
                 price = self.round_px(c, price)
-        locked = False
-        if e > 0:
-            if pos.side == "LONG" and float(pos.peak or 0) > e * 1.0015:
-                locked = True
-            if pos.side == "SHORT" and float(pos.peak or 0) and float(pos.peak) < e * 0.9985:
-                locked = True
-        if is_sl and e > 0 and not locked:
-            if pos.side == "LONG":
-                price = min(price, e * (1.0 - 0.0018))
-                price = min(price, lo - pad)
-            else:
-                price = max(price, e * (1.0 + 0.0018))
-                price = max(price, hi + pad)
-            if c:
-                price = self.round_px(c, price)
-        if is_sl:
-            tick = max(10 ** -(c.pprec if c else 4), hi * 1e-6)
-            b_lo, b_hi = sl_bounds(pos.side, mark, last, e, float(getattr(pos, "liq", 0) or 0), tick)
-            if b_lo and b_hi and b_lo < b_hi:
-                price = min(max(price, b_lo), b_hi)
-                if c:
-                    price = self.round_px(c, price)
         return price
 
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
@@ -2058,15 +2074,6 @@ class Pulse:
         now = time.time()
         for pos in list(self.open.values()):
             px = self.px.get(pos.symbol) or pos.entry
-            if px > 0 and pos.qty * px > self.max_book_notional() * 3.0:
-                c = self.contracts.get(pos.symbol)
-                min_n = 0.0
-                if c:
-                    min_n = self.min_order_qty(c, px) * px
-                if pos.qty * px > max(min_n * 1.35, 40.0):
-                    log(f"CTRL flatten oversized {pos.symbol} notional={pos.qty * px:.0f}")
-                    self.close_pos(pos, px, "oversized")
-                    continue
             need = self.missing_controls(pos)
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{pos.symbol}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
@@ -2259,8 +2266,20 @@ class Pulse:
 
         def _place_side(is_sl: bool, have_oid: str, have_px: float, want: float, live_have: bool, live_rows: List[Dict[str, Any]]) -> str:
             have_oid = real_oid(have_oid)
-            illegal = not (self.sl_legal(pos, have_px) if is_sl else self.tp_legal(pos, have_px)) if have_px > 0 else True
-            if have_oid and live_have and not illegal:
+            mark = float(self.px.get(pos.symbol) or 0)
+            side_ok = False
+            if have_px > 0 and mark > 0:
+                if is_sl:
+                    side_ok = (pos.side == "LONG" and have_px < mark) or (pos.side == "SHORT" and have_px > mark)
+                else:
+                    side_ok = (pos.side == "LONG" and have_px > mark) or (pos.side == "SHORT" and have_px < mark)
+            trail = False
+            if is_sl and side_ok and want > 0:
+                if pos.side == "LONG" and want > have_px * 1.0008 and want < mark:
+                    trail = True
+                if pos.side == "SHORT" and want < have_px * 0.9992 and want > mark:
+                    trail = True
+            if have_oid and live_have and side_ok and not trail:
                 return have_oid
             if have_oid and live_have and not can_replace:
                 return have_oid
@@ -2269,7 +2288,7 @@ class Pulse:
                 self.cancel_order(pos.symbol, have_oid, cid)
             oid = self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want)
             if oid:
-                self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
+                self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
             return oid or have_oid
 
         pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
@@ -3054,7 +3073,7 @@ class Pulse:
         self.block.enabled = bool(b_en) if b_en is not None else True
         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
             self.block.enabled = True
-        self.block.max_stack = 0 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
+        self.block.max_stack = 3 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
         try:
             self.load.configure(ov)
         except Exception:
@@ -3492,19 +3511,37 @@ class Pulse:
                 if self.missing_controls(pos):
                     continue
             px = self.px.get(pos.symbol) or pos.entry
-            row = self.dca.due(pos.symbol, pos.side, pos.qty, pos.entry, px)
+            if px <= 0 or pos.entry <= 0:
+                continue
+            if pos.qty * px >= self.max_book_notional():
+                self.dca.skips += 1
+                continue
+            sl_pct = float(pos.sl_pct or SL_PCT or 0.0048)
+            adv = abs(px - pos.entry) / pos.entry
+            against = (pos.side == "LONG" and px < pos.entry) or (pos.side == "SHORT" and px > pos.entry)
+            if against and adv > max(sl_pct * 1.5, 0.012):
+                self.dca.skips += 1
+                continue
+            parent = float(getattr(self.dca.lanes.get(self.dca.key(pos.symbol, pos.side), None), "parent_qty", 0) or 0)
+            seed = parent if parent > 0 else pos.qty
+            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px)
             if not row:
                 continue
             c = self.contracts.get(pos.symbol)
             if not c or px <= 0:
                 continue
-            qty = self.cap_order_qty(c, px, float(row["qty"]))
+            room = max(0.0, self.max_book_notional() - pos.qty * px)
+            add_cap = min(self.notional_cap() * max(1.0, float(row.get("mult") or 1)), room)
+            qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
             floor = self.min_order_qty(c, px)
             if qty < floor:
+                if floor * px > add_cap * 1.08:
+                    self.dca.skips += 1
+                    continue
                 qty = floor
             if qty <= 0:
                 continue
-            if (pos.qty + qty) * px > self.max_book_notional() * 1.15:
+            if (pos.qty + qty) * px > self.max_book_notional() * 1.02:
                 self.dca.skips += 1
                 continue
             margin = (qty * px) / max(1, self.leverage_for(c))

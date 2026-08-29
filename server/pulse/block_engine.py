@@ -102,8 +102,8 @@ class BlockBook:
             stack_n = int(raw_stack if raw_stack is not None else 0)
         except Exception:
             stack_n = 0
-        # 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
-        self.max_stack = 0 if stack_n <= 0 else max(1, stack_n)
+        # 0 = default 3 rungs. Volume increment stays count × ratio against the original parent.
+        self.max_stack = 3 if stack_n <= 0 else max(1, stack_n)
         self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
         self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 0.8) or 0.8), 0.2, 5.0)
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
