@@ -82,7 +82,7 @@ class DcaLane:
 class DcaBook:
     def __init__(self) -> None:
         self.enabled = True
-        self.max_steps = 4
+        self.max_steps = 0
         self.distances = [d / 100.0 for d in DEFAULT_DIST]
         self.mults = list(DEFAULT_MULT)
         self.tp_mode = "average"
@@ -108,17 +108,29 @@ class DcaBook:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         self.enabled = bool(ov.get("dcaEnabled", True))
-        self.max_steps = max(1, min(8, int(ov.get("dcaMaxSteps") or coord.get("dcaMaxSteps") or cts.get("dcaMaxSteps") or 4)))
+        try:
+            raw_steps = ov.get("dcaMaxSteps")
+            if raw_steps is None:
+                raw_steps = coord.get("dcaMaxSteps")
+            if raw_steps is None:
+                raw_steps = cts.get("dcaMaxSteps")
+            step_n = int(raw_steps if raw_steps is not None else 0)
+        except Exception:
+            step_n = 0
+        # 0 = unlimited. Seed from configured distances; due() grows steps on demand.
+        self.max_steps = 0 if step_n <= 0 else max(1, step_n)
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
-        while len(self.distances) < self.max_steps:
-            self.distances.append(self.distances[-1] + 0.005)
-        self.distances = self.distances[: self.max_steps]
+        if self.max_steps > 0:
+            while len(self.distances) < self.max_steps:
+                self.distances.append(self.distances[-1] + 0.005)
+            self.distances = self.distances[: self.max_steps]
         mult = ov.get("dcaStepVolumeMultipliers") or coord.get("dcaStepVolumeMultipliers") or cts.get("dcaStepVolumeMultipliers") or DEFAULT_MULT
         self.mults = _mult_list(mult, DEFAULT_MULT)
-        while len(self.mults) < self.max_steps:
-            self.mults.append(self.mults[-1])
-        self.mults = self.mults[: self.max_steps]
+        if self.max_steps > 0:
+            while len(self.mults) < self.max_steps:
+                self.mults.append(self.mults[-1])
+            self.mults = self.mults[: self.max_steps]
         self.tp_mode = str(ov.get("dcaTakeProfitMode") or coord.get("dcaTakeProfitMode") or cts.get("dcaTakeProfitMode") or "average")
         be_raw = ov.get("dcaBreakevenProfitPct", coord.get("dcaBreakevenProfitPct", cts.get("dcaBreakevenProfitPct", 0.2)))
         be = float(be_raw if be_raw is not None else 0.2)
@@ -135,13 +147,33 @@ class DcaBook:
         if self.cost_pct > 1:
             self.cost_pct = POSITION_COST_PCT_DEFAULT
 
+    def unlimited(self) -> bool:
+        return int(self.max_steps or 0) <= 0
+
+    def _dist_at(self, i: int) -> float:
+        if i < len(self.distances):
+            return self.distances[i]
+        last = self.distances[-1] if self.distances else 0.005
+        return min(0.08, last + 0.005 * (i - len(self.distances) + 1))
+
+    def _mult_at(self, i: int) -> float:
+        if i < len(self.mults):
+            return self.mults[i]
+        return self.mults[-1] if self.mults else 1.5
+
+    def _seed_n(self) -> int:
+        if self.max_steps > 0:
+            return self.max_steps
+        return max(len(self.distances), len(self.mults), 4)
+
     def attach(self, symbol: str, side: str, qty: float, entry: float) -> DcaLane:
         k = self.key(symbol, side)
         lane = self.lanes.get(k)
         if lane is None:
+            n = self._seed_n()
             steps = [
-                DcaStep(n=i + 1, distance_pct=self.distances[i], mult=self.mults[i])
-                for i in range(self.max_steps)
+                DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
+                for i in range(n)
             ]
             lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps)
             self.lanes[k] = lane
@@ -194,7 +226,12 @@ class DcaBook:
             nxt = st
             break
         if nxt is None:
-            return None
+            if self.unlimited():
+                i = len(lane.steps)
+                nxt = DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
+                lane.steps.append(nxt)
+            else:
+                return None
         if adv + 1e-12 < nxt.distance_pct:
             return None
         add_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
@@ -312,6 +349,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t9 = (b2.due("Z-USDT", "LONG", 1, 10, 9, now=t0) is None, "off")
     snap = b.snapshot()
     t10 = (snap["enabled"] and snap["maxSteps"] == 4 and "distancesPct" in snap, str(snap.get("distancesPct")))
+    u = DcaBook()
+    u.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+    t11 = (u.max_steps <= 0 and u.unlimited(), f"steps={u.max_steps}")
+    ulane = u.attach("UUU-USDT", "LONG", 1.0, 100.0)
+    t12 = (len(ulane.steps) >= 2, f"seed={len(ulane.steps)}")
+    for st in list(ulane.steps):
+        st.filled = True
+        st.qty = 1.0
+    ru = u.due("UUU-USDT", "LONG", 1.0, 100.0, 90.0, now=t0)
+    t13 = (ru is not None and int(ru["n"]) > 2, f"grow={None if ru is None else ru.get('n')}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -323,6 +370,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-deact-last25", t8[0], t8[1]),
         ("dca-disabled", t9[0], t9[1]),
         ("dca-snap", t10[0], t10[1]),
+        ("dca-unlim-flag", t11[0], t11[1]),
+        ("dca-unlim-seed", t12[0], t12[1]),
+        ("dca-unlim-grow", t13[0], t13[1]),
     ]
 
 

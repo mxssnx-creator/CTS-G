@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 BLOCK_COUNT_MIN = 1
-BLOCK_COUNT_MAX = 12
+BLOCK_COUNT_PREVIEW = 12
 BLOCK_VOL_RATIO_MIN = 0.25
 BLOCK_VOL_RATIO_MAX = 3.0
 BLOCK_PF_RATIO_MIN = 0.2
@@ -26,7 +26,7 @@ def parse_block_count(set_key: str) -> Optional[int]:
     if not m:
         return None
     c = int(m.group(1))
-    return c if BLOCK_COUNT_MIN <= c <= BLOCK_COUNT_MAX else None
+    return c if c >= BLOCK_COUNT_MIN else None
 
 
 def calculate_block_volume_increment_ratio(block_count: int, volume_ratio: float) -> float:
@@ -97,7 +97,13 @@ class BlockBook:
         self.path = path
         cfg = cfg or {}
         self.enabled = bool(cfg.get("variantBlockEnabled", True))
-        self.max_stack = int(clamp(int(cfg.get("blockMaxStack", 12) or 12), 1, 12))
+        raw_stack = cfg.get("blockMaxStack", 0)
+        try:
+            stack_n = int(raw_stack if raw_stack is not None else 0)
+        except Exception:
+            stack_n = 0
+        # 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
+        self.max_stack = 0 if stack_n <= 0 else max(1, stack_n)
         self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
         self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 0.8) or 0.8), 0.2, 5.0)
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
@@ -240,6 +246,19 @@ class BlockBook:
             "internPf": round(intern, 4),
         }
 
+    def unlimited(self) -> bool:
+        return int(self.max_stack or 0) <= 0
+
+    def _count_range(self, lane: Optional[BlockLane] = None) -> range:
+        """Walk 1..N, or the next few unsatisfied counts when the book is unlimited."""
+        if not self.unlimited():
+            return range(1, int(self.max_stack) + 1)
+        nxt = 1
+        if lane is not None:
+            sat = max([n for n, ok in (lane.satisfied or {}).items() if ok] or [0])
+            nxt = max(1, int(sat) + 1, len(lane.legs) + 1)
+        return range(1, nxt + 4)
+
     def next_order_qty(self, lane: BlockLane, count: int) -> float:
         f = self.formula(lane.base_qty, count)
         return max(0.0, f["targetAddQty"] - lane.confirmed_add)
@@ -250,7 +269,7 @@ class BlockBook:
         if not self.enabled or not lane.active or lane.base_qty <= 0:
             return rows
         now = time.time()
-        for n in range(1, self.max_stack + 1):
+        for n in self._count_range(lane):
             f = self.formula(lane.base_qty, n)
             paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
@@ -269,7 +288,9 @@ class BlockBook:
                 "emitted": 0,
             })
         if self.active_real and self.active_live and live_n >= 1:
-            n = min(self.max_stack, max(1, live_n))
+            n = max(1, live_n)
+            if not self.unlimited():
+                n = min(self.max_stack, n)
             f = self.formula(lane.base_qty, n)
             pf = self.pf_decision(lane, n, intern_pf=intern_pf)
             paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
@@ -354,7 +375,7 @@ class BlockBook:
         for n, rem in list(lane.pause_remaining.items()):
             if rem > 0:
                 lane.pause_remaining[n] = rem - 1
-        for n in range(1, self.max_stack + 1):
+        for n in self._count_range(lane):
             if any(leg.block_count == n for leg in lane.legs):
                 lane.pf_ring.setdefault(n, []).append(pnl)
                 lane.pf_ring[n] = lane.pf_ring[n][-self.window :]
@@ -398,7 +419,9 @@ class BlockBook:
                 ],
             })
         catalog = []
-        for n in range(1, max(1, int(self.max_stack)) + 1):
+        show_n = BLOCK_COUNT_PREVIEW if self.unlimited() else max(1, int(self.max_stack))
+        show_n = min(show_n, 32)
+        for n in range(1, show_n + 1):
             f = self.formula(1.0, n)
             catalog.append({
                 "n": n,

@@ -16,7 +16,7 @@
   "staggerS": 0.6,
   "controlOrders": true,
   "blockEnabled": true,
-  "blockMaxStack": 12,
+  "blockMaxStack": 0,
   "blockVolumeRatio": 1,
   "blockProfitFactorRatio": 0.8,
   "blockPauseCountRatio": 1,
@@ -52,11 +52,6 @@
   "tpCostRatio": 5,
   "slToTpRatio": 0.6,
   "slToTpRatios": [0.6, 0.9],
-  "slToTpAuto": false,
-  "stratIndications": true,
-  "stratBlock": true,
-  "stratTrailing": true,
-  "stratGeneral": true,
   "slToTpAuto": true,
   "slToTpRecalcN": 6,
   "slToTpRecalcEvery": 8,
@@ -87,6 +82,7 @@
   "modules": {
     "core.engine": true,
     "core.watchdog": true,
+    "core.load": true,
     "feed.ws": true,
     "feed.rest": true,
     "exchange.bingx": true,
@@ -112,7 +108,7 @@
   "setMinStep": 10,
   "setStepMax": 12,
   "setStepAdapt": true,
-  "setMaxActive": 8,
+  "setMaxActive": 0,
   "histLookbackBars": 240,
   "histRefreshS": 120,
   "exitRevOn": false,
@@ -121,22 +117,12 @@
   "exitBestOf": true,
   "scratchS": 600,
   "exitTimeOn": false,
-  "dcaMaxSteps": 4,
+  "dcaMaxSteps": 0,
   "dcaCooldownSeconds": 30,
   "dcaBreakevenProfitPct": 0.2,
   "dcaTakeProfitMode": "average",
-  "dcaStepDistancesPct": [
-    0.5,
-    1,
-    1.5,
-    2
-  ],
-  "dcaStepVolumeMultipliers": [
-    1.5,
-    2,
-    2.3,
-    2.5
-  ],
+  "dcaStepDistancesPct": [0.5, 1, 1.5, 2],
+  "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5],
   "dcaAutoDeact": true,
   "dcaMinPf": 1.1,
   "stratDca": true,
@@ -151,5 +137,6 @@
   "symbolsAll": true,
   "symbolsDynamic": true,
   "symbolSort": "vol1h",
-  "symbolCap": 0
+  "symbolCap": 0,
+  "loadPartial": true
 }

@@ -8,6 +8,7 @@ LAYERS = ("core", "feed", "exchange", "strategy", "risk", "exec", "desk")
 DEFAULT_FLAGS = {
     "core.engine": True,
     "core.historic": True,
+    "core.load": True,
     "strategy.sets": True,
     "strategy.exits": True,
     "feed.ws": True,

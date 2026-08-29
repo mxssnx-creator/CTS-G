@@ -33,6 +33,7 @@ BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 3
 STEP_MAX = 22
+HIST_CAP = 80
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -374,7 +375,7 @@ class SetBook:
         self.use_historic_gate = True
         self.min_samples = 12
         self.reactivate = True
-        self.max_active = 12
+        self.max_active = 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -416,7 +417,11 @@ class SetBook:
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 12)))
         self.reactivate = bool(ov.get("setReactivate", True))
-        self.max_active = max(1, min(50, int(ov.get("setMaxActive") or 12)))
+        try:
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
+        except Exception:
+            raw_active = 0
+        self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
             self.cost_pct = self.cost_pct / 100.0
@@ -599,6 +604,24 @@ class SetBook:
         if len(cleaned) >= 16:
             self.bars[symbol] = cleaned[-self.lookback :]
 
+    def trim_bars(self, keep: Sequence[str]) -> int:
+        want = set(keep)
+        n = 0
+        for s in list(self.bars):
+            if s not in want:
+                self.bars.pop(s, None)
+                n += 1
+        return n
+
+    def clamp_bars(self, max_n: int) -> int:
+        cap = max(60, int(max_n or self.lookback))
+        n = 0
+        for s, bars in list(self.bars.items()):
+            if len(bars) > cap:
+                self.bars[s] = bars[-cap:]
+                n += 1
+        return n
+
     def on_live_close(self, rec: Any) -> None:
         if isinstance(rec, dict):
             if rec.get("ours") is False:
@@ -677,28 +700,42 @@ class SetBook:
             return False
         return time.time() - self.last_run >= self.refresh_s or not self.progress.ready
 
-    def replay_all(self, now: Optional[float] = None, on_step: Optional[Callable[[], None]] = None) -> None:
+    def replay_all(
+        self,
+        now: Optional[float] = None,
+        on_step: Optional[Callable[[], None]] = None,
+        symbols: Optional[Sequence[str]] = None,
+        abort: Optional[Callable[[], bool]] = None,
+    ) -> None:
         if not self.enabled or self._running:
             return
         self._running = True
         t0 = time.time()
         now = now or t0
         try:
-            symbols = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
+            if symbols is None:
+                names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
+            else:
+                names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
             self.progress = Progress(
                 phase="replay",
                 pct=1.0,
                 sets_total=len(self.sets),
-                symbols_total=len(symbols),
-                bars_total=sum(len(self.bars[s]) for s in symbols),
+                symbols_total=len(names),
+                bars_total=sum(len(self.bars.get(s) or []) for s in names),
                 cycle=self.progress.cycle + 1,
-                detail=f"{len(symbols)} symbols · {len(self.sets)} sets",
+                detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
-            for i, symbol in enumerate(symbols):
+            aborted = False
+            for i, symbol in enumerate(names):
+                if abort and abort():
+                    aborted = True
+                    self.progress.detail = f"aborted-load {i}/{len(names)}"
+                    break
                 self.progress.symbol = symbol
                 self.progress.symbols_done = i
-                self.progress.pct = 5.0 + (i / max(1, len(symbols))) * 80.0
+                self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
                 self._replay_symbol(symbol, hist, now, on_step=on_step)
                 self.progress.bars_done += len(self.bars[symbol])
@@ -715,11 +752,12 @@ class SetBook:
             self.progress.phase = "ready"
             self.progress.pct = 100.0
             self.progress.ready = True
-            self.progress.symbols_done = len(symbols)
+            self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
             self.progress.sets_done = len(self.sets)
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
+                + (" · partial" if aborted else "")
             )
         except Exception as exc:
             self.progress.phase = "error"
@@ -737,7 +775,8 @@ class SetBook:
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         base_ts = now - (n - 1) * BAR_S
         for i in range(warmup, n):
-            window = bars[: i + 1][-60:]
+            lo = i + 1 - 60
+            window = bars[lo if lo > 0 else 0 : i + 1]
             ts = base_ts + i * BAR_S
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
@@ -801,7 +840,10 @@ class SetBook:
                             "reason": why,
                             "set_id": st.id,
                         }
-                        hist[st.id].append(rec)
+                        bucket = hist[st.id]
+                        bucket.append(rec)
+                        if len(bucket) > HIST_CAP:
+                            del bucket[:-HIST_CAP]
                         open_pos = None
                         cool = self.cooldown_bars
                     continue
@@ -907,6 +949,8 @@ class SetBook:
 
     def _cap_active(self) -> None:
         for kind, cap in (("base", self.max_active), ("trail", max(len(self.trails) * max(1, len(self.packs)), 4))):
+            if kind == "base" and cap <= 0:
+                continue
             active = [s for s in self.by_idx if s.active and s.kind == kind]
             if len(active) <= cap:
                 continue
@@ -1403,6 +1447,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-trail-independent", len(by_tr) >= 3 and len(set(by_tr.values())) >= 2, f"{by_tr}"))
     base_n = sum(1 for s in book5.by_idx if s.kind == "base")
     out.append(("set-trail-own-family", base_n >= 1 and all(s.step == 0 for s in book5.by_idx if s.kind == "trail"), f"base={base_n} trails={len(by_tr)}"))
+    dropped = book2.trim_bars(["AAA-USDT"])
+    out.append(("set-trim-bars", dropped >= 1 and "AAA-USDT" in book2.bars and "BBB-USDT" not in book2.bars, f"drop={dropped} left={list(book2.bars)}"))
+    book2.bars["AAA-USDT"] = book2.bars["AAA-USDT"] + book2.bars["AAA-USDT"]
+    clamped = book2.clamp_bars(80)
+    out.append(("set-clamp-bars", clamped >= 1 and len(book2.bars["AAA-USDT"]) <= 80, f"n={len(book2.bars['AAA-USDT'])} c={clamped}"))
+    book6 = SetBook()
+    book6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.3, "trailArmMax": 0.3})
+    book6.ingest_bars("FFF-USDT", synth_trend(240, 55.0, 0.16, 0.04))
+    book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
+    book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
+    out.append(("set-replay-slice", book6.progress.ready and book6.progress.symbols_total == 1, f"n={book6.progress.symbols_total} fills={sum(s.n for s in book6.sets.values())} {book6.progress.detail}"))
     return out
 
 

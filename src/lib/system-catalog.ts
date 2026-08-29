@@ -26,6 +26,7 @@ export const LAYERS: { id: LayerId; title: string; blurb: string }[] = [
 export const MODULES: SysModule[] = [
   { id: "core.engine", layer: "core", name: "Pulse engine", summary: "Independent live loop, adopt, stats dump", status: "live", defaultOn: true },
   { id: "core.watchdog", layer: "core", name: "Watchdog", summary: "Hang restart if a scan stalls", status: "live", defaultOn: true },
+  { id: "core.load", layer: "core", name: "Load governor", summary: "Partial scans, RSS caps, cache trim, thread backpressure", status: "live", defaultOn: true },
   { id: "core.historic", layer: "core", name: "1m historic", summary: "Prehistoric replay on 1-minute bars for every Set", status: "live", toggle: "histEnabled", defaultOn: true },
   { id: "feed.ws", layer: "feed", name: "WebSocket marks", summary: "Venue stream for last price", status: "live", defaultOn: true },
   { id: "feed.rest", layer: "feed", name: "REST snapshot", summary: "Ticker + kline batch with rate buckets", status: "live", defaultOn: true },

@@ -75,6 +75,7 @@ export type LiveStats = {
   symbolCount?: number;
   symbolMax?: number;
   scanMs?: number;
+  rssMb?: number;
   klinesReady?: number;
   regime?: string;
   coord?: {
@@ -247,6 +248,17 @@ export type LiveStats = {
       indications?: number;
       missingInd?: string[];
     };
+    load?: {
+      level?: string;
+      rssMb?: number;
+      peakMb?: number;
+      scanChunk?: number;
+      histChunk?: number;
+      trimmed?: number;
+      gcN?: number;
+      shed?: string[];
+      partial?: boolean;
+    };
   };
   unit?: string;
   connType?: string;
@@ -310,6 +322,34 @@ export type LiveStats = {
     ignoredForeign?: number;
     klineLimit?: number;
     tfReady?: Record<string, number>;
+    scanChunk?: number;
+    scanKeep?: string[];
+    load?: {
+      level?: string;
+      rssMb?: number;
+      peakMb?: number;
+      softMb?: number;
+      hardMb?: number;
+      scanChunk?: number;
+      histChunk?: number;
+      klineBatch?: number;
+      lookback?: number;
+      extraN?: number;
+      tf5m?: boolean;
+      tf15m?: boolean;
+      extraSources?: boolean;
+      histRun?: boolean;
+      doGc?: boolean;
+      statsFull?: boolean;
+      partial?: boolean;
+      trimmed?: number;
+      gcN?: number;
+      overrunN?: number;
+      shed?: string[];
+      hotMs?: number;
+      warmMs?: number;
+      histBusy?: boolean;
+    };
   };
   api?: {
     wsOk?: boolean;

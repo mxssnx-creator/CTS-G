@@ -10,7 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     import httpx
@@ -804,6 +804,33 @@ class ExtraBook:
         self.http = httpx.Client(timeout=2.2, headers={"User-Agent": "grok-x01-pulse/ind"}) if httpx else None
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ind-x")
+        self.cache_max = 48
+
+    def prune(self, keep: Optional[set] = None, max_n: Optional[int] = None) -> int:
+        now = time.time()
+        drop: List[str] = []
+        for k, (ts, _) in list(self.cache.items()):
+            sym = k.split(":", 1)[-1] if ":" in k else k
+            if keep is not None and sym not in keep:
+                drop.append(k)
+            elif now - ts > 90:
+                drop.append(k)
+        for k in drop:
+            self.cache.pop(k, None)
+        cap = int(max_n if max_n is not None else self.cache_max)
+        extra = len(self.cache) - cap
+        if extra > 0:
+            oldest = sorted(self.cache.items(), key=lambda kv: kv[1][0])
+            for k, _ in oldest[:extra]:
+                self.cache.pop(k, None)
+                drop.append(k)
+        for src in list(self.fail):
+            if self.fail.get(src, 0) <= 0:
+                self.fail.pop(src, None)
+        for src, until in list(self.cool.items()):
+            if until < now:
+                self.cool.pop(src, None)
+        return len(drop)
 
     def prefetch(self, pairs: List[Tuple[str, str]]) -> None:
         now = time.time()
@@ -825,6 +852,8 @@ class ExtraBook:
                 f.result(timeout=max(0.02, remain))
             except Exception:
                 continue
+        if len(self.cache) > self.cache_max:
+            self.prune(max_n=self.cache_max)
 
     def get(self, source: str, symbol: str) -> List[Candle]:
         key = f"{source}:{symbol}"
@@ -886,6 +915,16 @@ class IndicationBook:
         self.evals: Dict[str, List[SignalEval]] = {}
         self.cycle = 0
         self.extra_cursor = 0
+
+    def keep(self, symbols: Sequence[str]) -> int:
+        want = set(symbols)
+        n = 0
+        for store in (self.last, self.evals):
+            for k in list(store):
+                if k not in want:
+                    store.pop(k, None)
+                    n += 1
+        return n
 
     def load(self, overlay: Dict[str, Any]) -> None:
         s = self.settings
@@ -1189,6 +1228,13 @@ class IndicationBook:
         for rows in self.last.values():
             for i in rows:
                 types[i.kind] = types.get(i.kind, 0) + 1
+        keys = sorted(self.last.keys())
+        eval_items = list(self.evals.items())
+        last_items = list(self.last.items())
+        if len(eval_items) > 24:
+            eval_items = eval_items[:24]
+        if len(last_items) > 24:
+            last_items = last_items[:24]
         return {
             "enabled": bool(self.settings.get("enabled")),
             "types": {
@@ -1210,16 +1256,16 @@ class IndicationBook:
             "tfCombined": bool(self.settings.get("tfCombined", True)),
             "tfMinAgree": int(self.settings.get("tfMinAgree") or 2),
             "symbols": len(self.last),
-            "processed": sorted(self.last.keys()),
+            "processed": keys if len(keys) <= 48 else keys[:32],
             "evalN": sum(len(v) for v in self.evals.values()),
-            "lanes": {s: [e.source_id for e in v] for s, v in self.evals.items()},
-            "primary": primaries,
+            "lanes": {s: [e.source_id for e in v] for s, v in eval_items},
+            "primary": primaries[:24],
             "tf": {
                 s: {
                     "independent": [i.timeframe for i in rows if i.mode == "direct_tf"],
                     "combined": next((i.direction for i in rows if i.mode == "tf_combined"), None),
                 }
-                for s, rows in self.last.items()
+                for s, rows in last_items
             },
         }
 
@@ -1340,6 +1386,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.process("PICK-USDT", up, pulse_dir=1, pulse_conf=0.8, bars_by_tf={"1m": up, "5m": up, "15m": up})
     pe = book.pick_entry("PICK-USDT", min_conf=0.5)
     t16 = (pe is not None and pe[0].kind in ("state", "signals", "move", "direction", "active", "common") and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
+    book.process("KEEP-USDT", up, pulse_dir=1, pulse_conf=0.7, bars_by_tf={"1m": up, "5m": up, "15m": up})
+    dropped = book.keep(["PICK-USDT"])
+    t17 = (dropped >= 1 and "PICK-USDT" in book.last and "KEEP-USDT" not in book.last, f"drop={dropped} keys={sorted(book.last)}")
+    EXTRA.cache["binance-usdm:OLD-USDT"] = (time.time() - 200, [])
+    EXTRA.cache["binance-usdm:PICK-USDT"] = (time.time(), [])
+    pruned = EXTRA.prune({"PICK-USDT"}, max_n=8)
+    t18 = (pruned >= 1 and "binance-usdm:PICK-USDT" in EXTRA.cache, f"pruned={pruned} n={len(EXTRA.cache)}")
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1357,6 +1410,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-direction-needs-reversal", t14[0], t14[1]),
         ("ind-active-quiet-skip", t15[0], t15[1]),
         ("ind-pick-entry", t16[0], t16[1]),
+        ("ind-keep-trim", t17[0], t17[1]),
+        ("ind-extra-prune", t18[0], t18[1]),
     ]
 
 

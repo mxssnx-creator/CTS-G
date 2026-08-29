@@ -229,6 +229,8 @@ class Coordinator:
         return allow, reasons, metrics
 
     def slot_cap(self, max_open: int, last_pf: float) -> int:
+        if max_open <= 0 or max_open >= 10**8:
+            return 10**9
         cap = max_open
         if self.axes["cont"].enabled:
             extra = self.axes["cont"].max_window

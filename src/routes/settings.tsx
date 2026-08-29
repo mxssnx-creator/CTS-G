@@ -385,12 +385,12 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals" onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
-                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts 1–12" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
+                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts, 0 = unlimited" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={overlay.dcaEnabled !== false && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block adds on a live parent for every count 1–{overlay.blockMaxStack}.
+                Indications and general run in parallel for entries. Block adds on a live parent for every count (max stack {overlay.blockMaxStack || "unlimited"}).
                 Trailing only moves SL after min-step. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
@@ -508,12 +508,13 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
                 />
-                <Slider
+                <Num
                   label="Max active Sets"
                   value={overlay.setMaxActive}
-                  min={1}
-                  max={50}
+                  min={0}
+                  max={10000}
                   step={1}
+                  hint="0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -654,9 +655,10 @@ function SettingsPage() {
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}
-                  min={1}
-                  max={12}
+                  min={0}
+                  max={10000}
                   step={1}
+                  hint="0 = unlimited"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
@@ -702,7 +704,7 @@ function SettingsPage() {
                   </thead>
                   <tbody>
                     {table.map((r) => (
-                      <tr key={r.n} className={`border-t border-border font-mono ${r.n > overlay.blockMaxStack ? "text-faint" : ""}`}>
+                      <tr key={r.n} className={`border-t border-border font-mono ${overlay.blockMaxStack > 0 && r.n > overlay.blockMaxStack ? "text-faint" : ""}`}>
                         <td className="py-1.5">{r.n}</td>
                         <td className="py-1.5">{r.inc.toFixed(2)}×</td>
                         <td className="py-1.5">{r.add.toFixed(2)}</td>
@@ -866,9 +868,10 @@ function SettingsPage() {
                 <Num
                   label="Max steps"
                   value={overlay.dcaMaxSteps}
-                  min={1}
-                  max={8}
+                  min={0}
+                  max={10000}
                   step={1}
+                  hint="0 = unlimited"
                   onChange={(v) => patch("dcaMaxSteps", v)}
                 />
                 <Num
@@ -1151,8 +1154,8 @@ function SettingsPage() {
           {section === "pulse" && (
             <Card title="Pulse overlay" hint="Always max leverage per contract. Order qty is raised to exchange min lot / min USDT if the target is smaller.">
               <Grid>
-                <Num label="Max open" value={overlay.maxOpen} min={0} max={500} step={1} hint="0 = unlimited" onChange={(v) => patch("maxOpen", v)} />
-                <Num label="Max per group" value={overlay.maxPerGroup} min={0} max={64} step={1} hint="0 = unlimited" onChange={(v) => patch("maxPerGroup", v)} />
+                <Num label="Max open" value={overlay.maxOpen} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxOpen", v)} />
+                <Num label="Max per group" value={overlay.maxPerGroup} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxPerGroup", v)} />
                 <Num label="Cycle s" value={overlay.scanS} min={0.2} max={8} step={0.05} onChange={(v) => patch("scanS", v)} />
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
@@ -1175,15 +1178,7 @@ function SettingsPage() {
               />
               <div className="mt-3">
                 <Grid>
-                  <Num
-                    label="Dynamic cap"
-                    value={overlay.symbolCap}
-                    min={0}
-                    max={800}
-                    step={1}
-                    hint="0 = unlimited. With Dynamic on, the engine keeps this many highest-leverage / most-volatile names plus any open positions."
-                    onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
-                  />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="0 = unlimited. With Dynamic on, the engine keeps every USDT-M name (ranked max leverage then 1H vol) plus any open positions." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">
@@ -1430,6 +1425,7 @@ function Num({
           {unit}
         </span>
       </div>
+      {max - min <= 200 ? (
       <input
         type="range"
         min={min}
@@ -1441,6 +1437,7 @@ function Num({
         style={{ ["--fill" as string]: `${pct}%` }}
         suppressHydrationWarning
       />
+      ) : null}
       {hint ? <p className="mt-1 text-xs text-muted">{hint}</p> : null}
     </label>
   );

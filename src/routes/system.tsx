@@ -78,9 +78,9 @@ function SystemPage() {
         <Stat k="Live packs" v={String(liveN)} s="wired into the core" />
         <Stat k="Extension slots" v={String(slotN)} s="same contract, not attached" />
         <Stat
-          k="Venue"
-          v={stats?.exchange ?? "BingX"}
-          s={stats?.connection ?? "bingx-x01"}
+          k="Load"
+          v={String(stats?.engine?.load?.level ?? stats?.coverage?.load?.level ?? "calm")}
+          s={`rss ${Math.round(Number(stats?.engine?.load?.rssMb ?? stats?.rssMb ?? 0))}MB · chunk ${stats?.engine?.load?.scanChunk ?? "—"}`}
         />
       </section>
 

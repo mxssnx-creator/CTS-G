@@ -25,6 +25,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     { pf?: number; n?: number; open?: boolean }
   >;
   const track = cov?.tracking;
+  const load = cov?.load ?? live.engine?.load;
   const px = cov?.px ?? scan?.px ?? 0;
   const n = cov?.symbols ?? scan?.universe ?? live.symbolCount ?? 0;
   const full = n > 0 && px >= n;
@@ -76,6 +77,12 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         {track ? (
           <span>
             track {track.withCid ?? 0}/{track.ours ?? 0} cid · {track.withSet ?? 0} set · foreign {track.foreign ?? 0}
+          </span>
+        ) : null}
+        {load ? (
+          <span className={load.level === "critical" || load.level === "overload" ? "text-danger" : "text-muted"}>
+            load {load.level ?? "—"} · chunk {load.scanChunk ?? "—"} · rss {load.rssMb ?? "—"}MB
+            {load.shed?.length ? ` · shed ${load.shed.join(",")}` : ""}
           </span>
         ) : null}
       </div>

@@ -257,14 +257,14 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.6,
   controlOrders: true,
   blockEnabled: true,
-  blockMaxStack: 12,
+  blockMaxStack: 0,
   blockVolumeRatio: 1,
   blockProfitFactorRatio: 0.8,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
   dcaEnabled: true,
-  dcaMaxSteps: 4,
+  dcaMaxSteps: 0,
   dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
   dcaTakeProfitMode: "average",
@@ -351,7 +351,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setUseHistoricGate: true,
   setMinSamples: 12,
   setReactivate: true,
-  setMaxActive: 12,
+  setMaxActive: 0,
   setMinStep: 8,
   setStepMax: 22,
   setStepAdapt: true,
@@ -572,14 +572,14 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
-    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 12),
+    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 0),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 0.8),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
     dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, true),
-    dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 4),
+    dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 0),
     dcaCooldownSeconds: num(cts.dcaCooldownSeconds ?? coord.dcaCooldownSeconds, 30),
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
     dcaTakeProfitMode: String(cts.dcaTakeProfitMode ?? coord.dcaTakeProfitMode ?? "average"),
@@ -656,7 +656,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setMinSamples: num(cts.setMinSamples, 12),
     setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 12),
+    setMaxActive: num(cts.setMaxActive, 0),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 8),
     setStepMax: num(cts.setStepMax, 22),
     setStepAdapt: bool(cts.setStepAdapt, true),
@@ -702,9 +702,10 @@ function nestedAxis(coord: Record<string, unknown>, axis: string, field: string)
   return axes?.[axis]?.[field];
 }
 
-export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1) {
+export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1, stack = 0) {
   const rows = [];
-  for (let n = 1; n <= 12; n += 1) {
+  const nMax = stack > 0 ? Math.min(stack, 24) : 12;
+  for (let n = 1; n <= nMax; n += 1) {
     const inc = n * ratio;
     rows.push({
       n,
@@ -769,14 +770,15 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.symbolsDynamic = next.symbolsDynamic !== false;
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
-  const steps = Math.max(1, Math.min(8, Math.round(next.dcaMaxSteps || 4)));
+  const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;
   const dist = [...(next.dcaStepDistancesPct || [0.5, 1, 1.5, 2])];
   const mult = [...(next.dcaStepVolumeMultipliers || [1.5, 2, 2.3, 2.5])];
-  while (dist.length < steps) dist.push(Number((dist[dist.length - 1] + 0.5).toFixed(2)));
-  while (mult.length < steps) mult.push(mult[mult.length - 1] ?? 1.5);
-  next.dcaStepDistancesPct = dist.slice(0, steps);
-  next.dcaStepVolumeMultipliers = mult.slice(0, steps);
+  const seed = steps > 0 ? steps : Math.max(dist.length, mult.length, 4);
+  while (dist.length < seed) dist.push(Number((dist[dist.length - 1] + 0.5).toFixed(2)));
+  while (mult.length < seed) mult.push(mult[mult.length - 1] ?? 1.5);
+  next.dcaStepDistancesPct = steps > 0 ? dist.slice(0, steps) : dist;
+  next.dcaStepVolumeMultipliers = steps > 0 ? mult.slice(0, steps) : mult;
   const m: Record<string, boolean> = { ...(next.modules ?? {}) };
   m["strategy.block"] = Boolean(next.blockEnabled && next.stratBlock);
   m["strategy.dca"] = next.dcaEnabled !== false && next.stratDca !== false;

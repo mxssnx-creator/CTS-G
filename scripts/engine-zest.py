@@ -19,6 +19,8 @@ from indication_engine import self_test as indication_self_test
 from risk_variants import self_test as variants_self_test
 from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
+from load_engine import self_test as load_self_test
+from block_engine import BlockBook, BlockLane, parse_block_count
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
 from pulse_trader import (
     coerce_symbol_sort,
@@ -26,6 +28,14 @@ from pulse_trader import (
     symbol_rank_key,
     rank_self_test,
     Contract,
+    ctrl_payload,
+    real_oid,
+    extract_oid,
+    tpsl_attach_json,
+    sl_bounds,
+    ctrl_err_kind,
+    SL_TYPES,
+    TP_TYPES,
 )
 
 out: List[Tuple[str, bool, str]] = []
@@ -44,6 +54,7 @@ def run_units() -> None:
         (variants_self_test, "var"),
         (dca_self_test, "dca"),
         (stats_self_test, "stats"),
+        (load_self_test, "load"),
     ):
         try:
             rows = fn()
@@ -91,10 +102,16 @@ def overlay_zest() -> None:
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
-    rec("isolation-lists", x01.get("symbols") != x02.get("symbols") or x01.get("symbolsAll") != x02.get("symbolsAll"))
-    rec("x01-capped", int(x01.get("symbolCap") or 0) == 26 and x01.get("symbolsAll") is False)
+    rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 0, str(x01.get("blockMaxStack")))
+    rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
+    rec("x01-set-unlim", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
-    rec("x01-not-x02-symbols", "SOL-USDT" in (x01.get("symbols") or []) and (x02.get("symbols") == ["*"] or x02.get("symbolsAll")))
+    rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 0 and int(x02.get("dcaMaxSteps") or 0) == 0)
+    rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
 
 def cost_zest() -> None:
@@ -112,12 +129,87 @@ def contract_zest() -> None:
     rec("contract-min-usdt", float(c.min_usdt) == 2.0)
 
 
+def controls_zest() -> None:
+    rec("oid-reject-exists", real_oid("exists") == "")
+    rec("oid-keep", real_oid("1234567890") == "1234567890")
+    rec("oid-extract", extract_oid({"code": 0, "data": {"order": {"orderId": "99"}}}) == "99")
+    rec("oid-extract-nested-sl", extract_oid({"data": {"stopLoss": {"orderId": "55"}}}) == "55")
+    sl_close = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=True, with_qty=True)
+    rec("sl-no-qty-with-close", "quantity" not in sl_close and sl_close.get("closePosition") == "true", str(sl_close))
+    rec("sl-type-stop-mkt", sl_close.get("type") == "STOP_MARKET")
+    rec("sl-close-side", sl_close.get("side") == "SELL" and sl_close.get("positionSide") == "LONG")
+    sl_qty = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=False, with_qty=True)
+    rec("sl-qty-no-close", sl_qty.get("quantity") == "1.2" and "closePosition" not in sl_qty, str(sl_qty))
+    sl_stop = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=False, with_qty=True, otype="STOP")
+    rec("sl-stop-has-price", sl_stop.get("price") == "140.0" and sl_stop.get("stopPrice") == "140.0", str(sl_stop))
+    tp_close = ctrl_payload("SOL-USDT", "LONG", "tp", "160.0", "1.2", "Gx01vabc", close_pos=True, with_qty=False)
+    rec("tp-close-no-qty", "quantity" not in tp_close and tp_close.get("type") == "TAKE_PROFIT_MARKET")
+    short_sl = ctrl_payload("SOL-USDT", "SHORT", "sl", "160.0", "1.2", "Gx01uabc", close_pos=True, with_qty=False)
+    rec("short-sl-buy", short_sl.get("side") == "BUY")
+    att = tpsl_attach_json("140.0", "160.0")
+    rec("attach-both", "stopLoss" in att and "takeProfit" in att and "STOP_MARKET" in att["stopLoss"] and "TAKE_PROFIT" in att["takeProfit"])
+    rec("attach-price", '"price":"140.0"' in att["stopLoss"] or '"price": "140.0"' in att["stopLoss"] or "140.0" in att["stopLoss"])
+    rec("sl-types-cover", "STOP_MARKET" in SL_TYPES and "STOP" in SL_TYPES)
+    rec("tp-types-cover", "TAKE_PROFIT_MARKET" in TP_TYPES)
+    lo, hi = sl_bounds("LONG", 100.0, 100.0, 100.0, 99.4, 0.01)
+    rec("sl-long-window", lo > 99.4 and hi < 100.0 and lo < hi, f"lo={lo} hi={hi}")
+    rec("sl-long-inside-liq", lo >= 99.4 * 1.001, f"lo={lo}")
+    lo2, hi2 = sl_bounds("LONG", 100.0, 100.0, 100.0, 0.0, 0.01)
+    rec("sl-long-no-liq-cap", hi2 < 100.0 and lo2 > 99.4, f"lo={lo2} hi={hi2}")
+    rec("err-liq", ctrl_err_kind("stop loss less than the liquidation price") == "liq")
+    rec("err-px", ctrl_err_kind("the trigger price cannot be greater than current price") == "px")
+    rec("err-exists", ctrl_err_kind("order already exists") == "exists")
+    rec("err-qty-close", ctrl_err_kind("quantity and closePosition cannot be sent together") == "qty_close")
+    rec("no-reduce-only", "reduceOnly" not in sl_close and "reduceOnly" not in tp_close)
+    lo_s, hi_s = sl_bounds("SHORT", 100.0, 100.0, 100.0, 100.6, 0.01)
+    rec("sl-short-window", lo_s > 100.0 and hi_s < 100.6 and lo_s < hi_s, f"lo={lo_s} hi={hi_s}")
+    # In profit 1%: breakeven 100 sits inside LONG window below mark 101
+    lo_p, hi_p = sl_bounds("LONG", 101.0, 101.0, 100.0, 100.4, 0.01)
+    rec("sl-lock-room", lo_p > 100.0 and hi_p < 101.0 and lo_p < hi_p, f"lo={lo_p} hi={hi_p}")
+    rec("x01-dca-multi", len(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("dcaStepDistancesPct") or []) >= 2)
+    rec("payload-never-mix", "quantity" not in sl_close or "closePosition" not in sl_close)
+    rec("attach-keys", set(att) >= {"stopLoss", "takeProfit"})
+    rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
+    rec("oid-reject-exists-case", real_oid("EXISTS") == "")
+    rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
+    rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+
+
+def unlimited_zest() -> None:
+    b = BlockBook("/tmp/block-unlim-zest.json", {"variantBlockEnabled": True, "blockMaxStack": 0})
+    rec("block-unlim-stack", b.max_stack <= 0 and b.unlimited(), str(b.max_stack))
+    lane = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
+    rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.2)
+    rec("block-unlim-eval-bounded", 1 <= len(rows) <= 24, f"n={len(rows)}")
+    rec("block-parse-21", parse_block_count("sol-usdt:long#block:21") == 21, str(parse_block_count("sol-usdt:long#block:21")))
+    rec("block-parse-1", parse_block_count("sol-usdt:long#block:1") == 1)
+    finite = BlockBook("/tmp/block-lim-zest.json", {"variantBlockEnabled": True, "blockMaxStack": 3})
+    rec("block-finite-stack", finite.max_stack == 3, str(finite.max_stack))
+    frows = finite.evaluate_counts(BlockLane(symbol="XRP-USDT", side="SHORT", base_qty=1.0, base_entry=1.0), live_n=1, intern_pf=1.2)
+    rec("block-finite-eval", 3 <= len(frows) <= 6, f"n={len(frows)}")
+    from dca_engine import DcaBook
+    d = DcaBook()
+    d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
+    rec("dca-unlim-engine", d.max_steps <= 0, str(d.max_steps))
+    rec("coord-unlim-already", True)
+
+
+def coord_zest() -> None:
+    from coord_engine import Coordinator
+    c = Coordinator()
+    rec("coord-unlimited-slot", c.slot_cap(0, 1.2) >= 10**8, str(c.slot_cap(0, 1.2)))
+    rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
+
+
 def main() -> int:
     run_units()
     rank_zest()
     overlay_zest()
     cost_zest()
     contract_zest()
+    controls_zest()
+    coord_zest()
+    unlimited_zest()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:

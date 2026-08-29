@@ -588,6 +588,10 @@ function EngineStrip({ stats }: { stats: LiveStats | null }) {
   const api = stats?.api;
   if (!e && !api) return null;
   const qa = `${e?.qaPass ?? 0}P / ${e?.qaFail ?? 0}F`;
+  const load = e?.load;
+  const lv = load?.level ?? "normal";
+  const lvCls =
+    lv === "critical" || lv === "overload" ? "text-danger" : lv === "busy" ? "text-warn" : "text-primary";
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -609,6 +613,15 @@ function EngineStrip({ stats }: { stats: LiveStats | null }) {
         <span>1m {fmt(e?.tfReady?.["1m"], 0)}</span>
         <span>5m {fmt(e?.tfReady?.["5m"], 0)}</span>
         <span>15m {fmt(e?.tfReady?.["15m"], 0)}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-3" data-testid="load-strip">
+        <span className={lvCls}>
+          load {lv} · chunk {load?.scanChunk ?? e?.scanChunk ?? "—"} · rss {fmt(load?.rssMb ?? (stats as LiveStats & { rssMb?: number })?.rssMb, 0)}MB
+        </span>
+        <span className="text-muted">
+          hist {load?.histChunk ?? "—"} · trim {load?.trimmed ?? 0} · gc {load?.gcN ?? 0}
+          {load?.shed?.length ? ` · shed ${load.shed.join(",")}` : ""}
+        </span>
       </div>
     </div>
   );

@@ -39,6 +39,7 @@ try {
   if (/Open book|Scanning/i.test(desk)) ok("open book"); else fail("no open book");
   if (/coverage · px/i.test(desk) && /controls ·/i.test(desk)) ok("coverage+controls"); else fail("missing coverage/controls");
   if (/recon /i.test(desk)) ok("recon in coverage"); else out.push("WARN no recon");
+  if (/load /i.test(desk)) ok("load strip"); else out.push("WARN no load strip");
   await shot("/workspace/screenshots/desk-vst-live.png");
 
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
