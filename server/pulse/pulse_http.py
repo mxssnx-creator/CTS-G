@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +24,19 @@ SLOTS = [
 ]
 TYPE_TO_ID = {l["type"]: l["id"] for l in LANES}
 ID_TO_LANE = {l["id"]: l for l in LANES}
+
+
+def _short_err(msg) -> str:
+    s = " ".join(str(msg or "").split())
+    s = re.sub(r"https?://\S+", "", s)
+    s = re.sub(r"please verify our authentication.*", "", s, flags=re.I)
+    low = s.lower()
+    if "signature" in low:
+        return "signature mismatch"
+    if "insufficient" in low and "margin" in low:
+        return "insufficient margin"
+    return s.strip(" ,.")[:120]
+
 
 DETAIL_KEYS = (
     "coord",
@@ -302,7 +316,7 @@ def lane_summary(lane: dict) -> dict:
         "controlsMissing": cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
         "symbolCount": st.get("symbolCount") or len(st.get("symbols") or []),
-        "lastError": str(st.get("lastError") or "")[:160],
+        "lastError": _short_err(st.get("lastError")),
         "trackPrefix": eng.get("trackPrefix"),
         "cycle": st.get("cycle"),
     }
