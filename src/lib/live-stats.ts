@@ -1,0 +1,577 @@
+export type LiveOpen = {
+  symbol: string;
+  side: string;
+  qty: number;
+  entry: number;
+  px: number | null;
+  uPnlPct: number;
+  ageS: number;
+  reason: string;
+  sl: number;
+  tp: number;
+  slOid?: string;
+  tpOid?: string;
+  secSl?: number;
+  secTp?: number;
+  secSlOid?: string;
+  secTpOid?: string;
+  controls?: boolean;
+  overall?: boolean;
+  security?: boolean;
+  connection?: string;
+  connType?: string;
+  unit?: string;
+  slRatio?: number;
+  trailKey?: string;
+  slPct?: number;
+  tpPct?: number;
+  setId?: string;
+  pack?: string;
+  clientId?: string;
+  ours?: boolean;
+  indKind?: string;
+};
+
+export type LiveClosed = {
+  t: number;
+  symbol: string;
+  side: string;
+  qty: number;
+  entry: number;
+  exit: number;
+  pnl: number;
+  pnl_pct: number;
+  reason: string;
+  hold_s: number;
+  set_id?: string;
+  pack?: string;
+  sl_ratio?: number;
+  trail_key?: string;
+};
+
+export type LiveStats = {
+  running: boolean;
+  mode: string;
+  connection: string;
+  exchange: string;
+  startedAt: number;
+  now: number;
+  uptimeS: number;
+  equity: number;
+  startEquity: number;
+  available: number;
+  usedMargin: number;
+  unrealized: number;
+  realizedPnl: number;
+  sessionPnl: number;
+  pnlPct: number;
+  drawdownPct: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  openCount: number;
+  maxOpen: number;
+  symbols: string[];
+  symbolCount?: number;
+  symbolMax?: number;
+  scanMs?: number;
+  klinesReady?: number;
+  regime?: string;
+  coord?: {
+    axes?: Record<string, { enabled: boolean; max_window: number }>;
+    minPf?: number;
+    pfWindow?: number;
+    positionCostPct?: number;
+    rearrange?: boolean;
+    gate?: { allow?: boolean; reasons?: string[]; metrics?: Record<string, number> };
+    stages?: Record<string, { pf?: number; n?: number; open?: boolean }>;
+    mainEval?: number;
+    realEval?: number;
+  };
+  indications?: {
+    enabled?: boolean;
+    types?: Record<string, boolean>;
+    typeHits?: Record<string, number>;
+    minSources?: number;
+    minAgreement?: number;
+    extraSources?: boolean;
+    evalN?: number;
+    lanes?: Record<string, string[]>;
+    primary?: Array<{
+      symbol: string;
+      direction: string;
+      mode: string;
+      confidence: number;
+      agreement: number;
+      strength: number;
+      stop_loss_pct: number;
+      take_profit_pct: number;
+      sources: string[];
+      votes_long: number;
+      votes_short: number;
+      timeframe?: string;
+    }>;
+    tf?: Record<string, { independent?: string[]; combined?: string | null }>;
+    tf1m?: boolean;
+    tf5m?: boolean;
+    tf15m?: boolean;
+    tfCombined?: boolean;
+    tfMinAgree?: number;
+  };
+  halted: boolean;
+  haltReason: string | null;
+  leverage: number;
+  useMaxLeverage?: boolean;
+  leverageMap?: Record<string, number>;
+  slPct: number;
+  tpPct: number;
+  targetNotional: number;
+  activityPerMin: number;
+  consecLoss: number;
+  errors: number;
+  lastError: string;
+  cycle: number;
+  tests?: Array<{name:string;pass:boolean;detail:string}>;
+  open: LiveOpen[];
+  closed: LiveClosed[];
+  signals: Array<Record<string, unknown>>;
+  prices: Record<string, number | undefined>;
+  block?: {
+    enabled: boolean;
+    maxStack: number;
+    volumeRatio: number;
+    profitFactorRatio: number;
+    pauseCountRatio: number;
+    activeLive: boolean;
+    activeReal: boolean;
+    defaultMinPF: number;
+    allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
+    countN?: number;
+    lanes: Array<{
+      symbol: string;
+      side: string;
+      baseQty: number;
+      confirmedAdd: number;
+      aggregate: number;
+      counts: Array<{
+        n: number;
+        kind: string;
+        inc: number;
+        targetAdd: number;
+        requested: number;
+        minPF: number;
+        obsPF: number;
+        pass: boolean;
+        paused: boolean;
+        satisfied: boolean;
+        cold: boolean;
+      }>;
+    }>;
+  };
+  dca?: {
+    enabled?: boolean;
+    active?: boolean;
+    deactReason?: string;
+    maxSteps?: number;
+    distancesPct?: number[];
+    mults?: number[];
+    tpMode?: string;
+    lastPick?: string;
+    emits?: number;
+    last15Ratio?: number;
+    last25AvgR?: number;
+    last15N?: number;
+    lanes?: Array<{
+      symbol: string;
+      side: string;
+      parentQty: number;
+      avgEntry: number;
+      filledN: number;
+      steps: Array<{ n: number; distancePct: number; mult: number; filled: boolean; qty: number; paused: boolean }>;
+    }>;
+  };
+  pulse?: Record<string, unknown>;
+  coverage?: {
+    strategies?: Record<string, boolean>;
+    indicationTypes?: Record<string, boolean>;
+    indicationHits?: Record<string, number>;
+    evals?: { n?: number; symbols?: number; typeHits?: Record<string, number> };
+    coord?: {
+      allow?: boolean;
+      stages?: Record<string, { pf?: number; n?: number; open?: boolean }>;
+      mainEval?: number;
+      realEval?: number;
+      axes?: Record<string, { enabled?: boolean; maxWindow?: number }>;
+    };
+    tracking?: {
+      tag?: string;
+      ours?: number;
+      foreign?: number;
+      withSet?: number;
+      withCid?: number;
+      closedOurs?: number;
+    };
+    block?: {
+      enabled?: boolean;
+      maxStack?: number;
+      countN?: number;
+      allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
+      liveLanes?: number;
+      activeReal?: boolean;
+    };
+    sets?: {
+      families?: { base?: number; trail?: number };
+      setCount?: number;
+      activeCount?: number;
+      histFills?: number;
+      trailCover?: boolean;
+      independentTrail?: boolean;
+      slCover?: boolean;
+      product?: number;
+      packs?: string[];
+      slRatios?: number[];
+      trails?: string[];
+      steps?: number[];
+      dims?: { pack?: number; sl?: number; trail?: number; step?: number };
+    };
+    controls?: { open?: number; ok?: number; missing?: number; security?: number };
+    recon?: { ok?: boolean; detail?: string };
+    px?: number;
+    symbols?: number;
+    scan?: {
+      universe?: number;
+      px?: number;
+      kl1m?: number;
+      kl5m?: number;
+      kl15m?: number;
+      indications?: number;
+      missingInd?: string[];
+    };
+  };
+  unit?: string;
+  connType?: string;
+  paused?: boolean;
+  volumeFactor?: number;
+  lanes?: Array<{
+    type: string;
+    id: string;
+    label: string;
+    unit: string;
+    exchange: string;
+    mode?: string;
+    running: boolean;
+    halted: boolean;
+    haltReason?: string;
+    equity: number;
+    available: number;
+    unrealized: number;
+    openCount: number;
+    wins: number;
+    losses: number;
+    sessionPnl: number;
+    pf: number;
+    scanMs?: number;
+    rssMb?: number;
+    errors: number;
+    alive: boolean;
+    paused?: boolean;
+    progressPct?: number;
+    progressPhase?: string;
+    progressDetail?: string;
+    progressReady?: boolean;
+    hotMs?: number;
+    pfCost?: number;
+    controlsOk?: number;
+    controlsMissing?: number;
+    controlsSecurity?: number;
+    symbolCount?: number;
+    lastError?: string;
+    trackPrefix?: string;
+    cycle?: number;
+  }>;
+  equityLive?: number;
+  equityVst?: number;
+  sessionPnlLive?: number;
+  sessionPnlVst?: number;
+  detailConn?: string;
+  detailType?: string;
+  engine?: {
+    hotMs?: number;
+    warmMs?: number;
+    asyncP50?: number;
+    asyncN?: number;
+    qaPass?: number;
+    qaFail?: number;
+    scanS?: number;
+    cycleMs?: number;
+    cycleWaitMs?: number;
+    cycleOverrun?: boolean;
+    trackPrefix?: string;
+    ignoredForeign?: number;
+    klineLimit?: number;
+    tfReady?: Record<string, number>;
+  };
+  api?: {
+    wsOk?: boolean;
+    asyncP50?: number;
+    wsAgeMs?: number;
+    rest?: number;
+    ws?: number;
+  };
+  pfCost?: {
+    n?: number;
+    count?: number;
+    avgR?: number;
+    ratio?: number;
+    classicPf?: number;
+    costPct?: number;
+    netPct?: number;
+    grossPct?: number;
+    minPf?: number;
+    pass?: boolean;
+    scale?: string;
+    neutral?: number;
+    plus1x?: number;
+  };
+  profitFactor?: number;
+  pf?: number;
+  pfNeutral?: number;
+  pfPlus1xCost?: number;
+  pfScale?: string;
+  variants?: {
+    slRatio?: number;
+    slAuto?: boolean;
+    slPick?: string;
+    trailKey?: string;
+    trailArmPct?: number;
+    trailGivePct?: number;
+    trailAuto?: boolean;
+    trailPick?: string;
+    slGrid?: Array<{ ratio: number; rr: number; slPct: number; tpPct: number; selected: boolean }>;
+    slScores?: Array<{ key: string; n: number; ratio: number; pf: number; selected: boolean }>;
+    trailScores?: Array<{ key: string; n: number; ratio: number; pf: number; selected: boolean; inRange?: boolean }>;
+  };
+  sets?: {
+    enabled?: boolean;
+    ready?: boolean;
+    lookback?: number;
+    pfWindow?: number;
+    deactN?: number;
+    minPf?: number;
+    maxDdS?: number;
+    autoDeact?: boolean;
+    useHistoricGate?: boolean;
+    setCount?: number;
+    minStep?: number;
+    minStepCfg?: number;
+    stepMax?: number;
+    stepAdapt?: boolean;
+    steps?: number[];
+    activeCount?: number;
+    histFills?: number;
+    barsSymbols?: number;
+    lanes?: Array<{
+      type?: string;
+      id?: string;
+      label?: string;
+      progress?: {
+        phase?: string;
+        pct?: number;
+        detail?: string;
+        ready?: boolean;
+        cycle?: number;
+      };
+      activeCount?: number;
+      setCount?: number;
+      ready?: boolean;
+      histFills?: number;
+      running?: boolean;
+      halted?: boolean;
+    }>;
+    progress?: {
+      phase?: string;
+      pct?: number;
+      symbol?: string;
+      setId?: string;
+      barsDone?: number;
+      barsTotal?: number;
+      setsDone?: number;
+      setsTotal?: number;
+      symbolsDone?: number;
+      symbolsTotal?: number;
+      elapsedMs?: number;
+      lastRunMs?: number;
+      cycle?: number;
+      detail?: string;
+      ready?: boolean;
+      error?: string;
+    };
+    rows?: Array<{
+      id: string;
+      pack: string;
+      tf: string;
+      slRatio: number;
+      trailKey: string;
+      step?: number;
+      tpPct?: number;
+      n: number;
+      liveN: number;
+      wins: number;
+      last15Ratio: number;
+      last15Classic: number;
+      last15N: number;
+      last15R: number;
+      last25AvgR: number;
+      last25N: number;
+      last25AvgPnl: number;
+      maxDdS: number;
+      avgDdS: number;
+      ddEpisodes: number;
+      wr?: number;
+      expectancy?: number;
+      avgHoldS?: number;
+      classicPf?: number;
+      intern?: {
+        pf15?: number;
+        classic15?: number;
+        avgR15?: number;
+        avgR25?: number;
+        maxDdS?: number;
+        avgDdS?: number;
+        wr?: number;
+        E?: number;
+        avgHoldS?: number;
+        n?: number;
+        liveN?: number;
+      };
+      active: boolean;
+      deactReason: string;
+      locked: boolean;
+    }>;
+  };
+  exits?: {
+    enabled?: boolean;
+    ignoreTp?: boolean;
+    bestOf?: boolean;
+    lockOn?: boolean;
+    peakOn?: boolean;
+    revOn?: boolean;
+    timeOn?: boolean;
+    lockPct?: number;
+    optSlPct?: number;
+    lastPick?: string;
+    lanes?: Array<{
+      key: string;
+      n: number;
+      wins: number;
+      last15Ratio: number;
+      last25AvgR: number;
+      maxDdS: number;
+      active: boolean;
+      deactReason: string;
+      selected?: boolean;
+    }>;
+  };
+  klinesTf?: Record<string, number>;
+  cts?: Record<string, unknown>;
+};
+
+
+export function statsMatchesConn(s: LiveStats, conn: string): boolean {
+  const got = String(s.connType || "").toLowerCase();
+  const cid = String(s.connection || "").toLowerCase();
+  const unit = String(s.unit || "").toLowerCase();
+  if (conn === "live") {
+    if (got === "overall" || cid === "overall") return false;
+    if (got === "vst" || cid.includes("x02") || unit === "vst") return false;
+    return got === "live" || cid.includes("x01") || unit === "usdt";
+  }
+  if (conn === "vst") {
+    if (got === "overall" || cid === "overall") return false;
+    if (got === "live" || cid.includes("x01") || unit === "usdt") return false;
+    return got === "vst" || cid.includes("x02") || unit === "vst";
+  }
+  if (conn === "overall") return got === "overall" || cid === "overall";
+  return false;
+}
+
+export function pickView(stats: LiveStats | null, conn: string): LiveStats | null {
+  if (!stats) return null;
+  return statsMatchesConn(stats, conn) ? stats : null;
+}
+
+function cidPrefix(conn: string): string {
+  if (conn === "live") return "Gx01";
+  if (conn === "vst") return "Gx02";
+  return "";
+}
+
+export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
+  if (statsMatchesConn(s, conn)) return s;
+  const overall = String(s.connType || s.connection || "").toLowerCase() === "overall";
+  if (!overall) return null;
+  if (conn === "overall") return s;
+  const lane = (s.lanes || []).find((l) => l.type === conn);
+  if (!lane) return null;
+  const prefix = cidPrefix(conn);
+  const unitWant = conn === "vst" ? "vst" : "usdt";
+  const open = (s.open || []).filter((p) => {
+    const cid = String(p.clientId || "");
+    if (prefix && cid.startsWith(prefix)) return true;
+    const u = String(p.unit || "").toLowerCase();
+    return Boolean(u) && u === unitWant;
+  });
+  return {
+    ...s,
+    connType: conn,
+    connection: lane.id || (conn === "live" ? "bingx-x01" : "bingx-x02"),
+    unit: lane.unit || (conn === "vst" ? "VST" : "USDT"),
+    mode: lane.mode || (conn === "vst" ? "VST_DEMO" : "LIVE_MAINNET"),
+    exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
+    running: lane.running,
+    halted: lane.halted,
+    haltReason: lane.haltReason ?? s.haltReason ?? null,
+    paused: lane.paused,
+    equity: lane.equity,
+    available: lane.available ?? s.available,
+    unrealized: lane.unrealized ?? 0,
+    sessionPnl: lane.sessionPnl,
+    wins: lane.wins,
+    losses: lane.losses,
+    winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
+    openCount: lane.openCount,
+    open,
+    symbolCount: lane.symbolCount ?? s.symbolCount,
+    scanMs: lane.scanMs ?? s.scanMs,
+    lastError: lane.lastError ?? s.lastError,
+    pf: lane.pf,
+  };
+}
+
+async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { cache: "no-store", signal: ac.signal });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && typeof j === "object" ? j : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchLiveStats(conn = "overall"): Promise<LiveStats | null> {
+  const snapP = fetchJson("/live-stats.json", 4000);
+  const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 1600)) as LiveStats | null;
+  if (live && statsMatchesConn(live, conn)) return live;
+  if (live) {
+    const fromLive = viewFromSnapshot(live, conn);
+    if (fromLive) return fromLive;
+  }
+  const snap = (await snapP) as LiveStats | null;
+  if (!snap) return null;
+  return viewFromSnapshot(snap, conn);
+}

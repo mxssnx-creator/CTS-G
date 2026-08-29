@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --color-bg: #07110e;
+  --color-bg2: #0b1914;
+  --color-surface: #0f221c;
+  --color-surface2: #16302a;
+  --color-fg: #d9f0e6;
+  --color-muted: #7f9d90;
+  --color-faint: #4e6b60;
+  --color-primary: #3dcf8e;
+  --color-primary-dim: #1f7a54;
+  --color-warn: #e0b15a;
+  --color-danger: #ef6f63;
+  --color-border: #1d3a32;
+  --color-grid: #12241e;
+  --radius: 0.75rem;
+}
+
+@layer base {
+  html, body, #app { min-height: 100%; }
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  .tabular-nums, .font-mono { font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    accent-color: var(--color-primary);
+    height: 0.4rem;
+    appearance: none;
+    -webkit-appearance: none;
+    background:
+      linear-gradient(var(--color-primary), var(--color-primary)) 0 / var(--fill, 0%) 100% no-repeat,
+      var(--color-border);
+    border-radius: 999px;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 1rem;
+    height: 1rem;
+    border-radius: 999px;
+    background: var(--color-fg);
+    border: 2px solid var(--color-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 25%, transparent);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 1rem;
+    height: 1rem;
+    border-radius: 999px;
+    background: var(--color-fg);
+    border: 2px solid var(--color-primary);
+  }
+}
+
+.desk-grid {
+  background-image:
+    linear-gradient(to right, var(--color-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.live-dot { animation: pulse-live 1.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot { animation: none; }
+}
