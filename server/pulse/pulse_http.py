@@ -33,9 +33,15 @@ def _short_err(msg) -> str:
     low = s.lower()
     if "signature" in low:
         return ""
-    if "insufficient" in low and "margin" in low:
+    if "insufficient" in low:
         return ""
     if "cooling" in low or "position not exist" in low:
+        return ""
+    if "quantity or stopprice" in low or "parameter quantity" in low:
+        return ""
+    if "order size must be less" in low or "available amount" in low:
+        return ""
+    if "stop loss price should" in low or "take profit price should" in low:
         return ""
     return s.strip(" ,.")[:120]
 

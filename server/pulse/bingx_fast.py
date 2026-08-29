@@ -61,6 +61,7 @@ LIMITS = {
 }
 
 RATE_CODES = {100410, 100421, 109421, 109429, 100429, 101209}
+SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429}
 
 
 class TokenBucket:
@@ -376,8 +377,8 @@ class FastBingX:
             self.err.write("http", method=method, path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
         if isinstance(body, dict) and body.get("code") not in (0, None):
-            if body.get("code") not in (100404, 109400, 100001) or "signature" in str(body.get("msg") or "").lower():
-                if body.get("code") not in (109400, 100404):
+            if body.get("code") not in (100404, 109400, 100001, *SKIP_API_LOG) or "signature" in str(body.get("msg") or "").lower():
+                if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
             self._trip(path, body)
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}

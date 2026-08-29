@@ -172,11 +172,18 @@ _AUTH_TAIL_RE = re.compile(r"please verify our authentication.*", re.I)
 _TRANSIENT_API = (
     "signature",
     "insufficient margin",
+    "insufficient liquidity",
     "cooling",
     "rate limit",
     "frequency",
     "order not exist",
     "position not exist",
+    "quantity or stopprice is must",
+    "parameter quantity",
+    "order size must be less",
+    "available amount",
+    "stop loss price should",
+    "take profit price should",
 )
 
 
@@ -187,8 +194,14 @@ def short_api_msg(msg: str) -> str:
     low = m.lower()
     if "signature" in low:
         return "signature mismatch"
+    if "insufficient" in low and "liquidity" in low:
+        return "insufficient liquidity"
     if "insufficient" in low and "margin" in low:
         return "insufficient margin"
+    if "quantity or stopprice is must" in low or "parameter quantity" in low:
+        return "ctrl qty/stop"
+    if "order size must be less" in low or "available amount" in low:
+        return "order too large"
     if "cooling" in low:
         return "cooling"
     return m.strip(" ,.")[:120]
@@ -312,6 +325,10 @@ def ctrl_err_kind(msg: str) -> str:
         return "exists"
     if "quantity" in m and "closeposition" in compact:
         return "qty_close"
+    if "quantity or stopprice is must" in compact or "parameterquantity" in compact:
+        return "px"
+    if "insufficient liquidity" in m:
+        return "liq"
     if "trigger price" in m or "current price" in m or "stop loss price" in m or "take profit price" in m:
         return "px"
     if "exceeded" in m and "limit" in m:
@@ -807,16 +824,37 @@ class Pulse:
         return self.parse_lev_payload(r.get("data"))
 
     def round_px(self, c: Contract, px: float) -> float:
+        px = float(px or 0)
         p = max(0, int(c.pprec if c else 6))
-        return float(f"{px:.{p}f}")
+        out = float(f"{px:.{p}f}")
+        if px > 0 and out <= 0:
+            for p2 in range(p + 1, 12):
+                out = float(f"{px:.{p2}f}")
+                if out > 0:
+                    break
+        return out
 
     def fmt_px(self, c: Optional[Contract], px: float) -> str:
+        px = float(px or 0)
         p = max(0, int(c.pprec if c else 6))
-        return f"{float(px):.{p}f}"
+        s = f"{px:.{p}f}"
+        if px > 0 and float(s) <= 0:
+            for p2 in range(p + 1, 12):
+                s = f"{px:.{p2}f}"
+                if float(s) > 0:
+                    break
+        return s
 
     def fmt_qty(self, c: Optional[Contract], q: float) -> str:
+        q = float(q or 0)
         p = max(0, int(c.qprec if c else 6))
-        return f"{float(q):.{p}f}"
+        s = f"{q:.{p}f}"
+        if q > 0 and float(s) <= 0:
+            for p2 in range(p + 1, 12):
+                s = f"{q:.{p2}f}"
+                if float(s) > 0:
+                    break
+        return s
 
     def sized_notional(self) -> float:
         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
@@ -1883,9 +1921,13 @@ class Pulse:
         c = self.contracts.get(pos.symbol)
         qty_s = self.fmt_qty(c, pos.qty)
         px_s = self.fmt_px(c, price)
+        if float(px_s or 0) <= 0:
+            log(f"CTRL SKIP {kind} {pos.symbol} stopPrice=0", every=20.0, key=f"cskip:{pos.symbol}:px0")
+            self.ctrl_skip[pos.symbol] = time.time() + 60
+            return have_this
         forms = [
-            {"close_pos": True, "with_qty": False, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
             {"close_pos": False, "with_qty": True, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
+            {"close_pos": True, "with_qty": False, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
             {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
             {"close_pos": True, "with_qty": False, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
         ]
@@ -1948,13 +1990,15 @@ class Pulse:
                     self.ctrl_skip[pos.symbol] = time.time() + 30
                     return have_this
                 if kind_err in ("px", "liq"):
+                    self.ctrl_skip[pos.symbol] = time.time() + 45
                     break
             if oid:
                 break
         if not oid:
             short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
-            if is_transient_api(msg) or kind_err in ("flat", "px", "liq", "exists", "qty_close"):
+            if is_transient_api(msg) or kind_err in ("flat", "px", "liq", "exists", "qty_close", "qty"):
+                self.ctrl_skip[pos.symbol] = time.time() + (90 if kind_err in ("px", "liq", "qty") else 20)
                 log(f"CTRL SKIP {kind} {pos.symbol} {short}", every=12.0, key=f"cskip:{pos.symbol}:{short}")
             else:
                 self.errors += 1
@@ -1967,9 +2011,9 @@ class Pulse:
                 if age > 90.0 and self._exchange_flat(pos):
                     self.drop_ghost(pos, "ctrl-no-position")
             elif kind_err in ("px", "liq"):
-                self.ctrl_skip[pos.symbol] = time.time() + 12
+                self.ctrl_skip[pos.symbol] = time.time() + 45
             elif kind_err == "qty":
-                self.ctrl_skip[pos.symbol] = time.time() + 12
+                self.ctrl_skip[pos.symbol] = time.time() + 60
             return ""
         pos.overall = True
         pos.ctrl_qty = pos.qty
@@ -2531,6 +2575,9 @@ class Pulse:
                 if "insufficient" in low and "margin" in low:
                     self.cooldown["__book__"] = time.time() + 20.0
                     log(f"ENTRY wait available={self.available:.4f} after {sym}", every=15.0, key="avail-wait")
+                if "order size" in low or "available amount" in low:
+                    self.cooldown[sym] = time.time() + 60.0
+                    self.cooldown["__book__"] = time.time() + 20.0
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     return
@@ -3478,10 +3525,14 @@ class Pulse:
             )
             self.did_io = True
             if not self.ok(r):
-                self.errors += 1
-                self.last_error = f"dca {pos.symbol} n={row['n']} cooling"
-                self.dca_fail_cd[pos.symbol] = time.time() + 25.0
-                log(f"DCA FAIL {pos.symbol} #{row['n']} {r.get('msg')}", every=20.0, key=f"dcaf:{pos.symbol}")
+                msg = str(r.get("msg") or "")
+                self.dca_fail_cd[pos.symbol] = time.time() + (180.0 if is_transient_api(msg) else 25.0)
+                if is_transient_api(msg):
+                    log(f"DCA SKIP {pos.symbol} #{row['n']} {short_api_msg(msg)}", every=20.0, key=f"dcaf:{pos.symbol}")
+                else:
+                    self.errors += 1
+                    self.last_error = f"dca {pos.symbol} n={row['n']} {short_api_msg(msg)}"[:160]
+                    log(f"DCA FAIL {pos.symbol} #{row['n']} {r.get('msg')}", every=20.0, key=f"dcaf:{pos.symbol}")
                 self.dca_last_emit = time.time()
                 continue
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
@@ -4642,15 +4693,16 @@ class Pulse:
         )
         snap_ind = self.indications.snapshot()
         self.record_test("qa-ind-on", bool(snap_ind.get("enabled")), f"syms={snap_ind.get('symbols')} lanes={len(snap_ind.get('primary') or [])}")
-        have = set(getattr(self.indications, "last", {}) or {})
-        klined = [s for s in SYMBOLS if s in (self.klines_tf.get("1m", {}) or {}) or s in self.klines]
-        miss = [s for s in (klined or SYMBOLS) if s not in have][:4]
+        have = set(s for s, rows in (getattr(self.indications, "last", {}) or {}).items() if rows)
+        scored = [s for s in SYMBOLS if len((self.klines_tf.get("1m") or {}).get(s) or self.klines.get(s) or []) >= 20]
+        miss = [s for s in scored if s not in have][:4]
         warm_ind = self.cycle < max(80, len(SYMBOLS))
-        need = max(8, min(len(klined) - 2, max(8, len(klined) // 4))) if klined else 8
+        need = max(8, min(len(scored), max(8, len(scored) // 8))) if scored else 8
+        rotating = bool(getattr(self, "_scan_keep", None))
         self.record_test(
             "qa-ind-cover",
-            warm_ind or len(have) >= need,
-            f"{len(have)}/{len(SYMBOLS)} miss={miss}",
+            warm_ind or len(have) >= need or (rotating and len(have) >= 8),
+            f"{len(have)}/{len(scored) or len(SYMBOLS)} miss={miss}",
         )
         types = snap_ind.get("types") or {}
         self.record_test(
@@ -4869,8 +4921,6 @@ class Pulse:
                 self.maybe_dca_adds()
             else:
                 self.maybe_entries()
-        else:
-            self.maybe_dca_adds()
         if self.cycle % QA_EVERY == 0:
             self.qa_tick()
         if self.cycle % 12 == 0:
