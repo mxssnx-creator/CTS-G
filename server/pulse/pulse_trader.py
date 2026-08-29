@@ -4226,7 +4226,7 @@ class Pulse:
             "activityPerMin": round(per_min, 2),
             "consecLoss": self.consec_loss,
             "errors": self.errors,
-            "lastError": short_api_msg(self.last_error) if self.last_error else "",
+            "lastError": "" if (not self.last_error or is_transient_api(self.last_error)) else short_api_msg(self.last_error),
             "cycle": self.cycle,
             "lastEvent": getattr(self, "last_event", ""),
             "eventN": getattr(self, "event_n", 0),

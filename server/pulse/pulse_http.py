@@ -32,9 +32,11 @@ def _short_err(msg) -> str:
     s = re.sub(r"please verify our authentication.*", "", s, flags=re.I)
     low = s.lower()
     if "signature" in low:
-        return "signature mismatch"
+        return ""
     if "insufficient" in low and "margin" in low:
-        return "insufficient margin"
+        return ""
+    if "cooling" in low or "position not exist" in low:
+        return ""
     return s.strip(" ,.")[:120]
 
 
