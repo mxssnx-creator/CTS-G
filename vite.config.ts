@@ -13,8 +13,8 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
 
-const PULSE = "http://152.53.114.112:3015";
-const CTS = "http://152.53.114.112";
+const PULSE = (process.env.PULSE_URL || "http://152.53.114.112:3015").replace(/\/$/, "");
+const CTS = (process.env.CTS_URL || "http://152.53.114.112").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
 

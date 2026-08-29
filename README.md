@@ -22,10 +22,51 @@ This is the current CTS-G product. Previous CTS trees (keys, SSH dumps, old sett
 | `server/pulse/` | Engine: trader, indications, sets, coord, block, DCA, exits |
 | `server/pulse/overlay-bingx-x01.json` | Live overlay (capped liquid book, max leverage) |
 | `server/pulse/overlay-bingx-x02.json` | VST overlay (full USDT-M universe) |
+| `deploy/install-linux.sh` | First-time Linux install (packages, systemd, Redis, desk + engines) |
+| `deploy/update-linux.sh` | In-place Linux update (keeps overlays and open positions) |
 | `deploy/grok-pulse@.service` | systemd unit for a connection slot |
 | `scripts/` | zest / smoke / PWA / preview helpers |
 
 Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They are never stored in this repo.
+
+## Linux install
+
+On the VPS (`/opt/cts-g`, desk **:3102**):
+
+```bash
+git clone https://github.com/mxssnx-creator/CTS-G.git /opt/cts-g
+sudo /opt/cts-g/deploy/install-linux.sh --from-dir /opt/cts-g
+```
+
+From this tree, if SSH works:
+
+```bash
+./deploy/remote-install.sh --host 152.53.114.112 --user root
+```
+
+Installs Node 22, Python 3, Redis, pulse engine at `/opt/grok-x01-pulse`, desk at `/opt/cts-g`. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`).
+
+| Unit | Role |
+|---|---|
+| `grok-pulse-http` | Stats/control sidecar on :3015 |
+| `grok-desk` | Desk UI on :3102 |
+| `grok-pulse@bingx-x02` | VST engine |
+| `grok-pulse@bingx-x01` | Live engine (starts when Redis keys exist, or pass `--start-live`) |
+
+```bash
+sudo /opt/cts-g/deploy/update-linux.sh          # git pull, restart, keep overlays + opens
+sudo /opt/cts-g/deploy/update-linux.sh --force  # match origin/main exactly
+```
+
+Keys stay in Redis, never in git:
+
+```bash
+redis-cli HSET connection:bingx-x01 api_key '…' api_secret '…'
+redis-cli HSET connection:bingx-x02 api_key '…' api_secret '…'
+sudo systemctl restart grok-pulse@bingx-x01
+```
+
+`update-linux.sh` does not flatten exchange positions.
 
 ## Desk
 

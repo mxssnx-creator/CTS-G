@@ -1,0 +1,26 @@
+[Unit]
+Description=CTS-G pulse HTTP sidecar (:3015)
+Documentation=https://github.com/mxssnx-creator/CTS-G
+After=network-online.target
+Wants=network-online.target
+PartOf=grok-pulse.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/cts-g/cts-g.env
+WorkingDirectory=/opt/grok-x01-pulse
+ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_http.py
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+LimitNOFILE=4096
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grok-pulse-http
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=grok-pulse.target

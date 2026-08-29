@@ -1,0 +1,30 @@
+[Unit]
+Description=CTS-G desk UI (:3102)
+Documentation=https://github.com/mxssnx-creator/CTS-G
+After=network-online.target grok-pulse-http.service
+Wants=network-online.target
+PartOf=grok-pulse.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/cts-g/cts-g.env
+WorkingDirectory=/opt/cts-g
+ExecStart=/opt/cts-g/deploy/cts-g-desk.sh
+Restart=always
+RestartSec=3
+TimeoutStartSec=120
+TimeoutStopSec=20
+KillMode=mixed
+Environment=NODE_ENV=development
+Environment=HOST=0.0.0.0
+Environment=PORT=3102
+Environment=PULSE_URL=http://127.0.0.1:3015
+Environment=CTS_URL=http://127.0.0.1
+LimitNOFILE=8192
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grok-desk
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=grok-pulse.target

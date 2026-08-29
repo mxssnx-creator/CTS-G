@@ -1,6 +1,7 @@
 [Unit]
-Description=Independent pulse desk for %i
-After=network-online.target redis.service
+Description=CTS-G pulse engine (%i)
+Documentation=https://github.com/mxssnx-creator/CTS-G
+After=network-online.target redis-server.service redis.service grok-pulse-http.service
 Wants=network-online.target
 PartOf=grok-pulse.target
 
@@ -9,12 +10,16 @@ Type=notify
 NotifyAccess=all
 WatchdogSec=300
 WatchdogSignal=SIGKILL
+EnvironmentFile=-/etc/cts-g/cts-g.env
 WorkingDirectory=/opt/grok-x01-pulse
 ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_trader.py
 Restart=always
 RestartSec=2
 StartLimitBurst=20
 StartLimitIntervalSec=120
+TimeoutStartSec=90
+TimeoutStopSec=25
+KillMode=mixed
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
@@ -27,6 +32,8 @@ LimitNOFILE=4096
 OOMPolicy=kill
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=grok-pulse-%i
 
 [Install]
 WantedBy=multi-user.target
+WantedBy=grok-pulse.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=CTS-G pulse stack (HTTP + desk + engines)
+Documentation=https://github.com/mxssnx-creator/CTS-G
+Wants=grok-pulse-http.service grok-desk.service redis-server.service redis.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
