@@ -1,0 +1,58 @@
+=== run 2026-08-30T18:56:00Z start-stop-pause ===
+scope: Start/Stop/Pause muss immer funktionieren; Live-Tests gegen Remote-Server
+152.53.114.112 (Desk-UI :3102 via vite pulseControlProxy, Sidecar :3015); dazu
+In-Process-Tests lokal. Unlimited-Caps (0 = unlimited) inkl. Order-Guards.
+
+--- Remote Live-Befund (vor den Fixes, via :3102 + :3015) ---
+PAUSE  live  -> {"ok":true,"detail":"bingx-x01 paused"} ; stats: paused=true reason=paused  OK
+RESUME live  -> rc=0 aber stats halted=true reason="drawdown halt"  BUG: Halt-Latch
+                (equity 0.0009 < EQ_MIN 0.20, altes start_eq -> Resume wirkungslos)
+STOP   live  -> rc=0, cycle eingefroren 1473951->1473951, stats stale:
+                zeigt weiter altes "drawdown halt", kein "stopped"  BUG: stale stats
+START  live  -> {"ok":true,"detail":"Live already running","via":"cts"}  BUG:
+                tryPulse-Timeout 1.6s -> vite faellt auf legacy-CTS-Endpoints zurueck
+                und meldet falschen Zustand; systemctl start braucht ~25s
+                (Engine startete trotzdem: cycle 126->276, running=true halted=false)
+
+--- Fixes ---
+server/pulse/pulse_http.py
+  - apply_control: start/resume loescht PAUSE + STOP + STOP-ALL, legt reset-eq
+    File an (Engine re-baselt Equity), systemctl start mit reset-failed Retry;
+    Notiz enthaelt rc + echten systemd-State (unit_state, 3s Cache)
+  - stamp_stats: Ground-Truth-Override - STOP-File + systemd is-active schlagen
+    stale stats; stopped -> halted=true/running=false/reason="stopped";
+    service != active -> running=false/alive=false/stale + reason; neue Felder
+    svcActive, statsAgeS
+  - lane_summary: gleiche Ground-Truth (running/halted/halt_reason/svcActive/
+    statsAgeS/alive)
+  - heal_loop: restartet crashed/failed Engines automatisch (reset-failed +
+    start), ausser user-gestoppt (STOP-File) oder keine API-Keys in Redis;
+    150s Cooldown je Lane, 20s Intervall
+server/pulse/pulse_trader.py
+  - refresh_balance: reset-eq File (Sidecar-Start) -> start_eq re-baseline +
+    Halt-Latch aufgehoben; Deposit-Rescue: equity >= max(2*EQ_MIN,
+    1.5*halt_eq, halt_eq+1) -> re-baseline + halted=false; _halt_eq wird beim
+    Halt-Transition gesetzt
+vite.config.ts
+  - pulseControlProxy: Control-POSTs (start/stop/pause/resume) mit 30s Timeout
+    statt 1.6s -> kein Fallthrough auf legacy-CTS-Fallback mehr
+
+--- In-Process / lokale Checks (alle gruen) ---
+scripts/engine-zest.py            85/85  PASS
+npm test (run-ts-tests)           191 pass / 0 fail / 4 skip (node20 ohne
+                                  --experimental-strip-types, by design)
+npx tsc --noEmit                  clean
+scripts/max_symbols_smoke.py      12/12  PASS  (inkl. entries-no-order-cap-
+                                  unlimited order_est=516)
+scripts/overall-zest.mjs          45/45  PASS  (ZEST_BASE=http://127.0.0.1:8089)
+python3 -m py_compile             pulse_trader.py + pulse_http.py clean
+
+--- Remote Overlay ---
+POST /config.json beide Connections: blockMaxStack=0, dcaMaxSteps=0 geschrieben
+und verifiziert. Caveat: alter Remote-Engine-Code mappt 0->Defaults (live zeigt
+3/2) bis Code-Deploy auf dem Server erfolgt.
+
+--- Deploy ---
+Kein SSH aus der Sandbox; Deploy auf dem VPS erforderlich:
+  sudo /opt/cts-g/deploy/update-linux.sh --force
+Danach greifen unlimited caps + start/stop/pause-Fixes auf 152.53.114.112.
