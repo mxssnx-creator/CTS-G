@@ -403,7 +403,10 @@ function pulseControlPlugin(): Plugin {
             } catch {
               action = "";
             }
-            const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }));
+            // systemctl start/stop inside the sidecar can take ~25s — the 1.6s
+            // default would fall through to the legacy-CTS fallback on every
+            // start/stop and report bogus state. Control calls get 30s.
+            const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000);
             if (pulse) {
               jsonRes(res as ServerResponse, pulse.status, pulse.json);
               return;
