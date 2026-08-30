@@ -2,7 +2,8 @@ node_modules/
 .vercel/
 .tanstack/
 .nitro/
-.grok/
+.grok/*
+!.grok/app-env.json
 dist/
 artifacts/
 attachments/

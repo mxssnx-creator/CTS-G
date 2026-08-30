@@ -16,7 +16,7 @@
     "preview:stop": "node scripts/preview.mjs stop",
     "typecheck": "tsc --noEmit",
     "check:auth": "node scripts/check-auth-invariant.mjs",
-    "test": "node --test 'scripts/**/*.test.mjs' && node --experimental-strip-types --test src/lib/app-data/app-data.test.ts src/lib/auth/gate-identity.test.ts",
+    "test": "node --test scripts/ && node scripts/run-ts-tests.mjs",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
@@ -56,7 +56,7 @@
     "@tanstack/router-plugin": "^1.168.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "cmdk": "^1.1.1",
+    "cmdk": "^1.1.0",
     "date-fns": "^4.0.0",
     "lucide-react": "^0.510.0",
     "react": "^19.2.0",

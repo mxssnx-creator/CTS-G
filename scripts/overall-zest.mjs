@@ -2,13 +2,17 @@
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
 
-const BASE = "http://127.0.0.1:8080";
+const BASE = process.env.ZEST_BASE || "http://127.0.0.1:8080";
 const out = [];
 const ok = (m) => out.push("OK " + m);
 const fail = (m) => out.push("FAIL " + m);
 
 const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+// The platform's deferred extensions.js hangs whole page loads where grok.com
+// is unreachable (CI, offline dev). The zest checks the desk, not the platform
+// script, so abort it instead of letting it block DOMContentLoaded.
+await page.route("**/grok-app-builder/extensions.js", (route) => route.abort());
 page.setDefaultTimeout(14000);
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
@@ -171,6 +175,7 @@ try {
   else fail("snapshot live-stats " + snap.status);
 
   const page2 = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page2.route("**/grok-app-builder/extensions.js", (route) => route.abort());
   await page2.goto(BASE + "/", { waitUntil: "domcontentloaded" });
   await page2.waitForTimeout(900);
   const mob = await page2.locator("main").innerText();
