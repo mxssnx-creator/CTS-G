@@ -6,11 +6,14 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 
 DIR = "/opt/grok-x01-pulse"
+STOP_ALL_PATH = os.path.join(DIR, "STOP")
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [
@@ -181,6 +184,25 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["halted"] = True
         out["running"] = False
         out["haltReason"] = out.get("haltReason") or "paused"
+    # Ground truth: STOP file + systemd state beat a stale stats file, so a
+    # stopped/crashed desk never keeps showing its last "running" snapshot.
+    stopped = os.path.exists(os.path.join(DIR, f"STOP-{conn}")) or os.path.exists(STOP_ALL_PATH)
+    state = unit_state(conn)
+    out["svcActive"] = state == "active"
+    out["statsAgeS"] = round(stats_age(conn), 1)
+    if stopped:
+        out["halted"] = True
+        out["running"] = False
+        out["haltReason"] = "stopped"
+    if state != "active":
+        out["running"] = False
+        out["alive"] = False
+        out["stale"] = True
+        if not out.get("halted"):
+            out["halted"] = True
+            out["haltReason"] = "service failed" if state == "failed" else "service inactive"
+    elif out["statsAgeS"] > 20:
+        out["stale"] = True
     return out
 
 
@@ -196,6 +218,38 @@ def _unlink(path: str) -> None:
         pass
 
 
+def _sysctl(*args: str, timeout: float = 25.0) -> tuple:
+    try:
+        p = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=timeout)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except Exception as e:
+        return 99, str(e)[:160]
+
+
+_STATE_CACHE: dict = {}
+
+
+def unit_state(cid: str, fresh: bool = False) -> str:
+    """systemd is-active state, cached briefly — the desk polls several times a second."""
+    now = time.time()
+    hit = _STATE_CACHE.get(cid)
+    if not fresh and hit and now - hit[0] < 3.0:
+        return hit[1]
+    rc, out = _sysctl("is-active", f"grok-pulse@{cid}", timeout=6)
+    state = (out.splitlines() or [""])[0].strip() if out else ""
+    if state not in ("active", "inactive", "failed", "activating", "deactivating"):
+        state = "failed" if rc not in (0,) and state == "" else (state or "unknown")
+    _STATE_CACHE[cid] = (now, state)
+    return state
+
+
+def stats_age(conn: str) -> float:
+    try:
+        return time.time() - os.path.getmtime(stats_path(conn))
+    except Exception:
+        return 1e9
+
+
 def apply_control(conn: str, action: str) -> tuple:
     action = (action or "").lower().strip()
     if action not in ("start", "stop", "pause", "resume"):
@@ -207,21 +261,32 @@ def apply_control(conn: str, action: str) -> tuple:
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
+        reset_eq = os.path.join(DIR, f"reset-eq-{cid}")
         unit = f"grok-pulse@{cid}"
         if action == "pause":
             _unlink(stop)
             _touch(pause)
-            notes.append(f"{cid} paused")
+            notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
             _unlink(pause)
             _unlink(stop)
-            p = subprocess.run(["systemctl", "start", unit], capture_output=True, text=True, timeout=25)
-            notes.append(f"{cid} start rc={p.returncode}")
+            _unlink(STOP_ALL_PATH)
+            # Explicit Start = fresh session: engine re-baselines session equity
+            # on the next balance tick, so a latched drawdown/equity halt clears.
+            _touch(reset_eq)
+            rc, out = _sysctl("start", unit)
+            if rc != 0:
+                # start-limit-hit after a crash loop blocks start — reset and retry once.
+                _sysctl("reset-failed", unit, timeout=8)
+                rc, out = _sysctl("start", unit)
+            st = unit_state(cid, fresh=True)
+            notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
             _touch(stop)
-            p = subprocess.run(["systemctl", "stop", unit], capture_output=True, text=True, timeout=25)
-            notes.append(f"{cid} stop rc={p.returncode}")
+            rc, out = _sysctl("stop", unit)
+            st = unit_state(cid, fresh=True)
+            notes.append(f"{cid} stop rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
     return True, "; ".join(notes)
 
 
@@ -291,6 +356,15 @@ def lane_summary(lane: dict) -> dict:
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
+    stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
+    state = unit_state(lane["id"])
+    running = bool(st.get("running")) and state == "active" and not stopped
+    halted = bool(st.get("halted")) or stopped or state != "active"
+    halt_reason = st.get("haltReason")
+    if stopped:
+        halt_reason = "stopped"
+    elif state != "active" and not halt_reason:
+        halt_reason = "service failed" if state == "failed" else "service inactive"
     return {
         "type": lane["type"],
         "id": lane["id"],
@@ -298,9 +372,11 @@ def lane_summary(lane: dict) -> dict:
         "unit": lane["unit"],
         "exchange": st.get("exchange") or lane["exchange"],
         "mode": st.get("mode"),
-        "running": bool(st.get("running")),
-        "halted": bool(st.get("halted")),
-        "haltReason": st.get("haltReason"),
+        "running": running,
+        "halted": halted,
+        "haltReason": halt_reason,
+        "svcActive": state == "active",
+        "statsAgeS": round(stats_age(lane["id"]), 1),
         "equity": st.get("equity") or 0,
         "available": st.get("available") or 0,
         "unrealized": st.get("unrealized") or 0,
@@ -312,7 +388,7 @@ def lane_summary(lane: dict) -> dict:
         "scanMs": st.get("scanMs"),
         "rssMb": st.get("rssMb"),
         "errors": st.get("errors") or 0,
-        "alive": bool(st),
+        "alive": bool(st) and state == "active",
         "paused": bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}")),
         "progressPct": prog.get("pct"),
         "progressPhase": prog.get("phase"),
@@ -656,6 +732,43 @@ class Handler(SimpleHTTPRequestHandler):
         self._json({"ok": True, "overlay": cur, "conn": conn})
 
 
+def heal_loop() -> None:
+    """Restart crashed/failed engines unless the user stopped them on purpose.
+    After a crash loop systemd start-limit leaves a unit dead; reset-failed +
+    start revives it, so the desk always comes back on its own."""
+    last: dict = {}
+    while True:
+        try:
+            for lane in LANES:
+                cid = lane["id"]
+                if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
+                    continue
+                state = unit_state(cid, fresh=True)
+                if state == "active":
+                    continue
+                now = time.time()
+                if now - float(last.get(cid, 0) or 0) < 150.0:
+                    continue
+                try:
+                    p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
+                    if not (p.stdout or "").strip():
+                        continue  # no keys — engine would exit instantly
+                except Exception:
+                    continue
+                last[cid] = now
+                _sysctl("reset-failed", f"grok-pulse@{cid}", timeout=8)
+                rc, out = _sysctl("start", f"grok-pulse@{cid}")
+                try:
+                    with open(os.path.join(DIR, "http.log"), "a") as f:
+                        f.write(f"heal {cid} rc={rc} {out[:120]}\n")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(20.0)
+
+
 if __name__ == "__main__":
     os.chdir(DIR)
+    threading.Thread(target=heal_loop, name="heal", daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 3015), Handler).serve_forever()
