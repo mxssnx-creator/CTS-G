@@ -13,7 +13,7 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
 
-const PULSE = (process.env.PULSE_URL || "http://152.53.114.112:3015").replace(/\/$/, "");
+const PULSE = (process.env.PULSE_URL || "http://127.0.0.1:3015").replace(/\/$/, "");
 const CTS = (process.env.CTS_URL || "http://152.53.114.112").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
@@ -372,9 +372,20 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/universe.json"];
+        const handled = ["/control.json", "/connections.json", "/config.json", "/universe.json", "/live-stats.json"];
         if (!handled.includes(pathOnly)) {
           next();
+          return;
+        }
+        if (pathOnly === "/live-stats.json") {
+          // Synced snapshot wins when present; otherwise serve the halted-desk
+          // fallback so a fresh clone/dev box never 404s the desk snapshot.
+          const snap = join(process.cwd(), "public/live-stats.json");
+          if (existsSync(snap)) {
+            next();
+            return;
+          }
+          jsonRes(res as ServerResponse, 200, statsFallback("overall"));
           return;
         }
         try {
@@ -467,11 +478,116 @@ function pulseControlPlugin(): Plugin {
   };
 }
 
+function statsFallback(conn: string): Record<string, unknown> {
+  /** Full halted-desk payload for when the sidecar is unreachable: the desk
+   * renders "halted / sidecar-down" lanes instead of loading forever. */
+  let snap: Record<string, unknown> = {};
+  try {
+    snap = readLiveStats();
+  } catch {
+    /* no synced snapshot yet */
+  }
+  const snapLanes = (Array.isArray(snap.lanes) ? snap.lanes : []) as Array<Record<string, unknown>>;
+  const mkLane = (type: string, id: string, label: string, unit: string, exchange: string) => {
+    const cur = snapLanes.find((l) => l.type === type) ?? {};
+    return {
+      type,
+      id,
+      label,
+      unit,
+      exchange,
+      running: false,
+      halted: true,
+      paused: false,
+      alive: false,
+      haltReason: "sidecar-down",
+      equity: cur.equity ?? 0,
+      available: cur.available ?? 0,
+      unrealized: cur.unrealized ?? 0,
+      openCount: cur.openCount ?? 0,
+      wins: cur.wins ?? 0,
+      losses: cur.losses ?? 0,
+      sessionPnl: cur.sessionPnl ?? 0,
+      pf: cur.pf ?? 0,
+      scanMs: cur.scanMs ?? 0,
+      symbolCount: cur.symbolCount ?? 0,
+      errors: 0,
+      progressPct: cur.progressPct ?? 0,
+      progressPhase: cur.progressPhase ?? "idle",
+      progressReady: false,
+    };
+  };
+  const liveLane = mkLane("live", "bingx-x01", "Live", "USDT", "BingX");
+  const vstLane = mkLane("vst", "bingx-x02", "VST", "VST", "BingX VST");
+  const base: Record<string, unknown> = {
+    running: false,
+    halted: true,
+    paused: false,
+    haltReason: "sidecar-down",
+    mode: "OFF",
+    exchange: "BingX",
+    startedAt: 0,
+    now: Math.floor(Date.now() / 1000),
+    uptimeS: 0,
+    equity: 0,
+    startEquity: 0,
+    available: 0,
+    usedMargin: 0,
+    unrealized: 0,
+    realizedPnl: 0,
+    sessionPnl: 0,
+    pnlPct: 0,
+    drawdownPct: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    openCount: 0,
+    maxOpen: 0,
+    symbols: [],
+    leverage: 0,
+    slPct: 0,
+    tpPct: 0,
+    targetNotional: 0,
+    activityPerMin: 0,
+    consecLoss: 0,
+    errors: 0,
+    lastError: "",
+    cycle: 0,
+    open: [],
+    closed: [],
+    signals: [],
+    prices: {},
+    detail:
+      "Live pulse sidecar unreachable. Restart grok-pulse@bingx-x01 on the VPS (SSH). Overlay is ready: all USDT-M, 0=unlimited, Block+DCA multi-add.",
+  };
+  if (conn === "live") {
+    return { ...base, connType: "live", connection: "bingx-x01", unit: "USDT", mode: "LIVE_MAINNET" };
+  }
+  if (conn === "vst") {
+    return { ...base, connType: "vst", connection: "bingx-x02", unit: "VST", mode: "VST_DEMO", exchange: "BingX VST" };
+  }
+  return {
+    ...base,
+    connType: "overall",
+    connection: "overall",
+    unit: "MIXED",
+    lanes: [liveLane, vstLane],
+    equityLive: liveLane.equity,
+    equityVst: vstLane.equity,
+    sessionPnlLive: liveLane.sessionPnl,
+    sessionPnlVst: vstLane.sessionPnl,
+  };
+}
+
 function pulseProxy(path: string): Record<string, ProxyOptions> {
   return {
     [path]: {
       target: PULSE,
       changeOrigin: true,
+      // A hung sidecar must fail fast into the local fallback below, never
+      // stall the desk's polling loop on an open socket.
+      timeout: 8000,
+      proxyTimeout: 8000,
       configure(proxy) {
         proxy.on("error", (_err, req, res) => {
           const r = res as import("node:http").ServerResponse;
@@ -485,6 +601,18 @@ function pulseProxy(path: string): Record<string, ProxyOptions> {
             } catch {
               /* fall through */
             }
+            // No synced snapshot either: answer 200 with a full halted-desk
+            // payload so the desk renders halted lanes + identity instead of
+            // polling forever behind a "Loading…" placeholder.
+            let conn = "overall";
+            try {
+              conn = new URL(String(req.url || ""), "http://127.0.0.1").searchParams.get("conn") || "overall";
+            } catch {
+              /* keep overall */
+            }
+            r.writeHead(200, { "Content-Type": "application/json" });
+            r.end(JSON.stringify(statsFallback(conn)));
+            return;
           }
           r.writeHead(503, { "Content-Type": "application/json" });
           r.end(
