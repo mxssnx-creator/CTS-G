@@ -1,0 +1,172 @@
+--- a/server/pulse/pulse_trader.py
++++ b/server/pulse/pulse_trader.py
+@@ -50,6 +50,7 @@
+ ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
+ LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
+ START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
++RESET_EQ_PATH = os.path.join(DIR, f"reset-eq-{CONN_SHORT}")
+ 
+ UNIVERSE_PATH = os.path.join(DIR, "universe.json")
+ MAX_SYMBOLS = 0  # 0 = unlimited
+@@ -875,9 +876,19 @@
+         return max(0.0, float(self.available or 0)) * lev * 0.90
+ 
+     def max_book_notional(self) -> float:
+-        """Per-position cap: base size × configured Block/DCA rungs. Never the whole wallet."""
++        """Per-position book room. Limited books cap at base × configured rungs;
++        an unlimited Block/DCA book (0) is bounded only by remaining available."""
+         base = self.notional_cap()
+-        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if getattr(self.dca, "enabled", False) else 0
++        dca_on = bool(getattr(self.dca, "enabled", False))
++        block_on = bool(getattr(self.block, "enabled", False))
++        if (dca_on and int(getattr(self.dca, "max_steps", 0) or 0) <= 0) or (
++            block_on and int(getattr(self.block, "max_stack", 0) or 0) <= 0
++        ):
++            room = self.avail_notional()
++            if room > 0:
++                return room
++            return base
++        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if dca_on else 0
+         dca_extra = 0.0
+         if dca_n > 0:
+             try:
+@@ -1142,6 +1153,49 @@
+             except Exception:
+                 pass
+         self.last_bal = time.time()
++        # Explicit Start (sidecar drops reset-eq) or a real deposit must always
++        # revive the desk: re-baseline the session equity instead of latching
++        # the drawdown / equity-min halt forever.
++        try:
++            if os.path.exists(RESET_EQ_PATH):
++                os.remove(RESET_EQ_PATH)
++                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
++                    self._pre_pause_halt = None
++                self.start_eq = 0.0
++        except Exception:
++            pass
++        if self.start_eq <= 0 and self.equity > 0:
++            self.start_eq = self.equity
++            try:
++                tmp = START_EQ_PATH + ".tmp"
++                with open(tmp, "w") as f:
++                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
++                os.replace(tmp, START_EQ_PATH)
++            except Exception:
++                pass
++        halt_eq = float(getattr(self, "_halt_eq", 0.0) or 0.0)
++        econ_halt = self.halted and (
++            self.halt_reason == "drawdown halt" or str(self.halt_reason or "").startswith("equity ")
++        )
++        rescued = bool(
++            econ_halt
++            and halt_eq > 0
++            and self.equity >= max(EQ_MIN * 2.0, halt_eq * 1.5, halt_eq + 1.0)
++        )
++        if rescued:
++            log(f"EQ re-baseline on deposit start_eq {self.start_eq:.4f} -> {self.equity:.4f}")
++            self.start_eq = self.equity
++            try:
++                tmp = START_EQ_PATH + ".tmp"
++                with open(tmp, "w") as f:
++                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
++                os.replace(tmp, START_EQ_PATH)
++            except Exception:
++                pass
++            self.halted = False
++            self.halt_reason = None
++            self._pre_pause_halt = None
++            self._halt_eq = 0.0
+         if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
+             if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
+                 self._pre_pause_halt = self.halt_reason
+@@ -1153,10 +1207,14 @@
+             self.halted = True
+             self.halt_reason = "paused"
+         elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
++            if not self.halted:
++                self._halt_eq = self.equity
+             self.halted = True
+             self.halt_reason = "drawdown halt"
+             self._pre_pause_halt = None
+         elif self.equity < EQ_MIN:
++            if not self.halted:
++                self._halt_eq = self.equity
+             self.halted = True
+             self.halt_reason = f"equity {self.equity:.4f} below min"
+             self._pre_pause_halt = None
+@@ -2055,8 +2113,6 @@
+             return True
+         if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
+             return True
+-        if self._order_est_known and int(getattr(self, "_order_est", 0) or 0) >= 196:
+-            return True
+         if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
+             return True
+         return False
+@@ -3011,7 +3067,7 @@
+         self.strat_block = bool(ov.get("stratBlock", True))
+         self.strat_trail = bool(ov.get("stratTrailing", True))
+         self.strat_general = bool(ov.get("stratGeneral", True))
+-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
++        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
+         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
+         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
+         try:
+@@ -3073,7 +3129,7 @@
+         self.block.enabled = bool(b_en) if b_en is not None else True
+         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
+             self.block.enabled = True
+-        self.block.max_stack = 3 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
++        self.block.max_stack = 0 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
+         try:
+             self.load.configure(ov)
+         except Exception:
+@@ -3116,7 +3172,7 @@
+         else:
+             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
+             self.strat_ind = True
+-        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
++        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+         if not self.mods.get("strategy.coord", True):
+             for ax in self.coord.axes.values():
+                 ax.enabled = False
+@@ -3885,7 +3941,7 @@
+             else:
+                 skipped += 1
+             room = self.avail_notional()
+-            burst = 1 if int(getattr(self, "_order_est", 0) or 0) >= 180 else (16 if MAX_OPEN <= 0 else 6)
++            burst = 16 if MAX_OPEN <= 0 else 6  # unlimited: no order-count throttle
+             if room < 8:
+                 burst = 1
+             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
+@@ -4236,7 +4292,8 @@
+             self.record_test(name, ok, detail)
+         dca_ms = (time.perf_counter() - t_dca) * 1000
+         self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
+-        self.record_test("dca-enabled", bool(self.dca.enabled), f"steps={self.dca.max_steps} dist={self.dca.distances}")
++        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
++        self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
+         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
+         sl, tp, src = resolve_sl_tp(
+             base_sl=0.0048, base_tp=0.0075,
+@@ -4529,6 +4586,9 @@
+         self._stats_ts = now
+         self._stats_force = False
+         blob = json.dumps(self.stats(), separators=(",", ":"))
++        # State dir may be missing on a fresh box (or after a manual wipe):
++        # recreate it instead of dropping every stats write on the floor.
++        os.makedirs(DIR, exist_ok=True)
+         tmp = STATS_PATH + ".tmp"
+         with open(tmp, "w") as f:
+             f.write(blob)
+@@ -4753,7 +4813,8 @@
+             self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
+         except Exception as e:
+             self.record_test("qa-ind-self", False, str(e)[:80])
+-        self.record_test("qa-dca-on", bool(self.dca.enabled), f"en={self.dca.enabled} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
++        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
++        self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
+         try:
+             rows_g = self.strategy_closes()
+             consec_g = 0
