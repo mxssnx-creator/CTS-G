@@ -117,10 +117,10 @@ class DcaBook:
             step_n = int(raw_steps if raw_steps is not None else 0)
         except Exception:
             step_n = 0
+        # 0 = unlimited. Seed from configured distances; due() grows steps on demand.
+        self.max_steps = 0 if step_n <= 0 else max(1, step_n)
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
-        # 0 = use the configured rung list. Never grow extra unlimited steps.
-        self.max_steps = max(1, len(self.distances)) if step_n <= 0 else max(1, step_n)
         if self.max_steps > 0:
             while len(self.distances) < self.max_steps:
                 self.distances.append(self.distances[-1] + 0.005)
@@ -350,14 +350,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t10 = (snap["enabled"] and snap["maxSteps"] == 4 and "distancesPct" in snap, str(snap.get("distancesPct")))
     u = DcaBook()
     u.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    t11 = (u.max_steps == 2 and not u.unlimited(), f"steps={u.max_steps}")
+    t11 = (u.max_steps <= 0 and u.unlimited(), f"steps={u.max_steps}")
     ulane = u.attach("UUU-USDT", "LONG", 1.0, 100.0)
-    t12 = (len(ulane.steps) == 2, f"seed={len(ulane.steps)}")
+    t12 = (len(ulane.steps) >= 2, f"seed={len(ulane.steps)}")
     for st in list(ulane.steps):
         st.filled = True
         st.qty = 1.0
     ru = u.due("UUU-USDT", "LONG", 1.0, 100.0, 90.0, now=t0)
-    t13 = (ru is None, f"grow={None if ru is None else ru.get('n')}")
+    t13 = (ru is not None and int(ru["n"]) > 2, f"grow={None if ru is None else ru.get('n')}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
