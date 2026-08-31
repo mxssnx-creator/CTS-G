@@ -201,6 +201,332 @@ def coord_zest() -> None:
     rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
 
 
+def always_start_zest() -> None:
+    """In-process proof: a start/stop cycle can never leave the desk stuck.
+
+    Exercises the real always-start chain without systemd or the exchange:
+    the sidecar apply_control file contract (STOP/PAUSE/STOP_ALL cleared,
+    reset-eq dropped, start retried after reset-failed) and the engine halt
+    machine in Pulse.refresh_balance (reset-eq rescue re-baselines stale
+    session equity, auto-resume, deposit rescue) plus negative controls
+    (STOP file and a real drawdown still halt without an explicit start).
+    """
+    import tempfile
+    import pulse_trader as pt
+    import pulse_http as ph
+
+    tmp = tempfile.mkdtemp(prefix="astart-zest-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+
+    class FakeApi:
+        def __init__(self, equity: float):
+            self.equity = equity
+
+        def get(self, path: str):
+            e = str(self.equity)
+            return {"code": 0, "data": {"equity": e, "availableMargin": e, "usedMargin": "0", "unrealizedProfit": "0"}}
+
+    def mk(equity: float, start_eq: float = 0.0, halted: bool = False, reason=None):
+        p = object.__new__(pt.Pulse)
+        p.api = FakeApi(equity)
+        p.errors = 0
+        p.last_error = ""
+        p.equity = 0.0
+        p.available = 0.0
+        p.used = 0.0
+        p.upnl = 0.0
+        p.start_eq = start_eq
+        p.last_bal = 0.0
+        p.halted = halted
+        p.halt_reason = reason
+        p._pre_pause_halt = None
+        p._halt_eq = 0.0
+        return p
+
+    def touch(path: str) -> None:
+        with open(path, "a"):
+            pass
+
+    def rm(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL, pt.RESET_EQ_PATH, pt.START_EQ_PATH):
+        rm(f)
+
+    # 1) boot/explicit start with stale session equity + reset-eq -> re-baseline, no latch
+    p = mk(equity=80.0, start_eq=100.0, halted=True, reason="stopped")
+    touch(pt.RESET_EQ_PATH)
+    p.refresh_balance()
+    rec("astart-boot-stale-eq-clears", (not p.halted) and p.halt_reason is None
+        and abs(p.start_eq - 80.0) < 1e-9 and not os.path.exists(pt.RESET_EQ_PATH),
+        f"halted={p.halted} reason={p.halt_reason} start_eq={p.start_eq}")
+    rec("astart-reset-persists", abs((json.load(open(pt.START_EQ_PATH)) or {}).get("startEquity", 0) - 80.0) < 1e-9)
+
+    # 2) STOP file still wins (negative control)
+    p2 = mk(equity=100.0, start_eq=100.0)
+    touch(pt.STOP_PATH)
+    p2.refresh_balance()
+    rec("astart-stop-file-halts", p2.halted and p2.halt_reason == "stopped", f"{p2.halted} {p2.halt_reason}")
+
+    # 3) stop -> start cycle resumes
+    rm(pt.STOP_PATH)
+    touch(pt.RESET_EQ_PATH)
+    p2.refresh_balance()
+    rec("astart-stop-start-resumes", (not p2.halted) and p2.halt_reason is None, f"{p2.halted} {p2.halt_reason}")
+
+    # 4) real drawdown without explicit start still halts (negative control)
+    p4 = mk(equity=80.0, start_eq=100.0)
+    p4.refresh_balance()
+    rec("astart-drawdown-latches", p4.halted and p4.halt_reason == "drawdown halt", f"{p4.halted} {p4.halt_reason}")
+
+    # 5) auto-resume once drawdown recovers below DD_HALT*0.6
+    p4.api.equity = 95.0
+    p4.refresh_balance()
+    rec("astart-auto-resume", (not p4.halted) and p4.halt_reason is None, f"{p4.halted} {p4.halt_reason}")
+
+    # 6) deposit rescue re-baselines a latched economic halt
+    p6 = mk(equity=200.0, start_eq=100.0, halted=True, reason="drawdown halt")
+    p6._halt_eq = 80.0
+    p6.refresh_balance()
+    rec("astart-deposit-rescue", (not p6.halted) and abs(p6.start_eq - 200.0) < 1e-9,
+        f"halted={p6.halted} start_eq={p6.start_eq}")
+
+    # 7) pause file halts; resume (unlink pause + reset-eq) revives
+    p7 = mk(equity=100.0, start_eq=100.0)
+    touch(pt.PAUSE_PATH)
+    p7.refresh_balance()
+    paused_ok = p7.halted and p7.halt_reason == "paused"
+    rm(pt.PAUSE_PATH)
+    touch(pt.RESET_EQ_PATH)
+    p7.refresh_balance()
+    rec("astart-pause-resume", paused_ok and not p7.halted and p7.halt_reason is None, f"{p7.halted} {p7.halt_reason}")
+
+    # --- sidecar apply_control: file contract of the start/stop actions ---
+    class FakeCtl:
+        def __init__(self):
+            self.calls = []
+            self.fail_first_start = True
+
+        def __call__(self, *args, timeout: float = 25.0):
+            self.calls.append(args)
+            if args and args[0] == "start" and self.fail_first_start:
+                self.fail_first_start = False
+                return 1, "start-limit-hit"
+            return 0, "ok"
+
+    ctl = FakeCtl()
+    ph.DIR = tmp
+    ph.STOP_ALL_PATH = os.path.join(tmp, "STOP")
+    lane = {"type": "t", "id": "bingx-t01", "label": "T", "unit": "USDT", "exchange": "T"}
+    ph.LANES = [lane]
+    ph.ID_TO_LANE = {lane["id"]: lane}
+    ph.TYPE_TO_ID = {"t": "bingx-t01"}
+    ph._sysctl = ctl
+    ph.unit_state = lambda cid, fresh=False: "active"
+    ph._STATE_CACHE = {}
+
+    pause_f = os.path.join(tmp, "PAUSE-bingx-t01")
+    stop_f = os.path.join(tmp, "STOP-bingx-t01")
+    reset_f = os.path.join(tmp, "reset-eq-bingx-t01")
+    touch(pause_f)
+    touch(stop_f)
+    touch(ph.STOP_ALL_PATH)
+    rm(reset_f)
+    okc, msg = ph.apply_control("bingx-t01", "start")
+    rec("astart-sidecar-clears-all", okc and not os.path.exists(pause_f) and not os.path.exists(stop_f)
+        and not os.path.exists(ph.STOP_ALL_PATH) and os.path.exists(reset_f), msg[:140])
+    seq = [c[0] for c in ctl.calls if c]
+    rec("astart-sidecar-retry-after-limit", seq == ["start", "reset-failed", "start"], str(seq))
+
+    ctl.calls = []
+    ctl.fail_first_start = False
+    rm(stop_f)
+    touch(pause_f)
+    oks, msgs = ph.apply_control("bingx-t01", "stop")
+    rec("astart-sidecar-stop-marks", oks and os.path.exists(stop_f) and not os.path.exists(pause_f)
+        and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
+
+
+def control_coord_zest() -> None:
+    """Event-based control coordination: watcher snapshots, resume-after-start
+    guard in _one_cycle, and full sidecar serialization under concurrent
+    stress (no interleaved systemctl, no inconsistent control files)."""
+    import tempfile
+    import threading
+    import time
+    import pulse_trader as pt
+    import pulse_http as ph
+
+    tmp = tempfile.mkdtemp(prefix="ctrlcoord-zest-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+
+    def touch(path: str) -> None:
+        with open(path, "a"):
+            pass
+
+    def rm(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    paths = (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL, pt.RESET_EQ_PATH)
+    for f in paths:
+        rm(f)
+
+    # --- ctrl_mtimes: create / touch / delete always changes the snapshot ---
+    base = pt.ctrl_mtimes(paths)
+    rec("ctrl-mtimes-all-missing", all(v == 0.0 for v in base.values()), str(base))
+    touch(pt.STOP_PATH)
+    snap1 = pt.ctrl_mtimes(paths)
+    rec("ctrl-mtimes-create", snap1 != base and snap1[pt.STOP_PATH] > 0)
+    rm(pt.STOP_PATH)
+    snap2 = pt.ctrl_mtimes(paths)
+    rec("ctrl-mtimes-delete", snap2 != snap1 and snap2 == base)
+    touch(pt.PAUSE_PATH)
+    os.utime(pt.PAUSE_PATH, (base[pt.PAUSE_PATH] + 5, base[pt.PAUSE_PATH] + 5))
+    snap3 = pt.ctrl_mtimes(paths)
+    rec("ctrl-mtimes-touch", snap3 != snap2 and snap3[pt.PAUSE_PATH] > 0)
+    rm(pt.PAUSE_PATH)
+
+    # --- _one_cycle resume guard: explicit start (reset-eq) never restores
+    # the pre-stop economic halt ---
+    p = object.__new__(pt.Pulse)
+    p.halted = True
+    p.halt_reason = "stopped"
+    p._pre_pause_halt = "drawdown halt"
+    p.equity = 80.0
+    p.start_eq = 0.0
+    p.cycle = 0
+    p.did_io = False
+    p.hist_busy = False
+    p.last_scan_ms = 0.0
+    p.last_scan_io = False
+    p.cycle_overrun = False
+    p._stats_force = False
+    p.wake_ev = threading.Event()
+    p.errors = 0
+    p.last_error = ""
+    p.priority_controls = lambda: []
+    p.write_stats = lambda force=False: None
+    p.refresh_tickers = lambda: None
+    p.seed_px_bars = lambda: None
+    p.manage = lambda: None
+    p._budget = lambda: None
+    p.maybe_reload_config = lambda: None
+    p.adopt_exchange_positions = lambda: None
+    p.sync_own_fills = lambda: None
+    p.maybe_block_adds = lambda: None
+    p.maybe_dca_adds = lambda: None
+    p.maybe_entries = lambda: None
+    p.qa_tick = lambda: None
+    p.trim_caches = lambda force=False: None
+    p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
+    p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
+    old_sd = pt.sd_notify
+    pt.sd_notify = lambda *a, **k: None
+    try:
+        touch(pt.RESET_EQ_PATH)
+        rm(pt.STOP_PATH)
+        rm(pt.PAUSE_PATH)
+        rm(pt.STOP_ALL)
+        # equity 80 vs start_eq 0: without the guard the pre-stop drawdown
+        # halt would be restored and the desk would stay halted after Start.
+        p._one_cycle()
+        rec("ctrl-resume-no-pre-restore", (not p.halted) and p.halt_reason is None,
+            f"halted={p.halted} reason={p.halt_reason}")
+        rec("ctrl-resume-clears-pre", p._pre_pause_halt is None, str(p._pre_pause_halt))
+        # negative control: without reset-eq the pre-stop halt IS restored
+        p2 = object.__new__(pt.Pulse)
+        p2.__dict__.update(p.__dict__)
+        p2.halted = True
+        p2.halt_reason = "stopped"
+        p2._pre_pause_halt = "drawdown halt"
+        p2.wake_ev = threading.Event()
+        rm(pt.RESET_EQ_PATH)
+        p2._one_cycle()
+        rec("ctrl-resume-restores-pre", p2.halted and p2.halt_reason == "drawdown halt",
+            f"halted={p2.halted} reason={p2.halt_reason}")
+        # stopped branch: STOP file present halts immediately
+        p3 = object.__new__(pt.Pulse)
+        p3.__dict__.update(p.__dict__)
+        p3.halted = False
+        p3.halt_reason = None
+        p3._pre_pause_halt = None
+        p3.wake_ev = threading.Event()
+        touch(pt.STOP_PATH)
+        p3._one_cycle()
+        rec("ctrl-stop-branch-halts", p3.halted and p3.halt_reason == "stopped",
+            f"halted={p3.halted} reason={p3.halt_reason}")
+        rm(pt.STOP_PATH)
+    finally:
+        pt.sd_notify = old_sd
+
+    # --- sidecar serialization under concurrent stress ---
+    class StressCtl:
+        def __init__(self):
+            self.calls = []
+            self.cur = 0
+            self.max_cur = 0
+            self.lock = threading.Lock()
+
+        def __call__(self, *args, timeout: float = 25.0):
+            with self.lock:
+                self.cur += 1
+                self.max_cur = max(self.max_cur, self.cur)
+            time.sleep(0.005)  # force interleaving window
+            with self.lock:
+                self.cur -= 1
+                self.calls.append(args)
+            return 0, "ok"
+
+    ctl = StressCtl()
+    ph.DIR = tmp
+    ph.STOP_ALL_PATH = os.path.join(tmp, "STOP")
+    lane = {"type": "t", "id": "bingx-t01", "label": "T", "unit": "USDT", "exchange": "T"}
+    ph.LANES = [lane]
+    ph.ID_TO_LANE = {lane["id"]: lane}
+    ph.TYPE_TO_ID = {"t": "bingx-t01"}
+    ph._sysctl = ctl
+    ph.unit_state = lambda cid, fresh=False: "active"
+    ph._STATE_CACHE = {}
+
+    errs: List[str] = []
+    results: List[bool] = []
+    acts = ["start", "stop", "pause", "resume", "start", "stop"]
+
+    def worker(n: int) -> None:
+        for i in range(6):
+            try:
+                okc, _msg = ph.apply_control("bingx-t01", acts[(n + i) % len(acts)])
+                results.append(bool(okc))
+            except Exception as e:  # pragma: no cover - failure path
+                errs.append(str(e)[:120])
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    stop_f = os.path.join(tmp, "STOP-bingx-t01")
+    pause_f = os.path.join(tmp, "PAUSE-bingx-t01")
+    rec("ctrl-stress-no-errors", not errs and len(results) == 48 and all(results),
+        f"errs={errs[:1]} n={len(results)}")
+    rec("ctrl-stress-serialized", ctl.max_cur == 1, f"max_concurrent={ctl.max_cur} calls={len(ctl.calls)}")
+    rec("ctrl-stress-consistent", not (os.path.exists(stop_f) and os.path.exists(pause_f)),
+        f"stop={os.path.exists(stop_f)} pause={os.path.exists(pause_f)}")
+    # after the stress, an explicit start always converges to a clean start state
+    okf, msgf = ph.apply_control("bingx-t01", "start")
+    rec("ctrl-stress-final-start", okf and not os.path.exists(stop_f) and not os.path.exists(pause_f)
+        and os.path.exists(os.path.join(tmp, "reset-eq-bingx-t01")), msgf[:120])
+    rm(os.path.join(tmp, "reset-eq-bingx-t01"))
+
+
 def main() -> int:
     run_units()
     rank_zest()
@@ -210,6 +536,8 @@ def main() -> int:
     controls_zest()
     coord_zest()
     unlimited_zest()
+    always_start_zest()
+    control_coord_zest()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:
