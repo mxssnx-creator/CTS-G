@@ -27,7 +27,7 @@ from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_cand
 PACKS = ("indications", "general")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 240
+LOOKBACK_DEFAULT = 960
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -369,7 +369,7 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.10
+        self.min_pf = 1.20
         self.max_dd_s = 420.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -411,7 +411,7 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.10)
+        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.20)
         self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
@@ -931,13 +931,26 @@ class SetBook:
             st.last25_avg_pnl = live_tail_avg
             return
         notes = []
-        if st.last15_n >= max(self.min_samples, min(self.pf_n, 8)) and st.last15_ratio + 1e-9 < self.min_pf:
+        need = max(self.min_samples, min(self.pf_n, 8))
+        if st.last15_n >= need and st.last15_ratio + 1e-9 < self.min_pf:
             notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<{self.min_pf:.2f}")
         live_dd = False
         if len(live25) >= max(8, self.min_samples) and st.max_dd_s > self.max_dd_s:
             notes.append(f"maxDDt {st.max_dd_s:.0f}s>{self.max_dd_s:.0f}s")
             live_dd = True
-        if notes and not self.reactivate:
+        # Hard rule: only positive-PF sets (cost-adjusted last-N PF >= 1.00)
+        # stay validated and may be processed. Proven-negative sets deactivate;
+        # reactivate=on lets them return once the window rolls non-negative,
+        # reactivate=off keeps them off until PF recovers to min_pf.
+        proven_neg = st.last15_n >= need and st.last15_ratio + 1e-9 < 1.0
+        was_neg_off = (not st.active) and ("<1.00 neg" in st.deact_reason)
+        if proven_neg:
+            st.active = False
+            notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<1.00 neg")
+        elif was_neg_off and not self.reactivate and st.last15_ratio + 1e-9 < self.min_pf:
+            st.active = False
+            notes.append(st.deact_reason)
+        elif notes and not self.reactivate:
             # Historic PF below min is a rank penalty; only live DD / live last25 hard-stops.
             if live_dd or (st.last15_n >= self.pf_n and len(live25) >= self.min_samples and st.last15_ratio + 1e-9 < 1.0):
                 st.active = False
@@ -945,7 +958,7 @@ class SetBook:
                 st.active = True
         else:
             st.active = True
-        st.deact_reason = "; ".join(notes)
+        st.deact_reason = "; ".join(dict.fromkeys(notes))
 
     def _cap_active(self) -> None:
         for kind, cap in (("base", self.max_active), ("trail", max(len(self.trails) * max(1, len(self.packs)), 4))):
@@ -1028,22 +1041,32 @@ class SetBook:
         }
 
     def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
+        gated = bool(self.progress.ready and self.use_historic_gate)
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
+        if not rows and not gated:
+            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
         if not rows:
-            if not self.progress.ready or not self.use_historic_gate:
-                rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
-            if not rows:
-                return None
+            return None
+        need = max(self.min_samples, 8)
+
+        def proven_neg(s: SetState) -> bool:
+            return s.last15_n >= need and s.last15_ratio + 1e-9 < 1.0
+
+        # Tier 1: validated at min_pf. Tier 2: validated positive (>= 1.00).
         passing = [
             s for s in rows
-            if s.last15_n >= max(self.min_samples, 8) and s.last15_ratio + 1e-9 >= self.min_pf
+            if s.last15_n >= need and s.last15_ratio + 1e-9 >= self.min_pf
         ]
         if not passing:
             passing = [
                 s for s in rows
-                if s.last15_n >= max(self.min_samples, 8) and s.last15_ratio + 1e-9 >= 1.0
+                if s.last15_n >= need and s.last15_ratio + 1e-9 >= 1.0
             ]
         if not passing:
+            # Discovery tier: unproven sets only. Proven-negative sets are
+            # never validated and never processed while the gate is ready.
+            passing = [s for s in rows if not proven_neg(s)]
+        if not passing and not gated:
             passing = [s for s in rows if s.active] or list(rows)
         if not passing:
             return None
@@ -1264,7 +1287,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
     st.live = []
     book._score_one(st)
-    out.append(("set-hist-no-deact", st.active, f"{st.active} {st.deact_reason}"))
+    out.append(("set-hist-neg-off", (not st.active) and "neg" in st.deact_reason, f"{st.active} {st.deact_reason}"))
     st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
     out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
@@ -1458,6 +1481,81 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
     book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
     out.append(("set-replay-slice", book6.progress.ready and book6.progress.symbols_total == 1, f"n={book6.progress.symbols_total} fills={sum(s.n for s in book6.sets.values())} {book6.progress.detail}"))
+    # --- evaluation math: last-N window counts and PF averages, hand-computed ---
+    w = SetBook()
+    w.load(
+        {
+            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
+            "setMinSamples": 5, "setAutoDeact": False, "setMinStep": 3, "setStepMax": 3,
+            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6],
+            "trailArmMin": 0.3, "trailArmMax": 0.3,
+        }
+    )
+    wst = next(x for x in w.sets.values() if x.kind == "base")
+    rows20 = []
+    for i in range(20):
+        g = 0.004 if i % 2 == 0 else -0.002
+        rows20.append({"t": 5000 + i * 60, "pnl": g - 0.0015, "pnl_pct": g, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp" if g > 0 else "sl"})
+    wst.hist = rows20
+    wst.live = []
+    w._score_one(wst)
+    l15 = rows20[-15:]
+    rs15 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l15]
+    want_ratio = round(1.0 + (sum(rs15) / len(rs15)) * 0.10, 4)
+    l25 = rows20[-25:]
+    rs25 = [((r["pnl_pct"] * 100.0) - 0.15) / 0.15 for r in l25]
+    want25r = sum(rs25) / len(rs25)
+    want25p = sum(r["pnl"] for r in l25) / len(l25)
+    out.append(("set-lastn-window", wst.last15_n == 15 and abs(wst.last15_ratio - want_ratio) < 1e-6, f"n={wst.last15_n} ratio={wst.last15_ratio} want={want_ratio}"))
+    out.append(("set-avg-math", wst.last25_n == 20 and abs(wst.last25_avg_r - want25r) < 1e-9 and abs(wst.last25_avg_pnl - want25p) < 1e-9, f"n={wst.last25_n} avgR={wst.last25_avg_r:.4f}/{want25r:.4f} avgP={wst.last25_avg_pnl:.6f}/{want25p:.6f}"))
+    # --- positive-PF-only validation: gated pick and pack gate ---
+    g2 = SetBook()
+    g2.load(
+        {
+            "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
+            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6, 0.9],
+            "trailArmMin": 0.3, "trailArmMax": 0.3,
+        }
+    )
+    g2.progress.ready = True
+    bases = [x for x in g2.by_idx if x.kind == "base"]
+    neg_set, pos_set = bases[0], bases[1]
+    neg_rows = [{"t": 6000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
+    pos_rows = [{"t": 6000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    neg_set.hist = list(neg_rows)
+    pos_set.hist = list(pos_rows)
+    g2._score_one(neg_set)
+    g2._score_one(pos_set)
+    out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
+    pk = g2.pick("general")
+    out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
+    pos_set.active = False
+    for ts in g2.by_idx:
+        if ts.kind == "trail":
+            ts.hist = list(neg_rows)
+            g2._score_one(ts)
+    pk2 = g2.pick("general")
+    out.append(("set-pick-all-neg-none", pk2 is None, f"{getattr(pk2, 'id', None)}"))
+    out.append(("set-pack-closed", not g2.pack_open("general"), f"open={g2.pack_open('general')} fills={sum(x.n for x in g2.sets.values())}"))
+    # reactivation: negative set returns once the last-N window rolls positive
+    neg_set.hist = list(pos_rows)
+    g2._score_one(neg_set)
+    out.append(("set-neg-recover", neg_set.active and neg_set.last15_ratio >= 1.0, f"{neg_set.active} pf={neg_set.last15_ratio}"))
+    # sticky off when reactivate is disabled (until PF recovers to min_pf)
+    g2.reactivate = False
+    neg_set.hist = list(neg_rows)
+    g2._score_one(neg_set)
+    off1 = not neg_set.active
+    neg_set.hist = list(pos_rows)  # ratio 1.10 < min_pf 1.20 -> stays off
+    g2._score_one(neg_set)
+    out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    # cold start (no replay yet): ungated pick still returns a set
+    g3 = SetBook()
+    g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
+    pk3 = g3.pick("general")
+    out.append(("set-pick-cold", pk3 is not None, f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
     return out
 
 
