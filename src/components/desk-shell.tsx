@@ -125,9 +125,13 @@ export function DeskShell({
 }
 
 function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean; paused?: boolean }) {
-  const [busy, setBusy] = useState<string | null>(null);
+  // Per-action in-flight tracking: only the button whose request is running
+  // is disabled (prevents double-submit); every other action stays clickable
+  // so rapid switching always works. The sidecar serializes the actions.
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const run = async (action: "start" | "stop" | "pause" | "resume") => {
+    if (busy[action]) return;
     if (conn === "overall") {
       const ok = window.confirm(
         `${action.toUpperCase()} both Live and VST desks?\nOpen positions stay on the exchange — no flatten.`,
@@ -138,7 +142,7 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
       const ok = window.confirm(`Stop ${who}? Open positions stay on BingX — no flatten.`);
       if (!ok) return;
     }
-    setBusy(action);
+    setBusy((b) => ({ ...b, [action]: true }));
     setMsg(null);
     try {
       const r = await postControl(conn, action);
@@ -146,25 +150,30 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
     } catch (e) {
       setMsg(String(e));
     } finally {
-      setBusy(null);
+      setBusy((b) => ({ ...b, [action]: false }));
+      // Event-based coordination: the desk repolls stats immediately instead
+      // of waiting out the 2s poll cadence.
+      window.dispatchEvent(new CustomEvent("pulse:control"));
     }
   };
   const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-40";
   const active = Boolean(live) && !paused;
+  const startAction = paused ? "resume" : "start";
+  const anyBusy = Object.values(busy).some(Boolean);
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex rounded-radius border border-border bg-surface p-1">
-        <button type="button" className={`${btn} ${active ? "text-muted" : "text-primary"}`} disabled={Boolean(busy)} onClick={() => run(paused ? "resume" : "start")}>
+        <button type="button" className={`${btn} ${active ? "text-muted" : "text-primary"}`} disabled={Boolean(busy[startAction])} onClick={() => run(startAction)}>
           <Play className="size-4" /> {paused ? "Resume" : "Start"}
         </button>
-        <button type="button" className={`${btn}`} disabled={Boolean(busy) || !active} onClick={() => run("pause")}>
+        <button type="button" className={`${btn}`} disabled={Boolean(busy.pause)} onClick={() => run("pause")}>
           <Pause className="size-4" /> Pause
         </button>
-        <button type="button" className={`${btn} text-danger`} disabled={Boolean(busy)} onClick={() => run("stop")}>
+        <button type="button" className={`${btn} text-danger`} disabled={Boolean(busy.stop)} onClick={() => run("stop")}>
           <Square className="size-4" /> Stop
         </button>
       </div>
-      {msg ? <span className="max-w-72 text-right font-mono text-[10px] text-muted">{busy ? busy : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
+      {msg || anyBusy ? <span className="max-w-72 text-right font-mono text-[10px] text-muted">{anyBusy ? "…" : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
     </div>
   );
 }
