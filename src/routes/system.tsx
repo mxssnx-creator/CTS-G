@@ -43,11 +43,15 @@ function SystemPage() {
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(local || {}), ...(c.overlay || {}) }));
       }
     };
-    pull();
-    const id = setInterval(pull, 4000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const chain = async () => {
+      await pull();
+      if (alive) timer = setTimeout(chain, 4000);
+    };
+    void chain();
     return () => {
       alive = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
   }, [conn]);
 

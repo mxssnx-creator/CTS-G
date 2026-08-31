@@ -18,16 +18,17 @@ function ResultsPage() {
   useEffect(() => {
     let alive = true;
     setRaw(null);
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const pull = async () => {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
       setRaw(s);
+      timer = setTimeout(pull, 2000);
     };
-    pull();
-    const id = setInterval(pull, 2000);
+    void pull();
     return () => {
       alive = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
   }, [conn]);
   const stats = pickView(raw, conn);
