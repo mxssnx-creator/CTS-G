@@ -136,6 +136,18 @@ export type LiveStats = {
   progressPhase?: string;
   progressDetail?: string;
   progressReady?: boolean;
+  progressSymbol?: string;
+  progressSetId?: string;
+  progressSymbolsDone?: number;
+  progressSymbolsTotal?: number;
+  progressSetsDone?: number;
+  progressSetsTotal?: number;
+  progressBarsDone?: number;
+  progressBarsTotal?: number;
+  progressElapsedMs?: number;
+  progressLastRunMs?: number;
+  progressCycle?: number;
+  progressError?: string;
   alive?: boolean;
   tests?: Array<{name:string;pass:boolean;detail:string}>;
   open: LiveOpen[];
@@ -296,6 +308,19 @@ export type LiveStats = {
     progressPhase?: string;
     progressDetail?: string;
     progressReady?: boolean;
+    progressSymbol?: string;
+    progressSetId?: string;
+    progressSymbolsDone?: number;
+    progressSymbolsTotal?: number;
+    progressSetsDone?: number;
+    progressSetsTotal?: number;
+    progressBarsDone?: number;
+    progressBarsTotal?: number;
+    progressElapsedMs?: number;
+    progressLastRunMs?: number;
+    progressCycle?: number;
+    progressError?: string;
+    klinesReady?: number;
     hotMs?: number;
     pfCost?: number;
     controlsOk?: number;
@@ -594,6 +619,19 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     progressPhase: lane.progressPhase ?? s.progressPhase,
     progressDetail: lane.progressDetail ?? s.progressDetail,
     progressReady: lane.progressReady ?? s.progressReady,
+    progressSymbol: lane.progressSymbol ?? s.progressSymbol,
+    progressSetId: lane.progressSetId ?? s.progressSetId,
+    progressSymbolsDone: lane.progressSymbolsDone ?? s.progressSymbolsDone,
+    progressSymbolsTotal: lane.progressSymbolsTotal ?? s.progressSymbolsTotal,
+    progressSetsDone: lane.progressSetsDone ?? s.progressSetsDone,
+    progressSetsTotal: lane.progressSetsTotal ?? s.progressSetsTotal,
+    progressBarsDone: lane.progressBarsDone ?? s.progressBarsDone,
+    progressBarsTotal: lane.progressBarsTotal ?? s.progressBarsTotal,
+    progressElapsedMs: lane.progressElapsedMs ?? s.progressElapsedMs,
+    progressLastRunMs: lane.progressLastRunMs ?? s.progressLastRunMs,
+    progressCycle: lane.progressCycle ?? s.progressCycle,
+    progressError: lane.progressError ?? s.progressError,
+    klinesReady: lane.klinesReady ?? s.klinesReady,
     alive: lane.alive ?? s.alive,
     cycle: lane.cycle ?? s.cycle,
   };
