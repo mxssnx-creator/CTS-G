@@ -17,7 +17,7 @@
 +    create/delete/touch anywhere always changes the snapshot."""
 +    out: Dict[str, float] = {}
 +    for p in paths:
-+        try:
+        try:
 +            out[p] = os.path.getmtime(p)
 +        except OSError:
 +            out[p] = 0.0
@@ -75,7 +75,7 @@
 +        try:
 +            if os.path.exists(RESET_EQ_PATH):
 +                os.remove(RESET_EQ_PATH)
-                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
++                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
 +                    self._pre_pause_halt = None
 +                self.start_eq = 0.0
 +        except Exception:
