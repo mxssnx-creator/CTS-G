@@ -17,7 +17,7 @@
 +    create/delete/touch anywhere always changes the snapshot."""
 +    out: Dict[str, float] = {}
 +    for p in paths:
-        try:
++        try:
 +            out[p] = os.path.getmtime(p)
 +        except OSError:
 +            out[p] = 0.0
