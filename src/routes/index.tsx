@@ -32,17 +32,29 @@ function DeskPage() {
   const [raw, setRaw] = useState<LiveStats | null>(null);
   useEffect(() => {
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     setRaw(null);
+    // Non-overlapping poll: the next pull is scheduled only after the
+    // current one finished, so slow fetches can never stack up. Control
+    // actions (start/stop/pause) trigger an immediate extra pull via the
+    // pulse:control event instead of waiting out the cadence.
     const pull = async () => {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
       setRaw(s);
+      timer = setTimeout(pull, 2000);
     };
-    pull();
-    const id = setInterval(pull, 2000);
+    const kick = () => {
+      if (!alive) return;
+      if (timer) clearTimeout(timer);
+      void pull();
+    };
+    window.addEventListener("pulse:control", kick);
+    void pull();
     return () => {
       alive = false;
-      clearInterval(id);
+      window.removeEventListener("pulse:control", kick);
+      if (timer) clearTimeout(timer);
     };
   }, [conn]);
   const stats = pickView(raw, conn);
@@ -285,12 +297,57 @@ function DeskPage() {
   );
 }
 
+const PROGRESS_PHASE_LABEL: Record<string, string> = {
+  idle: "idle",
+  starting: "starting",
+  fetch: "fetching history",
+  replay: "calculating sets",
+  score: "scoring sets",
+  ready: "ready",
+  error: "calc error",
+};
+
+function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
+  const pct = Math.max(0, Math.min(100, l.progressPct ?? 0));
+  const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
+  const phase = starting ? "starting" : String(l.progressPhase || "idle");
+  const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
+  const busy = !l.progressReady;
+  const details: Array<[string, string]> = [];
+  if (l.progressSymbol) details.push(["symbol", l.progressSymbol]);
+  if (l.progressSymbolsTotal) details.push(["symbols", `${l.progressSymbolsDone ?? 0}/${l.progressSymbolsTotal}`]);
+  if (l.progressSetsTotal) details.push(["sets", `${l.progressSetsDone ?? 0}/${l.progressSetsTotal}`]);
+  if (l.progressBarsDone) details.push(["bars", `${l.progressBarsDone}${l.progressBarsTotal ? `/${l.progressBarsTotal}` : ""}`]);
+  if (l.klinesReady != null && l.symbolCount) details.push(["klines", `${l.klinesReady}/${l.symbolCount}`]);
+  if (l.progressElapsedMs) details.push(["elapsed", `${(l.progressElapsedMs / 1000).toFixed(1)}s`]);
+  if (l.progressCycle) details.push(["cycle", String(l.progressCycle)]);
+  return (
+    <div className="mt-3" data-testid={`lane-progress-${l.type}`}>
+      <div className="flex items-baseline justify-between gap-2 font-mono text-[10px] text-muted">
+        <span className={l.progressError ? "text-danger" : ""}>{l.progressError ? "calc error" : label}{l.progressReady ? " · ready" : ""}</span>
+        <span className="text-sm font-medium text-fg tabular-nums">{pct.toFixed(0)}%</span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-border">
+        <div className={`h-full rounded-full bg-primary ${busy ? "animate-pulse" : ""}`} style={{ width: `${pct}%` }} />
+      </div>
+      {details.length ? (
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] text-muted">
+          {details.map(([k, v]) => (
+            <span key={k}><span className="text-fg/70">{k}</span> {v}</span>
+          ))}
+        </div>
+      ) : null}
+      {l.progressDetail ? <p className="mt-1 font-mono text-[10px] text-muted">{l.progressDetail}</p> : null}
+      {l.progressError ? <p className="mt-1 font-mono text-[10px] text-danger">{l.progressError}</p> : null}
+    </div>
+  );
+}
+
 function LaneBoard({ stats }: { stats: LiveStats }) {
   const { setConn } = useConnection();
   return (
     <section className="grid gap-3 sm:grid-cols-2" data-testid="lane-board">
       {(stats.lanes ?? []).map((l) => {
-        const pct = Math.max(0, Math.min(100, l.progressPct ?? 0));
         return (
           <article
             key={l.id}
@@ -335,12 +392,7 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               <dt>Symbols</dt>
               <dd className="text-right text-fg">{l.symbolCount ?? "—"}</dd>
             </dl>
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-border">
-              <div className="h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
-            </div>
-            <p className="mt-1 font-mono text-[10px] text-muted">
-              {l.progressPhase || "idle"} {l.progressReady ? "ready" : ""} {l.progressDetail || ""}
-            </p>
+            <LaneProgress l={l} />
             {l.haltReason ? <p className="mt-2 text-xs text-danger">{l.haltReason}</p> : null}
           </article>
         );
