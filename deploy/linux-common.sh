@@ -269,6 +269,36 @@ pulse_rsync_excludes() {
 EOF
 }
 
+restore_pulse_trader() {
+  # server/pulse/pulse_trader.py is a placeholder in git (233KB engine). Rebuild the
+  # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
+  # verify both input and output git blob hashes. Runs on every install/update.
+  local pt="$PULSE_DIR/pulse_trader.py"
+  local pt_want="817f822b5d80d983e63b2dec87b1d634ad22d051"
+  local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
+  local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
+  if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
+    skip "pulse_trader.py already current"
+    return 0
+  fi
+  [[ -f "$pt_patch" ]] || die "restore patch missing: $pt_patch"
+  local scratch
+  scratch="$(mktemp -d)"
+  mkdir -p "$scratch/server/pulse"
+  if curl -fsSL -m 90 -o "$scratch/server/pulse/pulse_trader.py" \
+      "https://raw.githubusercontent.com/mxssnx-creator/CTS-G/2b3432d7b3/server/pulse/pulse_trader.py" \
+    && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_base" ]] \
+    && git -C "$scratch" apply "$pt_patch" \
+    && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_want" ]]; then
+    cp -a "$scratch/server/pulse/pulse_trader.py" "$pt"
+    rm -rf "$scratch"
+    ok "pulse_trader.py restored from verified patch"
+    return 0
+  fi
+  rm -rf "$scratch"
+  die "pulse_trader.py restore failed (base/patch/result hash mismatch)"
+}
+
 sync_pulse_tree() {
   local src="$CTS_G_ROOT/server/pulse"
   [[ -d "$src" ]] || die "pulse tree missing at $src"
@@ -292,6 +322,7 @@ sync_pulse_tree() {
     fi
   done
   [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
+  restore_pulse_trader
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py
   ok "pulse tree $PULSE_DIR"

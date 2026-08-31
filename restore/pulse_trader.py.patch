@@ -8,13 +8,36 @@
  
  UNIVERSE_PATH = os.path.join(DIR, "universe.json")
  MAX_SYMBOLS = 0  # 0 = unlimited
-@@ -875,9 +876,19 @@
+@@ -347,6 +348,18 @@
+ _LOG_FLUSH = 0.0
+ 
+ 
++def ctrl_mtimes(paths) -> Dict[str, float]:
++    """mtime snapshot of the control files; missing files map to 0.0, so a
++    create/delete/touch anywhere always changes the snapshot."""
++    out: Dict[str, float] = {}
++    for p in paths:
++        try:
++            out[p] = os.path.getmtime(p)
++        except OSError:
++            out[p] = 0.0
++    return out
++
++
+ def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
+     global _LOG_N, _LOG_FLUSH
+     if every > 0:
+@@ -875,9 +888,24 @@
          return max(0.0, float(self.available or 0)) * lev * 0.90
  
      def max_book_notional(self) -> float:
 -        """Per-position cap: base size × configured Block/DCA rungs. Never the whole wallet."""
-+        """Per-position book room. Limited books cap at base × configured rungs;
-+        an unlimited Block/DCA book (0) is bounded only by remaining available."""
++        """Per-position book room. Limited books cap at base × configured rungs.
++        Unlimited Block/DCA books (0 rungs = unlimited count) still get a hard
++        sanity ceiling: 32× base size (min 64 USDT) and never more than a
++        quarter of the remaining carry capacity — a stale balance read or a
++        corrupt overlay must never balloon one position into an impossible
++        notional the wallet cannot actually hold."""
          base = self.notional_cap()
 -        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if getattr(self.dca, "enabled", False) else 0
 +        dca_on = bool(getattr(self.dca, "enabled", False))
@@ -24,13 +47,25 @@
 +        ):
 +            room = self.avail_notional()
 +            if room > 0:
-+                return room
++                sane = max(base * 32.0, 64.0)
++                return max(base, min(room, sane, room * 0.25))
 +            return base
 +        dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if dca_on else 0
          dca_extra = 0.0
          if dca_n > 0:
              try:
-@@ -1142,6 +1153,49 @@
+@@ -934,6 +962,10 @@
+             return 0.0
+         if q * px > room * 1.02:
+             return 0.0
++        # Final sanity: an entry may never exceed 2× the configured target
++        # (exchange min-lot floor excepted) — catches corrupt sizing upstream.
++        if q * px > max(self.sized_notional() * 2.0, floor_n * 1.08):
++            return 0.0
+         return q
+ 
+     def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
+@@ -1142,6 +1174,49 @@
              except Exception:
                  pass
          self.last_bal = time.time()
@@ -40,7 +75,7 @@
 +        try:
 +            if os.path.exists(RESET_EQ_PATH):
 +                os.remove(RESET_EQ_PATH)
-+                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
+                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
 +                    self._pre_pause_halt = None
 +                self.start_eq = 0.0
 +        except Exception:
@@ -80,7 +115,7 @@
          if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
              if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                  self._pre_pause_halt = self.halt_reason
-@@ -1153,10 +1207,14 @@
+@@ -1153,10 +1228,14 @@
              self.halted = True
              self.halt_reason = "paused"
          elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
@@ -95,7 +130,7 @@
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -2055,8 +2113,6 @@
+@@ -2055,8 +2134,6 @@
              return True
          if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
              return True
@@ -104,7 +139,28 @@
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
-@@ -3011,7 +3067,7 @@
+@@ -2450,7 +2527,8 @@
+             return None
+         elif self.sets.enabled and self.sets.use_historic_gate:
+             if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
+-                return None
++                # Positive-PF-only: gate ready and every pack closed -> no entry.
++                return "set-gate"
+         return None
+ 
+     def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
+@@ -2956,7 +3034,9 @@
+         except Exception:
+             self.overlay_mtime = 0.0
+         if ov.get("targetNotional"):
+-            TARGET_NOTIONAL = float(ov["targetNotional"])
++            # Clamp desk-supplied target notional: a corrupt or absurd overlay
++            # value must never translate into impossible order volume.
++            TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
+         try:
+             self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
+         except Exception:
+@@ -3011,7 +3091,7 @@
          self.strat_block = bool(ov.get("stratBlock", True))
          self.strat_trail = bool(ov.get("stratTrailing", True))
          self.strat_general = bool(ov.get("stratGeneral", True))
@@ -113,7 +169,7 @@
          self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
          self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
          try:
-@@ -3073,7 +3129,7 @@
+@@ -3073,7 +3153,7 @@
          self.block.enabled = bool(b_en) if b_en is not None else True
          if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
              self.block.enabled = True
@@ -122,7 +178,7 @@
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3116,7 +3172,7 @@
+@@ -3116,7 +3196,7 @@
          else:
              self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
              self.strat_ind = True
@@ -131,7 +187,7 @@
          if not self.mods.get("strategy.coord", True):
              for ax in self.coord.axes.values():
                  ax.enabled = False
-@@ -3885,7 +3941,7 @@
+@@ -3885,7 +3965,7 @@
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -140,7 +196,7 @@
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -4236,7 +4292,8 @@
+@@ -4236,7 +4316,8 @@
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -150,7 +206,7 @@
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4529,6 +4586,9 @@
+@@ -4529,6 +4610,9 @@
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -160,7 +216,17 @@
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4753,7 +4813,8 @@
+@@ -4650,6 +4734,9 @@
+             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
+         )
+         self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
++        book_cap = self.max_book_notional()
++        sane_cap = max(self.notional_cap() * 32.0, 64.0)
++        self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
+         missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
+         cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
+         self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
+@@ -4753,7 +4840,8 @@
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -170,3 +236,64 @@
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
+@@ -4893,6 +4981,22 @@
+             if remain > 0:
+                 time.sleep(remain)
+ 
++    def _ctrl_watch_loop(self) -> None:
++        """Event-based control coordination: any create/delete/touch of the
++        control files (STOP / PAUSE / STOP_ALL / reset-eq) wakes the main
++        loop immediately instead of waiting out the scan cadence."""
++        last: Dict[str, float] = {}
++        paths = (STOP_PATH, PAUSE_PATH, STOP_ALL, RESET_EQ_PATH)
++        while True:
++            try:
++                snap = ctrl_mtimes(paths)
++                if last and snap != last:
++                    self.bump("ctrl")
++                last = snap
++            except Exception:
++                pass
++            time.sleep(0.15)
++
+     def _one_cycle(self) -> None:
+         sd_notify("WATCHDOG=1")
+         paused = os.path.exists(PAUSE_PATH)
+@@ -4904,7 +5008,8 @@
+             self.halt_reason = "stopped"
+             self.priority_controls()
+             self.write_stats(force=True)
+-            time.sleep(0.4)
++            self.wake_ev.clear()
++            self.wake_ev.wait(timeout=0.4)
+             return
+         if paused:
+             self.halted = True
+@@ -4916,11 +5021,17 @@
+             self.priority_controls()
+             self.manage()
+             self.write_stats(force=True)
+-            time.sleep(0.4)
++            self.wake_ev.clear()
++            self.wake_ev.wait(timeout=0.4)
+             return
+         if self.halt_reason in ("paused", "stopped"):
+             pre = getattr(self, "_pre_pause_halt", None)
+             self._pre_pause_halt = None
++            if os.path.exists(RESET_EQ_PATH):
++                # Explicit Start: fresh session — the reset-eq rescue in
++                # refresh_balance re-baselines equity; never restore the
++                # pre-stop economic halt across an explicit start.
++                pre = None
+             if pre:
+                 self.halted = True
+                 self.halt_reason = pre
+@@ -5001,6 +5112,8 @@
+         warm.start()
+         hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
+         hist.start()
++        ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
++        ctrl.start()
+         self.cycle_busy = False
+         self.cycle_wait_ms = 0.0
+         self.cycle_overrun = False
