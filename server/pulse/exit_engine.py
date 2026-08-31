@@ -97,7 +97,7 @@ class ExitBook:
         self.trail_min_step = 6.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.10
+        self.min_pf = 1.20
         self.min_samples = 8
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
@@ -126,7 +126,7 @@ class ExitBook:
         self.trail_min_step = float(ov.get("trailingMinStep") or 6)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or 1.10)
+        self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or 1.20)
         self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
@@ -357,7 +357,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("ex-deact-peak", not b.lanes["peak"].active, b.lanes["peak"].deact_reason))
     # best-of prefers high PF lane
     b2 = ExitBook()
-    b2.load({"exitBestOf": True, "exitMinHoldS": 1, "trailingMinStep": 1})
+    b2.load({"exitBestOf": True, "exitMinHoldS": 1, "trailingMinStep": 1, "exitMinPf": 1.05})
     for i in range(12):
         b2.on_close({"t": 2000 + i, "pnl": 0.02, "pnl_pct": 0.003, "reason": "exit:peak"})
         b2.on_close({"t": 3000 + i, "pnl": -0.01, "pnl_pct": -0.002, "reason": "exit:time"})

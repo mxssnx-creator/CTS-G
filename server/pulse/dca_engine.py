@@ -81,7 +81,7 @@ class DcaLane:
 
 class DcaBook:
     def __init__(self) -> None:
-        self.enabled = True
+        self.enabled = False  # DCA off by default — desk overlay can enable it
         self.max_steps = 0
         self.distances = [d / 100.0 for d in DEFAULT_DIST]
         self.mults = list(DEFAULT_MULT)
@@ -90,7 +90,7 @@ class DcaBook:
         self.cooldown_s = 30.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.10
+        self.min_pf = 1.20
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
@@ -107,7 +107,7 @@ class DcaBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        self.enabled = bool(ov.get("dcaEnabled", True))
+        self.enabled = bool(ov.get("dcaEnabled", False))
         try:
             raw_steps = ov.get("dcaMaxSteps")
             if raw_steps is None:
@@ -139,7 +139,7 @@ class DcaBook:
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.10)
+        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.20)
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:

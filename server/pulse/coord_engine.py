@@ -56,7 +56,7 @@ class Coordinator:
             "cont": Axis(True, 8),
             "pause": Axis(True, 8),
         }
-        self.min_pf = 1.1
+        self.min_pf = 1.2
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -95,9 +95,9 @@ class Coordinator:
         }
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
+            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
         except Exception:
-            self.min_pf = float(ov.get("minPf") or 1.1)
+            self.min_pf = float(ov.get("minPf") or 1.2)
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         if self.position_cost_pct > 2:

@@ -228,6 +228,13 @@ def _sysctl(*args: str, timeout: float = 25.0) -> tuple:
 
 _STATE_CACHE: dict = {}
 
+# Single global control mutex: every start/stop/pause/resume — from the desk
+# UI, the API, or the heal watchdog — is fully serialized, so rapid clicking
+# or a heal tick can never interleave file ops and systemctl calls. Clicks
+# queue and apply in arrival order; the last click always wins because it
+# executes last.
+CONTROL_LOCK = threading.Lock()
+
 
 def unit_state(cid: str, fresh: bool = False) -> str:
     """systemd is-active state, cached briefly — the desk polls several times a second."""
@@ -256,6 +263,11 @@ def apply_control(conn: str, action: str) -> tuple:
         return False, "unknown action"
     if conn not in ("", "overall") and conn not in ID_TO_LANE:
         return False, "unknown conn"
+    with CONTROL_LOCK:
+        return _apply_control_locked(conn, action)
+
+
+def _apply_control_locked(conn: str, action: str) -> tuple:
     ids = [l["id"] for l in LANES] if conn in ("", "overall") else [conn]
     notes = []
     for cid in ids:
@@ -394,6 +406,19 @@ def lane_summary(lane: dict) -> dict:
         "progressPhase": prog.get("phase"),
         "progressDetail": prog.get("detail"),
         "progressReady": bool(prog.get("ready")),
+        "progressSymbol": prog.get("symbol") or "",
+        "progressSetId": prog.get("setId") or "",
+        "progressSymbolsDone": prog.get("symbolsDone"),
+        "progressSymbolsTotal": prog.get("symbolsTotal"),
+        "progressSetsDone": prog.get("setsDone"),
+        "progressSetsTotal": prog.get("setsTotal"),
+        "progressBarsDone": prog.get("barsDone"),
+        "progressBarsTotal": prog.get("barsTotal"),
+        "progressElapsedMs": prog.get("elapsedMs"),
+        "progressLastRunMs": prog.get("lastRunMs"),
+        "progressCycle": prog.get("cycle"),
+        "progressError": prog.get("error") or "",
+        "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
         "pfCost": pc.get("ratio"),
         "controlsOk": cov.get("ok") or 0,
@@ -741,23 +766,27 @@ def heal_loop() -> None:
         try:
             for lane in LANES:
                 cid = lane["id"]
-                if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
-                    continue
-                state = unit_state(cid, fresh=True)
-                if state == "active":
-                    continue
-                now = time.time()
-                if now - float(last.get(cid, 0) or 0) < 150.0:
-                    continue
-                try:
-                    p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
-                    if not (p.stdout or "").strip():
-                        continue  # no keys — engine would exit instantly
-                except Exception:
-                    continue
-                last[cid] = now
-                _sysctl("reset-failed", f"grok-pulse@{cid}", timeout=8)
-                rc, out = _sysctl("start", f"grok-pulse@{cid}")
+                # Same mutex as apply_control: the STOP-file check and the
+                # start are atomic against a manual stop/pause click, so the
+                # watchdog can never revive a lane the user just stopped.
+                with CONTROL_LOCK:
+                    if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
+                        continue
+                    state = unit_state(cid, fresh=True)
+                    if state == "active":
+                        continue
+                    now = time.time()
+                    if now - float(last.get(cid, 0) or 0) < 150.0:
+                        continue
+                    try:
+                        p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
+                        if not (p.stdout or "").strip():
+                            continue  # no keys — engine would exit instantly
+                    except Exception:
+                        continue
+                    last[cid] = now
+                    _sysctl("reset-failed", f"grok-pulse@{cid}", timeout=8)
+                    rc, out = _sysctl("start", f"grok-pulse@{cid}")
                 try:
                     with open(os.path.join(DIR, "http.log"), "a") as f:
                         f.write(f"heal {cid} rc={rc} {out[:120]}\n")
