@@ -1,0 +1,61 @@
+# 2026-09-01 — Block strategy: all counts enabled, calcs + volume coordination hardened
+
+Request: "make all counts for Block Strategy be enabled and make sure calcs and pos
+volumes adjustments and live trade and coordinations are completely correct intensively."
+
+## Live settings re-verified
+- sidecar /config.json?conn=live on 152.53.114.112 re-fetched: all block toggles ON
+  (blockEnabled, blockActiveReal, blockActiveLive, stratBlock), blockMaxStack=0
+  (unlimited), blockVolumeRatio=1, blockProfitFactorRatio=0.8, blockPauseCountRatio=1.
+- Both repo overlays (bingx-x01 / bingx-x02) already carry exactly these keys (139 each);
+  defaultMinPF follows CTS strategies.main.real.min_profit_factor = 1.2 (correct as-is).
+
+## Findings + fixes (server/pulse/pulse_trader.py)
+1. _coverage_blob(): unlimited book (maxStack=0) degenerated the Block coverage to
+   count 1 only — now exposes the full preview window (BLOCK_COUNT_PREVIEW=12, cap 32),
+   same rule as BlockBook.snapshot(). Added the missing BLOCK_COUNT_PREVIEW import.
+2. _coverage_blob(): referenced `sim_n` which only existed as a stats() local —
+   every stats() call would have raised NameError. Now computed locally via sim_stats().
+3. maybe_block_adds(): intern-PF floor was hardcoded 1.2 in three spots — now follows
+   block.default_min_pf (CTS strategies.main.real stage coordinate), so overlay/CTS
+   changes propagate instead of being overridden by a constant.
+4. maybe_block_adds(): volume-adjustment parent reference was a fresh size_qty()
+   (re-derived from remaining balance) while the count formula targets are built on
+   lane.base_qty — now parent = lane.base_qty (fallback size_qty only when the lane
+   has no base recorded), so caps coordinate with the emitted targets.
+
+## Verified correct as-is (audit)
+- block_engine.evaluate_counts walks every count 1..maxStack (or the rolling
+  unsatisfied window when unlimited) + the active-live overlay row; pick_emit prefers
+  active-live then the smallest unsatisfied passing count; record_fill marks lower
+  counts satisfied cumulatively; pause_count halts a single count after hard fails.
+- Overlay→BlockBook wiring in apply_live_config (enabled/stack/ratio/pf/pause/
+  activeLive/activeReal/defaultMinPF) complete; strategy.modules gate honored.
+- maybe_block_adds guards: halted/strat/entries_blocked/available/stagger/STOP-PAUSE
+  files/book cooldown/order-path cooldown; per-position: controls present, side
+  continuation (pulse score, indication fallback), no stacking into a losing parent
+  (u < -0.15% skips), book-cap + margin caps, exchange min-lot bump, oversized pause.
+- Fill path: record_fill + weighted entry + available-margin debit + control
+  re-attach (oids cleared, ctrl_verified=False, ensure_controls) + book persist.
+
+## Tests — scripts/engine-zest.py block_calc_zest (15 new, 137/137 total)
+- formula math: inc=count*ratio (n=3,r=1.5 -> 4.5); minPF 1+(1.2-1)*0.8*4.5 = 1.72
+- coverage: unlimited book -> 12 counts shown; limited(5) -> exactly 1..5; enabled flags
+- evaluate_counts: window [1..4] + active-live row on fresh lane; window rolls
+  [1..7] after counts 1-3 satisfied; satisfied count never requests; pick_emit -> 2
+- maybe_block_adds end-to-end (FakeApi):
+  * cold set + defaultMinPF 1.1 -> count2 gate 1.16 > 1.1 -> NO emit (floor follows
+    default; a hardcoded 1.2 would have emitted)
+  * warm set (PF 1.5, n=12) -> emits count2, qty/entry/confirmed_add/last-emit all
+    coordinated (fill recorded, weighted entry exact)
+  * cold default 1.2 fresh lane -> count1 emits (gate min(1.2, 1.12) = 1.12)
+  * disabled book / disabled strategy -> never emits
+  * lane without live parent is retired (active=False, base=0), never traded
+
+## Gates
+- engine-zest 137/137, py_compile all server/pulse + scripts, tsc clean, npm build OK.
+- restore/pulse_trader.py.patch regenerated (23326B): pinned base b3a9ff3c + patch ->
+  git blob 2e39a63bd52f5db36681e94c1ad7735f3ea3e8f5, git-apply + py_compile verified.
+- deploy/linux-common.sh pt_want updated to 2e39a63b.
+
+Deploy: user action — sudo /opt/cts-g/deploy/update-linux.sh --force

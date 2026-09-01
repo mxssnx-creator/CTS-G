@@ -1,0 +1,99 @@
+=== CTS-G VERIFIER RUN 2026-09-01 phantom-positions ===
+Scope: Request "Dashboard is showing open pos.. but in exchange are none.. fix it!
+Add to counts also the exchange indeed count"
+
+SYMPTOM (remote 152.53.114.112, sidecar :3015)
+- live lane stats.json: openCount=37, controlsMissing=13 — while the exchange
+  account itself held ZERO open positions. Phantom book.
+
+ROOT CAUSE (pulse_trader.adopt_exchange_positions)
+- The reconcile ran every 25 cycles, but had a blanket guard:
+      if live_n == 0 and self.open: return   # "ADOPT skip empty rest"
+  meant to protect against a glitchy empty REST page. Consequence: when the
+  exchange was REALLY flat (all closed/liquidated externally, fills the engine
+  missed), the stale-local sweep below never ran -> tracked positions lived
+  forever, and openCount (len(self.open)) kept lying to the dashboard.
+
+FIX (engine)
+- Glitch guard kept but bounded: first empty read only arms a streak counter;
+  the SECOND consecutive empty adopt (50 cycles apart, plus per-position
+  _exchange_flat re-check for controlled positions and age>=180s guard in the
+  sweep) confirms the flat exchange and the sweep drops the phantom book.
+- Streak resets as soon as the book matches the exchange; API failure (non-ok
+  response) still never touches the book.
+- stats() now exposes "exchangeOpenCount" (real exchange position count from
+  the last adopt read; -1 = not yet read) and recon{...,exchangeOpen}.
+
+FIX (sidecar pulse_http)
+- lane_summary, merge_overall, connections_blob (types + lanes) and both
+  results-export payloads forward exchangeOpenCount (overall = lane sum,
+  -1 when unknown).
+
+FIX (desk UI)
+- live-stats.ts / connections.ts: exchangeOpenCount on LiveStats, lane element
+  and ConnLane types + lane-merge passthrough.
+- index.tsx lane card: new "Exchange" row under "Open" — shown in danger color
+  whenever the real exchange count differs from the engine book count.
+- desk-shell conn tabs: "· N open · xch M" indicator, danger-colored on mismatch.
+
+IN-PROCESS TESTS (engine-zest phantom_recon_zest, +7 tests)
+- phantom-skip-first-empty: first empty read arms guard, book untouched
+- phantom-count-visible: exchange_open_count=0 visible immediately (for UI)
+- phantom-drop-on-confirm: second empty read reconciles, phantom book dropped
+- phantom-streak-resets: streak back to 0 once book matches exchange
+- phantom-keeps-young: in-flight entries (age<180s) survive confirmed flat read
+- phantom-controlled-dropped: controlled phantom double-checked + dropped,
+  cooldown set
+- phantom-live-pos-kept: NEGATIVE — position still on exchange is kept, xch=1
+- phantom-api-fail-keeps-book: NEGATIVE — API failure never wipes the book
+
+SUITES (local, sandbox)
+- python3 -m py_compile server/pulse/*.py -> clean
+- python3 scripts/engine-zest.py -> 116/116 pass (108 + 7 phantom + 1 previously
+  skipped by missing module-level `import time`, now imported at top)
+
+DEPLOY PACKAGING
+- restore/pulse_trader.py.patch regenerated: base b3a9ff3c (229106B) + patch
+  (17482B) -> engine sha ad749ec34c506dfdff476fef18405ab8ab069091; verified via
+  BOTH `patch` and `git apply` reconstruction + py_compile.
+- deploy/linux-common.sh pt_want updated to ad749ec34c...
+
+ACTION REQUIRED on VPS: sudo /opt/cts-g/deploy/update-linux.sh --force
+— after deploy the phantom book self-corrects within ~2 adopt cycles and the
+UI shows the real exchange count next to the engine count.
+
+== 2) REAL / LIVE / SIMULATED naming + simulated stats (2026-09-01) ==
+Request: "Call them Real / Live where Real are the positions valid to get open
+and Live which are indeed live open in exchange.. and make also stats and calcs
+for Simulated (which are Real Valid to get processed... Systemintern calcs)."
+
+SEMANTICS
+- Real      = openCount: every tracked (valid) engine position.
+- Live      = exchangeOpenCount: confirmed by the exchange position list.
+- Simulated = simOpenCount/simUPnl: Real positions NOT on the exchange —
+  valid to process by system-internal calcs (count + unrealized PnL), shown
+  separately so the book can never silently lie again.
+
+ENGINE
+- adopt_exchange_positions builds live_pos_keys (SYM:SIDE) from EVERY valid
+  exchange read (even while the flat-exchange glitch guard is still arming).
+- New Pulse.sim_stats() -> (count, unrealized pnl); -1 while exchange truth
+  unknown (UI shows dash, never a fake number).
+- stats(): simOpenCount + simUPnl + recon.simOpen.
+
+SIDECAR (pulse_http): simOpenCount/simUPnl forwarded in lane_summary,
+merge_overall (lane sum), connections_blob (types + lanes), both exports.
+
+UI
+- Lane card: "Open"->"Real", "Exchange"->"Live" (danger on mismatch), new
+  "Sim" row = count · signed uPnl (warn color while sim > 0).
+- Conn tabs: "R n · L m (· S k)" with danger color on R != L.
+
+TESTS (engine-zest sim_stats_zest, +5)
+- sim-unknown-minus1 / sim-count-real-minus-live / sim-upnl-math (LONG+SHORT
+  signs, live excluded) / sim-all-when-flat / sim-adopt-keys (adopt wires
+  SYM:SIDE keys, zero-amt rows ignored)
+
+SUITES: engine-zest 121/121, py_compile clean, tsc clean, npm 191/0.
+DEPLOY PACKAGING: patch c1e1d70a (20441B) -> engine 1ace621f…, git-apply
+verified + compiled; linux-common.sh pt_want updated.

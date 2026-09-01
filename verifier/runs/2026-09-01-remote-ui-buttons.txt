@@ -1,0 +1,75 @@
+=== CTS-G VERIFIER RUN 2026-09-01 remote-ui-buttons ===
+Scope: Request "Reinstall on remote server.. restart vst and test through UI completly..
+also buttons .. restarts.. and ui overall data correctness and timings.."
+
+ENV: remote 152.53.114.112 (desk UI :3102 vite dev, sidecar :3015) still runs the OLD
+build (deploy = user action: sudo /opt/cts-g/deploy/update-linux.sh --force).
+Tests executed from sandbox via python-playwright + system chromium (headless).
+
+SIDECAR CONTROL PLANE (VST lane x02)
+- POST /control.json?conn=vst {action:stop}  -> ok:true rc=0
+- POST /control.json?conn=vst {action:start} -> ok:true rc=0; engine process boots,
+  stats cycle advances 126 -> 451 -> 876 -> 1197 over 60s (process alive and scanning)
+- VST remains halted "drawdown halt" (startEquity 14734.2156 vs equity ~9160.39 =
+  -37.8% >= DD_HALT 18%): OLD build latches the persisted drawdown on boot; the
+  reset-eq re-baseline rescue exists only in the new build -> clears on deploy.
+
+UI BUTTONS (desk :3102, VST desk selected, old UI build)
+- ui-vst-selected PASS   (desk switch works)
+- ui-stop-accepted PASS  (Stop button -> sidecar stop rc=0)
+- ui-start-engine-boots PASS (Start button -> engine restarts, cycle 11751 -> 12276)
+- ui-pause BLOCKED on old build: Pause button hard-disabled whenever stats do not
+  show a running lane (stale-stats gating) — the exact bug fixed in the pushed build
+  (per-action busy, Pause no longer gated on stats, always-clickable).
+- ui-stress: rapid Pause/Start alternation not fully exercisable pre-deploy because
+  of the disabled-Pause gating; StressCtl (8 threads x 6 actions, 48 serialized
+  apply_control, max_concurrent=1) covers the backend path in-process (108/108).
+- No page errors / console errors during all UI interactions.
+
+UI DATA CORRECTNESS (UI vs sidecar, same instant)
+- data-live-equity-match PASS  ui=9160.3913 sidecar=9160.3913 (exact)
+- data-vst-equity-match PASS   ui=9160.3706 sidecar=9160.3706 (exact)
+- data-open-count PASS         ui=8 sidecar live 8 + vst 0
+- conn-lane-live-running PASS  live running=true halted=false
+- conn-lane-vst-halt PASS      vst haltReason="drawdown halt"
+- conn-progress-fields PASS    progressPct/progressPhase/progressReady present
+  (progressPhase="ready" on both lanes)
+
+TIMINGS
+- sidecar stats `now` drift rate 1.12 over 30s sustained (cycle +2/~6s base with
+  scan bursts) — acceptable; a single 2-sample pair showed 1.5x which was write-
+  cadence noise, not clock skew.
+- UI cold load in headless chromium: ~15-20s until first data (vite dev server
+  module graph); polls then update continuously (live-stats.json, connections.json,
+  stats.json?conn=overall every poll interval, no overlap observed).
+
+CONNECTION MIXUP (still user-action)
+- x01 "live" lane carries VST demo keys -> live and vst equity both ~9160.39 (same
+  VST account). Real mainnet creds exist on record bingx-8581b0cb8581 (...BONQ /
+  ...qYKQ). Repair routes (pick one):
+  1) paste full api_key/api_secret for bingx-x01 (mainnet) via secure channel
+  2) fix in CTS-K-N UI (port 80) connection editor
+  3) on VPS: redis-cli HSET connection:bingx-x01 api_key '...' api_secret '...'
+     is_testnet 'false' base_url 'https://open-api.bingx.com'
+
+LOCAL SUITES (this session, sandbox)
+- python3 scripts/engine-zest.py -> 108/108 pass (incl. always_start_zest 11,
+  control_coord_zest 12 with StressCtl serialization checks)
+
+PUSH STATE (GitHub main, mxssnx-creator/CTS-G)
+- HEAD 939651c0 "fix restore patch: restore + prefix on ctrl_mtimes try line"
+- All code batches pushed + sha-verified: pulse_http/coord/dca/exit engines,
+  desk-shell/connection-provider/index/results/settings routes, config-model,
+  live-stats, engine-zest, linux-common.sh (d5349ef0, pt_want=817f822b),
+  restore/pulse_trader.py.patch (9ee6aabe, 15047B, byte-exact vs local).
+- PENDING (tooling-blocked this session, ready on disk): verifier/README.md
+  (7519ab9f) + runs/2026-08-30-defaults-dca-off.txt (88a0229e),
+  2026-08-30-no-order-limit.txt (bbdca4e9), 2026-08-31-always-start.txt (921e9193),
+  2026-08-31-conn-volume-progress.txt (8b3d5e12),
+  2026-09-01-control-coordination.txt (5f53fd04), this file.
+
+ACTION REQUIRED on VPS (code deploy): sudo /opt/cts-g/deploy/update-linux.sh --force
+— installs the new engine (reset-eq rescue clears the VST drawdown halt on start,
+volume sanity caps, ctrl-watch event wake) + new sidecar (CONTROL_LOCK, heal_loop,
+reset-eq touch) + new desk UI (always-clickable buttons, instant repoll). Then:
+VST start clears the halt and trades; Pause becomes clickable in every state.
