@@ -375,8 +375,34 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               {l.unit === "VST" ? " VST" : ""}
             </p>
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
-              <dt>Open</dt>
-              <dd className="text-right text-fg">{l.openCount}</dd>
+              <dt>Real</dt>
+              <dd className="text-right text-fg" title="Engine book — valid system entries">
+                {l.openCount}
+              </dd>
+              <dt>Live</dt>
+              <dd
+                className={`text-right ${
+                  typeof l.exchangeOpenCount === "number" &&
+                  l.exchangeOpenCount >= 0 &&
+                  l.exchangeOpenCount !== l.openCount
+                    ? "text-danger"
+                    : "text-fg"
+                }`}
+                title="Indeed live open on the exchange (reconcile)"
+              >
+                {typeof l.exchangeOpenCount === "number" && l.exchangeOpenCount >= 0
+                  ? l.exchangeOpenCount
+                  : "—"}
+              </dd>
+              <dt>Sim</dt>
+              <dd
+                className={`text-right ${(l.simOpenCount ?? 0) > 0 ? "text-warn" : "text-fg"}`}
+                title="Simulated — Real positions not on the exchange; system-internal calcs (count · unrealized PnL)"
+              >
+                {typeof l.simOpenCount === "number" && l.simOpenCount >= 0
+                  ? `${l.simOpenCount}${typeof l.simUPnl === "number" && l.simOpenCount > 0 ? ` · ${l.simUPnl >= 0 ? "+" : ""}${fmt(l.simUPnl, 2)}` : ""}`
+                  : "—"}
+              </dd>
               <dt>W / L</dt>
               <dd className="text-right text-fg">
                 {l.wins} / {l.losses}
