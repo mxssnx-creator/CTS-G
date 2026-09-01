@@ -16,7 +16,7 @@ DEFAULT_FLAGS = {
     "exchange.bingx": True,
     "strategy.block": True,
     "strategy.trailing": True,
-    "strategy.dca": False,  # DCA off by default — overlay dcaEnabled=true re-enables
+    "strategy.dca": True,  # live default — overlay dcaEnabled=false disables
     "strategy.indications": True,
     "strategy.coord": True,
     "feed.signals": True,
