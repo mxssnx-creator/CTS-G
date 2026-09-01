@@ -10,6 +10,9 @@ export type ConnLane = {
   halted?: boolean;
   equity?: number;
   openCount?: number;
+  exchangeOpenCount?: number;
+  simOpenCount?: number;
+  simUPnl?: number;
   alive?: boolean;
   exchange?: string;
   wins?: number;

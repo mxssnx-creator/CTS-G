@@ -61,6 +61,9 @@ export function DeskShell({
             const on = conn === t.id;
             const running = Boolean(lane?.running);
             const openN = lane?.openCount ?? 0;
+            const xchN = lane?.exchangeOpenCount ?? -1;
+            const simN = lane?.simOpenCount ?? -1;
+            const xchMismatch = xchN >= 0 && xchN !== openN;
             return (
               <button
                 key={t.id}
@@ -78,9 +81,13 @@ export function DeskShell({
                   />
                   <span className="text-sm font-medium">{t.label}</span>
                 </div>
-                <div className="mt-0.5 font-mono text-[10px] tracking-wide uppercase">
+                <div
+                  className={`mt-0.5 font-mono text-[10px] tracking-wide uppercase ${xchMismatch ? "text-danger" : ""}`}
+                >
                   {t.hint}
-                  {` · ${openN} open`}
+                  {` · R ${openN}`}
+                  {xchN >= 0 ? ` · L ${xchN}` : ""}
+                  {simN > 0 ? ` · S ${simN}` : ""}
                 </div>
               </button>
             );
