@@ -912,6 +912,233 @@ def block_calc_zest() -> None:
         f"active={laneE.active} base={laneE.base_qty}")
 
 
+def strict_gate_zest() -> None:
+    """Strict validation gate: only VALIDATED (last-N samples >=
+    max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) strategy
+    sets and indication kinds may drive live orders.
+
+    Proves end-to-end: entry_sense blocks when nothing is validated, the
+    intern_any override no longer reopens closed packs, place() never posts
+    an order without a validated + profitable set, place() DOES trade once
+    one exists, the per-kind indication gate cuts proven losers while an
+    unproven kind rides a validated pack, and Block intern PF only lifts off
+    the CTS floor for validated + profitable sets.
+    """
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    import set_engine as se
+
+    tmp = tempfile.mkdtemp(prefix="strict-zest-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+
+    def win_rows(strong: bool = False):
+        pct = 0.006 if strong else 0.003
+        pnl = 0.003 if strong else 0.0015
+        return [{"t": 1000 + i * 60, "pnl": pnl, "pnl_pct": pct, "symbol": "T",
+                 "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+
+    def loss_rows():
+        return [{"t": 2000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T",
+                 "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
+
+    def mk_book(winner: bool = True, strong: bool = False):
+        b = se.SetBook()
+        b.load({"histEnabled": True, "setMinPf": 1.10, "setMinSamples": 8,
+                "stratIndications": True, "stratGeneral": True,
+                "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3,
+                "trailArmMin": 0.3, "trailArmMax": 0.3})
+        b.progress.ready = True
+        if winner:
+            for st in b.by_idx:
+                st.hist = win_rows(strong) if st is b.by_idx[0] else []
+                b._score_one(st)
+        return b
+
+    def mk_trader(book):
+        p = object.__new__(pt.Pulse)
+        p.px = {"AAA-USDT": 100.0}
+        p.open = {}
+        p.sets = book
+        p.strat_ind = True
+        p.indications = SimpleNamespace(
+            settings={"enabled": True},
+            match=lambda s, r: None, primary=lambda s: None, best=lambda s: None)
+        p.occupying = lambda *a, **k: False
+        return p
+
+    # 1) strict + nothing validated: both packs closed, entry hard-blocked
+    cold = mk_book(winner=False)
+    for st in cold.by_idx:
+        cold._score_one(st)
+    p1 = mk_trader(cold)
+    rec("strict-entry-blocked-no-set",
+        p1.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") == "set-gate",
+        f"{p1.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
+    rec("strict-packs-closed", not cold.pack_open("general") and not cold.pack_open("indications"))
+
+    # 2) strict + one validated + profitable set: entry allowed, winner bound
+    warm = mk_book(winner=True)
+    p2 = mk_trader(warm)
+    rec("strict-entry-allowed-validated",
+        p2.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") is None,
+        f"{p2.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
+    winner = warm.by_idx[0]
+    rec("strict-pick-is-winner",
+        warm.pick_any("indications") is winner and winner.last15_n >= 8 and winner.last15_ratio >= 1.0,
+        f"{winner.id} pf={winner.last15_ratio} n={winner.last15_n}")
+
+    # 3) validated loser set is never picked, even when it is the only evidence
+    loser_book = se.SetBook()
+    loser_book.load({"histEnabled": True, "setMinPf": 1.10, "setMinSamples": 8,
+                     "stratIndications": True, "stratGeneral": True,
+                     "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3,
+                     "trailArmMin": 0.3, "trailArmMax": 0.3})
+    loser_book.progress.ready = True
+    for st in loser_book.by_idx:
+        st.hist = loss_rows()
+        loser_book._score_one(st)
+    p3 = mk_trader(loser_book)
+    rec("strict-loser-never-picked",
+        loser_book.pick_any("general") is None and loser_book.pick_any("indications") is None
+        and p3.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") == "set-gate",
+        f"pick={loser_book.pick_any('general')}")
+
+    # 4) per-kind indication gate
+    ind_book = mk_book(winner=True)  # by_idx[0] = indications:sl0.6:st3 winner
+    p4 = mk_trader(ind_book)
+    ind_book.ind_live["move"] = loss_rows()[:12]
+    ind_book.ind_live["state"] = win_rows()[:12]
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move")
+    rec("strict-ind-loser-kind-blocked",
+        p4.entry_sense("AAA-USDT", 1, "ind:move:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") == "ind-gate",
+        "move kind gated")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    rec("strict-ind-winner-kind-runs",
+        p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
+        "state kind runs")
+    # unproven kind rides the validated indications pack
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
+    rec("strict-ind-unproven-rides-pack",
+        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") is None,
+        "common kind unproven but pack validated")
+    # ...but not when the indications pack itself has no validated winner
+    ind_book.by_idx[0].hist = []
+    ind_book._score_one(ind_book.by_idx[0])
+    rec("strict-ind-unproven-pack-closed",
+        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") == "ind-gate",
+        f"{p4.entry_sense('AAA-USDT', 1, 'ind:common:ta:0.70:a1:ta', 0.9, 'indications')}")
+
+    # 5) place() never posts without a validated + profitable set
+    class OrderApi:
+        def __init__(self):
+            self.posts = []
+            self.path_cd: Dict[str, float] = {}
+
+        def post(self, path, body):
+            self.posts.append((path, dict(body)))
+            return {"code": 0, "data": {"order": {"orderId": f"o{len(self.posts)}",
+                    "avgPrice": "100", "quantity": str(body.get("quantity"))}}}
+
+    def mk_place_trader(book):
+        p = mk_trader(book)
+        p.api = OrderApi()
+        p.entries_blocked = lambda: False
+        p.halted = False
+        p.cooldown = {}
+        p.available = 100.0
+        p.last_entry_ts = 0.0
+        p.ignore_syms = {}
+        p.group_of = lambda s: "g"
+        p.group_count = lambda g: 0
+        p.skip_log = {}
+        p.contracts = {"AAA-USDT": Contract("AAA-USDT", 0.001, 0.001, 3, 2, 1.0, 150)}
+        p.size_qty = lambda c, px: 0.05
+        p.max_book_notional = lambda: 1000.0
+        p.notional_cap = lambda: 250.0
+        p.ensure_max_leverage = lambda s, force=False: None
+        p.leverage_for = lambda c: 150
+        p.ok = lambda r: isinstance(r, dict) and r.get("code") == 0
+        p.cid = lambda kind="o", **kw: f"GTEST{len(p.api.posts)}"
+        p.sl_min, p.sl_max = 0.002, 0.012
+        p.tp_min, p.tp_max = 0.0035, 0.024
+        p.position_cost_pct = 0.15
+        p.tp_cost_ratio = 5
+        p.variants = SimpleNamespace(current_sl=lambda: 0.6,
+                                     current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
+        p.exits = SimpleNamespace(enabled=True, ignore_tp=False)
+        p.control_orders = False
+        p.security_prices = lambda pos: (pos.sl, pos.tp)
+        p.save_open_book = lambda: None
+        p.seen_fill_cids = set()
+        p.owned_syms = set()
+        p.fees_est = 0.0
+        p.signals = []
+        p.block = SimpleNamespace(register_parent=lambda *a, **k: None, default_min_pf=1.2)
+        p.dca = SimpleNamespace(attach=lambda *a, **k: None)
+        p.did_io = False
+        p.errors = 0
+        p.last_error = ""
+        return p
+
+    old_max_open, old_max_group = pt.MAX_OPEN, pt.MAX_PER_GROUP
+    pt.MAX_OPEN, pt.MAX_PER_GROUP = 0, 0
+    try:
+        p5 = mk_place_trader(mk_book(winner=False))
+        p5.place("AAA-USDT", 1, "gen:ema+", 0.9)
+        rec("strict-place-no-order-cold", p5.api.posts == [], f"posts={p5.api.posts}")
+        p5b = mk_place_trader(loser_book)
+        p5b.place("AAA-USDT", 1, "gen:ema+", 0.9)
+        rec("strict-place-no-order-losers", p5b.api.posts == [], f"posts={p5b.api.posts}")
+        # 6) place() trades once a validated + profitable set exists
+        warm2 = mk_book(winner=True)
+        p6 = mk_place_trader(warm2)
+        p6.place("AAA-USDT", 1, "gen:ema+", 0.9)
+        pos6 = p6.open.get("AAA-USDT")
+        rec("strict-place-trades-validated",
+            len(p6.api.posts) == 1 and pos6 is not None and pos6.set_id == warm2.by_idx[0].id,
+            f"posts={len(p6.api.posts)} set={getattr(pos6, 'set_id', None)}")
+    finally:
+        pt.MAX_OPEN, pt.MAX_PER_GROUP = old_max_open, old_max_group
+
+    # 7) Block intern PF: strict — only validated + profitable lifts the floor
+    p7 = object.__new__(pt.Pulse)
+    p7.block = SimpleNamespace(default_min_pf=1.2)
+    strong_book = mk_book(winner=True, strong=True)  # ratio 1.3 > floor 1.2
+    p7.sets = strong_book
+    pos_w = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
+                        sl=99.0, tp=101.0, peak=100.0,
+                        set_id=strong_book.by_idx[0].id, pack="indications")
+    got_w = p7.block_intern_pf(pos_w)
+    rec("strict-block-pf-validated-lifts",
+        abs(got_w - strong_book.by_idx[0].last15_ratio) < 1e-9 and got_w > 1.2,
+        f"intern={got_w} set_pf={strong_book.by_idx[0].last15_ratio}")
+    pos_c = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
+                        sl=99.0, tp=101.0, peak=100.0,
+                        set_id=strong_book.by_idx[1].id, pack="indications")
+    rec("strict-block-pf-cold-floor", abs(p7.block_intern_pf(pos_c) - 1.2) < 1e-9,
+        f"intern={p7.block_intern_pf(pos_c)}")
+    strong_book.by_idx[0].hist = loss_rows()
+    strong_book._score_one(strong_book.by_idx[0])
+    rec("strict-block-pf-loser-floor", abs(p7.block_intern_pf(pos_w) - 1.2) < 1e-9,
+        f"intern={p7.block_intern_pf(pos_w)}")
+    # legacy (strict off): warm ratio lifts even below 8 samples? no — legacy
+    # floors cold sets; warm ratio is used as-is (old behavior preserved)
+    legacy_sets = SimpleNamespace(strict_gate=False, sets={},
+                                  pick_any=lambda pack: SimpleNamespace(last15_ratio=1.5, last15_n=12))
+    p7.sets = legacy_sets
+    pos_l = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
+                        sl=99.0, tp=101.0, peak=100.0, set_id="", pack="general")
+    rec("legacy-block-pf-unchanged", abs(p7.block_intern_pf(pos_l) - 1.5) < 1e-9,
+        f"intern={p7.block_intern_pf(pos_l)}")
+
+
 def main() -> int:
     run_units()
     rank_zest()
@@ -926,6 +1153,7 @@ def main() -> int:
     phantom_recon_zest()
     sim_stats_zest()
     block_calc_zest()
+    strict_gate_zest()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:
