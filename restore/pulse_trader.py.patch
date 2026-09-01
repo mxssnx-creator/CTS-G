@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..2e39a63 100644
+index b3a9ff3..eb60545 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -21,7 +21,7 @@ from collections import deque
@@ -47,7 +47,15 @@ index b3a9ff3..2e39a63 100644
  def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
      global _LOG_N, _LOG_FLUSH
      if every > 0:
-@@ -632,6 +645,9 @@ class Pulse:
+@@ -540,6 +553,7 @@ class Closed:
+     client_id: str = ""
+     ours: bool = True
+     conn: str = ""
++    ind_kind: str = ""
+ 
+ 
+ class Pulse:
+@@ -632,6 +646,9 @@ class Pulse:
          self.last_px: Dict[str, float] = {}
          self.recon_ok = True
          self.recon_detail = "pending"
@@ -57,7 +65,7 @@ index b3a9ff3..2e39a63 100644
          self._load_trade_history()
          self._load_open_book()
          self.block = BlockBook(BLOCK_PATH, {
-@@ -875,9 +891,24 @@ class Pulse:
+@@ -875,9 +892,24 @@ class Pulse:
          return max(0.0, float(self.available or 0)) * lev * 0.90
  
      def max_book_notional(self) -> float:
@@ -84,7 +92,7 @@ index b3a9ff3..2e39a63 100644
          dca_extra = 0.0
          if dca_n > 0:
              try:
-@@ -934,6 +965,10 @@ class Pulse:
+@@ -934,6 +966,10 @@ class Pulse:
              return 0.0
          if q * px > room * 1.02:
              return 0.0
@@ -95,7 +103,7 @@ index b3a9ff3..2e39a63 100644
          return q
  
      def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
-@@ -1142,6 +1177,49 @@ class Pulse:
+@@ -1142,6 +1178,49 @@ class Pulse:
              except Exception:
                  pass
          self.last_bal = time.time()
@@ -145,7 +153,7 @@ index b3a9ff3..2e39a63 100644
          if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
              if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                  self._pre_pause_halt = self.halt_reason
-@@ -1153,10 +1231,14 @@ class Pulse:
+@@ -1153,10 +1232,14 @@ class Pulse:
              self.halted = True
              self.halt_reason = "paused"
          elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
@@ -160,7 +168,7 @@ index b3a9ff3..2e39a63 100644
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -2055,8 +2137,6 @@ class Pulse:
+@@ -2055,8 +2138,6 @@ class Pulse:
              return True
          if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
              return True
@@ -169,9 +177,39 @@ index b3a9ff3..2e39a63 100644
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
-@@ -2450,7 +2530,8 @@ class Pulse:
+@@ -2435,6 +2516,19 @@ class Pulse:
+             want = 1 if ind.direction == "long" else -1
+             if want != direction:
+                 return "ind-mismatch"
++            # Indication gate: under the strict gate (default) a kind runs
++            # only while it is validated + profitable — or, if unproven, only
++            # while the indications pack has a validated + profitable set.
++            try:
++                bits = str(reason).split(":")
++                ind_kind = bits[1] if len(bits) > 1 and bits[0] == "ind" else ""
++                if not ind_kind:
++                    ind_kind = str(getattr(ind, "kind", "") or "")
++                gate = getattr(self.sets, "indication_ok", None)
++                if self.sets.enabled and callable(gate) and not gate(ind_kind):
++                    return "ind-gate"
++            except Exception:
++                pass
+         chosen = None
+         try:
+             chosen = self.sets.pick_any(pack) if self.sets.enabled else None
+@@ -2445,12 +2539,16 @@ class Pulse:
+         if chosen:
+             if self.occupying(sym, side, pack, chosen.id):
+                 return "set-slot"
+-            # Intern-soft: always bind a Set. Never skip on historic PF / inactive —
+-            # pick() already falls back to the best available book.
++            # pick() already enforces the validation gate: under the strict
++            # gate only validated + profitable sets are returned at all.
              return None
          elif self.sets.enabled and self.sets.use_historic_gate:
++            if getattr(self.sets, "strict_gate", False):
++                # Strict: no validated + profitable set anywhere -> no entry.
++                return "set-gate"
              if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
 -                return None
 +                # Positive-PF-only: gate ready and every pack closed -> no entry.
@@ -179,7 +217,7 @@ index b3a9ff3..2e39a63 100644
          return None
  
      def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
-@@ -2725,6 +2806,30 @@ class Pulse:
+@@ -2725,6 +2823,30 @@ class Pulse:
          log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
          self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
  
@@ -210,7 +248,23 @@ index b3a9ff3..2e39a63 100644
      def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
          skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
          if exchange:
-@@ -2956,7 +3061,9 @@ class Pulse:
+@@ -2747,6 +2869,7 @@ class Pulse:
+             time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
+             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
+             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
++            ind_kind=str(getattr(pos, "ind_kind", "") or ""),
+         )
+         if pos.client_id:
+             self.seen_fill_cids.add(pos.client_id)
+@@ -2921,6 +3044,7 @@ class Pulse:
+                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
+                     ours=bool(rec.get("ours", True)),
+                     conn=str(rec.get("conn") or rec.get("connection") or ""),
++                    ind_kind=str(rec.get("ind_kind") or rec.get("indKind") or ""),
+                 )
+                 cid = c.client_id
+                 if cid and not self.cid_ours(cid):
+@@ -2956,7 +3080,9 @@ class Pulse:
          except Exception:
              self.overlay_mtime = 0.0
          if ov.get("targetNotional"):
@@ -221,7 +275,7 @@ index b3a9ff3..2e39a63 100644
          try:
              self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
          except Exception:
-@@ -3073,7 +3180,7 @@ class Pulse:
+@@ -3073,7 +3199,7 @@ class Pulse:
          self.block.enabled = bool(b_en) if b_en is not None else True
          if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
              self.block.enabled = True
@@ -230,32 +284,75 @@ index b3a9ff3..2e39a63 100644
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3349,17 +3456,20 @@ class Pulse:
+@@ -3252,6 +3378,7 @@ class Pulse:
+             "setMaxDdTimeS": self.sets.max_dd_s,
+             "setAutoDeact": self.sets.auto_deact,
+             "setUseHistoricGate": self.sets.use_historic_gate,
++            "setStrictGate": bool(getattr(self.sets, "strict_gate", True)),
+             "setMinSamples": self.sets.min_samples,
+             "setReactivate": self.sets.reactivate,
+             "setMaxActive": self.sets.max_active,
+@@ -3304,6 +3431,38 @@ class Pulse:
+             "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
+         }
+ 
++    def block_intern_pf(self, pos: Position) -> float:
++        """intern PF feeding the Block count gates for this parent position.
++
++        Floor follows the BlockBook defaultMinPF (CTS strategies.main.real
++        stage), never a hardcoded constant. Under the strict gate (default)
++        only a VALIDATED (last15_n >= max(minSamples, 8)) AND PROFITABLE
++        (cost-adjusted PF >= 1.00) set may lift the floor — unproven or losing
++        sets keep the CTS default. Legacy mode keeps the old soft behavior.
++        """
++        floor_pf = float(getattr(self.block, "default_min_pf", 1.2) or 1.2)
++        intern_pf = floor_pf
++        try:
++            st = self.sets.sets.get(pos.set_id) if pos.set_id else None
++            if st is None:
++                st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
++            if st is not None:
++                ratio = float(getattr(st, "last15_ratio", 0.0) or 0.0)
++                n = int(getattr(st, "last15_n", 0) or 0)
++                if getattr(self.sets, "strict_gate", False):
++                    need = max(int(getattr(self.sets, "min_samples", 8) or 8), 8)
++                    if n >= need and ratio + 1e-9 >= 1.0:
++                        # Validated + profitable: the set governs, but never
++                        # below the CTS real-stage floor.
++                        intern_pf = max(ratio, floor_pf)
++                else:
++                    intern_pf = ratio or floor_pf
++                    if n < 8:
++                        intern_pf = max(intern_pf, floor_pf)
++        except Exception:
++            intern_pf = floor_pf
++        return intern_pf
++
+     def maybe_block_adds(self) -> None:
+         """CTS Block Live: add-on only against an existing same-side parent."""
+         if self.halted or not self.block.enabled or not self.strat_block:
+@@ -3349,17 +3508,9 @@ class Pulse:
              if not lane or lane.base_qty <= 0:
                  continue
              # Parent still valid only if pulse score agrees with side (continuation).
 -            intern_pf = 1.2
-+            # Floor follows the BlockBook defaultMinPF (CTS strategies.main.real
-+            # stage), never a hardcoded constant.
-+            floor_pf = float(getattr(self.block, "default_min_pf", 1.2) or 1.2)
-+            intern_pf = floor_pf
-             try:
-                 st = self.sets.sets.get(pos.set_id) if pos.set_id else None
-                 if st is None:
-                     st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
-                 if st is not None:
+-            try:
+-                st = self.sets.sets.get(pos.set_id) if pos.set_id else None
+-                if st is None:
+-                    st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
+-                if st is not None:
 -                    intern_pf = float(getattr(st, "last15_ratio", 1.2) or 1.2)
-+                    intern_pf = float(getattr(st, "last15_ratio", floor_pf) or floor_pf)
-                     if int(getattr(st, "last15_n", 0) or 0) < 8:
+-                    if int(getattr(st, "last15_n", 0) or 0) < 8:
 -                        intern_pf = max(intern_pf, 1.2)
-+                        intern_pf = max(intern_pf, floor_pf)
-             except Exception:
+-            except Exception:
 -                intern_pf = 1.2
-+                intern_pf = floor_pf
++            # intern PF comes from block_intern_pf: under the strict gate only
++            # a validated + profitable set lifts the CTS real-stage floor.
++            intern_pf = self.block_intern_pf(pos)
              d, why, conf = self.score(pos.symbol)
              same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
              if not same:
-@@ -3386,7 +3496,10 @@ class Pulse:
+@@ -3386,7 +3537,10 @@ class Pulse:
              if not c or px <= 0:
                  continue
              raw = row["requestedAddQty"]
@@ -267,7 +364,31 @@ index b3a9ff3..2e39a63 100644
              inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
              room = max(0.0, self.max_book_notional() - pos.qty * px)
              add_cap = min(self.notional_cap() * max(1.0, inc), room)
-@@ -3885,7 +3998,7 @@ class Pulse:
+@@ -3814,7 +3968,10 @@ class Pulse:
+             else:
+                 intern[pack] = True
+             intern_any = intern_any or intern[pack]
+-        if not intern_any and self.sets.enabled:
++        if not intern_any and self.sets.enabled and not getattr(self.sets, "strict_gate", False):
++            # Legacy mode only: reopen both packs when the gate has no pick.
++            # Strict gate (default): closed packs stay closed — no validated +
++            # profitable set means no live entries at all.
+             intern_any = True
+             intern["indications"] = intern["general"] = True
+         # 0 / missing maxOpen = unlimited. Coord and intern are advisory, never a hard book cap.
+@@ -3874,6 +4031,11 @@ class Pulse:
+                     alt = "general" if pack == "indications" else "indications"
+                     if intern.get(alt):
+                         pack = alt
++                    elif getattr(self.sets, "strict_gate", False):
++                        # Strict: both packs closed -> this candidate cannot
++                        # bind a validated + profitable set. Skip it.
++                        skipped += 1
++                        continue
+                     elif intern_any:
+                         pack = "general" if intern.get("general") else "indications"
+                     else:
+@@ -3885,7 +4047,7 @@ class Pulse:
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -276,7 +397,7 @@ index b3a9ff3..2e39a63 100644
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -3912,15 +4025,37 @@ class Pulse:
+@@ -3912,15 +4074,37 @@ class Pulse:
          if not isinstance(rows, list):
              return
          live_n = 0
@@ -319,7 +440,7 @@ index b3a9ff3..2e39a63 100644
          live = set()
          foreign = set()
          for p in rows:
-@@ -4236,7 +4371,8 @@ class Pulse:
+@@ -4236,7 +4420,8 @@ class Pulse:
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -329,7 +450,7 @@ index b3a9ff3..2e39a63 100644
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4274,6 +4410,7 @@ class Pulse:
+@@ -4274,6 +4459,7 @@ class Pulse:
          pc["neutral"] = 1.0
          pc["plus1x"] = 1.1
          pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -337,7 +458,7 @@ index b3a9ff3..2e39a63 100644
          return {
              "running": not self.halted,
              "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
-@@ -4297,6 +4434,9 @@ class Pulse:
+@@ -4297,6 +4483,9 @@ class Pulse:
              "losses": self.losses,
              "winRate": round(wr, 1),
              "openCount": len(self.open),
@@ -347,7 +468,7 @@ index b3a9ff3..2e39a63 100644
              "maxOpen": MAX_OPEN,
              "symbols": SYMBOLS,
              "regime": self.regime,
-@@ -4408,7 +4548,12 @@ class Pulse:
+@@ -4408,7 +4597,12 @@ class Pulse:
  
      def _coverage_blob(self) -> Dict[str, Any]:
          catalog = []
@@ -361,7 +482,15 @@ index b3a9ff3..2e39a63 100644
              f = self.block.formula(1.0, n)
              catalog.append({
                  "n": n,
-@@ -4508,7 +4653,7 @@ class Pulse:
+@@ -4459,6 +4653,7 @@ class Pulse:
+                 "signals": bool(self.indications.settings.get("typeSignals", True)),
+             },
+             "indicationHits": hits,
++            "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
+             "evals": {
+                 "n": eval_n,
+                 "symbols": len(getattr(self.indications, "evals", {}) or {}),
+@@ -4508,7 +4703,7 @@ class Pulse:
                  "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                  "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
              },
@@ -370,7 +499,7 @@ index b3a9ff3..2e39a63 100644
              "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
              "symbols": len(SYMBOLS),
              "scan": {
-@@ -4529,6 +4674,9 @@ class Pulse:
+@@ -4529,6 +4724,9 @@ class Pulse:
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -380,7 +509,7 @@ index b3a9ff3..2e39a63 100644
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4650,6 +4798,9 @@ class Pulse:
+@@ -4650,6 +4848,9 @@ class Pulse:
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -390,7 +519,7 @@ index b3a9ff3..2e39a63 100644
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4753,7 +4904,8 @@ class Pulse:
+@@ -4753,7 +4954,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -400,7 +529,7 @@ index b3a9ff3..2e39a63 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4893,6 +5045,22 @@ class Pulse:
+@@ -4893,6 +5095,22 @@ class Pulse:
              if remain > 0:
                  time.sleep(remain)
  
@@ -423,7 +552,7 @@ index b3a9ff3..2e39a63 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4904,7 +5072,8 @@ class Pulse:
+@@ -4904,7 +5122,8 @@ class Pulse:
              self.halt_reason = "stopped"
              self.priority_controls()
              self.write_stats(force=True)
@@ -433,7 +562,7 @@ index b3a9ff3..2e39a63 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5085,17 @@ class Pulse:
+@@ -4916,11 +5135,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -452,7 +581,7 @@ index b3a9ff3..2e39a63 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5176,8 @@ class Pulse:
+@@ -5001,6 +5226,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
