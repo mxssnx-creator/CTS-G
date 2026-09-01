@@ -1,0 +1,39 @@
+=== CTS-G VERIFIER RUN 2026-09-01 live-defaults ===
+Scope: Request "Check the actual settings running live on remote server and set
+them as default everywhere"
+
+SOURCE OF TRUTH: GET sidecar :3015 /config.json?conn=live — the overlay the
+live x01 lane actually runs with (139 keys, actively tuned via desk UI).
+
+KEY LIVE VALUES (now defaults everywhere)
+- dcaEnabled=true, stratDca=true, modules[strategy.dca]=true, dcaMinPf=1.1,
+  dcaMaxSteps=0 (unlimited), dcaStepDistancesPct=[0.5,1,1.5,2],
+  dcaStepVolumeMultipliers=[1.5,2,2.3,2.5], dcaCooldownSeconds=30
+- minPf=1.1, setMinPf=1.1, exitMinPf=1.1, pfWindow=15
+- histLookbackBars=480, histMinBars=120, histRefreshS=90, histWarmup=30
+- minStep=6, setMinStep=8, setStepMax=22, cooldownS=9, staggerS=0.6
+- leverage=150, targetNotional=2.15, scanS=0.2, symbolSort=vol1h,
+  symbolsAll/dynamic, maxOpen=0 (unlimited), setMaxActive=0 (unlimited),
+  blockMaxStack=0 (unlimited)
+
+FILES ALIGNED
+- server/pulse/overlay-bingx-x01.json / overlay-bingx-x02.json: REPLACED by the
+  full live overlay (139 keys, sorted, both lanes identical)
+- src/lib/config-model.ts: DEFAULT_OVERLAY + overlayFromCts fallbacks
+  (dcaEnabled/stratDca true, dcaMinPf/minPf/setMinPf 1.1, histLookbackBars 480,
+  minStep 6)
+- server/pulse/modules.py: strategy.dca default True
+- server/pulse/set_engine.py: LOOKBACK_DEFAULT 480, min_pf 1.10 (ctor + load)
+- server/pulse/coord_engine.py: min_pf 1.1 (ctor + both load fallbacks)
+- server/pulse/dca_engine.py: min_pf 1.10 (ctor + load); dist/mult/cooldown
+  defaults already matched live
+- server/pulse/exit_engine.py: min_pf 1.10 (ctor + load)
+- server/pulse/pulse_trader.py: strat_dca/dca.enabled/dca_want default-True
+  chain, STAGGER_S 0.6
+
+NOTE: supersedes the 2026-08-30 "defaults-dca-off" run per explicit user
+request — the live-tuned values win.
+
+SUITES: engine-zest 121/121, py_compile clean, tsc clean, npm 191/0.
+DEPLOY PACKAGING: patch e82790a5 (19428B) -> engine 24fb2fb2…, git-apply
+verified + compiled; linux-common.sh pt_want updated.
