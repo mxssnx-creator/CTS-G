@@ -1,6 +1,17 @@
+diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
+index b3a9ff3..2e39a63 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
-@@ -50,6 +50,7 @@
+@@ -21,7 +21,7 @@ from collections import deque
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from dataclasses import dataclass, asdict
+ from typing import Any, Deque, Dict, List, Optional, Tuple
+-from block_engine import BlockBook, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
++from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
+ from coord_engine import Coordinator
+ from bingx_fast import FastBingX, ErrorLog
+ from modules import resolve as resolve_modules
+@@ -50,6 +50,7 @@ CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
  ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
  LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
  START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
@@ -8,7 +19,16 @@
  
  UNIVERSE_PATH = os.path.join(DIR, "universe.json")
  MAX_SYMBOLS = 0  # 0 = unlimited
-@@ -347,6 +348,18 @@
+@@ -144,7 +145,7 @@ SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "lev
+ BALANCE_EVERY = 6.0
+ QA_EVERY = 5
+ COOLDOWN_S = 9.0
+-STAGGER_S = 0.12
++STAGGER_S = 0.6
+ DD_HALT = 0.18
+ EQ_MIN = 0.20
+ RECV = 5000
+@@ -347,6 +348,18 @@ _LOG_BUF: List[str] = []
  _LOG_FLUSH = 0.0
  
  
@@ -27,7 +47,17 @@
  def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
      global _LOG_N, _LOG_FLUSH
      if every > 0:
-@@ -875,9 +888,24 @@
+@@ -632,6 +645,9 @@ class Pulse:
+         self.last_px: Dict[str, float] = {}
+         self.recon_ok = True
+         self.recon_detail = "pending"
++        self.exchange_open_count = -1  # -1 = not yet read from exchange
++        self._empty_rest_streak = 0
++        self.live_pos_keys: Optional[set] = None  # None = exchange truth unknown
+         self._load_trade_history()
+         self._load_open_book()
+         self.block = BlockBook(BLOCK_PATH, {
+@@ -875,9 +891,24 @@ class Pulse:
          return max(0.0, float(self.available or 0)) * lev * 0.90
  
      def max_book_notional(self) -> float:
@@ -54,7 +84,7 @@
          dca_extra = 0.0
          if dca_n > 0:
              try:
-@@ -934,6 +962,10 @@
+@@ -934,6 +965,10 @@ class Pulse:
              return 0.0
          if q * px > room * 1.02:
              return 0.0
@@ -65,7 +95,7 @@
          return q
  
      def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
-@@ -1142,6 +1174,49 @@
+@@ -1142,6 +1177,49 @@ class Pulse:
              except Exception:
                  pass
          self.last_bal = time.time()
@@ -115,7 +145,7 @@
          if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
              if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                  self._pre_pause_halt = self.halt_reason
-@@ -1153,10 +1228,14 @@
+@@ -1153,10 +1231,14 @@ class Pulse:
              self.halted = True
              self.halt_reason = "paused"
          elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
@@ -130,7 +160,7 @@
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -2055,8 +2134,6 @@
+@@ -2055,8 +2137,6 @@ class Pulse:
              return True
          if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
              return True
@@ -139,7 +169,7 @@
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
-@@ -2450,7 +2527,8 @@
+@@ -2450,7 +2530,8 @@ class Pulse:
              return None
          elif self.sets.enabled and self.sets.use_historic_gate:
              if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
@@ -149,7 +179,38 @@
          return None
  
      def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
-@@ -2956,7 +3034,9 @@
+@@ -2725,6 +2806,30 @@ class Pulse:
+         log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
+         self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
+ 
++    def sim_stats(self) -> Tuple[int, float]:
++        """Real/Live/Simulated bookkeeping. Every tracked position is "Real"
++        (valid system entry). Positions confirmed by the exchange's position
++        list are "Live". The rest are "Simulated": valid to process by the
++        system-internal calcs (uPnl, set evaluation), but not on the exchange.
++        Returns (sim_count, sim_unrealized_pnl); count -1 while the exchange
++        truth is unknown (no successful adopt read yet)."""
++        keys = getattr(self, "live_pos_keys", None)
++        if keys is None:
++            return -1, 0.0
++        n = 0
++        upnl = 0.0
++        for p in self.open.values():
++            if f"{p.symbol}:{p.side}" in keys:
++                continue
++            n += 1
++            px = self.px.get(p.symbol) or 0
++            if px > 0 and p.entry > 0:
++                d = (px - p.entry) / p.entry
++                if p.side != "LONG":
++                    d = -d
++                upnl += d * p.qty * p.entry
++        return n, upnl
++
+     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
+         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+         if exchange:
+@@ -2956,7 +3061,9 @@ class Pulse:
          except Exception:
              self.overlay_mtime = 0.0
          if ov.get("targetNotional"):
@@ -160,16 +221,7 @@
          try:
              self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
          except Exception:
-@@ -3011,7 +3091,7 @@
-         self.strat_block = bool(ov.get("stratBlock", True))
-         self.strat_trail = bool(ov.get("stratTrailing", True))
-         self.strat_general = bool(ov.get("stratGeneral", True))
--        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
-+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
-         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
-         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
-         try:
-@@ -3073,7 +3153,7 @@
+@@ -3073,7 +3180,7 @@ class Pulse:
          self.block.enabled = bool(b_en) if b_en is not None else True
          if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
              self.block.enabled = True
@@ -178,16 +230,44 @@
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3116,7 +3196,7 @@
-         else:
-             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
-             self.strat_ind = True
--        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
-+        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
-         if not self.mods.get("strategy.coord", True):
-             for ax in self.coord.axes.values():
-                 ax.enabled = False
-@@ -3885,7 +3965,7 @@
+@@ -3349,17 +3456,20 @@ class Pulse:
+             if not lane or lane.base_qty <= 0:
+                 continue
+             # Parent still valid only if pulse score agrees with side (continuation).
+-            intern_pf = 1.2
++            # Floor follows the BlockBook defaultMinPF (CTS strategies.main.real
++            # stage), never a hardcoded constant.
++            floor_pf = float(getattr(self.block, "default_min_pf", 1.2) or 1.2)
++            intern_pf = floor_pf
+             try:
+                 st = self.sets.sets.get(pos.set_id) if pos.set_id else None
+                 if st is None:
+                     st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
+                 if st is not None:
+-                    intern_pf = float(getattr(st, "last15_ratio", 1.2) or 1.2)
++                    intern_pf = float(getattr(st, "last15_ratio", floor_pf) or floor_pf)
+                     if int(getattr(st, "last15_n", 0) or 0) < 8:
+-                        intern_pf = max(intern_pf, 1.2)
++                        intern_pf = max(intern_pf, floor_pf)
+             except Exception:
+-                intern_pf = 1.2
++                intern_pf = floor_pf
+             d, why, conf = self.score(pos.symbol)
+             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
+             if not same:
+@@ -3386,7 +3496,10 @@ class Pulse:
+             if not c or px <= 0:
+                 continue
+             raw = row["requestedAddQty"]
+-            parent = self.size_qty(c, px)
++            # Parent reference is the lane base the count formula targets were
++            # built on — falling back to a fresh size_qty only if the lane
++            # hasn't recorded one yet.
++            parent = float(lane.base_qty or 0) or self.size_qty(c, px)
+             inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
+             room = max(0.0, self.max_book_notional() - pos.qty * px)
+             add_cap = min(self.notional_cap() * max(1.0, inc), room)
+@@ -3885,7 +3998,7 @@ class Pulse:
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -196,17 +276,101 @@
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -4236,7 +4316,8 @@
+@@ -3912,15 +4025,37 @@ class Pulse:
+         if not isinstance(rows, list):
+             return
+         live_n = 0
++        live_keys: set = set()
+         for p in rows:
+             try:
+-                if abs(float(p.get("positionAmt") or p.get("availableAmt") or 0)) > 1e-12:
+-                    live_n += 1
++                amt = float(p.get("positionAmt") or p.get("availableAmt") or 0)
+             except Exception:
+-                pass
++                continue
++            if abs(amt) > 1e-12:
++                live_n += 1
++                sym_k = p.get("symbol")
++                if sym_k:
++                    side_k = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
++                    live_keys.add(f"{sym_k}:{side_k}")
++        self.exchange_open_count = live_n
++        # Real/Live/Simulated: live_pos_keys = what the exchange REALLY holds
++        # right now (any valid read refreshes it, even while the flat-exchange
++        # glitch guard below still arms). Book positions not in this set are
++        # "Simulated" — system-internal calcs only.
++        self.live_pos_keys = live_keys
+         if live_n == 0 and self.open:
+-            log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
+-            return
++            # Glitch guard: one empty REST page must never wipe the book — but a
++            # CONFIRMED flat exchange (2 consecutive empty reads, ~50 cycles apart)
++            # means every tracked position is a phantom: fall through so the
++            # stale-local sweep below removes them (age>=180s + per-position
++            # _exchange_flat re-check for controlled positions).
++            self._empty_rest_streak = int(getattr(self, "_empty_rest_streak", 0) or 0) + 1
++            if self._empty_rest_streak < 2:
++                log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
++                return
++            log(f"ADOPT flat-exchange confirmed streak={self._empty_rest_streak} book={len(self.open)}")
++        else:
++            self._empty_rest_streak = 0
+         live = set()
+         foreign = set()
+         for p in rows:
+@@ -4236,7 +4371,8 @@ class Pulse:
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
 -        self.record_test("dca-enabled", bool(self.dca.enabled), f"steps={self.dca.max_steps} dist={self.dca.distances}")
-+        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
++        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
 +        self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4529,6 +4610,9 @@
+@@ -4274,6 +4410,7 @@ class Pulse:
+         pc["neutral"] = 1.0
+         pc["plus1x"] = 1.1
+         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
++        sim_n, sim_upnl = self.sim_stats()
+         return {
+             "running": not self.halted,
+             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
+@@ -4297,6 +4434,9 @@ class Pulse:
+             "losses": self.losses,
+             "winRate": round(wr, 1),
+             "openCount": len(self.open),
++            "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
++            "simOpenCount": sim_n,
++            "simUPnl": round(sim_upnl, 4),
+             "maxOpen": MAX_OPEN,
+             "symbols": SYMBOLS,
+             "regime": self.regime,
+@@ -4408,7 +4548,12 @@ class Pulse:
+ 
+     def _coverage_blob(self) -> Dict[str, Any]:
+         catalog = []
+-        for n in range(1, max(1, int(self.block.max_stack)) + 1):
++        # Unlimited book (max_stack=0) must still expose ALL preview counts —
++        # otherwise the Block coverage degenerates to count 1 only.
++        sim_n, _sim_upnl = self.sim_stats()
++        show_n = BLOCK_COUNT_PREVIEW if int(self.block.max_stack or 0) <= 0 else max(1, int(self.block.max_stack))
++        show_n = min(show_n, 32)
++        for n in range(1, show_n + 1):
+             f = self.block.formula(1.0, n)
+             catalog.append({
+                 "n": n,
+@@ -4508,7 +4653,7 @@ class Pulse:
+                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
+                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
+             },
+-            "recon": {"ok": self.recon_ok, "detail": self.recon_detail},
++            "recon": {"ok": self.recon_ok, "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
+             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
+             "symbols": len(SYMBOLS),
+             "scan": {
+@@ -4529,6 +4674,9 @@ class Pulse:
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -216,7 +380,7 @@
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4650,6 +4734,9 @@
+@@ -4650,6 +4798,9 @@ class Pulse:
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -226,17 +390,17 @@
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4753,7 +4840,8 @@
+@@ -4753,7 +4904,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
 -        self.record_test("qa-dca-on", bool(self.dca.enabled), f"en={self.dca.enabled} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
-+        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
++        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
 +        self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4893,6 +4981,22 @@
+@@ -4893,6 +5045,22 @@ class Pulse:
              if remain > 0:
                  time.sleep(remain)
  
@@ -259,7 +423,7 @@
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4904,7 +5008,8 @@
+@@ -4904,7 +5072,8 @@ class Pulse:
              self.halt_reason = "stopped"
              self.priority_controls()
              self.write_stats(force=True)
@@ -269,7 +433,7 @@
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5021,17 @@
+@@ -4916,11 +5085,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -288,7 +452,7 @@
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5112,8 @@
+@@ -5001,6 +5176,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
