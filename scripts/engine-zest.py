@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
 from typing import Any, Dict, List, Tuple
 
@@ -527,6 +528,390 @@ def control_coord_zest() -> None:
     rm(os.path.join(tmp, "reset-eq-bingx-t01"))
 
 
+def phantom_recon_zest() -> None:
+    """In-process proof: a confirmed-flat exchange reconciles the tracked book.
+
+    Regression for "dashboard shows open positions, exchange has none":
+    adopt_exchange_positions used to return early whenever the exchange reported
+    ZERO live positions, so a fully-flat exchange left phantom positions in the
+    book (and in the UI counts) forever. Now: the first empty read only arms the
+    glitch guard (streak), the second consecutive empty read confirms the flat
+    exchange and the stale-local sweep drops tracked positions (age >= 180s,
+    per-position _exchange_flat re-check for controlled ones), and stats expose
+    the real exchange count via exchangeOpenCount.
+    """
+    import tempfile
+    import pulse_trader as pt
+
+    tmp = tempfile.mkdtemp(prefix="phantom-zest-")
+    pt.OPEN_PATH = os.path.join(tmp, "open.json")
+
+    class FakeApi:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def get(self, path: str):
+            return {"code": 0, "data": list(self.rows)}
+
+    def mk(rows):
+        p = object.__new__(pt.Pulse)
+        p.api = FakeApi(rows)
+        p.open = {}
+        p.px = {}
+        p.cooldown = {}
+        p.did_io = False
+        p.recon_ok = True
+        p.recon_detail = "pending"
+        p.exchange_open_count = -1
+        p._empty_rest_streak = 0
+        p.ignored_foreign = 0
+        return p
+
+    def pos(sym: str, age: float, sl_oid: str = "") -> pt.Position:
+        return pt.Position(
+            symbol=sym, side="LONG", qty=1.0, entry=100.0,
+            opened_at=time.time() - age, sl=99.0, tp=101.0, peak=100.0,
+            sl_oid=sl_oid,
+        )
+
+    # 1) first empty read: glitch guard arms, book untouched, exchange count visible
+    p = mk([])
+    p.open["AAA-USDT"] = pos("AAA-USDT", age=3600)
+    p.open["BBB-USDT"] = pos("BBB-USDT", age=3600)
+    p.adopt_exchange_positions()
+    rec("phantom-skip-first-empty", len(p.open) == 2 and p._empty_rest_streak == 1,
+        f"book={len(p.open)} streak={p._empty_rest_streak}")
+    rec("phantom-count-visible", p.exchange_open_count == 0,
+        f"exchange_open_count={p.exchange_open_count}")
+
+    # 2) second consecutive empty read: confirmed flat -> phantoms dropped
+    p.adopt_exchange_positions()
+    rec("phantom-drop-on-confirm", len(p.open) == 0 and p.recon_ok,
+        f"book={len(p.open)} recon={p.recon_detail}")
+
+    # 3) streak resets once the book matches the exchange
+    p.adopt_exchange_positions()
+    rec("phantom-streak-resets", p._empty_rest_streak == 0, f"streak={p._empty_rest_streak}")
+
+    # 4) young positions (in-flight entries) survive even a confirmed flat read
+    p2 = mk([])
+    p2.open["NEW-USDT"] = pos("NEW-USDT", age=30)
+    p2.adopt_exchange_positions()
+    p2.adopt_exchange_positions()
+    rec("phantom-keeps-young", "NEW-USDT" in p2.open, f"book={list(p2.open)}")
+
+    # 5) controlled phantom: sweep double-checks via _exchange_flat, then drops
+    p3 = mk([])
+    p3.open["CTL-USDT"] = pos("CTL-USDT", age=3600, sl_oid="sl-1")
+    p3.adopt_exchange_positions()  # streak 1
+    p3.adopt_exchange_positions()  # streak 2 -> sweep -> _exchange_flat(CTL) -> drop
+    rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and p3.cooldown.get("CTL-USDT", 0) > time.time(),
+        f"book={list(p3.open)} cool={bool(p3.cooldown.get('CTL-USDT'))}")
+
+    # 6) negative control: position still live on the exchange is kept
+    rows = [{"symbol": "REAL-USDT", "positionSide": "LONG", "positionAmt": "1.0",
+             "avgPrice": "100.0", "leverage": ""}]
+    p4 = mk(rows)
+    p4.open["REAL-USDT"] = pos("REAL-USDT", age=3600, sl_oid="sl-9")
+    p4.adopt_exchange_positions()
+    rec("phantom-live-pos-kept", "REAL-USDT" in p4.open and p4.exchange_open_count == 1
+        and p4._empty_rest_streak == 0,
+        f"book={list(p4.open)} xch={p4.exchange_open_count} streak={p4._empty_rest_streak}")
+
+    # 7) API failure must never wipe the book (count stays unknown-ish, book intact)
+    class FailApi:
+        def get(self, path: str):
+            return {"code": 500, "msg": "boom"}
+
+    p5 = mk([])
+    p5.api = FailApi()
+    p5.open["AAA-USDT"] = pos("AAA-USDT", age=3600)
+    p5.adopt_exchange_positions()
+    rec("phantom-api-fail-keeps-book", len(p5.open) == 1 and not p5.recon_ok,
+        f"book={len(p5.open)} recon={p5.recon_detail}")
+
+
+def sim_stats_zest() -> None:
+    """Real / Live / Simulated bookkeeping.
+
+    Real = every tracked (valid) engine position. Live = confirmed by the
+    exchange position list. Simulated = Real minus Live — system-internal
+    calcs (count + unrealized PnL) for positions the exchange does not hold.
+    """
+    import tempfile
+    import pulse_trader as pt
+
+    tmp = tempfile.mkdtemp(prefix="sim-zest-")
+    pt.OPEN_PATH = os.path.join(tmp, "open.json")
+
+    def mk():
+        p = object.__new__(pt.Pulse)
+        p.open = {}
+        p.px = {}
+        p.live_pos_keys = None
+        return p
+
+    def pos(sym, side, qty, entry):
+        return pt.Position(symbol=sym, side=side, qty=qty, entry=entry,
+                           opened_at=time.time() - 60, sl=entry * 0.99, tp=entry * 1.01, peak=entry)
+
+    # 1) exchange truth unknown -> sim count -1 (UI shows dash, not a lie)
+    p = mk()
+    p.open["A-USDT"] = pos("A-USDT", "LONG", 1.0, 100.0)
+    rec("sim-unknown-minus1", p.sim_stats()[0] == -1, f"{p.sim_stats()}")
+
+    # 2) count: 3 Real, 1 Live -> 2 Simulated
+    p.live_pos_keys = {"A-USDT:LONG"}
+    p.open["B-USDT"] = pos("B-USDT", "LONG", 1.0, 100.0)
+    p.open["C-USDT"] = pos("C-USDT", "SHORT", 1.0, 100.0)
+    n, _ = p.sim_stats()
+    rec("sim-count-real-minus-live", n == 2, f"n={n}")
+
+    # 3) uPnl math: LONG 2x100 -> px 110 = +20; SHORT 1x100 -> px 90 = +10; live excluded
+    p.px = {"A-USDT": 999.0, "B-USDT": 110.0, "C-USDT": 90.0}
+    p.open["B-USDT"] = pos("B-USDT", "LONG", 2.0, 100.0)
+    n, upnl = p.sim_stats()
+    rec("sim-upnl-math", n == 2 and abs(upnl - 30.0) < 1e-9, f"n={n} upnl={upnl}")
+
+    # 4) flat exchange confirmed -> everything Simulated
+    p.live_pos_keys = set()
+    n, upnl = p.sim_stats()
+    rec("sim-all-when-flat", n == 3, f"n={n}")
+
+    # 5) adopt wires live_pos_keys from the exchange payload (SYM:SIDE)
+    class FakeApi:
+        def get(self, path):
+            return {"code": 0, "data": [
+                {"symbol": "A-USDT", "positionSide": "LONG", "positionAmt": "1.5", "avgPrice": "100", "leverage": ""},
+                {"symbol": "Z-USDT", "positionSide": "BOTH", "positionAmt": "0", "avgPrice": "0"},
+            ]}
+
+    p2 = object.__new__(pt.Pulse)
+    p2.api = FakeApi()
+    p2.open = {"A-USDT": pos("A-USDT", "LONG", 1.5, 100.0)}
+    p2.px = {}
+    p2.cooldown = {}
+    p2.did_io = False
+    p2.recon_ok = True
+    p2.recon_detail = "pending"
+    p2.exchange_open_count = -1
+    p2._empty_rest_streak = 0
+    p2.ignored_foreign = 0
+    p2.live_pos_keys = None
+    p2.adopt_exchange_positions()
+    n, _ = p2.sim_stats()
+    rec("sim-adopt-keys", p2.live_pos_keys == {"A-USDT:LONG"} and n == 0
+        and p2.exchange_open_count == 1,
+        f"keys={p2.live_pos_keys} n={n} xch={p2.exchange_open_count}")
+
+
+def block_calc_zest() -> None:
+    """Block strategy: ALL counts enabled/evaluated, formula math, intern-PF
+    floor following the book defaultMinPF (CTS real stage), and add-on volume
+    coordination against the lane base the count targets are built on."""
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    from block_engine import (
+        BLOCK_COUNT_PREVIEW,
+        calculate_block_volume_increment_ratio,
+        calculate_block_minimum_profit_factor,
+    )
+
+    tmp = tempfile.mkdtemp(prefix="block-zest-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+
+    # 1) formula math (BLOCK_STRATEGY_SYSTEM.md: base=1 ratio=1.5 -> inc=count*ratio)
+    rec("block-formula-inc", calculate_block_volume_increment_ratio(3, 1.5) == 4.5,
+        str(calculate_block_volume_increment_ratio(3, 1.5)))
+    rec("block-formula-minpf",
+        abs(calculate_block_minimum_profit_factor(1.2, 0.8, 4.5) - 1.72) < 1e-9,
+        str(calculate_block_minimum_profit_factor(1.2, 0.8, 4.5)))
+
+    # 2) coverage blob exposes ALL counts (unlimited -> full preview window)
+    def mk_cov(stack: int):
+        p = object.__new__(pt.Pulse)
+        p.block = BlockBook(os.path.join(tmp, f"block-cov-{stack}.json"),
+                            {"variantBlockEnabled": True, "blockMaxStack": stack})
+        p.indications = SimpleNamespace(last={}, evals={}, settings={"enabled": True})
+        p.sets = SimpleNamespace(coverage=lambda: {"families": {}}, sets={}, enabled=True)
+        p.coord = SimpleNamespace(last={"stages": {}}, axes={}, rearrange=True, main_eval=5, real_eval=3)
+        p.open = {}
+        p.px = {}
+        p.klines_tf = {"1m": {}, "5m": {}, "15m": {}}
+        p.klines = {}
+        p.live_pos_keys = set()
+        p.overlay = {}
+        p.strat_ind = True
+        p.strat_general = True
+        p.strat_block = True
+        p.strat_trail = True
+        p.dca = SimpleNamespace(enabled=True)
+        p.exits = SimpleNamespace(enabled=True)
+        p.variants = SimpleNamespace(trail_auto=True)
+        p.ignored_foreign = 0
+        p.recon_ok = True
+        p.recon_detail = "ok"
+        p.exchange_open_count = 0
+        p.cid_ours = lambda cid: False
+        p.strategy_closes = lambda: []
+        return p
+
+    want = min(BLOCK_COUNT_PREVIEW, 32)
+    cov = mk_cov(0)._coverage_blob()
+    rec("block-coverage-unlimited-all-counts",
+        cov["block"]["countN"] == want and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, want + 1)),
+        f"n={cov['block']['countN']}")
+    cov5 = mk_cov(5)._coverage_blob()
+    rec("block-coverage-limited-all-counts",
+        cov5["block"]["countN"] == 5 and [r["n"] for r in cov5["block"]["allCounts"]] == [1, 2, 3, 4, 5],
+        f"n={cov5['block']['countN']}")
+    rec("block-coverage-enabled-flag",
+        cov["block"]["enabled"] is True and cov["strategies"]["block"] is True)
+
+    # 3) evaluate_counts walks every count + active-live overlay; satisfied
+    # counts never request; pick_emit takes the smallest unsatisfied count
+    b = BlockBook(os.path.join(tmp, "block-eval.json"), {
+        "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
+        "blockProfitFactorRatio": 0.8, "defaultMinPF": 1.2,
+        "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
+    lane = BlockLane(symbol="TST-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
+    rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
+    regular = [r for r in rows if r["kind"] == "regular"]
+    rec("block-eval-all-counts",
+        [r["blockCount"] for r in regular] == [1, 2, 3, 4] and all(r["evaluated"] == 1 for r in rows),
+        f"regular={[r['blockCount'] for r in regular]} total={len(rows)}")
+    rec("block-eval-active-live", any(r["kind"] == "active-live" for r in rows))
+    # unlimited window rolls forward with the satisfied frontier
+    lane.satisfied = {1: True, 2: True, 3: True}
+    lane.confirmed_add = 6.0
+    rows_roll = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
+    rec("block-eval-window-rolls",
+        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == [1, 2, 3, 4, 5, 6, 7],
+        f"{[r['blockCount'] for r in rows_roll if r['kind'] == 'regular']}")
+    lane.satisfied = {1: True}
+    lane.confirmed_add = 1.0
+    rows2 = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
+    r1 = [r for r in rows2 if r["kind"] == "regular" and r["blockCount"] == 1][0]
+    rec("block-eval-satisfied-no-request", r1["targetSatisfied"] and r1["requestedAddQty"] == 0.0)
+    pick = b.pick_emit(rows2)
+    rec("block-eval-pick-smallest-unsat", pick is not None and pick["blockCount"] == 2,
+        f"pick={pick and pick['blockCount']}")
+
+    # 4) maybe_block_adds end-to-end with a fake exchange
+    class FakeApi:
+        def __init__(self):
+            self.posts = []
+            self.path_cd: Dict[str, float] = {}
+
+        def post(self, path, body):
+            self.posts.append((path, dict(body)))
+            return {"code": 0, "data": {"order": {
+                "orderId": f"oid{len(self.posts)}",
+                "avgPrice": "100",
+                "quantity": str(body.get("quantity"))}}}
+
+        def get(self, path, params=None):
+            return {"code": 0, "data": []}
+
+    def mk_trader(default_min_pf: float, set_ratio: float, set_n: int,
+                  satisfied=None, confirmed: float = 0.0):
+        p = object.__new__(pt.Pulse)
+        p.api = FakeApi()
+        p.halted = False
+        p.block = BlockBook(os.path.join(tmp, f"block-trade-{default_min_pf}-{set_ratio}-{set_n}-{confirmed}.json"), {
+            "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
+            "blockProfitFactorRatio": 0.8, "defaultMinPF": default_min_pf,
+            "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
+        p.strat_block = True
+        p.available = 100.0
+        p.block_last_emit = 0.0
+        p.cooldown = {}
+        p.errors = 0
+        p.last_error = ""
+        p.skip_log = {}
+        p.did_io = False
+        p.entries_blocked = lambda: False
+        p.missing_controls = lambda pos: False
+        p.ensure_controls = lambda pos: None
+        p.control_orders = False
+        p.save_open_book = lambda: None
+        p.cid = lambda kind="o", pos=None, **kw: f"GTEST{len(p.api.posts)}"
+        p.ok = lambda r: r.get("code") == 0
+        st = SimpleNamespace(last15_ratio=set_ratio, last15_n=set_n)
+        p.sets = SimpleNamespace(sets={}, pick_any=lambda pack: st)
+        p.score = lambda sym: (1, "t", 0.9)
+        p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
+        p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
+        p.px = {"TST-USDT": 100.0}
+        p.lev_map = {"TST-USDT": 100}
+        p.lev_max = {"TST-USDT": 100}
+        p.dca = SimpleNamespace(enabled=False, max_steps=0)
+        p.open = {"TST-USDT": pt.Position(
+            symbol="TST-USDT", side="LONG", qty=0.05, entry=100.0,
+            opened_at=time.time() - 600, sl=99.0, tp=101.0, peak=100.0,
+            set_id="", pack="general")}
+        ln = p.block.register_parent("TST-USDT", "LONG", 0.05, 100.0)
+        ln.satisfied = dict(satisfied or {})
+        ln.confirmed_add = confirmed
+        return p
+
+    # 4a) cold set + defaultMinPF 1.1: floor must follow the book default
+    # (count2 effective = 1 + 0.1*0.8*2 = 1.16 > 1.1 -> NO emit; a hardcoded
+    # 1.2 floor would wrongly emit here)
+    pA = mk_trader(1.1, 1.0, 3, satisfied={1: True}, confirmed=0.05)
+    pA.maybe_block_adds()
+    rec("block-floor-follows-default", pA.api.posts == [],
+        f"posts={pA.api.posts}")
+
+    # 4b) warm set (PF 1.5, n=12) lifts intern_pf above the count-2 gate -> emit,
+    # volume coordinated against lane.base_qty and the book cap
+    pB = mk_trader(1.1, 1.5, 12, satisfied={1: True}, confirmed=0.05)
+    pB.maybe_block_adds()
+    posB = pB.open["TST-USDT"]
+    laneB = pB.block.lanes["TST-USDT:LONG"]
+    posted_q = float(pB.api.posts[0][1]["quantity"]) if pB.api.posts else 0.0
+    rec("block-warm-set-emits", len(pB.api.posts) == 1 and posted_q > 0,
+        f"posts={pB.api.posts}")
+    rec("block-fill-coordination",
+        len(pB.api.posts) == 1
+        and abs(posB.qty - (0.05 + posted_q)) < 1e-9
+        and abs(laneB.confirmed_add - (0.05 + posted_q)) < 1e-9
+        and abs(posB.entry - 100.0) < 1e-9
+        and pB.block_last_emit > 0,
+        f"q={posB.qty} add={laneB.confirmed_add} entry={posB.entry}")
+
+    # 4c) cold default 1.2: count 1 gate is min(defaultMinPF, 1.12) -> emits
+    pC = mk_trader(1.2, 1.0, 3)
+    pC.maybe_block_adds()
+    rec("block-cold-count1-emits", len(pC.api.posts) == 1,
+        f"posts={pC.api.posts}")
+
+    # 4d) disabled book / disabled strategy -> never emits
+    pD = mk_trader(1.2, 1.5, 12)
+    pD.block.enabled = False
+    pD.maybe_block_adds()
+    pD.block.enabled = True
+    pD.strat_block = False
+    pD.maybe_block_adds()
+    rec("block-disabled-no-emit", pD.api.posts == [], f"posts={pD.api.posts}")
+
+    # 4e) lane without a live parent is retired, never traded
+    pE = mk_trader(1.2, 1.5, 12)
+    pE.open = {}
+    pE.maybe_block_adds()
+    laneE = pE.block.lanes["TST-USDT:LONG"]
+    rec("block-lane-retires-without-parent",
+        pE.api.posts == [] and not laneE.active and laneE.base_qty == 0.0,
+        f"active={laneE.active} base={laneE.base_qty}")
+
+
 def main() -> int:
     run_units()
     rank_zest()
@@ -538,6 +923,9 @@ def main() -> int:
     unlimited_zest()
     always_start_zest()
     control_coord_zest()
+    phantom_recon_zest()
+    sim_stats_zest()
+    block_calc_zest()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:
