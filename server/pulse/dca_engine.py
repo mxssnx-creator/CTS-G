@@ -90,7 +90,7 @@ class DcaBook:
         self.cooldown_s = 30.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.20
+        self.min_pf = 1.10
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
@@ -139,7 +139,7 @@ class DcaBook:
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.20)
+        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.10)
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
