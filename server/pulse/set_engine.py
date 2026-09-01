@@ -27,7 +27,7 @@ from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_cand
 PACKS = ("indications", "general")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 960
+LOOKBACK_DEFAULT = 480
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -369,7 +369,7 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.20
+        self.min_pf = 1.10
         self.max_dd_s = 420.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -411,7 +411,7 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.20)
+        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.10)
         self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
