@@ -70,6 +70,9 @@ export type LiveStats = {
   losses: number;
   winRate: number;
   openCount: number;
+  exchangeOpenCount?: number;
+  simOpenCount?: number;
+  simUPnl?: number;
   maxOpen: number;
   symbols: string[];
   symbolCount?: number;
@@ -295,6 +298,9 @@ export type LiveStats = {
     available: number;
     unrealized: number;
     openCount: number;
+    exchangeOpenCount?: number;
+    simOpenCount?: number;
+    simUPnl?: number;
     wins: number;
     losses: number;
     sessionPnl: number;
@@ -610,6 +616,9 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     losses: lane.losses,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
+    exchangeOpenCount: lane.exchangeOpenCount ?? s.exchangeOpenCount,
+    simOpenCount: lane.simOpenCount ?? s.simOpenCount,
+    simUPnl: lane.simUPnl ?? s.simUPnl,
     open,
     symbolCount: lane.symbolCount ?? s.symbolCount,
     scanMs: lane.scanMs ?? s.scanMs,
