@@ -36,7 +36,7 @@ FIX (desk UI)
   whenever the real exchange count differs from the engine book count.
 - desk-shell conn tabs: "· N open · xch M" indicator, danger-colored on mismatch.
 
-IN-PROCESS TESTS (engine-zest phantom_recon_zest, +7 tests)
+IN-PROCESS TESTS (engine-test phantom_recon_test, +7 tests)
 - phantom-skip-first-empty: first empty read arms guard, book untouched
 - phantom-count-visible: exchange_open_count=0 visible immediately (for UI)
 - phantom-drop-on-confirm: second empty read reconciles, phantom book dropped
@@ -49,7 +49,7 @@ IN-PROCESS TESTS (engine-zest phantom_recon_zest, +7 tests)
 
 SUITES (local, sandbox)
 - python3 -m py_compile server/pulse/*.py -> clean
-- python3 scripts/engine-zest.py -> 116/116 pass (108 + 7 phantom + 1 previously
+- python3 scripts/engine-test.py -> 116/116 pass (108 + 7 phantom + 1 previously
   skipped by missing module-level `import time`, now imported at top)
 
 DEPLOY PACKAGING
@@ -89,11 +89,11 @@ UI
   "Sim" row = count · signed uPnl (warn color while sim > 0).
 - Conn tabs: "R n · L m (· S k)" with danger color on R != L.
 
-TESTS (engine-zest sim_stats_zest, +5)
+TESTS (engine-test sim_stats_test, +5)
 - sim-unknown-minus1 / sim-count-real-minus-live / sim-upnl-math (LONG+SHORT
   signs, live excluded) / sim-all-when-flat / sim-adopt-keys (adopt wires
   SYM:SIDE keys, zero-amt rows ignored)
 
-SUITES: engine-zest 121/121, py_compile clean, tsc clean, npm 191/0.
+SUITES: engine-test 121/121, py_compile clean, tsc clean, npm 191/0.
 DEPLOY PACKAGING: patch c1e1d70a (20441B) -> engine 1ace621f…, git-apply
 verified + compiled; linux-common.sh pt_want updated.

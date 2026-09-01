@@ -53,14 +53,14 @@ CONNECTION MIXUP (still user-action)
      is_testnet 'false' base_url 'https://open-api.bingx.com'
 
 LOCAL SUITES (this session, sandbox)
-- python3 scripts/engine-zest.py -> 108/108 pass (incl. always_start_zest 11,
-  control_coord_zest 12 with StressCtl serialization checks)
+- python3 scripts/engine-test.py -> 108/108 pass (incl. always_start_test 11,
+  control_coord_test 12 with StressCtl serialization checks)
 
 PUSH STATE (GitHub main, mxssnx-creator/CTS-G)
 - HEAD 939651c0 "fix restore patch: restore + prefix on ctrl_mtimes try line"
 - All code batches pushed + sha-verified: pulse_http/coord/dca/exit engines,
   desk-shell/connection-provider/index/results/settings routes, config-model,
-  live-stats, engine-zest, linux-common.sh (d5349ef0, pt_want=817f822b),
+  live-stats, engine-test, linux-common.sh (d5349ef0, pt_want=817f822b),
   restore/pulse_trader.py.patch (9ee6aabe, 15047B, byte-exact vs local).
 - PENDING (tooling-blocked this session, ready on disk): verifier/README.md
   (7519ab9f) + runs/2026-08-30-defaults-dca-off.txt (88a0229e),

@@ -1,0 +1,11 @@
+=== run 2026-08-30T18:09:37Z no-order-limit ===
+change: removed self-imposed order-count limits (user request "remove orders limit -> unlimited")
+  - pulse_trader.py entries_blocked(): dropped _order_est >= 196 guard
+  - pulse_trader.py maybe_entries(): dropped _order_est >= 180 burst throttle (burst=16 unlimited)
+  - kept: exchange-error-driven __order_cap__ cooldown (backpressure on real BingX rejections, not a self limit)
+  - verifier/v2/max_symbols_smoke.py: asserts entries stay unblocked at _order_est=500
+  - verifier/v1/offline_smoke.py: fixed stats path (engine state dir, was repo-relative -> pre-existing FAIL)
+engine-test exit=0 -> 85/85 passed  fail=0
+offline-smoke exit=0 -> 11/11 passed  fail=0
+max-symbols exit=0 -> 12/12 passed  fail=0  (entries-no-order-cap-unlimited order_est=524 NOT blocked)
+py_compile exit=0

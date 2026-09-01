@@ -29,7 +29,7 @@ pulse_trader.py (git blob eb605459bc640a1ceef9456683556e507449fcd0)
   sha-verified patch (restore/pulse_trader.py.patch, base b3a9ff3c60c7...,
   pt_want updated in deploy/linux-common.sh).
 
-engine-zest.py (sha1 25a262c2b0502206e083d5cb48615b48d32b58fd)
+engine-test.py (sha1 25a262c2b0502206e083d5cb48615b48d32b58fd)
 - 16 new strict-gate tests: entry blocked cold / allowed validated, pick ==
   winner only, loser kinds cut / unproven ride pack, place() no order when cold
   or all-loser, place() trades validated winner, block PF lift/floor/legacy.
@@ -42,7 +42,7 @@ GATE SEMANTICS
 
 VERIFY (local, sandbox)
 - set_engine.py self_test: ok (incl. 9 new strict/ind-gate checks)
-- engine-zest.py: 153/153 passed (137 prior + 16 new)
+- engine-test.py: 153/153 passed (137 prior + 16 new)
 - indication_engine/risk_variants/exit_engine/dca_engine self_tests: ok
 - py_compile: pulse_trader/pulse_http/block_engine/dca_engine/set_engine OK
 - tsc --noEmit rc=0; vite build rc=0

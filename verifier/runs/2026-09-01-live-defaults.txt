@@ -34,6 +34,6 @@ FILES ALIGNED
 NOTE: supersedes the 2026-08-30 "defaults-dca-off" run per explicit user
 request — the live-tuned values win.
 
-SUITES: engine-zest 121/121, py_compile clean, tsc clean, npm 191/0.
+SUITES: engine-test 121/121, py_compile clean, tsc clean, npm 191/0.
 DEPLOY PACKAGING: patch e82790a5 (19428B) -> engine 24fb2fb2…, git-apply
 verified + compiled; linux-common.sh pt_want updated.

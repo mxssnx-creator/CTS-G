@@ -1,0 +1,88 @@
+run 2026-08-31 (conn-volume-progress): three work packages — (1) live/vst connection mixup fully diagnosed (repair blocked on mainnet credentials), (2) impossible-volume position bug fixed with hard sanity caps, (3) engine calc progress surfaced as a percentage bar with multi-details in the desk UI.
+
+1) CONNECTION MIXUP DIAGNOSIS (152.53.114.112, CTS API :80 + sidecar :3015 — no SSH, HTTP only)
+- bingx-x01 (live lane): is_testnet=TRUE, key fingerprints ...VhEQ / ...xXDA — identical VST demo credentials as x02. Both engines traded the SAME VST account; identical equity 9164.9438 on both lanes. live_trade_enabled=true on the record.
+- bingx-x02 (vst lane): correctly prod-vst (is_testnet=true, base_url https://open-api-vst.bingx.com, last_test_balance 112434.5248 VST).
+- bingx-8581b0cb8581 ("Bingx X01"): is_testnet=false, fingerprints ...BONQ / ...qYKQ, connection test -> environment "prod-live", virtualFunds=false. THESE are the real mainnet credentials.
+- bingx-90fb3a5490fb: stale duplicate (is_testnet=false but VST keys, is_active=false).
+- BLOCKER: the CTS API masks secrets (only last-4 fingerprints); no reveal/copy/assign endpoint exists. Repointing x01 to mainnet requires the full api_key/api_secret: user pastes them, or fixes in CTS-K-N UI, or redis-cli HSET connection:bingx-x01 api_key '...' api_secret '...' is_testnet 'false' base_url 'https://open-api.bingx.com' on the VPS. A partial PATCH (is_testnet=false without correct keys) would break live — deliberately NOT done.
+
+2) IMPOSSIBLE-VOLUME FIX (root cause + hard caps)
+- Root cause: with unlimited Block/DCA books (0 rungs = unlimited count) max_book_notional() returned the FULL carry capacity (available x 150 lev x 0.9 — e.g. ~1.24M USDT live / ~15M VST) as per-position room, so Block/DCA rungs could stack one position to absurd notional; overlay targetNotional was also accepted unclamped.
+- server/pulse/pulse_trader.py:
+  - max_book_notional(): unlimited branch now returns max(base, min(room, sane, room*0.25)) with sane = max(base*32, 64 USDT) — a stale balance read or corrupt overlay can never balloon one position.
+  - size_qty(): final entry guard — entry notional may never exceed max(2x sized target, 1.08x exchange min-lot floor).
+  - apply_live_config(): TARGET_NOTIONAL clamped to 0.2..500 USDT against corrupt overlay values.
+  - qa_tick(): new invariant test "qa-book-cap" (book cap <= sane ceiling) every 5 cycles.
+  - Oversized BLOCK lanes reset on config reload (lane.base_qty * px > max_book_notional -> lane zeroed).
+
+3) PROGRESS BAR WITH MULTI-DETAILS (engine -> sidecar -> desk)
+- server/pulse/set_engine.py (unchanged this run): Progress dataclass (phase/pct/symbol/setId/barsDone/barsTotal/setsDone/setsTotal/symbolsDone/symbolsTotal/elapsedMs/lastRunMs/cycle/detail/ready/error) serialized camelCase in snapshot; phases fetch (0-8%) / replay (5-85%) / score (90%) / ready (100%) / error.
+- server/pulse/pulse_http.py: lane_summary forwards 13 new fields (progressSymbol/SetId/SymbolsDone/SymbolsTotal/SetsDone/SetsTotal/BarsDone/BarsTotal/ElapsedMs/LastRunMs/Cycle/Error + klinesReady) into connections.json.
+- src/lib/live-stats.ts: 13 optional fields on main LiveStats interface, lane element interface, and lane-merge function.
+- src/routes/index.tsx: LaneProgress component (data-testid lane-progress-<lane>) — phase label (starting/fetching history/calculating sets/scoring sets/ready/calc error), big NN%, h-2 rounded bar with animate-pulse while calculating, detail chips (symbol, symbols x/y, sets x/y, bars n/total, klines x/y, elapsed s, cycle n), progressDetail line, progressError in danger color. Replaces the old thin bar in LaneBoard.
+
+SUITES (local, sandbox)
+- python3 -m py_compile server/pulse/*.py   -> clean
+- python3 scripts/engine-test.py            -> 85/85 pass
+- npm test                                  -> 191 pass / 0 fail / 4 skipped (node 20 skips .ts suites)
+- node_modules/.bin/tsc --noEmit            -> clean
+- python3 verifier/v2/max_symbols_smoke.py  -> 12/12 pass (redis-cli stubbed)
+- TEST_BASE=http://127.0.0.1:8088 node scripts/overall-test.mjs -> 45/45 pass (vite dev + playwright chromium)
+
+PUSH STATE (GitHub main, mxssnx-creator/CTS-G)
+- main's server/pulse/pulse_trader.py was a placeholder (blob f905293d, 29 bytes). Full 233104-byte engine (blob 59e1bb4399d030dd555134bab365549021482d3c) pushed via GitHub MCP push_files (token lacks workflow scope, so the restore-workflow path was abandoned in favor of direct full-content push); remote blob sha verified.
+- Same push round: set_engine.py 55ccf6a6, coord_engine.py 74e65930, dca_engine.py 73d116b1, exit_engine.py a8009680, modules.py a22e214c, overlay-bingx-x01.json 0e517f90, overlay-bingx-x02.json 29803f9c, pulse_http.py a795f982, config-model.ts 65eb969a, live-stats.ts c0914f26, index.tsx f03c184b, verifier records.
+
+ACTION REQUIRED on VPS (code deploy): sudo /opt/cts-g/deploy/update-linux.sh --force — installs the restored engine (volume caps, reset-eq re-baseline clearing the vst drawdown halt, unlimited caps, start/stop/pause hardening, new defaults) and the new sidecar (progress fields). Then restart via sidecar and confirm: x01 equity != x02 equity ONLY AFTER the x01 connection carries the mainnet keys (see section 1 blocker).
+
+== 4) SET-EVALUATION: last-N windows, PF averages, positive-PF-only gating (2026-08-31) ==
+Request: "Make sure the evaluations for sets and calcs are working correctly .. last num pos
+and PF average calcs and which config sets are enabled etc.. make inprocess tests..
+only positive pf sets to getting validated and processed."
+
+FINDINGS (audit of set_engine.py + position_cost.py):
+- Window math was correct: last-N cost PF = 1 + avg(signed_result_r) * 0.10 over the last
+  pf_n (default 15) tape rows; last-deact_n averages (default 25) for avgR / avgPnl correct;
+  net pnl = gross move - PositionCost (0.15%) consistent everywhere.
+- GAP 1: _score_one only rank-penalized historic PF < min_pf (default 1.20); with
+  reactivate=on (default) proven-NEGATIVE sets (cost-adjusted PF < 1.00) stayed active.
+- GAP 2: pick() final fallback returned ANY active set — including proven-negative ones.
+- GAP 3: pulse_trader entry_sense() returned None (=proceed) even when every pack was
+  closed by the historic gate, so entries continued without any validated set.
+
+FIXES:
+- set_engine._score_one: hard rule — sets with last15_n >= max(min_samples, min(pf_n,8))
+  and cost-adjusted last-N PF < 1.00 are deactivated ("<1.00 neg"). reactivate=on: set
+  returns automatically once the rolling last-N window scores >= 1.00 again.
+  reactivate=off: stays off until PF recovers to >= min_pf (sticky).
+- set_engine.pick: tiered selection — (1) PF >= min_pf, (2) PF >= 1.00 (validated
+  positive), (3) discovery tier of UNPROVEN sets only (never proven-negative), (4) cold
+  start fallback only while the gate is not ready. Gated + all proven-negative -> None.
+- pulse_trader.entry_sense: returns "set-gate" skip when the historic gate is ready and
+  no pack has a processable (positive/unproven) set -> entry blocked.
+- Enabled-set config flow unchanged and verified: packs from stratIndications/stratGeneral,
+  grid = packs x slToTpRatios x steps + trail sets; snapshot exposes per-set on/off, pf,
+  windows and the full gate config (pfWindow, deactN, minPf, minSamples, costPct).
+
+IN-PROCESS TESTS (set_engine.self_test, run by scripts/engine-test.py):
+- set-lastn-window: hand-computed 15-row window ratio 0.9533 matches engine exactly.
+- set-avg-math: last-25 window (20 rows) avgR=-0.3333 / avgPnl=-0.000500 match exactly.
+- set-hist-neg-off / set-neg-off: proven-negative hist deactivates with "neg" reason.
+- set-pos-on / set-pick-pos-only: positive set stays active and is the one picked.
+- set-pick-all-neg-none / set-pack-closed: all-negative pack -> pick None, pack closed.
+- set-neg-recover: reactivate=on recovery when window rolls positive.
+- set-neg-sticky: reactivate=off keeps set off below min_pf.
+- set-pick-cold: pre-replay cold start still picks (gate only bites when ready).
+
+SUITES (all in-process, local):
+- python3 server/pulse/set_engine.py ......... 43/43 PASS
+- python3 scripts/engine-test.py ............. 85/85 passed, fail=0
+- npx tsc --noEmit ........................... clean
+- npm test ................................... 191 pass / 0 fail (4 skipped)
+- python3 verifier/v2/max_symbols_smoke.py ... 12/12 passed
+- TEST_BASE=:8088 node scripts/overall-test .. 45/45 ok
+
+NOTE: FUSE mount truncated set_engine.py mid-edit (0 bytes) twice; file was restored
+bytecode-verified against __pycache__ (compiled from the exact 61201-byte source) and
+re-edited via /tmp staging + mv. All writes grep/sha-verified afterwards.

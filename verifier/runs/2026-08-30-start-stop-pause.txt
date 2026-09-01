@@ -38,13 +38,13 @@ vite.config.ts
     statt 1.6s -> kein Fallthrough auf legacy-CTS-Fallback mehr
 
 --- In-Process / lokale Checks (alle gruen) ---
-scripts/engine-zest.py            85/85  PASS
+scripts/engine-test.py            85/85  PASS
 npm test (run-ts-tests)           191 pass / 0 fail / 4 skip (node20 ohne
                                   --experimental-strip-types, by design)
 npx tsc --noEmit                  clean
 scripts/max_symbols_smoke.py      12/12  PASS  (inkl. entries-no-order-cap-
                                   unlimited order_est=516)
-scripts/overall-zest.mjs          45/45  PASS  (ZEST_BASE=http://127.0.0.1:8089)
+scripts/overall-test.mjs          45/45  PASS  (TEST_BASE=http://127.0.0.1:8089)
 python3 -m py_compile             pulse_trader.py + pulse_http.py clean
 
 --- Remote Overlay ---

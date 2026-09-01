@@ -1,0 +1,57 @@
+=== CTS-G VERIFIER RUN 2026-09-01 control-coordination ===
+Scope: Request "Make buttons start,pause,stop always work completely also on multiple
+switchings and stress .. coordinations completly correct .. event based coordinations
+and processings... No race conditions, no stalls, no lagg, no fails."
+
+FINDINGS (audit of desk UI / sidecar / engine control chain):
+1) Sidecar apply_control ran unserialized on ThreadingHTTPServer handler threads:
+   rapid clicks (or a heal tick) could interleave file ops and systemctl calls —
+   final STOP/PAUSE/reset-eq state was racy.
+2) heal_loop checked the STOP file and started the unit in two separate steps —
+   a manual stop in between could be overridden by the watchdog.
+3) Engine only noticed control-file changes at the next scan tick (or the 0.4s
+   stopped/paused sleep) — reaction lag, not event-based.
+4) _one_cycle resume restored the pre-stop economic halt even across an explicit
+   Start (reset-eq) — desk could halt right after a successful start until the
+   next balance tick cleared it.
+5) Desk UI disabled ALL buttons while any action was in flight (multi-second
+   systemctl) and gated Pause on possibly-stale stats — buttons felt dead under
+   stress; after an action the UI waited out the 2s poll (timing lag).
+6) Stats pollers used setInterval with async pulls — slow fetches could overlap.
+
+FIXES:
+- pulse_http: global CONTROL_LOCK serializes every start/stop/pause/resume
+  (clicks queue in arrival order, last click wins); heal_loop does its
+  STOP-check + start atomically under the same lock.
+- pulse_trader: ctrl-watch thread (ctrl_mtimes snapshot of STOP/PAUSE/STOP_ALL/
+  reset-eq every 150ms) bumps wake_ev on any change — event-based reaction;
+  stopped/paused branches wait on wake_ev instead of a blind sleep; resume
+  branch ignores the pre-stop halt when reset-eq exists (explicit Start =
+  fresh session).
+- desk-shell EngineControls: per-action in-flight tracking — only the running
+  button is disabled, all others always clickable; Pause no longer gated on
+  stale stats; after each action a pulse:control event is dispatched.
+- index route: immediate repoll on pulse:control; all stats pollers (desk,
+  results, system, settings, connection catalog) converted to non-overlapping
+  setTimeout chains — no stacked fetches, no UI lag.
+- deploy: restore/pulse_trader.py.patch regenerated (target sha 817f822b,
+  234674B) and linux-common.sh pt_want updated; reconstruction verified
+  byte-identical + compiles.
+
+IN-PROCESS TESTS (engine-test.py control_coord_test, +12 tests):
+- ctrl-mtimes-*: create/touch/delete always changes the watcher snapshot
+- ctrl-resume-no-pre-restore / ctrl-resume-clears-pre: explicit Start never
+  restores the pre-stop drawdown halt (halted=False, pre cleared)
+- ctrl-resume-restores-pre: negative control — without reset-eq the pre-stop
+  halt IS restored
+- ctrl-stop-branch-halts: STOP file halts immediately in _one_cycle
+- ctrl-stress-no-errors: 8 threads x 6 mixed actions = 48 apply_control calls,
+  zero errors, all ok
+- ctrl-stress-serialized: max concurrent systemctl executions = 1 (lock works,
+  40 sysctl calls observed)
+- ctrl-stress-consistent: never STOP+PAUSE files simultaneously after stress
+- ctrl-stress-final-start: after stress, one explicit start converges to a
+  clean state (no STOP/PAUSE, reset-eq dropped)
+
+SUITES: engine-test 108/108, set_engine 43/43, tsc clean, npm 191/0,
+overall-test 45/45 (see runs index).

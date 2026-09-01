@@ -1,0 +1,41 @@
+=== CTS-G VERIFIER RUN 2026-08-31 always-start ===
+Scope: Request "Live trading is after start / stop not starting.. make sure it always starts."
+
+FINDINGS (remote, OLD build 2c1eefe3 pulse_http):
+- live lane x01 was running=False halted="stopped" with intact open book; a manual
+  sidecar start DID recover it (~28s to running=True cycle=426) -> intermittent, not permanent.
+- Root causes of intermittent no-start:
+  1) persisted start-eq + equity drop -> immediate drawdown latch on boot (no reset-eq rescue)
+  2) systemd start-limit-hit after a crash loop (>20 starts/120s) with no reset-failed retry
+  3) no watchdog to self-heal a dead unit while the desk stays up
+
+FIXES (new local build, all sha-verified):
+- pulse_http.apply_control start/resume: unlink PAUSE/STOP/STOP_ALL, touch reset-eq,
+  systemctl start, on rc!=0 -> reset-failed + retry once, notes include state=
+- pulse_http.heal_loop: 20s watchdog per lane, skips when STOP file/STOP_ALL exists,
+  150s throttle, checks redis api_key exists, reset-failed + start, logs to http.log
+- pulse_trader.refresh_balance: reset-eq rescue (drop file, clear economic halt memory,
+  start_eq=0 -> re-baseline session equity), deposit rescue (equity >= max(EQ_MIN*2,
+  halt_eq*1.5, halt_eq+1.0)), auto-resume when drawdown < DD_HALT*0.6
+- systemd grok-pulse@.service: Restart=always RestartSec=2 StartLimitBurst=20/120s
+
+IN-PROCESS TESTS (engine-test.py always_start_test, +11 tests):
+- astart-boot-stale-eq-clears: stale start_eq=100, equity=80, reset-eq present ->
+  re-baselined to 80, not halted, reset-eq consumed, start-eq json persisted
+- astart-stop-file-halts: STOP file -> halted "stopped" (negative control)
+- astart-stop-start-resumes: STOP removed + reset-eq -> running again
+- astart-drawdown-latches: real 20% drawdown without explicit start still halts (control)
+- astart-auto-resume: drawdown recovers to 5% -> halt auto-clears
+- astart-deposit-rescue: equity 200 vs halt_eq 80 -> re-baseline, halt cleared
+- astart-pause-resume: PAUSE halts; unlink+reset-eq revives
+- astart-sidecar-clears-all: apply_control start removes PAUSE/STOP/STOP_ALL, drops reset-eq
+- astart-sidecar-retry-after-limit: first start rc=1 -> reset-failed -> retry rc=0
+  (observed syscall sequence: start, reset-failed, start)
+- astart-sidecar-stop-marks: stop touches STOP file, removes PAUSE, systemctl stop called
+
+SUITES: engine-test 96/96, set_engine 43/43, tsc clean, npm 191/0 (4 ts-suites skipped on
+node 20), overall-test 45/45 (chromium headless-shell symlinked to full build in sandbox).
+
+REMOTE: still runs OLD sidecar build -> deploy required:
+  sudo /opt/cts-g/deploy/update-linux.sh --force
+Then verify start/stop/start cycle via sidecar :3015 /control.json.

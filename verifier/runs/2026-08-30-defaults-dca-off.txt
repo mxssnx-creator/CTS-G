@@ -1,0 +1,29 @@
+run 2026-08-30 (defaults-dca-off): new defaults — DCA disabled by default, historic lookback x4 (240 -> 960 bars = 16h of 1m), min profit factor 1.2 (was 1.1). Symbol sort default confirmed "vol1h" (Volatile 1H, leverage-first then 1H volatility) in engine, overlays and desk UI.
+
+CODE CHANGES
+- server/pulse/modules.py:19            "strategy.dca": False (default module flag; overlay dcaEnabled=true re-enables)
+- server/pulse/dca_engine.py            enabled=False default; load() dcaEnabled default False; min_pf 1.20 (ctor + load dcaMinPf/minPf)
+- server/pulse/set_engine.py            LOOKBACK_DEFAULT = 960 (4x prehistoric calc window); min_pf 1.20 (ctor + load setMinPf/minPf); load clamps 120..1440
+- server/pulse/coord_engine.py          min_pf 1.2 (ctor + both load fallbacks)
+- server/pulse/exit_engine.py           min_pf 1.20 (ctor + load exitMinPf/setMinPf); self_test best-of lane passes explicit exitMinPf 1.05 so the lane-preference check is independent of the default
+- server/pulse/pulse_trader.py          strat_dca default False; apply_live_config dca.enabled gate = mods(strategy.dca) AND overlay dcaEnabled AND strat_dca (all default False); run_self_tests "dca-enabled" and qa_tick "qa-dca-on" assert dca.enabled == dca_want (config consistency, works with DCA off)
+- server/pulse/overlay-bingx-x01.json   dcaEnabled=false, stratDca=false, modules[strategy.dca]=false, minPf/setMinPf/dcaMinPf/exitMinPf=1.2, histLookbackBars=960, symbolSort stays vol1h
+- server/pulse/overlay-bingx-x02.json   same (+ exitMinPf added)
+- src/lib/config-model.ts               DEFAULT_OVERLAY: dcaEnabled false, stratDca false, dcaMinPf/minPf/setMinPf 1.2, histLookbackBars 960; overlayFromCts fallbacks: dcaEnabled false, dcaMinPf 1.2, minPf 1.2, stratDca false, histLookbackBars 960, setMinPf 1.2
+
+SUITES (local, sandbox)
+- python3 -m py_compile server/pulse/*.py   -> clean
+- python3 scripts/engine-test.py            -> 85/85 pass
+- npm test                                  -> 191 pass / 0 fail / 4 skipped (node 20 skips .ts suites)
+- node_modules/.bin/tsc --noEmit            -> clean (typescript 5.9.3 from lockfile)
+- python3 verifier/v2/max_symbols_smoke.py  -> 12/12 pass (redis-cli stubbed: returns empty; engine tolerates)
+- TEST_BASE=http://127.0.0.1:8089 node scripts/overall-test.mjs -> 45/45 pass (vite dev server + playwright chromium)
+
+REMOTE (152.53.114.112, sidecar :3015 — no SSH, HTTP only)
+- GET /config.json?conn=live before: dcaEnabled=false stratDca=false minPf=1.2 setMinPf=1.1 dcaMinPf=1.1 exitMinPf=1.1 histLookbackBars=840 symbolSort=vol1h
+- POST /config.json?conn=live|vst {overlay:{dcaEnabled:false,stratDca:false,minPf:1.2,setMinPf:1.2,dcaMinPf:1.2,exitMinPf:1.2,histLookbackBars:960,symbolSort:"vol1h",modules:{"strategy.dca":false}}} -> ok:true both
+- GET verify after: live+vst both exactly the new defaults (all eight keys + modules.dca=false)
+- control stop live rc=0, stop vst rc=0, start live rc=0, start vst rc=0
+- after restart: live running=true halted=false errors=0 open=56 symbols=58
+- vst: still halted "drawdown halt" (equity 9164.9438 vs startEquity 14734.2156 = -37.8% >= DD_HALT 18%). Remote runs pre-reset-eq code; the reset-eq re-baseline only exists in the new build. ALSO NOTE: vst equity reported identical to live equity (9164.9438) — suspected stale cross-lane equity read in the old deployed build.
+- ACTION REQUIRED on VPS (code deploy): sudo /opt/cts-g/deploy/update-linux.sh --force  — installs the new engine (reset-eq re-baseline clears the vst drawdown halt on next start; unlimited caps; start/stop/pause hardening; new code defaults) and the new sidecar (ground-truth stats, heal_loop).

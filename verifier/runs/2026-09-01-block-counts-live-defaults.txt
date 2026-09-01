@@ -38,7 +38,7 @@ volumes adjustments and live trade and coordinations are completely correct inte
 - Fill path: record_fill + weighted entry + available-margin debit + control
   re-attach (oids cleared, ctrl_verified=False, ensure_controls) + book persist.
 
-## Tests — scripts/engine-zest.py block_calc_zest (15 new, 137/137 total)
+## Tests — scripts/engine-test.py block_calc_test (15 new, 137/137 total)
 - formula math: inc=count*ratio (n=3,r=1.5 -> 4.5); minPF 1+(1.2-1)*0.8*4.5 = 1.72
 - coverage: unlimited book -> 12 counts shown; limited(5) -> exactly 1..5; enabled flags
 - evaluate_counts: window [1..4] + active-live row on fresh lane; window rolls
@@ -53,7 +53,7 @@ volumes adjustments and live trade and coordinations are completely correct inte
   * lane without live parent is retired (active=False, base=0), never traded
 
 ## Gates
-- engine-zest 137/137, py_compile all server/pulse + scripts, tsc clean, npm build OK.
+- engine-test 137/137, py_compile all server/pulse + scripts, tsc clean, npm build OK.
 - restore/pulse_trader.py.patch regenerated (23326B): pinned base b3a9ff3c + patch ->
   git blob 2e39a63bd52f5db36681e94c1ad7735f3ea3e8f5, git-apply + py_compile verified.
 - deploy/linux-common.sh pt_want updated to 2e39a63b.
