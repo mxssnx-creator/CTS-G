@@ -34,6 +34,9 @@ FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 3
 STEP_MAX = 22
 HIST_CAP = 80
+# Indication kinds (live) <-> historic replay vote tags (indication_signal why).
+IND_KINDS = ("state", "signals", "active", "direction", "move", "common")
+IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move"}
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -375,6 +378,7 @@ class SetBook:
         self.use_historic_gate = True
         self.min_samples = 12
         self.reactivate = True
+        self.strict_gate = True
         self.max_active = 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
@@ -400,6 +404,10 @@ class SetBook:
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
         self.locks: Dict[str, bool] = {}
+        # Per-indication-kind evidence: hist (rebuilt by every replay from the
+        # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
+        self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
+        self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
         self._running = False
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
@@ -417,6 +425,11 @@ class SetBook:
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 12)))
         self.reactivate = bool(ov.get("setReactivate", True))
+        # Strict gate (default ON): only VALIDATED (last-N samples >=
+        # max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) sets
+        # and indication kinds may drive live orders. Cold/unproven sets keep
+        # collecting historic + simulated evidence but never trade live.
+        self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
             raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
         except Exception:
@@ -637,6 +650,7 @@ class SetBook:
                 "reason": str(rec.get("reason") or ""),
                 "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
             }
+            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "")
         else:
             if getattr(rec, "ours", True) is False:
                 return
@@ -651,6 +665,15 @@ class SetBook:
                 "reason": str(getattr(rec, "reason", "")),
                 "client_id": str(getattr(rec, "client_id", "") or ""),
             }
+            ind_kind = str(getattr(rec, "ind_kind", "") or "")
+        # Per-kind live evidence feeds the indication gate even when the close
+        # cannot be attributed to a known set below.
+        if ind_kind:
+            tape = self.ind_live.setdefault(ind_kind, [])
+            cid0 = row.get("client_id") or ""
+            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
+                tape.append(dict(row))
+                del tape[:-HIST_CAP]
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
             sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
@@ -727,6 +750,7 @@ class SetBook:
                 detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+            ind_hist: Dict[str, List[Dict[str, Any]]] = {}
             aborted = False
             for i, symbol in enumerate(names):
                 if abort and abort():
@@ -737,10 +761,11 @@ class SetBook:
                 self.progress.symbols_done = i
                 self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
-                self._replay_symbol(symbol, hist, now, on_step=on_step)
+                self._replay_symbol(symbol, hist, now, on_step=on_step, ind_hist=ind_hist)
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
+            self.ind_hist = {k: v[-HIST_CAP:] for k, v in ind_hist.items()}
             self.progress.phase = "score"
             self.progress.pct = 90.0
             for st in self.by_idx:
@@ -768,7 +793,7 @@ class SetBook:
             self.last_run = time.time()
             self._running = False
 
-    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None) -> None:
+    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
@@ -844,6 +869,17 @@ class SetBook:
                         bucket.append(rec)
                         if len(bucket) > HIST_CAP:
                             del bucket[:-HIST_CAP]
+                        # Attribute indications-pack fills to the indication
+                        # kinds that voted for the taken direction.
+                        if st.pack == "indications" and ind_hist is not None:
+                            for tag in str(open_pos.get("tags") or "").split("+"):
+                                kind = IND_TAG_KIND.get(tag.strip())
+                                if not kind:
+                                    continue
+                                buf = ind_hist.setdefault(kind, [])
+                                buf.append(rec)
+                                if len(buf) > HIST_CAP:
+                                    del buf[:-HIST_CAP]
                         open_pos = None
                         cool = self.cooldown_bars
                     continue
@@ -861,7 +897,7 @@ class SetBook:
                 else:
                     sl = close * (1 + sl_frac)
                     tp = close * (1 - tp_frac)
-                open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
+                open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None, "tags": str(why or "")}
             self.progress.set_id = st.id
 
     def _score_one(self, st: SetState) -> None:
@@ -1062,11 +1098,12 @@ class SetBook:
                 s for s in rows
                 if s.last15_n >= need and s.last15_ratio + 1e-9 >= 1.0
             ]
-        if not passing:
-            # Discovery tier: unproven sets only. Proven-negative sets are
-            # never validated and never processed while the gate is ready.
+        if not passing and not self.strict_gate:
+            # Legacy discovery tier: unproven sets only. The strict gate
+            # (default) never lets an unvalidated or unprofitable set drive a
+            # live order — it must earn validation from historic replay first.
             passing = [s for s in rows if not proven_neg(s)]
-        if not passing and not gated:
+        if not passing and not self.strict_gate and not gated:
             passing = [s for s in rows if s.active] or list(rows)
         if not passing:
             return None
@@ -1089,10 +1126,61 @@ class SetBook:
     def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
+        if self.strict_gate:
+            # Strict: a pack is open only while it has a VALIDATED +
+            # PROFITABLE set to bind. No cold pass — the desk waits for the
+            # first replay instead of trading unproven sets.
+            return self.pick_any(pack) is not None
         fills = sum(s.n for s in self.sets.values())
         if fills < 8 or not self.progress.ready:
             return True
         return self.pick_any(pack) is not None
+
+    def ind_stats(self, kind: str) -> Dict[str, Any]:
+        """Cost-adjusted PF evidence for one indication kind (hist + live)."""
+        tape = list(self.ind_hist.get(kind) or []) + list(self.ind_live.get(kind) or [])
+        if tape:
+            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
+            n = int(last["count"])
+            pf = float(last["ratio"])
+        else:
+            n, pf = 0, 0.0
+        need = max(self.min_samples, 8)
+        return {
+            "kind": kind,
+            "n": n,
+            "tapeN": len(tape),
+            "pf": round(pf, 4),
+            "validated": n >= need,
+            "profitable": pf + 1e-9 >= 1.0,
+        }
+
+    def indication_ok(self, kind: str) -> bool:
+        """Strict live gate for one indication kind.
+
+        A kind with enough evidence runs only while it is VALIDATED
+        (n >= max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00);
+        a proven loser is cut off. An unproven kind may run only while the
+        indications pack itself has a validated + profitable set, so new
+        kinds collect evidence under pack-level validation instead of a
+        deadlock.
+        """
+        if not (self.enabled and self.use_historic_gate and self.strict_gate):
+            return True
+        k = str(kind or "").strip()
+        if k:
+            st = self.ind_stats(k)
+            if st["validated"]:
+                return bool(st["profitable"])
+        return self.pack_open("indications")
+
+    def ind_gate_snapshot(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k in IND_KINDS:
+            st = self.ind_stats(k)
+            st["ok"] = self.indication_ok(k)
+            out[k] = st
+        return out
 
     def snapshot(self) -> Dict[str, Any]:
         rows = []
@@ -1180,6 +1268,8 @@ class SetBook:
             "maxDdS": self.max_dd_s,
             "autoDeact": self.auto_deact,
             "useHistoricGate": self.use_historic_gate,
+            "strictGate": bool(self.strict_gate),
+            "indGate": self.ind_gate_snapshot(),
             "minSamples": self.min_samples,
             "costPct": self.cost_pct,
             "setCount": len(self.sets),
@@ -1551,11 +1641,68 @@ def self_test() -> List[Tuple[str, bool, str]]:
     neg_set.hist = list(pos_rows)  # ratio 1.10 < min_pf 1.20 -> stays off
     g2._score_one(neg_set)
     out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
-    # cold start (no replay yet): ungated pick still returns a set
+    # cold start (no replay yet): STRICT gate (default) blocks every pick and
+    # closes every pack until a set is validated + profitable by replay;
+    # legacy mode (setStrictGate off) keeps the old cold-pass behavior.
     g3 = SetBook()
     g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
     pk3 = g3.pick("general")
-    out.append(("set-pick-cold", pk3 is not None, f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
+    out.append(("set-pick-cold-strict-none", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} pick={getattr(pk3, 'id', None)} open={g3.pack_open('general')}"))
+    g3.strict_gate = False
+    pk3b = g3.pick("general")
+    out.append(("set-pick-cold-legacy", pk3b is not None and g3.pack_open("general"), f"legacy {getattr(pk3b, 'id', None)}"))
+    # strict: validated + profitable set runs; validated loser never picked
+    g4 = SetBook()
+    g4.load({"histEnabled": True, "setMinPf": 1.20, "setMinSamples": 8, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
+    g4.progress.ready = True
+    gb = [x for x in g4.by_idx if x.pack == "general" and x.kind == "base"]
+    gb[0].hist = [{"t": 7000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    for x in gb[1:]:
+        x.hist = [{"t": 7000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
+    for x in g4.by_idx:
+        g4._score_one(x)
+    pk4 = g4.pick("general")
+    out.append(("set-strict-pick-validated", pk4 is not None and pk4.id == gb[0].id and pk4.last15_ratio >= 1.0 and pk4.last15_n >= 8, f"{getattr(pk4, 'id', None)} pf={getattr(pk4, 'last15_ratio', 0)}"))
+    out.append(("set-strict-pack-open-winner", g4.pack_open("general") and not g4.pack_open("indications"), f"gen={g4.pack_open('general')} ind={g4.pack_open('indications')}"))
+    # strict: once the only winner turns cold (no samples), pack closes again
+    gb[0].hist = []
+    g4._score_one(gb[0])
+    out.append(("set-strict-cold-closes", g4.pick("general") is None and not g4.pack_open("general"), f"pick={g4.pick('general')}"))
+    # indication-kind gate: proven loser off, validated winner on, unproven
+    # kind rides the pack, pack closed -> everything off
+    gb[0].hist = [{"t": 8000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    g4._score_one(gb[0])
+    ib = [x for x in g4.by_idx if x.pack == "indications" and x.kind == "base"]
+    ib[0].hist = [{"t": 8000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    for x in ib[1:]:
+        x.hist = []
+    for x in g4.by_idx:
+        if x.pack == "indications":
+            g4._score_one(x)
+    out.append(("ind-gate-unproven-rides-pack", g4.indication_ok("common") and g4.pack_open("indications"), f"common={g4.indication_ok('common')} indOpen={g4.pack_open('indications')}"))
+    g4.ind_live["move"] = [{"t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(12)]
+    g4.ind_live["state"] = [{"t": 9000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(12)]
+    out.append(("ind-gate-loser-off", not g4.indication_ok("move"), f"move pf={g4.ind_stats('move')}"))
+    out.append(("ind-gate-winner-on", g4.indication_ok("state"), f"state pf={g4.ind_stats('state')}"))
+    # live closes carrying ind_kind feed the kind tape even without a set match
+    g5 = SetBook()
+    g5.load({"histEnabled": True, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
+    g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
+    g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
+    out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
+    # hist replay attributes indications fills to the winning vote tags
+    g6 = SetBook()
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12})
+    g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
+    _orig_sig = indication_signal
+    globals()["indication_signal"] = lambda bars, settings, now: (1, 0.9, "sig+dir")
+    try:
+        g6.replay_all(now=1_700_000_400)
+    finally:
+        globals()["indication_signal"] = _orig_sig
+    ind_fills = sum(len(v) for v in g6.ind_hist.values())
+    out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
+    out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
     return out
 
 
