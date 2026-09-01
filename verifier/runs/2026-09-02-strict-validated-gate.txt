@@ -1,0 +1,55 @@
+2026-09-02 strict validated-only gate (sets + indication kinds) — post-Block-enable hardening
+
+CHANGE (user: "make only profitable and validated indications and strategy Sets run")
+
+set_engine.py (sha1 380e74c170c86c395ea5e464cd774779952513cc)
+- strict_gate (default ON, overlay setStrictGate): in strict mode ONLY VALIDATED
+  (last15_n >= max(minSamples,8)) AND PROFITABLE (cost-adjusted PF >= 1.00) sets
+  may drive live orders. Discovery tier (unvalidated PF >= setMinPf) and the
+  ungated fallback are disabled. Cold desk => nothing trades until the first
+  historic replay validates a profitable set (no cold-pass).
+- Per-kind indication gate: six kinds (state/signals/active/direction/move/
+  common). Validated+profitable kind runs; proven loser is cut; unproven kind
+  rides while its pack has a validated+profitable set (no cold-start deadlock,
+  since replay_all bootstraps stats from klines). Attribution: historic replay
+  via indication_signal reason tags (sig/ta/dir/move); live via Position.
+  ind_kind -> Closed.ind_kind -> SetBook.ind_live (client_id dedupe, HIST_CAP 80).
+- snapshot: strictGate + indGate (per-kind n/pf/validated/profitable/ok).
+
+pulse_trader.py (git blob eb605459bc640a1ceef9456683556e507449fcd0)
+- Closed.ind_kind; close_pos/_load_trade_history persist it.
+- entry_sense: kind gate on "ind:<kind>" entries (skip "ind-gate"); strict
+  set-gate rejects when no validated+profitable set (skip "set-gate").
+- maybe_entries: intern_any force-reopen and pack-switch both honor strict mode.
+- block_intern_pf(pos): Block intern PF is lifted off the CTS floor
+  (default_min_pf 1.2) ONLY by validated+profitable set stats; never below floor.
+  Legacy mode keeps old raw last15_ratio behavior.
+- pulse_snapshot.setStrictGate; coverage blob indicationGate.
+- engine source stays OUT of git (placeholder); deploy restores via pinned-base
+  sha-verified patch (restore/pulse_trader.py.patch, base b3a9ff3c60c7...,
+  pt_want updated in deploy/linux-common.sh).
+
+engine-zest.py (sha1 25a262c2b0502206e083d5cb48615b48d32b58fd)
+- 16 new strict-gate tests: entry blocked cold / allowed validated, pick ==
+  winner only, loser kinds cut / unproven ride pack, place() no order when cold
+  or all-loser, place() trades validated winner, block PF lift/floor/legacy.
+
+GATE SEMANTICS
+- validated: last15_n >= max(minSamples, 8)
+- profitable: cost-adjusted last-N PF >= 1.00 (1.00 = neutral after costs)
+- kind unproven (no tape): runs only while pack_open("indications") is true
+- escape hatch: overlay setStrictGate=false restores legacy discovery behavior
+
+VERIFY (local, sandbox)
+- set_engine.py self_test: ok (incl. 9 new strict/ind-gate checks)
+- engine-zest.py: 153/153 passed (137 prior + 16 new)
+- indication_engine/risk_variants/exit_engine/dca_engine self_tests: ok
+- py_compile: pulse_trader/pulse_http/block_engine/dca_engine/set_engine OK
+- tsc --noEmit rc=0; vite build rc=0
+- patch round-trip: base(b3a9ff3c) + git apply -> blob eb605459 (pt_want) + py_compile OK
+
+POST-DEPLOY CHECK (remote)
+- stats: sets.strictGate == true; sets.indGate per-kind ok flags;
+  coverage.indicationGate; pulse.setStrictGate == true
+- first minutes after restart: no new entries until replay validates a set —
+  expected in strict mode.
