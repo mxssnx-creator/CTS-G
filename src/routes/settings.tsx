@@ -23,7 +23,6 @@ import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { MAX_SYMBOLS } from "@/lib/config-model";
-import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -58,14 +57,6 @@ function SettingsPage() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [ready, setReady] = useState(false);
-  const [creds, setCreds] = useState<ConnectionCreds | null>(null);
-  const [apiKey, setApiKey] = useState("");
-  const [apiSecret, setApiSecret] = useState("");
-  const [connType, setConnType] = useState<"mainnet" | "vst">("mainnet");
-  const [connMethod, setConnMethod] = useState("library");
-  const [asDefaultMainnet, setAsDefaultMainnet] = useState(true);
-  const [credMsg, setCredMsg] = useState<string | null>(null);
-  const [credSaving, setCredSaving] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
 
@@ -77,18 +68,11 @@ function SettingsPage() {
     dirtyRef.current = false;
     setSaveMsg(null);
     setReady(false);
-    setCreds(null);
-    setApiKey("");
-    setApiSecret("");
-    setCredMsg(null);
-    setConnType(conn === "vst" ? "vst" : "mainnet");
-    setAsDefaultMainnet(conn !== "vst");
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
     const pull = async () => {
       const sP = fetchLiveStats(conn);
       const cP = fetchCtsBundle(conn);
-      const kP = fetchConnection(conn);
       const s = await sP;
       if (!alive) return;
       setRaw(s);
@@ -98,14 +82,6 @@ function SettingsPage() {
       if (!dirtyRef.current) {
         const stored = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
-      }
-      const k = await kP;
-      if (!alive) return;
-      if (k) {
-        setCreds(k);
-        setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
-        setConnMethod(k.connectionMethod || "library");
-        if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
       }
       setReady(true);
     };
@@ -137,7 +113,7 @@ function SettingsPage() {
     main?: Record<string, { enabled?: boolean; min_profit_factor?: number; max_drawdown_time?: number; max_positions?: number }>;
     mainTradePfRatioSemantics?: string;
   };
-  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, 1.2);
+  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, 1.1);
   const table = useMemo(
     () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1),
     [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf],
@@ -160,32 +136,6 @@ function SettingsPage() {
       dirtyRef.current = false;
       setDirty(false);
       if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
-    }
-  };
-
-  const onSaveCreds = async () => {
-    setCredSaving(true);
-    setCredMsg(null);
-    const payload: {
-      api_key?: string;
-      api_secret?: string;
-      connection_type: string;
-      connection_method: string;
-      as_default_mainnet: boolean;
-    } = {
-      connection_type: connType,
-      connection_method: connMethod,
-      as_default_mainnet: asDefaultMainnet || connType === "mainnet",
-    };
-    if (apiKey && !apiKey.includes("…") && !apiKey.includes("•")) payload.api_key = apiKey.trim();
-    if (apiSecret && !apiSecret.includes("•")) payload.api_secret = apiSecret.trim();
-    const r = await saveConnection(conn === "vst" && !payload.as_default_mainnet ? "vst" : conn === "vst" ? "live" : conn, payload);
-    setCredSaving(false);
-    setCredMsg(r.detail);
-    if (r.ok && r.creds) {
-      setCreds(r.creds);
-      setApiSecret("");
-      if (r.creds.apiKeyMasked) setApiKey(r.creds.apiKeyMasked);
     }
   };
 
@@ -231,8 +181,6 @@ function SettingsPage() {
                                   ? "Exits · SL"
                                   : id === "overview"
                                     ? "Overview"
-                                    : id === "connection"
-                                      ? "Connection · keys"
                                     : id === "controls"
                                       ? "Control orders"
                                       : id}
@@ -266,100 +214,27 @@ function SettingsPage() {
               <Grid>
                 <KV k="Selected" v={conn === "vst" ? "VST demo" : conn === "live" ? "Live mainnet" : "Overall"} />
                 <KV k="Name" v={conn === "vst" ? "BingX X02" : conn === "live" ? "BingX X01" : "All desks"} />
-                <KV k="Exchange" v={String(stats?.exchange ?? creds?.exchange ?? "BingX")} />
-                <KV k="Connection type" v={connType === "vst" ? "VST demo" : "Live mainnet"} />
-                <KV k="Connection method" v={connMethod} />
-                <KV k="API key" v={creds?.apiKeyMasked || (creds?.apiKeySet ? "set" : "missing")} />
-                <KV k="API secret" v={creds?.apiSecretSet ? "set · hidden" : "missing"} />
-                <KV k="Base URL" v={String(creds?.baseUrl ?? (connType === "vst" ? "https://open-api-vst.bingx.com" : "https://open-api.bingx.com"))} />
-                <KV k="Testnet" v={connType === "vst" ? "yes" : "no"} />
-                <KV k="Live trade" v={bool(cts?.live_trading_enabled) || creds?.liveTradeEnabled ? "on" : "off"} />
-                <KV k="Last status" v={String(creds?.lastTestStatus || stats?.mode || "—")} />
+                <KV k="Exchange" v={String(stats?.exchange ?? "BingX")} />
+                <KV k="Mode" v={String(stats?.mode ?? "—")} />
                 <KV k="Position mode" v={String(cts?.position_mode ?? "hedge")} />
                 <KV k="Margin" v={String(cts?.margin_mode ?? "cross")} />
                 <KV k="Leverage % (CTS)" v={`${num(cts?.leveragePercentage, 100)}%`} />
                 <KV k="Maximal leverage" v={bool(cts?.useMaximalLeverage) ? "on" : "off"} />
+                <KV k="Live requested" v={bool(cts?.live_trade_requested) ? "yes" : "no"} />
+                <KV k="CTS engine live flag" v={bool(cts?.live_trading_enabled) ? "on" : "off"} />
+                <KV k="Close-only" v={bool(cts?.useSystemCloseOnly) ? "on" : "off"} />
+                <KV k="PF semantics" v={String(cts?.mainTradePfRatioSemantics ?? "position-cost-net-v3")} />
+                <KV k="Settings version" v={String(cts?.settings_version ?? "—")} />
+                <KV k="Updated" v={String(cts?.updated_at ?? "—")} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
                 <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 1))} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
-              <div className="space-y-3 rounded-lg border border-border bg-bg2 p-3">
-                <p className="font-mono text-xs text-muted uppercase">Credentials · submitted as live mainnet default</p>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="block text-sm">
-                    <span className="font-mono text-xs text-muted">Connection type</span>
-                    <select
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
-                      value={connType}
-                      onChange={(e) => {
-                        const v = e.target.value === "vst" ? "vst" : "mainnet";
-                        setConnType(v);
-                        if (v === "mainnet") setAsDefaultMainnet(true);
-                      }}
-                    >
-                      <option value="mainnet">Live mainnet (BingX X01)</option>
-                      <option value="vst">VST demo (BingX X02)</option>
-                    </select>
-                  </label>
-                  <label className="block text-sm">
-                    <span className="font-mono text-xs text-muted">Connection method</span>
-                    <select
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
-                      value={connMethod}
-                      onChange={(e) => setConnMethod(e.target.value)}
-                    >
-                      <option value="library">library (HMAC)</option>
-                      <option value="rest">REST signed</option>
-                    </select>
-                  </label>
-                  <label className="block text-sm sm:col-span-2">
-                    <span className="font-mono text-xs text-muted">API key</span>
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
-                      value={apiKey}
-                      placeholder={creds?.apiKeySet ? "leave to keep current" : "BingX API key"}
-                      onChange={(e) => setApiKey(e.target.value)}
-                    />
-                  </label>
-                  <label className="block text-sm sm:col-span-2">
-                    <span className="font-mono text-xs text-muted">API secret</span>
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
-                      value={apiSecret}
-                      placeholder={creds?.apiSecretSet ? "leave blank to keep current" : "BingX API secret"}
-                      onChange={(e) => setApiSecret(e.target.value)}
-                    />
-                  </label>
-                </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={asDefaultMainnet}
-                    onChange={(e) => setAsDefaultMainnet(e.target.checked)}
-                  />
-                  Save submitted credentials as the default for live mainnet
-                </label>
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    className="min-h-11 rounded-lg bg-primary px-4 text-sm text-bg"
-                    disabled={credSaving}
-                    onClick={() => void onSaveCreds()}
-                  >
-                    {credSaving ? "Saving…" : "Save credentials"}
-                  </button>
-                  {credMsg ? <span className="text-sm text-muted">{credMsg}</span> : null}
-                </div>
-                <p className="text-sm text-muted">
-                  Secrets stay in Redis on the desk host and are never written to git. Submitted keys become the Live mainnet (X01) default unless you uncheck that box.
-                </p>
-              </div>
+              <p className="text-sm text-muted">
+                This desk is independent of the CTS engine. Overlay saves apply only to Live or VST —
+                Overall is a mixed view and will not write either book.
+              </p>
             </Card>
           )}
 
@@ -751,6 +626,11 @@ function SettingsPage() {
                   </tbody>
                 </table>
               </div>
+              <Grid>
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.08" onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · 1.10 = +1×PositionCost · default 1.10" onChange={(v) => patch("realMinPf", v)} />
+              </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
