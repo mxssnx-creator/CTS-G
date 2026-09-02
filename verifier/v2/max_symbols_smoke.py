@@ -239,7 +239,11 @@ def main() -> int:
         err = traceback.format_exc()[-300:]
     rec("write-stats-530-no-crash", err is None, repr(err or ""))
     try:
-        stats = json.load(open("/opt/grok-x01-pulse/stats-bingx-x01.json"))
+        # Read the isolated snapshot written by Pulse, never the live runtime
+        # snapshot.  The latter may legitimately use a bounded production
+        # overlay and would make this offline full-universe check flaky.
+        with open(pt.STATS_PATH) as fh:
+            stats = json.load(fh)
         rec("stats-has-indications", "indications" in stats, f"indKeys={sorted((stats.get('indications') or {}))[:8]}")
         rec("stats-symbols-full", len(stats.get("symbols") or []) >= 500, f"symbols={len(stats.get('symbols') or [])}")
         rec("stats-by-indication", isinstance(stats.get("byIndication"), dict) and all(k in (stats.get("byIndication") or {}) for k in want_kinds),
