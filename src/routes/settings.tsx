@@ -10,7 +10,7 @@ import {
   overlayFromCts,
   saveOverlay,
   slTpGrid,
-  TRAIL_VARIANTS,
+  trailGrid,
   trailGiveFromArm,
   syncOverlayFlags,
   type CtsSettings,
@@ -1412,94 +1412,65 @@ function SettingsPage() {
           )}
 
           {section === "trailing" && (
-            <Card title="Trailing · independent recals" hint="Arm min–max × give min–max is the catalog · every combo is its own Set · chips are live fallback only">
+            <Card title="Trailing · independent recals" hint="All arm × give combos always run as independent Sets · no trail picker">
+              <p className="text-sm text-muted">
+                Catalog is fixed system-wide: arm 0.3–1.5 step 0.3 × give 0.1–0.5 step 0.1 ({trailGrid().length} trail Sets)
+                plus the matching Normal (no-trail) book. Auto-recalc only chooses live attach. Nothing in Settings turns a trail off.
+              </p>
               <Grid>
                 <Toggle
                   label="Trailing pack"
                   on={overlay.stratTrailing}
                   onChange={(v) => patch("stratTrailing", v)}
                 />
-                <Toggle label="Auto-recalc trail" on={overlay.trailAuto} onChange={(v) => patch("trailAuto", v)} />
+                <Toggle label="Auto-recalc live attach" on={overlay.trailAuto} onChange={(v) => patch("trailAuto", v)} />
                 <Toggle
                   label="Recalc give from arm × factor"
                   on={overlay.trailRecalcGive}
                   onChange={(v) => {
                     patch("trailRecalcGive", v);
-                    if (v) patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax));
+                    if (v) patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, 0.1, 0.5));
                   }}
                 />
-              </Grid>
-              <p className="font-mono text-xs text-muted">CTS variants · arm:give · filtered by optimal range</p>
-              <div className="flex flex-wrap gap-2">
-                {(Array.isArray(cts?.strategyBaseTrailingVariants) ? cts!.strategyBaseTrailingVariants : [...TRAIL_VARIANTS]).map((t) => {
-                  const raw = String(t);
-                  const [a, g] = raw.split(":");
-                  const arm = Number(a) || 0;
-                  const give = overlay.trailRecalcGive
-                    ? trailGiveFromArm(arm, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax)
-                    : Number(g) || 0;
-                  const inRange =
-                    arm + 1e-9 >= overlay.trailArmMin &&
-                    arm - 1e-9 <= overlay.trailArmMax &&
-                    give + 1e-9 >= overlay.trailGiveMin &&
-                    give - 1e-9 <= overlay.trailGiveMax;
-                  const active =
-                    Math.abs(arm - overlay.trailArmPct) < 1e-6 &&
-                    Math.abs(give - overlay.trailGivePct) < 0.02;
-                  return (
-                    <button
-                      key={raw}
-                      type="button"
-                      data-trail={raw}
-                      disabled={!inRange}
-                      onClick={() => {
-                        patch("trailArmPct", arm);
-                        patch("trailGivePct", give);
-                      }}
-                      className={`min-h-11 rounded-lg border px-3 font-mono text-sm ${
-                        active
-                          ? "border-primary bg-primary-dim/40 text-fg"
-                          : inRange
-                            ? "border-border text-muted"
-                            : "border-border text-faint opacity-40"
-                      }`}
-                    >
-                      {arm.toFixed(1)}:{give.toFixed(1)}
-                    </button>
-                  );
-                })}
-              </div>
-              <Grid>
-                <Slider label="Arm min" value={overlay.trailArmMin} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => patch("trailArmMin", v)} />
-                <Slider label="Arm max" value={overlay.trailArmMax} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => patch("trailArmMax", v)} />
-                <Slider label="Give min" value={overlay.trailGiveMin} min={0.05} max={0.5} step={0.05} unit="%" onChange={(v) => patch("trailGiveMin", v)} />
-                <Slider label="Give max" value={overlay.trailGiveMax} min={0.1} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGiveMax", v)} />
                 <Slider
                   label="Give factor"
                   value={overlay.trailGiveFactor}
                   min={0.2}
                   max={0.6}
                   step={0.01}
-                  hint={`give = arm × factor → ${trailGiveFromArm(overlay.trailArmPct, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax).toFixed(2)}%`}
+                  hint={`auto give = arm × factor`}
                   onChange={(v) => {
                     patch("trailGiveFactor", v);
                     if (overlay.trailRecalcGive) {
-                      patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, v, overlay.trailGiveMin, overlay.trailGiveMax));
+                      patch("trailGivePct", trailGiveFromArm(overlay.trailArmPct, v, 0.1, 0.5));
                     }
                   }}
                 />
-                <Slider label="Arm %" value={overlay.trailArmPct} min={0.3} max={1.5} step={0.3} unit="%" onChange={(v) => {
-                  patch("trailArmPct", v);
-                  if (overlay.trailRecalcGive) {
-                    patch("trailGivePct", trailGiveFromArm(v, overlay.trailGiveFactor, overlay.trailGiveMin, overlay.trailGiveMax));
-                  }
-                }} />
-                <Slider label="Giveback %" value={overlay.trailGivePct} min={0.05} max={0.8} step={0.05} unit="%" onChange={(v) => patch("trailGivePct", v)} />
                 <Slider label="Recalc min samples" value={overlay.trailRecalcN} min={3} max={20} step={1} onChange={(v) => patch("trailRecalcN", v)} />
                 <Slider label="Recalc every N closes" value={overlay.trailRecalcEvery} min={3} max={30} step={1} onChange={(v) => patch("trailRecalcEvery", v)} />
               </Grid>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="font-mono text-xs text-muted">
+                    <tr>
+                      <th className="pb-2 font-medium">Trail</th>
+                      <th className="pb-2 font-medium">Arm %</th>
+                      <th className="pb-2 font-medium">Give %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trailGrid().map((t) => (
+                      <tr key={t.key} className="border-t border-border font-mono">
+                        <td className="py-1.5">{t.key}</td>
+                        <td className="py-1.5">{t.arm.toFixed(1)}</td>
+                        <td className="py-1.5">{t.give.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
               <p className="text-sm text-muted">
-                Live fallback {overlay.trailArmPct.toFixed(1)}:{overlay.trailGivePct.toFixed(1)}. Catalog is every arm in {overlay.trailArmMin}–{overlay.trailArmMax} × every give in {overlay.trailGiveMin}–{overlay.trailGiveMax}. Recals only pick for new entries. Scores are independent of the SL:TP book.
+                All {trailGrid().length} trail ratios stay in eval, independent of the SL:TP book. Auto-recalc only picks the live attach for a new fill.
               </p>
             </Card>
           )}

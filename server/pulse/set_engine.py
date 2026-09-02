@@ -659,7 +659,8 @@ class SetBook:
         # Always enumerate the full arm×give product as independent Sets
         # alongside Normal (base) SL×TP. A selected live trail does not hide
         # the others. Explicit stratTrailing=False drops the trail family
-        # (hist-calc checkbox) — live default stays on.
+        # (hist-calc checkbox) — live default stays on. Settings no longer
+        # shrinks the catalog; overlay min/max are forced to the full grid.
         if ov.get("stratTrailing") is False:
             self.trails = []
         else:

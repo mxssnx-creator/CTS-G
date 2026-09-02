@@ -588,9 +588,9 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "indTypeTrend": bool(opt.get("indTypeTrend", True)),
         "indTypeBreak": bool(opt.get("indTypeBreak", True)),
         "trailArmMin": 0.3,
-        "trailArmMax": 1.5 if opt.get("trailing", True) else 0.3,
+        "trailArmMax": 1.5,
         "trailGiveMin": 0.1,
-        "trailGiveMax": 0.5 if opt.get("trailing", True) else 0.1,
+        "trailGiveMax": 0.5,
         "trailRecalcGive": False,
         "exitIgnoreTp": True,
         "setHonorTp": True,
@@ -611,6 +611,13 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
             ov[k] = v
         ov["histLookbackBars"] = lookback
         ov["histMinBars"] = min(int(ov.get("histMinBars") or 120), lookback)
+    ov["slToTpMin"] = SL_TP_MIN
+    ov["slToTpMax"] = SL_TP_MAX
+    ov["slToTpStep"] = SL_TP_STEP
+    ov["trailArmMin"] = 0.3
+    ov["trailArmMax"] = 1.5
+    ov["trailGiveMin"] = 0.1
+    ov["trailGiveMax"] = 0.5
     return ov
 
 

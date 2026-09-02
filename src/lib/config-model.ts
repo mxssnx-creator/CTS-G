@@ -99,6 +99,18 @@ export function slTpGrid(lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): num
 
 export const SL_TP_RATIOS = slTpGrid() as readonly number[];
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
+export const TRAIL_ARMS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
+export const TRAIL_GIVES = [0.1, 0.2, 0.3, 0.4, 0.5] as const;
+
+export function trailGrid(): { key: string; arm: number; give: number }[] {
+  const out: { key: string; arm: number; give: number }[] = [];
+  for (const arm of TRAIL_ARMS) {
+    for (const give of TRAIL_GIVES) {
+      out.push({ key: `${arm.toFixed(1)}:${give.toFixed(1)}`, arm, give });
+    }
+  }
+  return out;
+}
 
 export function snapSlToTp(v: number, lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number {
   const grid = slTpGrid(lo, hi, step);
@@ -739,6 +751,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.slToTpMax = 2.6;
   out.slToTpStep = 0.2;
   out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), 0.2, 2.6, 0.2);
+  out.trailArmMin = 0.3;
+  out.trailArmMax = 1.5;
+  out.trailGiveMin = 0.1;
+  out.trailGiveMax = 0.5;
   out.setMinStep = Math.max(3, Math.min(22, Math.round(num(out.setMinStep, 3))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
   out.modules = {
