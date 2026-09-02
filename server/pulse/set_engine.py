@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Independent config Sets: 1m historic replay, last-15 PF, max DD time, last-25 deact.
+"""Independent config Sets: 1m historic replay, last-15 PF, max DD time, live deact.
 
-A Set is one (pack × SL:TP ratio × trail) book. Historic walks 1-minute OHLC,
-simulates entries/exits, then scores each Set on its own tape. Live closes
-merge into the same book. Last 25 average Result-R < 0 deactivates that Set.
+A Set is one (pack × SL:TP ratio × trail × step) book. Historic walks 1-minute
+OHLC to discover unproven books. Live on-exchange closes (cost-net) score the
+processed Sets and are the only tape that deactivates them.
 """
 from __future__ import annotations
 
@@ -472,6 +472,7 @@ class SetState:
     locked: bool = False
     source_n: int = 0
     by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    live_eval: Dict[str, Any] = field(default_factory=dict)
 
     def tape(self) -> List[Dict[str, Any]]:
         return list(self.hist) + list(self.live)
@@ -1288,11 +1289,13 @@ class SetBook:
             "net_avg": float(last15.get("netAvg") or expectancy),
         }
 
-    def _side_active_flags(self, m: Dict[str, Any], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
-        """Per-side deact from that side's tape only. Mixed fills never gate the other side."""
+    def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
+        """Per-side deact from LIVE exchange fills only. Simulated hist never gates a side."""
         if not self.auto_deact:
             return True, ""
         live_rows = [r for r in live if isinstance(r, dict)]
+        if len(live_rows) < 8:
+            return True, ""
         live25 = live_rows[-self.deact_n :]
         live_avg = (
             sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25) if live25 else 0.0
@@ -1302,19 +1305,19 @@ class SetBook:
             sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail) if live_tail else 0.0
         )
         need = max(self.min_samples, min(self.pf_n, 8))
-        n15 = int(m.get("last15_n") or 0)
-        ratio = float(m.get("last15_ratio") or 0)
         if len(live25) >= self.deact_n and live_avg < 0:
             return False, f"live last{len(live25)} avg loss {live_avg:.4f}"
         if len(live_rows) >= 8 and live_tail_avg < 0:
             return False, f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
-        notes: List[str] = []
+        if not m:
+            return True, ""
+        n15 = int(m.get("last15_n") or 0)
+        ratio = float(m.get("last15_ratio") or 0)
         if n15 >= need and ratio + 1e-9 < 1.0:
-            notes.append(f"last{n15} PF {ratio:.2f}<1.00 neg")
-            return False, "; ".join(notes)
+            return False, f"live last{n15} PF {ratio:.2f}<1.00 neg"
         if n15 >= need and ratio + 1e-9 < self.min_pf:
-            notes.append(f"last{n15} PF {ratio:.2f}<{self.min_pf:.2f}")
-        return True, "; ".join(notes)
+            return False, f"live last{n15} PF {ratio:.2f}<{self.min_pf:.2f}"
+        return True, ""
 
     def _score_one(self, st: SetState) -> None:
         tape = st.tape()
@@ -1344,13 +1347,57 @@ class SetBook:
         st.avg_dd_s = m["avg_dd_s"]
         st.dd_episodes = m["dd_episodes"]
         st.source_n = m["source_n"]
+        live_m = self._score_metrics(st.live)
+        st.live_eval = {
+            "n": len(st.live),
+            "last15N": int(live_m["last15_n"]),
+            "last15Ratio": round(float(live_m["last15_ratio"]), 4),
+            "last15R": round(float(live_m["last15_r"]), 4),
+            "netAvg": round(float(live_m["net_avg"]), 6),
+            "expectancy": float(live_m["expectancy"]),
+            "wr": float(live_m["wr"]),
+            "maxDdS": float(live_m["max_dd_s"]),
+            "avgDdS": float(live_m["avg_dd_s"]),
+            "gp": float(live_m["gp"]),
+            "gl": float(live_m["gl"]),
+            "validated": bool(live_m["validated"]),
+            "costSubtracted": True,
+            "source": "live-exchange",
+        }
+        need = max(self.min_samples, min(self.pf_n, 8))
         by: Dict[str, Dict[str, Any]] = {}
         for side in DIRECTIONS:
             sub_hist = filter_side(st.hist, side)
             sub_tape = filter_side(tape, side)
+            sub_live = filter_side(st.live, side)
             sm = self._score_metrics(sub_tape, hist_n=len(sub_hist))
             sm["side"] = side
-            active_s, reason_s = self._side_active_flags(sm, filter_side(st.live, side))
+            lm = self._score_metrics(sub_live)
+            sm["live"] = {
+                "n": len(sub_live),
+                "last15_n": lm["last15_n"],
+                "last15_ratio": lm["last15_ratio"],
+                "last15_r": lm["last15_r"],
+                "net_avg": lm["net_avg"],
+                "expectancy": lm["expectancy"],
+                "max_dd_s": lm["max_dd_s"],
+                "wr": lm["wr"],
+                "validated": lm["validated"],
+                "cost_subtracted": True,
+            }
+            sm["liveN"] = len(sub_live)
+            if len(sub_live) >= need:
+                sm["last15_ratio"] = lm["last15_ratio"]
+                sm["last15_n"] = lm["last15_n"]
+                sm["last15_r"] = lm["last15_r"]
+                sm["net_avg"] = lm["net_avg"]
+                sm["expectancy"] = lm["expectancy"]
+                sm["max_dd_s"] = lm["max_dd_s"]
+                sm["validated"] = lm["validated"]
+                sm["source"] = "live-exchange"
+            else:
+                sm["source"] = "hist-sim"
+            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= 8 else None, sub_live)
             sm["active"] = active_s
             sm["deact_reason"] = reason_s
             by[side] = sm
@@ -1372,8 +1419,8 @@ class SetBook:
             st.active = True
             st.deact_reason = ""
             return
-        # Hard deactivation: latest 25 LIVE exchange fills, overall average is a loss.
-        if len(live25) >= self.deact_n and live_avg < 0:
+        # Deactivation is LIVE on-exchange only. Simulated hist never turns a Set off.
+        if live_n >= self.deact_n and live_avg < 0:
             st.active = False
             st.deact_reason = f"live last{len(live25)} avg loss {live_avg:.4f}"
             st.last25_avg_pnl = live_avg
@@ -1385,33 +1432,26 @@ class SetBook:
             st.last25_avg_pnl = live_tail_avg
             return
         notes = []
-        need = max(self.min_samples, min(self.pf_n, 8))
-        if st.last15_n >= need and st.last15_ratio + 1e-9 < self.min_pf:
-            notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<{self.min_pf:.2f}")
-        live_dd = False
-        if len(live25) >= max(8, self.min_samples) and st.max_dd_s > self.max_dd_s:
-            notes.append(f"maxDDt {st.max_dd_s:.0f}s>{self.max_dd_s:.0f}s")
-            live_dd = True
-        # Hard rule: only positive-PF sets (cost-adjusted last-N PF >= 1.00)
-        # stay validated and may be processed. Proven-negative sets deactivate;
-        # reactivate=on lets them return once the window rolls non-negative,
-        # reactivate=off keeps them off until PF recovers to min_pf.
-        proven_neg = st.last15_n >= need and st.last15_ratio + 1e-9 < 1.0
-        was_neg_off = (not st.active) and ("<1.00 neg" in st.deact_reason)
-        if proven_neg:
+        live_ratio = float(live_m["last15_ratio"])
+        live_n15 = int(live_m["last15_n"])
+        if live_n15 >= need and live_ratio + 1e-9 < 1.0:
             st.active = False
-            notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<1.00 neg")
-        elif was_neg_off and not self.reactivate and st.last15_ratio + 1e-9 < self.min_pf:
+            st.deact_reason = f"live last{live_n15} PF {live_ratio:.2f}<1.00 neg"
+            return
+        if live_n15 >= need and live_ratio + 1e-9 < self.min_pf:
+            notes.append(f"live last{live_n15} PF {live_ratio:.2f}<{self.min_pf:.2f}")
+        if live_n >= need and float(live_m["max_dd_s"]) > self.max_dd_s:
+            notes.append(f"live maxDDt {live_m['max_dd_s']:.0f}s>{self.max_dd_s:.0f}s")
+        was_live_off = (not st.active) and st.deact_reason.startswith("live ")
+        if notes and not self.reactivate and was_live_off:
             st.active = False
-            notes.append(st.deact_reason)
-        elif notes and not self.reactivate:
-            # Historic PF below min is a rank penalty; only live DD / live last25 hard-stops.
-            if live_dd or (st.last15_n >= self.pf_n and len(live25) >= self.min_samples and st.last15_ratio + 1e-9 < 1.0):
-                st.active = False
-            else:
-                st.active = True
-        else:
-            st.active = True
+            st.deact_reason = "; ".join(dict.fromkeys(notes + [st.deact_reason]))
+            return
+        if notes and not self.reactivate and live_n15 >= need:
+            st.active = False
+            st.deact_reason = "; ".join(dict.fromkeys(notes))
+            return
+        st.active = True
         st.deact_reason = "; ".join(dict.fromkeys(notes))
 
     def _cap_active(self) -> None:
@@ -1638,9 +1678,17 @@ class SetBook:
         return self.pick_any(pack, side=side) is not None
 
     def ind_stats(self, kind: str, side: Optional[str] = None) -> Dict[str, Any]:
-        """Cost-adjusted PF evidence for one indication kind (hist + live), optional side."""
-        tape = list(self.ind_hist.get(kind) or []) + list(self.ind_live.get(kind) or [])
-        tape = filter_side(tape, side)
+        """Cost-adjusted PF evidence for one indication kind. Live tape wins once it has samples."""
+        live = list(self.ind_live.get(kind) or [])
+        hist = list(self.ind_hist.get(kind) or [])
+        live_side = filter_side(live, side)
+        need = max(self.min_samples, 8)
+        if len(live_side) >= need:
+            tape = live_side
+            source = "live-exchange"
+        else:
+            tape = filter_side(hist + live, side)
+            source = "mixed" if live_side else "hist-sim"
         tape.sort(key=lambda r: finite(r.get("t")))
         dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
@@ -1669,6 +1717,8 @@ class SetBook:
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "ddEpisodes": int(dd.get("episodes") or 0),
             "bySide": by_side,
+            "source": source,
+            "liveN": len(live_side),
         }
 
     def indication_ok(self, kind: str, side: Optional[str] = None) -> bool:
@@ -1702,6 +1752,75 @@ class SetBook:
             out[k] = st
         return out
 
+    def live_overview(self) -> Dict[str, Any]:
+        """On-exchange processed Sets, cost-net. Unique client_id so a fill is not double-counted."""
+        processed = [s for s in self.by_idx if s.live]
+        seen: set = set()
+        fills: List[Dict[str, Any]] = []
+        for s in processed:
+            for r in s.live:
+                if not isinstance(r, dict):
+                    continue
+                cid = str(r.get("client_id") or "") or f"{r.get('t')}:{r.get('symbol')}:{s.id}:{r.get('pnl')}"
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                fills.append(r)
+        fills.sort(key=lambda r: finite(r.get("t")))
+        m = self._score_metrics(fills)
+        rows = []
+        for s in sorted(processed, key=lambda x: (-len(x.live), -float((x.live_eval or {}).get("last15Ratio") or 0), x.max_dd_s)):
+            ev = s.live_eval or {}
+            rows.append({
+                "id": s.id,
+                "pack": s.pack,
+                "kind": s.kind,
+                "slRatio": s.sl_ratio,
+                "step": s.step,
+                "trailKey": s.trail_key,
+                "direction": "BOTH",
+                "n": int(ev.get("n") or len(s.live)),
+                "last15Ratio": float(ev.get("last15Ratio") or 0),
+                "last15N": int(ev.get("last15N") or 0),
+                "netAvg": float(ev.get("netAvg") or 0),
+                "wr": float(ev.get("wr") or 0),
+                "maxDdS": float(ev.get("maxDdS") or 0),
+                "validated": bool(ev.get("validated")),
+                "active": s.active,
+                "deactReason": s.deact_reason,
+                "costSubtracted": True,
+                "source": "live-exchange",
+                "bySide": {
+                    d: {
+                        "n": int((v.get("live") or {}).get("n") or v.get("liveN") or 0),
+                        "pf": round(float((v.get("live") or {}).get("last15_ratio") or 0), 4),
+                        "netAvg": round(float((v.get("live") or {}).get("net_avg") or 0), 6),
+                        "active": bool(v.get("active", True)),
+                        "validated": bool((v.get("live") or {}).get("validated")),
+                    }
+                    for d, v in (s.by_side or {}).items()
+                    if isinstance(v, dict)
+                },
+            })
+            if len(rows) >= 32:
+                break
+        return {
+            "processed": len(processed),
+            "active": sum(1 for s in processed if s.active),
+            "deactivated": sum(1 for s in processed if not s.active),
+            "fills": len(fills),
+            "last15Ratio": round(float(m["last15_ratio"]), 4),
+            "last15N": int(m["last15_n"]),
+            "netAvg": round(float(m["net_avg"]), 6),
+            "wr": float(m["wr"]),
+            "maxDdS": float(m["max_dd_s"]),
+            "validated": bool(m["validated"]),
+            "costSubtracted": True,
+            "costPct": self.cost_pct,
+            "source": "live-exchange",
+            "rows": rows,
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         rows = []
         for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.last15_ratio, s.max_dd_s)):
@@ -1724,7 +1843,28 @@ class SetBook:
                     "tpPct": round(st.tp_pct * 100, 4),
                     "n": st.n,
                     "liveN": len(st.live),
+                    "histN": len(st.hist),
                     "wins": st.wins,
+                    "last15Ratio": round(st.last15_ratio, 4),
+                    "last15Classic": round(st.last15_classic, 3),
+                    "last15N": st.last15_n,
+                    "last15R": round(st.last15_r, 4),
+                    "last25AvgR": round(st.last25_avg_r, 4),
+                    "last25N": st.last25_n,
+                    "last25AvgPnl": round(st.last25_avg_pnl, 6),
+                    "maxDdS": st.max_dd_s,
+                    "avgDdS": st.avg_dd_s,
+                    "ddEpisodes": st.dd_episodes,
+                    "wr": st.wr,
+                    "expectancy": st.expectancy,
+                    "avgHoldS": st.avg_hold_s,
+                    "classicPf": st.classic_all,
+                    "gp": st.gp,
+                    "gl": st.gl,
+                    "costSubtracted": True,
+                    "netAvg": round(st.expectancy, 6),
+                    "live": st.live_eval or {},
+                    "source": "live-exchange" if st.live else "hist-sim",
                     "last15Ratio": round(st.last15_ratio, 4),
                     "last15Classic": round(st.last15_classic, 3),
                     "last15N": st.last15_n,
@@ -1782,6 +1922,7 @@ class SetBook:
         rows = rows[:24]
         p = self.progress
         cover = self.coverage()
+        live_ov = self.live_overview()
         index = [
             {
                 "i": st.idx,
@@ -1817,6 +1958,10 @@ class SetBook:
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
             "coverage": cover,
+            "liveOverview": live_ov,
+            "liveFills": int(live_ov.get("fills") or 0),
+            "liveProcessed": int(live_ov.get("processed") or 0),
+            "liveActive": int(live_ov.get("active") or 0),
             "index": index,
             "minStep": self.min_step,
             "minStepCfg": self.min_step_cfg,
@@ -1921,10 +2066,20 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
     st.live = []
     book._score_one(st)
-    out.append(("set-hist-neg-off", (not st.active) and "neg" in st.deact_reason, f"{st.active} {st.deact_reason}"))
+    out.append(("set-hist-neg-not-deact", st.active, f"{st.active} {st.deact_reason}"))
     st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
     out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
+    st.hist = [{"t": 1500 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(15)]
+    st.live = [{"t": 2500 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(10)]
+    book._score_one(st)
+    out.append(("set-live-overrides-hist", (not st.active) and str(st.deact_reason).startswith("live"), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
+    st.hist = [{"t": 1500 + i, "pnl": -0.02, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(15)]
+    st.live = [{"t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(10)]
+    book._score_one(st)
+    out.append(("set-live-wins-keep", st.active, f"{st.active} {st.deact_reason} live={st.live_eval}"))
+    snap_ov = book.snapshot().get("liveOverview") or {}
+    out.append(("set-live-overview", int(snap_ov.get("processed") or 0) >= 1 and snap_ov.get("costSubtracted") is True and snap_ov.get("source") == "live-exchange", str(snap_ov)[:220]))
     st.live = [{"t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
     book._score_one(st)
     out.append(("set-live-win-on", st.active, f"{st.active} {st.deact_reason}"))
@@ -2168,7 +2323,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     g2._score_one(pos_set)
-    out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    out.append(("set-neg-hist-stays", neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
     out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
     pk = g2.pick("general")
     out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
@@ -2184,14 +2339,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     neg_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     out.append(("set-neg-recover", neg_set.active and neg_set.last15_ratio >= 1.0, f"{neg_set.active} pf={neg_set.last15_ratio}"))
-    # sticky off when reactivate is disabled (until PF recovers to min_pf)
+    # sticky off when reactivate is disabled — LIVE processed only
     g2.reactivate = False
-    neg_set.hist = list(neg_rows)
+    neg_set.live = [{"t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl", "client_id": f"ls{i}"} for i in range(15)]
     g2._score_one(neg_set)
     off1 = not neg_set.active
-    neg_set.hist = list(pos_rows)  # ratio 1.10 < min_pf 1.20 -> stays off
+    neg_set.live = [{"t": 10000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp", "client_id": f"lw{i}"} for i in range(15)]
     g2._score_one(neg_set)
-    out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    out.append(("set-live-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.live_eval}"))
     # cold start (no replay yet): STRICT pick stays None, but packs stay
     # open so the desk keeps processing until the first replay finishes.
     g3 = SetBook()
@@ -2324,7 +2479,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     lblob = ist.by_side.get("LONG") or {}
     sblob = ist.by_side.get("SHORT") or {}
     out.append(("set-dir-long-active", bool(lblob.get("active")) and bool(lblob.get("validated")), str(lblob)))
-    out.append(("set-dir-short-off", sblob.get("active") is False and float(sblob.get("last15_ratio") or 0) < 1.0, str(sblob)))
+    out.append(("set-dir-short-off", float(sblob.get("last15_ratio") or 0) < 1.0 and ibook.pick("general", side="SHORT") is None, str(sblob)))
     pk_l = ibook.pick("general", side="LONG")
     pk_s = ibook.pick("general", side="SHORT")
     out.append(("set-dir-pick-long-ok", pk_l is not None, f"L={getattr(pk_l, 'id', None)} mixed_on={ist.active}"))

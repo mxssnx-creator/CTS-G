@@ -2115,6 +2115,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
   const sets = stats?.sets;
   const p = sets?.progress;
   const rows = sets?.rows ?? [];
+  const liveOv = sets?.liveOverview;
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   return (
     <div className="space-y-3">
@@ -2122,7 +2123,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
           <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}</span>
           <span className="text-muted">
-            {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist fills · last {fmtNum(p?.lastRunMs, 0)}ms
+            {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
           </span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
@@ -2130,6 +2131,9 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         </div>
         <p className="mt-2 font-mono text-[11px] text-muted">
           {p?.detail || "waiting 1m bars"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} {p?.error ? `· ${p.error}` : ""}
+        </p>
+        <p className="mt-1 font-mono text-[11px] text-primary">
+          live on-exchange {liveOv?.active ?? sets?.liveActive ?? 0}/{liveOv?.processed ?? sets?.liveProcessed ?? 0} processed · fills {liveOv?.fills ?? sets?.liveFills ?? 0} · PF {Number(liveOv?.last15Ratio ?? 0).toFixed(2)} net {(Number(liveOv?.netAvg ?? 0) * 100).toFixed(3)}% · cost subtracted · deact from live only
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -2153,26 +2157,32 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 </td>
               </tr>
             ) : (
-              rows.slice(0, 40).map((r) => (
+              rows.slice(0, 40).map((r) => {
+                const liveN = r.liveN || r.live?.n || 0;
+                const pf = liveN ? Number(r.live?.last15Ratio ?? r.last15Ratio) : r.last15Ratio;
+                const ddt = liveN ? Number(r.live?.maxDdS ?? r.maxDdS) : r.maxDdS;
+                return (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5">
                     {r.pack} · sl{r.slRatio.toFixed(1)} · st{r.step ?? "—"} · {r.trailKey}
+                    {liveN ? " · live" : " · hist"}
                   </td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
-                    {r.liveN ? `+${r.liveN}` : ""}
+                    {liveN ? `+${liveN}` : ""}
                   </td>
-                  <td className={`py-1.5 text-right ${r.last15Ratio + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
-                    {r.last15Ratio.toFixed(2)}
+                  <td className={`py-1.5 text-right ${pf + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                    {pf.toFixed(2)}
                   </td>
                   <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>
                     {r.last25AvgR.toFixed(2)}
                   </td>
-                  <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
+                  <td className="py-1.5 text-right">{formatDuration(ddt * 1000)}</td>
                   <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>

@@ -14,6 +14,12 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     setCount?: number;
     activeCount?: number;
     histFills?: number;
+    liveFills?: number;
+    liveProcessed?: number;
+    liveActive?: number;
+    livePf?: number;
+    liveNetAvg?: number;
+    costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;
     product?: number;
@@ -39,6 +45,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         <span className="text-muted">
           sets {sets.activeCount ?? 0}/{sets.setCount ?? 0}
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
+          {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
         </span>
       </div>
@@ -111,6 +118,12 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
     setCount?: number;
     activeCount?: number;
     histFills?: number;
+    liveFills?: number;
+    liveProcessed?: number;
+    liveActive?: number;
+    livePf?: number;
+    liveNetAvg?: number;
+    costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;
     independentTrail?: boolean;
@@ -121,6 +134,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
     steps?: number[];
     dims?: { pack?: number; sl?: number; trail?: number; step?: number };
   };
+  const liveSets = live?.sets?.liveOverview;
   const ctrl = cov?.controls;
   const recon = cov?.recon;
   const px = cov?.px ?? scan?.px ?? 0;
@@ -136,7 +150,12 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
         <KV k="Recon" v={String(recon?.detail || (recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
-        <KV k="Sets" v={`${sets.activeCount ?? 0}/${sets.setCount ?? 0} live · hist ${sets.histFills ?? 0}`} ok={(sets.activeCount ?? 0) > 0} />
+        <KV k="Sets" v={`${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.activeCount ?? 0) > 0} />
+        <KV
+          k="Live sets (cost-net)"
+          v={`${sets.liveActive ?? liveSets?.active ?? 0}/${sets.liveProcessed ?? liveSets?.processed ?? 0} processed · PF ${Number(sets.livePf ?? liveSets?.last15Ratio ?? 0).toFixed(2)} · n ${sets.liveFills ?? liveSets?.fills ?? 0}`}
+          ok={(sets.liveProcessed ?? liveSets?.processed ?? 0) >= 0}
+        />
         <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
         <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
         <KV
@@ -179,6 +198,41 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
           set product {sets.product ?? "—"} · pack {sets.dims.pack} × sl {sets.dims.sl} × trail {sets.dims.trail} × step {sets.dims.step}
           {sets.trailCover === false ? " · trail cover gap" : " · trail cover ok"}
         </p>
+      ) : null}
+      {(liveSets?.rows || []).length ? (
+        <div className="overflow-x-auto">
+          <p className="mb-1 font-mono text-[11px] uppercase text-muted">Live on-exchange sets · cost subtracted</p>
+          <table className="w-full min-w-[560px] text-left text-xs">
+            <thead className="font-mono text-muted">
+              <tr>
+                <th className="pb-1 font-medium">Set</th>
+                <th className="pb-1 font-medium">Pack</th>
+                <th className="pb-1 text-right font-medium">n</th>
+                <th className="pb-1 text-right font-medium">PF</th>
+                <th className="pb-1 text-right font-medium">net</th>
+                <th className="pb-1 text-right font-medium">DDt</th>
+                <th className="pb-1 font-medium">state</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {(liveSets?.rows || []).slice(0, 12).map((r) => {
+                const id = String(r.id || "");
+                const on = Boolean(r.active);
+                return (
+                  <tr key={id} className={`border-t border-border ${on ? "text-fg" : "text-muted"}`}>
+                    <td className="py-1">{id.replace("-USDT", "")}</td>
+                    <td className="py-1">{String(r.pack || "")}</td>
+                    <td className="py-1 text-right">{r.n ?? 0}</td>
+                    <td className="py-1 text-right">{Number(r.last15Ratio ?? 0).toFixed(2)}</td>
+                    <td className="py-1 text-right">{(Number(r.netAvg ?? 0) * 100).toFixed(3)}%</td>
+                    <td className="py-1 text-right">{Math.round(Number(r.maxDdS ?? 0))}s</td>
+                    <td className="py-1">{on ? "on" : String(r.deactReason || "off")}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : null}
       {gaps.length ? (
         <p className="font-mono text-xs text-danger">

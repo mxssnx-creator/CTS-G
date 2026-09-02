@@ -4800,6 +4800,7 @@ class Pulse:
             for i in rows:
                 hits[i.kind] = hits.get(i.kind, 0) + 1
         scov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
+        live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
         stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
         ours_open = [p for p in self.open.values() if getattr(p, "ours", True)]
         with_set = sum(1 for p in ours_open if getattr(p, "set_id", ""))
@@ -4863,6 +4864,12 @@ class Pulse:
                 "setCount": len(self.sets.sets),
                 "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
+                "liveFills": int(live_ov.get("fills") or 0),
+                "liveProcessed": int(live_ov.get("processed") or 0),
+                "liveActive": int(live_ov.get("active") or 0),
+                "livePf": float(live_ov.get("last15Ratio") or 0),
+                "liveNetAvg": float(live_ov.get("netAvg") or 0),
+                "costSubtracted": True,
                 "trailCover": scov.get("trailCover"),
                 "slCover": scov.get("slCover"),
                 "independentTrail": scov.get("independentTrail"),

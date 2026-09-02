@@ -306,6 +306,12 @@ export type LiveStats = {
       setCount?: number;
       activeCount?: number;
       histFills?: number;
+      liveFills?: number;
+      liveProcessed?: number;
+      liveActive?: number;
+      livePf?: number;
+      liveNetAvg?: number;
+      costSubtracted?: boolean;
       trailCover?: boolean;
       independentTrail?: boolean;
       slCover?: boolean;
@@ -507,6 +513,34 @@ export type LiveStats = {
     steps?: number[];
     activeCount?: number;
     histFills?: number;
+    liveFills?: number;
+    liveProcessed?: number;
+    liveActive?: number;
+    liveOverview?: {
+      processed?: number;
+      active?: number;
+      deactivated?: number;
+      fills?: number;
+      last15Ratio?: number;
+      last15N?: number;
+      netAvg?: number;
+      wr?: number;
+      maxDdS?: number;
+      costSubtracted?: boolean;
+      source?: string;
+      rows?: Array<{
+        id?: string;
+        pack?: string;
+        n?: number;
+        last15Ratio?: number;
+        netAvg?: number;
+        maxDdS?: number;
+        wr?: number;
+        active?: boolean;
+        deactReason?: string;
+        costSubtracted?: boolean;
+      }>;
+    };
     barsSymbols?: number;
     lanes?: Array<{
       type?: string;
@@ -554,6 +588,7 @@ export type LiveStats = {
       tpPct?: number;
       n: number;
       liveN: number;
+      histN?: number;
       wins: number;
       last15Ratio: number;
       last15Classic: number;
@@ -585,8 +620,33 @@ export type LiveStats = {
       active: boolean;
       deactReason: string;
       locked: boolean;
+      source?: string;
+      live?: {
+        n?: number;
+        last15Ratio?: number;
+        last15N?: number;
+        netAvg?: number;
+        wr?: number;
+        maxDdS?: number;
+        validated?: boolean;
+        costSubtracted?: boolean;
+        source?: string;
+      };
     }>;
   };
+  internBest?: Array<{
+    id?: string;
+    pack?: string;
+    last15Ratio?: number;
+    last25AvgR?: number;
+    maxDdS?: number;
+    n?: number;
+    liveN?: number;
+    netAvg?: number;
+    active?: boolean;
+    deactReason?: string;
+    source?: string;
+  }>;
   exits?: {
     enabled?: boolean;
     ignoreTp?: boolean;

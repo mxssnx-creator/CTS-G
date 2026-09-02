@@ -433,6 +433,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "tpPct": r.get("tpPct"),
             "n": r.get("n"),
             "liveN": r.get("liveN"),
+            "histN": r.get("histN"),
             "wins": r.get("wins"),
             "wr": r.get("wr"),
             "expectancyNetCost": r.get("expectancy"),
@@ -455,6 +456,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "locked": r.get("locked"),
             "costSubtracted": True,
             "bySide": r.get("bySide"),
+            "live": r.get("live") or {},
+            "source": r.get("source") or ("live-exchange" if int(r.get("liveN") or 0) else "hist-sim"),
         })
     blob: Dict[str, Any] = {
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -530,21 +533,35 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "setCount": sets.get("setCount"),
         "setActive": sets.get("activeCount"),
         "histFills": sets.get("histFills"),
+        "liveFills": sets.get("liveFills"),
+        "liveProcessed": sets.get("liveProcessed"),
+        "liveActive": sets.get("liveActive"),
+        "liveOverview": sets.get("liveOverview") or {},
         "setsProgress": sets.get("progress"),
         "sets": rows,
         "internBest": [
             {
                 "id": r.get("id"),
                 "pack": r.get("pack"),
-                "last15Ratio": r.get("last15Ratio"),
+                "last15Ratio": (r.get("live") or {}).get("last15Ratio") if int(r.get("liveN") or 0) else r.get("last15Ratio"),
                 "last25AvgR": r.get("last25AvgR"),
-                "maxDdS": r.get("maxDdS"),
+                "maxDdS": (r.get("live") or {}).get("maxDdS") if int(r.get("liveN") or 0) else r.get("maxDdS"),
                 "n": r.get("n"),
                 "liveN": r.get("liveN"),
+                "netAvg": (r.get("live") or {}).get("netAvg") if int(r.get("liveN") or 0) else r.get("expectancyNetCost"),
                 "active": r.get("active"),
                 "deactReason": r.get("deactReason"),
+                "source": r.get("source"),
+                "costSubtracted": True,
             }
-            for r in sorted(rows, key=lambda x: (-float(x.get("last15Ratio") or 0), float(x.get("maxDdS") or 0)))[:12]
+            for r in sorted(
+                rows,
+                key=lambda x: (
+                    0 if int(x.get("liveN") or 0) else 1,
+                    -float(((x.get("live") or {}).get("last15Ratio") if int(x.get("liveN") or 0) else x.get("last15Ratio")) or 0),
+                    float(x.get("maxDdS") or 0),
+                ),
+            )[:12]
         ],
         "exits": exits.get("lanes"),
         "exitRevOn": exits.get("revOn"),
@@ -638,6 +655,17 @@ def render_md(blob: Dict[str, Any]) -> str:
         )
     lines += ["", "## Independent Sets (intern, cost deducted)", ""]
     lines.append(f"active {blob.get('setActive')}/{blob.get('setCount')} · hist fills {blob.get('histFills')} · minStep {blob.get('setMinStep')}-{blob.get('setStepMax')}")
+    lov = blob.get("liveOverview") or {}
+    lines += [
+        "",
+        "## Live on-exchange Sets (cost subtracted)",
+        f"processed {lov.get('processed') or blob.get('liveProcessed') or 0} · on {lov.get('active') or blob.get('liveActive') or 0} · fills {lov.get('fills') or blob.get('liveFills') or 0} · PF {lov.get('last15Ratio')} net {lov.get('netAvg')} · source live-exchange",
+    ]
+    for r in (lov.get("rows") or [])[:16]:
+        lines.append(
+            f"- `{r.get('id')}` live n={r.get('n')} PF={r.get('last15Ratio')} net={r.get('netAvg')} DDt={r.get('maxDdS')}s {'ON' if r.get('active') else 'OFF'} {r.get('deactReason') or ''}"
+        )
+    lines += ["", "## Set intern ranking", ""]
     for r in sorted(sets, key=lambda x: (-float(x.get("last15Ratio") or 0), float(x.get("maxDdS") or 0)))[:20]:
         lines.append(
             f"- `{r.get('id')}` PF15={r.get('last15Ratio')} R25={r.get('last25AvgR')} WR={r.get('wr')} E={r.get('expectancyNetCost')} hold={r.get('avgHoldS')}s maxDDt={r.get('maxDdS')}s n={r.get('n')}+{r.get('liveN')} on={r.get('active')} {r.get('deactReason') or ''}"
