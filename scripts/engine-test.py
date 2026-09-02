@@ -192,7 +192,7 @@ def unlimited_test() -> None:
     finite = BlockBook("/tmp/block-lim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 3})
     rec("block-finite-stack", finite.max_stack == 3, str(finite.max_stack))
     frows = finite.evaluate_counts(BlockLane(symbol="XRP-USDT", side="SHORT", base_qty=1.0, base_entry=1.0), live_n=1, intern_pf=1.2)
-    rec("block-finite-eval", 3 <= len(frows) <= 6, f"n={len(frows)}")
+    rec("block-finite-eval", 12 <= len(frows) <= 13, f"n={len(frows)}")
     from dca_engine import DcaBook
     d = DcaBook()
     d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
@@ -843,11 +843,11 @@ def block_calc_test() -> None:
     want = 3  # 0 remaps to the default Block stack of 3
     cov = mk_cov(0)._coverage_blob()
     rec("block-coverage-unlimited-all-counts",
-        cov["block"]["countN"] == want and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, want + 1)),
+        cov["block"]["countN"] == 12 and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, 13)),
         f"n={cov['block']['countN']}")
     cov5 = mk_cov(5)._coverage_blob()
     rec("block-coverage-limited-all-counts",
-        cov5["block"]["countN"] == 5 and [r["n"] for r in cov5["block"]["allCounts"]] == [1, 2, 3, 4, 5],
+        cov5["block"]["countN"] == 12 and [r["n"] for r in cov5["block"]["allCounts"]] == list(range(1, 13)),
         f"n={cov5['block']['countN']}")
     rec("block-coverage-enabled-flag",
         cov["block"]["enabled"] is True and cov["strategies"]["block"] is True)
@@ -862,15 +862,15 @@ def block_calc_test() -> None:
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     regular = [r for r in rows if r["kind"] == "regular"]
     rec("block-eval-all-counts",
-        [r["blockCount"] for r in regular] == [1, 2, 3] and all(r["evaluated"] == 1 for r in rows),
+        [r["blockCount"] for r in regular] == list(range(1, 13)) and all(r["evaluated"] == 1 for r in rows),
         f"regular={[r['blockCount'] for r in regular]} total={len(rows)}")
     rec("block-eval-active-live", any(r["kind"] == "active-live" for r in rows))
-    # finite stack stays 1..max — no unbounded roll after satisfied counts
+    # finite stack stays 1..max for live emit — evals still walk 1..12
     lane.satisfied = {1: True, 2: True, 3: True}
     lane.confirmed_add = 6.0
     rows_roll = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     rec("block-eval-window-rolls",
-        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == [1, 2, 3],
+        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == list(range(1, 13)),
         f"{[r['blockCount'] for r in rows_roll if r['kind'] == 'regular']}")
     lane.satisfied = {1: True}
     lane.confirmed_add = 1.0

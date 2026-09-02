@@ -1115,9 +1115,10 @@ class SetBook:
             pos["tp"] = e * (1 - tp_frac)
 
     def _maybe_block_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
-        if int(pos.get("adds") or 0) >= 1:
+        n = int(pos.get("adds") or 0)
+        stack = 3
+        if n >= stack:
             return
-        held = 1  # caller guarantees held >= 1
         close = float(bar[3])
         entry = float(pos["entry"])
         side = int(pos["side"])
@@ -1126,11 +1127,12 @@ class SetBook:
         u = ((close - entry) / entry) * side
         if u < 0.002:
             return
+        # Always size off original parent, never the last add.
         add = float(pos["parent"]) * float(self.block_vr or 1.0)
         qty = float(pos["qty"])
         pos["entry"] = (entry * qty + close * add) / (qty + add)
         pos["qty"] = qty + add
-        pos["adds"] = 1
+        pos["adds"] = n + 1
         self._rearm_stops(pos, sl_frac, tp_frac)
 
     def _maybe_dca_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:

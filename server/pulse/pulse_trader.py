@@ -21,7 +21,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from typing import Any, Deque, Dict, List, Optional, Tuple
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -3233,7 +3233,7 @@ class Pulse:
         self.block.enabled = bool(b_en) if b_en is not None else True
         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
             self.block.enabled = True
-        self.block.max_stack = 3 if int(b_stack or 0) <= 0 else max(1, int(b_stack))
+        self.block.max_stack = clamp_stack(b_stack)
         try:
             self.load.configure(ov)
         except Exception:
@@ -4822,19 +4822,21 @@ class Pulse:
 
     def _coverage_blob(self) -> Dict[str, Any]:
         catalog = []
-        # Unlimited book (max_stack=0) must still expose ALL preview counts —
-        # otherwise the Block coverage degenerates to count 1 only.
         sim_n, _sim_upnl = self.sim_stats()
-        show_n = BLOCK_COUNT_PREVIEW if int(self.block.max_stack or 0) <= 0 else max(1, int(self.block.max_stack))
-        show_n = min(show_n, 32)
+        show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
+        show_n = min(max(show_n, 12), 32)
         for n in range(1, show_n + 1):
             f = self.block.formula(1.0, n)
             catalog.append({
                 "n": n,
                 "inc": f["volumeIncrement"],
+                "stepQty": round(float(f.get("stepQty") or 0), 8),
+                "volScale": round(float(f.get("volScale") or 1), 4),
                 "targetAdd": round(f["targetAddQty"], 8),
                 "targetBlock": round(f["targetBlockQty"], 8),
                 "minPF": round(f["blockMinPF"], 4),
+                "liveStack": n <= int(self.block.max_stack or 3),
+                "independent": True,
             })
         hits: Dict[str, int] = {}
         for rows in self.indications.last.values():
@@ -4896,6 +4898,7 @@ class Pulse:
                 "enabled": bool(self.block.enabled and self.strat_block),
                 "maxStack": self.block.max_stack,
                 "countN": len(catalog),
+                "evalN": show_n,
                 "allCounts": catalog,
                 "liveLanes": sum(1 for ln in self.block.lanes.values() if ln.active),
                 "activeReal": bool(getattr(self.block, "active_real", True)),
