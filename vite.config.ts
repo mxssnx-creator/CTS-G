@@ -373,7 +373,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json"];
+        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -537,6 +537,39 @@ function pulseControlPlugin(): Plugin {
               return;
             }
             jsonRes(res as ServerResponse, 200, seed);
+            return;
+          }
+          if (pathOnly === "/user-presets.json") {
+            const pulsePath = method === "GET" ? "/user-presets.json" : "/user-presets.json";
+            if (method === "GET") {
+              const pulse = await tryPulse("GET", pulsePath);
+              if (pulse && pulse.status < 400 && pulse.json && typeof pulse.json === "object") {
+                jsonRes(res as ServerResponse, pulse.status, pulse.json);
+                return;
+              }
+              const local = join(process.cwd(), "server/pulse/user-presets.json");
+              if (existsSync(local)) {
+                try {
+                  jsonRes(res as ServerResponse, 200, JSON.parse(readFileSync(local, "utf8")));
+                  return;
+                } catch {
+                  /* fall through */
+                }
+              }
+              jsonRes(res as ServerResponse, 200, { ok: true, presets: [], system: true, max: 24 });
+              return;
+            }
+            if (method !== "POST") {
+              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+              return;
+            }
+            const raw = await readReqBody(req);
+            const pulse = await tryPulse("POST", "/user-presets.json", raw, 8000);
+            if (pulse && pulse.status < 400 && pulse.json && typeof pulse.json === "object") {
+              jsonRes(res as ServerResponse, pulse.status, pulse.json);
+              return;
+            }
+            jsonRes(res as ServerResponse, 503, { ok: false, detail: "pulse sidecar offline — presets save on the desk host" });
             return;
           }
           if (pathOnly === "/config.json") {

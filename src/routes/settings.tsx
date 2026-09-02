@@ -26,6 +26,17 @@ import { CoveragePanel } from "@/components/coverage-overview";
 import { MAX_SYMBOLS } from "@/lib/config-model";
 import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
 import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
+import {
+  applyUserPreset,
+  deleteUserPreset,
+  fetchUserPresets,
+  loadUserPreset,
+  renameUserPreset,
+  saveUserPreset,
+  suggestPresetName,
+  overlayOverview,
+  type UserPreset,
+} from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
@@ -75,6 +86,13 @@ function SettingsPage() {
   const [calcBusy, setCalcBusy] = useState(false);
   const [presetId, setPresetId] = useState<string | null>(null);
   const [resetAsk, setResetAsk] = useState(false);
+  const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
+  const [userName, setUserName] = useState("Preset-1");
+  const [userSel, setUserSel] = useState<string | null>(null);
+  const [userBusy, setUserBusy] = useState(false);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState("");
+  const [deleteId, setDeleteId] = useState<string | null>(null);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
 
@@ -140,6 +158,18 @@ function SettingsPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [resetAsk]);
 
+  useEffect(() => {
+    let alive = true;
+    void fetchUserPresets().then((rows) => {
+      if (!alive) return;
+      setUserPresets(rows);
+      setUserName(suggestPresetName(rows));
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const stats = pickView(raw, conn);
 
   useEffect(() => {
@@ -188,6 +218,62 @@ function SettingsPage() {
       }));
     }
     setSaveMsg(`Preset ${preset?.name || id} applied · save Live or VST to persist`);
+  };
+
+  const onSaveSystemPreset = async () => {
+    setUserBusy(true);
+    const r = await saveUserPreset({ name: userName, overlay, calcOpt });
+    setUserBusy(false);
+    setUserPresets(r.presets);
+    if (r.preset) {
+      setUserSel(r.preset.id);
+      setUserName(suggestPresetName(r.presets));
+    }
+    setSaveMsg(r.ok ? `${r.preset?.name || userName} saved · overall system (Live + VST)` : r.detail);
+  };
+
+  const onLoadSystemPreset = async (id: string) => {
+    setUserBusy(true);
+    const r = await loadUserPreset(id);
+    if (!r.ok || !r.preset) {
+      setUserBusy(false);
+      setSaveMsg(r.detail);
+      return;
+    }
+    const next = applyUserPreset(overlay, r.preset);
+    dirtyRef.current = false;
+    setOverlay(next);
+    setDirty(false);
+    setPresetId(null);
+    setUserSel(id);
+    if (r.calcOpt) setCalcOpt((o) => ({ ...o, ...r.calcOpt }));
+    const live = await saveOverlay(next, "live");
+    const vst = await saveOverlay(next, "vst");
+    setUserBusy(false);
+    const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
+    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"}`);
+  };
+
+  const onRenameSystemPreset = async () => {
+    if (!renameId) return;
+    setUserBusy(true);
+    const r = await renameUserPreset(renameId, renameVal);
+    setUserBusy(false);
+    setUserPresets(r.presets);
+    setRenameId(null);
+    setSaveMsg(r.ok ? r.detail : r.detail);
+  };
+
+  const onDeleteSystemPreset = async () => {
+    if (!deleteId) return;
+    setUserBusy(true);
+    const r = await deleteUserPreset(deleteId);
+    setUserBusy(false);
+    setUserPresets(r.presets);
+    setUserName(suggestPresetName(r.presets));
+    if (userSel === deleteId) setUserSel(null);
+    setDeleteId(null);
+    setSaveMsg(r.ok ? "Preset deleted" : r.detail);
   };
 
   const onCalcAll = async () => {
@@ -416,6 +502,101 @@ function SettingsPage() {
                     );
                   })}
                 </div>
+              </Card>
+              <Card
+                title="System presets · Live + VST"
+                hint="Save the current book as Preset-N for overall use. Load applies every section (SL, steps, trail, Block/DCA, indications) to Live and VST immediately."
+              >
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    data-testid="user-preset-name"
+                    value={userName}
+                    onChange={(e) => setUserName(e.target.value)}
+                    placeholder="Preset-1"
+                    className="min-h-11 flex-1 rounded-lg border border-border bg-bg2 px-3 font-mono text-sm"
+                  />
+                  <button
+                    type="button"
+                    data-testid="user-preset-save"
+                    disabled={userBusy || !ready}
+                    onClick={() => void onSaveSystemPreset()}
+                    className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
+                  >
+                    {userBusy ? "Saving…" : "Save as system preset"}
+                  </button>
+                </div>
+                <p className="font-mono text-[11px] text-muted">{overlayOverview(overlay)}</p>
+                {userPresets.length === 0 ? (
+                  <p className="text-sm text-muted">No saved system presets yet. Tune sliders, then save.</p>
+                ) : (
+                  <div className="grid gap-2">
+                    {userPresets.map((p) => {
+                      const on = userSel === p.id;
+                      const renaming = renameId === p.id;
+                      return (
+                        <div
+                          key={p.id}
+                          data-testid={`user-preset-${p.id}`}
+                          className={`rounded-lg border px-3 py-3 ${on ? "border-primary bg-primary-dim/30" : "border-border bg-bg2"}`}
+                        >
+                          {renaming ? (
+                            <div className="flex flex-col gap-2 sm:flex-row">
+                              <input
+                                value={renameVal}
+                                onChange={(e) => setRenameVal(e.target.value)}
+                                className="min-h-11 flex-1 rounded-lg border border-border bg-surface px-3 font-mono text-sm"
+                                autoFocus
+                              />
+                              <button type="button" className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg" onClick={() => void onRenameSystemPreset()}>
+                                Save name
+                              </button>
+                              <button type="button" className="min-h-11 rounded-lg border border-border px-3 text-sm" onClick={() => setRenameId(null)}>
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-medium">{p.name}</p>
+                                  <p className="mt-1 font-mono text-[11px] text-muted">{p.overview || p.hint}</p>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    data-testid={`user-preset-load-${p.id}`}
+                                    disabled={userBusy}
+                                    className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg disabled:opacity-40"
+                                    onClick={() => void onLoadSystemPreset(p.id)}
+                                  >
+                                    Load
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="min-h-11 rounded-lg border border-border px-3 text-sm"
+                                    onClick={() => {
+                                      setRenameId(p.id);
+                                      setRenameVal(p.name);
+                                    }}
+                                  >
+                                    Rename
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="min-h-11 rounded-lg border border-border px-3 text-sm text-muted"
+                                    onClick={() => setDeleteId(p.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </Card>
               <Card
                 title="Historic calc · last 20 hours"
@@ -1785,6 +1966,18 @@ function SettingsPage() {
             >
               Reset from CTS
             </button>
+            <button
+              type="button"
+              data-testid="save-system-preset"
+              disabled={userBusy || !ready}
+              onClick={() => {
+                setSection("presets");
+                void onSaveSystemPreset();
+              }}
+              className="min-h-11 rounded-lg border border-primary px-4 text-sm text-fg disabled:opacity-40"
+            >
+              Save as Preset
+            </button>
             <span className="text-sm text-muted" data-testid="save-status">
               {saving
                 ? "Saving…"
@@ -1839,6 +2032,29 @@ function SettingsPage() {
                 className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
               >
                 Reset overlay
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {deleteId ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4">
+            <h3 className="text-sm font-medium">Delete system preset?</h3>
+            <p className="mt-2 text-sm text-muted">
+              {userPresets.find((p) => p.id === deleteId)?.name || "This preset"} will be removed for Live and VST. Overlay on the engine is not changed until you load another.
+            </p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button type="button" className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setDeleteId(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="user-preset-delete-yes"
+                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
+                onClick={() => void onDeleteSystemPreset()}
+              >
+                Delete preset
               </button>
             </div>
           </div>

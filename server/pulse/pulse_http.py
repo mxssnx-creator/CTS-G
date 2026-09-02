@@ -11,6 +11,7 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from user_presets import UserPresetStore
 
 DIR = "/opt/grok-x01-pulse"
 STOP_ALL_PATH = os.path.join(DIR, "STOP")
@@ -27,6 +28,11 @@ SLOTS = [
 ]
 TYPE_TO_ID = {l["type"]: l["id"] for l in LANES}
 ID_TO_LANE = {l["id"]: l for l in LANES}
+PRESET_STORE = UserPresetStore(
+    os.path.join(DIR, "user-presets.json"),
+    write_overlay=lambda cid, ov: write_overlay(cid, ov),
+    lane_ids=[l["id"] for l in LANES],
+)
 
 
 def _short_err(msg) -> str:
@@ -279,6 +285,23 @@ def overlay_path(conn: str) -> str:
     if os.path.exists(p):
         return p
     return os.path.join(DIR, "overlay.json")
+
+
+def write_overlay(conn: str, overlay: dict) -> dict:
+    cid = resolve_conn(conn) if conn not in ("", "overall") else conn
+    if cid in ("", "overall"):
+        raise ValueError("pick a lane")
+    dest = os.path.join(DIR, f"overlay-{cid}.json")
+    cur = load_overlay(cid)
+    if not isinstance(overlay, dict):
+        overlay = {}
+    cur.update(overlay)
+    tmp = dest + ".tmp"
+    os.makedirs(DIR, exist_ok=True)
+    with open(tmp, "w") as f:
+        json.dump(cur, f)
+    os.replace(tmp, dest)
+    return cur
 
 
 def cts_path(conn: str) -> str:
@@ -895,6 +918,13 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if path in ("/user-presets.json", "/user-presets"):
+            try:
+                rows = PRESET_STORE.list()
+            except Exception:
+                rows = []
+            self._json({"ok": True, "presets": rows, "system": True, "max": 24})
+            return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
                 from hist_calc import read_job, public_presets
@@ -956,6 +986,50 @@ class Handler(SimpleHTTPRequestHandler):
             blob["detail"] = detail
             self._json(blob, 200 if ok else 400)
             return
+        if path in ("/user-presets.json", "/user-presets"):
+            body = body if isinstance(body, dict) else {}
+            action = str(body.get("action") or "save").lower().strip()
+            try:
+                if action in ("save", "create", "update"):
+                    row = PRESET_STORE.save(
+                        overlay=body.get("overlay") if isinstance(body.get("overlay"), dict) else {},
+                        name=str(body.get("name") or ""),
+                        calc_opt=body.get("calcOpt") if isinstance(body.get("calcOpt"), dict) else {},
+                        preset_id=str(body.get("id") or "") or None,
+                    )
+                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": f"saved {row.get('name')}"})
+                    return
+                if action == "rename":
+                    row = PRESET_STORE.rename(str(body.get("id") or ""), str(body.get("name") or ""))
+                    if not row:
+                        self._json({"ok": False, "detail": "preset not found"}, 404)
+                        return
+                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": f"renamed {row.get('name')}"})
+                    return
+                if action == "delete":
+                    okd = PRESET_STORE.delete(str(body.get("id") or ""))
+                    self._json({"ok": okd, "presets": PRESET_STORE.list(), "detail": "deleted" if okd else "preset not found"}, 200 if okd else 404)
+                    return
+                if action == "load":
+                    row, applied = PRESET_STORE.apply(str(body.get("id") or ""), apply_all=body.get("applyAll") is not False)
+                    if not row:
+                        self._json({"ok": False, "detail": "preset not found"}, 404)
+                        return
+                    self._json({
+                        "ok": True,
+                        "preset": row,
+                        "overlay": row.get("overlay") or {},
+                        "calcOpt": row.get("calcOpt") or {},
+                        "applied": applied,
+                        "detail": f"loaded {row.get('name')}" + (" · Live + VST" if applied else ""),
+                    })
+                    return
+                self._json({"ok": False, "detail": f"unknown action {action}"}, 400)
+            except ValueError as exc:
+                self._json({"ok": False, "detail": str(exc)[:160]}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "detail": str(exc)[:200]}, 200)
+            return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
                 from hist_calc import start_job, is_running
@@ -975,13 +1049,11 @@ class Handler(SimpleHTTPRequestHandler):
         overlay = body.get("overlay") if isinstance(body, dict) else None
         if not isinstance(overlay, dict):
             overlay = body if isinstance(body, dict) else {}
-        dest = os.path.join(DIR, f"overlay-{conn}.json")
-        cur = load_overlay(conn)
-        cur.update(overlay)
-        tmp = dest + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cur, f)
-        os.replace(tmp, dest)
+        try:
+            cur = write_overlay(conn, overlay)
+        except Exception as exc:
+            self._json({"ok": False, "detail": str(exc)[:160]}, 400)
+            return
         self._json({"ok": True, "overlay": cur, "conn": conn})
 
 

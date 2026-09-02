@@ -22,6 +22,7 @@ from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
+from user_presets import self_test as user_presets_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
 from pulse_trader import (
@@ -59,6 +60,7 @@ def run_units() -> None:
         (stats_self_test, "stats"),
         (load_self_test, "load"),
         (hist_calc_self_test, "histcalc"),
+        (user_presets_self_test, "upreset"),
     ):
         try:
             rows = fn()
