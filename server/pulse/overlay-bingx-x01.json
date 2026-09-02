@@ -12,7 +12,7 @@
     "blockEnabled": true,
     "blockMaxStack": 0,
     "blockPauseCountRatio": 1,
-    "blockProfitFactorRatio": 0.8,
+    "blockProfitFactorRatio": 1.1,
     "blockVolumeRatio": 1,
     "controlOrders": true,
     "cooldownS": 9,
