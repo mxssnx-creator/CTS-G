@@ -725,7 +725,7 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss ratios vs take profit" hint="SL = TP × ratio · grid 0.3–1.5 step 0.3 · independent of trailing">
+            <Card title="Stop loss ratios vs take profit" hint="Every ratio × every TP step is its own set · highlighted is live fallback · independent of trailing">
               <div className="flex flex-wrap gap-2">
                 {SL_TP_RATIOS.map((r) => {
                   const active = Math.abs(overlay.slToTpRatio - r) < 1e-9;
@@ -749,6 +749,11 @@ function SettingsPage() {
                   );
                 })}
               </div>
+              <p className="text-sm text-muted">
+                All {SL_TP_RATIOS.length} SL ratios always run as independent config sets against every
+                take-profit step ({overlay.setMinStep}–{overlay.setStepMax} × cost). The highlighted
+                ratio is the live fallback; auto-recalc only chooses which one to open with.
+              </p>
               <Grid>
                 <Toggle label="Auto-recalc SL:TP" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
                 <Slider

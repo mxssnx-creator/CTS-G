@@ -401,15 +401,15 @@ def hit_exit(
 
 
 def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
+    if trail:
+        return f"{pack}:1m:sl{sl_ratio:.1f}:tr{trail}"
     if step:
         return f"{pack}:1m:sl{sl_ratio:.1f}:st{int(step)}"
-    if trail:
-        return f"{pack}:1m:tr{trail}"
     return f"{pack}:1m:sl{sl_ratio:.1f}"
 
 
-def make_trail_id(pack: str, trail: str) -> str:
-    return f"{pack}:1m:tr{trail}"
+def make_trail_id(pack: str, trail: str, sl_ratio: float = 0.6) -> str:
+    return make_set_id(pack, sl_ratio, trail=trail)
 
 
 @dataclass
@@ -658,7 +658,9 @@ class SetBook:
         self._rebuild_sets()
 
     def _step_grid(self) -> List[int]:
-        lo = clamp_step(self.min_step, STEP_MIN, self.step_max)
+        # Always the configured TP-step range. Live adapt may prefer a higher
+        # step when picking, but it must never drop SL×TP sets from the book.
+        lo = clamp_step(self.min_step_cfg, STEP_MIN, self.step_max)
         hi = clamp_step(self.step_max, lo, STEP_MAX)
         return list(range(lo, hi + 1))
 
@@ -703,33 +705,34 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            for tr_i, (tkey, arm, give) in enumerate(trails):
-                sid = make_trail_id(pack, tkey)
-                prev = keep.get(sid)
-                mid_step = self.steps[len(self.steps) // 2] if self.steps else 8
-                tp = step_tp_pct(mid_step, self.cost_pct)
-                if prev:
-                    st = prev
-                    st.trail_key = tkey
-                    st.trail_arm = arm
-                    st.trail_give = give
-                    st.sl_ratio = 0.6
-                    st.step = 0
-                    st.tp_pct = tp
-                    st.kind = "trail"
-                    st.locked = bool(self.locks.get(sid))
-                else:
-                    st = SetState(
-                        id=sid, pack=pack, tf="1m", sl_ratio=0.6,
-                        trail_key=tkey, trail_arm=arm, trail_give=give,
-                        step=0, tp_pct=tp, kind="trail",
-                        locked=bool(self.locks.get(sid)),
-                    )
-                st.pack_i = pack_i
-                st.sl_i = -1
-                st.tr_i = tr_i
-                st.step_i = -1
-                _put(st)
+            for sl_i, sl in enumerate(self.sl_ratios):
+                for tr_i, (tkey, arm, give) in enumerate(trails):
+                    sid = make_trail_id(pack, tkey, sl)
+                    prev = keep.get(sid)
+                    mid_step = self.steps[len(self.steps) // 2] if self.steps else 8
+                    tp = step_tp_pct(mid_step, self.cost_pct)
+                    if prev:
+                        st = prev
+                        st.trail_key = tkey
+                        st.trail_arm = arm
+                        st.trail_give = give
+                        st.sl_ratio = sl
+                        st.step = 0
+                        st.tp_pct = tp
+                        st.kind = "trail"
+                        st.locked = bool(self.locks.get(sid))
+                    else:
+                        st = SetState(
+                            id=sid, pack=pack, tf="1m", sl_ratio=sl,
+                            trail_key=tkey, trail_arm=arm, trail_give=give,
+                            step=0, tp_pct=tp, kind="trail",
+                            locked=bool(self.locks.get(sid)),
+                        )
+                    st.pack_i = pack_i
+                    st.sl_i = sl_i
+                    st.tr_i = tr_i
+                    st.step_i = -1
+                    _put(st)
         self.sets = next_sets
         self.by_idx = by_idx
         self.progress.sets_total = len(self.sets)
@@ -764,9 +767,8 @@ class SetBook:
                 nxt = clamp_step(n if n else floor, floor, self.step_max)
             else:
                 nxt = floor
-        if nxt != self.min_step:
-            self.min_step = nxt
-            self._rebuild_sets()
+        self.min_step = nxt
+        # Prefer a higher step when picking; never drop SL×TP sets.
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
         if not bars:
@@ -1068,7 +1070,7 @@ class SetBook:
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
         for st in self.by_idx:
             pack_sig = signals.get(st.pack) or [(0, 0.0, "")] * n
-            sl_frac_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
+            sl_frac_base = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
             use_trail = st.kind == "trail"
             arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
             give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
@@ -1166,70 +1168,75 @@ class SetBook:
     ) -> None:
         """Independent Signal / State / Direction / Move / Active / Common tapes.
 
-        Each kind walks its own entries with a low-SL representative (0.6 × min-step TP)
-        so PF / DDT is honest even when the kind disagrees with pack consensus.
+        Each kind walks its own entries on every SL ratio vs the configured
+        min-step TP so PF / DDT is independent of pack consensus and of a
+        single representative SL.
         """
         n = len(bars)
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        tp_frac = max(0.0020, step_tp_pct(self.min_step, self.cost_pct))
-        sl_frac = max(0.0015, tp_frac * 0.6)
-        for kind, sigs in kind_sigs.items():
-            if not any(d != 0 for d, _ in sigs):
-                continue
-            buf = ind_hist.setdefault(kind, [])
-            for want_side in (1, -1):
-                open_pos: Optional[Dict[str, Any]] = None
-                cool = 0
-                for i in range(warmup, n):
-                    bar = bars[i]
-                    ts = base_ts + i * BAR_S
-                    if open_pos is not None:
-                        side = int(open_pos["side"])
-                        entry = float(open_pos["entry"])
-                        held = i - int(open_pos["i"])
-                        why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
-                        if why is None and held >= time_bars:
-                            why, px = "time", float(bar[3])
-                        if why is None and held >= scratch_bars:
-                            move = (float(bar[3]) - entry) / entry * side
-                            if move >= self.scratch_min:
-                                why, px = "scratch+", float(bar[3])
-                        if why:
-                            raw = (px - entry) / entry * side
-                            buf.append({
-                                "t": ts,
-                                "symbol": symbol,
-                                "side": "LONG" if side > 0 else "SHORT",
-                                "direction": "LONG" if side > 0 else "SHORT",
-                                "pnl": net_pnl_pct(raw, self.cost_pct),
-                                "pnl_pct": raw,
-                                "hold_s": held * BAR_S,
-                                "reason": f"ind:{kind}:{why}",
-                                "ind_kind": kind,
-                                "pack": "indications",
-                                "costPct": self.cost_pct,
-                            })
-                            open_pos = None
-                            cool = self.cooldown_bars
-                        continue
-                    if cool > 0:
-                        cool -= 1
-                        continue
-                    d, conf = sigs[i]
-                    if d == 0 or conf < 0.52:
-                        continue
-                    if d != want_side:
-                        continue
-                    close = float(bar[3])
-                    if d > 0:
-                        sl = close * (1 - sl_frac)
-                        tp = close * (1 + tp_frac)
-                    else:
-                        sl = close * (1 + sl_frac)
-                        tp = close * (1 - tp_frac)
-                    open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "i": i}
+        sls = list(self.sl_ratios) or [0.6]
+        tp_frac = max(0.0020, step_tp_pct(self.min_step_cfg, self.cost_pct))
+        for sl in sls:
+            sl_frac = max(0.0015, tp_frac * max(0.3, float(sl or 0.6)))
+            for kind, sigs in kind_sigs.items():
+                if not any(d != 0 for d, _ in sigs):
+                    continue
+                buf = ind_hist.setdefault(kind, [])
+                for want_side in (1, -1):
+                    open_pos: Optional[Dict[str, Any]] = None
+                    cool = 0
+                    for i in range(warmup, n):
+                        bar = bars[i]
+                        ts = base_ts + i * BAR_S
+                        if open_pos is not None:
+                            side = int(open_pos["side"])
+                            entry = float(open_pos["entry"])
+                            held = i - int(open_pos["i"])
+                            why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
+                            if why is None and held >= time_bars:
+                                why, px = "time", float(bar[3])
+                            if why is None and held >= scratch_bars:
+                                move = (float(bar[3]) - entry) / entry * side
+                                if move >= self.scratch_min:
+                                    why, px = "scratch+", float(bar[3])
+                            if why:
+                                raw = (px - entry) / entry * side
+                                buf.append({
+                                    "t": ts,
+                                    "symbol": symbol,
+                                    "side": "LONG" if side > 0 else "SHORT",
+                                    "direction": "LONG" if side > 0 else "SHORT",
+                                    "pnl": net_pnl_pct(raw, self.cost_pct),
+                                    "pnl_pct": raw,
+                                    "hold_s": held * BAR_S,
+                                    "reason": f"ind:{kind}:{why}",
+                                    "ind_kind": kind,
+                                    "pack": "indications",
+                                    "costPct": self.cost_pct,
+                                    "slRatio": sl,
+                                    "tpPct": tp_frac * 100.0,
+                                })
+                                open_pos = None
+                                cool = self.cooldown_bars
+                            continue
+                        if cool > 0:
+                            cool -= 1
+                            continue
+                        d, conf = sigs[i]
+                        if d == 0 or conf < 0.52:
+                            continue
+                        if d != want_side:
+                            continue
+                        close = float(bar[3])
+                        if d > 0:
+                            sl_px = close * (1 - sl_frac)
+                            tp_px = close * (1 + tp_frac)
+                        else:
+                            sl_px = close * (1 + sl_frac)
+                            tp_px = close * (1 - tp_frac)
+                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
 
     def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
         ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
@@ -1457,20 +1464,33 @@ class SetBook:
         by_tr: Dict[str, Dict[str, Any]] = {}
         by_sl: Dict[str, Dict[str, Any]] = {}
         for st in trail_sets:
-            b = by_tr.setdefault(st.trail_key, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
+            b = by_tr.setdefault(st.trail_key, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1, "sl": []})
             b["n"] += 1
             b["active"] += int(st.active)
+            sls = b.setdefault("sl", [])
+            if st.sl_ratio not in sls:
+                sls.append(st.sl_ratio)
             if st.last15_ratio >= b["bestPf"]:
                 b["bestPf"] = st.last15_ratio
                 b["bestIdx"] = st.idx
+        sl_step: Dict[str, set] = {}
         for st in base_sets:
             skey = f"{st.sl_ratio:.1f}"
-            s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
+            s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1, "steps": []})
             s["n"] += 1
             s["active"] += int(st.active)
+            steps = s.setdefault("steps", [])
+            if st.step not in steps:
+                steps.append(st.step)
+            sl_step.setdefault(skey, set()).add(st.step)
             if st.last15_ratio >= s["bestPf"]:
                 s["bestPf"] = st.last15_ratio
                 s["bestIdx"] = st.idx
+        sl_tp_cover = all(set(self.steps) <= sl_step.get(f"{sl:.1f}", set()) for sl in self.sl_ratios) if self.sl_ratios and self.steps else True
+        trail_sl_cover = all(
+            all(any(abs(st.sl_ratio - sl) < 1e-9 and st.trail_key == t for st in trail_sets) for sl in self.sl_ratios)
+            for t in trails
+        ) if trails and self.sl_ratios else True
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -1490,12 +1510,15 @@ class SetBook:
             "independentDirection": True,
             "independentIndication": True,
             "independentStrategy": True,
+            "independentSlTp": True,
             "costSubtracted": True,
             "directions": list(DIRECTIONS),
             "byTrail": by_tr,
             "bySl": by_sl,
             "trailCover": all(any(st.trail_key == t for st in trail_sets) for t in trails) if trails else True,
             "slCover": all(any(abs(st.sl_ratio - sl) < 1e-9 for st in base_sets) for sl in self.sl_ratios),
+            "slTpCover": sl_tp_cover,
+            "trailSlCover": trail_sl_cover,
         }
 
     def _side_view(self, st: SetState, side: Optional[str] = None) -> Dict[str, Any]:
@@ -1576,6 +1599,7 @@ class SetBook:
         chosen = live_pass or passing
         chosen.sort(key=lambda s: (
             float(view(s).get("last15_ratio") or 0),
+            1 if (s.kind != "base" or int(s.step or 0) >= int(self.min_step or 0)) else 0,
             float(view(s).get("last25_avg_r") or 0),
             -float(view(s).get("max_dd_s") or 0),
             int(view(s).get("n") or 0),
@@ -1878,6 +1902,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     mixed = [{"pnl": -0.02, "pnl_pct": -0.003}] * 20 + [{"pnl": 0.02, "pnl_pct": 0.004}] * 5
     book.adapt_from_live(mixed)
     out.append(("set-adapt-min", book.min_step == 5, f"min={book.min_step} n={len(book.sets)}"))
+    out.append(("set-adapt-keeps-grid", sorted({s.step for s in book.sets.values() if s.kind == "base"}) == list(range(3, 7)), f"steps={sorted({s.step for s in book.sets.values() if s.kind == 'base'})}"))
     sid = next(iter(book.sets))
     st = book.sets[sid]
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
@@ -2013,7 +2038,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     )
     cov = book4.coverage()
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
-    want_tr = len(book4.packs) * max(1, len(book4.trails))
+    want_tr = len(book4.packs) * len(book4.sl_ratios) * max(1, len(book4.trails))
     want = want_base + want_tr
     idxs = [s.idx for s in book4.by_idx]
     trails_in = {s.trail_key for s in book4.by_idx if s.kind == "trail"}
@@ -2022,6 +2047,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-idx-unique", idxs == list(range(len(idxs))), f"n={len(idxs)} last={idxs[-1] if idxs else None}"))
     out.append(("set-trail-cover", cov.get("trailCover") and len(trails_in) >= 5 and "trail" in kinds, f"trails={sorted(trails_in)} cover={cov.get('trailCover')}"))
     out.append(("set-sl-cover", cov.get("slCover") and len(book4.sl_ratios) >= 5, f"sl={book4.sl_ratios}"))
+    out.append(("set-sl-tp-cover", bool(cov.get("slTpCover")), f"slTp={cov.get('slTpCover')} steps={cov.get('steps')} bySl={ {k: v.get('steps') for k, v in (cov.get('bySl') or {}).items()} }"))
+    out.append(("set-trail-sl-cover", bool(cov.get("trailSlCover")), f"trailSl={cov.get('trailSlCover')} byTrail={ {k: v.get('sl') for k, v in (cov.get('byTrail') or {}).items()} }"))
+    out.append(("set-independent-sl-tp", bool(cov.get("independentSlTp")), str(cov.get("independentSlTp"))))
     out.append(("set-get-idx", book4.get_idx(0) is book4.by_idx[0] and book4.get_idx(want - 1) is book4.by_idx[-1], f"0={book4.get_idx(0).id if book4.get_idx(0) else None}"))
     v = book4.coord_vars(book4.by_idx[0])
     out.append(("set-coord-vars", v.get("idx") == 0 and v.get("kind") == "base" and "step" in v, str(v)))
