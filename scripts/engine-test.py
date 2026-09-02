@@ -149,7 +149,7 @@ def controls_test() -> None:
     rec("short-sl-buy", short_sl.get("side") == "BUY")
     att = tpsl_attach_json("140.0", "160.0")
     rec("attach-both", "stopLoss" in att and "takeProfit" in att and "STOP_MARKET" in att["stopLoss"] and "TAKE_PROFIT" in att["takeProfit"])
-    rec("attach-price", '"price":"140.0"' in att["stopLoss"] or '"price": "140.0"' in att["stopLoss"] or "140.0" in att["stopLoss"])
+    rec("attach-price", '\"price\":\"140.0\"' in att["stopLoss"] or '\"price\": \"140.0\"' in att["stopLoss"] or "140.0" in att["stopLoss"])
     rec("sl-types-cover", "STOP_MARKET" in SL_TYPES and "STOP" in SL_TYPES)
     rec("tp-types-cover", "TAKE_PROFIT_MARKET" in TP_TYPES)
     lo, hi = sl_bounds("LONG", 100.0, 100.0, 100.0, 99.4, 0.01)
@@ -200,6 +200,73 @@ def coord_test() -> None:
     c = Coordinator()
     rec("coord-unlimited-slot", c.slot_cap(0, 1.2) >= 10**8, str(c.slot_cap(0, 1.2)))
     rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
+
+
+def stage_min_pf_test() -> None:
+    """Stage PositionCost PF floors: Base 1.05 / Main 1.08 / Real 1.10.
+
+    1.00 = neutral on the cost scale; default min PF is 1.1 systemwide.
+    Proves defaults, overlay precedence (baseMinPf/mainMinPf/realMinPf),
+    strategies.main.<stage>.min_profit_factor fallback, real-floor canonical
+    min_pf, gate blocking at the base floor, and advisory reasons at the
+    main/real floors.
+    """
+    from coord_engine import Coordinator
+
+    # 1) defaults after a bare load
+    c = Coordinator()
+    c.load({}, {})
+    rec("stage-pf-defaults",
+        c.stage_min_pf == {"base": 1.05, "main": 1.08, "real": 1.10},
+        str(c.stage_min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.10) < 1e-9, str(c.min_pf))
+
+    # 2) overlay wins over strategies.main.<stage>
+    c2 = Coordinator()
+    c2.load({"strategies": {"main": {"base": {"min_profit_factor": 1.02},
+                                     "main": {"min_profit_factor": 1.04},
+                                     "real": {"min_profit_factor": 1.06}}}},
+            {"baseMinPf": 1.05, "mainMinPf": 1.08, "realMinPf": 1.1})
+    rec("stage-pf-overlay-wins",
+        c2.stage_min_pf == {"base": 1.05, "main": 1.08, "real": 1.10},
+        str(c2.stage_min_pf))
+
+    # 3) strategies.main.<stage> used when no overlay key
+    c3 = Coordinator()
+    c3.load({"strategies": {"main": {"base": {"min_profit_factor": 1.03},
+                                     "main": {"min_profit_factor": 1.07},
+                                     "real": {"min_profit_factor": 1.15}}}},
+            {})
+    rec("stage-pf-strategies-fallback",
+        c3.stage_min_pf == {"base": 1.03, "main": 1.07, "real": 1.15},
+        str(c3.stage_min_pf))
+    rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
+
+    # 4) gate blocks below the base floor, allows above it
+    def rows(pcts):
+        return [{"pnl": x, "pnl_pct": x, "qty": 1.0, "price": 100.0} for x in pcts]
+    c4 = Coordinator()
+    c4.load({}, {})
+    neg = rows([-5.0] * 12 + [0.4] * 3)  # heavy losers -> PF well under 1
+    allow_bad, reasons_bad, _ = c4.gate(neg, 0)
+    rec("stage-pf-base-blocks", not allow_bad and any("base/last" in r for r in reasons_bad),
+        f"allow={allow_bad} reasons={reasons_bad[:2]}")
+    pos = rows([5.0] * 12)  # all winners -> high cost-PF
+    allow_good, reasons_good, _ = c4.gate(pos, 0)
+    rec("stage-pf-base-allows", allow_good, f"reasons={reasons_good[:2]}")
+
+    # 5) main/real stages report floors in the stages snapshot
+    stages = (c4.last or {}).get("stages") or {}
+    rec("stage-pf-stages-floors",
+        stages.get("base", {}).get("minPf") == 1.05
+        and stages.get("main", {}).get("minPf") == 1.08
+        and stages.get("real", {}).get("minPf") == 1.10,
+        str({k: v.get("minPf") for k, v in stages.items()}))
+
+    # 6) snapshot carries the stage map
+    snap = c4.snapshot()
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.08, "real": 1.10},
+        str(snap.get("stageMinPf")))
 
 
 def always_start_test() -> None:
@@ -1510,6 +1577,7 @@ def main() -> int:
     contract_test()
     controls_test()
     coord_test()
+    stage_min_pf_test()
     unlimited_test()
     always_start_test()
     control_coord_test()
