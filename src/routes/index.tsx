@@ -308,6 +308,7 @@ const PROGRESS_PHASE_LABEL: Record<string, string> = {
   fetch: "fetching history",
   replay: "calculating sets",
   score: "scoring sets",
+  partial: "partial history coverage",
   ready: "ready",
   deferred: "history deferred by load",
   error: "calc error",
@@ -318,7 +319,7 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
   const phase = starting ? "starting" : String(l.progressPhase || "idle");
   const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
-  const updating = ["fetch", "replay", "score"].includes(phase);
+  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
   const busy = updating || !l.progressReady;
   const gate = l.progressReady ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const details: Array<[string, string]> = [];
@@ -554,7 +555,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const rows = (s?.rows ?? []).slice(0, 8);
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score"].includes(phase);
+  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
   const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
@@ -575,7 +576,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           {lanes.map((ln) => {
             const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? 0));
             const lanePhase = String(ln.progress?.phase ?? "idle");
-            const laneUpdating = ["fetch", "replay", "score"].includes(lanePhase);
+            const laneUpdating = ["fetch", "replay", "score", "partial"].includes(lanePhase);
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             return (
               <div key={ln.id || ln.type}>
@@ -600,6 +601,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           </div>
           <p className="mt-1 text-muted">
             {p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
+            {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
             {updating && p?.ready ? " · prior gate remains active" : ""}
           </p>
         </>

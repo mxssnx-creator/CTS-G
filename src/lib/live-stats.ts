@@ -330,7 +330,7 @@ export type LiveStats = {
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
     controls?: { open?: number; ok?: number; missing?: number; security?: number };
-    recon?: { ok?: boolean; detail?: string };
+    recon?: { ok?: boolean; pending?: boolean; detail?: string };
     px?: number;
     symbols?: number;
     scan?: {

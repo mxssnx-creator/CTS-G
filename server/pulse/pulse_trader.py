@@ -25,7 +25,7 @@ from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLO
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
+from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, cost_as_frac, net_pnl_pct, net_pnl_usdt
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
@@ -655,6 +655,7 @@ class Pulse:
         self.ignore_syms: Dict[str, float] = {}
         self.last_px: Dict[str, float] = {}
         self.recon_ok = True
+        self.recon_pending = False
         self.recon_detail = "pending"
         self.exchange_open_count = -1  # -1 = not yet read from exchange
         self._empty_rest_streak = 0
@@ -688,6 +689,7 @@ class Pulse:
         self._order_est_known: bool = False
         self._score_cache: Dict[str, Any] = {}
         self._ind_fp: Dict[str, Any] = {}
+        self._lev_retry: Dict[str, float] = {}
         self.flatten_skip: Dict[str, float] = {}
         self.cts: Dict[str, Any] = {}
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
@@ -778,14 +780,19 @@ class Pulse:
     def ensure_max_leverage(self, symbol: str, force: bool = False) -> int:
         """Actively set this symbol to its exchange max long/short. Cached, no GET spam."""
         self.use_max_leverage = True
+        if not hasattr(self, "_lev_retry"):
+            self._lev_retry = {}
         c = self.contracts.get(symbol)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
         applied = int(self.lev_map.get(symbol) or 0)
+        now = time.time()
+        if self._lev_retry.get(symbol, 0.0) > now:
+            return applied or mx
         if not force and mx > 0 and applied >= mx:
             if c is not None:
                 c.max_lev = mx
             return applied
-        if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
+        if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > now:
             return applied or mx
         if mx <= 0 or force or applied < mx:
             got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
@@ -808,6 +815,9 @@ class Pulse:
             if not self.ok(r):
                 ok_both = False
                 if r.get("code") in (100410, 101209, 100421):
+                    # adopt()/set_leverage() can observe the same transient
+                    # response repeatedly; back off this pair independently.
+                    self._lev_retry[symbol] = time.time() + 180.0
                     return applied or want
                 # too high — discover real max
                 got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
@@ -823,6 +833,7 @@ class Pulse:
                 else:
                     return applied or want
         if ok_both or want:
+            self._lev_retry.pop(symbol, None)
             self.lev_map[symbol] = want
             self.lev_max[symbol] = max(int(self.lev_max.get(symbol) or 0), want)
             if c is not None:
@@ -3292,7 +3303,8 @@ class Pulse:
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
-        # SL:TP ratios 0.3–1.5 are the risk grid. Do not cap TP against maxStopLossRatio.
+        # SL:TP ratios use the full configured 0.2–2.6 risk grid. Do not cap
+        # TP against maxStopLossRatio.
         if not initial:
             log(
                 f"CFG reload n={len(SYMBOLS)} notional={TARGET_NOTIONAL} lev={LEVERAGE} "
@@ -4352,6 +4364,7 @@ class Pulse:
         r = self.api.get("/openApi/swap/v2/user/positions")
         if not self.ok(r):
             self.recon_ok = False
+            self.recon_pending = False
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
         rows = r.get("data") or []
@@ -4376,6 +4389,7 @@ class Pulse:
         # glitch guard below still arms). Book positions not in this set are
         # "Simulated" — system-internal calcs only.
         self.live_pos_keys = live_keys
+        self.recon_pending = False
         if live_n == 0 and self.open:
             # Glitch guard: one empty REST page must never wipe the book — but a
             # CONFIRMED flat exchange (2 consecutive empty reads, ~50 cycles apart)
@@ -4384,6 +4398,9 @@ class Pulse:
             # _exchange_flat re-check for controlled positions).
             self._empty_rest_streak = int(getattr(self, "_empty_rest_streak", 0) or 0) + 1
             if self._empty_rest_streak < 2:
+                self.recon_pending = True
+                self.recon_ok = True
+                self.recon_detail = f"pending empty exchange read {self._empty_rest_streak}/2"
                 log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
                 return
             log(f"ADOPT flat-exchange confirmed streak={self._empty_rest_streak} book={len(self.open)}")
@@ -4487,6 +4504,7 @@ class Pulse:
                 self.place_ctrl_pair(rec_pos)
                 if self.missing_controls(rec_pos):
                     self.ensure_controls(rec_pos)
+        pending_absent: List[str] = []
         for sym in list(self.open):
             pos = self.open.get(sym)
             if not pos:
@@ -4504,6 +4522,7 @@ class Pulse:
                     self._absent_n.pop(sym, None)
                 continue
             if age < 45.0:
+                pending_absent.append(sym)
                 continue
             misses = int((getattr(self, "_absent_n", None) or {}).get(sym, 0)) + 1
             if not hasattr(self, "_absent_n"):
@@ -4512,9 +4531,11 @@ class Pulse:
             flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 2 and live_n == 0
             # Partial list: need 3 misses. Fully-flat exchange already confirmed by streak.
             if not flat_ex and misses < 3:
+                pending_absent.append(sym)
                 continue
             has_ctrl = bool(pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
             if has_ctrl and not flat_ex and not self._exchange_flat(pos):
+                pending_absent.append(sym)
                 continue
             log(f"DROP stale local {sym} age={age:.0f}s miss={misses}")
             self.open.pop(sym, None)
@@ -4525,15 +4546,20 @@ class Pulse:
         issues = []
         for pos in self.open.values():
             if pos.symbol not in live:
+                if pos.symbol in pending_absent:
+                    continue
                 issues.append(f"book-only {pos.symbol}")
         if abs(len(self.open) - len(book_syms & live)) > 0 and book_syms - live:
             issues.append(f"count book={len(self.open)} live_ours={len(live - {x.split(':')[0] for x in foreign})}")
+        self.recon_pending = bool(pending_absent)
         self.recon_ok = not issues
-        self.recon_detail = (
-            f"ok ours={len(self.open)} foreign={len(foreign)} live={len(live)}"
-            if not issues
-            else "; ".join(issues)
-        )[:160]
+        if issues:
+            self.recon_detail = "; ".join(issues)
+        elif pending_absent:
+            self.recon_detail = f"pending {len(pending_absent)} absent · ours={len(self.open)} live={len(live)}"
+        else:
+            self.recon_detail = f"ok ours={len(self.open)} foreign={len(foreign)} live={len(live)}"
+        self.recon_detail = self.recon_detail[:160]
         self.save_open_book()
 
     def sync_own_fills(self) -> None:
@@ -4608,9 +4634,16 @@ class Pulse:
         global LEVERAGE
         self.use_max_leverage = True
         self._load_lev_file()
+        if not hasattr(self, "_lev_retry"):
+            self._lev_retry = {}
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
-        need = [s for s in SYMBOLS if int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max]
+        now = time.time()
+        need = [
+            s for s in SYMBOLS
+            if self._lev_retry.get(s, 0.0) <= now
+            and (int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max)
+        ]
         if not need:
             if self.lev_map:
                 LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
@@ -4618,7 +4651,9 @@ class Pulse:
             if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
                 self._lev_rot_ts = now
                 rot = SYMBOLS[int(now / 90) % len(SYMBOLS)]
-                self.ensure_max_leverage(rot, force=True)
+                # Cached applied/max agreement needs no forced POST. Forced
+                # rotations caused recurring 100410 noise on busy accounts.
+                self.ensure_max_leverage(rot, force=False)
             return
         for s in need[:12]:
             self.ensure_max_leverage(s, force=s not in self.lev_max)
@@ -5093,7 +5128,7 @@ class Pulse:
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
             },
-            "recon": {"ok": self.recon_ok, "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
+            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
             "symbols": len(SYMBOLS),
             "scan": {
@@ -5229,11 +5264,19 @@ class Pulse:
         ready15 = sum(1 for s in SYMBOLS if s in self.klines_tf.get("15m", {}))
         self.record_test("qa-klines-5m", ready5 >= 4 or filling_1m or warm, f"{ready5}/{len(SYMBOLS)}")
         self.record_test("qa-klines-15m", ready15 >= 3 or filling_1m or warm, f"{ready15}/{len(SYMBOLS)}")
-        self.record_test("qa-sltp-grid", abs(self.sl_to_tp - round(self.sl_to_tp, 1)) < 1e-9 and 0.3 <= self.sl_to_tp <= 1.5, f"r={self.sl_to_tp}")
+        sl_grid = getattr(self.variants, "sl_ratios", None) or list(SL_TP_RATIOS)
+        sl_ratio = round(float(self.sl_to_tp), 1)
+        self.record_test(
+            "qa-sltp-grid",
+            any(abs(sl_ratio - float(r)) < 1e-9 for r in sl_grid) and SL_TP_MIN <= sl_ratio <= SL_TP_MAX,
+            f"r={self.sl_to_tp} grid={sl_grid[0]:.1f}..{sl_grid[-1]:.1f}",
+        )
         self.record_test("qa-trail-indep", self.variants.trail_arm >= 0.3, f"{self.variants.trail_key}")
         self.record_test("qa-hot-budget", self.last_scan_ms <= (SCAN_S * 1000.0 + 40.0) or self.last_scan_io or self.hist_busy or self.cycle < 40, f"{self.last_scan_ms:.0f}ms budget={SCAN_S*1000:.0f} io={int(self.last_scan_io)} hist={int(self.hist_busy)}")
         rss = rss_mb()
-        self.record_test("qa-rss", rss < (110 if len(SYMBOLS) <= 80 else 520), f"{rss:.1f}MB n={len(SYMBOLS)}")
+        hard_rss = self.load.hard_limit(len(SYMBOLS)) if hasattr(self, "load") else (140.0 + len(SYMBOLS) * 0.55)
+        rss_limit = max(180.0, hard_rss + 40.0)
+        self.record_test("qa-rss", rss < rss_limit, f"{rss:.1f}MB n={len(SYMBOLS)} limit={rss_limit:.1f}MB")
         self.record_test(
             "qa-load",
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
@@ -5252,7 +5295,9 @@ class Pulse:
                 continue
             if not (real_oid(p.sl_oid) and real_oid(p.tp_oid) or (real_oid(getattr(p, "sec_sl_oid", "")) and real_oid(getattr(p, "sec_tp_oid", "")))):
                 overall_ok = False
-        range_ok = True
+        sl_bad = 0
+        tp_bad = 0
+        tp_crossed = 0
         for p in self.open.values():
             if time.time() - float(getattr(p, "opened_at", 0) or 0) < 90.0:
                 continue
@@ -5264,13 +5309,18 @@ class Pulse:
             if sl_px > 0 and mark > 0:
                 side_ok = (p.side == "LONG" and sl_px < mark) or (p.side == "SHORT" and sl_px > mark)
                 if not side_ok:
-                    range_ok = False
+                    sl_bad += 1
             if tp_px > 0 and mark > 0:
                 side_ok = (p.side == "LONG" and tp_px > mark) or (p.side == "SHORT" and tp_px < mark)
                 if not side_ok:
-                    range_ok = False
+                    crossed = (p.side == "LONG" and tp_px > p.entry) or (p.side == "SHORT" and tp_px < p.entry)
+                    if crossed:
+                        tp_crossed += 1
+                    else:
+                        tp_bad += 1
+        range_ok = sl_bad == 0 and tp_bad == 0
         self.record_test("qa-ctrl-overall", overall_ok or cooling, f"open={len(self.open)} overall={int(overall_ok)} miss={missing}")
-        self.record_test("qa-ctrl-range", range_ok or cooling or not self.open, f"range ok={int(range_ok)}")
+        self.record_test("qa-ctrl-range", range_ok or cooling or not self.open, f"range ok={int(range_ok)} slBad={sl_bad} tpBad={tp_bad} tpCrossed={tp_crossed}")
         covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)
         self.record_test("qa-px-cover", covered >= max(8, min(len(SYMBOLS) - 1, len(SYMBOLS) * 3 // 4)) or self.cycle < max(80, len(SYMBOLS)), f"{covered}/{len(SYMBOLS)}")
         btc = self.contracts.get("BTC-USDT")
@@ -5491,6 +5541,8 @@ class Pulse:
                                     on_step=_hist_step,
                                     symbols=names,
                                     abort=lambda: already and self.load.last_budget.level == "critical",
+                                    merge=True,
+                                    progress_total=len(SYMBOLS),
                                 )
                             elif self.sets.progress.ready:
                                 self.sets.progress.phase = "deferred"

@@ -73,8 +73,8 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         <span className={miss ? "text-danger" : "text-primary"}>
           controls {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {ctrl?.security ?? 0} sec
         </span>
-        <span className={recon?.ok === false ? "text-danger" : "text-primary"}>
-          recon {recon?.ok === false ? recon.detail || "gap" : "ok"}
+        <span className={recon?.ok === false ? "text-danger" : recon?.pending ? "text-warn" : "text-primary"}>
+          recon {recon?.ok === false ? recon.detail || "gap" : recon?.pending ? recon.detail || "pending" : "ok"}
         </span>
         <span>
           block {cov?.block?.enabled ? "on" : "off"} · {cov?.block?.countN ?? 0} counts · {cov?.block?.liveLanes ?? 0} lanes
@@ -148,7 +148,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Scan universe" v={`${px}/${n || 0} px`} ok={n > 0 && px >= n} />
         <KV k="Klines 1/5/15" v={`${scan?.kl1m ?? "—"} / ${scan?.kl5m ?? "—"} / ${scan?.kl15m ?? "—"}`} ok={Boolean(scan && scan.kl1m && scan.kl5m && scan.kl15m)} />
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
-        <KV k="Recon" v={String(recon?.detail || (recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false} />
+        <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
         <KV k="Sets" v={`${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.activeCount ?? 0) > 0} />
         <KV
