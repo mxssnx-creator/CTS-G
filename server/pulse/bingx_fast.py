@@ -50,7 +50,7 @@ except Exception:
 
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
-RECV = 5000
+RECV = 10000
 UA = "grok-x01-pulse/2.0"
 
 # CTS connector numbers (UID / IP)

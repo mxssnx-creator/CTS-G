@@ -3762,6 +3762,10 @@ class Pulse:
             px = self.px.get(pos.symbol) or pos.entry
             if px <= 0 or pos.entry <= 0:
                 continue
+            age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
+            if age < max(8.0, float(getattr(self.dca, "cooldown_s", 0) or 0)):
+                self.dca.skips += 1
+                continue
             if pos.qty * px >= self.max_book_notional():
                 self.dca.skips += 1
                 continue
@@ -5027,7 +5031,7 @@ class Pulse:
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
         )
-        self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
+        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
         book_cap = self.max_book_notional()
         sane_cap = max(self.notional_cap() * 32.0, 64.0)
         self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")

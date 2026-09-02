@@ -175,11 +175,13 @@ class DcaBook:
                 DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
                 for i in range(n)
             ]
-            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps)
+            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps, last_add=time.time())
             self.lanes[k] = lane
         else:
             if lane.parent_qty <= 0 and qty > 0:
                 lane.parent_qty = qty
+            if float(lane.last_add or 0) <= 0:
+                lane.last_add = time.time()
         return lane
 
     def drop(self, symbol: str, side: str) -> None:
@@ -370,6 +372,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     hi = DcaBook()
     hi.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
     t16 = (max(hi.mults) <= 2.5 and abs(hi.mults[0] - 2.1) < 1e-9, f"mults={hi.mults}")
+    cd = DcaBook()
+    cd.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 30})
+    t_open = time.time()
+    cd.attach("CD-USDT", "LONG", 1.0, 100.0)
+    rcd = cd.due("CD-USDT", "LONG", 1.0, 100.0, 99.4, now=t_open + 3)
+    t17 = (rcd is None, f"early={rcd}")
+    rcd2 = cd.due("CD-USDT", "LONG", 1.0, 100.0, 99.4, now=t_open + 31)
+    t18 = (rcd2 is not None and rcd2["n"] == 1, f"after={None if rcd2 is None else rcd2.get('n')}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -387,6 +397,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-parent-step1", t14[0], str(t14[1])[:80]),
         ("dca-parent-frozen", t15[0], t15[1]),
         ("dca-mult-clamp", t16[0], t16[1]),
+        ("dca-cooldown-from-open", t17[0], t17[1]),
+        ("dca-cooldown-elapsed", t18[0], t18[1]),
     ]
 
 
