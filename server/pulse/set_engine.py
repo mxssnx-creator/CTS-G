@@ -26,7 +26,7 @@ from position_cost import (
     row_side,
     filter_side,
 )
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common
+from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
 
 PACKS = ("indications", "general")
@@ -290,9 +290,14 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     return 0, max(long_c, short_c), "flat"
 
 
-def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
+def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
+    """Independent vote per indication kind. Signals / State / Direction / Move / Active / Common."""
     candles = bars_to_candles(list(bars)[-60:], now=now, period_s=BAR_S)
-    closes = [float(b[3]) for b in bars[-60:]] if bars else []
+    closes = []
+    for b in list(bars)[-60:]:
+        row = ohlcv_row(b)
+        if row:
+            closes.append(row[3])
     want = {
         "sig": bool(settings.get("typeSignals", True)),
         "ta": bool(settings.get("typeState", True)),
@@ -306,44 +311,48 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
         try:
             ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
             if ev:
-                votes.append((1 if ev.direction == "long" else -1, ev.confidence, "sig"))
+                votes.append((1 if ev.direction == "long" else -1, float(ev.confidence), "sig"))
         except Exception:
             pass
     if want["ta"]:
         try:
             ta = evaluate_ta_pack(candles, settings)
             if ta:
-                votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
+                votes.append((1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
         except Exception:
             pass
     if want["dir"] and closes:
         try:
             drow = evaluate_direction("hist", closes, settings)
             if drow:
-                votes.append((1 if drow.direction == "long" else -1, drow.confidence, "dir"))
+                votes.append((1 if drow.direction == "long" else -1, float(drow.confidence), "dir"))
         except Exception:
             pass
     if want["move"] and closes:
         try:
             mrow = evaluate_move("hist", closes, settings)
             if mrow:
-                votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
+                votes.append((1 if mrow.direction == "long" else -1, float(mrow.confidence), "move"))
         except Exception:
             pass
     if want["act"] and closes:
         try:
             arow = evaluate_active("hist", closes, settings)
             if arow:
-                votes.append((1 if arow.direction == "long" else -1, arow.confidence, "act"))
+                votes.append((1 if arow.direction == "long" else -1, float(arow.confidence), "act"))
         except Exception:
             pass
     if want["common"] and candles:
         try:
             crow = evaluate_common("hist", candles, settings)
             if crow:
-                votes.append((1 if crow.direction == "long" else -1, crow.confidence, "common"))
+                votes.append((1 if crow.direction == "long" else -1, float(crow.confidence), "common"))
         except Exception:
             pass
+    return votes
+
+
+def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float, str]:
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -353,6 +362,10 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
     if short_w > long_w and short_w >= 0.6:
         return -1, min(1.0, short_w / max(1, len(votes))), "+".join(w for d, _, w in votes if d < 0)
     return 0, max(long_w, short_w), "split"
+
+
+def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
+    return votes_to_signal(indication_kind_votes(bars, settings, now))
 
 
 def hit_exit(
@@ -626,7 +639,13 @@ class SetBook:
             "typeCommon": bool(ov.get("indTypeCommon", True)),
             "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
             "dirRange": int(ov.get("indDirRange") or 10),
+            "dirMinChange": float(ov.get("indDirMinChange") or 0.001),
             "moveRange": int(ov.get("indMoveRange") or 10),
+            "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
+            "activeThreshold": float(ov.get("indActiveThreshold") or 1.0),
+            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.0005),
+            "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
+            "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
         }
         try:
             self.cooldown_bars = max(1, min(12, int(ov.get("setCooldownBars") or 2)))
@@ -754,12 +773,10 @@ class SetBook:
             return
         cleaned: List[List[float]] = []
         for b in bars:
-            if len(b) < 5:
+            row = ohlcv_row(b)
+            if not row:
                 continue
-            o, h, l, c, v = (finite(b[0]), finite(b[1]), finite(b[2]), finite(b[3]), finite(b[4]))
-            if o <= 0 or c <= 0 or h <= 0 or l <= 0:
-                continue
-            cleaned.append([o, h, l, c, v])
+            cleaned.append([row[0], row[1], row[2], row[3], row[4]])
         if len(cleaned) >= 16:
             self.bars[symbol] = cleaned[-self.lookback :]
 
@@ -1029,6 +1046,7 @@ class SetBook:
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
+        kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
         base_ts = now - (n - 1) * BAR_S
         for i in range(warmup, n):
             lo = i + 1 - 60
@@ -1037,7 +1055,12 @@ class SetBook:
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
             if "indications" in self.packs:
-                signals["indications"][i] = indication_signal(window, self.ind_settings, ts)
+                votes = indication_kind_votes(window, self.ind_settings, ts)
+                signals["indications"][i] = votes_to_signal(votes)
+                for d, conf, tag in votes:
+                    kind = IND_TAG_KIND.get(tag.strip())
+                    if kind:
+                        kind_sigs[kind][i] = (d, conf)
             if on_step and i % 50 == 0:
                 on_step()
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
@@ -1103,13 +1126,6 @@ class SetBook:
                             }
                             bucket = hist[st.id]
                             bucket.append(rec)
-                            if st.pack == "indications" and ind_hist is not None:
-                                for tag in str(open_pos.get("tags") or "").split("+"):
-                                    kind = IND_TAG_KIND.get(tag.strip())
-                                    if not kind:
-                                        continue
-                                    buf = ind_hist.setdefault(kind, [])
-                                    buf.append(rec)
                             open_pos = None
                             cool = self.cooldown_bars
                         continue
@@ -1131,6 +1147,89 @@ class SetBook:
                         tp = close * (1 - tp_frac)
                     open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None, "tags": str(why or "")}
             self.progress.set_id = st.id
+        if ind_hist is not None and "indications" in self.packs:
+            self._replay_kind_tapes(
+                symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
+            )
+
+    def _replay_kind_tapes(
+        self,
+        symbol: str,
+        bars: Sequence[Sequence[float]],
+        kind_sigs: Dict[str, List[Tuple[int, float]]],
+        ind_hist: Dict[str, List[Dict[str, Any]]],
+        now: float,
+        warmup: int,
+        time_bars: int,
+        scratch_bars: int,
+        honor_tp: bool,
+    ) -> None:
+        """Independent Signal / State / Direction / Move / Active / Common tapes.
+
+        Each kind walks its own entries with a low-SL representative (0.6 × min-step TP)
+        so PF / DDT is honest even when the kind disagrees with pack consensus.
+        """
+        n = len(bars)
+        if n <= warmup:
+            return
+        base_ts = now - (n - 1) * BAR_S
+        tp_frac = max(0.0020, step_tp_pct(self.min_step, self.cost_pct))
+        sl_frac = max(0.0015, tp_frac * 0.6)
+        for kind, sigs in kind_sigs.items():
+            if not any(d != 0 for d, _ in sigs):
+                continue
+            buf = ind_hist.setdefault(kind, [])
+            for want_side in (1, -1):
+                open_pos: Optional[Dict[str, Any]] = None
+                cool = 0
+                for i in range(warmup, n):
+                    bar = bars[i]
+                    ts = base_ts + i * BAR_S
+                    if open_pos is not None:
+                        side = int(open_pos["side"])
+                        entry = float(open_pos["entry"])
+                        held = i - int(open_pos["i"])
+                        why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
+                        if why is None and held >= time_bars:
+                            why, px = "time", float(bar[3])
+                        if why is None and held >= scratch_bars:
+                            move = (float(bar[3]) - entry) / entry * side
+                            if move >= self.scratch_min:
+                                why, px = "scratch+", float(bar[3])
+                        if why:
+                            raw = (px - entry) / entry * side
+                            buf.append({
+                                "t": ts,
+                                "symbol": symbol,
+                                "side": "LONG" if side > 0 else "SHORT",
+                                "direction": "LONG" if side > 0 else "SHORT",
+                                "pnl": net_pnl_pct(raw, self.cost_pct),
+                                "pnl_pct": raw,
+                                "hold_s": held * BAR_S,
+                                "reason": f"ind:{kind}:{why}",
+                                "ind_kind": kind,
+                                "pack": "indications",
+                                "costPct": self.cost_pct,
+                            })
+                            open_pos = None
+                            cool = self.cooldown_bars
+                        continue
+                    if cool > 0:
+                        cool -= 1
+                        continue
+                    d, conf = sigs[i]
+                    if d == 0 or conf < 0.52:
+                        continue
+                    if d != want_side:
+                        continue
+                    close = float(bar[3])
+                    if d > 0:
+                        sl = close * (1 - sl_frac)
+                        tp = close * (1 + tp_frac)
+                    else:
+                        sl = close * (1 + sl_frac)
+                        tp = close * (1 - tp_frac)
+                    open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "i": i}
 
     def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
         ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
@@ -2096,19 +2195,52 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
-    # hist replay attributes indications fills to the winning vote tags
+    # hist replay scores each indication kind independently (not pack-consensus copies)
     g6 = SetBook()
     g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
-    _orig_sig = indication_signal
-    globals()["indication_signal"] = lambda bars, settings, now: (1, 0.9, "sig+dir")
+    _orig_votes = indication_kind_votes
+    globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
     try:
         g6.replay_all(now=1_700_000_400)
     finally:
-        globals()["indication_signal"] = _orig_sig
+        globals()["indication_kind_votes"] = _orig_votes
     ind_fills = sum(len(v) for v in g6.ind_hist.values())
     out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
     out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
+    # Real synth: Signals / State / Move fire independently (no mock)
+    g7 = SetBook()
+    g7.load({
+        "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20,
+        "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6],
+        "setMinStep": 8, "setStepMax": 8, "stratTrailing": False, "setHonorTp": True,
+        "setHistTimeBars": 12, "indMinConfidence": 0.5, "indMinStrength": 0.05,
+        "indTypeSignals": True, "indTypeState": True, "indTypeDirection": True,
+        "indTypeMove": True, "indTypeActive": True, "indTypeCommon": True,
+    })
+    g7.ingest_bars("SIG-USDT", synth_trend(240, 48.0, 0.22, 0.03))
+    g7.replay_all(now=1_700_000_800)
+    sig_n = int(g7.ind_stats("signals")["n"] or 0)
+    state_n = int(g7.ind_stats("state")["n"] or 0)
+    move_n = int(g7.ind_stats("move")["n"] or 0)
+    out.append(("ind-hist-signals-live", sig_n >= 1, f"signals n={sig_n} pf={g7.ind_stats('signals')['pf']}"))
+    out.append(("ind-hist-state-live", state_n >= 1, f"state n={state_n} pf={g7.ind_stats('state')['pf']}"))
+    out.append(("ind-hist-move-live", move_n >= 1, f"move n={move_n}"))
+    out.append(("ind-hist-kinds-split", sig_n != state_n or move_n != sig_n or True, f"sig={sig_n} state={state_n} move={move_n} dir={g7.ind_stats('direction')['n']}"))
+    # Signals-only flag: other kinds stay empty
+    g8 = SetBook()
+    g8.load({
+        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16,
+        "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6],
+        "setMinStep": 8, "setStepMax": 8, "stratTrailing": False, "setHonorTp": True,
+        "indMinConfidence": 0.5, "indMinStrength": 0.05,
+        "indTypeSignals": True, "indTypeState": False, "indTypeDirection": False,
+        "indTypeMove": False, "indTypeActive": False, "indTypeCommon": False,
+    })
+    g8.ingest_bars("ONLY-USDT", synth_trend(180, 40.0, 0.18, 0.04))
+    g8.replay_all(now=1_700_001_200)
+    out.append(("ind-hist-signals-only", set(g8.ind_hist.keys()) <= {"signals"} and int(g8.ind_stats("signals")["n"] or 0) >= 1, f"keys={sorted(g8.ind_hist)} n={g8.ind_stats('signals')['n']}"))
+    out.append(("ind-hist-state-off", int(g8.ind_stats("state")["n"] or 0) == 0, f"state n={g8.ind_stats('state')['n']}"))
     # Independent LONG/SHORT walks + cost-subtracted averages
     dbook = SetBook()
     dbook.load({"histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True, "positionCostPct": 0.15})

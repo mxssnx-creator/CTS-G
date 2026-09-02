@@ -1176,6 +1176,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))
     rec("calc-kinds", set((job.get("kinds") or {}).keys()) == set(IND_KINDS), str(sorted((job.get("kinds") or {}).keys())))
     rec("calc-kind-ddt", all("maxDdS" in (job.get("kinds") or {}).get(k, {}) and "pf" in (job.get("kinds") or {}).get(k, {}) for k in IND_KINDS))
+    rec("calc-signals-n", int(((job.get("kinds") or {}).get("signals") or {}).get("n") or 0) >= 1, str((job.get("kinds") or {}).get("signals")))
+    rec("calc-state-n", int(((job.get("kinds") or {}).get("state") or {}).get("n") or 0) >= 1, str((job.get("kinds") or {}).get("state")))
+    rec("calc-kinds-independent", (
+        len({round(float(((job.get("kinds") or {}).get(k) or {}).get("pf") or 0), 3) for k in IND_KINDS}) >= 2
+        or len({int(((job.get("kinds") or {}).get(k) or {}).get("tapeN") or 0) for k in IND_KINDS}) >= 2
+    ), str({k: {kk: ((job.get("kinds") or {}).get(k) or {}).get(kk) for kk in ("n", "tapeN", "pf")} for k in IND_KINDS}))
     rec("calc-dir-keys", set((job.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str(job.get("byDirection")))
     rec("calc-dir-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byDirection") or {}).values()), str(job.get("byDirection")))
     rec("calc-dir-rows", any(r.get("direction") == "LONG" for r in (job.get("rows") or [])) and any(r.get("direction") == "SHORT" for r in (job.get("rows") or [])), str({r.get("direction") for r in (job.get("rows") or [])}))

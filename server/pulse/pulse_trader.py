@@ -21,7 +21,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from typing import Any, Deque, Dict, List, Optional, Tuple
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -428,8 +428,13 @@ def rss_mb() -> float:
 
 
 def redis_hget(field: str) -> str:
-    p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-    return (p.stdout or "").strip()
+    try:
+        p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
+        return (p.stdout or "").strip()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
 
 
 def load_json_file(path: str) -> dict:
@@ -918,7 +923,7 @@ class Pulse:
         vr = max(0.25, float(getattr(self.block, "volume_ratio", 1.0) or 1.0))
         block_extra = 0.0
         if stack > 0:
-            block_extra = sum(calculate_block_volume_increment_ratio(i, vr) for i in range(1, min(stack, 8) + 1))
+            block_extra = calculate_block_max_additional_ratio(stack, vr)
         extra = min(12.0, max(dca_extra, block_extra))
         hard = base * (1.0 + extra)
         room = self.avail_notional()
@@ -2737,7 +2742,7 @@ class Pulse:
                 ind = self.indications.match(sym, reason)
         except Exception:
             ind = None
-        if ind is None:
+        if ind is None and not str(reason).startswith("ind:"):
             try:
                 ind = self.indications.primary(sym)
             except Exception:
@@ -2936,7 +2941,7 @@ class Pulse:
                 self.consec_loss = 4
                 log("pause new entries 120s after cold streak")
         self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
-        self.block.on_parent_close(pos.symbol, pos.side, pnl)
+        self.block.on_parent_close(pos.symbol, pos.side, pnl, pnl_pct=net_pnl_pct(pnl_pct, self.position_cost_pct))
         self.open.pop(pos.symbol, None)
         self.save_open_book()
         try:
@@ -3498,9 +3503,17 @@ class Pulse:
                 except TypeError:
                     st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
             if st is not None:
-                blob = (getattr(st, "by_side", None) or {}).get(side.upper() if side else "") or {}
-                ratio = float(blob.get("last15_ratio") or getattr(st, "last15_ratio", 0.0) or 0.0)
-                n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                blob = {}
+                side_u = (side or "").upper()
+                raw_side = getattr(st, "by_side", None) or {}
+                if side_u and isinstance(raw_side, dict):
+                    blob = raw_side.get(side_u) or {}
+                if blob:
+                    ratio = float(blob.get("last15_ratio") or 0.0)
+                    n = int(blob.get("last15_n") or 0)
+                else:
+                    ratio = float(getattr(st, "last15_ratio", 0.0) or 0.0)
+                    n = int(getattr(st, "last15_n", 0) or 0)
                 if getattr(self.sets, "strict_gate", False):
                     need = max(int(getattr(self.sets, "min_samples", 8) or 8), 8)
                     if n >= need and ratio + 1e-9 >= 1.0:
@@ -3567,7 +3580,24 @@ class Pulse:
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:
                 try:
-                    ind = self.indications.best(pos.symbol) or self.indications.primary(pos.symbol)
+                    def _blk_allow(kind: str, direction: str = "") -> bool:
+                        gate = getattr(self.sets, "indication_ok", None)
+                        if not (self.sets.enabled and callable(gate)):
+                            return True
+                        try:
+                            return bool(gate(kind, pos.side))
+                        except TypeError:
+                            return bool(gate(kind))
+                        except Exception:
+                            return True
+                    picked = None
+                    try:
+                        picked = self.indications.pick_entry(pos.symbol, min_conf=0.50, allow=_blk_allow)
+                    except TypeError:
+                        picked = self.indications.pick_entry(pos.symbol, min_conf=0.50)
+                    except Exception:
+                        picked = None
+                    ind = picked[0] if picked else (self.indications.best(pos.symbol) or self.indications.primary(pos.symbol))
                     if ind:
                         same = (pos.side == "LONG" and ind.direction == "long") or (pos.side == "SHORT" and ind.direction == "short")
                 except Exception:
@@ -3997,18 +4027,29 @@ class Pulse:
         ranked: List[Tuple[float, str, int, str]] = []
         best: Dict[str, Tuple[float, str, int, str]] = {}
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
+            def _ind_allow(kind: str, direction: str = "") -> bool:
+                gate = getattr(self.sets, "indication_ok", None)
+                if not (self.sets.enabled and callable(gate)):
+                    return True
+                side = "LONG" if str(direction).lower().startswith("l") else "SHORT"
+                try:
+                    return bool(gate(kind, side))
+                except TypeError:
+                    return bool(gate(kind))
+                except Exception:
+                    return True
             for s in SYMBOLS:
                 if s in self.open:
                     continue
                 picked = None
                 try:
-                    picked = self.indications.pick_entry(s, min_conf=0.52)
+                    picked = self.indications.pick_entry(s, min_conf=0.52, allow=_ind_allow)
                 except Exception:
                     picked = None
                 if not picked:
                     try:
                         one = self.indications.best(s) or self.indications.primary(s)
-                        if one and one.confidence >= 0.52:
+                        if one and one.confidence >= 0.52 and _ind_allow(one.kind, one.direction):
                             picked = (one, float(one.confidence), 1)
                     except Exception:
                         picked = None
@@ -4544,6 +4585,36 @@ class Pulse:
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
         sim_n, sim_upnl = self.sim_stats()
+        closed_out = []
+        for c in list(self.closed)[-80:][::-1]:
+            d = asdict(c)
+            d["indKind"] = d.get("ind_kind") or ""
+            closed_out.append(d)
+        cov = self._coverage_blob()
+        ind_snap = self.indications.snapshot()
+        sets_snap = self.sets.snapshot()
+        try:
+            from stats_report import merge_kind_stats, merge_strategy_stats
+            by_ind = merge_kind_stats(
+                closed_out,
+                self.position_cost_pct,
+                gate=sets_snap.get("indGate") or cov.get("indicationGate") or {},
+                hits=cov.get("indicationHits") or ind_snap.get("typeHits") or {},
+                types=cov.get("indicationTypes") or ind_snap.get("types") or {},
+                kind_live=ind_snap.get("kindStats") or {},
+            )
+            by_strat = merge_strategy_stats(
+                closed_out,
+                self.position_cost_pct,
+                coverage=cov,
+                block=self.block.snapshot(),
+                dca=self.dca.snapshot(),
+                exits=self.exits.snapshot(),
+                sets_rows=sets_snap.get("rows") or [],
+            )
+        except Exception:
+            by_ind = {}
+            by_strat = {}
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -4603,9 +4674,9 @@ class Pulse:
             "pfPlus1xCost": 1.1,
             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
             "variants": self.variants.snapshot(),
-            "sets": self.sets.snapshot(),
+            "sets": sets_snap,
             "exits": self.exits.snapshot(),
-            "indications": self.indications.snapshot(),
+            "indications": ind_snap,
             "dca": self.dca.snapshot(),
             "api": snap,
             "cts": {"blockMaxStack": self.cts.get("blockMaxStack"), "variantBlockEnabled": self.cts.get("variantBlockEnabled"), "blockVolumeRatio": self.cts.get("blockVolumeRatio"), "blockProfitFactorRatio": self.cts.get("blockProfitFactorRatio"), "position_mode": self.cts.get("position_mode"), "margin_mode": self.cts.get("margin_mode"), "control_orders": self.cts.get("control_orders")},
@@ -4648,7 +4719,7 @@ class Pulse:
                 }
                 for p in self.open.values()
             ],
-            "closed": [asdict(c) for c in list(self.closed)[-80:][::-1]],
+            "closed": closed_out,
             "signals": list(self.signals)[::-1][:16],
             "symbolCount": len(SYMBOLS),
             "symbolMax": MAX_SYMBOLS,
@@ -4676,7 +4747,9 @@ class Pulse:
                 "scanKeep": list(getattr(self, "_scan_keep", []) or [])[:12],
                 "load": self.load.snapshot() if hasattr(self, "load") else {},
             },
-            "coverage": self._coverage_blob(),
+            "coverage": cov,
+            "byIndication": by_ind,
+            "byStrategy": by_strat,
         }
 
     def _coverage_blob(self) -> Dict[str, Any]:

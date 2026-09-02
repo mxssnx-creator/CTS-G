@@ -50,11 +50,17 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         ))}
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
-        {TYPES.map((k) => (
-          <span key={k} className={types[k] === false ? "text-faint" : "text-fg"}>
-            {k} {types[k] === false ? "off" : hits[k] ?? 0}
-          </span>
-        ))}
+        {TYPES.map((k) => {
+          const gate = (cov?.indicationGate || {})[k];
+          const pf = gate?.pf;
+          const n = gate?.n;
+          return (
+            <span key={k} className={types[k] === false ? "text-faint" : "text-fg"}>
+              {k} {types[k] === false ? "off" : hits[k] ?? 0}
+              {n ? ` · ${Number(pf ?? 0).toFixed(2)}` : ""}
+            </span>
+          );
+        })}
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span className={miss ? "text-danger" : "text-primary"}>
@@ -153,14 +159,20 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         ))}
       </div>
       <div className="flex flex-wrap gap-2">
-        {TYPES.map((k) => (
-          <span
-            key={k}
-            className={`rounded-full border px-2 py-0.5 font-mono text-xs ${types[k] !== false ? "border-primary text-primary" : "border-border text-faint"}`}
-          >
-            {k} {types[k] === false ? "off" : `ON · ${hits[k] ?? 0}`}
-          </span>
-        ))}
+        {TYPES.map((k) => {
+          const gate = (cov?.indicationGate || {})[k];
+          const pf = gate?.pf;
+          const n = gate?.n;
+          return (
+            <span
+              key={k}
+              className={`rounded-full border px-2 py-0.5 font-mono text-xs ${types[k] !== false ? "border-primary text-primary" : "border-border text-faint"}`}
+            >
+              {k} {types[k] === false ? "off" : `ON · ${hits[k] ?? 0}`}
+              {n ? ` · PF ${Number(pf ?? 0).toFixed(2)}` : ""}
+            </span>
+          );
+        })}
       </div>
       {sets.dims ? (
         <p className="font-mono text-xs text-muted">

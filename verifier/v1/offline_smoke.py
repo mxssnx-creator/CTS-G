@@ -47,13 +47,12 @@ class StubAPI:
 def synth_bars(n=60, start=100.0, drift=0.001):
     bars = []
     px = start
-    t = int(time.time()) - n * 60
     for i in range(n):
         o = px
         px = px * (1 + drift)
         hi = max(o, px) * 1.0005
         lo = min(o, px) * 0.9995
-        bars.append([t + i * 60, o, hi, lo, px, 1000.0])
+        bars.append([o, hi, lo, px, 1000.0])
     return bars
 
 
@@ -80,7 +79,7 @@ def main() -> int:
     # 2. indications on synthetic bars
     bars = synth_bars()
     p.klines_tf["1m"]["SOL-USDT"] = bars
-    p.px["SOL-USDT"] = bars[-1][4]
+    p.px["SOL-USDT"] = bars[-1][3]
     err = None
     try:
         p.process_indications()
@@ -101,7 +100,9 @@ def main() -> int:
         err = e
     rec("write-stats-no-crash", err is None, repr(err or ""))
     try:
-        stats = json.load(open(os.path.join(DIR, "stats-bingx-x01.json")))
+        stats_path = getattr(pt, "STATS_PATH", os.path.join(DIR, "stats-bingx-x01.json"))
+        os.makedirs(os.path.dirname(stats_path) or ".", exist_ok=True)
+        stats = json.load(open(stats_path))
         rec("stats-has-indications", "indications" in stats, f"keys={sorted(stats)[:12]}")
     except Exception as e:
         rec("stats-has-indications", False, repr(e))

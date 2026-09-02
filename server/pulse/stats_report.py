@@ -15,7 +15,7 @@ from position_cost import (
     net_pnl_usdt,
     signed_result_r,
 )
-from set_engine import drawdown_time
+from set_engine import drawdown_time, IND_KINDS
 
 
 def _f(v: Any, fb: float = 0.0) -> float:
@@ -44,6 +44,8 @@ def _row(c: Any) -> Dict[str, Any]:
             "client_id": str(c.get("client_id") or c.get("clientId") or ""),
             "sl_ratio": _f(c.get("sl_ratio") or c.get("slRatio")),
             "trail_key": str(c.get("trail_key") or c.get("trailKey") or ""),
+            "ind_kind": str(c.get("ind_kind") or c.get("indKind") or ""),
+            "indKind": str(c.get("indKind") or c.get("ind_kind") or ""),
         }
     return {
         "t": _f(getattr(c, "t", 0)),
@@ -61,6 +63,8 @@ def _row(c: Any) -> Dict[str, Any]:
         "client_id": str(getattr(c, "client_id", "") or ""),
         "sl_ratio": _f(getattr(c, "sl_ratio", 0)),
         "trail_key": str(getattr(c, "trail_key", "") or ""),
+        "ind_kind": str(getattr(c, "ind_kind", "") or ""),
+        "indKind": str(getattr(c, "ind_kind", "") or ""),
     }
 
 
@@ -154,50 +158,223 @@ def by_pack(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
     return {k: pf_window(v, None, cost_pct) for k, v in buckets.items()}
 
 
+IND_KIND_SET = set(IND_KINDS)
+STRAT_KEYS = ("indications", "general", "block", "trailing", "dca", "exits")
+
+
+def _side_of(r: Dict[str, Any]) -> str:
+    s = str(r.get("side") or "").upper()
+    if s.startswith("L") or s in ("1", "BUY"):
+        return "LONG"
+    if s.startswith("S") or s in ("-1", "SELL"):
+        return "SHORT"
+    return ""
+
+
+def _kind_of(r: Dict[str, Any]) -> str:
+    k = str(r.get("ind_kind") or r.get("indKind") or "").strip().lower()
+    if k in IND_KIND_SET:
+        return k
+    reason = str(r.get("reason") or "")
+    if reason.startswith("ind:"):
+        bits = reason.split(":")
+        cand = (bits[1] if len(bits) > 1 else "signals").strip().lower()
+        return cand if cand in IND_KIND_SET else "signals"
+    return ""
+
+
+def _strats_of(r: Dict[str, Any]) -> List[str]:
+    keys: List[str] = []
+    pack = str(r.get("pack") or "").lower()
+    if pack in ("indications", "general", "block", "dca"):
+        keys.append(pack)
+    reason = str(r.get("reason") or "").lower()
+    head = reason.split(":")[0].split()[0] if reason else ""
+    if head.startswith("block") or pack == "block":
+        keys.append("block")
+    if head.startswith("dca") or pack == "dca":
+        keys.append("dca")
+    trail = str(r.get("trail_key") or r.get("trailKey") or "")
+    if trail and trail not in ("0", "off", "none"):
+        keys.append("trailing")
+    if any(tok in reason for tok in ("lock", "peak", "rev", "time-exit", "hard", "exit:")) or head in ("sl", "tp", "trail"):
+        keys.append("exits")
+    kind = _kind_of(r)
+    if kind:
+        keys.append("indications")
+        keys.append(f"indications:{kind}")
+    elif pack == "indications":
+        keys.append("indications")
+    return list(dict.fromkeys(keys))
+
+
+def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    d = drawdown_time([{"t": x.get("t"), "pnl": x.get("netPnl", x.get("pnl"))} for x in rows]) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+    window["maxDdS"] = d.get("maxS")
+    window["avgDdS"] = d.get("avgS")
+    window["ddEpisodes"] = d.get("episodes")
+    window["costSubtracted"] = True
+    return window
+
+
+def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    w = pf_window(items, None, cost_pct)
+    _with_ddt(w, items)
+    by_side: Dict[str, Any] = {}
+    for d in ("LONG", "SHORT"):
+        sub = [x for x in items if _side_of(x) == d]
+        sw = pf_window(sub, None, cost_pct)
+        _with_ddt(sw, sub)
+        sw["direction"] = d
+        by_side[d] = sw
+    w["bySide"] = by_side
+    w["validated"] = int(w.get("n") or 0) >= 8 and float(w.get("pf") or 0) + 1e-9 >= 1.0
+    return w
+
+
 def by_indication(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
-    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in IND_KINDS}
     for r in rows:
-        reason = str(r.get("reason") or "")
-        kind = "other"
-        if reason.startswith("ind:"):
-            bits = reason.split(":")
-            kind = bits[1] if len(bits) > 1 else "signals"
-        elif str(r.get("pack") or "") == "indications":
-            kind = "indications"
-        elif str(r.get("pack") or "") == "general":
-            kind = "general"
-        buckets.setdefault(kind, []).append(r)
-    return {k: pf_window(v, None, cost_pct) for k, v in buckets.items()}
+        k = _kind_of(r)
+        if k:
+            buckets.setdefault(k, []).append(r)
+    out: Dict[str, Any] = {}
+    for k in IND_KINDS:
+        blob = _bucket_stats(buckets.get(k) or [], cost_pct)
+        blob["kind"] = k
+        out[k] = blob
+    return out
 
 
 def by_direction(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
     buckets: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
     for r in rows:
-        s = str(r.get("side") or "").upper()
-        if s.startswith("L") or s in ("1", "BUY"):
-            buckets["LONG"].append(r)
-        elif s.startswith("S") or s in ("-1", "SELL"):
-            buckets["SHORT"].append(r)
+        s = _side_of(r)
+        if s:
+            buckets[s].append(r)
     return {
-        k: {**pf_window(v, None, cost_pct), "direction": k, "costSubtracted": True}
+        k: {**_bucket_stats(v, cost_pct), "direction": k}
         for k, v in buckets.items()
     }
 
 
 def by_strategy(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
-    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in STRAT_KEYS}
     for r in rows:
-        pack = str(r.get("pack") or "unknown")
-        buckets.setdefault(pack, []).append(r)
-        reason = str(r.get("reason") or "")
-        if reason.startswith("ind:"):
-            bits = reason.split(":")
-            kind = bits[1] if len(bits) > 1 else "signals"
-            buckets.setdefault(f"indications:{kind}", []).append(r)
-    return {
-        k: {**pf_window(v, None, cost_pct), "strategy": k, "costSubtracted": True}
-        for k, v in buckets.items()
+        for key in _strats_of(r):
+            buckets.setdefault(key, []).append(r)
+    out: Dict[str, Any] = {}
+    for k, v in buckets.items():
+        blob = _bucket_stats(v, cost_pct)
+        blob["strategy"] = k
+        out[k] = blob
+    for k in STRAT_KEYS:
+        out.setdefault(k, {**_bucket_stats([], cost_pct), "strategy": k})
+    return out
+
+
+def merge_kind_stats(
+    closed: Sequence[Dict[str, Any]],
+    cost_pct: float,
+    *,
+    gate: Optional[Dict[str, Any]] = None,
+    hits: Optional[Dict[str, Any]] = None,
+    types: Optional[Dict[str, Any]] = None,
+    kind_live: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Closed-tape PF/DDT + intern gate + live scan hits for every indication type."""
+    out = by_indication(closed, cost_pct)
+    gate = gate or {}
+    hits = hits or {}
+    types = types or {}
+    kind_live = kind_live or {}
+    for k in IND_KINDS:
+        blob = out.setdefault(k, {**_bucket_stats([], cost_pct), "kind": k})
+        g = gate.get(k) if isinstance(gate.get(k), dict) else {}
+        live = kind_live.get(k) if isinstance(kind_live.get(k), dict) else {}
+        hist_n = int(g.get("n") or 0)
+        live_n = int(blob.get("n") or 0)
+        if hist_n >= live_n and hist_n:
+            blob["pf"] = round(float(g.get("pf") or blob.get("pf") or 0), 4)
+            blob["n"] = hist_n
+            blob["maxDdS"] = g.get("maxDdS", blob.get("maxDdS"))
+            blob["avgDdS"] = g.get("avgDdS", blob.get("avgDdS"))
+            blob["ddEpisodes"] = g.get("ddEpisodes", blob.get("ddEpisodes"))
+            blob["netAvg"] = g.get("netAvg", blob.get("netAvg"))
+            if isinstance(g.get("bySide"), dict) and g.get("bySide"):
+                blob["bySide"] = g.get("bySide")
+            blob["validated"] = bool(g.get("validated"))
+            blob["profitable"] = bool(g.get("profitable"))
+        blob["ok"] = g.get("ok") if "ok" in g else bool(blob.get("validated") and float(blob.get("pf") or 0) >= 1.0)
+        blob["hits"] = int(live.get("hits") or hits.get(k) or 0)
+        blob["scanSymbols"] = int(live.get("symbols") or 0)
+        blob["scanLong"] = int(live.get("long") or 0)
+        blob["scanShort"] = int(live.get("short") or 0)
+        blob["avgConf"] = float(live.get("avgConf") or 0)
+        blob["avgStrength"] = float(live.get("avgStrength") or 0)
+        blob["enabled"] = bool(types.get(k, live.get("enabled", True)))
+        blob["processed"] = True
+        blob["kind"] = k
+        blob["costSubtracted"] = True
+    return out
+
+
+def merge_strategy_stats(
+    closed: Sequence[Dict[str, Any]],
+    cost_pct: float,
+    *,
+    coverage: Optional[Dict[str, Any]] = None,
+    block: Optional[Dict[str, Any]] = None,
+    dca: Optional[Dict[str, Any]] = None,
+    exits: Optional[Dict[str, Any]] = None,
+    sets_rows: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    out = by_strategy(closed, cost_pct)
+    cov_on = (coverage or {}).get("strategies") or {}
+    block = block or {}
+    dca = dca or {}
+    exits = exits or {}
+    pack_pf: Dict[str, List[float]] = {}
+    for r in sets_rows or []:
+        pack = str(r.get("pack") or "")
+        if pack:
+            pack_pf.setdefault(pack, []).append(float(r.get("last15Ratio") or 0))
+        if str(r.get("kind") or "") == "trail":
+            pack_pf.setdefault("trailing", []).append(float(r.get("last15Ratio") or 0))
+    extras = {
+        "block": {
+            "enabled": bool(block.get("enabled", cov_on.get("block", True))),
+            "n": int(block.get("countN") or len(block.get("lanes") or []) or (out.get("block") or {}).get("n") or 0),
+            "pf": float(block.get("last15Ratio") or (out.get("block") or {}).get("pf") or 0),
+        },
+        "dca": {
+            "enabled": bool(dca.get("enabled", cov_on.get("dca", False))),
+            "n": int(dca.get("last15N") or len(dca.get("lanes") or []) or (out.get("dca") or {}).get("n") or 0),
+            "pf": float(dca.get("last15Ratio") or (out.get("dca") or {}).get("pf") or 0),
+        },
+        "trailing": {"enabled": bool(cov_on.get("trailing", True))},
+        "exits": {
+            "enabled": bool(exits.get("enabled", cov_on.get("exits", True))),
+            "n": sum(int(ln.get("n") or 0) for ln in (exits.get("lanes") or []) if isinstance(ln, dict)) or int((out.get("exits") or {}).get("n") or 0),
+            "pf": next((float(ln.get("last15Ratio") or 0) for ln in (exits.get("lanes") or []) if isinstance(ln, dict) and ln.get("selected")), float((out.get("exits") or {}).get("pf") or 0)),
+        },
+        "indications": {"enabled": bool(cov_on.get("indications", True))},
+        "general": {"enabled": bool(cov_on.get("general", True))},
     }
+    for k in STRAT_KEYS:
+        blob = out.setdefault(k, {**_bucket_stats([], cost_pct), "strategy": k})
+        extra = extras.get(k) or {}
+        blob["enabled"] = bool(extra.get("enabled", cov_on.get(k, k != "dca")))
+        if extra.get("pf") and not blob.get("n"):
+            blob["pf"] = round(float(extra["pf"]), 4)
+        if extra.get("n") and not blob.get("n"):
+            blob["n"] = int(extra["n"])
+        if pack_pf.get(k) and not blob.get("n"):
+            blob["pf"] = round(sum(pack_pf[k]) / len(pack_pf[k]), 4)
+        blob["strategy"] = k
+        blob["costSubtracted"] = True
+        blob["processed"] = True
+    return out
 
 
 def by_reason(rows: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -326,9 +503,24 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         },
         "bySymbol": by_symbol(closed, cost_pct),
         "byPack": by_pack(closed, cost_pct),
-        "byIndication": by_indication(closed, cost_pct),
+        "byIndication": merge_kind_stats(
+            closed,
+            cost_pct,
+            gate=(sets.get("indGate") or (st.get("coverage") or {}).get("indicationGate") or {}),
+            hits=(st.get("coverage") or {}).get("indicationHits") or (st.get("indications") or {}).get("typeHits") or {},
+            types=(st.get("coverage") or {}).get("indicationTypes") or (st.get("indications") or {}).get("types") or {},
+            kind_live=(st.get("indications") or {}).get("kindStats") or {},
+        ),
         "byDirection": by_direction(closed, cost_pct),
-        "byStrategy": by_strategy(closed, cost_pct),
+        "byStrategy": merge_strategy_stats(
+            closed,
+            cost_pct,
+            coverage=st.get("coverage") or {},
+            block=st.get("block") or {},
+            dca=st.get("dca") or {},
+            exits=exits,
+            sets_rows=rows,
+        ),
         "byReason": by_reason(closed),
         "block": st.get("block"),
         "coordGate": (st.get("coord") or {}).get("gate"),
@@ -520,6 +712,26 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("rep-dir-cost", all(bool(v.get("costSubtracted")) for v in (blob.get("byDirection") or {}).values()), str(blob.get("byDirection"))))
     out.append(("rep-strat", "general" in (blob.get("byStrategy") or {}), str(blob.get("byStrategy"))))
     out.append(("rep-netavg", "netAvg" in (blob.get("profitFactor") or {}).get("all", {}), str((blob.get("profitFactor") or {}).get("all"))))
+    kinds = blob.get("byIndication") or {}
+    out.append(("rep-ind-all-six", set(kinds.keys()) == set(IND_KINDS), str(sorted(kinds))))
+    out.append(("rep-ind-ddt", all("maxDdS" in (kinds.get(k) or {}) and "bySide" in (kinds.get(k) or {}) for k in IND_KINDS), str({k: list((kinds.get(k) or {}).keys())[:8] for k in IND_KINDS})))
+    mixed = [
+        {"t": 3, "symbol": "BBB-USDT", "side": "SHORT", "qty": 1, "entry": 10, "pnl": 0.08, "pnl_pct": 0.002, "hold_s": 30, "reason": "ind:active:tp", "pack": "indications", "ind_kind": "active", "trail_key": "0.3:0.1"},
+        {"t": 4, "symbol": "BBB-USDT", "side": "LONG", "qty": 1, "entry": 10, "pnl": -0.04, "pnl_pct": -0.001, "hold_s": 20, "reason": "block:1", "pack": "block"},
+        {"t": 5, "symbol": "CCC-USDT", "side": "LONG", "qty": 1, "entry": 8, "pnl": 0.02, "pnl_pct": 0.001, "hold_s": 15, "reason": "dca:2", "pack": "dca"},
+        {"t": 6, "symbol": "CCC-USDT", "side": "SHORT", "qty": 1, "entry": 8, "pnl": 0.01, "pnl_pct": 0.0008, "hold_s": 12, "reason": "lock", "pack": "general"},
+    ]
+    mixed_e = [enrich(_row(r), 0.15) for r in mixed]
+    ki = merge_kind_stats(mixed_e, 0.15, hits={"active": 4, "state": 2}, types={k: True for k in IND_KINDS})
+    out.append(("rep-ind-kind-field", int((ki.get("active") or {}).get("n") or 0) == 1 and (ki.get("active") or {}).get("hits") == 4, str(ki.get("active"))))
+    out.append(("rep-ind-processed", all(bool((ki.get(k) or {}).get("processed")) for k in IND_KINDS), str({k: (ki.get(k) or {}).get("processed") for k in IND_KINDS})))
+    stt = merge_strategy_stats(mixed_e, 0.15, coverage={"strategies": {"indications": True, "general": True, "block": True, "dca": False, "trailing": True, "exits": True}})
+    out.append(("rep-strat-canonical", all(k in stt for k in STRAT_KEYS), str(sorted(stt))))
+    out.append(("rep-strat-block", int((stt.get("block") or {}).get("n") or 0) >= 1, str(stt.get("block"))))
+    out.append(("rep-strat-dca-n", int((stt.get("dca") or {}).get("n") or 0) >= 1, str(stt.get("dca"))))
+    out.append(("rep-strat-trail", int((stt.get("trailing") or {}).get("n") or 0) >= 1, str(stt.get("trailing"))))
+    out.append(("rep-strat-exits", int((stt.get("exits") or {}).get("n") or 0) >= 1, str(stt.get("exits"))))
+    out.append(("rep-strat-ind-kind", "indications:active" in stt, str(sorted(stt))))
     return out
 
 

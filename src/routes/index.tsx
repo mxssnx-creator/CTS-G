@@ -23,6 +23,7 @@ import {
   WinRing,
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
+import { KindStrategyStrip } from "@/components/kind-strategy-stats";
 import type { ConnType } from "@/lib/connections";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
@@ -138,6 +139,7 @@ function DeskPage() {
           <EngineStrip stats={stats} />
           <WorkStrip stats={stats} />
           <IndicationStrip stats={stats} />
+          <KindStrategyStrip stats={stats} />
         </div>
         <div className="rounded-radius border border-border bg-surface p-5">
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
@@ -748,6 +750,8 @@ function VariantsStrip({ stats }: { stats: LiveStats | null }) {
 function IndicationStrip({ stats }: { stats: LiveStats | null }) {
   const ind = stats?.indications;
   const rows = ind?.primary ?? [];
+  const kinds = ind?.kindStats || {};
+  const samples = ind?.samples ?? [];
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2">
       <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
@@ -760,31 +764,55 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
           {ind?.extraSources ? " · extra venues" : ""}
         </span>
       </div>
-      {rows.length === 0 ? (
+      <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px]">
+        {(["state", "signals", "active", "direction", "move", "common"] as const).map((k) => {
+          const row = kinds[k];
+          const on = ind?.types?.[k] !== false;
+          return (
+            <span key={k} className={on ? "text-fg" : "text-faint"}>
+              {k} {on ? row?.hits ?? 0 : "off"}
+              {row?.long || row?.short ? ` L${row.long ?? 0}/S${row.short ?? 0}` : ""}
+            </span>
+          );
+        })}
+      </div>
+      {rows.length === 0 && samples.length === 0 ? (
         <p className="mt-2 text-xs text-muted">No consensus yet — waiting on independent 1/5/15 lanes</p>
       ) : (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
-          {rows.slice(0, 8).map((r) => {
-            const tag =
-              r.mode === "tf_combined"
-                ? "tf"
-                : r.mode === "multi_source_consensus"
-                  ? "cons"
-                  : r.timeframe || "src";
-            return (
-              <div key={r.symbol} className="flex items-center justify-between gap-2 font-mono text-xs">
-                <span className="text-fg">
-                  {r.symbol.replace("-USDT", "")}{" "}
-                  <span className={r.direction === "long" ? "text-primary" : "text-danger"}>
-                    {r.direction}
-                  </span>
-                </span>
-                <span className="text-muted tabular-nums">
-                  {tag} · {fmt(r.agreement, 2)} · {fmt(r.confidence, 2)}
-                </span>
-              </div>
-            );
-          })}
+          {samples.slice(0, 6).map((s) => (
+            <div key={s.symbol} className="font-mono text-xs">
+              <span className="text-fg">{s.symbol.replace("-USDT", "")}</span>
+              <span className="ml-2 text-muted">
+                {Object.entries(s.kinds || {})
+                  .map(([k, v]) => `${k[0]}${v.dir === "short" ? "−" : "+"}`)
+                  .join(" ")}
+              </span>
+            </div>
+          ))}
+          {samples.length === 0
+            ? rows.slice(0, 8).map((r) => {
+                const tag =
+                  r.mode === "tf_combined"
+                    ? "tf"
+                    : r.mode === "multi_source_consensus"
+                      ? "cons"
+                      : r.timeframe || "src";
+                return (
+                  <div key={r.symbol} className="flex items-center justify-between gap-2 font-mono text-xs">
+                    <span className="text-fg">
+                      {r.symbol.replace("-USDT", "")}{" "}
+                      <span className={r.direction === "long" ? "text-primary" : "text-danger"}>
+                        {r.direction}
+                      </span>
+                    </span>
+                    <span className="text-muted tabular-nums">
+                      {tag} · {fmt(r.agreement, 2)} · {fmt(r.confidence, 2)}
+                    </span>
+                  </div>
+                );
+              })
+            : null}
         </div>
       )}
     </div>

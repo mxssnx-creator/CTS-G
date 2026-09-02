@@ -22,7 +22,7 @@ from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
-from block_engine import BlockBook, BlockLane, parse_block_count
+from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
 from pulse_trader import (
     coerce_symbol_sort,
@@ -55,6 +55,7 @@ def run_units() -> None:
         (indication_self_test, "ind"),
         (variants_self_test, "var"),
         (dca_self_test, "dca"),
+        (block_self_test, "block"),
         (stats_self_test, "stats"),
         (load_self_test, "load"),
         (hist_calc_self_test, "histcalc"),
@@ -939,6 +940,11 @@ def block_calc_test() -> None:
         p.lev_map = {"TST-USDT": 100}
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
+        p.notional_cap = lambda: 10**9
+        p.max_book_notional = lambda: 10**9
+        p.cap_order_qty = lambda c, px, qty, cap=None: float(qty)
+        p.min_order_qty = lambda c, px: float(c.min_qty)
+        p.leverage_for = lambda c: 100
         p.open = {"TST-USDT": pt.Position(
             symbol="TST-USDT", side="LONG", qty=0.05, entry=100.0,
             opened_at=time.time() - 600, sl=99.0, tp=101.0, peak=100.0,
@@ -996,6 +1002,91 @@ def block_calc_test() -> None:
     rec("block-lane-retires-without-parent",
         pE.api.posts == [] and not laneE.active and laneE.base_qty == 0.0,
         f"active={laneE.active} base={laneE.base_qty}")
+
+    rec("block-max-add-not-sum", calculate_block_max_additional_ratio(3, 1.0) == 3.0
+        and calculate_block_volume_increment_ratio(1, 1.0)
+        + calculate_block_volume_increment_ratio(2, 1.0)
+        + calculate_block_volume_increment_ratio(3, 1.0) == 6.0,
+        "sequential extra=3, independent sum=6")
+
+    # SHORT parent adds independently (SELL, remainder 1× parent)
+    pS = mk_trader(1.2, 1.5, 12)
+    pS.open["TST-USDT"].side = "SHORT"
+    pS.block.lanes.clear()
+    lnS = pS.block.register_parent("TST-USDT", "SHORT", 0.05, 100.0)
+    pS.score = lambda sym: (-1, "t", 0.9)
+    pS.maybe_block_adds()
+    rec("block-short-emits-sell",
+        len(pS.api.posts) == 1 and pS.api.posts[0][1].get("side") == "SELL"
+        and pS.api.posts[0][1].get("positionSide") == "SHORT"
+        and abs(float(pS.api.posts[0][1]["quantity"]) - 0.05) < 1e-9,
+        f"posts={pS.api.posts}")
+    rec("block-short-lane", lnS.side == "SHORT" and lnS.confirmed_add > 0)
+
+    # live overlay with live_n=3 must still request n=1 remainder (no 3× jump)
+    pJ = mk_trader(1.2, 1.5, 12)
+    laneJ = pJ.block.lanes["TST-USDT:LONG"]
+    rowsJ = pJ.block.evaluate_counts(laneJ, live_n=3, intern_pf=1.5)
+    pickJ = pJ.block.pick_emit(rowsJ)
+    rec("block-no-liven-jump",
+        pickJ is not None and pickJ["blockCount"] == 1 and abs(pickJ["requestedAddQty"] - 0.05) < 1e-9
+        and all(r["blockCount"] == 1 for r in rowsJ if r["kind"] == "active-live"),
+        f"pick={pickJ and (pickJ['blockCount'], pickJ['requestedAddQty'])} act={[r['blockCount'] for r in rowsJ if r['kind']=='active-live']}")
+
+    # sequential remainder through n=1,2,3 → aggregate 4× parent, never more
+    pR = mk_trader(1.1, 1.5, 12)
+    for step in (1, 2, 3):
+        pR.block_last_emit = 0.0
+        pR.maybe_block_adds()
+    laneR = pR.block.lanes["TST-USDT:LONG"]
+    rec("block-seq-3-adds",
+        len(pR.api.posts) == 3 and abs(laneR.confirmed_add - 0.15) < 1e-9
+        and abs((laneR.base_qty + laneR.confirmed_add) - 0.20) < 1e-9
+        and pR.block.next_unsatisfied(laneR) is None,
+        f"posts={len(pR.api.posts)} add={laneR.confirmed_add} tot={laneR.base_qty+laneR.confirmed_add}")
+    pR.block_last_emit = 0.0
+    pR.maybe_block_adds()
+    rec("block-seq-full-stops", len(pR.api.posts) == 3, f"posts={len(pR.api.posts)}")
+
+    # intern PF is per-side: winning LONG lifts, losing SHORT stays at floor
+    pI = mk_trader(1.2, 1.5, 12)
+    pI.sets.strict_gate = True
+    pI.sets.min_samples = 8
+    st_split = SimpleNamespace(
+        last15_ratio=1.0, last15_n=12,
+        by_side={
+            "LONG": {"last15_ratio": 1.4, "last15_n": 12},
+            "SHORT": {"last15_ratio": 0.7, "last15_n": 12},
+        },
+    )
+    pI.sets.pick_any = lambda pack, side=None: st_split
+    posL = pI.open["TST-USDT"]
+    rec("block-intern-long-lifts", abs(pI.block_intern_pf(posL) - 1.4) < 1e-9, str(pI.block_intern_pf(posL)))
+    posS = pt.Position(symbol="TST-USDT", side="SHORT", qty=0.05, entry=100.0,
+                       opened_at=time.time() - 600, sl=101.0, tp=99.0, peak=100.0, set_id="", pack="general")
+    rec("block-intern-short-floor", abs(pI.block_intern_pf(posS) - 1.2) < 1e-9, str(pI.block_intern_pf(posS)))
+
+    # book cap uses sequential extra (3×) not the 1+2+3 sum (6×)
+    pCap = object.__new__(pt.Pulse)
+    pCap.block = BlockBook(os.path.join(tmp, "block-cap.json"), {
+        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0})
+    pCap.dca = SimpleNamespace(enabled=False, max_steps=0)
+    pCap.volume_factor = 1.0
+    pCap.available = 100000.0
+    extra = calculate_block_max_additional_ratio(pCap.block.max_stack, pCap.block.volume_ratio)
+    rec("block-book-extra-3", abs(extra - 3.0) < 1e-9, str(extra))
+    base_n = pt.Pulse.notional_cap(pCap)
+    book_n = pt.Pulse.max_book_notional(pCap)
+    rec("block-book-cap-4x", abs(book_n / base_n - 4.0) < 0.08, f"book={book_n} base={base_n} ratio={book_n / base_n:.3f}")
+
+    # parent close stores cost-net fraction, opposite side stays live
+    pC2 = mk_trader(1.2, 1.5, 12)
+    pC2.block.register_parent("TST-USDT", "SHORT", 0.04, 100.0)
+    pC2.block.on_parent_close("TST-USDT", "LONG", 9.9, pnl_pct=0.0015)
+    rec("block-close-net-pct", abs(pC2.block.lanes["TST-USDT:LONG"].parent_pf_ring[-1] - 0.0015) < 1e-9)
+    rec("block-close-other-side-live", pC2.block.lanes["TST-USDT:SHORT"].active is True
+        and float(pC2.block.lanes["TST-USDT:SHORT"].base_qty) > 0,
+        f"short={pC2.block.lanes.get('TST-USDT:SHORT') and pC2.block.lanes['TST-USDT:SHORT'].base_qty}")
 
 
 def set_orders_test() -> None:
@@ -1395,6 +1486,20 @@ def strict_gate_test() -> None:
     rec("strict-ind-unproven-rides-pack",
         p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") is None,
         "common kind unproven but pack validated")
+    # Signals keep running when State is the proven loser
+    ind_book.ind_live["state"] = loss_rows()[:12]
+    ind_book.ind_live["signals"] = win_rows()[:12]
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
+    rec("strict-ind-state-loser-blocked",
+        p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") == "ind-gate",
+        "state kind gated")
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals")
+    rec("strict-ind-signals-runs",
+        p4.entry_sense("AAA-USDT", 1, "ind:signals:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
+        "signals kind runs while state is gated")
+    # restore state as winner for the pack-closed follow-up
+    ind_book.ind_live["state"] = win_rows()[:12]
+    p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="common")
     # ...but not when the indications pack itself has no validated winner
     ind_book.by_idx[0].hist = []
     ind_book._score_one(ind_book.by_idx[0])

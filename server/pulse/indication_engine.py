@@ -163,17 +163,47 @@ def recent_return(closes: List[float], periods: int) -> float:
     return cur / prev - 1.0 if prev > 0 else 0.0
 
 
+def ohlcv_row(bar: Sequence[float]) -> Optional[Tuple[float, float, float, float, float]]:
+    """Normalize a bar to (o, h, l, c, v). Accepts [o,h,l,c,v] or [ts,o,h,l,c,v]."""
+    if bar is None:
+        return None
+    try:
+        n = len(bar)
+    except Exception:
+        return None
+    if n < 5:
+        return None
+    try:
+        if n >= 6:
+            ts = float(bar[0])
+            if ts > 1e11:
+                ts = ts / 1000.0
+            if ts > 1e9:
+                o, h, l, c, v = (float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]), float(bar[5]))
+            else:
+                o, h, l, c, v = (float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]))
+        else:
+            o, h, l, c, v = (float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3]), float(bar[4]))
+    except Exception:
+        return None
+    if o <= 0 or c <= 0 or h <= 0 or l <= 0:
+        return None
+    if h < l:
+        h, l = l, h
+    return o, h, l, c, v
+
+
 def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period_s: float = 60.0) -> List[Candle]:
     now = now or time.time()
-    n = len(bars)
     step = period_s if period_s > 0 else 60.0
+    parsed: List[Tuple[float, float, float, float, float]] = []
+    for b in bars:
+        row = ohlcv_row(b)
+        if row:
+            parsed.append(row)
+    n = len(parsed)
     out: List[Candle] = []
-    for i, b in enumerate(bars):
-        if len(b) < 5:
-            continue
-        o, h, l, c, v = (float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4]))
-        if o <= 0 or c <= 0 or h <= 0 or l <= 0:
-            continue
+    for i, (o, h, l, c, v) in enumerate(parsed):
         out.append(Candle(now - (n - 1 - i) * step, o, h, l, c, v))
     return out
 
@@ -394,7 +424,12 @@ def low_stop_consensus(
 
 
 def _closes(bars: List[List[float]]) -> List[float]:
-    return [float(b[3]) for b in bars if len(b) >= 4 and float(b[3]) > 0]
+    out: List[float] = []
+    for b in bars:
+        row = ohlcv_row(b)
+        if row:
+            out.append(row[3])
+    return out
 
 
 def _dir_of(pxs: List[float]) -> float:
@@ -1052,7 +1087,7 @@ class IndicationBook:
                 )
             )
         # Non-TF direct sources
-        others = [e for e in evals if not str(e.source_id).startswith("bingx-")]
+        others = [e for e in evals if not str(e.source_id).startswith("bingx-") and e.source_id != "ta-rsi-macd-ema"]
         ordered = sorted(others, key=lambda e: (e.stop_loss_pct, -e.confidence, -e.strength, e.source_id))
         for ev in ordered:
             indications.append(
@@ -1076,6 +1111,30 @@ class IndicationBook:
                     kind="signals",
                 )
             )
+        if self.settings.get("typeState", True):
+            ta = next((e for e in evals if e.source_id == "ta-rsi-macd-ema"), None)
+            if ta:
+                indications.append(
+                    Indication(
+                        symbol=symbol,
+                        direction=ta.direction,
+                        mode="ta_pack",
+                        confidence=ta.confidence,
+                        strength=ta.strength,
+                        agreement=1.0,
+                        stop_loss_pct=ta.stop_loss_pct,
+                        take_profit_pct=ta.take_profit_pct,
+                        reward_risk=ta.reward_risk,
+                        last_price=ta.last_price,
+                        sources=[ta.source_id],
+                        votes_long=1 if ta.direction == "long" else 0,
+                        votes_short=1 if ta.direction == "short" else 0,
+                        primary=False,
+                        t=now,
+                        timeframe="1m",
+                        kind="state",
+                    )
+                )
         if self.settings.get("tfCombined", True):
             comb = combine_timeframes(tf_evals, int(self.settings.get("tfMinAgree") or 2), self.settings)
             if comb:
@@ -1176,9 +1235,20 @@ class IndicationBook:
     def match(self, symbol: str, reason: str) -> Optional[Indication]:
         rows = self.last.get(symbol) or []
         low = (reason or "").lower()
+        bits = [b for b in low.split(":") if b]
+        want_kind = ""
+        if bits and bits[0] == "ind" and len(bits) > 1:
+            cand = bits[1].strip()
+            if cand in ("state", "signals", "active", "direction", "move", "common"):
+                want_kind = cand
+        if want_kind:
+            cands = [i for i in rows if i.kind == want_kind]
+            if not cands:
+                return None
+            cands.sort(key=lambda e: (e.confidence, -e.stop_loss_pct), reverse=True)
+            return cands[0]
         for i in rows:
-            token = f"ind:{i.kind}"
-            if token in low or i.kind in low.split(":") or i.mode in low:
+            if i.mode and i.mode in low:
                 return i
         return self.best(symbol)
 
@@ -1191,9 +1261,30 @@ class IndicationBook:
                 out[i.kind] = i
         return out
 
-    def pick_entry(self, symbol: str, min_conf: float = 0.52) -> Optional[Tuple["Indication", float, int]]:
-        """Highest independent type, boosted when ≥2 kinds agree on direction."""
+    def pick_entry(
+        self,
+        symbol: str,
+        min_conf: float = 0.52,
+        allow: Optional[Any] = None,
+    ) -> Optional[Tuple["Indication", float, int]]:
+        """Highest independent type that is allowed, boosted when ≥2 kinds agree."""
         by = self.kinds_for(symbol)
+        if callable(allow) and by:
+            kept: Dict[str, Indication] = {}
+            for k, i in by.items():
+                ok = True
+                try:
+                    ok = bool(allow(k, i.direction))
+                except TypeError:
+                    try:
+                        ok = bool(allow(k))
+                    except Exception:
+                        ok = True
+                except Exception:
+                    ok = True
+                if ok:
+                    kept[k] = i
+            by = kept
         if not by:
             return None
         signed = [(1.0 if i.direction == "long" else -1.0) * max(0.01, float(i.confidence)) for i in by.values()]
@@ -1216,6 +1307,58 @@ class IndicationBook:
             return None
         return pick, conf, agree_n
 
+    def kind_stats(self) -> Dict[str, Any]:
+        """Live scan evidence for every independent indication type."""
+        order = ("state", "signals", "active", "direction", "move", "common")
+        flags = {
+            "state": "typeState",
+            "signals": "typeSignals",
+            "active": "typeActive",
+            "direction": "typeDirection",
+            "move": "typeMove",
+            "common": "typeCommon",
+        }
+        out: Dict[str, Any] = {}
+        for k in order:
+            out[k] = {
+                "kind": k,
+                "enabled": bool(self.settings.get(flags[k], True)),
+                "hits": 0,
+                "symbols": 0,
+                "long": 0,
+                "short": 0,
+                "avgConf": 0.0,
+                "avgStrength": 0.0,
+                "avgSl": 0.0,
+                "processed": True,
+            }
+        seen: Dict[str, set] = {k: set() for k in order}
+        confs: Dict[str, List[float]] = {k: [] for k in order}
+        strs: Dict[str, List[float]] = {k: [] for k in order}
+        sls: Dict[str, List[float]] = {k: [] for k in order}
+        for s, rows in self.last.items():
+            for i in rows:
+                k = str(getattr(i, "kind", "") or "")
+                if k not in out:
+                    continue
+                out[k]["hits"] += 1
+                seen[k].add(s)
+                if i.direction == "long":
+                    out[k]["long"] += 1
+                elif i.direction == "short":
+                    out[k]["short"] += 1
+                confs[k].append(float(i.confidence or 0))
+                strs[k].append(float(i.strength or 0))
+                sls[k].append(float(i.stop_loss_pct or 0))
+        for k in order:
+            out[k]["symbols"] = len(seen[k])
+            if confs[k]:
+                n = len(confs[k])
+                out[k]["avgConf"] = round(sum(confs[k]) / n, 3)
+                out[k]["avgStrength"] = round(sum(strs[k]) / n, 3)
+                out[k]["avgSl"] = round(sum(sls[k]) / n, 3)
+        return out
+
     def snapshot(self) -> Dict[str, Any]:
         primaries = []
         for s, rows in self.last.items():
@@ -1224,10 +1367,8 @@ class IndicationBook:
                 rec = asdict(p)
                 primaries.append(rec)
         primaries.sort(key=lambda r: r["confidence"], reverse=True)
-        types = {}
-        for rows in self.last.values():
-            for i in rows:
-                types[i.kind] = types.get(i.kind, 0) + 1
+        kinds = self.kind_stats()
+        types = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
         keys = sorted(self.last.keys())
         eval_items = list(self.evals.items())
         last_items = list(self.last.items())
@@ -1235,6 +1376,16 @@ class IndicationBook:
             eval_items = eval_items[:24]
         if len(last_items) > 24:
             last_items = last_items[:24]
+        samples: List[Dict[str, Any]] = []
+        for s, rows in last_items:
+            by = self.kinds_for(s)
+            samples.append({
+                "symbol": s,
+                "kinds": {
+                    k: {"dir": i.direction, "conf": round(i.confidence, 3), "sl": round(i.stop_loss_pct, 3), "mode": i.mode}
+                    for k, i in by.items()
+                },
+            })
         return {
             "enabled": bool(self.settings.get("enabled")),
             "types": {
@@ -1246,6 +1397,7 @@ class IndicationBook:
                 "signals": bool(self.settings.get("typeSignals", True)),
             },
             "typeHits": types,
+            "kindStats": kinds,
             "minSources": self.settings.get("minimumSourceSignals"),
             "minAgreement": self.settings.get("minimumAgreement"),
             "minConfidence": self.settings.get("minimumConfidence"),
@@ -1260,6 +1412,7 @@ class IndicationBook:
             "evalN": sum(len(v) for v in self.evals.values()),
             "lanes": {s: [e.source_id for e in v] for s, v in eval_items},
             "primary": primaries[:24],
+            "samples": samples[:16],
             "tf": {
                 s: {
                     "independent": [i.timeframe for i in rows if i.mode == "direct_tf"],
@@ -1393,6 +1546,68 @@ def self_test() -> List[Tuple[str, bool, str]]:
     EXTRA.cache["binance-usdm:PICK-USDT"] = (time.time(), [])
     pruned = EXTRA.prune({"PICK-USDT"}, max_n=8)
     t18 = (pruned >= 1 and "binance-usdm:PICK-USDT" in EXTRA.cache, f"pruned={pruned} n={len(EXTRA.cache)}")
+    # TA pack is State, never Signals
+    book.settings["typeState"] = True
+    book.settings["typeSignals"] = True
+    book.settings["minimumConfidence"] = 0.4
+    book.settings["minimumStrength"] = 0.05
+    rows_ta = book.process("TA-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
+    ta_rows = [r for r in rows_ta if r.mode == "ta_pack"]
+    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" for r in ta_rows), f"ta={[r.kind+':'+r.mode for r in ta_rows]}")
+    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
+    snap = book.snapshot()
+    ks = snap.get("kindStats") or {}
+    t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common"}, f"keys={sorted(ks)}")
+    t21 = (int((ks.get("signals") or {}).get("hits") or 0) >= 1 and int((ks.get("state") or {}).get("hits") or 0) >= 1, f"hits={{k: v.get('hits') for k, v in ks.items()}}")
+    t22 = (all(bool(v.get("processed")) and "enabled" in v for v in ks.values()), str({k: v.get("enabled") for k, v in ks.items()}))
+    # Direction / move / active / common still run independently on their own tapes
+    kinds_seen = {r.kind for r in rows_ta}
+    if drow:
+        kinds_seen.add(drow.kind)
+    if mrow:
+        kinds_seen.add(mrow.kind)
+    kinds_seen |= {r.kind for r in arows}
+    if crow:
+        kinds_seen.add(crow.kind)
+    t23 = ({"state", "signals", "direction", "move", "active"} <= kinds_seen, f"seen={sorted(kinds_seen)}")
+    # Signals stay first-class: flag off drops them; match never swaps to State
+    book.settings["typeState"] = True
+    book.settings["typeSignals"] = True
+    book.settings["minimumConfidence"] = 0.5
+    book.settings["minimumStrength"] = 0.05
+    rows_sig = book.process("SIG-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
+    sig_rows = [r for r in rows_sig if r.kind == "signals"]
+    t24 = (len(sig_rows) >= 1 and all(r.kind == "signals" for r in sig_rows), f"n={len(sig_rows)} modes={[r.mode for r in sig_rows[:4]]}")
+    m_sig = book.match("SIG-USDT", "ind:signals:direct_tf:1.00:a1:bingx-1m")
+    t25 = (m_sig is not None and m_sig.kind == "signals", f"match={m_sig.kind if m_sig else None}")
+    m_miss = book.match("SIG-USDT", "ind:active:outbreak:3")
+    # active may or may not exist on a pure up-tape; if missing, must not fall back to state
+    if not any(r.kind == "active" for r in rows_sig):
+        t26 = (m_miss is None, f"miss-fallback={m_miss.kind if m_miss else None}")
+    else:
+        t26 = (m_miss is not None and m_miss.kind == "active", f"active={m_miss.kind if m_miss else None}")
+    pe_skip = book.pick_entry("SIG-USDT", min_conf=0.5, allow=lambda k, d=None: k != "state")
+    t27 = (pe_skip is not None and pe_skip[0].kind != "state", f"pick={pe_skip[0].kind if pe_skip else None}")
+    book.settings["typeSignals"] = False
+    rows_nosig = book.process("NOSIG-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
+    t28 = (not any(r.kind == "signals" for r in rows_nosig), f"kinds={sorted({r.kind for r in rows_nosig})}")
+    book.settings["typeSignals"] = True
+    six = []
+    ts0 = time.time() - 40 * 60
+    for i, b in enumerate(up):
+        six.append([ts0 + i * 60, b[0], b[1], b[2], b[3], b[4]])
+    c5 = bars_to_candles(up)
+    c6 = bars_to_candles(six)
+    t29 = (
+        len(c5) == len(c6) == 40
+        and abs(c5[-1].close - c6[-1].close) < 1e-9
+        and abs(c5[-1].open - c6[-1].open) < 1e-9
+        and c6[-1].open < 1000,
+        f"n5={len(c5)} n6={len(c6)} o6={c6[-1].open if c6 else None} c6={c6[-1].close if c6 else None}",
+    )
+    rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
+    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6),
+           f"kinds={sorted({r.kind for r in rows6})}")
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1412,6 +1627,18 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-pick-entry", t16[0], t16[1]),
         ("ind-keep-trim", t17[0], t17[1]),
         ("ind-extra-prune", t18[0], t18[1]),
+        ("ind-ta-is-state", t19[0] and t19b[0], f"{t19[1]} {t19b[1]}"),
+        ("ind-kind-stats-all-six", t20[0], t20[1]),
+        ("ind-kind-stats-hits", t21[0], t21[1]),
+        ("ind-kind-stats-processed", t22[0], t22[1]),
+        ("ind-all-types-evaluated", t23[0], t23[1]),
+        ("ind-signals-tf-lanes", t24[0], t24[1]),
+        ("ind-match-signals", t25[0], t25[1]),
+        ("ind-match-no-swap", t26[0], t26[1]),
+        ("ind-pick-skip-gated-state", t27[0], t27[1]),
+        ("ind-signals-flag-off", t28[0], t28[1]),
+        ("ind-ohlcv-6tuple", t29[0], t29[1]),
+        ("ind-process-6tuple-signals", t30[0], t30[1]),
     ]
 
 

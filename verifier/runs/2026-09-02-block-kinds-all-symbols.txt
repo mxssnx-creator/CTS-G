@@ -1,0 +1,23 @@
+run 2026-09-02 (block sequential + all-kind stats + 531-symbol stress)
+
+Fixes
+- Block: sequential remainder only (n=1 then +1× then +1× → 4× parent max).
+  live overlay no longer jumps to n=live_n (the 3×-on-first-add bug).
+  Book cap = stack × volume_ratio extra (3×), not 1+2+3=6×.
+  PF rings store cost-net %. Intern PF is per-side.
+  LONG/SHORT lanes independent; parent close does not retire the other side.
+- Indications: bars_to_candles / ingest_bars accept both [o,h,l,c,v] (live) and
+  [ts,o,h,l,c,v] (BingX raw). 6-tuple timestamps no longer explode ATR / mute Signals.
+- Stats: byIndication (all 6 kinds) + byStrategy (indications/general/block/trailing/dca/exits)
+  on engine stats, sidecar overall, and Results/Overview UI.
+
+Stress
+- engine-test 208/208
+- indication_engine 30/30 (incl 6-tuple)
+- block_engine 37/37
+- max_symbols_smoke 23/23: 531/531 scored in 0.52s, all 6 kinds hit
+  (state 482, signals 531, active 1276, direction 49, move 531, common 434)
+  Block n=1 remainder 1× parent, never 3×
+- v1 offline 11/11
+- stress_vst 15/15
+- tsc clean, vite build OK

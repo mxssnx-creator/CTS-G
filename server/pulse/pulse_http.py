@@ -60,6 +60,8 @@ DETAIL_KEYS = (
     "dca",
     "api",
     "coverage",
+    "byIndication",
+    "byStrategy",
     "klinesTf",
     "tests",
     "signals",
@@ -684,6 +686,30 @@ def merge_overall() -> dict:
         "detailType": detail_lane.get("type"),
         "sets": sets,
     }
+    try:
+        from stats_report import merge_kind_stats, merge_strategy_stats
+        cost = float((detail_st.get("pfCost") or {}).get("costPct") or POSITION_COST_PCT_DEFAULT)
+        ind = detail_st.get("indications") or {}
+        cov = detail_st.get("coverage") or {}
+        out["byIndication"] = merge_kind_stats(
+            closed,
+            cost,
+            gate=(sets.get("indGate") or cov.get("indicationGate") or {}),
+            hits=cov.get("indicationHits") or ind.get("typeHits") or {},
+            types=cov.get("indicationTypes") or ind.get("types") or {},
+            kind_live=ind.get("kindStats") or {},
+        )
+        out["byStrategy"] = merge_strategy_stats(
+            closed,
+            cost,
+            coverage=cov,
+            block=detail_st.get("block") or {},
+            dca=detail_st.get("dca") or {},
+            exits=detail_st.get("exits") or {},
+            sets_rows=sets.get("rows") or [],
+        )
+    except Exception:
+        pass
     for k in DETAIL_KEYS:
         if k == "tests":
             continue

@@ -47,6 +47,61 @@ export type LiveClosed = {
   pack?: string;
   sl_ratio?: number;
   trail_key?: string;
+  ind_kind?: string;
+  indKind?: string;
+};
+
+export type SideStat = {
+  n?: number;
+  pf?: number;
+  wr?: number;
+  maxDdS?: number;
+  netAvg?: number;
+  validated?: boolean;
+  ok?: boolean;
+  direction?: string;
+};
+
+export type KindStat = {
+  kind?: string;
+  n?: number;
+  pf?: number;
+  wr?: number;
+  maxDdS?: number;
+  avgDdS?: number;
+  ddEpisodes?: number;
+  netAvg?: number;
+  validated?: boolean;
+  profitable?: boolean;
+  ok?: boolean;
+  enabled?: boolean;
+  processed?: boolean;
+  hits?: number;
+  symbols?: number;
+  long?: number;
+  short?: number;
+  scanSymbols?: number;
+  scanLong?: number;
+  scanShort?: number;
+  avgConf?: number;
+  avgStrength?: number;
+  costSubtracted?: boolean;
+  bySide?: Record<string, SideStat>;
+};
+
+export type StrategyStat = {
+  strategy?: string;
+  n?: number;
+  pf?: number;
+  wr?: number;
+  maxDdS?: number;
+  avgDdS?: number;
+  netAvg?: number;
+  validated?: boolean;
+  enabled?: boolean;
+  processed?: boolean;
+  costSubtracted?: boolean;
+  bySide?: Record<string, SideStat>;
 };
 
 export type LiveStats = {
@@ -96,6 +151,11 @@ export type LiveStats = {
     enabled?: boolean;
     types?: Record<string, boolean>;
     typeHits?: Record<string, number>;
+    kindStats?: Record<string, KindStat>;
+    samples?: Array<{
+      symbol: string;
+      kinds?: Record<string, { dir?: string; conf?: number; sl?: number; mode?: string }>;
+    }>;
     minSources?: number;
     minAgreement?: number;
     extraSources?: boolean;
@@ -216,6 +276,7 @@ export type LiveStats = {
     strategies?: Record<string, boolean>;
     indicationTypes?: Record<string, boolean>;
     indicationHits?: Record<string, number>;
+    indicationGate?: Record<string, KindStat>;
     evals?: { n?: number; symbols?: number; typeHits?: Record<string, number> };
     coord?: {
       allow?: boolean;
@@ -437,6 +498,7 @@ export type LiveStats = {
     maxDdS?: number;
     autoDeact?: boolean;
     useHistoricGate?: boolean;
+    indGate?: Record<string, KindStat>;
     setCount?: number;
     minStep?: number;
     minStepCfg?: number;
@@ -548,6 +610,8 @@ export type LiveStats = {
       selected?: boolean;
     }>;
   };
+  byIndication?: Record<string, KindStat>;
+  byStrategy?: Record<string, StrategyStat>;
   klinesTf?: Record<string, number>;
   cts?: Record<string, unknown>;
 };

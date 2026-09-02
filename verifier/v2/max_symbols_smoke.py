@@ -62,17 +62,26 @@ class StubAPI:
         return {"code": 0, "data": {}}
 
 
-def synth_bars(n=60, start=100.0, drift=0.001):
+def synth_bars(n=60, start=100.0, drift=0.001, vol_spike=False):
+    """Live engine bars are [o, h, l, c, v] (no timestamp) — see Pulse._parse_klines."""
     bars = []
     px = start
-    t = int(time.time()) - n * 60
     for i in range(n):
         o = px
         px = px * (1 + drift)
-        hi = max(o, px) * 1.0005
-        lo = min(o, px) * 0.9995
-        bars.append([t + i * 60, o, hi, lo, px, 1000.0])
+        hi = max(o, px) * 1.0008
+        lo = min(o, px) * 0.9992
+        vol = 8000.0 if (vol_spike and i == n - 1) else 1000.0
+        bars.append([o, hi, lo, px, vol])
     return bars
+
+
+def reversal_bars(n=60, start=100.0):
+    """Last 10 bars reverse the prior window so Direction (range=10) fires."""
+    n = max(24, int(n))
+    down = synth_bars(n - 10, start, -0.005)
+    up = synth_bars(10, down[-1][3], 0.008, vol_spike=True)
+    return down + up
 
 
 def main() -> int:
@@ -99,9 +108,14 @@ def main() -> int:
     pt.SYMBOLS.extend(names + ["SOL-USDT"])
     p.universe = [{"symbol": s, "maxLeverage": 300, "vol1h": 5.0, "quoteVolume": 1e6} for s in pt.SYMBOLS]
     for i, s in enumerate(pt.SYMBOLS):
-        bars = synth_bars(drift=0.0005 + (i % 7) * 0.0002)
+        if i % 11 == 0:
+            bars = reversal_bars(80, 80.0 + (i % 7))
+        elif i % 5 == 0:
+            bars = synth_bars(80, 90.0 + (i % 9), drift=-0.0015 - (i % 5) * 0.0002, vol_spike=True)
+        else:
+            bars = synth_bars(80, 100.0, drift=0.0008 + (i % 7) * 0.0003, vol_spike=(i % 3 == 0))
         p.klines_tf["1m"][s] = bars
-        p.px[s] = bars[-1][4]
+        p.px[s] = bars[-1][3]
 
     t0 = time.time()
     err = None
@@ -134,6 +148,66 @@ def main() -> int:
     rec("entries-530-no-crash", err is None, repr(err or ""))
     rec("entries-no-false-order-cap", not p.entries_blocked(), f"order_est={p._order_est}")
 
+    # Full-universe pass: disable partial chunking so EVERY symbol is processed
+    # in one tick (live stays chunked; this is the all-symbols stress).
+    p.load.partial = False
+    t_full = time.time()
+    err = None
+    try:
+        p.process_indications()
+    except Exception:
+        err = traceback.format_exc()[-300:]
+    dt_full = time.time() - t_full
+    rec("indications-full-no-crash", err is None, repr(err or ""))
+    have_full = set(s for s, rows in (getattr(p.indications, "last", {}) or {}).items() if rows)
+    rec("indications-all-symbols", len(have_full) >= N, f"scored={len(have_full)}/{len(pt.SYMBOLS)} in {dt_full:.2f}s")
+
+    kinds_hit = {}
+    kind_long = {}
+    kind_short = {}
+    for rows in (p.indications.last or {}).values():
+        for i in rows:
+            k = str(getattr(i, "kind", "") or "")
+            if not k:
+                continue
+            kinds_hit[k] = kinds_hit.get(k, 0) + 1
+            d = str(getattr(i, "direction", "") or "").lower()
+            if d == "long":
+                kind_long[k] = kind_long.get(k, 0) + 1
+            elif d == "short":
+                kind_short[k] = kind_short.get(k, 0) + 1
+    want_kinds = ("state", "signals", "active", "direction", "move", "common")
+    rec("indications-all-6-kinds", all(kinds_hit.get(k, 0) >= 1 for k in want_kinds),
+        f"hits={ {k: kinds_hit.get(k, 0) for k in want_kinds} }")
+    ksnap = p.indications.kind_stats() if hasattr(p.indications, "kind_stats") else {}
+    rec("indications-kindstats-6", all(ksnap.get(k, {}).get("enabled") for k in want_kinds) and len(ksnap) >= 6,
+        f"keys={sorted(ksnap)}")
+    rec("indications-kindstats-hits", all(int((ksnap.get(k) or {}).get("hits") or 0) >= 1 for k in want_kinds),
+        f"hits={ {k: (ksnap.get(k) or {}).get('hits') for k in want_kinds} }")
+
+    # Independent LONG vs SHORT: downward bars on a dedicated pair must score short
+    short_sym = "COIN500-USDT"
+    p.klines_tf["1m"][short_sym] = synth_bars(n=80, start=100.0, drift=-0.002)
+    p.px[short_sym] = p.klines_tf["1m"][short_sym][-1][4]
+    p.process_indications()
+    short_rows = p.indications.last.get(short_sym) or []
+    short_dirs = {str(getattr(i, "direction", "")).lower() for i in short_rows}
+    rec("indications-short-independent", "short" in short_dirs, f"dirs={sorted(short_dirs)} n={len(short_rows)}")
+
+    # Block: first add is 1× parent remainder, never 3× jump; lanes are per-side
+    n1_ok = True
+    jump_detail = []
+    for pos in p.open.values():
+        lane = p.block.lanes.get(p.block.key(pos.symbol, pos.side))
+        if not lane or lane.base_qty <= 0:
+            continue
+        cap = lane.base_qty * float(p.block.volume_ratio or 1.0) * 1.05
+        if lane.confirmed_add > cap + 1e-9:
+            n1_ok = False
+            jump_detail.append((pos.symbol, lane.base_qty, lane.confirmed_add))
+    rec("block-n1-not-3x", n1_ok, f"jumps={jump_detail[:4]} lanes={len(p.block.lanes)}")
+    rec("block-lanes-per-side", all(":" in k for k in p.block.lanes), f"keys={list(p.block.lanes)[:4]}")
+
     err = None
     try:
         p.write_stats(force=True)
@@ -142,8 +216,15 @@ def main() -> int:
     rec("write-stats-530-no-crash", err is None, repr(err or ""))
     try:
         stats = json.load(open("/opt/grok-x01-pulse/stats-bingx-x01.json"))
-        rec("stats-has-indications", "indications" in stats, f"indKeys={sorted((stats.get('indications') or {}))[:6]}")
+        rec("stats-has-indications", "indications" in stats, f"indKeys={sorted((stats.get('indications') or {}))[:8]}")
         rec("stats-symbols-full", len(stats.get("symbols") or []) >= 500, f"symbols={len(stats.get('symbols') or [])}")
+        rec("stats-by-indication", isinstance(stats.get("byIndication"), dict) and all(k in (stats.get("byIndication") or {}) for k in want_kinds),
+            f"keys={sorted((stats.get('byIndication') or {}))}")
+        rec("stats-by-strategy", isinstance(stats.get("byStrategy"), dict) and "block" in (stats.get("byStrategy") or {}),
+            f"keys={sorted((stats.get('byStrategy') or {}))}")
+        rec("stats-kindstats", isinstance((stats.get("indications") or {}).get("kindStats"), dict)
+            and len((stats.get("indications") or {}).get("kindStats") or {}) >= 6,
+            f"n={len((stats.get('indications') or {}).get('kindStats') or {})}")
     except Exception as e:
         rec("stats-has-indications", False, repr(e))
         rec("stats-symbols-full", False, repr(e))
