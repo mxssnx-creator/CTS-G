@@ -12,7 +12,9 @@ BLOCK_COUNT_MIN = 1
 BLOCK_COUNT_PREVIEW = 12
 BLOCK_VOL_RATIO_MIN = 0.25
 BLOCK_VOL_RATIO_MAX = 3.0
-BLOCK_PF_RATIO_MIN = 0.2
+# Base-1 PF coordination (position_cost): 1.00=neutral, 0.10=1×PositionCost.
+# Floor moved 0.2 -> 0.5 in the same +0.3 relation as the 0.8 -> 1.1 default.
+BLOCK_PF_RATIO_MIN = 0.5
 BLOCK_PF_RATIO_MAX = 5.0
 
 
@@ -105,7 +107,7 @@ class BlockBook:
         # 0 = unlimited. Never clamp the book; evaluate() only walks the next few unsatisfied counts.
         self.max_stack = 0 if stack_n <= 0 else max(1, stack_n)
         self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
-        self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 0.8) or 0.8), 0.2, 5.0)
+        self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 1.1) or 1.1), BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
