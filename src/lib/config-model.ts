@@ -109,6 +109,7 @@ export type PulseOverlay = {
   trailArmPct: number;
   trailGivePct: number;
   timeStopS: number;
+  maxDdTimeS: number;
   scratchS: number;
   scratchMinPct: number;
   scanS: number;
@@ -250,6 +251,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
+  maxDdTimeS: 0,
   scratchS: 600,
   scratchMinPct: 0.16,
   scanS: 0.2,
