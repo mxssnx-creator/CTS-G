@@ -94,6 +94,36 @@ def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dic
     return out[-cap:]
 
 
+def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, float]:
+    """Stable identity for a deterministic historic replay row."""
+    return (
+        str(row.get("symbol") or ""),
+        round(finite(row.get("t")), 6),
+        str(row.get("side") or row.get("direction") or ""),
+        str(row.get("reason") or ""),
+        round(finite(row.get("pnl_pct")), 10),
+        round(finite(row.get("hold_s")), 3),
+    )
+
+
+def merge_hist_rows(
+    previous: Sequence[Dict[str, Any]],
+    incoming: Sequence[Dict[str, Any]],
+    replace_symbols: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Merge a refreshed symbol slice into the bounded historic tape."""
+    replace = {str(s) for s in (replace_symbols or ())}
+    merged: Dict[Tuple[str, float, str, str, float, float], Dict[str, Any]] = {}
+    for row in previous:
+        if not isinstance(row, dict) or str(row.get("symbol") or "") in replace:
+            continue
+        merged[hist_row_key(row)] = row
+    for row in incoming:
+        if isinstance(row, dict):
+            merged[hist_row_key(row)] = row
+    return trim_hist(list(merged.values()), HIST_CAP)
+
+
 def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
     """Last-N fills with every symbol still represented when possible."""
     n = max(1, int(n))
@@ -568,6 +598,13 @@ class SetBook:
         # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
         self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
+        # Partial load-sliced replays retain bounded evidence from symbols
+        # already covered in the current cycle. Per-symbol counts keep
+        # histFills meaningful even though each Set tape is capped for RAM.
+        self._hist_seen: set[str] = set()
+        self._hist_total = 0
+        self._hist_counts: Dict[str, Dict[str, int]] = {}
+        self._hist_set_signature: Tuple[str, ...] = ()
         self._running = False
         self._snap_cache: Optional[Dict[str, Any]] = None
         self._snap_ts = 0.0
@@ -798,6 +835,23 @@ class SetBook:
         self.sets = next_sets
         self.by_idx = by_idx
         self.progress.sets_total = len(self.sets)
+        signature = tuple(next_sets)
+        if signature != self._hist_set_signature:
+            self._hist_set_signature = signature
+            self._hist_seen.clear()
+            self._hist_total = 0
+            self._hist_counts = {}
+            # Existing SetState objects are reused when IDs overlap. Their
+            # historic tape belongs to the previous catalog and must not be
+            # counted during the first partial replay of the new catalog.
+            for st in self.by_idx:
+                st.hist = []
+                st.n = 0
+                self._score_one(st)
+            # A changed set catalog invalidates the old gate until the new
+            # catalog has been replayed over the full configured universe.
+            self.progress.ready = False
+            self.progress.phase = "idle"
 
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
         """If live average is a loss, raise min step to # of positive/successful fills."""
@@ -983,6 +1037,8 @@ class SetBook:
         workers: int = 1,
         drop_bars: bool = False,
         on_symbol: Optional[Callable[[str, int, int], None]] = None,
+        merge: bool = False,
+        progress_total: Optional[int] = None,
     ) -> None:
         if not self.enabled or self._running:
             return
@@ -994,17 +1050,34 @@ class SetBook:
                 names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
             else:
                 names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
+            prior_ready = bool(self.progress.ready)
+            if merge:
+                total = max(0, int(progress_total if progress_total is not None else len(names)))
+                if total != self._hist_total:
+                    self._hist_seen.clear()
+                    self._hist_total = total
+                    self._hist_counts = {}
+                    prior_ready = False
+                elif prior_ready and total > 0 and len(self._hist_seen) >= total:
+                    # The previous cycle completed. Start a fresh refresh
+                    # cycle while retaining the last completed evidence.
+                    self._hist_seen.clear()
+                symbols_total = total
+            else:
+                symbols_total = len(names)
             self.progress = Progress(
                 phase="replay",
                 pct=1.0,
                 sets_total=len(self.sets),
-                symbols_total=len(names),
+                symbols_total=symbols_total,
                 bars_total=sum(len(self.bars.get(s) or []) for s in names),
                 cycle=self.progress.cycle + 1,
                 detail=f"{len(names)} symbols · {len(self.sets)} sets",
+                ready=prior_ready if merge else False,
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
+            processed_symbols: set[str] = set()
             aborted = False
             w = max(1, min(int(workers or 1), 8, len(names) or 1))
             lock = threading.Lock()
@@ -1020,6 +1093,9 @@ class SetBook:
                 if drop_bars:
                     self.bars.pop(symbol, None)
                 self.progress.bars_done += nbar
+                if merge:
+                    self._hist_seen.add(symbol)
+                    processed_symbols.add(symbol)
 
             def _one(symbol: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
                 local: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
@@ -1070,16 +1146,30 @@ class SetBook:
                             on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
-            self._commit_hist(hist, ind_hist)
-            self.progress.phase = "ready"
-            self.progress.pct = 100.0
-            self.progress.ready = True
-            self.progress.symbols_done = done if aborted else len(names)
+            self._commit_hist(
+                hist,
+                ind_hist,
+                merge=merge,
+                replayed_symbols=processed_symbols if merge else names,
+            )
+            coverage_done = len(self._hist_seen) if merge else (done if aborted else len(names))
+            complete = (not merge and not aborted) or (merge and symbols_total > 0 and coverage_done >= symbols_total)
+            if complete:
+                self.progress.phase = "ready"
+                self.progress.pct = 100.0
+                self.progress.ready = True
+                self.progress.symbols_done = symbols_total if merge else (done if aborted else len(names))
+            else:
+                self.progress.phase = "partial" if merge else "replay"
+                self.progress.pct = 8.0 + (82.0 * coverage_done / max(1, symbols_total)) if symbols_total else 0.0
+                self.progress.ready = prior_ready if merge else False
+                self.progress.symbols_done = coverage_done
             self.progress.sets_done = len(self.sets)
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
-                + (" · partial" if aborted else "")
+                + (f" · coverage {coverage_done}/{symbols_total}" if merge else "")
+                + (" · aborted" if aborted else "")
             )
         except Exception as exc:
             self.progress.phase = "error"
@@ -1098,17 +1188,40 @@ class SetBook:
         self,
         hist: Dict[str, List[Dict[str, Any]]],
         ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        *,
+        merge: bool = False,
+        replayed_symbols: Optional[Sequence[str]] = None,
     ) -> None:
-        if ind_hist is not None:
-            self.ind_hist = {k: trim_hist(v, HIST_CAP) for k, v in ind_hist.items()}
+        names = [str(s) for s in (replayed_symbols or ())]
+        if not merge:
+            if ind_hist is not None:
+                self.ind_hist = {k: trim_hist(v, HIST_CAP) for k, v in ind_hist.items()}
+        elif ind_hist is not None:
+            keys = set(self.ind_hist) | set(ind_hist)
+            self.ind_hist = {
+                k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
+                for k in keys
+            }
         for st in self.by_idx:
             full = hist.get(st.id, [])
-            full.sort(key=lambda r: finite(r.get("t")))
-            st.hist = full
-            self._score_one(st)
-            n_full = len(full)
-            st.hist = trim_hist(full, HIST_CAP)
-            st.n = n_full
+            if merge:
+                counts = self._hist_counts.setdefault(st.id, {})
+                if not counts and st.hist:
+                    for row in st.hist:
+                        symbol = str(row.get("symbol") or "")
+                        counts[symbol] = counts.get(symbol, 0) + 1
+                for symbol in names:
+                    counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
+                st.hist = merge_hist_rows(st.hist, full, names)
+                self._score_one(st)
+                st.n = sum(counts.values())
+            else:
+                full.sort(key=lambda r: finite(r.get("t")))
+                st.hist = full
+                self._score_one(st)
+                n_full = len(full)
+                st.hist = trim_hist(full, HIST_CAP)
+                st.n = n_full
         self._cap_active()
 
     def replay_symbol_partial(
@@ -2614,6 +2727,41 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
     book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
     out.append(("set-replay-slice", book6.progress.ready and book6.progress.symbols_total == 1, f"n={book6.progress.symbols_total} fills={sum(s.n for s in book6.sets.values())} {book6.progress.detail}"))
+    # Load-sliced production replay: a slice is not a complete gate, and the
+    # next slice must retain the first symbol's evidence instead of replacing
+    # the whole tape.
+    book_partial = SetBook()
+    book_partial.load({
+        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 80,
+        "histWarmup": 20, "setMinStep": 8, "setStepMax": 8,
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "slToTpRatios": [0.6],
+    })
+    book_partial.ingest_bars("FFF-USDT", synth_trend(180, 55.0, 0.16, 0.04))
+    book_partial.ingest_bars("GGG-USDT", synth_trend(180, 33.0, -0.12, 0.04))
+    book_partial.replay_all(now=1_700_000_500, symbols=["FFF-USDT"], merge=True, progress_total=2)
+    pfirst = next(iter(book_partial.sets.values()))
+    first_symbols = {str(r.get("symbol")) for r in pfirst.hist}
+    first_ok = (
+        not book_partial.progress.ready
+        and book_partial.progress.symbols_done == 1
+        and book_partial.progress.symbols_total == 2
+        and first_symbols <= {"FFF-USDT"}
+    )
+    book_partial.replay_all(now=1_700_000_600, symbols=["GGG-USDT"], merge=True, progress_total=2)
+    psecond = next(iter(book_partial.sets.values()))
+    merged_symbols = {str(r.get("symbol")) for r in psecond.hist}
+    out.append(("set-replay-partial-gate", first_ok, f"ready={book_partial.progress.ready} symbols={book_partial.progress.symbols_done}/{book_partial.progress.symbols_total} first={first_symbols}"))
+    out.append(("set-replay-partial-merge", book_partial.progress.ready and {"FFF-USDT", "GGG-USDT"} <= merged_symbols and psecond.n >= len(psecond.hist), f"symbols={merged_symbols} n={psecond.n} tape={len(psecond.hist)}"))
+    old_hist = [dict(psecond.hist[0])] if psecond.hist else []
+    book_partial.load({
+        "histEnabled": True, "histLookbackBars": 180, "histMinBars": 80,
+        "histWarmup": 20, "setMinStep": 9, "setStepMax": 9,
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "slToTpRatios": [0.6],
+    })
+    changed = next(iter(book_partial.sets.values()))
+    out.append(("set-replay-catalog-reset", not book_partial.progress.ready and changed.n == 0 and not changed.hist and old_hist != changed.hist, f"ready={book_partial.progress.ready} n={changed.n} tape={len(changed.hist)}"))
     # --- evaluation math: last-N window counts and PF averages, hand-computed ---
     w = SetBook()
     w.load(

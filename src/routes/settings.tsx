@@ -2254,7 +2254,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
   const liveOv = sets?.liveOverview;
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score"].includes(phase);
+  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
   const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   return (
     <div className="space-y-3">
@@ -2270,6 +2270,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         </div>
         <p className="mt-2 font-mono text-[11px] text-muted">
           {p?.detail || "waiting 1m bars"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} {p?.error ? `· ${p.error}` : ""}
+          {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
           {updating && p?.ready ? " · prior gate remains active" : ""}
         </p>
         <p className="mt-1 font-mono text-[11px] text-primary">

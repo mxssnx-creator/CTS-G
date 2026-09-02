@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent SL:TP ratio sets and trailing recals.
 
-SL is bound to TP on the discrete CTS grid 0.3–1.5 step 0.3.
+SL is bound to TP on the discrete CTS grid 0.2–2.6 step 0.2.
 Trailing arm/give is a separate book with its own optimal range and recals.
 Neither book writes the other.
 """
