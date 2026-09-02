@@ -217,6 +217,31 @@ def coord_test() -> None:
     c = Coordinator()
     rec("coord-unlimited-slot", c.slot_cap(0, 1.2) >= 10**8, str(c.slot_cap(0, 1.2)))
     rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
+    rec("coord-countpos-mult-0", abs(c.size_mult(0) - 1.0) < 1e-9, str(c.size_mult(0)))
+    rec("coord-countpos-mult-4", abs(c.size_mult(4) - (1.0 - 4 * 0.05)) < 1e-9, str(c.size_mult(4)))
+    rec("coord-countpos-mult-floor", c.size_mult(40) >= 0.35 - 1e-9, str(c.size_mult(40)))
+    rec("coord-add-stack-ok", c.add_stack_cap(3, 1.4) == 3, str(c.add_stack_cap(3, 1.4)))
+    rec("coord-add-stack-weak", c.add_stack_cap(3, 0.8) == 1, str(c.add_stack_cap(3, 0.8)))
+    c_off = Coordinator()
+    c_off.axes["cont"].enabled = False
+    rec("coord-add-stack-cont-off", c_off.add_stack_cap(3, 0.8) == 3, str(c_off.add_stack_cap(3, 0.8)))
+    c2 = Coordinator()
+    c2.load({}, {"axisPauseEnabled": True, "axisPauseMaxWindow": 2, "axisLastEnabled": True, "axisLastMaxWindow": 4})
+    losers = [{"pnl": -1.0, "pnl_pct": -0.02, "qty": 1.0}] * 8
+    allow_p, why_p, _ = c2.add_gate(losers, 8)
+    rec("coord-add-gate-pause", not allow_p and any("pause" in r for r in why_p), str(why_p[:3]))
+    tape = [-0.02] * 6
+    allow_c, why_c, m_c = c2.add_gate([], 0, count=3, count_tape=tape)
+    rec("coord-add-gate-countpos", not allow_c and any("count-pos" in r for r in why_c), str(why_c[:3]))
+    rec("coord-add-gate-count-n", int(m_c.get("count") or 0) == 3, str(m_c.get("count")))
+    winners = [{"pnl": 2.0, "pnl_pct": 0.03, "qty": 1.0}] * 12
+    allow_ok, why_ok, _ = c2.add_gate(winners, 0, count=1, count_tape=[0.02] * 6)
+    rec("coord-add-gate-ok", allow_ok, str(why_ok[:3]))
+    c3 = Coordinator()
+    c3.load({}, {"mainEvalPosCount": 7, "realEvalPosCount": 4, "posCountsVolumeRatio": 0.1})
+    rec("coord-eval-from-overlay", c3.main_eval == 7 and c3.real_eval == 4, f"{c3.main_eval}/{c3.real_eval}")
+    rec("coord-vol-ratio-overlay", abs(c3.pos_count_vol_ratio - 0.1) < 1e-9, str(c3.pos_count_vol_ratio))
+    rec("coord-snap-countpos", bool((c3.snapshot().get("countPos") or {}).get("addGate")), str(c3.snapshot().get("countPos")))
 
 
 def stage_min_pf_test() -> None:

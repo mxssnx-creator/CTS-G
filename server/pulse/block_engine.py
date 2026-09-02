@@ -378,11 +378,13 @@ class BlockBook:
         """Independent evals: every count 1..12, regardless of live stack."""
         return range(1, int(self.eval_n or BLOCK_EVAL_N) + 1)
 
-    def next_unsatisfied(self, lane: BlockLane) -> Optional[int]:
+    def next_unsatisfied(self, lane: BlockLane, stack_cap: Optional[int] = None) -> Optional[int]:
         """Next sequential count (1..maxStack). Never skip a failed/paused rung."""
         if not lane or lane.base_qty <= 0:
             return None
-        for n in self._count_range(lane):
+        cap = int(stack_cap) if stack_cap is not None else int(self.max_stack)
+        cap = max(1, min(int(self.max_stack), cap))
+        for n in range(1, cap + 1):
             f = self.formula(lane.base_qty, n, lane)
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
             if not sat:
@@ -407,20 +409,22 @@ class BlockBook:
                 lane.satisfied[c] = True
         self.save()
 
-    def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0) -> List[Dict[str, Any]]:
+    def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0, stack_cap: Optional[int] = None) -> List[Dict[str, Any]]:
         """Evaluate every 1..12 independently. Emit qty only for the next live stack rung."""
         rows = []
         if not self.enabled or not lane.active or lane.base_qty <= 0:
             return rows
         now = time.time()
-        nxt = self.next_unsatisfied(lane)
+        live_stack = int(stack_cap) if stack_cap is not None else int(self.max_stack)
+        live_stack = max(1, min(int(self.max_stack), live_stack))
+        nxt = self.next_unsatisfied(lane, stack_cap=live_stack)
         for n in self._eval_range():
             f = self.formula(lane.base_qty, n, lane)
             paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
             pf = self.pf_decision(lane, n, intern_pf=intern_pf)
             avg, n_avg = self.count_avg(n, lane)
-            live_ok = n <= int(self.max_stack)
+            live_ok = n <= live_stack
             requested = 0.0
             if live_ok and nxt == n and not sat and not paused and pf["passesProfitFactor"]:
                 requested = max(0.0, f["targetAddQty"] - lane.confirmed_add)
@@ -772,6 +776,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     b.overall_tape = [0.004] * 8
     rec("blk-release-overall-pos", abs(b.vol_factor(3, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
     rec("blk-step-restore-base", abs(b.step_qty(10.0, 1, scale_lane) - 10.0) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
+    # Cont/count-pos stack cap: live emit only 1..cap, evals still 1..12
+    cap_lane = BlockLane("CAP-USDT", "LONG", 10.0, 100.0)
+    cap_rows = b.evaluate_counts(cap_lane, live_n=1, intern_pf=2.0, stack_cap=1)
+    live_req = [r for r in cap_rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0]
+    rec("blk-stack-cap-1", all(int(r["blockCount"]) == 1 for r in live_req) and len(live_req) >= 1, str([(r["blockCount"], r.get("requestedAddQty")) for r in live_req]))
+    rec("blk-stack-cap-evals-12", sum(1 for r in cap_rows if r.get("kind") == "regular") == 12, str(sum(1 for r in cap_rows if r.get("kind") == "regular")))
     return out
 
 

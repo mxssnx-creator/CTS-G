@@ -136,17 +136,14 @@ class Coordinator:
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
         self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
-        self.main_eval = int(coord.get("mainEvalPosCount") or 5)
-        self.real_eval = int(coord.get("realEvalPosCount") or 3)
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)
+        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 2)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 2)
         self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)
-
-    def size_mult(self, open_n: int) -> float:
-        return max(0.55, 1.0 - max(0, open_n) * self.pos_count_vol_ratio)
 
     def outbreak_ok(self, bars: Sequence[Sequence[float]]) -> bool:
         if len(bars) < max(self.outbreak + [self.min_step]):
@@ -220,7 +217,7 @@ class Coordinator:
         }
         allow = True
         sample_ok = cost["count"] >= min(8, self.pf_window)
-        intern_ok = intern_n >= max(5, self.min_samples if hasattr(self, "min_samples") else 5) and intern_pf + 1e-9 >= 1.0
+        intern_ok = intern_n >= max(3, int(self.prev_min_count or 5)) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
         base_floor = float(self.stage_min_pf.get("base", 1.25))
@@ -257,6 +254,66 @@ class Coordinator:
             "prev": {"pf": float(prev_cost["ratio"]), "n": float(prev_cost["count"])},
         }
         self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
+        return allow, reasons, metrics
+
+    def size_mult(self, open_n: int) -> float:
+        """Count-pos volume: each extra open trims new-entry size by posCountsVolumeRatio."""
+        ratio = max(0.0, min(0.3, float(self.pos_count_vol_ratio or 0)))
+        n = max(0, int(open_n or 0))
+        return max(0.35, 1.0 - n * ratio)
+
+    def add_stack_cap(self, configured_stack: int, last_pf: float) -> int:
+        """Cont axis on additional strategies: weak last-PF keeps only the first half of counts."""
+        stack = max(1, int(configured_stack or 1))
+        if not self.axes["cont"].enabled:
+            return stack
+        try:
+            pf = float(last_pf or 0)
+        except Exception:
+            pf = 0.0
+        if pf + 1e-9 >= float(self.min_pf or 1.25):
+            return stack
+        return max(1, stack // 2)
+
+    def add_gate(
+        self,
+        closed_rows: Sequence[Any],
+        consec: int,
+        intern: Optional[Dict[str, Any]] = None,
+        count: Optional[int] = None,
+        count_tape: Optional[Sequence[float]] = None,
+    ) -> Tuple[bool, List[str], Dict[str, float]]:
+        """Axis coordination for additional strategies (Block / DCA) using count-pos.
+
+        Pause / last / prev apply independently of new entries. When a Block
+        count tape is given, last+pause also run on that count's own history.
+        """
+        allow, reasons, metrics = self.gate(closed_rows, consec, intern=intern)
+        if count is not None:
+            n = max(1, int(count))
+            tape = [float(x) for x in (count_tape or []) if x is not None]
+            last_w = max(1, int(self.axes["last"].max_window))
+            tail = tape[-max(last_w, n) :]
+            metrics["count"] = float(n)
+            metrics["countN"] = float(len(tail))
+            if self.axes["last"].enabled and len(tail) >= min(3, last_w):
+                gp = sum(x for x in tail if x > 0)
+                gl = abs(sum(x for x in tail if x < 0))
+                pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
+                floor = float(self.stage_min_pf.get("base", 1.25))
+                metrics["countPf"] = round(pf, 4)
+                if pf + 1e-9 < floor:
+                    allow = False
+                    reasons.append(f"count-pos n={n} last{len(tail)} PF {pf:.2f}<{floor:.2f}")
+            if self.axes["pause"].enabled and tail:
+                pause_n = max(1, int(self.axes["pause"].max_window))
+                cl = consec_loss(tail)
+                metrics["countConsec"] = float(cl)
+                if cl >= pause_n:
+                    allow = False
+                    reasons.append(f"count-pos pause n={n} {cl}/{pause_n}")
+        metrics["addsAllow"] = 1.0 if allow else 0.0
+        self.last = {**(self.last or {}), "addsAllow": allow, "addReasons": list(reasons), "metrics": metrics}
         return allow, reasons, metrics
 
     def slot_cap(self, max_open: int, last_pf: float) -> int:
@@ -320,6 +377,14 @@ class Coordinator:
             "maxSlRatio": self.max_sl_ratio,
             "trailingMinStep": self.trailing_min_step,
             "posCountVolRatio": self.pos_count_vol_ratio,
+            "countPos": {
+                "openMult": True,
+                "addGate": True,
+                "prevMinCount": self.prev_min_count,
+                "prevWindow": self.prev_window,
+                "mainEval": self.main_eval,
+                "realEval": self.real_eval,
+            },
             "rearrange": self.rearrange,
             "rearrangeGap": self.rearrange_gap,
             "mainEval": self.main_eval,

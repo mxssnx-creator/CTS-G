@@ -1710,8 +1710,10 @@ function SettingsPage() {
               </Grid>
               <Toggle label="Rearrange weak slots" on={overlay.rearrange} onChange={(v) => patch("rearrange", v)} />
               <p className="text-sm text-muted">
-                Last/Prev PF gates entries. Pause halts on a loss streak. Cont caps live slots.
-                Rearrange frees a weak open for a stronger signal when the confidence gap clears.
+                Last/Prev PF gates entries by position-count windows. Pause halts on a loss streak.
+                Cont caps live slots and, on additional strategies (Block / DCA), halves the live
+                count stack when last-PF is below min. Count-pos vol ratio trims new-entry size as
+                more positions are open. Each Block count keeps its own last-N tape for the add gate.
               </p>
             </Card>
           )}

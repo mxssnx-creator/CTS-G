@@ -900,6 +900,11 @@ class Pulse:
                     vf *= max(0.35, min(1.0, (v / med) ** 0.5))
             elif v <= 0:
                 vf *= 0.5
+        try:
+            open_n = len(self.open) if isinstance(getattr(self, "open", None), dict) else 0
+            vf *= float(self.coord.size_mult(open_n))
+        except Exception:
+            pass
         return max(0.2, float(TARGET_NOTIONAL) * vf)
 
     def notional_cap(self) -> float:
@@ -3528,6 +3533,38 @@ class Pulse:
             intern_pf = floor_pf
         return intern_pf
 
+    def _coord_add_state(self, count: Optional[int] = None) -> Tuple[bool, int, float, List[str]]:
+        """Axis count-pos gate for additional strategies. Returns (allow, stack_cap, last_pf, reasons)."""
+        stack = int(getattr(self.block, "max_stack", 3) or 3)
+        coord = getattr(self, "coord", None)
+        if coord is None or not callable(getattr(coord, "add_gate", None)):
+            return True, stack, 1.0, []
+        rows = self.strategy_closes()
+        consec = 0
+        for c in reversed(rows):
+            pnl = float(getattr(c, "pnl", 0) or 0)
+            if pnl < 0:
+                consec += 1
+            else:
+                break
+        intern = {}
+        try:
+            m = ((self.coord.last or {}).get("metrics") or {})
+            intern = {"pf": float(m.get("internPf") or 0), "n": float(m.get("internN") or 0)}
+        except Exception:
+            intern = {}
+        tape = None
+        if count is not None:
+            try:
+                tape = list((self.block.count_tape or {}).get(int(count)) or [])
+            except Exception:
+                tape = None
+        allow, reasons, metrics = self.coord.add_gate(rows, consec, intern=intern, count=count, count_tape=tape)
+        last_pf = float((metrics or {}).get("lastPf") or (metrics or {}).get("last15Ratio") or 1.0)
+        stack = int(getattr(self.block, "max_stack", 3) or 3)
+        cap = self.coord.add_stack_cap(stack, last_pf)
+        return bool(allow), int(cap), last_pf, list(reasons or [])
+
     def maybe_block_adds(self) -> None:
         """CTS Block Live: add-on only against an existing same-side parent."""
         if self.halted or not self.block.enabled or not self.strat_block:
@@ -3535,6 +3572,12 @@ class Pulse:
         if self.entries_blocked():
             return
         if self.available <= 0:
+            return
+        allow_add, stack_cap, last_pf, add_reasons = self._coord_add_state()
+        if not allow_add:
+            if time.time() - self.skip_log.get("add-gate", 0) > 45:
+                log("COORD add-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-add", quiet=True)
+                self.skip_log["add-gate"] = time.time()
             return
         if time.time() - self.block_last_emit < max(12.0, STAGGER_S * 8):
             return
@@ -3630,9 +3673,17 @@ class Pulse:
                     continue
             except Exception:
                 pass
-            rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
+            rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
             row = self.block.pick_emit(rows)
             if not row:
+                continue
+            count_n = int(row.get("blockCount") or 0)
+            ok_n, _, _, why_n = self._coord_add_state(count=count_n)
+            if not ok_n:
+                self.block.pause_count(lane, count_n, 90)
+                if time.time() - self.skip_log.get(f"add-n:{count_n}", 0) > 45:
+                    log(f"COORD count-pos n={count_n} " + "; ".join(why_n)[:120], every=45.0, key=f"coord-add-{count_n}", quiet=True)
+                    self.skip_log[f"add-n:{count_n}"] = time.time()
                 continue
             c = self.contracts.get(pos.symbol)
             px = self.px.get(pos.symbol) or pos.entry
@@ -3768,6 +3819,12 @@ class Pulse:
             return
         live_pf = self.live_recent_pf(n=8)
         if live_pf is not None and live_pf + 1e-9 < 1.25:
+            return
+        allow_add, _, _, add_reasons = self._coord_add_state()
+        if not allow_add:
+            if time.time() - self.skip_log.get("dca-add-gate", 0) > 45:
+                log("COORD dca-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-dca", quiet=True)
+                self.skip_log["dca-add-gate"] = time.time()
             return
         if time.time() - getattr(self, "dca_last_emit", 0) < 0.35:
             return
@@ -4902,9 +4959,14 @@ class Pulse:
             },
             "coord": {
                 "allow": bool((self.coord.last or {}).get("allow", True)),
+                "addsAllow": bool((self.coord.last or {}).get("addsAllow", True)),
+                "addReasons": list((self.coord.last or {}).get("addReasons") or [])[:6],
                 "stages": stages,
                 "mainEval": int(getattr(self.coord, "main_eval", 5)),
                 "realEval": int(getattr(self.coord, "real_eval", 3)),
+                "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05) or 0.05),
+                "sizeMult": round(float(self.coord.size_mult(len(self.open))), 4),
+                "openN": len(self.open),
                 "axes": {k: {"enabled": v.enabled, "maxWindow": v.max_window} for k, v in self.coord.axes.items()},
             },
             "block": {
