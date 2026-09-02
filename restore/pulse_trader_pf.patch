@@ -1,0 +1,15 @@
+--- a/server/pulse/pulse_trader.py
++++ b/server/pulse/pulse_trader.py
+@@ -3207,10 +3207,10 @@
+         b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
+         b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1)
+         b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
+-        real_pf = 1.2
++        real_pf = 1.1
+         try:
+             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
+-            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
++            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
+         except Exception:
+             pass
+         self.block.enabled = bool(b_en) if b_en is not None else True
