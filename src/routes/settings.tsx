@@ -1175,7 +1175,7 @@ function SettingsPage() {
                   min={1}
                   max={2.3}
                   step={0.02}
-                  hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
+                  hint="Last-N cost PF. Sets above 1.15 with enough fills and DDt under the cap go live."
                   onChange={(v) => patch("setMinPf", v)}
                 />
                 <Slider
@@ -1185,7 +1185,7 @@ function SettingsPage() {
                   max={3600}
                   step={30}
                   unit="s"
-                  hint="Reported per Set and used to rank — last-25 negative is the kill"
+                  hint="Enable a Set only if its max underwater time stays under this. Rank prefers lower DDt."
                   onChange={(v) => patch("setMaxDdTimeS", v)}
                 />
                 <Slider

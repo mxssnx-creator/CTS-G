@@ -282,7 +282,7 @@ for _p in PRESETS:
     _pt = _p["patch"]
     _pt["setMinStep"] = 2
     _pt["setStepMax"] = 4
-    _pt["setMinPf"] = 1.25
+    _pt["setMinPf"] = 1.15
     _pt["minPf"] = 1.25
     _pt["baseMinPf"] = 1.25
     _pt["mainMinPf"] = 1.25
@@ -618,7 +618,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setStrictGate": True,
         "setAutoDeact": True,
         "setMinSamples": 8,
-        "setMinPf": 1.25,
+        "setMinPf": 1.15,
         "setMaxDdTimeS": 1800,
         "setMinStep": int(opt.get("minStep") or 3),
         "setStepMax": int(opt.get("stepMax") or 22),

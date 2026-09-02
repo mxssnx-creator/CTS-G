@@ -531,11 +531,11 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.10
-        self.max_dd_s = 420.0
+        self.min_pf = 1.15
+        self.max_dd_s = 1800.0
         self.auto_deact = True
         self.use_historic_gate = True
-        self.min_samples = 12
+        self.min_samples = 8
         self.reactivate = True
         self.strict_gate = True
         self.max_active = 0
@@ -588,16 +588,15 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.25)
+        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.15)
         self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
-        self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 12)))
+        self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 8)))
         self.reactivate = bool(ov.get("setReactivate", True))
-        # Strict gate (default ON): only VALIDATED (last-N samples >=
-        # max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) sets
-        # and indication kinds may drive live orders. Cold/unproven sets keep
-        # collecting historic + simulated evidence but never trade live.
+        # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
+        # PROFITABLE (cost-adjusted PF > 1.15) + DDt under the cap may
+        # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
             raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
@@ -710,6 +709,18 @@ class SetBook:
         except Exception:
             self.scratch_min = 0.0016
         self._rebuild_sets()
+
+    def eval_need(self) -> int:
+        """Fills needed to enable a Set. Capped at 8 so last-15 can validate."""
+        try:
+            ms = int(self.min_samples or 8)
+        except Exception:
+            ms = 8
+        try:
+            pf = int(self.pf_n or 15)
+        except Exception:
+            pf = 15
+        return max(5, min(8, ms, pf))
 
     def _step_grid(self) -> List[int]:
         # Always the configured TP-step range. Live adapt may prefer a higher
@@ -1502,11 +1513,14 @@ class SetBook:
             last25_avg_r = 0.0
             last25_avg_pnl = 0.0
         dd = drawdown_time_by_symbol(ordered)
-        need = max(self.min_samples, min(self.pf_n, 8))
+        need = self.eval_need()
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         validated = n15 >= need and ratio + 1e-9 >= 1.0
-        proven_neg = n15 >= need and ratio + 1e-9 < 1.0
+        enable_pf = float(self.min_pf or 1.15)
+        proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
+        dd_s = float(dd["maxS"])
+        dd_ok = dd_s <= float(self.max_dd_s or 1800) + 1e-9
         return {
             "n": int(hist_n if hist_n is not None else len(ordered)),
             "wins": wins,
@@ -1528,7 +1542,9 @@ class SetBook:
             "dd_episodes": int(dd["episodes"]),
             "source_n": len(ordered),
             "validated": validated,
-            "active": (not proven_neg),
+            "active": bool(n15 >= need and ratio + 1e-9 >= enable_pf and dd_ok),
+            "enablePf": enable_pf,
+            "ddOk": dd_ok,
             "cost_subtracted": True,
             "cost_pct": self.cost_pct,
             "net_avg": float(last15.get("netAvg") or expectancy),
@@ -1539,8 +1555,9 @@ class SetBook:
         if not self.auto_deact:
             return True, ""
         live_rows = [r for r in live if isinstance(r, dict)]
-        need = max(self.min_samples, min(self.pf_n, 8))
-        if len(live_rows) < 8:
+        need = self.eval_need()
+        enable_pf = float(self.min_pf or 1.15)
+        if len(live_rows) < need:
             if not self.strict_gate:
                 return True, ""
             if not m:
@@ -1549,8 +1566,11 @@ class SetBook:
             ratio = float(m.get("last15_ratio") or 0)
             if n15 < need:
                 return False, "unproven"
-            if ratio + 1e-9 < 1.0:
-                return False, f"hist PF {ratio:.2f}"
+            if ratio + 1e-9 < enable_pf:
+                return False, f"hist PF {ratio:.2f}<{enable_pf:.2f}"
+            dd_s = float(m.get("max_dd_s") or 0)
+            if dd_s > float(self.max_dd_s or 1800) + 1e-9:
+                return False, f"hist DDt {dd_s:.0f}s"
             return True, ""
         live25 = live_rows[-self.deact_n :]
         live_avg = (
@@ -1560,10 +1580,9 @@ class SetBook:
         live_tail_avg = (
             sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail) if live_tail else 0.0
         )
-        need = max(self.min_samples, min(self.pf_n, 8))
         if len(live25) >= self.deact_n and live_avg < 0:
             return False, f"live last{len(live25)} avg loss {live_avg:.4f}"
-        if len(live_rows) >= 8 and live_tail_avg < 0:
+        if len(live_rows) >= need and live_tail_avg < 0:
             return False, f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
         if not m:
             return True, ""
@@ -1571,8 +1590,11 @@ class SetBook:
         ratio = float(m.get("last15_ratio") or 0)
         if n15 >= need and ratio + 1e-9 < 1.0:
             return False, f"live last{n15} PF {ratio:.2f}<1.00 neg"
-        if n15 >= need and ratio + 1e-9 < self.min_pf:
-            return False, f"live last{n15} PF {ratio:.2f}<{self.min_pf:.2f}"
+        if n15 >= need and ratio + 1e-9 < enable_pf:
+            return False, f"live last{n15} PF {ratio:.2f}<{enable_pf:.2f}"
+        dd_s = float(m.get("max_dd_s") or 0)
+        if n15 >= need and dd_s > float(self.max_dd_s or 1800) + 1e-9:
+            return False, f"live DDt {dd_s:.0f}s"
         return True, ""
 
     def _score_one(self, st: SetState) -> None:
@@ -1605,6 +1627,7 @@ class SetBook:
         st.avg_dd_s = m["avg_dd_s"]
         st.dd_episodes = m["dd_episodes"]
         st.source_n = m["source_n"]
+        need = self.eval_need()
         live_m = self._score_metrics(st.live)
         st.live_eval = {
             "n": len(st.live),
@@ -1622,7 +1645,8 @@ class SetBook:
             "costSubtracted": True,
             "source": "live-exchange",
         }
-        need = max(self.min_samples, min(self.pf_n, 8))
+        need = self.eval_need()
+        enable_pf = float(self.min_pf or 1.15)
         by: Dict[str, Dict[str, Any]] = {}
         for side in DIRECTIONS:
             sub_hist = filter_side(st.hist, side)
@@ -1644,7 +1668,7 @@ class SetBook:
                 "cost_subtracted": True,
             }
             sm["liveN"] = len(sub_live)
-            if len(sub_live) >= need:
+            if len(sub_live) >= self.eval_need():
                 sm["last15_ratio"] = lm["last15_ratio"]
                 sm["last15_n"] = lm["last15_n"]
                 sm["last15_r"] = lm["last15_r"]
@@ -1655,7 +1679,7 @@ class SetBook:
                 sm["source"] = "live-exchange"
             else:
                 sm["source"] = "hist-sim"
-            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= 8 else sm, sub_live)
+            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= self.eval_need() else sm, sub_live)
             sm["active"] = active_s
             sm["deact_reason"] = reason_s
             by[side] = sm
@@ -1677,14 +1701,14 @@ class SetBook:
             st.active = True
             st.deact_reason = ""
             return
-        need_h = max(self.min_samples, min(self.pf_n, 8))
+        need_h = self.eval_need()
         hist_n15 = int(m.get("last15_n") or 0)
         hist_pf = float(m.get("last15_ratio") or 0)
-        hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= 1.0
+        hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= enable_pf
         hist_dd_ok = float(m.get("max_dd_s") or 0) <= self.max_dd_s + 1e-9
         # Realtime only validated books. Historic still scores every SL×TP;
-        # unproven / hist-losing sets stay off the live path.
-        if live_n < 8:
+        # unproven / hist-losing / high-DDt sets stay off the live path.
+        if live_n < need_h:
             if self.strict_gate:
                 any_side = any(bool((by.get(d) or {}).get("active")) for d in DIRECTIONS)
                 st.active = bool((hist_ok and hist_dd_ok) or any_side)
@@ -1692,8 +1716,10 @@ class SetBook:
                     st.deact_reason = ""
                 elif hist_n15 < need_h:
                     st.deact_reason = "unproven"
+                elif not hist_ok:
+                    st.deact_reason = f"hist PF {hist_pf:.2f}<{enable_pf:.2f}"
                 else:
-                    st.deact_reason = f"hist PF {hist_pf:.2f}<1.00" if not hist_ok else f"hist DDt {m.get('max_dd_s'):.0f}s"
+                    st.deact_reason = f"hist DDt {m.get('max_dd_s'):.0f}s"
             else:
                 st.active = True
                 st.deact_reason = ""
@@ -1705,7 +1731,7 @@ class SetBook:
             st.last25_avg_pnl = live_avg
             st.last25_n = len(live25)
             return
-        if live_n >= 8 and live_tail_avg < 0:
+        if live_n >= need_h and live_tail_avg < 0:
             st.active = False
             st.deact_reason = f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
             st.last25_avg_pnl = live_tail_avg
@@ -1853,7 +1879,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= max(self.min_samples, 8) and st.last15_ratio + 1e-9 >= 1.0,
+                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.min_pf or 1.15),
                 "active": st.active,
             }
         return blob
@@ -1869,7 +1895,7 @@ class SetBook:
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
         if not rows:
             return None
-        need = max(self.min_samples, 8)
+        need = self.eval_need()
 
         def view(s: SetState) -> Dict[str, Any]:
             return self._side_view(s, want_side if use_side else None)
@@ -1897,7 +1923,7 @@ class SetBook:
             s for s in rows
             if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.min_pf
         ]
-        if not passing:
+        if not passing and not self.strict_gate:
             passing = [
                 s for s in rows
                 if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= 1.0
@@ -1956,7 +1982,7 @@ class SetBook:
         live = list(self.ind_live.get(kind) or [])
         hist = list(self.ind_hist.get(kind) or [])
         live_side = filter_side(live, side)
-        need = max(self.min_samples, 8)
+        need = self.eval_need()
         if len(live_side) >= need:
             tape = live_side
             source = "live-exchange"
@@ -1972,7 +1998,7 @@ class SetBook:
             net_avg = float(last.get("netAvg") or 0)
         else:
             n, pf, net_avg = 0, 0.0, 0.0
-        need = max(self.min_samples, 8)
+        need = self.eval_need()
         by_side: Dict[str, Any] = {}
         if not side:
             for d in DIRECTIONS:
@@ -2236,6 +2262,8 @@ class SetBook:
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
             "minPf": self.min_pf,
+            "enablePf": 1.15 if float(self.min_pf or 0) <= 0 else self.min_pf,
+            "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,
             "autoDeact": self.auto_deact,
             "useHistoricGate": self.use_historic_gate,
@@ -2537,7 +2565,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     trail_row = next((s for s in book4.sets.values() if s.kind == "trail"), None)
     if trail_row:
         trail_row.hist = [
-            {"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"}
+            {"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"}
             for i in range(20)
         ]
         book4._score_one(trail_row)
@@ -2627,7 +2655,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     bases = [x for x in g2.by_idx if x.kind == "base"]
     neg_set, pos_set = bases[0], bases[1]
     neg_rows = [{"t": 6000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
-    pos_rows = [{"t": 6000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    pos_rows = [{"t": 6000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     neg_set.hist = list(neg_rows)
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
@@ -2670,7 +2698,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g4.load({"histEnabled": True, "setMinPf": 1.20, "setMinSamples": 8, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
     g4.progress.ready = True
     gb = [x for x in g4.by_idx if x.pack == "general" and x.kind == "base"]
-    gb[0].hist = [{"t": 7000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    gb[0].hist = [{"t": 7000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     for x in gb[1:]:
         x.hist = [{"t": 7000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
     for x in g4.by_idx:
@@ -2684,10 +2712,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-strict-cold-closes", g4.pick("general") is None and not g4.pack_open("general"), f"pick={g4.pick('general')}"))
     # indication-kind gate: proven loser off, validated winner on, unproven
     # kind rides the pack, pack closed -> everything off
-    gb[0].hist = [{"t": 8000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    gb[0].hist = [{"t": 8000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     g4._score_one(gb[0])
     ib = [x for x in g4.by_idx if x.pack == "indications" and x.kind == "base"]
-    ib[0].hist = [{"t": 8000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    ib[0].hist = [{"t": 8000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     for x in ib[1:]:
         x.hist = []
     for x in g4.by_idx:
@@ -2850,6 +2878,27 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-range-sl", rsl == [0.4, 0.6, 0.8, 1.0], f"sl={rsl}"))
     out.append(("set-range-tp", rst == [5, 6, 7], f"steps={rst}"))
     out.append(("set-range-product", len(ranged.by_idx) == 4 * 3, f"n={len(ranged.by_idx)}"))
+    e = SetBook()
+    e.load({
+        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "setMinPf": 1.15, "setMinSamples": 8, "setMaxDdTimeS": 1800, "setStrictGate": True,
+    })
+    out.append(("set-enable-need-8", e.eval_need() == 8, str(e.eval_need())))
+    out.append(("set-enable-pf-115", abs(e.min_pf - 1.15) < 1e-9, str(e.min_pf)))
+    est = next(x for x in e.by_idx if x.kind == "base")
+    est.hist = [{"t": 100 + i, "pnl": 0.002, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(8)]
+    e._score_one(est)
+    out.append(("set-pf115-n8-on", bool(est.active and est.last15_n >= 8 and est.last15_ratio + 1e-9 >= 1.15),
+                f"on={est.active} n={est.last15_n} pf={est.last15_ratio} {est.deact_reason}"))
+    pk115 = e.pick("general")
+    out.append(("set-pick-pf115", pk115 is not None and pk115.id == est.id, f"pick={getattr(pk115, 'id', None)}"))
+    est.hist = [{"t": 100 + i, "pnl": -0.001, "pnl_pct": 0.0004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(8)]
+    e._score_one(est)
+    out.append(("set-pf-below-115-off", not est.active, f"on={est.active} pf={est.last15_ratio} {est.deact_reason}"))
+    est.hist = [{"t": 100 + i, "pnl": 0.002, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(4)]
+    e._score_one(est)
+    out.append(("set-n4-unproven", (not est.active) and est.deact_reason == "unproven", f"{est.active} {est.deact_reason} n={est.last15_n}"))
     return out
 
 
