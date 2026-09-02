@@ -303,21 +303,21 @@ class LoadGovernor:
             if not b.hist_run:
                 shed.append("hist")
         elif level == "busy":
-            b.scan_chunk = max(8, min(20, 12 + n_open))
-            b.kline_batch = 4
-            b.hist_chunk = 6
-            b.extra_n = 4
-            b.lookback = 180
-            b.universe_rows = 80
-            b.vol1h_batch = 6
+            b.scan_chunk = max(8, min(16, 10 + min(n_open, 8)))
+            b.kline_batch = 3
+            b.hist_chunk = 4 if n > 200 else 6
+            b.extra_n = 2 if n > 80 else 4
+            b.lookback = 120 if n > 200 else 180
+            b.universe_rows = 60 if n > 200 else 80
+            b.vol1h_batch = 4
             b.tf_5m = True
             b.tf_15m = n <= 80
             b.extra_sources = n <= 40
             b.hist_run = True
             b.kline_rest = not (self.hist_busy and n > 48)
-            b.do_gc = rss >= soft
+            b.do_gc = rss >= soft or n > 200
             b.stats_full = n <= 40
-            b.warm_s = 0.40
+            b.warm_s = 0.45
             if not b.tf_15m:
                 shed.append("tf15m")
             if not b.extra_sources:

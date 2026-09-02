@@ -630,6 +630,7 @@ def merge_overall() -> dict:
             closed.append(q)
         tests.extend(st.get("tests") or [])
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
+    closed = closed[:40]
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0

@@ -3909,6 +3909,13 @@ class Pulse:
         except Exception:
             pass
         try:
+            b = getattr(self.load, "last_budget", None)
+            look = int(getattr(b, "lookback", 180) or 180)
+            n += self.sets.trim_bars(keep)
+            n += self.sets.trim_tapes(hist_cap=96, live_cap=64, bar_cap=look)
+        except Exception:
+            pass
+        try:
             from indication_engine import EXTRA
             n += EXTRA.prune(keep, max_n=48)
         except Exception:
@@ -4612,36 +4619,47 @@ class Pulse:
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
         sim_n, sim_upnl = self.sim_stats()
+        closed_n = 80 if getattr(getattr(self.load, "last_budget", None), "stats_full", True) else 40
         closed_out = []
-        for c in list(self.closed)[-80:][::-1]:
+        for c in list(self.closed)[-closed_n:][::-1]:
             d = asdict(c)
             d["indKind"] = d.get("ind_kind") or ""
             closed_out.append(d)
         cov = self._coverage_blob()
         ind_snap = self.indications.snapshot()
-        sets_snap = self.sets.snapshot()
+        sets_snap = self.sets.snapshot(full=False)
         try:
             from stats_report import merge_kind_stats, merge_strategy_stats
-            by_ind = merge_kind_stats(
-                closed_out,
-                self.position_cost_pct,
-                gate=sets_snap.get("indGate") or cov.get("indicationGate") or {},
-                hits=cov.get("indicationHits") or ind_snap.get("typeHits") or {},
-                types=cov.get("indicationTypes") or ind_snap.get("types") or {},
-                kind_live=ind_snap.get("kindStats") or {},
-            )
-            by_strat = merge_strategy_stats(
-                closed_out,
-                self.position_cost_pct,
-                coverage=cov,
-                block=self.block.snapshot(),
-                dca=self.dca.snapshot(),
-                exits=self.exits.snapshot(),
-                sets_rows=sets_snap.get("rows") or [],
-            )
+            now_m = time.monotonic()
+            fat = bool(getattr(getattr(self.load, "last_budget", None), "stats_full", False))
+            last_m = float(getattr(self, "_stats_merge_ts", 0) or 0)
+            if fat or now_m - last_m >= 3.5 or not getattr(self, "_by_ind_cache", None):
+                by_ind = merge_kind_stats(
+                    closed_out,
+                    self.position_cost_pct,
+                    gate=sets_snap.get("indGate") or cov.get("indicationGate") or {},
+                    hits=cov.get("indicationHits") or ind_snap.get("typeHits") or {},
+                    types=cov.get("indicationTypes") or ind_snap.get("types") or {},
+                    kind_live=ind_snap.get("kindStats") or {},
+                )
+                by_strat = merge_strategy_stats(
+                    closed_out,
+                    self.position_cost_pct,
+                    coverage=cov,
+                    block=self.block.snapshot(),
+                    dca=self.dca.snapshot(),
+                    exits=self.exits.snapshot(),
+                    sets_rows=sets_snap.get("rows") or [],
+                )
+                self._by_ind_cache = by_ind
+                self._by_strat_cache = by_strat
+                self._stats_merge_ts = now_m
+            else:
+                by_ind = self._by_ind_cache
+                by_strat = self._by_strat_cache
         except Exception:
-            by_ind = {}
-            by_strat = {}
+            by_ind = getattr(self, "_by_ind_cache", {}) or {}
+            by_strat = getattr(self, "_by_strat_cache", {}) or {}
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -4910,7 +4928,9 @@ class Pulse:
 
     def write_stats(self, force: bool = False) -> None:
         now = time.monotonic()
-        if not force and not self._stats_force and now - self._stats_ts < 0.95:
+        fat = bool(getattr(getattr(self.load, "last_budget", None), "stats_full", False))
+        min_dt = 0.95 if fat else 1.6
+        if not force and not self._stats_force and now - self._stats_ts < min_dt:
             return
         self._stats_ts = now
         self._stats_force = False
@@ -5463,8 +5483,9 @@ class Pulse:
             if remain > 0:
                 self.wake_ev.clear()
                 self.wake_ev.wait(timeout=remain)
-            elif wall > SCAN_S:
-                self._stats_force = True
+            else:
+                # Yield so hist/warm/ctrl threads run instead of busy-spinning.
+                time.sleep(0.02)
 
 
 def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:

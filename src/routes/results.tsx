@@ -24,7 +24,8 @@ function ResultsPage() {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
       setRaw(s);
-      timer = setTimeout(pull, 2000);
+      const hidden = typeof document !== "undefined" && document.hidden;
+      timer = setTimeout(pull, hidden ? 8000 : 4000);
     };
     void pull();
     return () => {

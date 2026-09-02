@@ -43,7 +43,8 @@ function DeskPage() {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
       setRaw(s);
-      timer = setTimeout(pull, 2000);
+      const hidden = typeof document !== "undefined" && document.hidden;
+      timer = setTimeout(pull, hidden ? 8000 : 3500);
     };
     const kick = () => {
       if (!alive) return;

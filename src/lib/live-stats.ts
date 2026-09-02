@@ -786,14 +786,16 @@ async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null>
 }
 
 export async function fetchLiveStats(conn = "overall"): Promise<LiveStats | null> {
-  const snapP = fetchJson("/live-stats.json", 4000);
+  if (conn === "overall") {
+    const snap = (await fetchJson("/live-stats.json", 4000)) as LiveStats | null;
+    if (!snap) return null;
+    return viewFromSnapshot(snap, conn) || snap;
+  }
   const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 1600)) as LiveStats | null;
   if (live && statsMatchesConn(live, conn)) return live;
   if (live) {
     const fromLive = viewFromSnapshot(live, conn);
     if (fromLive) return fromLive;
   }
-  const snap = (await snapP) as LiveStats | null;
-  if (!snap) return null;
-  return viewFromSnapshot(snap, conn);
+  return null;
 }

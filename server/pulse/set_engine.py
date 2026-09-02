@@ -40,7 +40,7 @@ BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 3
 STEP_MAX = 22
-HIST_CAP = 240
+HIST_CAP = 96
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common")
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common"}
@@ -548,6 +548,10 @@ class SetBook:
         self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
         self._running = False
+        self._snap_cache: Optional[Dict[str, Any]] = None
+        self._snap_ts = 0.0
+        self._live_ov_cache: Optional[Dict[str, Any]] = None
+        self._live_ov_ts = 0.0
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
@@ -781,6 +785,28 @@ class SetBook:
         if len(cleaned) >= 16:
             self.bars[symbol] = cleaned[-self.lookback :]
 
+    def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
+        n = 0
+        hc = max(24, int(hist_cap or HIST_CAP))
+        lc = max(16, int(live_cap or 80))
+        for st in self.by_idx:
+            if len(st.hist) > hc:
+                st.hist = st.hist[-hc:]
+                n += 1
+            if len(st.live) > lc:
+                st.live = st.live[-lc:]
+                n += 1
+        n += self.clamp_bars(bar_cap)
+        for k, tape in list(self.ind_hist.items()):
+            if len(tape) > hc:
+                self.ind_hist[k] = tape[-hc:]
+                n += 1
+        for k, tape in list(self.ind_live.items()):
+            if len(tape) > lc:
+                self.ind_live[k] = tape[-lc:]
+                n += 1
+        return n
+
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)
         n = 0
@@ -875,6 +901,8 @@ class SetBook:
             st.live.append(row)
             st.live = st.live[-80:]
             self._score_one(st)
+        self._snap_ts = 0.0
+        self._live_ov_ts = 0.0
 
     def seed_live(self, closed: Sequence[Any]) -> None:
         for rec in closed:
@@ -1002,6 +1030,10 @@ class SetBook:
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
+            self._snap_ts = 0.0
+            self._live_ov_ts = 0.0
+            self._snap_ts = 0.0
+            self._live_ov_ts = 0.0
 
     def _commit_hist(
         self,
@@ -1320,6 +1352,8 @@ class SetBook:
         return True, ""
 
     def _score_one(self, st: SetState) -> None:
+        self._snap_ts = 0.0
+        self._live_ov_ts = 0.0
         tape = st.tape()
         tape.sort(key=lambda r: finite(r.get("t")))
         m = self._score_metrics(tape, hist_n=len(st.hist))
@@ -1453,6 +1487,8 @@ class SetBook:
             return
         st.active = True
         st.deact_reason = "; ".join(dict.fromkeys(notes))
+        self._snap_ts = 0.0
+        self._live_ov_ts = 0.0
 
     def _cap_active(self) -> None:
         for kind, cap in (("base", self.max_active), ("trail", max(len(self.trails) * max(1, len(self.packs)), 4))):
@@ -1754,6 +1790,10 @@ class SetBook:
 
     def live_overview(self) -> Dict[str, Any]:
         """On-exchange processed Sets, cost-net. Unique client_id so a fill is not double-counted."""
+        now = time.monotonic()
+        cached = self._live_ov_cache
+        if cached is not None and now - self._live_ov_ts < 2.0:
+            return cached
         processed = [s for s in self.by_idx if s.live]
         seen: set = set()
         fills: List[Dict[str, Any]] = []
@@ -1802,9 +1842,9 @@ class SetBook:
                     if isinstance(v, dict)
                 },
             })
-            if len(rows) >= 32:
+            if len(rows) >= 16:
                 break
-        return {
+        out = {
             "processed": len(processed),
             "active": sum(1 for s in processed if s.active),
             "deactivated": sum(1 for s in processed if not s.active),
@@ -1820,8 +1860,18 @@ class SetBook:
             "source": "live-exchange",
             "rows": rows,
         }
+        self._live_ov_cache = out
+        self._live_ov_ts = time.monotonic()
+        return out
+        self._live_ov_cache = out
+        self._live_ov_ts = time.monotonic()
+        return out
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, full: bool = False) -> Dict[str, Any]:
+        now = time.monotonic()
+        cached = self._snap_cache
+        if cached is not None and now - self._snap_ts < (0.8 if full else 1.4):
+            return cached
         rows = []
         for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.last15_ratio, s.max_dd_s)):
             rows.append(
@@ -1919,26 +1969,29 @@ class SetBook:
                     "locked": st.locked,
                 }
             )
-        rows = rows[:24]
+        rows = rows[:16]
         p = self.progress
         cover = self.coverage()
         live_ov = self.live_overview()
-        index = [
-            {
-                "i": st.idx,
-                "id": st.id,
-                "kind": st.kind,
-                "pack": st.pack,
-                "sl": st.sl_ratio,
-                "tr": st.trail_key,
-                "st": st.step,
-                "on": int(st.active),
-                "pf": round(st.last15_ratio, 4),
-                "dd": st.max_dd_s,
-            }
-            for st in self.by_idx
-        ]
-        return {
+        # Never dump the full 1000+ set index into the hot stats JSON.
+        index = []
+        if full:
+            index = [
+                {
+                    "i": st.idx,
+                    "id": st.id,
+                    "kind": st.kind,
+                    "pack": st.pack,
+                    "sl": st.sl_ratio,
+                    "tr": st.trail_key,
+                    "st": st.step,
+                    "on": int(st.active),
+                    "pf": round(st.last15_ratio, 4),
+                    "dd": st.max_dd_s,
+                }
+                for st in self.by_idx[:48]
+            ]
+        out = {
             "enabled": self.enabled,
             "ready": p.ready,
             "lookback": self.lookback,
@@ -1991,6 +2044,9 @@ class SetBook:
             },
             "rows": rows,
         }
+        self._snap_cache = out
+        self._snap_ts = time.monotonic()
+        return out
 
 
 def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: float = 0.04) -> List[List[float]]:
@@ -2046,6 +2102,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         }
     )
     out.append(("set-count", len(book.sets) >= 2, f"n={len(book.sets)}"))
+    slim = book.snapshot()
+    out.append(("set-snap-slim-index", len(slim.get("index") or []) == 0, f"index={len(slim.get('index') or [])} rows={len(slim.get('rows') or [])}"))
     out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.0045) < 1e-9, f"{step_tp_pct(3, 0.15)}"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
     trail_only = [s for s in book.sets.values() if s.kind == "trail"]
