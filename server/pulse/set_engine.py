@@ -22,11 +22,15 @@ from position_cost import (
     SL_TP_RATIOS,
     cost_as_frac,
     net_pnl_pct,
+    row_net_pnl,
+    row_side,
+    filter_side,
 )
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common
 from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
 
 PACKS = ("indications", "general")
+DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 480
@@ -453,9 +457,13 @@ class SetState:
     deact_reason: str = ""
     locked: bool = False
     source_n: int = 0
+    by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def tape(self) -> List[Dict[str, Any]]:
         return list(self.hist) + list(self.live)
+
+    def tape_side(self, side: Optional[str] = None) -> List[Dict[str, Any]]:
+        return filter_side(self.tape(), side)
 
 
 @dataclass
@@ -1037,136 +1045,193 @@ class SetBook:
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
         for st in self.by_idx:
             pack_sig = signals.get(st.pack) or [(0, 0.0, "")] * n
-            open_pos: Optional[Dict[str, Any]] = None
-            cool = 0
             sl_frac_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
             use_trail = st.kind == "trail"
             arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
             give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
             tp_frac = max(0.0020, st.tp_pct)
-            for i in range(warmup, n):
-                bar = bars[i]
-                ts = base_ts + i * BAR_S
-                if open_pos is not None:
-                    side = int(open_pos["side"])
-                    entry = float(open_pos["entry"])
-                    held = i - int(open_pos["i"])
-                    if use_trail:
-                        if side > 0:
+            # LONG and SHORT walk independently so one side never blocks the other.
+            for want_side in (1, -1):
+                open_pos: Optional[Dict[str, Any]] = None
+                cool = 0
+                for i in range(warmup, n):
+                    bar = bars[i]
+                    ts = base_ts + i * BAR_S
+                    if open_pos is not None:
+                        side = int(open_pos["side"])
+                        entry = float(open_pos["entry"])
+                        held = i - int(open_pos["i"])
+                        if use_trail:
+                            if side > 0:
+                                open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
+                                fav = (open_pos["peak"] - entry) / entry
+                                if fav >= arm:
+                                    trail = open_pos["peak"] * (1 - give)
+                                    open_pos["trail"] = max(open_pos.get("trail") or 0.0, trail)
+                            else:
+                                open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
+                                fav = (entry - open_pos["peak"]) / entry
+                                if fav >= arm:
+                                    trail = open_pos["peak"] * (1 + give)
+                                    cur = open_pos.get("trail")
+                                    open_pos["trail"] = trail if cur is None else min(cur, trail)
+                        elif side > 0:
                             open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
-                            fav = (open_pos["peak"] - entry) / entry
-                            if fav >= arm:
-                                trail = open_pos["peak"] * (1 - give)
-                                open_pos["trail"] = max(open_pos.get("trail") or 0.0, trail)
                         else:
                             open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                            fav = (entry - open_pos["peak"]) / entry
-                            if fav >= arm:
-                                trail = open_pos["peak"] * (1 + give)
-                                cur = open_pos.get("trail")
-                                open_pos["trail"] = trail if cur is None else min(cur, trail)
-                    elif side > 0:
-                        open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
+                        why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], open_pos.get("trail"), bar, ignore_tp=not honor_tp)
+                        if why is None and held >= time_bars:
+                            why, px = "time", float(bar[3])
+                        if why is None and held >= scratch_bars:
+                            move = (float(bar[3]) - entry) / entry * side
+                            if move >= self.scratch_min:
+                                why, px = "scratch+", float(bar[3])
+                        if why:
+                            raw = (px - entry) / entry * side
+                            rec = {
+                                "t": ts,
+                                "symbol": symbol,
+                                "side": "LONG" if side > 0 else "SHORT",
+                                "direction": "LONG" if side > 0 else "SHORT",
+                                "pnl": net_pnl_pct(raw, self.cost_pct),
+                                "pnl_pct": raw,
+                                "hold_s": held * BAR_S,
+                                "reason": why,
+                                "set_id": st.id,
+                                "pack": st.pack,
+                                "costPct": self.cost_pct,
+                            }
+                            bucket = hist[st.id]
+                            bucket.append(rec)
+                            if st.pack == "indications" and ind_hist is not None:
+                                for tag in str(open_pos.get("tags") or "").split("+"):
+                                    kind = IND_TAG_KIND.get(tag.strip())
+                                    if not kind:
+                                        continue
+                                    buf = ind_hist.setdefault(kind, [])
+                                    buf.append(rec)
+                            open_pos = None
+                            cool = self.cooldown_bars
+                        continue
+                    if cool > 0:
+                        cool -= 1
+                        continue
+                    d, conf, why = pack_sig[i]
+                    if d == 0 or conf < 0.58:
+                        continue
+                    if d != want_side:
+                        continue
+                    close = float(bar[3])
+                    sl_frac = max(0.0015, sl_frac_base)
+                    if d > 0:
+                        sl = close * (1 - sl_frac)
+                        tp = close * (1 + tp_frac)
                     else:
-                        open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                    why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], open_pos.get("trail"), bar, ignore_tp=not honor_tp)
-                    if why is None and held >= time_bars:
-                        why, px = "time", float(bar[3])
-                    if why is None and held >= scratch_bars:
-                        move = (float(bar[3]) - entry) / entry * side
-                        if move >= self.scratch_min:
-                            why, px = "scratch+", float(bar[3])
-                    if why:
-                        raw = (px - entry) / entry * side
-                        rec = {
-                            "t": ts,
-                            "symbol": symbol,
-                            "side": "LONG" if side > 0 else "SHORT",
-                            "pnl": net_pnl_pct(raw, self.cost_pct),
-                            "pnl_pct": raw,
-                            "hold_s": held * BAR_S,
-                            "reason": why,
-                            "set_id": st.id,
-                        }
-                        bucket = hist[st.id]
-                        bucket.append(rec)
-                        # Attribute indications-pack fills to the indication
-                        # kinds that voted for the taken direction.
-                        if st.pack == "indications" and ind_hist is not None:
-                            for tag in str(open_pos.get("tags") or "").split("+"):
-                                kind = IND_TAG_KIND.get(tag.strip())
-                                if not kind:
-                                    continue
-                                buf = ind_hist.setdefault(kind, [])
-                                buf.append(rec)
-                        open_pos = None
-                        cool = self.cooldown_bars
-                    continue
-                if cool > 0:
-                    cool -= 1
-                    continue
-                d, conf, why = pack_sig[i]
-                if d == 0 or conf < 0.58:
-                    continue
-                close = float(bar[3])
-                sl_frac = max(0.0015, sl_frac_base)
-                if d > 0:
-                    sl = close * (1 - sl_frac)
-                    tp = close * (1 + tp_frac)
-                else:
-                    sl = close * (1 + sl_frac)
-                    tp = close * (1 - tp_frac)
-                open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None, "tags": str(why or "")}
+                        sl = close * (1 + sl_frac)
+                        tp = close * (1 - tp_frac)
+                    open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None, "tags": str(why or "")}
             self.progress.set_id = st.id
+
+    def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
+        ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
+        wins = sum(1 for x in nets if x > 0)
+        gp = round(sum(x for x in nets if x > 0), 6)
+        gl = round(abs(sum(x for x in nets if x < 0)), 6)
+        decided = sum(1 for x in nets if x != 0)
+        wr = round(100.0 * wins / decided, 1) if decided else 0.0
+        expectancy = round(sum(nets) / len(nets), 6) if nets else 0.0
+        holds = [finite(r.get("hold_s")) for r in ordered]
+        avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
+        classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
+        pf_tape = last_n_balanced(ordered, self.pf_n)
+        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
+        last25 = ordered[-self.deact_n :]
+        if last25:
+            rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
+            last25_avg_r = sum(rs) / len(rs)
+            last25_avg_pnl = sum(row_net_pnl(r, self.cost_pct) for r in last25) / len(last25)
+        else:
+            last25_avg_r = 0.0
+            last25_avg_pnl = 0.0
+        dd = drawdown_time_by_symbol(ordered)
+        need = max(self.min_samples, min(self.pf_n, 8))
+        n15 = int(last15["count"])
+        ratio = float(last15["ratio"])
+        validated = n15 >= need and ratio + 1e-9 >= 1.0
+        proven_neg = n15 >= need and ratio + 1e-9 < 1.0
+        return {
+            "n": int(hist_n if hist_n is not None else len(ordered)),
+            "wins": wins,
+            "gp": gp,
+            "gl": gl,
+            "wr": wr,
+            "expectancy": expectancy,
+            "avg_hold_s": avg_hold,
+            "classic_all": classic,
+            "last15_ratio": ratio,
+            "last15_classic": float(last15["classicPf"]),
+            "last15_n": n15,
+            "last15_r": float(last15["avgR"]),
+            "last25_n": len(last25),
+            "last25_avg_r": last25_avg_r,
+            "last25_avg_pnl": last25_avg_pnl,
+            "max_dd_s": float(dd["maxS"]),
+            "avg_dd_s": float(dd["avgS"]),
+            "dd_episodes": int(dd["episodes"]),
+            "source_n": len(ordered),
+            "validated": validated,
+            "active": (not proven_neg),
+            "cost_subtracted": True,
+            "cost_pct": self.cost_pct,
+            "net_avg": float(last15.get("netAvg") or expectancy),
+        }
 
     def _score_one(self, st: SetState) -> None:
         tape = st.tape()
         tape.sort(key=lambda r: finite(r.get("t")))
-        st.n = len(st.hist)
-        pnls = [finite(r.get("pnl")) for r in tape]
-        st.wins = sum(1 for x in pnls if x > 0)
-        st.gp = round(sum(x for x in pnls if x > 0), 6)
-        st.gl = round(abs(sum(x for x in pnls if x < 0)), 6)
-        decided = sum(1 for x in pnls if x != 0)
-        st.wr = round(100.0 * st.wins / decided, 1) if decided else 0.0
-        st.expectancy = round(sum(pnls) / len(pnls), 6) if pnls else 0.0
-        holds = [finite(r.get("hold_s")) for r in tape]
-        st.avg_hold_s = round(sum(holds) / len(holds), 1) if holds else 0.0
-        st.classic_all = round(st.gp / st.gl, 4) if st.gl > 0 else (99.0 if st.gp > 0 else 0.0)
+        m = self._score_metrics(tape, hist_n=len(st.hist))
+        st.n = m["n"]
+        st.wins = m["wins"]
+        st.gp = m["gp"]
+        st.gl = m["gl"]
+        st.wr = m["wr"]
+        st.expectancy = m["expectancy"]
+        st.avg_hold_s = m["avg_hold_s"]
+        st.classic_all = m["classic_all"]
         counts: Dict[str, int] = {}
         for r in tape:
             k = str(r.get("reason") or "x").split(":")[0]
             counts[k] = counts.get(k, 0) + 1
         st.exits = counts
-        pf_tape = last_n_balanced(tape, self.pf_n)
-        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
-        st.last15_ratio = float(last15["ratio"])
-        st.last15_classic = float(last15["classicPf"])
-        st.last15_n = int(last15["count"])
-        st.last15_r = float(last15["avgR"])
-        last25 = tape[-self.deact_n :]
-        st.last25_n = len(last25)
-        if last25:
-            rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
-            st.last25_avg_r = sum(rs) / len(rs)
-            st.last25_avg_pnl = sum(finite(r.get("pnl")) for r in last25) / len(last25)
-        else:
-            st.last25_avg_r = 0.0
-            st.last25_avg_pnl = 0.0
+        st.last15_ratio = m["last15_ratio"]
+        st.last15_classic = m["last15_classic"]
+        st.last15_n = m["last15_n"]
+        st.last15_r = m["last15_r"]
+        st.last25_n = m["last25_n"]
+        st.last25_avg_r = m["last25_avg_r"]
+        st.last25_avg_pnl = m["last25_avg_pnl"]
+        st.max_dd_s = m["max_dd_s"]
+        st.avg_dd_s = m["avg_dd_s"]
+        st.dd_episodes = m["dd_episodes"]
+        st.source_n = m["source_n"]
+        by: Dict[str, Dict[str, Any]] = {}
+        for side in DIRECTIONS:
+            sub_hist = filter_side(st.hist, side)
+            sub_tape = filter_side(tape, side)
+            sm = self._score_metrics(sub_tape, hist_n=len(sub_hist))
+            sm["side"] = side
+            by[side] = sm
+        st.by_side = by
         live25 = st.live[-self.deact_n :]
         live_avg = 0.0
         if live25:
-            live_avg = sum(finite(r.get("pnl")) for r in live25) / len(live25)
+            live_avg = sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25)
         live_n = len(st.live)
         live_tail = st.live[-max(8, min(self.deact_n, 15)) :]
         live_tail_avg = 0.0
         if live_tail:
-            live_tail_avg = sum(finite(r.get("pnl")) for r in live_tail) / len(live_tail)
-        dd = drawdown_time_by_symbol(tape)
-        st.max_dd_s = float(dd["maxS"])
-        st.avg_dd_s = float(dd["avgS"])
-        st.dd_episodes = int(dd["episodes"])
-        st.source_n = len(tape)
+            live_tail_avg = sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail)
         if st.locked:
             st.active = False
             st.deact_reason = "locked"
@@ -1286,18 +1351,40 @@ class SetBook:
                 "sl": len(self.sl_ratios),
                 "trail": len(trails),
                 "step": len(self.steps),
+                "direction": 2,
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
             "product": len(self.by_idx),
             "indexed": True,
             "independentTrail": bool(getattr(self, "trail_enabled", True)),
+            "independentDirection": True,
+            "directions": list(DIRECTIONS),
             "byTrail": by_tr,
             "bySl": by_sl,
             "trailCover": all(any(st.trail_key == t for st in trail_sets) for t in trails) if trails else True,
             "slCover": all(any(abs(st.sl_ratio - sl) < 1e-9 for st in base_sets) for sl in self.sl_ratios),
         }
 
-    def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
+    def _side_view(self, st: SetState, side: Optional[str] = None) -> Dict[str, Any]:
+        want = str(side or "").strip().upper()
+        if want in ("L", "1", "BUY"):
+            want = "LONG"
+        elif want in ("S", "-1", "SELL"):
+            want = "SHORT"
+        blob = (st.by_side or {}).get(want) if want in DIRECTIONS else None
+        if not blob:
+            return {
+                "last15_ratio": st.last15_ratio,
+                "last15_n": st.last15_n,
+                "last25_avg_r": st.last25_avg_r,
+                "max_dd_s": st.max_dd_s,
+                "n": st.n,
+                "validated": st.last15_n >= max(self.min_samples, 8) and st.last15_ratio + 1e-9 >= 1.0,
+                "active": st.active,
+            }
+        return blob
+
+    def pick(self, pack: str, kind: str = "base", side: Optional[str] = None) -> Optional[SetState]:
         gated = bool(self.progress.ready and self.use_historic_gate)
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
         if not rows and not gated:
@@ -1305,104 +1392,113 @@ class SetBook:
         if not rows:
             return None
         need = max(self.min_samples, 8)
+        want_side = str(side or "").strip().upper()
+        if want_side in ("L", "1", "BUY"):
+            want_side = "LONG"
+        elif want_side in ("S", "-1", "SELL"):
+            want_side = "SHORT"
+        use_side = want_side in DIRECTIONS
+
+        def view(s: SetState) -> Dict[str, Any]:
+            return self._side_view(s, want_side if use_side else None)
 
         def proven_neg(s: SetState) -> bool:
-            return s.last15_n >= need and s.last15_ratio + 1e-9 < 1.0
+            v = view(s)
+            return int(v.get("last15_n") or 0) >= need and float(v.get("last15_ratio") or 0) + 1e-9 < 1.0
 
-        # Tier 1: validated at min_pf. Tier 2: validated positive (>= 1.00).
         passing = [
             s for s in rows
-            if s.last15_n >= need and s.last15_ratio + 1e-9 >= self.min_pf
+            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.min_pf
         ]
         if not passing:
             passing = [
                 s for s in rows
-                if s.last15_n >= need and s.last15_ratio + 1e-9 >= 1.0
+                if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= 1.0
             ]
         if not passing and not self.strict_gate:
-            # Legacy discovery tier: unproven sets only. The strict gate
-            # (default) never lets an unvalidated or unprofitable set drive a
-            # live order — it must earn validation from historic replay first.
             passing = [s for s in rows if not proven_neg(s)]
         if not passing and not self.strict_gate and not gated:
             passing = [s for s in rows if s.active] or list(rows)
         if not passing:
             return None
         def live_ok(s: SetState) -> bool:
-            tail = s.live[-8:]
+            tail = filter_side(s.live, want_side if use_side else None)[-8:]
             if len(tail) < 8:
                 return True
-            return sum(finite(r.get("pnl")) for r in tail) / len(tail) >= 0.0
+            return sum(row_net_pnl(r, self.cost_pct) for r in tail) / len(tail) >= 0.0
         live_pass = [s for s in passing if live_ok(s)]
         chosen = live_pass or passing
-        chosen.sort(key=lambda s: (s.last15_ratio, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        chosen.sort(key=lambda s: (
+            float(view(s).get("last15_ratio") or 0),
+            float(view(s).get("last25_avg_r") or 0),
+            -float(view(s).get("max_dd_s") or 0),
+            int(view(s).get("n") or 0),
+        ), reverse=True)
         return chosen[0]
 
-    def pick_trail(self, pack: str) -> Optional[SetState]:
-        return self.pick(pack, kind="trail")
+    def pick_trail(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
+        return self.pick(pack, kind="trail", side=side)
 
-    def pick_any(self, pack: str) -> Optional[SetState]:
-        return self.pick(pack, "base") or self.pick(pack, "trail")
+    def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
+        return self.pick(pack, "base", side=side) or self.pick(pack, "trail", side=side)
 
-    def pack_open(self, pack: str) -> bool:
+    def pack_open(self, pack: str, side: Optional[str] = None) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
         if self.strict_gate:
-            # Strict: a pack is open only while it has a VALIDATED +
-            # PROFITABLE set to bind. While hist is still loading, stay open
-            # so the desk keeps processing instead of freezing.
             if not getattr(self.progress, "ready", False):
                 return True
-            return self.pick_any(pack) is not None
+            return self.pick_any(pack, side=side) is not None
         fills = sum(s.n for s in self.sets.values())
         if fills < 8 or not self.progress.ready:
             return True
-        return self.pick_any(pack) is not None
+        return self.pick_any(pack, side=side) is not None
 
-    def ind_stats(self, kind: str) -> Dict[str, Any]:
-        """Cost-adjusted PF evidence for one indication kind (hist + live)."""
+    def ind_stats(self, kind: str, side: Optional[str] = None) -> Dict[str, Any]:
+        """Cost-adjusted PF evidence for one indication kind (hist + live), optional side."""
         tape = list(self.ind_hist.get(kind) or []) + list(self.ind_live.get(kind) or [])
+        tape = filter_side(tape, side)
         tape.sort(key=lambda r: finite(r.get("t")))
-        dd = drawdown_time(tape)
+        dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
             last = last_n_cost_pf(last_n_balanced(tape, self.pf_n), self.pf_n, self.cost_pct)
             n = int(last["count"])
             pf = float(last["ratio"])
+            net_avg = float(last.get("netAvg") or 0)
         else:
-            n, pf = 0, 0.0
+            n, pf, net_avg = 0, 0.0, 0.0
         need = max(self.min_samples, 8)
+        by_side: Dict[str, Any] = {}
+        if not side:
+            for d in DIRECTIONS:
+                by_side[d] = self.ind_stats(kind, d)
         return {
             "kind": kind,
+            "side": (str(side).upper() if side else "BOTH"),
             "n": n,
             "tapeN": len(tape),
             "pf": round(pf, 4),
+            "netAvg": round(net_avg, 6),
+            "costSubtracted": True,
             "validated": n >= need,
             "profitable": pf + 1e-9 >= 1.0,
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "ddEpisodes": int(dd.get("episodes") or 0),
+            "bySide": by_side,
         }
 
-    def indication_ok(self, kind: str) -> bool:
-        """Strict live gate for one indication kind.
-
-        A kind with enough evidence runs only while it is VALIDATED
-        (n >= max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00);
-        a proven loser is cut off. An unproven kind may run only while the
-        indications pack itself has a validated + profitable set, so new
-        kinds collect evidence under pack-level validation instead of a
-        deadlock.
-        """
+    def indication_ok(self, kind: str, side: Optional[str] = None) -> bool:
         if not (self.enabled and self.use_historic_gate and self.strict_gate):
             return True
         if not getattr(self.progress, "ready", False):
             return True
         k = str(kind or "").strip()
         if k:
-            st = self.ind_stats(k)
+            st = self.ind_stats(k, side=side)
             if st["validated"]:
                 return bool(st["profitable"])
-        return self.pack_open("indications")
+        return self.pack_open("indications", side=side)
 
     def ind_gate_snapshot(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -1933,6 +2029,31 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ind_fills = sum(len(v) for v in g6.ind_hist.values())
     out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
     out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
+    # Independent LONG/SHORT walks + cost-subtracted averages
+    dbook = SetBook()
+    dbook.load({"histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True, "positionCostPct": 0.15})
+    dbook.ingest_bars("DIR-USDT", synth_trend(180, 48.0, 0.22, 0.03))
+    dbook.replay_all(now=1_700_001_000, drop_bars=True)
+    dst = next(iter(dbook.sets.values()))
+    sides = set((dst.by_side or {}).keys())
+    out.append(("set-dir-keys", sides == {"LONG", "SHORT"}, str(sides)))
+    ln = int((dst.by_side.get("LONG") or {}).get("n") or 0)
+    sn = int((dst.by_side.get("SHORT") or {}).get("n") or 0)
+    out.append(("set-dir-independent-n", ln > 0 and sn > 0, f"long={ln} short={sn}"))
+    lp = float((dst.by_side.get("LONG") or {}).get("last15_ratio") or 0)
+    sp = float((dst.by_side.get("SHORT") or {}).get("last15_ratio") or 0)
+    out.append(("set-dir-scores-split", abs(lp - sp) > 1e-9 or ln != sn, f"Lpf={lp} Spf={sp}"))
+    pick_l = dbook.pick("general", side="LONG")
+    pick_s = dbook.pick("general", side="SHORT")
+    out.append(("set-dir-pick-side", True, f"L={getattr(pick_l, 'id', None)} S={getattr(pick_s, 'id', None)}"))
+    cost_rows = [{"t": 100 + i, "pnl_pct": 0.003, "pnl": 9.9, "symbol": "T", "side": "LONG"} for i in range(12)]
+    wst2 = next(iter(dbook.sets.values()))
+    wst2.hist = cost_rows
+    wst2.live = []
+    dbook._score_one(wst2)
+    want_net = net_pnl_pct(0.003, 0.15)
+    out.append(("set-cost-net-expectancy", abs(wst2.expectancy - want_net) < 1e-9, f"E={wst2.expectancy} want={want_net}"))
+    out.append(("set-cost-flag", bool((wst2.by_side.get("LONG") or {}).get("cost_subtracted")), str(wst2.by_side.get("LONG"))))
     mixed_dd = [
         {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
         {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},

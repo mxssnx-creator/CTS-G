@@ -479,6 +479,7 @@ function SettingsPage() {
                         <thead className="font-mono text-[11px] text-muted">
                           <tr>
                             <th className="pb-2 font-medium">Set</th>
+                            <th className="pb-2 font-medium">Dir</th>
                             <th className="pb-2 font-medium">Pack</th>
                             <th className="pb-2 text-right font-medium">SL</th>
                             <th className="pb-2 text-right font-medium">Step</th>
@@ -491,6 +492,7 @@ function SettingsPage() {
                           {(calcJob.rows || []).slice(0, 16).map((r) => (
                             <tr key={r.id} className={`border-t border-border font-mono ${r.validated ? "text-fg" : "text-muted"}`}>
                               <td className="py-1.5">{r.id.replace("-USDT", "")}</td>
+                              <td className="py-1.5">{r.direction || "BOTH"}</td>
                               <td className="py-1.5">{r.pack}</td>
                               <td className="py-1.5 text-right">{r.kind === "trail" ? r.trailKey || "trail" : r.slRatio.toFixed(1)}</td>
                               <td className="py-1.5 text-right">{r.step || "—"}</td>
@@ -502,7 +504,7 @@ function SettingsPage() {
                         </tbody>
                       </table>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-3">
                       <div>
                         <p className="mb-2 font-mono text-xs text-muted uppercase">Indication kinds · PF / DDT</p>
                         <div className="space-y-1">
@@ -510,6 +512,17 @@ function SettingsPage() {
                             <div key={k} className="flex justify-between font-mono text-xs">
                               <span className={v.validated && v.profitable ? "text-primary" : "text-muted"}>{k}</span>
                               <span>PF {(v.pf ?? 0).toFixed(2)} · DDt {Math.round(v.maxDdS ?? 0)}s · n {v.n ?? 0}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-2 font-mono text-xs text-muted uppercase">Direction · net PF</p>
+                        <div className="space-y-1">
+                          {Object.entries(calcJob.byDirection || {}).map(([k, v]) => (
+                            <div key={k} className="flex justify-between font-mono text-xs">
+                              <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
+                              <span>PF {v.pf.toFixed(2)} · DDt {Math.round(v.maxDdS)}s · n {v.n}</span>
                             </div>
                           ))}
                         </div>
@@ -530,7 +543,7 @@ function SettingsPage() {
                   </div>
                 ) : null}
                 <p className="text-sm text-muted">
-                  All configs = every enabled pack × all SL:TP ratios × trail variants (if on) × steps from min to max × every selected symbol on the last {calcOpt.hours} hours of 1m bars. Does not start or stop the live engine.
+                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol. Position cost is subtracted from PF, expectancy and averages. Does not start the live engine.
                 </p>
               </Card>
             </>

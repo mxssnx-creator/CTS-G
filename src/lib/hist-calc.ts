@@ -7,12 +7,17 @@ export type HistCalcKind = {
   maxDdS?: number;
   avgDdS?: number;
   ok?: boolean;
+  side?: string;
+  netAvg?: number;
+  costSubtracted?: boolean;
+  bySide?: Record<string, HistCalcKind>;
 };
 
 export type HistCalcRow = {
   id: string;
   kind: string;
   pack: string;
+  direction?: string;
   slRatio: number;
   trailKey?: string;
   trailArm?: number;
@@ -29,6 +34,8 @@ export type HistCalcRow = {
   validated?: boolean;
   lowSl?: boolean;
   deactReason?: string;
+  costSubtracted?: boolean;
+  bySide?: Record<string, { n: number; pf: number; validated?: boolean; maxDdS?: number }>;
 };
 
 export type HistCalcSymbol = {
@@ -38,6 +45,20 @@ export type HistCalcSymbol = {
   maxDdS: number;
   wr: number;
   validated?: boolean;
+  netAvg?: number;
+  costSubtracted?: boolean;
+  bySide?: Record<string, { n: number; pf: number; validated?: boolean }>;
+};
+
+export type HistCalcDirection = {
+  direction: string;
+  n: number;
+  pf: number;
+  maxDdS: number;
+  wr: number;
+  validated?: boolean;
+  netAvg?: number;
+  costSubtracted?: boolean;
 };
 
 export type HistCalcOptions = {
@@ -66,6 +87,7 @@ export type HistCalcJob = {
   rowCount?: number;
   validatedCount?: number;
   bySymbol?: HistCalcSymbol[];
+  byDirection?: Record<string, HistCalcDirection>;
   kinds?: Record<string, HistCalcKind>;
   winner?: HistCalcRow | null;
   apply?: Record<string, unknown>;

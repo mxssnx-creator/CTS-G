@@ -2525,15 +2525,23 @@ class Pulse:
                 if not ind_kind:
                     ind_kind = str(getattr(ind, "kind", "") or "")
                 gate = getattr(self.sets, "indication_ok", None)
-                if self.sets.enabled and callable(gate) and not gate(ind_kind):
+                if self.sets.enabled and callable(gate) and not gate(ind_kind, "LONG" if direction > 0 else "SHORT"):
                     return "ind-gate"
             except Exception:
                 pass
         chosen = None
+        side_name = "LONG" if direction > 0 else "SHORT"
         try:
-            chosen = self.sets.pick_any(pack) if self.sets.enabled else None
+            chosen = self.sets.pick_any(pack, side=side_name) if self.sets.enabled else None
             if not chosen and self.sets.enabled:
-                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                chosen = self.sets.pick_any("general", side=side_name) or self.sets.pick_any("indications", side=side_name)
+        except TypeError:
+            try:
+                chosen = self.sets.pick_any(pack) if self.sets.enabled else None
+                if not chosen and self.sets.enabled:
+                    chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+            except Exception:
+                chosen = None
         except Exception:
             chosen = None
         if chosen:
@@ -2599,9 +2607,16 @@ class Pulse:
         order_side = "BUY" if direction > 0 else "SELL"
         chosen = None
         try:
-            chosen = self.sets.pick_any(pack)
+            chosen = self.sets.pick_any(pack, side=side)
             if not chosen:
-                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
+        except TypeError:
+            try:
+                chosen = self.sets.pick_any(pack)
+                if not chosen:
+                    chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+            except Exception:
+                chosen = None
         except Exception:
             chosen = None
         set_idx = -1

@@ -8,7 +8,7 @@ required net % = cost% × ((ratio − 1) / 0.10)
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 POSITION_COST_PCT_DEFAULT = 0.15
 RATIO_BASE = 1.0
@@ -59,6 +59,45 @@ def net_pnl_usdt(pnl_pct: float, qty: float, entry: float, cost_pct: float = POS
     return notion * net_pnl_pct(pnl_pct, cost_pct)
 
 
+def row_pnl_pct(row: Any) -> float:
+    """Gross price-move fraction from a fill row."""
+    if isinstance(row, dict):
+        return finite(row.get("pnl_pct"))
+    return finite(getattr(row, "pnl_pct", 0))
+
+
+def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Net fraction after subtracting one PositionCost. Always from the gross move."""
+    return net_pnl_pct(row_pnl_pct(row), cost_pct)
+
+
+def row_side(row: Any) -> str:
+    raw = ""
+    if isinstance(row, dict):
+        raw = str(row.get("side") or row.get("direction") or "")
+    else:
+        raw = str(getattr(row, "side", "") or getattr(row, "direction", "") or "")
+    u = raw.strip().upper()
+    if u.startswith("L") or u in ("1", "BUY"):
+        return "LONG"
+    if u.startswith("S") or u in ("-1", "SELL"):
+        return "SHORT"
+    return ""
+
+
+def filter_side(rows: Sequence[Any], side: Optional[str] = None) -> List[Any]:
+    if not side:
+        return [r for r in rows]
+    want = str(side).strip().upper()
+    if want in ("L", "1", "BUY"):
+        want = "LONG"
+    elif want in ("S", "-1", "SELL"):
+        want = "SHORT"
+    if want not in ("LONG", "SHORT"):
+        return [r for r in rows]
+    return [r for r in rows if row_side(r) == want]
+
+
 def signed_result_r(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """pnl_pct is a fraction (0.001 = 0.10%). Cost is a percent (0.15)."""
     cost = max(1e-9, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
@@ -90,21 +129,20 @@ def last_n_cost_pf(
 ) -> Dict[str, float]:
     window = list(rows)[-max(1, int(n)) :]
     rs: List[float] = []
+    nets: List[float] = []
     gp = gl = 0.0
     for row in window:
-        if isinstance(row, dict):
-            pnl_pct = finite(row.get("pnl_pct"))
-            pnl = finite(row.get("pnl"))
-        else:
-            pnl_pct = finite(getattr(row, "pnl_pct", 0))
-            pnl = finite(getattr(row, "pnl", 0))
+        pnl_pct = row_pnl_pct(row)
+        net = row_net_pnl(row, cost_pct)
         rs.append(signed_result_r(pnl_pct, cost_pct))
-        if pnl > 0:
-            gp += pnl
-        elif pnl < 0:
-            gl += abs(pnl)
+        nets.append(net)
+        if net > 0:
+            gp += net
+        elif net < 0:
+            gl += abs(net)
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
+    net_avg = sum(nets) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
     classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
     return {
@@ -116,6 +154,8 @@ def last_n_cost_pf(
         "costPct": float(cost_pct),
         "netPct": round(net_move_pct(ratio, cost_pct), 4),
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+        "netAvg": round(net_avg, 6),
+        "costSubtracted": True,
     }
 
 
@@ -178,6 +218,12 @@ if __name__ == "__main__":
     assert abs(cost_as_frac(0.0015) - 0.0015) < 1e-12
     assert abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-12
     assert abs(net_pnl_usdt(0.003, 1.0, 100.0, 0.15) - 0.15) < 1e-9
+    assert abs(row_net_pnl({"pnl_pct": 0.003, "pnl": 9}, 0.15) - 0.0015) < 1e-12
+    assert row_side({"side": "long"}) == "LONG" and row_side({"side": "SELL"}) == "SHORT"
+    assert len(filter_side([{"side": "LONG"}, {"side": "SHORT"}], "LONG")) == 1
+    n = last_n_cost_pf([{"pnl_pct": 0.003, "pnl": 0.0015}] * 10, 10, 0.15)
+    assert n["costSubtracted"] and abs(n["netAvg"] - 0.0015) < 1e-9
+    print("position_cost ok")
     rows = [{"pnl_pct": 0.003, "pnl": 1.0}] * 15
     got = last_n_cost_pf(rows, 15, 0.15)
     assert abs(got["ratio"] - 1.10) < 1e-6, got

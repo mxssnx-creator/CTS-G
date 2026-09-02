@@ -19,8 +19,9 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import SL_TP_RATIOS, last_n_cost_pf
+from position_cost import SL_TP_RATIOS, last_n_cost_pf, row_net_pnl, filter_side
 from set_engine import (
+    DIRECTIONS,
     IND_KINDS,
     LOOKBACK_MAX,
     SetBook,
@@ -540,34 +541,106 @@ def rank_tuple(row: Dict[str, Any]) -> Tuple:
     return (0 if validated else 1, -pf, dd, sl, -exp, -int(row.get("n") or 0))
 
 
-def set_row(st: Any) -> Dict[str, Any]:
+def set_row(st: Any, side: str = "") -> Dict[str, Any]:
+    want = str(side or "").upper()
+    blob = (getattr(st, "by_side", None) or {}).get(want) if want in DIRECTIONS else None
+
+    def g(key: str, fallback: Any) -> Any:
+        if blob is not None:
+            return blob.get(key, fallback)
+        return getattr(st, key, fallback)
+
+    n15 = int(g("last15_n", getattr(st, "last15_n", 0)) or 0)
+    pf = float(g("last15_ratio", getattr(st, "last15_ratio", 0)) or 0)
+    n = int(g("n", getattr(st, "n", 0)) or 0)
+    by_side_pub = None
+    if not want:
+        raw = getattr(st, "by_side", None) or {}
+        by_side_pub = {
+            d: {
+                "n": int(v.get("n") or 0),
+                "pf": round(float(v.get("last15_ratio") or 0), 4),
+                "last15N": int(v.get("last15_n") or 0),
+                "maxDdS": float(v.get("max_dd_s") or 0),
+                "expectancy": float(v.get("expectancy") or 0),
+                "validated": bool(v.get("validated")),
+                "costSubtracted": True,
+            }
+            for d, v in raw.items()
+            if isinstance(v, dict)
+        }
     return {
-        "id": st.id,
+        "id": st.id if not want else f"{st.id}:{want.lower()}",
         "kind": st.kind,
         "pack": st.pack,
+        "direction": want or "BOTH",
         "slRatio": st.sl_ratio,
         "trailKey": st.trail_key,
         "trailArm": st.trail_arm,
         "trailGive": st.trail_give,
         "step": st.step,
-        "n": st.n,
-        "wins": st.wins,
-        "wr": st.wr,
-        "last15Ratio": round(st.last15_ratio, 4),
-        "last15N": st.last15_n,
-        "last15R": round(st.last15_r, 4),
-        "last25AvgR": round(st.last25_avg_r, 4),
-        "maxDdS": st.max_dd_s,
-        "avgDdS": st.avg_dd_s,
-        "ddEpisodes": st.dd_episodes,
-        "expectancy": st.expectancy,
-        "avgHoldS": st.avg_hold_s,
-        "classicPf": st.classic_all,
-        "active": bool(st.active),
-        "deactReason": st.deact_reason,
-        "validated": st.last15_n >= 8 and st.last15_ratio + 1e-9 >= 1.0,
+        "n": n,
+        "wins": int(g("wins", st.wins) or 0),
+        "wr": float(g("wr", st.wr) or 0),
+        "last15Ratio": round(pf, 4),
+        "last15N": n15,
+        "last15R": round(float(g("last15_r", st.last15_r) or 0), 4),
+        "last25AvgR": round(float(g("last25_avg_r", st.last25_avg_r) or 0), 4),
+        "maxDdS": float(g("max_dd_s", st.max_dd_s) or 0),
+        "avgDdS": float(g("avg_dd_s", st.avg_dd_s) or 0),
+        "ddEpisodes": int(g("dd_episodes", st.dd_episodes) or 0),
+        "expectancy": float(g("expectancy", st.expectancy) or 0),
+        "avgHoldS": float(g("avg_hold_s", st.avg_hold_s) or 0),
+        "classicPf": float(g("classic_all", st.classic_all) or 0),
+        "active": bool(g("active", st.active)),
+        "deactReason": st.deact_reason if not want else "",
+        "validated": n15 >= 8 and pf + 1e-9 >= 1.0,
         "lowSl": st.sl_ratio <= 0.6 + 1e-9 or st.kind == "trail",
+        "costSubtracted": True,
+        "bySide": by_side_pub,
     }
+
+
+def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
+    tapes: List[Dict[str, Any]] = []
+    if hist:
+        for rows in hist.values():
+            tapes.extend(rows)
+    else:
+        for st in book.by_idx:
+            tapes.extend(st.hist)
+    out: Dict[str, Any] = {}
+    for d in DIRECTIONS:
+        sub = filter_side(tapes, d)
+        pf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+        nets = [row_net_pnl(r, book.cost_pct) for r in sub]
+        wins = sum(1 for x in nets if x > 0)
+        decided = sum(1 for x in nets if x != 0)
+        dd = drawdown_time_by_symbol(sub) if sub else {"maxS": 0.0, "avgS": 0.0}
+        out[d] = {
+            "direction": d,
+            "n": len(sub),
+            "pf": round(float(pf["ratio"]), 4),
+            "netAvg": round(float(pf.get("netAvg") or 0), 6),
+            "last15N": int(pf["count"]),
+            "maxDdS": round(float(dd.get("maxS") or 0), 1),
+            "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
+            "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "costSubtracted": True,
+        }
+    return out
+
+
+def expand_rows(book: SetBook) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for st in book.by_idx:
+        rows.append(set_row(st))
+        for d in DIRECTIONS:
+            side = set_row(st, d)
+            if int(side.get("n") or 0) > 0:
+                rows.append(side)
+    rows.sort(key=rank_tuple)
+    return rows
 
 
 def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
@@ -597,18 +670,33 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             }
         else:
             dd = drawdown_time(tape)
-        pnls = [float(r.get("pnl") or 0) for r in tape]
-        wins = sum(1 for x in pnls if x > 0)
-        decided = sum(1 for x in pnls if x != 0)
+        nets = [row_net_pnl(r, book.cost_pct) for r in tape]
+        wins = sum(1 for x in nets if x > 0)
+        decided = sum(1 for x in nets if x != 0)
+        by_dir: Dict[str, Any] = {}
+        for d in DIRECTIONS:
+            sub = filter_side(tape, d)
+            if not sub:
+                continue
+            spf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+            by_dir[d] = {
+                "n": len(sub),
+                "pf": round(float(spf["ratio"]), 4),
+                "netAvg": round(float(spf.get("netAvg") or 0), 6),
+                "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
+            }
         out.append({
             "symbol": s,
             "n": len(tape),
             "pf": round(float(pf["ratio"]), 4),
+            "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "costSubtracted": True,
+            "bySide": by_dir,
         })
     out.sort(key=lambda r: (0 if r["validated"] else 1, -r["pf"], r["maxDdS"]))
     return out
@@ -823,13 +911,13 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def snapshot(done: int, total: int, phase: str) -> None:
             book._commit_hist(hist, ind_hist)
-            rows = [set_row(st) for st in book.by_idx]
-            rows.sort(key=rank_tuple)
+            rows = expand_rows(book)
             job["rows"] = rows[:80]
             job["rowCount"] = len(rows)
             job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
             job["kinds"] = book.ind_gate_snapshot()
             job["bySymbol"] = symbol_rollup(book, hist)
+            job["byDirection"] = direction_rollup(book, hist)
             job["phase"] = phase
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["detail"] = (
@@ -859,10 +947,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         book.progress.phase = "ready"
         book.progress.ready = True
         book.progress.pct = 100.0
-        rows = [set_row(st) for st in book.by_idx]
-        rows.sort(key=rank_tuple)
+        rows = expand_rows(book)
         kinds = book.ind_gate_snapshot()
         by_sym = symbol_rollup(book, hist)
+        by_dir = direction_rollup(book, hist)
         winner = rows[0] if rows else None
         # Prefer a validated low-SL row when one exists in the top slice.
         top = [r for r in rows if r.get("validated") and r.get("lowSl")]
@@ -883,6 +971,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "rowCount": len(rows),
             "validatedCount": sum(1 for r in rows if r.get("validated")),
             "bySymbol": by_sym,
+            "byDirection": by_dir,
             "kinds": kinds,
             "winner": winner,
             "apply": winner_patch(winner, opt),
@@ -1018,6 +1107,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))
     rec("calc-kinds", set((job.get("kinds") or {}).keys()) == set(IND_KINDS), str(sorted((job.get("kinds") or {}).keys())))
     rec("calc-kind-ddt", all("maxDdS" in (job.get("kinds") or {}).get(k, {}) and "pf" in (job.get("kinds") or {}).get(k, {}) for k in IND_KINDS))
+    rec("calc-dir-keys", set((job.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str(job.get("byDirection")))
+    rec("calc-dir-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byDirection") or {}).values()), str(job.get("byDirection")))
+    rec("calc-dir-rows", any(r.get("direction") == "LONG" for r in (job.get("rows") or [])) and any(r.get("direction") == "SHORT" for r in (job.get("rows") or [])), str({r.get("direction") for r in (job.get("rows") or [])}))
+    rec("calc-cost-flag", all(r.get("costSubtracted") for r in (job.get("rows") or [])[:5]))
     rec("calc-symbols", len(job.get("bySymbol") or []) >= 2, str(len(job.get("bySymbol") or [])))
     rec("calc-sym-pf", all("pf" in r and "maxDdS" in r for r in (job.get("bySymbol") or [])))
     rec("calc-winner", bool(job.get("winner")) and "last15Ratio" in (job.get("winner") or {}), str((job.get("winner") or {}).get("id")))
