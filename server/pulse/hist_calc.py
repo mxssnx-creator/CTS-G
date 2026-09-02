@@ -596,7 +596,7 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
         names = uni or list(DEFAULT_SYMBOLS)
     seen = set()
     out: List[str] = []
-    cap = 96 if wild else 32
+    cap = 48 if wild else 24
     for s in names:
         if s in seen:
             continue
@@ -1123,9 +1123,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
         try:
-            workers = max(1, min(8, int(body.get("workers") or 8)))
+            workers = max(1, min(4, int(body.get("workers") or 2)))
         except Exception:
-            workers = 8
+            workers = 2
         job["workers"] = workers
         job["partial"] = True
         job["async"] = True
@@ -1287,7 +1287,7 @@ def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logf = subprocess.DEVNULL
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-u", script, "--req", req_path()],
+            ["nice", "-n", "15", sys.executable, "-u", script, "--req", req_path()],
             cwd=here,
             stdout=logf,
             stderr=subprocess.STDOUT,
