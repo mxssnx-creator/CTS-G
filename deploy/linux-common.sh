@@ -44,7 +44,7 @@ die()  { printf '[%s] ERROR %s\n' "$CTS_G_NAME" "$*" >&2; exit 1; }
 
 ok()   { STEPS_OK+=("$1"); log "ok    $1"; }
 skip() { STEPS_SKIP+=("$1"); log "skip  $1"; }
-fail() { STEPS_FAIL+=("$1"); warn "fail  $1"; }
+fail() { STEPS_FAIL+=("$1"); warn "fail $1"; }
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo $0)"
@@ -276,19 +276,28 @@ restore_pulse_trader() {
   local pt="$PULSE_DIR/pulse_trader.py"
   local pt_want="5319e02ae28b6cfb2f2661aed07da1bbec1c0c8d"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
-  local pt_patch="$CTS_G_ROOT/restore/pulse_trader.py.patch"
+  # main patch is pinned at commit f76f0423 (byte-exact on GitHub, hash-verified
+  # below); the stage-PF micro patch ships in-repo at restore/pulse_trader_pf.patch
+  local pt_patch_sha="aa6cf593268181c0b938bc632f5eb12957091709"
+  local pt_patch_url="https://raw.githubusercontent.com/mxssnx-creator/CTS-G/f76f042374efd17a7f2eb61247c56c0d0de021ec/restore/pulse_trader.py.patch"
+  local pt_pf_patch="$CTS_G_ROOT/restore/pulse_trader_pf.patch"
+  local pt_pf_sha="37ae494b324929d7e139c94d87beeacbfd8a8e6e"
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
     skip "pulse_trader.py already current"
     return 0
   fi
-  [[ -f "$pt_patch" ]] || die "restore patch missing: $pt_patch"
+  [[ -f "$pt_pf_patch" ]] || die "restore PF patch missing: $pt_pf_patch"
+  [[ "$(git hash-object "$pt_pf_patch")" == "$pt_pf_sha" ]] || die "restore PF patch hash mismatch"
   local scratch
   scratch="$(mktemp -d)"
   mkdir -p "$scratch/server/pulse"
   if curl -fsSL -m 90 -o "$scratch/server/pulse/pulse_trader.py" \
       "https://raw.githubusercontent.com/mxssnx-creator/CTS-G/2b3432d7b3/server/pulse/pulse_trader.py" \
     && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_base" ]] \
-    && git -C "$scratch" apply "$pt_patch" \
+    && curl -fsSL -m 90 -o "$scratch/main.patch" "$pt_patch_url" \
+    && [[ "$(git hash-object "$scratch/main.patch")" == "$pt_patch_sha" ]] \
+    && git -C "$scratch" apply "$scratch/main.patch" \
+    && git -C "$scratch" apply "$pt_pf_patch" \
     && [[ "$(git hash-object "$scratch/server/pulse/pulse_trader.py")" == "$pt_want" ]]; then
     cp -a "$scratch/server/pulse/pulse_trader.py" "$pt"
     rm -rf "$scratch"
@@ -476,8 +485,8 @@ print_results() {
   echo "units"
   printf '  %-36s %s\n' grok-pulse-http.service "$(unit_state grok-pulse-http.service)"
   printf '  %-36s %s\n' grok-desk.service "$(unit_state grok-desk.service)"
-  printf '  %-36s %s\n' "grok-pulse@${VST_SLOT}.service" "$(unit_state grok-pulse@${VST_SLOT}.service)"
-  printf '  %-36s %s\n' "grok-pulse@${LIVE_SLOT}.service" "$(unit_state grok-pulse@${LIVE_SLOT}.service)"
+  printf '  %-36s %s\n' "grok-pulse@${VST_SLOT}.service" "$(unit_state "grok-pulse@${VST_SLOT}.service")"
+  printf '  %-36s %s\n' "grok-pulse@${LIVE_SLOT}.service" "$(unit_state "grok-pulse@${LIVE_SLOT}.service")"
   echo
   echo "packages installed  ${PKG_INSTALLED[*]:-(none)}"
   echo "packages skipped    ${PKG_SKIPPED[*]:-(none)}"
