@@ -85,7 +85,7 @@ else
   die "no git clone at $CTS_G_ROOT and no --from-dir given"
 fi
 
-chmod 755 "$CTS_G_ROOT/deploy/"*.sh
+find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 configure_git "$CTS_G_ROOT"
 seed_env
 sync_pulse_tree

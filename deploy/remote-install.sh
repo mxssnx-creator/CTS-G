@@ -77,7 +77,7 @@ else
   mkdir -p $(dirname $CTS_G_ROOT)
   git clone --branch $BRANCH --depth 1 '$REPO_URL' $CTS_G_ROOT
 fi
-chmod 755 $CTS_G_ROOT/deploy/*.sh
+find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 $CTS_G_ROOT/deploy/install-linux.sh --yes --name $CTS_G_NAME --port $DESK_PORT --host $REMOTE_HOST --from-dir $CTS_G_ROOT $LIVE_FLAG
 EOF
 )

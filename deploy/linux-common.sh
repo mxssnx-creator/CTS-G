@@ -442,7 +442,13 @@ sync_app_tree() {
     --exclude 'preview.log' \
     --exclude '__pycache__/' \
     "$from/" "$CTS_G_ROOT/"
-  chmod 755 "$CTS_G_ROOT/deploy/"*.sh 2>/dev/null || true
+  # A source sync can carry a newer HEAD/ref but leave an older index in an
+  # existing install.  Refresh only the index so staged state cannot mask the
+  # deployed worktree; mixed reset never discards file contents.
+  if [[ -d "$CTS_G_ROOT/.git" ]]; then
+    git -C "$CTS_G_ROOT" reset --mixed HEAD >/dev/null 2>&1 || true
+  fi
+  find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} + 2>/dev/null || true
   ok "app tree $CTS_G_ROOT"
 }
 
