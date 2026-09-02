@@ -181,8 +181,31 @@ ensure_redis() {
   else
     warn "no redis systemd unit — start redis yourself if needed"
   fi
+  cap_redis_memory
   if have redis-cli; then
     redis-cli ping >/dev/null 2>&1 && ok "redis ping" || fail "redis ping"
+  fi
+}
+
+cap_redis_memory() {
+  # Hard cap so Redis cannot OOM the host (was 8GB RSS, killed 3×).
+  local f
+  for f in /etc/redis/redis.conf /etc/redis.conf; do
+    [[ -f "$f" ]] || continue
+    grep -q '^maxmemory ' "$f" || echo 'maxmemory 512mb' >> "$f"
+    sed -i 's/^maxmemory .*/maxmemory 512mb/' "$f"
+    if grep -q '^maxmemory-policy ' "$f"; then
+      sed -i 's/^maxmemory-policy .*/maxmemory-policy allkeys-lru/' "$f"
+    else
+      echo 'maxmemory-policy allkeys-lru' >> "$f"
+    fi
+  done
+  if have redis-cli && redis-cli ping >/dev/null 2>&1; then
+    redis-cli CONFIG SET maxmemory 536870912 >/dev/null 2>&1 || true
+    redis-cli CONFIG SET maxmemory-policy allkeys-lru >/dev/null 2>&1 || true
+    redis-cli MEMORY PURGE >/dev/null 2>&1 || true
+    redis-cli CONFIG REWRITE >/dev/null 2>&1 || true
+    ok "redis maxmemory 512mb allkeys-lru"
   fi
 }
 

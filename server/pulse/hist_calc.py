@@ -596,7 +596,7 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
         names = uni or list(DEFAULT_SYMBOLS)
     seen = set()
     out: List[str] = []
-    cap = 48 if wild else 24
+    cap = 24 if wild else 12
     for s in names:
         if s in seen:
             continue
@@ -1118,17 +1118,30 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         book = SetBook()
         book.load(ov)
         job["coverage"] = book.coverage()
-        hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in book.sets}
+        hist: Dict[str, List[Dict[str, Any]]] = {}
         ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
         try:
-            workers = max(1, min(4, int(body.get("workers") or 2)))
+            workers = max(1, min(2, int(body.get("workers") or 2)))
         except Exception:
             workers = 2
         job["workers"] = workers
         job["partial"] = True
         job["async"] = True
+        from set_engine import HIST_CAP as _HC
+        hist_cap = max(24, min(48, int(_HC or 48)))
+
+        def _trim_maps() -> None:
+            for k, v in list(hist.items()):
+                if len(v) > hist_cap:
+                    hist[k] = v[-hist_cap:]
+            for k, v in list(ind_hist.items()):
+                if len(v) > hist_cap:
+                    ind_hist[k] = v[-hist_cap:]
+            for k, v in list(strat_hist.items()):
+                if len(v) > 400:
+                    strat_hist[k] = v[-240:]
 
         def snapshot(done: int, total: int, phase: str, heavy: bool = False) -> None:
             fills = sum(len(v) for v in hist.values())
@@ -1160,6 +1173,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
             book.ingest_bars(sym, bars)
             book.replay_symbol_partial(sym, hist, now=now, ind_hist=ind_hist, drop_bars=True, strat_hist=strat_hist)
+            _trim_maps()
             job["source"] = src
             heavy = done == total or done % 16 == 0
             if persist or heavy or done % 8 == 0:
