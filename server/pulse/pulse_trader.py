@@ -3595,12 +3595,36 @@ class Pulse:
                     same = True
             if not same:
                 continue
-            # Don't stack into a losing parent.
+            # One add-strategy per parent: DCA already filled → skip Block.
+            try:
+                dca_lane = (getattr(self.dca, "lanes", {}) or {}).get(self.dca.key(pos.symbol, pos.side))
+                if dca_lane and int(getattr(dca_lane, "filled_n", 0) or 0) > 0:
+                    continue
+            except Exception:
+                pass
+            # Don't pyramid the same second as the entry (that's just 2× size).
+            age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
+            if age < 45.0:
+                continue
+            # Don't stack into a losing or still-flat parent. Adds need a real
+            # continuation so a stop doesn't immediately double the loss.
             px_now = self.px.get(pos.symbol) or pos.entry
+            u = 0.0
             if px_now > 0 and pos.entry > 0:
                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
-                if u < -0.0015:
-                    continue
+            if u < 0.002:
+                continue
+            # Live book losing → don't let historic intern PF authorize more size.
+            try:
+                live_rows = [c for c in (getattr(self, "closed", None) or []) if str(getattr(c, "side", "")).upper() == pos.side][-8:]
+                if len(live_rows) >= 5:
+                    gp = sum(float(getattr(c, "pnl", 0) or 0) for c in live_rows if float(getattr(c, "pnl", 0) or 0) > 0)
+                    gl = abs(sum(float(getattr(c, "pnl", 0) or 0) for c in live_rows if float(getattr(c, "pnl", 0) or 0) < 0))
+                    live_pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
+                    if live_pf + 1e-9 < 1.0:
+                        intern_pf = min(float(intern_pf), float(live_pf))
+            except Exception:
+                pass
             rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
             row = self.block.pick_emit(rows)
             if not row:
@@ -3609,30 +3633,28 @@ class Pulse:
             px = self.px.get(pos.symbol) or pos.entry
             if not c or px <= 0:
                 continue
-            raw = row["requestedAddQty"]
-            # Parent reference is the lane base the count formula targets were
-            # built on — falling back to a fresh size_qty only if the lane
-            # hasn't recorded one yet.
             parent = float(lane.base_qty or 0) or self.size_qty(c, px)
             inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
+            raw = float(row.get("requestedAddQty") or 0)
+            leftover = max(0.0, parent * inc - float(lane.confirmed_add or 0))
+            raw = min(raw, leftover) if leftover > 0 else 0.0
+            if raw <= 0:
+                continue
+            # Dust remainder: mark the count filled instead of bumping to a full extra parent.
+            if raw < float(c.min_qty or 0) or raw * px < float(c.min_usdt or 0) * 0.98:
+                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                log(f"BLOCK sat dust {pos.symbol} n={row['blockCount']} rem={raw} min={c.min_qty}/{c.min_usdt}")
+                continue
             room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, inc), room)
+            add_cap = min(self.notional_cap() * max(1.0, inc), room, leftover * px)
             qty = self.cap_order_qty(c, px, raw, add_cap)
-            if parent > 0 and qty > parent * inc * 1.05:
-                qty = self.cap_order_qty(c, px, parent * inc, add_cap)
-            if qty < c.min_qty or qty <= 0:
-                bumped = self.min_order_qty(c, px)
-                if bumped > 0 and (pos.qty + bumped) * px <= self.max_book_notional() * 1.15:
-                    qty = bumped
-                else:
-                    if raw * px > self.notional_cap() * 4:
-                        self.block.pause_count(lane, int(row["blockCount"]), 180)
-                        log(f"BLOCK skip oversized {pos.symbol} n={row['blockCount']} want={raw} cap={add_cap:.2f}")
-                    continue
-            if qty * px < c.min_usdt * 0.98:
-                bumped = self.min_order_qty(c, px)
-                if bumped > 0:
-                    qty = bumped
+            qty = min(qty, leftover * 1.02)
+            if qty > leftover * 1.15 or qty < float(c.min_qty or 0) or qty <= 0:
+                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                continue
+            if qty * px < float(c.min_usdt or 0) * 0.98:
+                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                continue
             if (pos.qty + qty) * px > self.max_book_notional() * 1.05:
                 key = f"{pos.symbol}:{row['blockCount']}:cap"
                 now = time.time()
@@ -3743,6 +3765,14 @@ class Pulse:
             if pos.qty * px >= self.max_book_notional():
                 self.dca.skips += 1
                 continue
+            # Independent of Block, but never stack both onto the same parent.
+            try:
+                blk = self.block.lanes.get(self.block.key(pos.symbol, pos.side))
+                if blk and float(getattr(blk, "confirmed_add", 0) or 0) > 0:
+                    self.dca.skips += 1
+                    continue
+            except Exception:
+                pass
             sl_pct = float(pos.sl_pct or SL_PCT or 0.0048)
             adv = abs(px - pos.entry) / pos.entry
             against = (pos.side == "LONG" and px < pos.entry) or (pos.side == "SHORT" and px > pos.entry)
@@ -3757,16 +3787,18 @@ class Pulse:
             c = self.contracts.get(pos.symbol)
             if not c or px <= 0:
                 continue
+            want = min(float(row["qty"]), seed * 2.5)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, float(row.get("mult") or 1)), room)
-            qty = self.cap_order_qty(c, px, float(row["qty"]), add_cap)
+            add_cap = min(self.notional_cap() * max(1.0, min(2.5, float(row.get("mult") or 1))), room)
+            qty = self.cap_order_qty(c, px, want, add_cap)
             floor = self.min_order_qty(c, px)
             if qty < floor:
-                if floor * px > add_cap * 1.08:
+                if floor * px > add_cap * 1.08 or floor > seed * 2.5:
                     self.dca.skips += 1
                     continue
                 qty = floor
-            if qty <= 0:
+            if qty <= 0 or qty > seed * 2.55:
+                self.dca.skips += 1
                 continue
             if (pos.qty + qty) * px > self.max_book_notional() * 1.02:
                 self.dca.skips += 1

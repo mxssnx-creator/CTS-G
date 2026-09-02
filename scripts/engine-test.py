@@ -936,7 +936,7 @@ def block_calc_test() -> None:
         p.score = lambda sym: (1, "t", 0.9)
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
         p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
-        p.px = {"TST-USDT": 100.0}
+        p.px = {"TST-USDT": 100.30}
         p.lev_map = {"TST-USDT": 100}
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
@@ -1012,6 +1012,7 @@ def block_calc_test() -> None:
     # SHORT parent adds independently (SELL, remainder 1× parent)
     pS = mk_trader(1.2, 1.5, 12)
     pS.open["TST-USDT"].side = "SHORT"
+    pS.px["TST-USDT"] = 99.70
     pS.block.lanes.clear()
     lnS = pS.block.register_parent("TST-USDT", "SHORT", 0.05, 100.0)
     pS.score = lambda sym: (-1, "t", 0.9)
@@ -1047,6 +1048,32 @@ def block_calc_test() -> None:
     pR.block_last_emit = 0.0
     pR.maybe_block_adds()
     rec("block-seq-full-stops", len(pR.api.posts) == 3, f"posts={len(pR.api.posts)}")
+
+    # volume correctness: no add at entry, no add while flat, remainder not bumped
+    pAge = mk_trader(1.2, 1.5, 12)
+    pAge.open["TST-USDT"].opened_at = time.time() - 5
+    pAge.maybe_block_adds()
+    rec("block-no-add-at-entry", pAge.api.posts == [], f"posts={pAge.api.posts}")
+    pFlat = mk_trader(1.2, 1.5, 12)
+    pFlat.px["TST-USDT"] = 100.0
+    pFlat.maybe_block_adds()
+    rec("block-no-add-flat", pFlat.api.posts == [], f"posts={pFlat.api.posts}")
+    pDust = mk_trader(1.2, 1.5, 12)
+    lnD = pDust.block.lanes["TST-USDT:LONG"]
+    lnD.confirmed_add = 0.049
+    pDust.contracts["TST-USDT"] = Contract("TST-USDT", 0.01, 0.01, 3, 2, 1.0, 100)
+    pDust.maybe_block_adds()
+    rec("block-remainder-no-bump",
+        pDust.api.posts == [] and bool(lnD.satisfied.get(1)),
+        f"posts={pDust.api.posts} sat={lnD.satisfied}")
+    pMx = mk_trader(1.2, 1.5, 12)
+    pMx.dca = SimpleNamespace(enabled=True, lanes={"TST-USDT:LONG": SimpleNamespace(filled_n=1)}, key=lambda s, d: f"{s}:{d}")
+    pMx.maybe_block_adds()
+    rec("block-skip-if-dca-filled", pMx.api.posts == [], f"posts={pMx.api.posts}")
+    from dca_engine import DcaBook as _Dca
+    dclamp = _Dca()
+    dclamp.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
+    rec("dca-mult-clamp", max(dclamp.mults) <= 2.5, f"mults={dclamp.mults}")
 
     # intern PF is per-side: winning LONG lifts, losing SHORT stays at floor
     pI = mk_trader(1.2, 1.5, 12)

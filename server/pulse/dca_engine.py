@@ -43,7 +43,7 @@ def _mult_list(raw: Any, fallback: List[float]) -> List[float]:
                 n = float(x)
             except Exception:
                 continue
-            out.append(max(0.25, min(8.0, n)))
+            out.append(max(0.25, min(2.5, n)))
     return out or list(fallback)
 
 
@@ -367,6 +367,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         p.record_fill(r1["lane"], r1["step"], r1["qty"], 99.4, "Gx02p1")
         p.attach("PPP-USDT", "LONG", 2.5, 99.4)  # later qty must not rewrite parent
     t15 = (abs(p.lanes["PPP-USDT:LONG"].parent_qty - 1.0) < 1e-9, f"frozen={p.lanes.get('PPP-USDT:LONG') and p.lanes['PPP-USDT:LONG'].parent_qty}")
+    hi = DcaBook()
+    hi.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
+    t16 = (max(hi.mults) <= 2.5 and abs(hi.mults[0] - 2.1) < 1e-9, f"mults={hi.mults}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -383,6 +386,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-no-unbounded-grow", t13[0], t13[1]),
         ("dca-parent-step1", t14[0], str(t14[1])[:80]),
         ("dca-parent-frozen", t15[0], t15[1]),
+        ("dca-mult-clamp", t16[0], t16[1]),
     ]
 
 

@@ -283,6 +283,20 @@ class BlockBook:
         f = self.formula(lane.base_qty, count)
         return max(0.0, f["targetAddQty"] - lane.confirmed_add)
 
+    def remainder_qty(self, lane: BlockLane, count: int) -> float:
+        """Physical leftover to the sequential target. Never a fresh n× parent."""
+        return self.next_order_qty(lane, count)
+
+    def mark_nearly_filled(self, lane: BlockLane, count: int) -> None:
+        """Dust remainder that cannot be placed (below min lot) is treated as filled."""
+        n = int(count)
+        lane.satisfied[n] = True
+        for c in range(1, n):
+            fc = self.formula(lane.base_qty, c)
+            if lane.confirmed_add + 1e-12 >= fc["targetAddQty"]:
+                lane.satisfied[c] = True
+        self.save()
+
     def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0) -> List[Dict[str, Any]]:
         """Evaluate every 1..maxStack independently + active overlay. No emission here."""
         rows = []
@@ -541,6 +555,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     b.record_fill(long, pick3, 10.0, "c3", "o3")
     rec("blk-stack-full", b.next_unsatisfied(long) is None and b.pick_emit(b.evaluate_counts(long, live_n=1, intern_pf=1.5)) is None)
     rec("blk-agg-4x", abs(long.base_qty + long.confirmed_add - 40.0) < 1e-9, str(long.base_qty + long.confirmed_add))
+    rec("blk-remainder-qty", abs(b.remainder_qty(long, 3) - 0.0) < 1e-9)
+    dust = BlockLane(symbol="DUST-USDT", side="LONG", base_qty=10.0, base_entry=1.0, confirmed_add=9.99)
+    b.mark_nearly_filled(dust, 1)
+    rec("blk-dust-sat", bool(dust.satisfied.get(1)), str(dust.satisfied))
 
     # SHORT lane is untouched by LONG fills
     rec("blk-short-untouched", short.confirmed_add == 0.0 and b.next_unsatisfied(short) == 1)
