@@ -697,7 +697,17 @@ export function statsMatchesConn(s: LiveStats, conn: string): boolean {
 
 export function pickView(stats: LiveStats | null, conn: string): LiveStats | null {
   if (!stats) return null;
-  return statsMatchesConn(stats, conn) ? stats : null;
+  if (statsMatchesConn(stats, conn)) return stats;
+  const sliced = viewFromSnapshot(stats, conn);
+  if (sliced) return sliced;
+  if (conn === "overall") {
+    return {
+      ...stats,
+      connType: stats.connType || "overall",
+      connection: stats.connection || "overall",
+    };
+  }
+  return null;
 }
 
 function cidPrefix(conn: string): string {
@@ -787,15 +797,24 @@ async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null>
 
 export async function fetchLiveStats(conn = "overall"): Promise<LiveStats | null> {
   if (conn === "overall") {
-    const snap = (await fetchJson("/live-stats.json", 4000)) as LiveStats | null;
-    if (!snap) return null;
-    return viewFromSnapshot(snap, conn) || snap;
+    const [snap, ov] = await Promise.all([
+      fetchJson("/live-stats.json", 8000) as Promise<LiveStats | null>,
+      fetchJson("/stats.json?conn=overall", 8000) as Promise<LiveStats | null>,
+    ]);
+    const best =
+      ov && (ov.running || (Array.isArray(ov.lanes) && ov.lanes.length))
+        ? ov
+        : snap;
+    if (!best) return snap || ov;
+    return viewFromSnapshot(best, conn) || pickView(best, conn);
   }
-  const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 1600)) as LiveStats | null;
+  const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 8000)) as LiveStats | null;
   if (live && statsMatchesConn(live, conn)) return live;
   if (live) {
     const fromLive = viewFromSnapshot(live, conn);
     if (fromLive) return fromLive;
   }
+  const snap = (await fetchJson("/live-stats.json", 8000)) as LiveStats | null;
+  if (snap) return viewFromSnapshot(snap, conn);
   return null;
 }

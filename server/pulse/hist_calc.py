@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -316,6 +317,57 @@ def job_path() -> str:
 
 def req_path() -> str:
     return job_path().replace("hist-calc.json", "hist-calc-req.json")
+
+
+def _pid_path() -> str:
+    return job_path().replace("hist-calc.json", "hist-calc.pid")
+
+
+def _write_pid(pid: Optional[int] = None) -> None:
+    try:
+        with open(_pid_path(), "w") as f:
+            f.write(str(int(pid or os.getpid())))
+    except Exception:
+        pass
+
+
+def _clear_pid() -> None:
+    try:
+        os.remove(_pid_path())
+    except Exception:
+        pass
+
+
+def _pid_alive() -> bool:
+    try:
+        pid = int(open(_pid_path()).read().strip())
+    except Exception:
+        return False
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        _clear_pid()
+        return False
+
+
+_LOCK = threading.Lock()
+_RUNNING = False
+
+
+def _set_running(v: bool) -> None:
+    global _RUNNING
+    with _LOCK:
+        _RUNNING = bool(v)
+
+
+def is_running() -> bool:
+    with _LOCK:
+        if _RUNNING:
+            return True
+    return _pid_alive()
 
 
 def _atomic_write(path: str, blob: Dict[str, Any]) -> None:
@@ -1024,21 +1076,6 @@ def pipeline_symbols(
     return "live"
 
 
-_LOCK = threading.Lock()
-_RUNNING = False
-
-
-def _set_running(v: bool) -> None:
-    global _RUNNING
-    with _LOCK:
-        _RUNNING = v
-
-
-def is_running() -> bool:
-    with _LOCK:
-        return _RUNNING
-
-
 def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dict[str, Any]:
     """Synchronous calc. persist=True writes hist-calc.json as it goes."""
     body = body if isinstance(body, dict) else {}
@@ -1048,6 +1085,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
     synth = bool(body.get("synth"))
     extra = body.get("overlay") if isinstance(body.get("overlay"), dict) else None
     t0 = time.time()
+    _set_running(True)
+    if persist:
+        _write_pid()
     job: Dict[str, Any] = {
         **idle_job(),
         "phase": "fetch",
@@ -1207,6 +1247,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             except Exception:
                 pass
         return job
+    finally:
+        _set_running(False)
+        if persist:
+            _clear_pid()
 
 
 def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1234,14 +1278,33 @@ def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     except Exception:
         pass
 
-    def _go() -> None:
-        _set_running(True)
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "hist_calc.py")
+    logp = job_path().replace("hist-calc.json", "hist-calc.log")
+    try:
+        logf = open(logp, "ab", buffering=0)
+    except Exception:
+        logf = subprocess.DEVNULL
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-u", script, "--req", req_path()],
+            cwd=here,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+        _write_pid(proc.pid)
+        seed["pid"] = proc.pid
+        seed["detached"] = True
+    except Exception as exc:
+        seed["phase"] = "error"
+        seed["error"] = str(exc)[:200]
+        seed["detail"] = seed["error"]
         try:
-            run_calc(body, persist=True)
-        finally:
-            _set_running(False)
-
-    threading.Thread(target=_go, name="hist-calc", daemon=True).start()
+            _atomic_write(job_path(), seed)
+        except Exception:
+            pass
     return seed
 
 

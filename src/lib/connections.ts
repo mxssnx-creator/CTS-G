@@ -85,7 +85,7 @@ async function fetchJson(url: string, timeoutMs: number): Promise<unknown | null
 
 export async function fetchConnections(): Promise<ConnCatalog | null> {
   const snapP = fetchJson("/live-stats.json", 4000);
-  const live = (await fetchJson("/connections.json", 1600)) as ConnCatalog | null;
+  const live = (await fetchJson("/connections.json", 8000)) as ConnCatalog | null;
   if (live && Array.isArray(live.types) && live.types.length) return live;
   const s = (await snapP) as { lanes?: ConnLane[]; slots?: ConnCatalog["slots"]; running?: boolean; openCount?: number; equity?: number } | null;
   if (!s) return null;

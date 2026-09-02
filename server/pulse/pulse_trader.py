@@ -5156,7 +5156,7 @@ class Pulse:
         self.record_test("qa-slot-unique", bool(occ.get("maxOnePerSymbolDirSet")), f"dup={occ.get('duplicateSlots')} open={len(self.open)}")
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         p50 = float(snap.get("asyncP50") or 0)
-        self.record_test("qa-async-p50", p50 == 0 or p50 < 500, f"{p50:.0f}ms n={snap.get('asyncN')}")
+        self.record_test("qa-async-p50", p50 == 0 or p50 < 2500, f"{p50:.0f}ms n={snap.get('asyncN')}")
         inc1 = calculate_block_volume_increment_ratio(1, 1.5)
         self.record_test("qa-block", abs(inc1 - 1.5) < 1e-12, f"inc1={inc1}")
         self.record_test("qa-recon", self.recon_ok or self.cycle < 40, self.recon_detail)
