@@ -62,7 +62,7 @@ def main() -> int:
         "SOL-USDT": pt.Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300),
         "XRP-USDT": pt.Contract("XRP-USDT", 0.1, 0.1, 1, 4, 2.0, 150),
     }
-    # Keep this verifier genuinely offline: Pulse initialisation must not
+    # Keep this verifier genuinely offline: Pulse construction must not
     # fetch exchange contracts for symbols that the fixture did not provide.
     pt.SYMBOLS[:] = list(contracts)
     p = pt.Pulse(api, contracts)
@@ -74,6 +74,10 @@ def main() -> int:
     except Exception as e:
         err = e
     rec("apply-config-no-crash", err is None, repr(err or ""))
+    # The real x01 overlay may intentionally be symbolsAll.  Restore the
+    # bounded fixture after exercising that config path so partial scanning
+    # cannot rotate past the only synthetic symbol in this offline test.
+    pt.SYMBOLS[:] = list(contracts)
     rec("x01-block-unlimited", int(getattr(p.block, "max_stack", -1) or 0) == 3 and not p.block.unlimited(), f"stack={p.block.max_stack}")
     rec("x01-dca-unlimited", int(getattr(p.dca, "max_steps", -1) or 0) == 4 and not p.dca.unlimited(), f"steps={p.dca.max_steps}")
     rec("x01-maxopen-unlimited", int(pt.MAX_OPEN or 0) == 0, f"maxOpen={pt.MAX_OPEN}")
