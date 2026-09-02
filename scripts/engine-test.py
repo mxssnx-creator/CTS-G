@@ -149,7 +149,7 @@ def controls_test() -> None:
     rec("short-sl-buy", short_sl.get("side") == "BUY")
     att = tpsl_attach_json("140.0", "160.0")
     rec("attach-both", "stopLoss" in att and "takeProfit" in att and "STOP_MARKET" in att["stopLoss"] and "TAKE_PROFIT" in att["takeProfit"])
-    rec("attach-price", '"price":"140.0"' in att["stopLoss"] or '"price": "140.0"' in att["stopLoss"] or "140.0" in att["stopLoss"])
+    rec("attach-price", '\"price\":\"140.0\"' in att["stopLoss"] or '\"price\": \"140.0\"' in att["stopLoss"] or "140.0" in att["stopLoss"])
     rec("sl-types-cover", "STOP_MARKET" in SL_TYPES and "STOP" in SL_TYPES)
     rec("tp-types-cover", "TAKE_PROFIT_MARKET" in TP_TYPES)
     lo, hi = sl_bounds("LONG", 100.0, 100.0, 100.0, 99.4, 0.01)
@@ -1425,6 +1425,83 @@ def strict_gate_test() -> None:
         f"intern={p7.block_intern_pf(pos_l)}")
 
 
+def dd_time_test() -> None:
+    """Max drawdown time (maxDdTimeS): a position stuck underwater longer
+    than the window is force-closed with reason dd-time; shorter stays,
+    disabled (0) windows, and profitable resets never trigger it."""
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+
+    tmp = tempfile.mkdtemp(prefix="ddtime-test-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH", "TRADES_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+
+    def mk(px: float, under_for: float):
+        p = object.__new__(pt.Pulse)
+        p.ingest_ws_px = lambda: 0
+        p.px = {"AAA-USDT": px}
+        pos = pt.Position(symbol="AAA-USDT", side="LONG", qty=1.0, entry=100.0,
+                          opened_at=time.time() - 100.0, sl=0.0, tp=1e9, peak=100.0)
+        pos.under_since = (time.time() - under_for) if under_for else 0.0
+        p.open = {"AAA-USDT": pos}
+        p.control_orders = False
+        p.ctrl_skip = {}
+        p.exits = SimpleNamespace(enabled=False, ignore_tp=False, rev_on=False)
+        p.strat_trail = False
+        p.coord = SimpleNamespace(trailing_min_step=6)
+        closed: List[Tuple[str, float, str]] = []
+        p.close_pos = lambda po, price, reason: closed.append((po.symbol, round(price, 2), reason))
+        return p, pos, closed
+
+    old = pt.MAX_DD_TIME_S
+    try:
+        # 1) underwater 120s with a 60s window -> force close dd-time
+        pt.MAX_DD_TIME_S = 60.0
+        p, pos, closed = mk(99.0, 120.0)
+        p.manage()
+        rec("dd-time-closes-stuck-loser", closed == [("AAA-USDT", 99.0, "dd-time")], str(closed))
+
+        # 2) underwater 30s < 60s window -> no close, clock preserved
+        pt.MAX_DD_TIME_S = 60.0
+        p, pos, closed = mk(99.0, 30.0)
+        p.manage()
+        rec("dd-time-within-window-kept", not closed and pos.under_since > 0, str(closed))
+
+        # 3) window disabled (0) -> never closes even after hours
+        pt.MAX_DD_TIME_S = 0.0
+        p, pos, closed = mk(99.0, 99999.0)
+        p.manage()
+        rec("dd-time-disabled-off", not closed, str(closed))
+
+        # 4) back at/above breakeven -> clock resets, no close
+        pt.MAX_DD_TIME_S = 60.0
+        p, pos, closed = mk(100.05, 120.0)
+        p.manage()
+        rec("dd-time-breakeven-resets", not closed and pos.under_since == 0.0,
+            f"under_since={pos.under_since} closed={closed}")
+
+        # 5) SHORT underwater tracking symmetric: entry 100, px 101 (-1%)
+        pt.MAX_DD_TIME_S = 60.0
+        p, pos, closed = mk(99.0, 120.0)
+        pos.side = "SHORT"
+        pos.tp = 1e-9
+        p.px = {"AAA-USDT": 101.0}
+        p.manage()
+        rec("dd-time-short-symmetric", closed == [("AAA-USDT", 101.0, "dd-time")], str(closed))
+    finally:
+        pt.MAX_DD_TIME_S = old
+
+    # 6) overlay plumbing: engine maps overlay maxDdTimeS -> MAX_DD_TIME_S
+    src = open(os.path.join(DIR, "pulse_trader.py")).read()
+    rec("dd-time-overlay-mapped", 'ov.get("maxDdTimeS")' in src and '"maxDdTimeS": MAX_DD_TIME_S' in src)
+    # 7) config model + desk expose the field
+    cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
+    st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 0," in cm)
+    rec("dd-time-settings-ui", 'Max DD time s' in st and 'patch("maxDdTimeS", v)' in st)
+
+
 def main() -> int:
     run_units()
     rank_test()
@@ -1441,6 +1518,7 @@ def main() -> int:
     block_calc_test()
     set_orders_test()
     strict_gate_test()
+    dd_time_test()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:
