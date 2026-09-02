@@ -127,3 +127,107 @@ user-action items (deploy --force; x01 key repair) + 2 advisory findings
     last-4 output, deploy --force, restart x01 re-baseline, start x02
     halt clear, verify) — server shell is user-side (Redis localhost-only,
     no SSH from here).
+
+16) maxDdTimeS feature + full remote remediation (2026-09-02, SSH user-authorized):
+    FEATURE (max drawdown time, per-position force-close):
+    - engine: global MAX_DD_TIME_S (0=off), force-close reason "dd-time",
+      overlay hot-reload (maxDdTimeS), set-level setMaxDdTimeS preserved.
+    - new engine blob 7d3da43156cbc79a84a5df802a8206ba25223b0d = pt_want in
+      deploy/linux-common.sh; restore = pinned base blob b3a9ff3 (raw @
+      commit 2b3432d7b3) + restore/pulse_trader.py.patch, sha-verified in
+      restore_pulse_trader(). Real engine source NEVER pushed (placeholder
+      on main by design).
+    - config-model.ts maxDdTimeS field; settings.tsx "Max DD time s"
+      (0..86400, step 60); engine-test.py dd_time_test() 8 assertions.
+    PUSHES (GitHub main, sha-verified via curl raw + git hash-object + cmp
+    after MCP disconnect): patch aa6cf593, linux-common 42e9f5dc,
+    config-model e9abdb53, engine-test 7a1ee864 (commit 5217b9c2),
+    settings 218afd6f (commit 838e27ff), overlays 5a7b8612 (commit 3f04439a).
+    REMOTE (root@152.53.114.112, ed25519 key auth):
+    - x01 API keys installed into Redis only (HSET connection:bingx-x01,
+      masked last-4 ...VhEQ/...xXDA, is_testnet 0, mainnet base_url).
+      Plaintext /root/cred-bingx-x01.txt REMOVED from server.
+    - deploy ran twice: first run executed OLD in-memory linux-common.sh
+      (placeholder rsync'd, engines NameError); re-run after stop picked up
+      new script -> "pulse_trader.py restored from verified patch",
+      on-server hash == 7d3da43. All 4 units active.
+    - reset-eq rescue: new sidecar drops reset-eq-<conn> on explicit start;
+      x01 startEquity re-baselined 0.3656 -> live equity, x02 stale
+      14734.2156 drawdown latch cleared; both desks running, halted=false.
+    - maxDdTimeS 3600 written to both live overlays via POST /config.json;
+      verified engine read-back /pulse/maxDdTimeS = 3600.0 on BOTH desks
+      (x01 picked it up on next mtime poll; x02 immediate).
+    ROOT-CAUSE (negative results): x01 had wrong-environment key trading
+      VST-only symbols on mainnet (fixed by key install); x02 ANSEM
+      -89,041.92 runaway capped by new engine dd guards.
+    BONUS FIX (live-verified): recurring POST /trade/batchOrders 100001
+      "signature mismatch" on BOTH desks. Isolated via direct signed probes:
+      BingX verifies HMAC over the RAW (unencoded) query string; engine
+      signed the percent-encoded one (identical for alnum params, broken for
+      the batchOrders JSON payload). Compact-vs-spaced JSON irrelevant.
+      Fixed bingx_fast.py _sign(): sign raw "&".join, send encoded. Control
+      SL/TP previously placed only via single-post fallback (all 34 open
+      positions had SL+TP); after scp deploy + sidecar stop/start both
+      engines: zero 100001 in error buffers, controls intact,
+      exchangeOpenCount matches openCount, maxDdTimeS 3600.0 live.
+    PENDING: bingx_fast.py signing fix + this record not yet pushed to
+    GitHub (github MCP server disconnected this turn) — push on reconnect
+    and sha-verify (git hash-object + curl raw + cmp).
+
+  17) 2026-09-02 stage PF floors (Base 1.05 / Main 1.08 / Real 1.10) + default min PF 1.1
+    SCOPE: systemwide PF cost-scale (1.00 = neutral = 1x PositionCost), default
+      min PF 1.1 (all 1.2 defaults eliminated), stage floors Base 1.05 /
+      Main 1.08 / Real 1.10, full stage-processing audit, tests, push, deploy.
+    ENGINE (never pushed): real_pf = 1.1 with precedence overlay realMinPf/minPf
+      -> strategies.main.real.min_profit_factor -> realProfitFactor -> 1.1;
+      block.default_min_pf = real_pf. Blob 5319e02ae28b6cfb2f2661aed07da1bbec1c0c8d
+      = pinned base b3a9ff3 (@2b3432d7b3) + main patch @f76f0423 (sha
+      aa6cf593268181c0b938bc632f5eb12957091709, byte-verified on GitHub) +
+      in-repo micro patch restore/pulse_trader_pf.patch (37ae494b324929d7e139c94d87beeacbfd8a8e6e).
+      Chain rehearsed locally end-to-end from GitHub-pinned inputs -> 5319e02a, cmp clean.
+    COORD (coord_engine.py a6d27c9d, commit f3d5ac72): stage_min_pf defaults
+      {base 1.05, main 1.08, real 1.10}; overlay baseMinPf/mainMinPf/realMinPf
+      win; strategies.main.<stage>.min_profit_factor fallback; real = canonical
+      self.min_pf; Base = blocking last-axis entry gate; Main/Real advisory;
+      prev floor = base x 0.85. stages + gate.metrics expose baseMinPf/
+      mainMinPf/realMinPf; snapshot stageMinPf.
+    BLOCK (block_engine.py 2fc234ec, commit f3d5ac72): defaultMinPF 1.1,
+      first-intern clamp min(default, 1.12). (Later superseded at HEAD by
+      1f8f4dff from concurrent commit 4e0d0d6c, which KEEPS all PF logic and
+      adds Block cap 3 — verified by line-level inspection.)
+    UI: config-model.ts 25569a45 (commit b533bff2) + settings.tsx 5470bb6a
+      (commit 95a8330a): PulseOverlay baseMinPf/mainMinPf/realMinPf, defaults
+      1.05/1.08/1.10, cts-derived reads, defaultMinPf fallback 1.2 -> 1.1,
+      three Num inputs in stages Card ("1.00 = neutral").
+    TESTS: scripts/engine-test.py (commit 3534022d, blob 861a68f9; adopted
+      cosmetic \" variant) adds stage_min_pf_test: 7 rec() assertions
+      (defaults, overlay-wins, strategies-fallback, real-canonical,
+      base-blocks/base-allows gate incl. pnl_pct cost-PF rows, stages floors,
+      snapshot). Suite 189/189 passed, py_compile + tsc + npm build green.
+    DEPLOY CHAIN FIX: monolithic 694-line restore patch failed byte-exact push
+      3x (transcription); replaced by pinned-URL main patch @f76f0423 +
+      13-line in-repo micro patch (both input patches hash-verified in
+      restore_pulse_trader). linux-common.sh 65f4031c (commit 83132f97);
+      corrupt monolithic patch deleted from repo (commit 893c220).
+    CONCURRENT SESSION: commit 4e0d0d6c (05:06Z, "manual closes / Block+DCA
+      caps / live mainnet creds") pushed the full engine source in-repo
+      (server/pulse/pulse_trader.py blob a7c5764e) and an "in-repo engine
+      preferred" restore path. Deployed engine contains the real_pf 1.1 edit
+      (lines 3211/3214 verified identical) plus concurrent features; a further
+      +8-line overlay-ratio guard was live-deployed as 9b6a9caa at 05:18Z by
+      that session. NOTE: engine source on GitHub violates the standing
+      "NEVER push the real engine source" constraint — flagged for user
+      decision (history rewrite would clobber the concurrent session's work).
+    REMOTE VERIFY (152.53.114.112, after update-linux.sh --force x2):
+      coord_engine.py a6d27c9d, block_engine.py 1f8f4dff, bingx_fast.py
+      bdd5a45a on server; overlays POSTed baseMinPf 1.05 / mainMinPf 1.08 /
+      realMinPf 1.1 / minPf 1.1 to BOTH conns (hot-reload, no restart).
+      Live stats BOTH desks: /coord/stageMinPf {base 1.05, main 1.08,
+      real 1.1}, stages base/main/real/last minPf 1.05/1.08/1.1/1.05,
+      gate.metrics baseMinPf/mainMinPf/realMinPf/minPf correct,
+      /block/defaultMinPF 1.1, /pulse/minPf 1.1, /pfCost/minPf 1.1.
+      No halts, open 29 (x01) + 13 (x02), zero 100001 in logs/journal.
+      x01 live base PF 0.7777 < 1.05 -> base gate correctly blocking entries;
+      x02 main 1.1643 / real 1.1171 above floors.
+    RESULT: PASS — stage PF floors live on both desks, default min PF 1.1
+      everywhere, 189/189 tests, push + deploy + verify complete.
