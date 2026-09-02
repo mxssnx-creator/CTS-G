@@ -149,7 +149,7 @@ def controls_test() -> None:
     rec("short-sl-buy", short_sl.get("side") == "BUY")
     att = tpsl_attach_json("140.0", "160.0")
     rec("attach-both", "stopLoss" in att and "takeProfit" in att and "STOP_MARKET" in att["stopLoss"] and "TAKE_PROFIT" in att["takeProfit"])
-    rec("attach-price", '\"price\":\"140.0\"' in att["stopLoss"] or '\"price\": \"140.0\"' in att["stopLoss"] or "140.0" in att["stopLoss"])
+    rec("attach-price", '"price":"140.0"' in att["stopLoss"] or '"price": "140.0"' in att["stopLoss"] or "140.0" in att["stopLoss"])
     rec("sl-types-cover", "STOP_MARKET" in SL_TYPES and "STOP" in SL_TYPES)
     rec("tp-types-cover", "TAKE_PROFIT_MARKET" in TP_TYPES)
     lo, hi = sl_bounds("LONG", 100.0, 100.0, 100.0, 99.4, 0.01)
