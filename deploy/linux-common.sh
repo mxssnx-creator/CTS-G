@@ -195,17 +195,17 @@ cap_redis_memory() {
     grep -q '^maxmemory ' "$f" || echo 'maxmemory 512mb' >> "$f"
     sed -i 's/^maxmemory .*/maxmemory 512mb/' "$f"
     if grep -q '^maxmemory-policy ' "$f"; then
-      sed -i 's/^maxmemory-policy .*/maxmemory-policy allkeys-lru/' "$f"
+      sed -i 's/^maxmemory-policy .*/maxmemory-policy volatile-lru/' "$f"
     else
-      echo 'maxmemory-policy allkeys-lru' >> "$f"
+      echo 'maxmemory-policy volatile-lru' >> "$f"
     fi
   done
   if have redis-cli && redis-cli ping >/dev/null 2>&1; then
     redis-cli CONFIG SET maxmemory 536870912 >/dev/null 2>&1 || true
-    redis-cli CONFIG SET maxmemory-policy allkeys-lru >/dev/null 2>&1 || true
+    redis-cli CONFIG SET maxmemory-policy volatile-lru >/dev/null 2>&1 || true
     redis-cli MEMORY PURGE >/dev/null 2>&1 || true
     redis-cli CONFIG REWRITE >/dev/null 2>&1 || true
-    ok "redis maxmemory 512mb allkeys-lru"
+    ok "redis maxmemory 512mb volatile-lru"
   fi
 }
 
