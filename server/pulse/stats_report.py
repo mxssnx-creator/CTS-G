@@ -122,6 +122,8 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "avgR": cost.get("avgR"),
         "classicPfCost": cost.get("classicPf"),
         "costPct": cost_pct,
+        "netAvg": round(float(cost.get("netAvg") or 0), 6),
+        "costSubtracted": True,
         "scale": "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost",
     }
 
@@ -166,6 +168,36 @@ def by_indication(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, 
             kind = "general"
         buckets.setdefault(kind, []).append(r)
     return {k: pf_window(v, None, cost_pct) for k, v in buckets.items()}
+
+
+def by_direction(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
+    for r in rows:
+        s = str(r.get("side") or "").upper()
+        if s.startswith("L") or s in ("1", "BUY"):
+            buckets["LONG"].append(r)
+        elif s.startswith("S") or s in ("-1", "SELL"):
+            buckets["SHORT"].append(r)
+    return {
+        k: {**pf_window(v, None, cost_pct), "direction": k, "costSubtracted": True}
+        for k, v in buckets.items()
+    }
+
+
+def by_strategy(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        pack = str(r.get("pack") or "unknown")
+        buckets.setdefault(pack, []).append(r)
+        reason = str(r.get("reason") or "")
+        if reason.startswith("ind:"):
+            bits = reason.split(":")
+            kind = bits[1] if len(bits) > 1 else "signals"
+            buckets.setdefault(f"indications:{kind}", []).append(r)
+    return {
+        k: {**pf_window(v, None, cost_pct), "strategy": k, "costSubtracted": True}
+        for k, v in buckets.items()
+    }
 
 
 def by_reason(rows: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -244,6 +276,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "active": r.get("active"),
             "deactReason": r.get("deactReason"),
             "locked": r.get("locked"),
+            "costSubtracted": True,
+            "bySide": r.get("bySide"),
         })
     blob: Dict[str, Any] = {
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -293,6 +327,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "bySymbol": by_symbol(closed, cost_pct),
         "byPack": by_pack(closed, cost_pct),
         "byIndication": by_indication(closed, cost_pct),
+        "byDirection": by_direction(closed, cost_pct),
+        "byStrategy": by_strategy(closed, cost_pct),
         "byReason": by_reason(closed),
         "block": st.get("block"),
         "coordGate": (st.get("coord") or {}).get("gate"),
@@ -480,6 +516,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     md = render_md(blob)
     out.append(("rep-md", "PositionCost" in md and "Independent Sets" in md, md[:80]))
     out.append(("rep-blob", blob["costAccounting"]["positionCostPct"] == 0.15 and blob["occupancy"]["maxOnePerSymbolDirSet"], str(blob["costAccounting"]["last15"])))
+    out.append(("rep-dir", set((blob.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str(blob.get("byDirection"))))
+    out.append(("rep-dir-cost", all(bool(v.get("costSubtracted")) for v in (blob.get("byDirection") or {}).values()), str(blob.get("byDirection"))))
+    out.append(("rep-strat", "general" in (blob.get("byStrategy") or {}), str(blob.get("byStrategy"))))
+    out.append(("rep-netavg", "netAvg" in (blob.get("profitFactor") or {}).get("all", {}), str((blob.get("profitFactor") or {}).get("all"))))
     return out
 
 

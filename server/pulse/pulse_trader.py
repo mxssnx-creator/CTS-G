@@ -2555,9 +2555,9 @@ class Pulse:
                 # Hist still loading — keep processing instead of freezing the book.
                 return None
             if getattr(self.sets, "strict_gate", False):
-                # Strict: no validated + profitable set anywhere -> no entry.
+                # Strict: no validated + profitable set for this side -> no entry.
                 return "set-gate"
-            if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
+            if not (self.sets.pack_open(pack, side=side) or self.sets.pack_open("general", side=side) or self.sets.pack_open("indications", side=side)):
                 # Positive-PF-only: gate ready and every pack closed -> no entry.
                 return "set-gate"
         return None
@@ -2622,7 +2622,12 @@ class Pulse:
         set_idx = -1
         trail_st = None
         try:
-            trail_st = self.sets.pick_trail(pack)
+            trail_st = self.sets.pick_trail(pack, side=side)
+        except TypeError:
+            try:
+                trail_st = self.sets.pick_trail(pack)
+            except Exception:
+                trail_st = None
         except Exception:
             trail_st = None
         if chosen:
@@ -3485,12 +3490,17 @@ class Pulse:
         floor_pf = float(getattr(self.block, "default_min_pf", 1.2) or 1.2)
         intern_pf = floor_pf
         try:
+            side = str(getattr(pos, "side", "") or "")
             st = self.sets.sets.get(pos.set_id) if pos.set_id else None
             if st is None:
-                st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
+                try:
+                    st = self.sets.pick_any(pos.pack or "indications", side=side) or self.sets.pick_any("general", side=side)
+                except TypeError:
+                    st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
             if st is not None:
-                ratio = float(getattr(st, "last15_ratio", 0.0) or 0.0)
-                n = int(getattr(st, "last15_n", 0) or 0)
+                blob = (getattr(st, "by_side", None) or {}).get(side.upper() if side else "") or {}
+                ratio = float(blob.get("last15_ratio") or getattr(st, "last15_ratio", 0.0) or 0.0)
+                n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
                 if getattr(self.sets, "strict_gate", False):
                     need = max(int(getattr(self.sets, "min_samples", 8) or 8), 8)
                     if n >= need and ratio + 1e-9 >= 1.0:
@@ -3950,15 +3960,32 @@ class Pulse:
         intern_metrics: Dict[str, Any] = {"pf": 0.0, "n": 0}
         try:
             best_st = None
+            best_n = -1
+            best_side = ""
             for pack_name in ("indications", "general"):
-                st = self.sets.pick_any(pack_name) if self.sets.enabled else None
-                if st and (best_st is None or int(getattr(st, "last15_n", 0) or 0) > int(getattr(best_st, "last15_n", 0) or 0)):
-                    best_st = st
+                for side_n in ("LONG", "SHORT"):
+                    st = None
+                    try:
+                        st = self.sets.pick_any(pack_name, side=side_n) if self.sets.enabled else None
+                    except TypeError:
+                        st = self.sets.pick_any(pack_name) if self.sets.enabled else None
+                    except Exception:
+                        st = None
+                    if not st:
+                        continue
+                    blob = (getattr(st, "by_side", None) or {}).get(side_n) or {}
+                    n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                    if best_st is None or n > best_n:
+                        best_st = st
+                        best_n = n
+                        best_side = side_n
             if best_st:
+                blob = (getattr(best_st, "by_side", None) or {}).get(best_side) or {}
                 intern_metrics = {
-                    "pf": float(best_st.last15_ratio),
-                    "n": float(best_st.last15_n),
+                    "pf": float(blob.get("last15_ratio") or best_st.last15_ratio),
+                    "n": float(blob.get("last15_n") or best_st.last15_n),
                     "pack": best_st.pack,
+                    "side": best_side,
                 }
         except Exception:
             intern_metrics = {"pf": 0.0, "n": 0}
@@ -4007,7 +4034,12 @@ class Pulse:
         hist_ready = bool(self.sets.enabled and getattr(self.sets, "progress", None) and self.sets.progress.ready)
         for pack in ("indications", "general"):
             if self.sets.enabled and self.sets.use_historic_gate and hist_ready:
-                intern[pack] = bool(self.sets.pack_open(pack))
+                try:
+                    intern[pack] = bool(
+                        self.sets.pack_open(pack, side="LONG") or self.sets.pack_open(pack, side="SHORT")
+                    )
+                except TypeError:
+                    intern[pack] = bool(self.sets.pack_open(pack))
             else:
                 intern[pack] = True
             intern_any = intern_any or intern[pack]
@@ -5019,7 +5051,17 @@ class Pulse:
             intern_m: Dict[str, Any] = {"pf": 0.0, "n": 0}
             stg = None
             try:
-                stg = self.sets.pick_any("indications") or self.sets.pick_any("general")
+                stg = (
+                    self.sets.pick_any("indications", side="LONG")
+                    or self.sets.pick_any("indications", side="SHORT")
+                    or self.sets.pick_any("general", side="LONG")
+                    or self.sets.pick_any("general", side="SHORT")
+                )
+            except TypeError:
+                try:
+                    stg = self.sets.pick_any("indications") or self.sets.pick_any("general")
+                except Exception:
+                    stg = None
             except Exception:
                 stg = None
             if stg:

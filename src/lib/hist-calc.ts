@@ -30,6 +30,7 @@ export type HistCalcRow = {
   maxDdS: number;
   avgDdS?: number;
   expectancy?: number;
+  netAvg?: number;
   active?: boolean;
   validated?: boolean;
   lowSl?: boolean;
@@ -61,6 +62,18 @@ export type HistCalcDirection = {
   costSubtracted?: boolean;
 };
 
+export type HistCalcStrategy = {
+  strategy: string;
+  n: number;
+  pf: number;
+  maxDdS?: number;
+  wr?: number;
+  validated?: boolean;
+  netAvg?: number;
+  costSubtracted?: boolean;
+  bySide?: Record<string, { n: number; pf: number; validated?: boolean; netAvg?: number }>;
+};
+
 export type HistCalcOptions = {
   hours: number;
   minStep: number;
@@ -88,6 +101,7 @@ export type HistCalcJob = {
   validatedCount?: number;
   bySymbol?: HistCalcSymbol[];
   byDirection?: Record<string, HistCalcDirection>;
+  byStrategy?: Record<string, HistCalcStrategy>;
   kinds?: Record<string, HistCalcKind>;
   winner?: HistCalcRow | null;
   apply?: Record<string, unknown>;
@@ -101,6 +115,16 @@ export type HistCalcJob = {
   partial?: boolean;
   workers?: number;
   barsHeld?: number;
+  independence?: {
+    symbol?: boolean;
+    direction?: boolean;
+    indication?: boolean;
+    strategy?: boolean;
+    config?: boolean;
+    costSubtracted?: boolean;
+    async?: boolean;
+    partial?: boolean;
+  };
 };
 
 export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {

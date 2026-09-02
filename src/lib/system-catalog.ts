@@ -43,7 +43,7 @@ export const MODULES: SysModule[] = [
   { id: "strategy.indications", layer: "strategy", name: "Indications", summary: "Signals coordinated: min 3 sources, 0.6 agreement, low-stop consensus", status: "live", toggle: "indEnabled", defaultOn: true },
   { id: "strategy.block", layer: "strategy", name: "Block strategy", summary: "Counts 1–12 on a live parent · independent PF per stack", status: "live", toggle: "blockEnabled", defaultOn: true },
   { id: "strategy.coord", layer: "strategy", name: "Coordination axes", summary: "Prev / last / cont / pause windows gate new risk", status: "live", defaultOn: true },
-  { id: "strategy.sets", layer: "strategy", name: "Independent Sets", summary: "Pack × SL:TP × trail × step books with 1m historic", status: "live", toggle: "histEnabled", defaultOn: true },
+  { id: "strategy.sets", layer: "strategy", name: "Independent Sets", summary: "Pack × SL:TP × trail × step × LONG/SHORT books with 1m historic · cost-net PF", status: "live", toggle: "histEnabled", defaultOn: true },
   { id: "strategy.trailing", layer: "strategy", name: "Trailing recals", summary: "Independent arm/give range · auto pick on last-N", status: "live", toggle: "stratTrailing", defaultOn: true },
   { id: "strategy.trailRecalc", layer: "strategy", name: "Trail auto-recalc", summary: "Pick arm:give from last-N independent of SL:TP", status: "live", toggle: "trailAuto", defaultOn: true },
   { id: "strategy.dca", layer: "strategy", name: "DCA", summary: "Independent CTS steps on adverse move · own PF book", status: "live", toggle: "dcaEnabled", defaultOn: false },

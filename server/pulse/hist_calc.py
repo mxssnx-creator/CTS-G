@@ -336,6 +336,8 @@ def idle_job() -> Dict[str, Any]:
         "coverage": {},
         "rows": [],
         "bySymbol": [],
+        "byDirection": {},
+        "byStrategy": {},
         "kinds": {},
         "winner": None,
         "presets": public_presets(),
@@ -345,6 +347,16 @@ def idle_job() -> Dict[str, Any]:
         "finishedAt": 0,
         "source": "",
         "independent": True,
+        "independence": {
+            "symbol": True,
+            "direction": True,
+            "indication": True,
+            "strategy": True,
+            "config": True,
+            "costSubtracted": True,
+            "async": True,
+            "partial": True,
+        },
     }
 
 
@@ -590,6 +602,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "avgDdS": float(g("avg_dd_s", st.avg_dd_s) or 0),
         "ddEpisodes": int(g("dd_episodes", st.dd_episodes) or 0),
         "expectancy": float(g("expectancy", st.expectancy) or 0),
+        "netAvg": float(g("net_avg", g("expectancy", st.expectancy)) or 0),
         "avgHoldS": float(g("avg_hold_s", st.avg_hold_s) or 0),
         "classicPf": float(g("classic_all", st.classic_all) or 0),
         "active": bool(g("active", st.active)),
@@ -627,6 +640,49 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
+        }
+    return out
+
+
+def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
+    """Independent pack / kind / pack:kind books. Cost subtracted. Split by side."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for st in book.by_idx:
+        rows = list((hist or {}).get(st.id) or st.hist)
+        groups.setdefault(st.pack, []).extend(rows)
+        groups.setdefault(st.kind, []).extend(rows)
+        groups.setdefault(f"{st.pack}:{st.kind}", []).extend(rows)
+    out: Dict[str, Any] = {}
+    for key, tape in groups.items():
+        pf = last_n_cost_pf(tape, book.pf_n, book.cost_pct)
+        nets = [row_net_pnl(r, book.cost_pct) for r in tape]
+        wins = sum(1 for x in nets if x > 0)
+        decided = sum(1 for x in nets if x != 0)
+        dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0}
+        by_dir: Dict[str, Any] = {}
+        for d in DIRECTIONS:
+            sub = filter_side(tape, d)
+            if not sub:
+                continue
+            spf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+            by_dir[d] = {
+                "n": len(sub),
+                "pf": round(float(spf["ratio"]), 4),
+                "netAvg": round(float(spf.get("netAvg") or 0), 6),
+                "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
+                "costSubtracted": True,
+            }
+        out[key] = {
+            "strategy": key,
+            "n": len(tape),
+            "pf": round(float(pf["ratio"]), 4),
+            "netAvg": round(float(pf.get("netAvg") or 0), 6),
+            "last15N": int(pf["count"]),
+            "maxDdS": round(float(dd.get("maxS") or 0), 1),
+            "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
+            "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "costSubtracted": True,
+            "bySide": by_dir,
         }
     return out
 
@@ -918,6 +974,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["kinds"] = book.ind_gate_snapshot()
             job["bySymbol"] = symbol_rollup(book, hist)
             job["byDirection"] = direction_rollup(book, hist)
+            job["byStrategy"] = strategy_rollup(book, hist)
             job["phase"] = phase
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["detail"] = (
@@ -951,6 +1008,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         kinds = book.ind_gate_snapshot()
         by_sym = symbol_rollup(book, hist)
         by_dir = direction_rollup(book, hist)
+        by_strat = strategy_rollup(book, hist)
         winner = rows[0] if rows else None
         # Prefer a validated low-SL row when one exists in the top slice.
         top = [r for r in rows if r.get("validated") and r.get("lowSl")]
@@ -972,6 +1030,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "validatedCount": sum(1 for r in rows if r.get("validated")),
             "bySymbol": by_sym,
             "byDirection": by_dir,
+            "byStrategy": by_strat,
             "kinds": kinds,
             "winner": winner,
             "apply": winner_patch(winner, opt),
@@ -991,6 +1050,16 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "partial": True,
             "barsHeld": len(book.bars),
             "workers": workers,
+            "independence": {
+                "symbol": True,
+                "direction": True,
+                "indication": True,
+                "strategy": True,
+                "config": True,
+                "costSubtracted": True,
+                "async": True,
+                "partial": True,
+            },
         })
         job.pop("_lastWrite", None)
         if persist:
@@ -1111,6 +1180,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-dir-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byDirection") or {}).values()), str(job.get("byDirection")))
     rec("calc-dir-rows", any(r.get("direction") == "LONG" for r in (job.get("rows") or [])) and any(r.get("direction") == "SHORT" for r in (job.get("rows") or [])), str({r.get("direction") for r in (job.get("rows") or [])}))
     rec("calc-cost-flag", all(r.get("costSubtracted") for r in (job.get("rows") or [])[:5]))
+    rec("calc-netavg", any(r.get("netAvg") is not None for r in (job.get("rows") or [])[:5]), str((job.get("rows") or [{}])[0].get("netAvg")))
+    rec("calc-kind-byside", all("LONG" in (((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}) and "SHORT" in (((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}) for k in IND_KINDS), str({k: list((((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}).keys()) for k in IND_KINDS}))
+    rec("calc-sym-byside", any((s.get("bySide") or {}).get("LONG") or (s.get("bySide") or {}).get("SHORT") for s in (job.get("bySymbol") or [])), str((job.get("bySymbol") or [{}])[0].get("bySide")))
+    rec("calc-strategy", "general" in (job.get("byStrategy") or {}) and "indications" in (job.get("byStrategy") or {}), str(sorted((job.get("byStrategy") or {}).keys())))
+    rec("calc-strategy-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byStrategy") or {}).values()), str(job.get("byStrategy")))
+    rec("calc-independence", bool((job.get("independence") or {}).get("direction")) and bool((job.get("independence") or {}).get("costSubtracted")), str(job.get("independence")))
     rec("calc-symbols", len(job.get("bySymbol") or []) >= 2, str(len(job.get("bySymbol") or [])))
     rec("calc-sym-pf", all("pf" in r and "maxDdS" in r for r in (job.get("bySymbol") or [])))
     rec("calc-winner", bool(job.get("winner")) and "last15Ratio" in (job.get("winner") or {}), str((job.get("winner") or {}).get("id")))

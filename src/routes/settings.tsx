@@ -471,7 +471,11 @@ function SettingsPage() {
                     </div>
                     {calcJob.winner ? (
                       <p className="text-sm">
-                        Winner <span className="font-mono text-primary">{calcJob.winner.id}</span> · PF {calcJob.winner.last15Ratio.toFixed(2)} · DDt {Math.round(calcJob.winner.maxDdS)}s · SL {calcJob.winner.slRatio.toFixed(1)}
+                        Winner <span className="font-mono text-primary">{calcJob.winner.id}</span>
+                        {calcJob.winner.direction ? ` · ${calcJob.winner.direction}` : ""}
+                        {" "}· PF {calcJob.winner.last15Ratio.toFixed(2)}
+                        {typeof calcJob.winner.netAvg === "number" ? ` · net ${(calcJob.winner.netAvg * 100).toFixed(3)}%` : ""}
+                        {" "}· DDt {Math.round(calcJob.winner.maxDdS)}s · SL {calcJob.winner.slRatio.toFixed(1)}
                       </p>
                     ) : null}
                     <div className="overflow-x-auto">
@@ -504,14 +508,17 @@ function SettingsPage() {
                         </tbody>
                       </table>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
                       <div>
                         <p className="mb-2 font-mono text-xs text-muted uppercase">Indication kinds · PF / DDT</p>
                         <div className="space-y-1">
                           {Object.entries(calcJob.kinds || {}).map(([k, v]) => (
-                            <div key={k} className="flex justify-between font-mono text-xs">
+                            <div key={k} className="flex justify-between gap-3 font-mono text-xs">
                               <span className={v.validated && v.profitable ? "text-primary" : "text-muted"}>{k}</span>
-                              <span>PF {(v.pf ?? 0).toFixed(2)} · DDt {Math.round(v.maxDdS ?? 0)}s · n {v.n ?? 0}</span>
+                              <span className="text-right">
+                                PF {(v.pf ?? 0).toFixed(2)} · DDt {Math.round(v.maxDdS ?? 0)}s
+                                {v.bySide ? ` · L ${(v.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(v.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -522,7 +529,21 @@ function SettingsPage() {
                           {Object.entries(calcJob.byDirection || {}).map(([k, v]) => (
                             <div key={k} className="flex justify-between font-mono text-xs">
                               <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
-                              <span>PF {v.pf.toFixed(2)} · DDt {Math.round(v.maxDdS)}s · n {v.n}</span>
+                              <span>PF {v.pf.toFixed(2)} · net {((v.netAvg ?? 0) * 100).toFixed(3)}% · DDt {Math.round(v.maxDdS)}s · n {v.n}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-2 font-mono text-xs text-muted uppercase">Strategy · pack / kind</p>
+                        <div className="space-y-1">
+                          {Object.entries(calcJob.byStrategy || {}).map(([k, v]) => (
+                            <div key={k} className="flex justify-between gap-3 font-mono text-xs">
+                              <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
+                              <span className="text-right">
+                                PF {v.pf.toFixed(2)}
+                                {v.bySide ? ` · L ${(v.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(v.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -531,9 +552,12 @@ function SettingsPage() {
                         <p className="mb-2 font-mono text-xs text-muted uppercase">Symbols · PF / DDT</p>
                         <div className="space-y-1">
                           {(calcJob.bySymbol || []).slice(0, 8).map((s) => (
-                            <div key={s.symbol} className="flex justify-between font-mono text-xs">
+                            <div key={s.symbol} className="flex justify-between gap-3 font-mono text-xs">
                               <span className={s.validated ? "text-primary" : "text-muted"}>{s.symbol.replace("-USDT", "")}</span>
-                              <span>PF {s.pf.toFixed(2)} · DDt {Math.round(s.maxDdS)}s</span>
+                              <span className="text-right">
+                                PF {s.pf.toFixed(2)} · DDt {Math.round(s.maxDdS)}s
+                                {s.bySide ? ` · L ${(s.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(s.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -543,7 +567,7 @@ function SettingsPage() {
                   </div>
                 ) : null}
                 <p className="text-sm text-muted">
-                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol. Position cost is subtracted from PF, expectancy and averages. Does not start the live engine.
+                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Does not start the live engine.
                 </p>
               </Card>
             </>

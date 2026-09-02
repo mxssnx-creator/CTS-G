@@ -37,6 +37,8 @@ export type CostPfMetric = {
   costPct: number;
   netPct: number;
   grossPct: number;
+  netAvg?: number;
+  costSubtracted?: boolean;
   minPf: number;
   pass: boolean;
 };
@@ -151,6 +153,15 @@ export function calculateDrawdownTime(
 }
 
 /** CTS Main-trade scale: 1.00 = Neutral after cost, 1.10 = +1× PositionCost net. */
+export function costAsFrac(costPct = POSITION_COST_PCT_DEFAULT): number {
+  const c = Math.max(0, finite(costPct));
+  return c > 0.05 ? c / 100 : c;
+}
+
+export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
+  return finite(pnlPctFraction) - costAsFrac(costPct);
+}
+
 export function signedResultR(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {
   const cost = Math.max(1e-9, finite(costPct));
   return (finite(pnlPctFraction) * 100 - cost) / cost;
@@ -168,18 +179,21 @@ export function lastNCostPf(
 ): CostPfMetric {
   const window = rows.slice(0, Math.max(1, n));
   const rs: number[] = [];
+  const nets: number[] = [];
   let gp = 0;
   let gl = 0;
   for (const row of window) {
     rs.push(signedResultR(finite(row.pnl_pct), costPct));
-    const pnl = finite(row.pnl);
-    if (pnl > 0) gp += pnl;
-    else if (pnl < 0) gl += Math.abs(pnl);
+    const net = row.pnl_pct != null ? netPnlPct(finite(row.pnl_pct), costPct) : finite(row.pnl);
+    nets.push(net);
+    if (net > 0) gp += net;
+    else if (net < 0) gl += Math.abs(net);
   }
   const count = rs.length;
   const avgR = count ? rs.reduce((a, b) => a + b, 0) / count : 0;
   const ratio = count ? ratioFromR(avgR) : 1;
   const classic = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
+  const netAvg = count ? nets.reduce((a, b) => a + b, 0) / count : 0;
   return {
     n,
     count,
@@ -189,6 +203,8 @@ export function lastNCostPf(
     costPct,
     netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
     grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
+    netAvg: round(netAvg, 6),
+    costSubtracted: true,
     minPf,
     pass: count < 8 || ratio + 1e-9 >= minPf,
   };

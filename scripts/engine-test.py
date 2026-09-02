@@ -931,7 +931,7 @@ def block_calc_test() -> None:
         p.cid = lambda kind="o", pos=None, **kw: f"GTEST{len(p.api.posts)}"
         p.ok = lambda r: r.get("code") == 0
         st = SimpleNamespace(last15_ratio=set_ratio, last15_n=set_n)
-        p.sets = SimpleNamespace(sets={}, pick_any=lambda pack: st)
+        p.sets = SimpleNamespace(sets={}, pick_any=lambda pack, side=None: st)
         p.score = lambda sym: (1, "t", 0.9)
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
         p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
@@ -1094,10 +1094,10 @@ def set_orders_test() -> None:
         sts.append(st)
     book.by_idx = list(sts)
     cur = {"i": 0}
-    book.pick_any = lambda pack: sts[cur["i"]] if cur["i"] < len(sts) else None
-    book.pick_trail = lambda pack: None
+    book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
+    book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
-    book.indication_ok = lambda kind: True
+    book.indication_ok = lambda kind, side=None: True
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
@@ -1498,7 +1498,7 @@ def strict_gate_test() -> None:
     # legacy (strict off): warm ratio lifts even below 8 samples? no — legacy
     # floors cold sets; warm ratio is used as-is (old behavior preserved)
     legacy_sets = SimpleNamespace(strict_gate=False, sets={},
-                                  pick_any=lambda pack: SimpleNamespace(last15_ratio=1.5, last15_n=12))
+                                  pick_any=lambda pack, side=None: SimpleNamespace(last15_ratio=1.5, last15_n=12))
     p7.sets = legacy_sets
     pos_l = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
                         sl=99.0, tp=101.0, peak=100.0, set_id="", pack="general")

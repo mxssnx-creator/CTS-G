@@ -1187,6 +1187,34 @@ class SetBook:
             "net_avg": float(last15.get("netAvg") or expectancy),
         }
 
+    def _side_active_flags(self, m: Dict[str, Any], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
+        """Per-side deact from that side's tape only. Mixed fills never gate the other side."""
+        if not self.auto_deact:
+            return True, ""
+        live_rows = [r for r in live if isinstance(r, dict)]
+        live25 = live_rows[-self.deact_n :]
+        live_avg = (
+            sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25) if live25 else 0.0
+        )
+        live_tail = live_rows[-max(8, min(self.deact_n, 15)) :]
+        live_tail_avg = (
+            sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail) if live_tail else 0.0
+        )
+        need = max(self.min_samples, min(self.pf_n, 8))
+        n15 = int(m.get("last15_n") or 0)
+        ratio = float(m.get("last15_ratio") or 0)
+        if len(live25) >= self.deact_n and live_avg < 0:
+            return False, f"live last{len(live25)} avg loss {live_avg:.4f}"
+        if len(live_rows) >= 8 and live_tail_avg < 0:
+            return False, f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
+        notes: List[str] = []
+        if n15 >= need and ratio + 1e-9 < 1.0:
+            notes.append(f"last{n15} PF {ratio:.2f}<1.00 neg")
+            return False, "; ".join(notes)
+        if n15 >= need and ratio + 1e-9 < self.min_pf:
+            notes.append(f"last{n15} PF {ratio:.2f}<{self.min_pf:.2f}")
+        return True, "; ".join(notes)
+
     def _score_one(self, st: SetState) -> None:
         tape = st.tape()
         tape.sort(key=lambda r: finite(r.get("t")))
@@ -1221,6 +1249,9 @@ class SetBook:
             sub_tape = filter_side(tape, side)
             sm = self._score_metrics(sub_tape, hist_n=len(sub_hist))
             sm["side"] = side
+            active_s, reason_s = self._side_active_flags(sm, filter_side(st.live, side))
+            sm["active"] = active_s
+            sm["deact_reason"] = reason_s
             by[side] = sm
         st.by_side = by
         live25 = st.live[-self.deact_n :]
@@ -1358,6 +1389,9 @@ class SetBook:
             "indexed": True,
             "independentTrail": bool(getattr(self, "trail_enabled", True)),
             "independentDirection": True,
+            "independentIndication": True,
+            "independentStrategy": True,
+            "costSubtracted": True,
             "directions": list(DIRECTIONS),
             "byTrail": by_tr,
             "bySl": by_sl,
@@ -1386,21 +1420,34 @@ class SetBook:
 
     def pick(self, pack: str, kind: str = "base", side: Optional[str] = None) -> Optional[SetState]:
         gated = bool(self.progress.ready and self.use_historic_gate)
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
-        if not rows and not gated:
-            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
-        if not rows:
-            return None
-        need = max(self.min_samples, 8)
         want_side = str(side or "").strip().upper()
         if want_side in ("L", "1", "BUY"):
             want_side = "LONG"
         elif want_side in ("S", "-1", "SELL"):
             want_side = "SHORT"
         use_side = want_side in DIRECTIONS
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
+        if not rows:
+            return None
+        need = max(self.min_samples, 8)
 
         def view(s: SetState) -> Dict[str, Any]:
             return self._side_view(s, want_side if use_side else None)
+
+        def side_on(s: SetState) -> bool:
+            if use_side:
+                blob = (s.by_side or {}).get(want_side)
+                if isinstance(blob, dict) and "active" in blob:
+                    return bool(blob.get("active"))
+            return s.active
+
+        on = [s for s in rows if side_on(s)]
+        if on:
+            rows = on
+        elif gated:
+            return None
+        if not rows:
+            return None
 
         def proven_neg(s: SetState) -> bool:
             v = view(s)
@@ -1418,7 +1465,7 @@ class SetBook:
         if not passing and not self.strict_gate:
             passing = [s for s in rows if not proven_neg(s)]
         if not passing and not self.strict_gate and not gated:
-            passing = [s for s in rows if s.active] or list(rows)
+            passing = [s for s in rows if side_on(s)] or list(rows)
         if not passing:
             return None
         def live_ok(s: SetState) -> bool:
@@ -1502,9 +1549,20 @@ class SetBook:
 
     def ind_gate_snapshot(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
+
+        def _ok(kind: str, side: Optional[str] = None) -> bool:
+            try:
+                return self.indication_ok(kind, side)
+            except TypeError:
+                return self.indication_ok(kind)
+
         for k in IND_KINDS:
             st = self.ind_stats(k)
-            st["ok"] = self.indication_ok(k)
+            st["ok"] = _ok(k)
+            for d in DIRECTIONS:
+                blob = (st.get("bySide") or {}).get(d)
+                if isinstance(blob, dict):
+                    blob["ok"] = _ok(k, d)
             out[k] = st
         return out
 
@@ -1547,6 +1605,25 @@ class SetBook:
                     "classicPf": st.classic_all,
                     "gp": st.gp,
                     "gl": st.gl,
+                    "costSubtracted": True,
+                    "netAvg": round(st.expectancy, 6),
+                    "bySide": {
+                        d: {
+                            "n": int(v.get("n") or 0),
+                            "pf": round(float(v.get("last15_ratio") or 0), 4),
+                            "last15N": int(v.get("last15_n") or 0),
+                            "last15R": round(float(v.get("last15_r") or 0), 4),
+                            "expectancy": float(v.get("expectancy") or 0),
+                            "netAvg": round(float(v.get("net_avg") or v.get("expectancy") or 0), 6),
+                            "maxDdS": float(v.get("max_dd_s") or 0),
+                            "wr": float(v.get("wr") or 0),
+                            "validated": bool(v.get("validated")),
+                            "active": bool(v.get("active", True)),
+                            "costSubtracted": True,
+                        }
+                        for d, v in (st.by_side or {}).items()
+                        if isinstance(v, dict)
+                    },
                     "exits": st.exits,
                     "intern": {
                         "pf15": round(st.last15_ratio, 4),
@@ -1598,6 +1675,9 @@ class SetBook:
             "indGate": self.ind_gate_snapshot(),
             "minSamples": self.min_samples,
             "costPct": self.cost_pct,
+            "costSubtracted": True,
+            "independentDirection": True,
+            "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
             "coverage": cover,
@@ -2054,6 +2134,28 @@ def self_test() -> List[Tuple[str, bool, str]]:
     want_net = net_pnl_pct(0.003, 0.15)
     out.append(("set-cost-net-expectancy", abs(wst2.expectancy - want_net) < 1e-9, f"E={wst2.expectancy} want={want_net}"))
     out.append(("set-cost-flag", bool((wst2.by_side.get("LONG") or {}).get("cost_subtracted")), str(wst2.by_side.get("LONG"))))
+    # Independent deact: a losing SHORT book must not gate a winning LONG book.
+    ibook = SetBook()
+    ibook.load({"histEnabled": True, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True, "positionCostPct": 0.15, "setUseHistoricGate": True, "setStrictGate": True, "setMinSamples": 8, "setMinPf": 1.10})
+    ist = next(iter(ibook.sets.values()))
+    long_rows = [{"t": 100 + i, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(12)]
+    short_rows = [{"t": 200 + i, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "SHORT", "hold_s": 40, "reason": "sl"} for i in range(12)]
+    ist.hist = long_rows + short_rows
+    ist.live = []
+    ibook.progress.ready = True
+    ibook._score_one(ist)
+    lblob = ist.by_side.get("LONG") or {}
+    sblob = ist.by_side.get("SHORT") or {}
+    out.append(("set-dir-long-active", bool(lblob.get("active")) and bool(lblob.get("validated")), str(lblob)))
+    out.append(("set-dir-short-off", sblob.get("active") is False and float(sblob.get("last15_ratio") or 0) < 1.0, str(sblob)))
+    pk_l = ibook.pick("general", side="LONG")
+    pk_s = ibook.pick("general", side="SHORT")
+    out.append(("set-dir-pick-long-ok", pk_l is not None, f"L={getattr(pk_l, 'id', None)} mixed_on={ist.active}"))
+    out.append(("set-dir-pick-short-none", pk_s is None, f"S={getattr(pk_s, 'id', None)}"))
+    out.append(("set-dir-long-netavg", abs(float(lblob.get("net_avg") or 0) - 0.0015) < 1e-6, str(lblob.get("net_avg"))))
+    out.append(("set-dir-pack-open-split", ibook.pack_open("general", side="LONG") and not ibook.pack_open("general", side="SHORT"), f"L={ibook.pack_open('general', 'LONG')} S={ibook.pack_open('general', 'SHORT')} mixed={ibook.pack_open('general')}"))
+    snap = ibook.snapshot()
+    out.append(("set-snap-byside", bool((snap.get("rows") or [{}])[0].get("bySide", {}).get("LONG")), str((snap.get("rows") or [{}])[0].get("bySide"))))
     mixed_dd = [
         {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
         {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},
