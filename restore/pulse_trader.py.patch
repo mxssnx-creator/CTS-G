@@ -1,5 +1,3 @@
-diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..7d3da43 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -21,7 +21,7 @@
@@ -265,7 +263,7 @@ index b3a9ff3..7d3da43 100644
 +            if px > 0 and p.entry > 0:
 +                d = (px - p.entry) / p.entry
 +                if p.side != "LONG":
-+                    d = -d
+                    d = -d
 +                upnl += d * p.qty * p.entry
 +        return n, upnl
 +
@@ -337,16 +335,21 @@ index b3a9ff3..7d3da43 100644
          if ov.get("scratchS"):
              SCRATCH_S = float(ov["scratchS"])
          if ov.get("scratchMinPct") is not None:
-@@ -3062,7 +3205,7 @@
+@@ -3062,24 +3205,24 @@
          except Exception:
              b_stack = 0
          b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
 -        b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
 +        b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1)
          b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
-         real_pf = 1.2
+-        real_pf = 1.2
++        real_pf = 1.1
          try:
-@@ -3073,13 +3216,13 @@
+             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
+-            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
++            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
+         except Exception:
+             pass
          self.block.enabled = bool(b_en) if b_en is not None else True
          if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
              self.block.enabled = True
