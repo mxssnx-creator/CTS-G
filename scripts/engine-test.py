@@ -31,6 +31,7 @@ from pulse_trader import (
     symbol_rank_key,
     rank_self_test,
     Contract,
+    Position,
     ctrl_payload,
     real_oid,
     extract_oid,
@@ -630,6 +631,43 @@ def control_coord_test() -> None:
     rm(os.path.join(tmp, "reset-eq-bingx-t01"))
 
 
+def cancel_replace_regression_test() -> None:
+    """BingX trailing SL updates must use cancel + place, never cancelReplace."""
+    import pulse_trader as pt
+
+    class RejectCancelReplace:
+        def cancel_replace(self, *_args, **_kwargs):
+            raise AssertionError("unsupported BingX cancelReplace route was called")
+
+    p = object.__new__(pt.Pulse)
+    p.api = RejectCancelReplace()
+    p.ctrl_skip = {}
+    p.contracts = {}
+    p.px = {"AAA-USDT": 100.0}
+    p.last_px = {}
+    p.did_io = False
+    p.sl_legal = lambda _pos, _px: True
+    p.clamp_ctrl_price = lambda _pos, _kind, px: float(px)
+    p.desired_sl_tp = lambda _pos: (99.5, 101.0, 99.5, 101.0)
+    calls: List[Tuple[str, Tuple[Any, ...]]] = []
+    p.cancel_order = lambda *args: calls.append(("cancel", args)) or True
+    p.place_ctrl = lambda *args: calls.append(("place", args)) or "new-sl"
+    pos = Position(
+        symbol="AAA-USDT", side="LONG", qty=0.1, entry=100.0,
+        opened_at=time.time() - 60.0, sl=99.0, tp=101.0, peak=100.0,
+        sl_oid="old-sl", sec_sl_oid="old-sl", tp_oid="old-tp",
+    )
+
+    p.replace_sl(pos, 99.5)
+    rec(
+        "ctrl-replace-bingx-safe",
+        calls == [("cancel", ("AAA-USDT", "old-sl")), ("place", (pos, "sec-sl", 99.5))]
+        and pos.sl_oid == "new-sl" and pos.sec_sl_oid == "new-sl"
+        and pos.controls_ok and pos.tp_oid == "old-tp",
+        f"calls={[name for name, _args in calls]} sl={pos.sl_oid}",
+    )
+
+
 def phantom_recon_test() -> None:
     """In-process proof: a confirmed-flat exchange reconciles the tracked book.
 
@@ -843,7 +881,15 @@ def block_calc_test() -> None:
                             {"variantBlockEnabled": True, "blockMaxStack": stack})
         p.indications = SimpleNamespace(last={}, evals={}, settings={"enabled": True})
         p.sets = SimpleNamespace(coverage=lambda: {"families": {}}, sets={}, enabled=True)
-        p.coord = SimpleNamespace(last={"stages": {}}, axes={}, rearrange=True, main_eval=5, real_eval=3)
+        p.coord = SimpleNamespace(
+            last={"stages": {}},
+            axes={},
+            rearrange=True,
+            main_eval=5,
+            real_eval=3,
+            pos_count_vol_ratio=0.05,
+            size_mult=lambda open_n: max(0.35, 1.0 - max(0, int(open_n or 0)) * 0.05),
+        )
         p.open = {}
         p.px = {}
         p.klines_tf = {"1m": {}, "5m": {}, "15m": {}}
@@ -1742,6 +1788,7 @@ def main() -> int:
     cost_test()
     contract_test()
     controls_test()
+    cancel_replace_regression_test()
     coord_test()
     stage_min_pf_test()
     unlimited_test()

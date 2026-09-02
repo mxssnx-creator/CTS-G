@@ -309,6 +309,7 @@ const PROGRESS_PHASE_LABEL: Record<string, string> = {
   replay: "calculating sets",
   score: "scoring sets",
   ready: "ready",
+  deferred: "history deferred by load",
   error: "calc error",
 };
 
@@ -317,7 +318,9 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
   const phase = starting ? "starting" : String(l.progressPhase || "idle");
   const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
-  const busy = !l.progressReady;
+  const updating = ["fetch", "replay", "score"].includes(phase);
+  const busy = updating || !l.progressReady;
+  const gate = l.progressReady ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const details: Array<[string, string]> = [];
   if (l.progressSymbol) details.push(["symbol", l.progressSymbol]);
   if (l.progressSymbolsTotal) details.push(["symbols", `${l.progressSymbolsDone ?? 0}/${l.progressSymbolsTotal}`]);
@@ -329,7 +332,7 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   return (
     <div className="mt-3" data-testid={`lane-progress-${l.type}`}>
       <div className="flex items-baseline justify-between gap-2 font-mono text-[10px] text-muted">
-        <span className={l.progressError ? "text-danger" : ""}>{l.progressError ? "calc error" : label}{l.progressReady ? " · ready" : ""}</span>
+        <span className={l.progressError ? "text-danger" : ""}>{l.progressError ? "calc error" : label}{updating ? " · updating" : ""}{gate}</span>
         <span className="text-sm font-medium text-fg tabular-nums">{pct.toFixed(0)}%</span>
       </div>
       <div className="mt-1 h-2 overflow-hidden rounded-full bg-border">
@@ -550,6 +553,9 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const p = s?.progress;
   const rows = (s?.rows ?? []).slice(0, 8);
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
+  const phase = String(p?.phase ?? "idle");
+  const updating = ["fetch", "replay", "score"].includes(phase);
+  const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
   return (
@@ -557,6 +563,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={p?.ready ? "text-primary" : "text-warn"}>
           sets · {p?.phase ?? "idle"} · {active}/{s?.setCount ?? 0} live
+          {updating ? " · updating" : ""}{gate}
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
         </span>
         <span className="text-muted">
@@ -567,13 +574,16 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           {lanes.map((ln) => {
             const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? 0));
+            const lanePhase = String(ln.progress?.phase ?? "idle");
+            const laneUpdating = ["fetch", "replay", "score"].includes(lanePhase);
+            const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             return (
               <div key={ln.id || ln.type}>
                 <div className="flex justify-between text-muted">
                   <span className={ln.running && !ln.halted ? "text-primary" : "text-faint"}>
                     {ln.type} {ln.activeCount ?? 0}/{ln.setCount ?? 0}
                   </span>
-                  <span>{ln.progress?.phase ?? "idle"} {fmt(lp, 0)}%</span>
+                  <span>{ln.progress?.phase ?? "idle"}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
                   <div className="h-full rounded-full bg-primary" style={{ width: `${lp}%` }} />
@@ -590,6 +600,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           </div>
           <p className="mt-1 text-muted">
             {p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
+            {updating && p?.ready ? " · prior gate remains active" : ""}
           </p>
         </>
       )}

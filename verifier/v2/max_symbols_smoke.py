@@ -90,6 +90,9 @@ def main() -> int:
     names = [f"COIN{i:03d}-USDT" for i in range(N)]
     contracts = {s: pt.Contract(s, 0.01, 0.01, 2, 3, 2.0, 300) for s in names}
     contracts["SOL-USDT"] = pt.Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300)
+    # Keep this verifier genuinely offline: provide the complete fixture
+    # universe before Pulse applies its initial configuration.
+    pt.SYMBOLS[:] = list(contracts)
     p = pt.Pulse(api, contracts)
 
     err = None

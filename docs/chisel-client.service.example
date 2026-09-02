@@ -1,0 +1,19 @@
+[Unit]
+Description=CTS-G managed-proxy Chisel SSH tunnel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Populate this root-owned file from deploy/remote-access.env.example.
+EnvironmentFile=/etc/cts-g/remote-access.env
+ExecStart=/usr/local/bin/chisel client --proxy ${HTTPS_PROXY} --fingerprint ${CHISEL_FINGERPRINT} --auth ${CHISEL_AUTH} ${CHISEL_SERVER} ${CHISEL_REMOTE}
+Restart=always
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

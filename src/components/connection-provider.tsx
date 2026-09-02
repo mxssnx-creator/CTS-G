@@ -51,6 +51,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   return <ConnectionCtx.Provider value={value}>{children}</ConnectionCtx.Provider>;
 }
 
+// This hook intentionally shares the provider module so the context remains private.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useConnection() {
   return useContext(ConnectionCtx);
 }

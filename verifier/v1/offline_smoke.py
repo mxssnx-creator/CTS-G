@@ -62,6 +62,9 @@ def main() -> int:
         "SOL-USDT": pt.Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300),
         "XRP-USDT": pt.Contract("XRP-USDT", 0.1, 0.1, 1, 4, 2.0, 150),
     }
+    # Keep this verifier genuinely offline: Pulse initialisation must not
+    # fetch exchange contracts for symbols that the fixture did not provide.
+    pt.SYMBOLS[:] = list(contracts)
     p = pt.Pulse(api, contracts)
 
     # 1. overlay apply

@@ -13,8 +13,15 @@ screenshots/
 *.pyo
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+*.auth
+ssh-chisel.txt
+snet-ln-deb01.txt
+xssnetlnx-cts-kex.txt
+.local/
+deploy/remote-access.env
 public/live-stats.json
 .project_id
 .node_modules.lock

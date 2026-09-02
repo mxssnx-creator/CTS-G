@@ -4,6 +4,11 @@ Independent BingX pulse desks — **Live mainnet (X01)** and **VST demo (X02)** 
 
 This is the current CTS-G product. Previous CTS trees (keys, SSH dumps, old settings JSON) are not part of this repo.
 
+Operations, recovery, remote-access and backup rules are documented in
+[`INFO.md`](INFO.md). In managed workspaces the Chisel client must use the
+workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
+`127.0.0.1:2222` (forwarded to the VPS SSH service on port `22`).
+
 ## What it does
 
 - **Overall / Live / VST** — three views, no identity bleed. Live and VST keep their own overlay, universe, tape, and control orders.
@@ -48,6 +53,10 @@ From this tree, if SSH works:
 ```bash
 ./deploy/remote-install.sh --host 152.53.114.112 --user root
 ```
+
+If direct SSH is unavailable, establish the documented Chisel tunnel first;
+see [Remote access](INFO.md#remote-access-canonical-solution). Do not put its
+credentials or SSH private keys in this repository.
 
 Installs Node 22, Python 3, Redis, pulse engine at `/opt/grok-x01-pulse`, desk at `/opt/cts-g`. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`).
 

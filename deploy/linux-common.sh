@@ -405,6 +405,12 @@ sync_pulse_tree() {
   fi
   rsync "${args[@]}" "$src/" "$PULSE_DIR/"
 
+  # The source sync intentionally excludes generated Python caches.  Remove
+  # stale caches already present in the install tree so a restart cannot load
+  # bytecode from an older source revision.
+  find "$PULSE_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+  find "$PULSE_DIR" -type d -name __pycache__ -empty -delete
+
   local f
   for f in "overlay-${LIVE_SLOT}.json" "overlay-${VST_SLOT}.json" universe.json; do
     if [[ ! -f "$PULSE_DIR/$f" && -f "$src/$f" ]]; then
