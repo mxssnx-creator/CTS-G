@@ -24,11 +24,14 @@ import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { MAX_SYMBOLS } from "@/lib/config-model";
 import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
+import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
+import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
 const SECTIONS = [
   "overview",
+  "presets",
   "connection",
   "profit",
   "risk",
@@ -66,6 +69,10 @@ function SettingsPage() {
   const [asDefaultMainnet, setAsDefaultMainnet] = useState(true);
   const [credMsg, setCredMsg] = useState<string | null>(null);
   const [credSaving, setCredSaving] = useState(false);
+  const [calcOpt, setCalcOpt] = useState<HistCalcOptions>(DEFAULT_CALC_OPTIONS);
+  const [calcJob, setCalcJob] = useState<HistCalcJob | null>(null);
+  const [calcBusy, setCalcBusy] = useState(false);
+  const [presetId, setPresetId] = useState<string | null>(null);
   const [resetAsk, setResetAsk] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
@@ -134,11 +141,66 @@ function SettingsPage() {
 
   const stats = pickView(raw, conn);
 
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const pull = async () => {
+      const j = await fetchHistCalc();
+      if (!alive) return;
+      setCalcJob(j);
+      const running = j.phase === "fetch" || j.phase === "replay" || j.phase === "score" || j.phase === "queued";
+      if (running) timer = setTimeout(() => void pull(), 1200);
+      else setCalcBusy(false);
+    };
+    if (calcBusy || (calcJob && ["fetch", "replay", "score", "queued"].includes(calcJob.phase))) {
+      void pull();
+    }
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [calcBusy, calcJob?.phase]);
+
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
     setOverlay((o) => ({ ...o, [k]: v }));
     setDirty(true);
     setSaveMsg(null);
+  };
+
+  const onApplyPreset = (id: string) => {
+    dirtyRef.current = true;
+    setOverlay((o) => applyPresetPatch(o, id));
+    setPresetId(id);
+    setDirty(true);
+    setSaveMsg(`Preset ${id} applied · save to persist`);
+  };
+
+  const onCalcAll = async () => {
+    setCalcBusy(true);
+    setSaveMsg(null);
+    const j = await startHistCalc({
+      ...calcOpt,
+      allConfigs: true,
+      symbols: overlay.symbolsAll || overlay.symbols.includes("*") ? undefined : overlay.symbols,
+    });
+    setCalcJob(j);
+    if (j.phase === "error") setCalcBusy(false);
+  };
+
+  const onApplyWinner = () => {
+    const apply = calcJob?.apply;
+    if (!apply || typeof apply !== "object") return;
+    dirtyRef.current = true;
+    setOverlay((o) => {
+      const next = { ...o } as PulseOverlay;
+      for (const [k, v] of Object.entries(apply)) {
+        (next as unknown as Record<string, unknown>)[k] = v;
+      }
+      return next;
+    });
+    setDirty(true);
+    setSaveMsg("Winner applied · save to persist");
   };
 
   const coord = (cts?.coordination_settings ?? cts?.coordinationSettings ?? {}) as Record<
@@ -205,6 +267,7 @@ function SettingsPage() {
     setOverlay(overlayFromCts(cts ?? {}));
     setDirty(true);
     dirtyRef.current = true;
+    setPresetId(null);
     setSaveMsg("Reset to CTS defaults");
     setResetAsk(false);
   };
@@ -251,6 +314,8 @@ function SettingsPage() {
                                   ? "Exits · SL"
                                   : id === "overview"
                                     ? "Overview"
+                                    : id === "presets"
+                                      ? "Presets · calc"
                                     : id === "connection"
                                       ? "Connection · keys"
                                     : id === "controls"
@@ -271,7 +336,7 @@ function SettingsPage() {
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={overlay.dcaEnabled !== false && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -280,6 +345,195 @@ function SettingsPage() {
                 These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
               </p>
             </Card>
+          )}
+          {section === "presets" && (
+            <>
+              <Card title="Config presets · low drawdown" hint="8 coordinated books. Block on · DCA off · SL 0.3 or 0.6. Apply then save to Live or VST.">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {CONFIG_PRESETS.map((p) => {
+                    const on = presetId === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        data-testid={`preset-${p.id}`}
+                        onClick={() => onApplyPreset(p.id)}
+                        className={`min-h-11 rounded-lg border px-3 py-3 text-left ${
+                          on ? "border-primary bg-primary-dim/40 text-fg" : "border-border bg-bg2 text-fg"
+                        }`}
+                      >
+                        <div className="text-sm font-medium">{p.name}</div>
+                        <p className="mt-1 text-xs text-muted">{p.hint}</p>
+                        <p className="mt-2 font-mono text-[11px] text-muted">
+                          SL {p.sl.toFixed(1)} · step {p.minStep}–{p.stepMax} · trail {p.trail} · PF {p.minPf.toFixed(2)} · DDt {p.maxDdS}s
+                        </p>
+                        <p className="font-mono text-[11px] text-primary">Block ON · DCA OFF</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </Card>
+              <Card
+                title="Historic calc · last 20 hours"
+                hint="Independent of engine start. Walks every selected pack × SL:TP × trail × step × symbol. PF + DDT scored per set, indication kind and symbol."
+              >
+                <Grid>
+                  <Slider
+                    label="Minimal Step Range"
+                    value={calcOpt.minStep}
+                    min={3}
+                    max={22}
+                    step={1}
+                    hint={`Sets below step ${calcOpt.minStep} are not calculated`}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, minStep: Math.round(v), stepMax: Math.max(o.stepMax, Math.round(v)) }))}
+                  />
+                  <Slider
+                    label="Step max"
+                    value={calcOpt.stepMax}
+                    min={3}
+                    max={22}
+                    step={1}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
+                  />
+                  <Slider
+                    label="Hours"
+                    value={calcOpt.hours}
+                    min={8}
+                    max={24}
+                    step={1}
+                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars`}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
+                  />
+                  <EnableSlider
+                    label="Trailing"
+                    on={calcOpt.trailing}
+                    hint="off = SL:TP books only"
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, trailing: v }))}
+                  />
+                  <EnableSlider
+                    label="Block"
+                    on={calcOpt.stratBlock}
+                    hint="enabled by default"
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratBlock: v }))}
+                  />
+                  <EnableSlider
+                    label="DCA"
+                    on={calcOpt.stratDca}
+                    hint="disabled by default"
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratDca: v }))}
+                  />
+                  <EnableSlider
+                    label="Indications"
+                    on={calcOpt.stratIndications}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratIndications: v }))}
+                  />
+                  <EnableSlider
+                    label="General pulse"
+                    on={calcOpt.stratGeneral}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, stratGeneral: v }))}
+                  />
+                </Grid>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    data-testid="hist-calc-all"
+                    disabled={calcBusy}
+                    onClick={() => void onCalcAll()}
+                    className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
+                  >
+                    {calcBusy ? "Calculating…" : "Calculate all configs"}
+                  </button>
+                  {calcJob?.winner ? (
+                    <button
+                      type="button"
+                      data-testid="hist-calc-apply"
+                      onClick={onApplyWinner}
+                      className="min-h-11 rounded-lg border border-border px-4 text-sm"
+                    >
+                      Apply winner
+                    </button>
+                  ) : null}
+                  <span className="text-sm text-muted">
+                    {calcJob?.phase && calcJob.phase !== "idle"
+                      ? `${calcJob.phase} ${Math.round(calcJob.pct || 0)}% · ${calcJob.detail || ""}`
+                      : "Runs without starting the engine · last 20 hours"}
+                  </span>
+                </div>
+                {calcJob && calcJob.phase !== "idle" ? (
+                  <div className="space-y-3">
+                    <div className="h-1.5 overflow-hidden rounded-full bg-border">
+                      <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, calcJob.pct || 0))}%` }} />
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <KV k="Validated sets" v={`${calcJob.validatedCount ?? 0}/${calcJob.rowCount ?? 0}`} />
+                      <KV k="Source" v={String(calcJob.source || "—")} />
+                      <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
+                    </div>
+                    {calcJob.winner ? (
+                      <p className="text-sm">
+                        Winner <span className="font-mono text-primary">{calcJob.winner.id}</span> · PF {calcJob.winner.last15Ratio.toFixed(2)} · DDt {Math.round(calcJob.winner.maxDdS)}s · SL {calcJob.winner.slRatio.toFixed(1)}
+                      </p>
+                    ) : null}
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[640px] text-left text-sm">
+                        <thead className="font-mono text-[11px] text-muted">
+                          <tr>
+                            <th className="pb-2 font-medium">Set</th>
+                            <th className="pb-2 font-medium">Pack</th>
+                            <th className="pb-2 text-right font-medium">SL</th>
+                            <th className="pb-2 text-right font-medium">Step</th>
+                            <th className="pb-2 text-right font-medium">PF</th>
+                            <th className="pb-2 text-right font-medium">Max DDt</th>
+                            <th className="pb-2 text-right font-medium">n</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(calcJob.rows || []).slice(0, 16).map((r) => (
+                            <tr key={r.id} className={`border-t border-border font-mono ${r.validated ? "text-fg" : "text-muted"}`}>
+                              <td className="py-1.5">{r.id.replace("-USDT", "")}</td>
+                              <td className="py-1.5">{r.pack}</td>
+                              <td className="py-1.5 text-right">{r.kind === "trail" ? r.trailKey || "trail" : r.slRatio.toFixed(1)}</td>
+                              <td className="py-1.5 text-right">{r.step || "—"}</td>
+                              <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
+                              <td className="py-1.5 text-right">{Math.round(r.maxDdS)}s</td>
+                              <td className="py-1.5 text-right">{r.n}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <p className="mb-2 font-mono text-xs text-muted uppercase">Indication kinds · PF / DDT</p>
+                        <div className="space-y-1">
+                          {Object.entries(calcJob.kinds || {}).map(([k, v]) => (
+                            <div key={k} className="flex justify-between font-mono text-xs">
+                              <span className={v.validated && v.profitable ? "text-primary" : "text-muted"}>{k}</span>
+                              <span>PF {(v.pf ?? 0).toFixed(2)} · DDt {Math.round(v.maxDdS ?? 0)}s · n {v.n ?? 0}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <p className="mb-2 font-mono text-xs text-muted uppercase">Symbols · PF / DDT</p>
+                        <div className="space-y-1">
+                          {(calcJob.bySymbol || []).slice(0, 8).map((s) => (
+                            <div key={s.symbol} className="flex justify-between font-mono text-xs">
+                              <span className={s.validated ? "text-primary" : "text-muted"}>{s.symbol.replace("-USDT", "")}</span>
+                              <span>PF {s.pf.toFixed(2)} · DDt {Math.round(s.maxDdS)}s</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    {calcJob.error ? <p className="text-sm text-danger">{calcJob.error}</p> : null}
+                  </div>
+                ) : null}
+                <p className="text-sm text-muted">
+                  All configs = every enabled pack × all SL:TP ratios × trail variants (if on) × steps from min to max × every selected symbol on the last {calcOpt.hours} hours of 1m bars. Does not start or stop the live engine.
+                </p>
+              </Card>
+            </>
           )}
           {section === "connection" && (
             <Card title="Connection" hint={connHint(conn, stats)}>
@@ -536,7 +790,7 @@ function SettingsPage() {
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts, 0 = unlimited" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={overlay.dcaEnabled !== false && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
                 Indications and general run in parallel for entries. Block adds on a live parent for every count (max stack {overlay.blockMaxStack || "unlimited"}).
@@ -553,6 +807,7 @@ function SettingsPage() {
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
+                <Toggle label="Strict validated gate" on={overlay.setStrictGate !== false} onChange={(v) => patch("setStrictGate", v)} />
                 <Toggle label="Auto-deactivate" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
                 <Toggle label="Reactivate on recovery" on={overlay.setReactivate} onChange={(v) => patch("setReactivate", v)} />
                 <Slider
@@ -1010,8 +1265,11 @@ function SettingsPage() {
             <Card title="DCA" hint="Independent of Block · fires on adverse % from average entry · own last-15 PF / last-25 deact">
               <Toggle
                 label="DCA enabled"
-                on={overlay.dcaEnabled !== false}
-                onChange={(v) => patch("dcaEnabled", v)}
+                on={Boolean(overlay.dcaEnabled)}
+                onChange={(v) => {
+                  patch("dcaEnabled", v);
+                  patch("stratDca", v);
+                }}
               />
               <Toggle
                 label="Auto-deact on last-25 avg loss"
@@ -1420,6 +1678,9 @@ function SettingsPage() {
             data-testid="reset-confirm"
             className="w-full max-w-md space-y-4 rounded-radius border border-border bg-surface p-4 shadow-lg"
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setResetAsk(false);
+            }}
           >
             <div>
               <h2 id="reset-overlay-title" className="text-sm font-medium tracking-wide text-muted uppercase">

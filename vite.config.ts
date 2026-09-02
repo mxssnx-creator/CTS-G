@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, openSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
@@ -372,7 +373,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json"];
+        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -461,6 +462,81 @@ function pulseControlPlugin(): Plugin {
               return;
             }
             jsonRes(res as ServerResponse, 503, { ok: false, detail: "pulse sidecar offline — credentials live in Redis on the desk host" });
+            return;
+          }
+          if (pathOnly === "/hist-calc.json") {
+            if (method === "GET") {
+              const pulse = await tryPulse("GET", "/hist-calc.json");
+              const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+              if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+                jsonRes(res as ServerResponse, pulse.status, pulse.json);
+                return;
+              }
+              const local = join(process.cwd(), "server/pulse/hist-calc.json");
+              if (existsSync(local)) {
+                try {
+                  jsonRes(res as ServerResponse, 200, JSON.parse(readFileSync(local, "utf8")));
+                  return;
+                } catch {
+                  /* fall through */
+                }
+              }
+              jsonRes(res as ServerResponse, 200, {
+                ok: true,
+                phase: "idle",
+                pct: 0,
+                detail: "no calc yet",
+                independent: true,
+                rows: [],
+                kinds: {},
+                bySymbol: [],
+              });
+              return;
+            }
+            if (method !== "POST") {
+              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+              return;
+            }
+            const raw = await readReqBody(req);
+            const pulse = await tryPulse("POST", "/hist-calc.json", raw, 8000);
+            const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+            if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+              jsonRes(res as ServerResponse, pulse.status, pulse.json);
+              return;
+            }
+            const dir = join(process.cwd(), "server/pulse");
+            const reqFile = join(dir, "hist-calc-req.json");
+            try {
+              writeFileSync(reqFile, raw || "{}");
+            } catch {
+              /* ignore */
+            }
+            const seed = {
+              ok: true,
+              phase: "queued",
+              pct: 1,
+              detail: "starting independent 20h calc",
+              independent: true,
+            };
+            try {
+              writeFileSync(join(dir, "hist-calc.json"), JSON.stringify(seed));
+            } catch {
+              /* ignore */
+            }
+            try {
+              const logFd = openSync(join(dir, "hist-calc.log"), "a");
+              const child = spawn("python3", [join(dir, "hist_calc.py"), "--run", "--req", reqFile], {
+                cwd: dir,
+                detached: true,
+                stdio: ["ignore", logFd, logFd],
+                env: { ...process.env, CTS_HIST_CALC_PATH: join(dir, "hist-calc.json") },
+              });
+              child.unref();
+            } catch (err) {
+              jsonRes(res as ServerResponse, 500, { ok: false, phase: "error", detail: String(err) });
+              return;
+            }
+            jsonRes(res as ServerResponse, 200, seed);
             return;
           }
           if (pathOnly === "/config.json") {

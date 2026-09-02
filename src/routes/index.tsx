@@ -508,7 +508,7 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
     ["indications", p.stratIndications !== false],
     ["general", p.stratGeneral !== false],
     ["block", p.stratBlock !== false],
-    ["dca", p.dcaEnabled !== false && stats?.dca?.enabled !== false],
+    ["dca", Boolean(p.dcaEnabled) && stats?.dca?.enabled !== false],
     ["trailing", p.stratTrailing !== false],
   ];
   const tp = (p.positionCostPct ?? 0.15) * (p.tpCostRatio ?? 5);

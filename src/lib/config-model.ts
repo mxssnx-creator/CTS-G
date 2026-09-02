@@ -212,6 +212,7 @@ export type PulseOverlay = {
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
   setUseHistoricGate: boolean;
+  setStrictGate: boolean;
   setMinSamples: number;
   setReactivate: boolean;
   setMaxActive: number;
@@ -268,7 +269,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
-  dcaEnabled: true,
+  dcaEnabled: false,
   dcaMaxSteps: 4,
   dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
@@ -321,7 +322,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratGeneral: true,
-  stratDca: true,
+  stratDca: false,
   indTypeState: true,
   indTypeDirection: true,
   indTypeMove: true,
@@ -357,6 +358,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMaxDdTimeS: 1800,
   setAutoDeact: true,
   setUseHistoricGate: true,
+  setStrictGate: true,
   setMinSamples: 12,
   setReactivate: true,
   setMaxActive: 0,
@@ -386,7 +388,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
     "strategy.sets": true,
     "core.historic": true,
     "strategy.block": true,
-    "strategy.dca": true,
+    "strategy.dca": false,
     "strategy.coord": true,
     "strategy.indications": true,
     "strategy.rearrange": true,
@@ -490,6 +492,7 @@ export type CtsSettings = {
   setMaxDdTimeS?: number;
   setAutoDeact?: boolean;
   setUseHistoricGate?: boolean;
+  setStrictGate?: boolean;
   setMinSamples?: number;
   setReactivate?: boolean;
   setMaxActive?: number;
@@ -586,7 +589,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
-    dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, true),
+    dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, false),
     dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 4),
     dcaCooldownSeconds: num(cts.dcaCooldownSeconds ?? coord.dcaCooldownSeconds, 30),
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
@@ -639,7 +642,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratGeneral: bool(cts.stratGeneral, true),
-    stratDca: bool(cts.stratDca ?? cts.dcaEnabled, true),
+    stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),
     indTypeMove: bool(cts.indTypeMove, true),
@@ -665,6 +668,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 1800),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
+    setStrictGate: bool(cts.setStrictGate, true),
     setMinSamples: num(cts.setMinSamples, 12),
     setReactivate: bool(cts.setReactivate, true),
     setMaxActive: num(cts.setMaxActive, 0),
@@ -792,7 +796,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.dcaStepVolumeMultipliers = steps > 0 ? mult.slice(0, steps) : mult;
   const m: Record<string, boolean> = { ...(next.modules ?? {}) };
   m["strategy.block"] = Boolean(next.blockEnabled && next.stratBlock);
-  m["strategy.dca"] = next.dcaEnabled !== false && next.stratDca !== false;
+  m["strategy.dca"] = Boolean(next.dcaEnabled) && next.stratDca !== false;
   m["exec.controls"] = Boolean(next.controlOrders);
   m["strategy.rearrange"] = Boolean(next.rearrange);
   m["strategy.indications"] = Boolean(next.indEnabled && next.stratIndications);

@@ -3155,7 +3155,7 @@ class Pulse:
         self.strat_block = bool(ov.get("stratBlock", True))
         self.strat_trail = bool(ov.get("stratTrailing", True))
         self.strat_general = bool(ov.get("stratGeneral", True))
-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
@@ -3268,7 +3268,7 @@ class Pulse:
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
             self.strat_ind = True
-        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
+        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
@@ -4457,7 +4457,7 @@ class Pulse:
             self.record_test(name, ok, detail)
         dca_ms = (time.perf_counter() - t_dca) * 1000
         self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
-        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
+        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
         self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
         sl, tp, src = resolve_sl_tp(
@@ -4991,7 +4991,7 @@ class Pulse:
             self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
         except Exception as e:
             self.record_test("qa-ind-self", False, str(e)[:80])
-        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
+        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
         self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
         try:
             rows_g = self.strategy_closes()

@@ -868,6 +868,18 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
+        if path in ("/hist-calc.json", "/hist-calc"):
+            try:
+                from hist_calc import read_job, public_presets
+                blob = read_job()
+                if not blob.get("presets"):
+                    blob["presets"] = public_presets()
+                blob["ok"] = True
+                blob["independent"] = True
+                self._json(blob)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True}, 200)
+            return
         if path in ("/config.json", "/config"):
             if conn == "overall":
                 self._json({
@@ -916,6 +928,16 @@ class Handler(SimpleHTTPRequestHandler):
             blob["ok"] = ok
             blob["detail"] = detail
             self._json(blob, 200 if ok else 400)
+            return
+        if path in ("/hist-calc.json", "/hist-calc"):
+            try:
+                from hist_calc import start_job, is_running
+                job = start_job(body if isinstance(body, dict) else {})
+                job["ok"] = True
+                job["running"] = is_running()
+                self._json(job)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200]}, 200)
             return
         if path not in ("/config.json", "/config"):
             self.send_error(404)

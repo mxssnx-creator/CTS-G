@@ -8,6 +8,8 @@ merge into the same book. Last 25 average Result-R < 0 deactivates that Set.
 from __future__ import annotations
 
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -21,22 +23,23 @@ from position_cost import (
     cost_as_frac,
     net_pnl_pct,
 )
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move
+from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common
 from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
 
 PACKS = ("indications", "general")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 480
+LOOKBACK_MAX = 1440
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 3
 STEP_MAX = 22
-HIST_CAP = 80
+HIST_CAP = 240
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common")
-IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move"}
+IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common"}
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -61,6 +64,61 @@ def finite(v: Any, fallback: float = 0.0) -> float:
     except Exception:
         return fallback
     return n if n == n and abs(n) != float("inf") else fallback
+
+
+def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
+    """Keep recent fills from every symbol so last-N PF/DDT is not the last 1–2 names."""
+    rows = [r for r in bucket if isinstance(r, dict)]
+    cap = max(8, int(cap or HIST_CAP))
+    if len(rows) <= cap:
+        rows.sort(key=lambda r: finite(r.get("t")))
+        return rows
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
+    per = max(3, cap // max(1, len(by)))
+    out: List[Dict[str, Any]] = []
+    for tape in by.values():
+        tape.sort(key=lambda r: finite(r.get("t")))
+        out.extend(tape[-per:])
+    out.sort(key=lambda r: finite(r.get("t")))
+    return out[-cap:]
+
+
+def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    """Last-N fills with every symbol still represented when possible."""
+    n = max(1, int(n))
+    ordered = [r for r in rows if isinstance(r, dict)]
+    ordered.sort(key=lambda r: finite(r.get("t")))
+    if len(ordered) <= n:
+        return ordered
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for r in ordered:
+        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
+    if len(by) <= 1:
+        return ordered[-n:]
+    names = list(by.keys())
+    if len(names) >= n:
+        recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
+        picked = [by[s][-1] for s in recent]
+        picked.sort(key=lambda r: finite(r.get("t")))
+        return picked
+    per = max(1, n // len(names))
+    out: List[Dict[str, Any]] = []
+    for tape in by.values():
+        out.extend(tape[-per:])
+    out.sort(key=lambda r: finite(r.get("t")))
+    if len(out) < n:
+        taken = {id(x) for x in out}
+        for r in reversed(ordered):
+            if id(r) in taken:
+                continue
+            out.append(r)
+            taken.add(id(r))
+            if len(out) >= n:
+                break
+        out.sort(key=lambda r: finite(r.get("t")))
+    return out[-n:]
 
 
 def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
@@ -106,6 +164,31 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
         "maxDepth": round(max_depth, 6),
         "inDd": 1.0 if started is not None else 0.0,
         "n": float(len(ordered)),
+    }
+
+
+def drawdown_time_by_symbol(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
+    """DDT per symbol, then max/mean. Mixed-market tapes must not span one 20h episode."""
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
+    if len(by) <= 1:
+        return drawdown_time(rows, now)
+    parts = [drawdown_time(tape, now) for tape in by.values() if tape]
+    if not parts:
+        return drawdown_time(rows, now)
+    episodes = sum(p["episodes"] for p in parts)
+    return {
+        "episodes": float(episodes),
+        "maxS": round(max(p["maxS"] for p in parts), 1),
+        "avgS": round(sum(p["avgS"] for p in parts) / len(parts), 1),
+        "currentS": round(max(p["currentS"] for p in parts), 1),
+        "maxDepth": round(max(p["maxDepth"] for p in parts), 6),
+        "inDd": 1.0 if any(p["inDd"] for p in parts) else 0.0,
+        "n": float(len(rows)),
+        "symbols": float(len(by)),
     }
 
 
@@ -205,26 +288,58 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
 
 def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
     candles = bars_to_candles(list(bars)[-60:], now=now, period_s=BAR_S)
-    ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
-    ta = evaluate_ta_pack(candles, settings)
     closes = [float(b[3]) for b in bars[-60:]] if bars else []
+    want = {
+        "sig": bool(settings.get("typeSignals", True)),
+        "ta": bool(settings.get("typeState", True)),
+        "dir": bool(settings.get("typeDirection", True)),
+        "move": bool(settings.get("typeMove", True)),
+        "act": bool(settings.get("typeActive", True)),
+        "common": bool(settings.get("typeCommon", True)),
+    }
     votes: List[Tuple[int, float, str]] = []
-    if ev:
-        votes.append((1 if ev.direction == "long" else -1, ev.confidence, "sig"))
-    if ta:
-        votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
-    try:
-        drow = evaluate_direction("hist", closes, settings) if closes else None
-        if drow:
-            votes.append((1 if drow.direction == "long" else -1, drow.confidence, "dir"))
-    except Exception:
-        pass
-    try:
-        mrow = evaluate_move("hist", closes, settings) if closes else None
-        if mrow:
-            votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
-    except Exception:
-        pass
+    if want["sig"]:
+        try:
+            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
+            if ev:
+                votes.append((1 if ev.direction == "long" else -1, ev.confidence, "sig"))
+        except Exception:
+            pass
+    if want["ta"]:
+        try:
+            ta = evaluate_ta_pack(candles, settings)
+            if ta:
+                votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
+        except Exception:
+            pass
+    if want["dir"] and closes:
+        try:
+            drow = evaluate_direction("hist", closes, settings)
+            if drow:
+                votes.append((1 if drow.direction == "long" else -1, drow.confidence, "dir"))
+        except Exception:
+            pass
+    if want["move"] and closes:
+        try:
+            mrow = evaluate_move("hist", closes, settings)
+            if mrow:
+                votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
+        except Exception:
+            pass
+    if want["act"] and closes:
+        try:
+            arow = evaluate_active("hist", closes, settings)
+            if arow:
+                votes.append((1 if arow.direction == "long" else -1, arow.confidence, "act"))
+        except Exception:
+            pass
+    if want["common"] and candles:
+        try:
+            crow = evaluate_common("hist", candles, settings)
+            if crow:
+                votes.append((1 if crow.direction == "long" else -1, crow.confidence, "common"))
+        except Exception:
+            pass
     if not votes:
         return 0, 0.0, "flat"
     long_w = sum(c for d, c, _ in votes if d > 0)
@@ -397,6 +512,7 @@ class SetBook:
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_TP_RATIOS)
         self.trails: List[Tuple[str, float, float]] = []
+        self.trail_enabled = True
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
         self.bars: Dict[str, List[List[float]]] = {}
@@ -413,7 +529,7 @@ class SetBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback = max(120, min(1440, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        self.lookback = max(120, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
@@ -468,28 +584,50 @@ class SetBook:
             except Exception:
                 continue
         self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
-        self.trails = trail_candidates(
-            float(ov.get("trailArmMin") or 0.3),
-            float(ov.get("trailArmMax") or 1.5),
-            float(ov.get("trailGiveMin") or 0.1),
-            float(ov.get("trailGiveMax") or 0.5),
-            float(ov.get("trailGiveFactor") or 1.0 / 3.0),
-            bool(ov.get("trailRecalcGive", True)),
-            ov.get("trailVariants") or list(TRAIL_VARIANTS),
-        )
+        self.trail_enabled = bool(ov.get("stratTrailing", True))
+        if self.trail_enabled:
+            self.trails = trail_candidates(
+                float(ov.get("trailArmMin") or 0.3),
+                float(ov.get("trailArmMax") or 1.5),
+                float(ov.get("trailGiveMin") or 0.1),
+                float(ov.get("trailGiveMax") or 0.5),
+                float(ov.get("trailGiveFactor") or 1.0 / 3.0),
+                bool(ov.get("trailRecalcGive", True)),
+                ov.get("trailVariants") or list(TRAIL_VARIANTS),
+            )
+        else:
+            self.trails = []
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
         self.ind_settings = {
             "candleLimit": 60,
             "minimumStrength": float(ov.get("indMinStrength") or 0.2),
             "minimumConfidence": float(ov.get("indMinConfidence") or 0.6),
+            "minimumAgreement": float(ov.get("indMinAgreement") or 0.55),
             "stopLossMinPct": float(ov.get("indStopMinPct") or 0.2),
             "stopLossMaxPct": float(ov.get("indStopMaxPct") or 1.5),
             "stopLossAtrMultiplier": float(ov.get("indAtrMult") or 0.85),
             "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
             "takeProfitMaxPct": 5.0,
             "positionCostPct": self.cost_pct,
+            "typeState": bool(ov.get("indTypeState", True)),
+            "typeSignals": bool(ov.get("indTypeSignals", True)),
+            "typeDirection": bool(ov.get("indTypeDirection", True)),
+            "typeMove": bool(ov.get("indTypeMove", True)),
+            "typeActive": bool(ov.get("indTypeActive", True)),
+            "typeCommon": bool(ov.get("indTypeCommon", True)),
+            "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
+            "dirRange": int(ov.get("indDirRange") or 10),
+            "moveRange": int(ov.get("indMoveRange") or 10),
         }
+        try:
+            self.cooldown_bars = max(1, min(12, int(ov.get("setCooldownBars") or 2)))
+        except Exception:
+            self.cooldown_bars = 2
+        try:
+            self.scratch_min = float(ov.get("setScratchMin") or 0.0016)
+        except Exception:
+            self.scratch_min = 0.0016
         self._rebuild_sets()
 
     def _step_grid(self) -> List[int]:
@@ -502,7 +640,7 @@ class SetBook:
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
-        trails = list(self.trails) or [("0.3:0.1", 0.3, 0.1)]
+        trails = list(self.trails) if self.trails and getattr(self, "trail_enabled", True) else []
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
@@ -673,7 +811,7 @@ class SetBook:
             cid0 = row.get("client_id") or ""
             if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
                 tape.append(dict(row))
-                del tape[:-HIST_CAP]
+                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
             sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
@@ -729,6 +867,9 @@ class SetBook:
         on_step: Optional[Callable[[], None]] = None,
         symbols: Optional[Sequence[str]] = None,
         abort: Optional[Callable[[], bool]] = None,
+        workers: int = 1,
+        drop_bars: bool = False,
+        on_symbol: Optional[Callable[[str, int, int], None]] = None,
     ) -> None:
         if not self.enabled or self._running:
             return
@@ -752,32 +893,75 @@ class SetBook:
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
             aborted = False
-            for i, symbol in enumerate(names):
-                if abort and abort():
-                    aborted = True
-                    self.progress.detail = f"aborted-load {i}/{len(names)}"
-                    break
-                self.progress.symbol = symbol
-                self.progress.symbols_done = i
-                self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
-                self.progress.elapsed_ms = (time.time() - t0) * 1000
-                self._replay_symbol(symbol, hist, now, on_step=on_step, ind_hist=ind_hist)
-                self.progress.bars_done += len(self.bars[symbol])
-                if on_step:
-                    on_step()
-            self.ind_hist = {k: v[-HIST_CAP:] for k, v in ind_hist.items()}
+            w = max(1, min(int(workers or 1), 8, len(names) or 1))
+            lock = threading.Lock()
+
+            def _merge(symbol: str, local: Dict[str, List[Dict[str, Any]]], local_ind: Dict[str, List[Dict[str, Any]]]) -> None:
+                for sid, rows in local.items():
+                    if rows:
+                        hist.setdefault(sid, []).extend(rows)
+                for k, rows in local_ind.items():
+                    if rows:
+                        ind_hist.setdefault(k, []).extend(rows)
+                nbar = len(self.bars.get(symbol) or [])
+                if drop_bars:
+                    self.bars.pop(symbol, None)
+                self.progress.bars_done += nbar
+
+            def _one(symbol: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+                local: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+                local_ind: Dict[str, List[Dict[str, Any]]] = {}
+                self._replay_symbol(symbol, local, now, on_step=None, ind_hist=local_ind)
+                return symbol, local, local_ind
+
+            done = 0
+            if w <= 1 or len(names) <= 1:
+                for i, symbol in enumerate(names):
+                    if abort and abort():
+                        aborted = True
+                        self.progress.detail = f"aborted-load {i}/{len(names)}"
+                        break
+                    self.progress.symbol = symbol
+                    self.progress.symbols_done = i
+                    self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
+                    self.progress.elapsed_ms = (time.time() - t0) * 1000
+                    self.progress.detail = f"replay {symbol} {i + 1}/{len(names)}"
+                    _sym, local, local_ind = _one(symbol)
+                    _merge(_sym, local, local_ind)
+                    done += 1
+                    if on_symbol:
+                        on_symbol(symbol, done, len(names))
+                    if on_step:
+                        on_step()
+            else:
+                with ThreadPoolExecutor(max_workers=w, thread_name_prefix="set-replay") as pool:
+                    futs = {pool.submit(_one, s): s for s in names}
+                    for fut in as_completed(futs):
+                        if abort and abort():
+                            aborted = True
+                            for pending in futs:
+                                pending.cancel()
+                            break
+                        symbol, local, local_ind = fut.result()
+                        with lock:
+                            _merge(symbol, local, local_ind)
+                            done += 1
+                            self.progress.symbol = symbol
+                            self.progress.symbols_done = done
+                            self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
+                            self.progress.elapsed_ms = (time.time() - t0) * 1000
+                            self.progress.detail = f"replay {symbol} {done}/{len(names)}"
+                        if on_symbol:
+                            on_symbol(symbol, done, len(names))
+                        if on_step:
+                            on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
-            for st in self.by_idx:
-                full = hist.get(st.id, [])
-                st.hist = full[-40:]
-                self._score_one(st)
-                st.n = len(full)
-            self._cap_active()
+            self._commit_hist(hist, ind_hist)
             self.progress.phase = "ready"
             self.progress.pct = 100.0
             self.progress.ready = True
-            self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
+            self.progress.symbols_done = done if aborted else len(names)
             self.progress.sets_done = len(self.sets)
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
@@ -792,6 +976,45 @@ class SetBook:
             self.progress.elapsed_ms = self.progress.last_run_ms
             self.last_run = time.time()
             self._running = False
+
+    def _commit_hist(
+        self,
+        hist: Dict[str, List[Dict[str, Any]]],
+        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> None:
+        if ind_hist is not None:
+            self.ind_hist = {k: trim_hist(v, HIST_CAP) for k, v in ind_hist.items()}
+        for st in self.by_idx:
+            full = hist.get(st.id, [])
+            full.sort(key=lambda r: finite(r.get("t")))
+            st.hist = full
+            self._score_one(st)
+            n_full = len(full)
+            st.hist = trim_hist(full, HIST_CAP)
+            st.n = n_full
+        self._cap_active()
+
+    def replay_symbol_partial(
+        self,
+        symbol: str,
+        hist: Dict[str, List[Dict[str, Any]]],
+        now: Optional[float] = None,
+        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        drop_bars: bool = True,
+    ) -> int:
+        """Replay one symbol into hist and drop its bars. Independent of other names."""
+        if symbol not in self.bars:
+            return 0
+        nbar = len(self.bars[symbol])
+        if nbar < self.min_bars:
+            if drop_bars:
+                self.bars.pop(symbol, None)
+            return 0
+        now = now or time.time()
+        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist)
+        if drop_bars:
+            self.bars.pop(symbol, None)
+        return nbar
 
     def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
         bars = self.bars[symbol]
@@ -867,8 +1090,6 @@ class SetBook:
                         }
                         bucket = hist[st.id]
                         bucket.append(rec)
-                        if len(bucket) > HIST_CAP:
-                            del bucket[:-HIST_CAP]
                         # Attribute indications-pack fills to the indication
                         # kinds that voted for the taken direction.
                         if st.pack == "indications" and ind_hist is not None:
@@ -878,8 +1099,6 @@ class SetBook:
                                     continue
                                 buf = ind_hist.setdefault(kind, [])
                                 buf.append(rec)
-                                if len(buf) > HIST_CAP:
-                                    del buf[:-HIST_CAP]
                         open_pos = None
                         cool = self.cooldown_bars
                     continue
@@ -902,6 +1121,7 @@ class SetBook:
 
     def _score_one(self, st: SetState) -> None:
         tape = st.tape()
+        tape.sort(key=lambda r: finite(r.get("t")))
         st.n = len(st.hist)
         pnls = [finite(r.get("pnl")) for r in tape]
         st.wins = sum(1 for x in pnls if x > 0)
@@ -918,7 +1138,8 @@ class SetBook:
             k = str(r.get("reason") or "x").split(":")[0]
             counts[k] = counts.get(k, 0) + 1
         st.exits = counts
-        last15 = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
+        pf_tape = last_n_balanced(tape, self.pf_n)
+        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
         st.last15_ratio = float(last15["ratio"])
         st.last15_classic = float(last15["classicPf"])
         st.last15_n = int(last15["count"])
@@ -941,7 +1162,7 @@ class SetBook:
         live_tail_avg = 0.0
         if live_tail:
             live_tail_avg = sum(finite(r.get("pnl")) for r in live_tail) / len(live_tail)
-        dd = drawdown_time(tape)
+        dd = drawdown_time_by_symbol(tape)
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
@@ -1063,13 +1284,13 @@ class SetBook:
             "dims": {
                 "pack": len(self.packs),
                 "sl": len(self.sl_ratios),
-                "trail": len(trails) or 1,
+                "trail": len(trails),
                 "step": len(self.steps),
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
             "product": len(self.by_idx),
             "indexed": True,
-            "independentTrail": True,
+            "independentTrail": bool(getattr(self, "trail_enabled", True)),
             "byTrail": by_tr,
             "bySl": by_sl,
             "trailCover": all(any(st.trail_key == t for st in trail_sets) for t in trails) if trails else True,
@@ -1141,8 +1362,10 @@ class SetBook:
     def ind_stats(self, kind: str) -> Dict[str, Any]:
         """Cost-adjusted PF evidence for one indication kind (hist + live)."""
         tape = list(self.ind_hist.get(kind) or []) + list(self.ind_live.get(kind) or [])
+        tape.sort(key=lambda r: finite(r.get("t")))
+        dd = drawdown_time(tape)
         if tape:
-            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
+            last = last_n_cost_pf(last_n_balanced(tape, self.pf_n), self.pf_n, self.cost_pct)
             n = int(last["count"])
             pf = float(last["ratio"])
         else:
@@ -1155,6 +1378,9 @@ class SetBook:
             "pf": round(pf, 4),
             "validated": n >= need,
             "profitable": pf + 1e-9 >= 1.0,
+            "maxDdS": round(float(dd.get("maxS") or 0), 1),
+            "avgDdS": round(float(dd.get("avgS") or 0), 1),
+            "ddEpisodes": int(dd.get("episodes") or 0),
         }
 
     def indication_ok(self, kind: str) -> bool:
@@ -1285,6 +1511,7 @@ class SetBook:
             "stepMax": self.step_max,
             "stepAdapt": self.step_adapt,
             "steps": list(self.steps),
+            "trailEnabled": bool(getattr(self, "trail_enabled", True)),
             "histFills": sum(s.n for s in self.sets.values()),
             "barsSymbols": len(self.bars),
             "progress": {
@@ -1706,6 +1933,27 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ind_fills = sum(len(v) for v in g6.ind_hist.values())
     out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
     out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
+    mixed_dd = [
+        {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
+        {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},
+        {"t": 50_000, "pnl": 1.0, "symbol": "B-USDT"},
+        {"t": 50_060, "pnl": -0.2, "symbol": "B-USDT"},
+        {"t": 50_120, "pnl": 1.5, "symbol": "B-USDT"},
+    ]
+    naive = drawdown_time(mixed_dd, now=50_120)
+    split = drawdown_time_by_symbol(mixed_dd, now=50_120)
+    out.append(("set-dd-split-not-span", split["maxS"] < 5_000 and naive["maxS"] > 5_000, f"split={split['maxS']} naive={naive['maxS']}"))
+    out.append(("set-dd-split-symbols", split.get("symbols") == 2.0, str(split)))
+    bookp = SetBook()
+    bookp.load({"histEnabled": True, "histLookbackBars": 180, "histMinBars": 60, "histWarmup": 16, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False, "setHonorTp": True})
+    bookp.ingest_bars("P1-USDT", synth_trend(180, 40.0, 0.16, 0.04))
+    bookp.ingest_bars("P2-USDT", synth_trend(180, 22.0, -0.12, 0.04))
+    bookp.ingest_bars("P3-USDT", synth_trend(180, 31.0, 0.10, 0.04))
+    bookp.replay_all(now=1_700_000_500, workers=3, drop_bars=True)
+    out.append(("set-parallel-ready", bookp.progress.ready and not bookp.progress.error, f"{bookp.progress.phase} {bookp.progress.error}"))
+    out.append(("set-parallel-fills", sum(s.n for s in bookp.sets.values()) >= 4, f"n={sum(s.n for s in bookp.sets.values())}"))
+    out.append(("set-drop-bars", not bookp.bars, f"left={list(bookp.bars)}"))
+    out.append(("set-lookback-20h", LOOKBACK_MAX >= 1200 and 1200 <= LOOKBACK_MAX, str(LOOKBACK_MAX)))
     return out
 
 

@@ -24,3 +24,6 @@ public/live-stats.json
 /tmp/
 .preview.pid
 preview.log
+server/pulse/hist-calc.json
+server/pulse/hist-calc-req.json
+server/pulse/hist-calc.log

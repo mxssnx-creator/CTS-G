@@ -21,6 +21,7 @@ from risk_variants import self_test as variants_self_test
 from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
+from hist_calc import self_test as hist_calc_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
 from pulse_trader import (
@@ -56,6 +57,7 @@ def run_units() -> None:
         (dca_self_test, "dca"),
         (stats_self_test, "stats"),
         (load_self_test, "load"),
+        (hist_calc_self_test, "histcalc"),
     ):
         try:
             rows = fn()
