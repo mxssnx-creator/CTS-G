@@ -314,6 +314,8 @@ restore_pulse_trader() {
 migrate_overlay_rungs() {
   # Overlay rsync is excluded so live 0-rung (unbounded pyramid) files survive
   # updates. Clamp 0 → Block 3 / DCA distance-list so volume cannot balloon.
+  # Also reset a leftover volume_ratio that was stored as max_stack (n=1 then
+  # adds 3× parent instead of 1×).
   python3 - "$PULSE_DIR" <<'PY'
 import json, os, sys
 root = sys.argv[1]
@@ -338,6 +340,15 @@ for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json"):
         stack = 0
     if stack <= 0:
         ov["blockMaxStack"] = 3
+        stack = 3
+        dirty = True
+    try:
+        vr = float(ov.get("blockVolumeRatio") if ov.get("blockVolumeRatio") is not None else 1)
+    except Exception:
+        vr = 1.0
+    # Stack leaked into ratio (vr==stack>=2) → n=1 adds stack× parent.
+    if vr >= 2.0 and int(round(vr)) == int(stack or 0):
+        ov["blockVolumeRatio"] = 1
         dirty = True
     if not dirty:
         continue
@@ -346,7 +357,12 @@ for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json"):
         json.dump(ov, f, indent=2)
         f.write("\n")
     os.replace(tmp, path)
-    print("migrated", name, "dcaMaxSteps", ov["dcaMaxSteps"], "blockMaxStack", ov["blockMaxStack"])
+    print(
+        "migrated", name,
+        "dcaMaxSteps", ov.get("dcaMaxSteps"),
+        "blockMaxStack", ov.get("blockMaxStack"),
+        "blockVolumeRatio", ov.get("blockVolumeRatio"),
+    )
 PY
 }
 

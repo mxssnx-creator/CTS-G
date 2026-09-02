@@ -3222,6 +3222,14 @@ class Pulse:
             self.load.configure(ov)
         except Exception:
             pass
+        try:
+            b_ratio = float(b_ratio)
+        except Exception:
+            b_ratio = 1.0
+        # Guard: leftover overlay stored max_stack as volume_ratio (n=1 then
+        # adds 3× parent). Count×ratio vs original parent needs ratio ~1.
+        if b_ratio >= 2.0 and int(round(b_ratio)) == int(self.block.max_stack):
+            b_ratio = 1.0
         self.block.volume_ratio = max(0.25, min(3.0, b_ratio))
         self.block.pf_ratio = max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, b_pfr))
         self.block.pause_ratio = max(0, b_pause)

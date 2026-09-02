@@ -193,6 +193,18 @@ def unlimited_test() -> None:
     d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
     rec("dca-unlim-engine", d.max_steps == 2 and not d.unlimited(), str(d.max_steps))
     rec("coord-unlim-already", True)
+    sized = BlockBook("/tmp/block-vr1.json", {"variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0, "defaultMinPF": 1.1})
+    f1 = sized.formula(10.0, 1)
+    rec("block-n1-is-1x-parent", abs(f1["volumeIncrement"] - 1.0) < 1e-9 and abs(f1["targetAddQty"] - 10.0) < 1e-9, str(f1))
+    f3 = sized.formula(10.0, 3)
+    rec("block-n3-is-3x-parent", abs(f3["volumeIncrement"] - 3.0) < 1e-9 and abs(f3["targetAddQty"] - 30.0) < 1e-9, str(f3))
+    lane1 = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
+    pick1 = sized.pick_emit(sized.evaluate_counts(lane1, live_n=1, intern_pf=1.5))
+    rec(
+        "block-pick-n1-requests-1x",
+        pick1 is not None and int(pick1["blockCount"]) == 1 and abs(float(pick1["requestedAddQty"]) - 10.0) < 1e-9,
+        f"n={pick1 and pick1.get('blockCount')} qty={pick1 and pick1.get('requestedAddQty')}",
+    )
 
 
 def coord_test() -> None:
