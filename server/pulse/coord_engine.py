@@ -56,10 +56,10 @@ class Coordinator:
             "cont": Axis(True, 8),
             "pause": Axis(True, 8),
         }
-        self.min_pf = 1.1
+        self.min_pf = 1.25
         # Stage PositionCost PF floors on the cost scale (1.00 = neutral):
-        # Base 1.05 / Main 1.08 / Real 1.10 (default min 1.1 systemwide).
-        self.stage_min_pf = {"base": 1.05, "main": 1.08, "real": 1.10}
+        # Base / Main / Real all 1.25 systemwide.
+        self.stage_min_pf = {"base": 1.25, "main": 1.25, "real": 1.25}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -69,9 +69,9 @@ class Coordinator:
         self.prev_window = 25
         self.main_eval = 5
         self.real_eval = 3
-        self.min_step = 8
+        self.min_step = 2
         self.max_sl_ratio = 2.5
-        self.trailing_min_step = 6
+        self.trailing_min_step = 2
         self.pos_count_vol_ratio = 0.05
         self.rearrange = True
         self.rearrange_gap = 0.22
@@ -99,16 +99,15 @@ class Coordinator:
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
             st = stages_cts.get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
+            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.25)
         except Exception:
-            self.min_pf = float(ov.get("minPf") or 1.1)
-        # Per-stage floors: overlay wins, then strategies.main.<stage>, then
-        # the recoordinated defaults (Base 1.05 / Main 1.08 / Real 1.10).
+            self.min_pf = float(ov.get("minPf") or 1.25)
+        # Per-stage floors: overlay wins, then strategies.main.<stage>, then 1.25.
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
         except Exception:
             stages_cts = {}
-        for _stage, _dflt in (("base", 1.05), ("main", 1.08), ("real", 1.10)):
+        for _stage, _dflt in (("base", 1.25), ("main", 1.25), ("real", 1.25)):
             _v = ov.get(f"{_stage}MinPf")
             if _v is None:
                 try:
@@ -139,9 +138,9 @@ class Coordinator:
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
         self.main_eval = int(coord.get("mainEvalPosCount") or 5)
         self.real_eval = int(coord.get("realEvalPosCount") or 3)
-        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 6)
+        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 2)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
-        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 6)
+        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 2)
         self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)
@@ -207,9 +206,9 @@ class Coordinator:
             "classicPf15": cost["classicPf"],
             "costPct": cost["costPct"],
             "minPf": self.min_pf,
-            "baseMinPf": float(self.stage_min_pf.get("base", 1.05)),
-            "mainMinPf": float(self.stage_min_pf.get("main", 1.08)),
-            "realMinPf": float(self.stage_min_pf.get("real", 1.10)),
+            "baseMinPf": float(self.stage_min_pf.get("base", 1.25)),
+            "mainMinPf": float(self.stage_min_pf.get("main", 1.25)),
+            "realMinPf": float(self.stage_min_pf.get("real", 1.25)),
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
@@ -224,9 +223,9 @@ class Coordinator:
         intern_ok = intern_n >= max(5, self.min_samples if hasattr(self, "min_samples") else 5) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
-        base_floor = float(self.stage_min_pf.get("base", 1.05))
-        main_floor = float(self.stage_min_pf.get("main", 1.08))
-        real_floor = float(self.stage_min_pf.get("real", 1.10))
+        base_floor = float(self.stage_min_pf.get("base", 1.25))
+        main_floor = float(self.stage_min_pf.get("main", 1.25))
+        real_floor = float(self.stage_min_pf.get("real", 1.25))
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
             if last_cost["ratio"] + 1e-9 < base_floor:

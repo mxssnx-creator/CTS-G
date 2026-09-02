@@ -606,7 +606,7 @@ function SettingsPage() {
                   <Slider
                     label="Minimal Step Range"
                     value={calcOpt.minStep}
-                    min={3}
+                    min={2}
                     max={22}
                     step={1}
                     hint={`Sets below step ${calcOpt.minStep} are not calculated`}
@@ -615,7 +615,7 @@ function SettingsPage() {
                   <Slider
                     label="Step max"
                     value={calcOpt.stepMax}
-                    min={3}
+                    min={2}
                     max={22}
                     step={1}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}

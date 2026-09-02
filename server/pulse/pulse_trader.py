@@ -3227,7 +3227,7 @@ class Pulse:
         real_pf = 1.1
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.25)
         except Exception:
             pass
         self.block.enabled = bool(b_en) if b_en is not None else True
@@ -3617,7 +3617,7 @@ class Pulse:
             # Live book losing → don't pyramid more size.
             try:
                 live_pf = self.live_recent_pf(pos.side, n=8)
-                if live_pf is not None and live_pf + 1e-9 < 1.0:
+                if live_pf is not None and live_pf + 1e-9 < 1.25:
                     continue
             except Exception:
                 pass
@@ -3756,7 +3756,7 @@ class Pulse:
         if self.entries_blocked():
             return
         live_pf = self.live_recent_pf(n=8)
-        if live_pf is not None and live_pf + 1e-9 < 1.0:
+        if live_pf is not None and live_pf + 1e-9 < 1.25:
             return
         if time.time() - getattr(self, "dca_last_emit", 0) < 0.35:
             return

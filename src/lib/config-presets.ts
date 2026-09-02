@@ -21,7 +21,7 @@ const SHARED: Partial<PulseOverlay> = {
   stratBlock: true,
   blockMaxStack: 3,
   blockVolumeRatio: 1,
-  blockProfitFactorRatio: 1.1,
+  blockProfitFactorRatio: 1.25,
   dcaEnabled: false,
   stratDca: false,
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
@@ -299,6 +299,27 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     },
   },
 ];
+
+for (const p of CONFIG_PRESETS) {
+  p.minStep = 2;
+  p.stepMax = 4;
+  p.minPf = 1.25;
+  p.patch = {
+    ...p.patch,
+    setMinStep: 2,
+    setStepMax: 4,
+    setMinPf: 1.25,
+    minPf: 1.25,
+    baseMinPf: 1.25,
+    mainMinPf: 1.25,
+    realMinPf: 1.25,
+    minStep: 2,
+    trailingMinStep: 2,
+    blockProfitFactorRatio: 1.25,
+    dcaMinPf: 1.25,
+    exitMinPf: 1.25,
+  };
+}
 
 export function applyPresetPatch(base: PulseOverlay, id: string): PulseOverlay {
   const preset = CONFIG_PRESETS.find((p) => p.id === id);

@@ -55,7 +55,7 @@ _SHARED = {
     "stratBlock": True,
     "blockMaxStack": 3,
     "blockVolumeRatio": 1.0,
-    "blockProfitFactorRatio": 1.1,
+    "blockProfitFactorRatio": 1.25,
     "dcaEnabled": False,
     "stratDca": False,
     "controlOrders": True,
@@ -277,6 +277,18 @@ PRESETS: List[Dict[str, Any]] = [
         },
     },
 ]
+for _p in PRESETS:
+    _pt = _p["patch"]
+    _pt["setMinStep"] = 2
+    _pt["setStepMax"] = 4
+    _pt["setMinPf"] = 1.25
+    _pt["minPf"] = 1.25
+    _pt["baseMinPf"] = 1.25
+    _pt["mainMinPf"] = 1.25
+    _pt["realMinPf"] = 1.25
+    _pt["blockProfitFactorRatio"] = 1.25
+    _pt["dcaMinPf"] = 1.25
+    _pt["exitMinPf"] = 1.25
 
 
 def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
@@ -390,8 +402,8 @@ def public_presets() -> List[Dict[str, Any]]:
 def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
-        "minStep": 8,
-        "stepMax": 22,
+        "minStep": 2,
+        "stepMax": 4,
         "trailing": True,
         "stratBlock": True,
         "stratDca": False,
@@ -416,7 +428,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             opt["hours"] = max(2, min(24, int(body["hours"])))
         except Exception:
             pass
-    for k, lo, hi in (("minStep", 3, 22), ("stepMax", 3, 22)):
+    for k, lo, hi in (("minStep", 2, 22), ("stepMax", 2, 22)):
         if body.get(k) is not None:
             try:
                 opt[k] = max(lo, min(hi, int(body[k])))
@@ -552,10 +564,10 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setStrictGate": True,
         "setAutoDeact": True,
         "setMinSamples": 8,
-        "setMinPf": 1.10,
+        "setMinPf": 1.25,
         "setMaxDdTimeS": 1800,
-        "setMinStep": int(opt.get("minStep") or 8),
-        "setStepMax": int(opt.get("stepMax") or 22),
+        "setMinStep": int(opt.get("minStep") or 2),
+        "setStepMax": int(opt.get("stepMax") or 4),
         "stratTrailing": bool(opt.get("trailing", True)),
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
@@ -846,8 +858,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "dcaCooldownSeconds": 45,
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
-        "setMinStep": int(opt.get("minStep") or 8),
-        "setStepMax": int(opt.get("stepMax") or 22),
+        "setMinStep": int(opt.get("minStep") or 2),
+        "setStepMax": int(opt.get("stepMax") or 4),
     }
     if not row:
         return patch
@@ -856,7 +868,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         patch["slToTpRatio"] = sl
     step = int(row.get("step") or 0)
     if step >= 3:
-        patch["setMinStep"] = max(int(opt.get("minStep") or 8), step)
+        patch["setMinStep"] = max(int(opt.get("minStep") or 2), step)
     arm = float(row.get("trailArm") or 0)
     give = float(row.get("trailGive") or 0)
     if arm > 0:
@@ -873,7 +885,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     dca_pf = float(dca.get("pf") or 0)
     dca_ok = (
         bool(dca.get("validated"))
-        and dca_pf >= 1.10
+        and dca_pf >= 1.25
         and float(dca.get("netAvg") or 0) > 0
         and float(dca.get("maxDdS") or 9e9) <= 1800
         and float(dca.get("wr") or 0) < 92.0
@@ -882,7 +894,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     block_pf = float(block.get("pf") or 0)
     block_ok = bool(block.get("validated")) and block_pf >= 1.0 and float(block.get("netAvg") or 0) >= 0
     # Stable continuous: Block remainder stays on when it doesn't destroy PF.
-    # DCA only when its independent tape is validated, +EV, PF≥1.10, DD capped.
+    # DCA only when its independent tape is validated, +EV, PF≥1.25, DD capped.
     patch["blockEnabled"] = True
     patch["stratBlock"] = True
     patch["dcaEnabled"] = bool(dca_ok)
@@ -1304,7 +1316,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     dca_blob = (job.get("byStrategy") or {}).get("dca") or {}
     dca_ok = (
         bool(dca_blob.get("validated"))
-        and float(dca_blob.get("pf") or 0) >= 1.10
+        and float(dca_blob.get("pf") or 0) >= 1.25
         and float(dca_blob.get("netAvg") or 0) > 0
         and float(dca_blob.get("maxDdS") or 9e9) <= 1800
         and float(dca_blob.get("wr") or 0) < 92.0
