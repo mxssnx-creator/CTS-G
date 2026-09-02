@@ -84,6 +84,13 @@ export type HistCalcOptions = {
   stratIndications: boolean;
   stratGeneral: boolean;
   allConfigs: boolean;
+  allSymbols: boolean;
+  indTypeSignals: boolean;
+  indTypeState: boolean;
+  indTypeDirection: boolean;
+  indTypeMove: boolean;
+  indTypeActive: boolean;
+  indTypeCommon: boolean;
 };
 
 export type HistCalcJob = {
@@ -95,7 +102,14 @@ export type HistCalcJob = {
   lookback?: number;
   symbols?: string[];
   options?: HistCalcOptions;
-  coverage?: { product?: number; dims?: Record<string, number> };
+  coverage?: {
+    product?: number;
+    dims?: Record<string, number>;
+    families?: { base?: number; trail?: number };
+    slTpCover?: boolean;
+    trailSlTpCover?: boolean;
+    independentConfigs?: boolean;
+  };
   rows?: HistCalcRow[];
   rowCount?: number;
   validatedCount?: number;
@@ -137,6 +151,13 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   stratIndications: true,
   stratGeneral: true,
   allConfigs: true,
+  allSymbols: true,
+  indTypeSignals: true,
+  indTypeState: true,
+  indTypeDirection: true,
+  indTypeMove: true,
+  indTypeActive: true,
+  indTypeCommon: true,
 };
 
 export async function fetchHistCalc(): Promise<HistCalcJob> {

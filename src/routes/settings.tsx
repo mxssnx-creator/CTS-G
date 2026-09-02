@@ -13,6 +13,7 @@ import {
   SL_TP_RATIOS,
   TRAIL_VARIANTS,
   trailGiveFromArm,
+  syncOverlayFlags,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
@@ -169,20 +170,35 @@ function SettingsPage() {
   };
 
   const onApplyPreset = (id: string) => {
+    const preset = CONFIG_PRESETS.find((p) => p.id === id);
     dirtyRef.current = true;
     setOverlay((o) => applyPresetPatch(o, id));
     setPresetId(id);
     setDirty(true);
-    setSaveMsg(`Preset ${id} applied · save to persist`);
+    if (preset) {
+      setCalcOpt((o) => ({
+        ...o,
+        minStep: preset.minStep,
+        stepMax: preset.stepMax,
+        trailing: true,
+        stratBlock: true,
+        stratDca: false,
+        hours: 20,
+        allConfigs: true,
+      }));
+    }
+    setSaveMsg(`Preset ${preset?.name || id} applied · save Live or VST to persist`);
   };
 
   const onCalcAll = async () => {
     setCalcBusy(true);
     setSaveMsg(null);
+    const allSym = calcOpt.allSymbols || overlay.symbolsAll || overlay.symbols.includes("*");
     const j = await startHistCalc({
       ...calcOpt,
       allConfigs: true,
-      symbols: overlay.symbolsAll || overlay.symbols.includes("*") ? undefined : overlay.symbols,
+      allSymbols: allSym,
+      symbols: allSym ? ["*"] : overlay.symbols,
     });
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
@@ -192,15 +208,9 @@ function SettingsPage() {
     const apply = calcJob?.apply;
     if (!apply || typeof apply !== "object") return;
     dirtyRef.current = true;
-    setOverlay((o) => {
-      const next = { ...o } as PulseOverlay;
-      for (const [k, v] of Object.entries(apply)) {
-        (next as unknown as Record<string, unknown>)[k] = v;
-      }
-      return next;
-    });
+    setOverlay((o) => syncOverlayFlags({ ...o, ...(apply as Partial<typeof o>) }));
     setDirty(true);
-    setSaveMsg("Winner applied · save to persist");
+    setSaveMsg("Winner applied · Block on · DCA off · save to persist");
   };
 
   const coord = (cts?.coordination_settings ?? cts?.coordinationSettings ?? {}) as Record<
@@ -344,6 +354,34 @@ function SettingsPage() {
               <p className="text-sm text-muted">
                 These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
               </p>
+              <div className="rounded-lg border border-border bg-bg2 p-3">
+                <p className="font-mono text-xs uppercase text-muted">Best configs · low drawdown</p>
+                <p className="mt-1 text-sm text-muted">
+                  Live was stacking Block + DCA and using SL:TP 1.5 (stop larger than take-profit). Apply a coordinated preset, then run Historic calc — it does not start the engine.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {CONFIG_PRESETS.filter((p) => p.recommended).map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="min-h-11 rounded-lg bg-primary px-3 text-sm text-bg"
+                      onClick={() => {
+                        onApplyPreset(p.id);
+                        setSection("presets");
+                      }}
+                    >
+                      Apply {p.name}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="min-h-11 rounded-lg border border-border px-3 text-sm"
+                    onClick={() => setSection("presets")}
+                  >
+                    All 8 presets · calc
+                  </button>
+                </div>
+              </div>
             </Card>
           )}
           {section === "presets" && (
@@ -362,12 +400,18 @@ function SettingsPage() {
                           on ? "border-primary bg-primary-dim/40 text-fg" : "border-border bg-bg2 text-fg"
                         }`}
                       >
-                        <div className="text-sm font-medium">{p.name}</div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">{p.name}</div>
+                          {p.recommended ? (
+                            <span className="rounded bg-primary-dim/50 px-1.5 font-mono text-[10px] uppercase text-primary">best</span>
+                          ) : null}
+                        </div>
                         <p className="mt-1 text-xs text-muted">{p.hint}</p>
+                        <p className="mt-2 text-xs text-fg/80">{p.why}</p>
                         <p className="mt-2 font-mono text-[11px] text-muted">
                           SL {p.sl.toFixed(1)} · step {p.minStep}–{p.stepMax} · trail {p.trail} · PF {p.minPf.toFixed(2)} · DDt {p.maxDdS}s
                         </p>
-                        <p className="font-mono text-[11px] text-primary">Block ON · DCA OFF</p>
+                        <p className="font-mono text-[11px] text-primary">Block ON · DCA OFF · cost subtracted</p>
                       </button>
                     );
                   })}
@@ -432,6 +476,42 @@ function SettingsPage() {
                     on={calcOpt.stratGeneral}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stratGeneral: v }))}
                   />
+                  <EnableSlider
+                    label="All symbols"
+                    on={calcOpt.allSymbols}
+                    hint={calcOpt.allSymbols ? "ranked universe (capped)" : "selected list only"}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
+                  />
+                  <EnableSlider
+                    label="Signals"
+                    on={calcOpt.indTypeSignals}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeSignals: v }))}
+                  />
+                  <EnableSlider
+                    label="State"
+                    on={calcOpt.indTypeState}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeState: v }))}
+                  />
+                  <EnableSlider
+                    label="Direction"
+                    on={calcOpt.indTypeDirection}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeDirection: v }))}
+                  />
+                  <EnableSlider
+                    label="Move"
+                    on={calcOpt.indTypeMove}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeMove: v }))}
+                  />
+                  <EnableSlider
+                    label="Active"
+                    on={calcOpt.indTypeActive}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeActive: v }))}
+                  />
+                  <EnableSlider
+                    label="Common"
+                    on={calcOpt.indTypeCommon}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeCommon: v }))}
+                  />
                 </Grid>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -468,6 +548,14 @@ function SettingsPage() {
                       <KV k="Validated sets" v={`${calcJob.validatedCount ?? 0}/${calcJob.rowCount ?? 0}`} />
                       <KV k="Source" v={String(calcJob.source || "—")} />
                       <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
+                      <KV
+                        k="Set product"
+                        v={
+                          calcJob.coverage?.product
+                            ? `${calcJob.coverage.product} · base ${calcJob.coverage.families?.base ?? "—"} / trail ${calcJob.coverage.families?.trail ?? "—"}`
+                            : "—"
+                        }
+                      />
                     </div>
                     {calcJob.winner ? (
                       <p className="text-sm">

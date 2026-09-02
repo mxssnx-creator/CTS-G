@@ -5,6 +5,8 @@ export type ConfigPreset = {
   id: string;
   name: string;
   hint: string;
+  why: string;
+  recommended?: boolean;
   sl: number;
   minStep: number;
   stepMax: number;
@@ -22,6 +24,8 @@ const SHARED: Partial<PulseOverlay> = {
   blockProfitFactorRatio: 1.1,
   dcaEnabled: false,
   stratDca: false,
+  dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
+  dcaMaxSteps: 4,
   controlOrders: true,
   histEnabled: true,
   setUseHistoricGate: true,
@@ -50,6 +54,8 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "tight-guard",
     name: "Tight Guard",
     hint: "Lowest SL 0.3 · min step 12 · 20h · max DD 15m",
+    why: "Best low-drawdown book: SL 0.3 so a stop is smaller than take-profit, high min-step so TP covers cost, 15-minute DD cut, Block on / DCA off so size does not pyramid into a loser.",
+    recommended: true,
     sl: 0.3,
     minStep: 12,
     stepMax: 18,
@@ -83,6 +89,8 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "low-dd-core",
     name: "Low DD Core",
     hint: "SL 0.6 · step 10–16 · trail 0.6:0.2 · 20h",
+    why: "Default coordinated live book. SL 0.6 is one cost-unit vs TP, steps 10–16 keep expectancy above fees, trail 0.6:0.2 locks winners, Block remainder 1× only.",
+    recommended: true,
     sl: 0.6,
     minStep: 10,
     stepMax: 16,
@@ -116,6 +124,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "balanced-coord",
     name: "Balanced Coord",
     hint: "Both packs · axes on · SL 0.6 · step 8–16",
+    why: "Indications + general pulse together. Axes (prev/last/cont/pause) coordinate intern→real PF stages. Wider step floor (8) for more fills while SL stays 0.6.",
     sl: 0.6,
     minStep: 8,
     stepMax: 16,
@@ -146,6 +155,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "trail-scout",
     name: "Trail Scout",
     hint: "Low SL 0.3 · trail 0.3–0.9 · step 10–18",
+    why: "Lets every trail arm 0.3–0.9 score as its own set against SL 0.3. Use when you want the calc to pick the trail, not a fixed 0.6:0.2.",
     sl: 0.3,
     minStep: 10,
     stepMax: 18,
@@ -173,6 +183,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "indication-lead",
     name: "Indication Lead",
     hint: "Indications only · agreement 0.7 · SL 0.6",
+    why: "Turns general pulse off. Entries only when indication kinds agree ≥ 0.7. Cleaner tapes for Signals / State / Direction / Move / Active / Common stats.",
     sl: 0.6,
     minStep: 10,
     stepMax: 18,
@@ -203,6 +214,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "block-stack",
     name: "Block Stack",
     hint: "Block stack 3 · vr 1 · SL 0.6 · DCA off",
+    why: "Block n=1..3 sequential remainder (max extra 3× parent, never 1+2+3). Adds only after the parent is in profit. DCA stays off so the two strategies cannot stack.",
     sl: 0.6,
     minStep: 8,
     stepMax: 14,
@@ -230,6 +242,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "strict-gate",
     name: "Strict Gate",
     hint: "PF 1.10/1.12/1.15 · SL 0.3 · max DD 10m",
+    why: "Highest intern/main/real PF floors and a 10-minute DD cut. Fewest trades, lowest SL. Use after a losing streak to stop the book from re-adding size.",
     sl: 0.3,
     minStep: 12,
     stepMax: 22,
@@ -261,6 +274,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     id: "wide-scan",
     name: "Wide Scan",
     hint: "Both packs · step 8–22 · full trail · 20h",
+    why: "Broadest independent set grid (every SL × TP step × trail). Run Historic calc on this, then Apply winner instead of leaving a wide live book.",
     sl: 0.6,
     minStep: 8,
     stepMax: 22,

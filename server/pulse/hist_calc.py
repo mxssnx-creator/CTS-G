@@ -86,6 +86,8 @@ PRESETS: List[Dict[str, Any]] = [
         "id": "tight-guard",
         "name": "Tight Guard",
         "hint": "Lowest SL 0.3 · min step 12 · 20h · max DD 15m",
+        "why": "Best low-drawdown book: SL 0.3, high min-step, 15m DD cut, Block on / DCA off.",
+        "recommended": True,
         "patch": {
             **_SHARED,
             "slToTpRatio": 0.3,
@@ -113,6 +115,8 @@ PRESETS: List[Dict[str, Any]] = [
         "id": "low-dd-core",
         "name": "Low DD Core",
         "hint": "SL 0.6 · step 10–16 · trail 0.6:0.2 · 20h",
+        "why": "Default coordinated live book. SL 0.6 vs TP, Block remainder 1×, DCA off.",
+        "recommended": True,
         "patch": {
             **_SHARED,
             "slToTpRatio": 0.6,
@@ -368,6 +372,8 @@ def public_presets() -> List[Dict[str, Any]]:
             "id": p["id"],
             "name": p["name"],
             "hint": p["hint"],
+            "why": p.get("why") or p["hint"],
+            "recommended": bool(p.get("recommended")),
             "sl": patch.get("slToTpRatio"),
             "minStep": patch.get("setMinStep"),
             "stepMax": patch.get("setStepMax"),
@@ -392,6 +398,13 @@ def default_options() -> Dict[str, Any]:
         "stratIndications": True,
         "stratGeneral": True,
         "allConfigs": True,
+        "allSymbols": False,
+        "indTypeSignals": True,
+        "indTypeState": True,
+        "indTypeDirection": True,
+        "indTypeMove": True,
+        "indTypeActive": True,
+        "indTypeCommon": True,
     }
 
 
@@ -411,7 +424,8 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 pass
     if opt["stepMax"] < opt["minStep"]:
         opt["stepMax"] = opt["minStep"]
-    for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs"):
+    for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs", "allSymbols",
+              "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon"):
         if k in body:
             opt[k] = bool(body[k])
     if not opt["stratIndications"] and not opt["stratGeneral"]:
@@ -460,24 +474,29 @@ def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 8.0) -> List[L
     return []
 
 
-def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
-    body = body if isinstance(body, dict) else {}
-    raw = body.get("symbols")
-    if isinstance(raw, str):
-        raw = [raw]
+def load_universe() -> List[str]:
     names: List[str] = []
-    if isinstance(raw, list) and raw and not (len(raw) == 1 and str(raw[0]) in ("*", "ALL", "")):
-        for s in raw:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (
+        os.path.join(os.path.dirname(job_path()), "universe.json"),
+        os.path.join(here, "universe.json"),
+        "/opt/grok-x01-pulse/universe.json",
+    ):
+        try:
+            raw = json.load(open(path))
+        except Exception:
+            continue
+        rows = raw if isinstance(raw, list) else (raw.get("symbols") or raw.get("universe") or [])
+        for s in rows:
+            if isinstance(s, dict):
+                s = s.get("symbol") or s.get("s") or ""
             t = str(s or "").strip().upper().replace("_", "-")
-            if t in ("*", "ALL"):
-                continue
             if t.endswith("USDT") and not t.endswith("-USDT"):
                 t = t[:-4] + "-USDT"
             if t.endswith("-USDT"):
                 names.append(t)
-    if not names:
-        names = list(DEFAULT_SYMBOLS)
-    # de-dupe, cap 24 so a full 20h walk stays interactive
+        if names:
+            break
     seen = set()
     out: List[str] = []
     for s in names:
@@ -485,7 +504,39 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
             continue
         seen.add(s)
         out.append(s)
-        if len(out) >= 24:
+    return out
+
+
+def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
+    body = body if isinstance(body, dict) else {}
+    opt = parse_options(body)
+    raw = body.get("symbols")
+    if isinstance(raw, str):
+        raw = [raw]
+    names: List[str] = []
+    wild = bool(opt.get("allSymbols")) or bool(body.get("allSymbols"))
+    if isinstance(raw, list) and raw:
+        for s in raw:
+            t = str(s or "").strip().upper().replace("_", "-")
+            if t in ("*", "ALL", ""):
+                wild = True
+                continue
+            if t.endswith("USDT") and not t.endswith("-USDT"):
+                t = t[:-4] + "-USDT"
+            if t.endswith("-USDT"):
+                names.append(t)
+    if wild or not names:
+        uni = load_universe()
+        names = uni or list(DEFAULT_SYMBOLS)
+    seen = set()
+    out: List[str] = []
+    cap = 48 if wild else 24
+    for s in names:
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= cap:
             break
     return out or list(DEFAULT_SYMBOLS)
 
@@ -512,12 +563,12 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
-        "indTypeState": True,
-        "indTypeSignals": True,
-        "indTypeDirection": True,
-        "indTypeMove": True,
-        "indTypeActive": True,
-        "indTypeCommon": True,
+        "indTypeState": bool(opt.get("indTypeState", True)),
+        "indTypeSignals": bool(opt.get("indTypeSignals", True)),
+        "indTypeDirection": bool(opt.get("indTypeDirection", True)),
+        "indTypeMove": bool(opt.get("indTypeMove", True)),
+        "indTypeActive": bool(opt.get("indTypeActive", True)),
+        "indTypeCommon": bool(opt.get("indTypeCommon", True)),
         "trailArmMin": 0.3,
         "trailArmMax": 1.5 if opt.get("trailing", True) else 0.3,
         "trailGiveMin": 0.1,
@@ -771,6 +822,9 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any]) -> Dict[str
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
+        "dcaStepVolumeMultipliers": [1.5, 2.0, 2.3, 2.5],
+        "blockVolumeRatio": 1.0,
+        "blockMaxStack": 3,
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
         "setMinStep": int(opt.get("minStep") or 8),
@@ -1130,6 +1184,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         out.append((name, bool(ok), str(detail)[:220]))
 
     rec("preset-count", len(PRESETS) == 8, str(len(PRESETS)))
+    rec("preset-recommended", sum(1 for p in PRESETS if p.get("recommended")) >= 2)
     ids = [p["id"] for p in PRESETS]
     rec("preset-unique", len(ids) == len(set(ids)), str(ids))
     rec("preset-block-on", all(p["patch"].get("blockEnabled") and p["patch"].get("stratBlock") for p in PRESETS))
@@ -1142,6 +1197,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-dca-default-off", parse_options({})["stratDca"] is False)
     rec("opt-block-default-on", parse_options({})["stratBlock"] is True)
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
+    rec("opt-all-symbols-default-off", parse_options({})["allSymbols"] is False)
+    rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
+    rec("opt-ind-types-on", parse_options({})["indTypeSignals"] is True and parse_options({})["indTypeState"] is True)
     rec("opt-hours-20", parse_options({})["hours"] == 20)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
