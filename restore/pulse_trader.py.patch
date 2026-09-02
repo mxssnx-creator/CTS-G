@@ -164,7 +164,7 @@
 +            try:
 +                tmp = START_EQ_PATH + ".tmp"
 +                with open(tmp, "w") as f:
-                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
++                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
 +                os.replace(tmp, START_EQ_PATH)
 +            except Exception:
 +                pass
@@ -212,7 +212,7 @@
 +                if not ind_kind:
 +                    ind_kind = str(getattr(ind, "kind", "") or "")
 +                gate = getattr(self.sets, "indication_ok", None)
-+                if self.sets.enabled and callable(gate) and not gate(ind_kind):
+                if self.sets.enabled and callable(gate) and not gate(ind_kind):
 +                    return "ind-gate"
 +            except Exception:
 +                pass
@@ -570,7 +570,7 @@
              "maxOpen": MAX_OPEN,
              "symbols": SYMBOLS,
              "regime": self.regime,
-@@ -4408,7 +4615,12 @@
+@@ -4408,7 +4615,12 
  
      def _coverage_blob(self) -> Dict[str, Any]:
          catalog = []
@@ -601,7 +601,7 @@
              "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
              "symbols": len(SYMBOLS),
              "scan": {
-@@ -4529,6 +4742,9 @@
+@@ -4529,6 +4742,9 
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -611,7 +611,7 @@
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4650,6 +4866,9 @@
+@@ -4650,6 +4866,9 
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -683,7 +683,7 @@
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5244,8 @@
+@@ -5001,6 +5244,8 
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
