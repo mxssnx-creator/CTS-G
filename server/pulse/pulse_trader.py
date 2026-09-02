@@ -2625,31 +2625,22 @@ class Pulse:
         except Exception:
             chosen = None
         set_idx = -1
-        trail_st = None
-        try:
-            trail_st = self.sets.pick_trail(pack, side=side)
-        except TypeError:
-            try:
-                trail_st = self.sets.pick_trail(pack)
-            except Exception:
-                trail_st = None
-        except Exception:
-            trail_st = None
+        trail_set_id = ""
+        trail_idx = -1
         if chosen:
             sl_ratio = chosen.sl_ratio
             set_id = chosen.id
             set_idx = int(getattr(chosen, "idx", -1))
-            trail_key, trail_arm, trail_give = chosen.trail_key or "0.3:0.1", chosen.trail_arm, chosen.trail_give
+            if str(getattr(chosen, "kind", "") or "") == "trail" and getattr(chosen, "trail_key", ""):
+                trail_key, trail_arm, trail_give = chosen.trail_key, chosen.trail_arm, chosen.trail_give
+                trail_set_id = chosen.id
+                trail_idx = set_idx
+            else:
+                trail_key, trail_arm, trail_give = "", 0.0, 0.0
         else:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
-        trail_set_id = ""
-        trail_idx = -1
-        if trail_st:
-            trail_key, trail_arm, trail_give = trail_st.trail_key, trail_st.trail_arm, trail_st.trail_give
-            trail_set_id = trail_st.id
-            trail_idx = int(getattr(trail_st, "idx", -1))
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,

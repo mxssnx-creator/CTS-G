@@ -750,9 +750,9 @@ function SettingsPage() {
                 })}
               </div>
               <p className="text-sm text-muted">
-                All {SL_TP_RATIOS.length} SL ratios always run as independent config sets against every
-                take-profit step ({overlay.setMinStep}–{overlay.setStepMax} × cost). The highlighted
-                ratio is the live fallback; auto-recalc only chooses which one to open with.
+                Every combination is its own set: pack × SL ratio × TP step × trail.
+                All {SL_TP_RATIOS.length} ratios × steps {overlay.setMinStep}–{overlay.setStepMax} run independently
+                (same as general config sets). Highlighted ratio is only the live fallback.
               </p>
               <Grid>
                 <Toggle label="Auto-recalc SL:TP" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />

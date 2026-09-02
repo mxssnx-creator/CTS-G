@@ -401,15 +401,16 @@ def hit_exit(
 
 
 def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
+    parts = [pack, "1m", f"sl{float(sl_ratio):.1f}"]
     if trail:
-        return f"{pack}:1m:sl{sl_ratio:.1f}:tr{trail}"
+        parts.append(f"tr{trail}")
     if step:
-        return f"{pack}:1m:sl{sl_ratio:.1f}:st{int(step)}"
-    return f"{pack}:1m:sl{sl_ratio:.1f}"
+        parts.append(f"st{int(step)}")
+    return ":".join(parts)
 
 
-def make_trail_id(pack: str, trail: str, sl_ratio: float = 0.6) -> str:
-    return make_set_id(pack, sl_ratio, trail=trail)
+def make_trail_id(pack: str, trail: str, sl_ratio: float = 0.6, step: int = 0) -> str:
+    return make_set_id(pack, sl_ratio, trail=trail, step=step)
 
 
 @dataclass
@@ -680,8 +681,8 @@ class SetBook:
         for pack_i, pack in enumerate(self.packs):
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(self.steps):
-                    sid = make_set_id(pack, sl, "", step)
                     tp = step_tp_pct(step, self.cost_pct)
+                    sid = make_set_id(pack, sl, "", step)
                     prev = keep.get(sid)
                     if prev:
                         st = prev
@@ -705,34 +706,31 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
-            for sl_i, sl in enumerate(self.sl_ratios):
-                for tr_i, (tkey, arm, give) in enumerate(trails):
-                    sid = make_trail_id(pack, tkey, sl)
-                    prev = keep.get(sid)
-                    mid_step = self.steps[len(self.steps) // 2] if self.steps else 8
-                    tp = step_tp_pct(mid_step, self.cost_pct)
-                    if prev:
-                        st = prev
-                        st.trail_key = tkey
-                        st.trail_arm = arm
-                        st.trail_give = give
-                        st.sl_ratio = sl
-                        st.step = 0
-                        st.tp_pct = tp
-                        st.kind = "trail"
-                        st.locked = bool(self.locks.get(sid))
-                    else:
-                        st = SetState(
-                            id=sid, pack=pack, tf="1m", sl_ratio=sl,
-                            trail_key=tkey, trail_arm=arm, trail_give=give,
-                            step=0, tp_pct=tp, kind="trail",
-                            locked=bool(self.locks.get(sid)),
-                        )
-                    st.pack_i = pack_i
-                    st.sl_i = sl_i
-                    st.tr_i = tr_i
-                    st.step_i = -1
-                    _put(st)
+                    for tr_i, (tkey, arm, give) in enumerate(trails):
+                        sid = make_trail_id(pack, tkey, sl, step)
+                        prev = keep.get(sid)
+                        if prev:
+                            st = prev
+                            st.trail_key = tkey
+                            st.trail_arm = arm
+                            st.trail_give = give
+                            st.sl_ratio = sl
+                            st.step = step
+                            st.tp_pct = tp
+                            st.kind = "trail"
+                            st.locked = bool(self.locks.get(sid))
+                        else:
+                            st = SetState(
+                                id=sid, pack=pack, tf="1m", sl_ratio=sl,
+                                trail_key=tkey, trail_arm=arm, trail_give=give,
+                                step=step, tp_pct=tp, kind="trail",
+                                locked=bool(self.locks.get(sid)),
+                            )
+                        st.pack_i = pack_i
+                        st.sl_i = sl_i
+                        st.tr_i = tr_i
+                        st.step_i = step_i
+                        _put(st)
         self.sets = next_sets
         self.by_idx = by_idx
         self.progress.sets_total = len(self.sets)
@@ -1168,19 +1166,16 @@ class SetBook:
     ) -> None:
         """Independent Signal / State / Direction / Move / Active / Common tapes.
 
-        Each kind walks its own entries on every SL ratio vs the configured
-        min-step TP so PF / DDT is independent of pack consensus and of a
-        single representative SL.
+        Each kind walks its own entries with a representative SL (0.6 × min-step TP).
+        SL × TP combinations live as independent Sets, not mixed into kind tapes.
         """
         n = len(bars)
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        sls = list(self.sl_ratios) or [0.6]
         tp_frac = max(0.0020, step_tp_pct(self.min_step_cfg, self.cost_pct))
-        for sl in sls:
-            sl_frac = max(0.0015, tp_frac * max(0.3, float(sl or 0.6)))
-            for kind, sigs in kind_sigs.items():
+        sl_frac = max(0.0015, tp_frac * 0.6)
+        for kind, sigs in kind_sigs.items():
                 if not any(d != 0 for d, _ in sigs):
                     continue
                 buf = ind_hist.setdefault(kind, [])
@@ -1215,7 +1210,7 @@ class SetBook:
                                     "ind_kind": kind,
                                     "pack": "indications",
                                     "costPct": self.cost_pct,
-                                    "slRatio": sl,
+                                    "slRatio": 0.6,
                                     "tpPct": tp_frac * 100.0,
                                 })
                                 open_pos = None
@@ -1491,6 +1486,13 @@ class SetBook:
             all(any(abs(st.sl_ratio - sl) < 1e-9 and st.trail_key == t for st in trail_sets) for sl in self.sl_ratios)
             for t in trails
         ) if trails and self.sl_ratios else True
+        trail_sl_tp_cover = all(
+            any(
+                abs(st.sl_ratio - sl) < 1e-9 and st.trail_key == t and int(st.step) == int(step)
+                for st in trail_sets
+            )
+            for t in trails for sl in self.sl_ratios for step in self.steps
+        ) if trails and self.sl_ratios and self.steps else True
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -1511,6 +1513,7 @@ class SetBook:
             "independentIndication": True,
             "independentStrategy": True,
             "independentSlTp": True,
+            "independentConfigs": True,
             "costSubtracted": True,
             "directions": list(DIRECTIONS),
             "byTrail": by_tr,
@@ -1519,6 +1522,7 @@ class SetBook:
             "slCover": all(any(abs(st.sl_ratio - sl) < 1e-9 for st in base_sets) for sl in self.sl_ratios),
             "slTpCover": sl_tp_cover,
             "trailSlCover": trail_sl_cover,
+            "trailSlTpCover": trail_sl_tp_cover,
         }
 
     def _side_view(self, st: SetState, side: Optional[str] = None) -> Dict[str, Any]:
@@ -1610,7 +1614,16 @@ class SetBook:
         return self.pick(pack, kind="trail", side=side)
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
-        return self.pick(pack, "base", side=side) or self.pick(pack, "trail", side=side)
+        base = self.pick(pack, "base", side=side)
+        trail = self.pick(pack, "trail", side=side)
+        if base and trail:
+            want = str(side or "").strip().upper()
+            vb = self._side_view(base, want if want in DIRECTIONS else None)
+            vt = self._side_view(trail, want if want in DIRECTIONS else None)
+            if float(vt.get("last15_ratio") or 0) > float(vb.get("last15_ratio") or 0):
+                return trail
+            return base
+        return base or trail
 
     def pack_open(self, pack: str, side: Optional[str] = None) -> bool:
         if not self.enabled or not self.use_historic_gate:
@@ -2008,10 +2021,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book3.ingest_bars("CCC-USDT", synth_trend(240, 80.0, 0.22, 0.05))
     book3.ingest_bars("DDD-USDT", synth_trend(240, 40.0, -0.16, 0.05))
     book3.replay_all(now=1_700_000_100)
-    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.3) < 1e-9]
-    wide = [s for s in book3.sets.values() if abs(s.sl_ratio - 1.5) < 1e-9]
-    lo_step = [s for s in book3.sets.values() if s.step == 3]
-    hi_step = [s for s in book3.sets.values() if s.step == 12]
+    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.3) < 1e-9 and s.kind == "base"]
+    wide = [s for s in book3.sets.values() if abs(s.sl_ratio - 1.5) < 1e-9 and s.kind == "base"]
+    lo_step = [s for s in book3.sets.values() if s.step == 3 and s.kind == "base"]
+    hi_step = [s for s in book3.sets.values() if s.step == 12 and s.kind == "base"]
     def sig(st: SetState) -> Tuple[int, float, float, float]:
         return (st.n, round(st.last15_ratio, 4), round(st.avg_hold_s, 1), round(st.expectancy, 6))
     t_sig = sig(tight[0]) if tight else (0, 0.0, 0.0, 0.0)
@@ -2038,7 +2051,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     )
     cov = book4.coverage()
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
-    want_tr = len(book4.packs) * len(book4.sl_ratios) * max(1, len(book4.trails))
+    want_tr = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps) * max(1, len(book4.trails))
     want = want_base + want_tr
     idxs = [s.idx for s in book4.by_idx]
     trails_in = {s.trail_key for s in book4.by_idx if s.kind == "trail"}
@@ -2050,6 +2063,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-sl-tp-cover", bool(cov.get("slTpCover")), f"slTp={cov.get('slTpCover')} steps={cov.get('steps')} bySl={ {k: v.get('steps') for k, v in (cov.get('bySl') or {}).items()} }"))
     out.append(("set-trail-sl-cover", bool(cov.get("trailSlCover")), f"trailSl={cov.get('trailSlCover')} byTrail={ {k: v.get('sl') for k, v in (cov.get('byTrail') or {}).items()} }"))
     out.append(("set-independent-sl-tp", bool(cov.get("independentSlTp")), str(cov.get("independentSlTp"))))
+    out.append(("set-trail-sl-tp-cover", bool(cov.get("trailSlTpCover")), f"trailSlTp={cov.get('trailSlTpCover')} product={cov.get('product')} want={want}"))
+    out.append(("set-independent-configs", bool(cov.get("independentConfigs")) and len(book4.by_idx) == want, f"n={len(book4.by_idx)} want={want}"))
+    combo = {(s.pack, round(s.sl_ratio, 1), s.step, s.trail_key or "") for s in book4.by_idx}
+    out.append(("set-combo-unique", len(combo) == len(book4.by_idx), f"unique={len(combo)} n={len(book4.by_idx)}"))
     out.append(("set-get-idx", book4.get_idx(0) is book4.by_idx[0] and book4.get_idx(want - 1) is book4.by_idx[-1], f"0={book4.get_idx(0).id if book4.get_idx(0) else None}"))
     v = book4.coord_vars(book4.by_idx[0])
     out.append(("set-coord-vars", v.get("idx") == 0 and v.get("kind") == "base" and "step" in v, str(v)))
@@ -2093,7 +2110,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         by_tr[st.trail_key] = (st.n, round(st.avg_hold_s, 1), round(st.expectancy, 6), st.idx)
     out.append(("set-trail-independent", len(by_tr) >= 3 and len(set(by_tr.values())) >= 2, f"{by_tr}"))
     base_n = sum(1 for s in book5.by_idx if s.kind == "base")
-    out.append(("set-trail-own-family", base_n >= 1 and all(s.step == 0 for s in book5.by_idx if s.kind == "trail"), f"base={base_n} trails={len(by_tr)}"))
+    out.append(("set-trail-own-family", base_n >= 1 and all(s.step == 8 and s.trail_key for s in book5.by_idx if s.kind == "trail") and all(s.kind == "base" or s.trail_key for s in book5.by_idx), f"base={base_n} trails={len(by_tr)} steps={[s.step for s in book5.by_idx if s.kind=='trail'][:4]}"))
     dropped = book2.trim_bars(["AAA-USDT"])
     out.append(("set-trim-bars", dropped >= 1 and "AAA-USDT" in book2.bars and "BBB-USDT" not in book2.bars, f"drop={dropped} left={list(book2.bars)}"))
     book2.bars["AAA-USDT"] = book2.bars["AAA-USDT"] + book2.bars["AAA-USDT"]

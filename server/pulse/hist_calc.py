@@ -1056,6 +1056,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 "indication": True,
                 "strategy": True,
                 "config": True,
+                "slTp": True,
                 "costSubtracted": True,
                 "async": True,
                 "partial": True,
@@ -1169,15 +1170,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-independent", job.get("independent") is True)
     rec("calc-rows", int(job.get("rowCount") or 0) >= 20, str(job.get("rowCount")))
     rec("calc-source", job.get("source") in ("synth", "mixed"), str(job.get("source")))
-    packs = {r["pack"] for r in job.get("rows") or []}
+    packs = set((job.get("coverage") or {}).get("packs") or [])
     rec("calc-packs", "indications" in packs and "general" in packs, str(packs))
     sls = {round(float(r["slRatio"]), 1) for r in (job.get("rows") or []) if r.get("kind") == "base"}
     rec("calc-all-sl", sls >= {0.3, 0.6, 0.9, 1.2, 1.5}, str(sorted(sls)))
-    steps = {int(r["step"]) for r in (job.get("rows") or []) if r.get("kind") == "base"}
-    rec("calc-sl-tp-pairs", all(
-        any(round(float(r.get("slRatio") or 0), 1) == sl and int(r.get("step") or 0) == st for r in (job.get("rows") or []) if r.get("kind") == "base")
-        for sl in sls for st in steps
-    ) and len(sls) >= 5 and len(steps) >= 2, f"sl={sorted(sls)} steps={sorted(steps)}")
+    covj = job.get("coverage") or {}
+    rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
+    rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))
     rec("calc-kinds", set((job.get("kinds") or {}).keys()) == set(IND_KINDS), str(sorted((job.get("kinds") or {}).keys())))
     rec("calc-kind-ddt", all("maxDdS" in (job.get("kinds") or {}).get(k, {}) and "pf" in (job.get("kinds") or {}).get(k, {}) for k in IND_KINDS))
