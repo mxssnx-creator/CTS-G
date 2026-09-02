@@ -552,6 +552,11 @@ class SetBook:
         self._snap_ts = 0.0
         self._live_ov_cache: Optional[Dict[str, Any]] = None
         self._live_ov_ts = 0.0
+        self.hist_block = True
+        self.hist_dca = True
+        self.block_vr = 1.0
+        self.dca_dist = [0.012, 0.016, 0.020, 0.024]
+        self.dca_mult = [1.5, 2.0, 2.3, 2.5]
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
@@ -590,6 +595,14 @@ class SetBook:
         self.tp_pct = tp / 100.0 if tp > 0.05 else tp
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         self.hist_honor_tp = bool(ov.get("setHonorTp", True))
+        self.hist_block = bool(ov.get("histSimulateBlock", ov.get("stratBlock", True)))
+        self.hist_dca = bool(ov.get("histSimulateDca", True))
+        try:
+            self.block_vr = max(0.5, min(2.0, float(ov.get("blockVolumeRatio") or 1.0)))
+        except Exception:
+            self.block_vr = 1.0
+        self.dca_dist = [0.012, 0.016, 0.020, 0.024]
+        self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         opt = float(ov.get("exitOptSlPct") or 0.30)
         self.opt_sl = opt / 100.0 if opt > 0.02 else opt
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
@@ -1059,6 +1072,7 @@ class SetBook:
         now: Optional[float] = None,
         ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         drop_bars: bool = True,
+        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> int:
         """Replay one symbol into hist and drop its bars. Independent of other names."""
         if symbol not in self.bars:
@@ -1069,12 +1083,152 @@ class SetBook:
                 self.bars.pop(symbol, None)
             return 0
         now = now or time.time()
-        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist)
+        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist, strat_hist=strat_hist)
         if drop_bars:
             self.bars.pop(symbol, None)
         return nbar
 
-    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+    def _seed_pos(self, side: int, close: float, sl: float, tp: float, i: int, why: str) -> Dict[str, Any]:
+        return {
+            "side": side,
+            "entry": close,
+            "sl": sl,
+            "tp": tp,
+            "peak": close,
+            "i": i,
+            "trail": None,
+            "tags": str(why or ""),
+            "qty": 1.0,
+            "parent": 1.0,
+            "adds": 0,
+        }
+
+    def _rearm_stops(self, pos: Dict[str, Any], sl_frac: float, tp_frac: float) -> None:
+        e = float(pos["entry"])
+        side = int(pos["side"])
+        if side > 0:
+            pos["sl"] = e * (1 - sl_frac)
+            pos["tp"] = e * (1 + tp_frac)
+        else:
+            pos["sl"] = e * (1 + sl_frac)
+            pos["tp"] = e * (1 - tp_frac)
+
+    def _maybe_block_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
+        if int(pos.get("adds") or 0) >= 1:
+            return
+        held = 1  # caller guarantees held >= 1
+        close = float(bar[3])
+        entry = float(pos["entry"])
+        side = int(pos["side"])
+        if entry <= 0 or close <= 0:
+            return
+        u = ((close - entry) / entry) * side
+        if u < 0.002:
+            return
+        add = float(pos["parent"]) * float(self.block_vr or 1.0)
+        qty = float(pos["qty"])
+        pos["entry"] = (entry * qty + close * add) / (qty + add)
+        pos["qty"] = qty + add
+        pos["adds"] = 1
+        self._rearm_stops(pos, sl_frac, tp_frac)
+
+    def _maybe_dca_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
+        n = int(pos.get("adds") or 0)
+        dists = self.dca_dist
+        if n >= min(4, len(dists)):
+            return
+        close = float(bar[3])
+        entry = float(pos["entry"])
+        side = int(pos["side"])
+        if entry <= 0 or close <= 0:
+            return
+        adv = (entry - close) / entry if side > 0 else (close - entry) / entry
+        if adv + 1e-12 < float(dists[n]):
+            return
+        mult = float(self.dca_mult[n] if n < len(self.dca_mult) else 2.5)
+        add = float(pos["parent"]) * min(2.5, max(0.25, mult))
+        qty = float(pos["qty"])
+        pos["entry"] = (entry * qty + close * add) / (qty + add)
+        pos["qty"] = qty + add
+        pos["adds"] = n + 1
+        self._rearm_stops(pos, sl_frac, tp_frac)
+
+    def _advance_pos(
+        self,
+        pos: Dict[str, Any],
+        bar: Sequence[float],
+        i: int,
+        sl_frac: float,
+        tp_frac: float,
+        use_trail: bool,
+        arm: float,
+        give: float,
+        time_bars: int,
+        scratch_bars: int,
+        honor_tp: bool,
+        ts: float,
+        symbol: str,
+        st_id: str,
+        pack: str,
+        strategy: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        side = int(pos["side"])
+        entry = float(pos["entry"])
+        held = i - int(pos["i"])
+        if strategy == "block" and held >= 1:
+            self._maybe_block_add(pos, bar, sl_frac, tp_frac)
+            entry = float(pos["entry"])
+        elif strategy == "dca" and held >= 1:
+            self._maybe_dca_add(pos, bar, sl_frac, tp_frac)
+            entry = float(pos["entry"])
+        if use_trail:
+            if side > 0:
+                pos["peak"] = max(pos["peak"], float(bar[1]))
+                fav = (pos["peak"] - entry) / entry
+                if fav >= arm:
+                    trail = pos["peak"] * (1 - give)
+                    pos["trail"] = max(pos.get("trail") or 0.0, trail)
+            else:
+                pos["peak"] = min(pos["peak"], float(bar[2]))
+                fav = (entry - pos["peak"]) / entry
+                if fav >= arm:
+                    trail = pos["peak"] * (1 + give)
+                    cur = pos.get("trail")
+                    pos["trail"] = trail if cur is None else min(cur, trail)
+        elif side > 0:
+            pos["peak"] = max(pos["peak"], float(bar[1]))
+        else:
+            pos["peak"] = min(pos["peak"], float(bar[2]))
+        why, px = hit_exit(side, entry, pos["sl"], pos["tp"], pos.get("trail"), bar, ignore_tp=not honor_tp)
+        if why is None and held >= time_bars:
+            why, px = "time", float(bar[3])
+        if why is None and held >= scratch_bars:
+            move = (float(bar[3]) - entry) / entry * side
+            if move >= self.scratch_min:
+                why, px = "scratch+", float(bar[3])
+        if not why:
+            return pos, None
+        raw = (px - entry) / entry * side
+        qty = max(0.25, float(pos.get("qty") or 1.0))
+        rec = {
+            "t": ts,
+            "symbol": symbol,
+            "side": "LONG" if side > 0 else "SHORT",
+            "direction": "LONG" if side > 0 else "SHORT",
+            "pnl": net_pnl_pct(raw, self.cost_pct) * qty,
+            "pnl_pct": raw,
+            "hold_s": held * BAR_S,
+            "reason": why,
+            "set_id": st_id,
+            "pack": pack,
+            "costPct": self.cost_pct,
+            "qty": qty,
+            "adds": int(pos.get("adds") or 0),
+            "strategy": strategy,
+        }
+        return None, rec
+
+    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
@@ -1107,60 +1261,47 @@ class SetBook:
             give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
             tp_frac = max(0.0020, st.tp_pct)
             # LONG and SHORT walk independently so one side never blocks the other.
+            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None
+            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None
+            if strat_hist is not None:
+                strat_hist.setdefault("block", [])
+                strat_hist.setdefault("dca", [])
             for want_side in (1, -1):
                 open_pos: Optional[Dict[str, Any]] = None
+                blk_pos: Optional[Dict[str, Any]] = None
+                dca_pos: Optional[Dict[str, Any]] = None
                 cool = 0
                 for i in range(warmup, n):
                     bar = bars[i]
                     ts = base_ts + i * BAR_S
+                    kw = dict(
+                        sl_frac=max(0.0015, sl_frac_base),
+                        tp_frac=tp_frac,
+                        use_trail=use_trail,
+                        arm=arm,
+                        give=give,
+                        time_bars=time_bars,
+                        scratch_bars=scratch_bars,
+                        honor_tp=honor_tp,
+                        ts=ts,
+                        symbol=symbol,
+                        st_id=st.id,
+                        pack=st.pack,
+                    )
                     if open_pos is not None:
-                        side = int(open_pos["side"])
-                        entry = float(open_pos["entry"])
-                        held = i - int(open_pos["i"])
-                        if use_trail:
-                            if side > 0:
-                                open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
-                                fav = (open_pos["peak"] - entry) / entry
-                                if fav >= arm:
-                                    trail = open_pos["peak"] * (1 - give)
-                                    open_pos["trail"] = max(open_pos.get("trail") or 0.0, trail)
-                            else:
-                                open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                                fav = (entry - open_pos["peak"]) / entry
-                                if fav >= arm:
-                                    trail = open_pos["peak"] * (1 + give)
-                                    cur = open_pos.get("trail")
-                                    open_pos["trail"] = trail if cur is None else min(cur, trail)
-                        elif side > 0:
-                            open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
-                        else:
-                            open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                        why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], open_pos.get("trail"), bar, ignore_tp=not honor_tp)
-                        if why is None and held >= time_bars:
-                            why, px = "time", float(bar[3])
-                        if why is None and held >= scratch_bars:
-                            move = (float(bar[3]) - entry) / entry * side
-                            if move >= self.scratch_min:
-                                why, px = "scratch+", float(bar[3])
-                        if why:
-                            raw = (px - entry) / entry * side
-                            rec = {
-                                "t": ts,
-                                "symbol": symbol,
-                                "side": "LONG" if side > 0 else "SHORT",
-                                "direction": "LONG" if side > 0 else "SHORT",
-                                "pnl": net_pnl_pct(raw, self.cost_pct),
-                                "pnl_pct": raw,
-                                "hold_s": held * BAR_S,
-                                "reason": why,
-                                "set_id": st.id,
-                                "pack": st.pack,
-                                "costPct": self.cost_pct,
-                            }
-                            bucket = hist[st.id]
-                            bucket.append(rec)
-                            open_pos = None
+                        open_pos, rec = self._advance_pos(open_pos, bar, i, strategy="core", **kw)
+                        if rec:
+                            hist.setdefault(st.id, []).append(rec)
                             cool = self.cooldown_bars
+                    if blk_pos is not None:
+                        blk_pos, recb = self._advance_pos(blk_pos, bar, i, strategy="block", **kw)
+                        if recb and strat_hist is not None:
+                            strat_hist["block"].append(recb)
+                    if dca_pos is not None:
+                        dca_pos, recd = self._advance_pos(dca_pos, bar, i, strategy="dca", **kw)
+                        if recd and strat_hist is not None:
+                            strat_hist["dca"].append(recd)
+                    if open_pos is not None or blk_pos is not None or dca_pos is not None:
                         continue
                     if cool > 0:
                         cool -= 1
@@ -1178,7 +1319,17 @@ class SetBook:
                     else:
                         sl = close * (1 + sl_frac)
                         tp = close * (1 - tp_frac)
-                    open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None, "tags": str(why or "")}
+                    seed = self._seed_pos(d, close, sl, tp, i, str(why or ""))
+                    open_pos = dict(seed)
+                    if do_block:
+                        blk_pos = dict(seed)
+                    if do_dca:
+                        dca_pos = dict(seed)
+            if strat_hist is not None:
+                for k in ("block", "dca"):
+                    tape = strat_hist.get(k) or []
+                    if len(tape) > 4000:
+                        strat_hist[k] = tape[-2400:]
             self.progress.set_id = st.id
         if ind_hist is not None and "indications" in self.packs:
             self._replay_kind_tapes(

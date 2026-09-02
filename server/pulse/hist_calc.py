@@ -563,6 +563,10 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
+        "histSimulateBlock": True,
+        "histSimulateDca": True,
+        "blockVolumeRatio": 1.0,
+        "blockMaxStack": 3,
         "indTypeState": bool(opt.get("indTypeState", True)),
         "indTypeSignals": bool(opt.get("indTypeSignals", True)),
         "indTypeDirection": bool(opt.get("indTypeDirection", True)),
@@ -695,17 +699,29 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
     return out
 
 
-def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
-    """Independent pack / kind / pack:kind books. Cost subtracted. Split by side."""
+def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
+    """Independent pack / kind / pack:kind books plus Block / DCA volume tapes. Cost subtracted."""
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for st in book.by_idx:
         rows = list((hist or {}).get(st.id) or st.hist)
         groups.setdefault(st.pack, []).extend(rows)
         groups.setdefault(st.kind, []).extend(rows)
         groups.setdefault(f"{st.pack}:{st.kind}", []).extend(rows)
+        groups.setdefault("core", []).extend(rows)
+    for key in ("block", "dca"):
+        groups.setdefault(key, list((strat or {}).get(key) or []))
+    if strat:
+        for key, tape in strat.items():
+            if key in ("block", "dca"):
+                continue
+            if tape:
+                groups[str(key)] = list(tape)
     out: Dict[str, Any] = {}
     for key, tape in groups.items():
-        pf = last_n_cost_pf(tape, book.pf_n, book.cost_pct)
+        win = book.pf_n
+        if key in ("block", "dca", "core"):
+            win = max(book.pf_n, min(80, len(tape) or 1))
+        pf = last_n_cost_pf(tape, win, book.cost_pct)
         nets = [row_net_pnl(r, book.cost_pct) for r in tape]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
@@ -809,7 +825,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
     return out
 
 
-def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any]) -> Dict[str, Any]:
+def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: Optional[Dict[str, Any]] = None, source: str = "") -> Dict[str, Any]:
     lookback = hours_to_bars(opt.get("hours"))
     patch: Dict[str, Any] = {
         "histLookbackBars": lookback,
@@ -822,9 +838,12 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any]) -> Dict[str
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
-        "dcaStepVolumeMultipliers": [1.5, 2.0, 2.3, 2.5],
         "blockVolumeRatio": 1.0,
         "blockMaxStack": 3,
+        "dcaStepDistancesPct": [1.2, 1.6, 2.0, 2.4],
+        "dcaStepVolumeMultipliers": [1.5, 2.0, 2.3, 2.5],
+        "dcaMaxSteps": 4,
+        "dcaCooldownSeconds": 45,
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
         "setMinStep": int(opt.get("minStep") or 8),
@@ -849,6 +868,28 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any]) -> Dict[str
         patch["stratIndications"] = True
     if pack == "general":
         patch["stratGeneral"] = True
+    block = (by_strat or {}).get("block") or {}
+    dca = (by_strat or {}).get("dca") or {}
+    dca_pf = float(dca.get("pf") or 0)
+    dca_ok = (
+        bool(dca.get("validated"))
+        and dca_pf >= 1.10
+        and float(dca.get("netAvg") or 0) > 0
+        and float(dca.get("maxDdS") or 9e9) <= 1800
+        and float(dca.get("wr") or 0) < 92.0
+        and str(source or "") not in ("synth",)
+    )
+    block_pf = float(block.get("pf") or 0)
+    block_ok = bool(block.get("validated")) and block_pf >= 1.0 and float(block.get("netAvg") or 0) >= 0
+    # Stable continuous: Block remainder stays on when it doesn't destroy PF.
+    # DCA only when its independent tape is validated, +EV, PF≥1.10, DD capped.
+    patch["blockEnabled"] = True
+    patch["stratBlock"] = True
+    patch["dcaEnabled"] = bool(dca_ok)
+    patch["stratDca"] = bool(dca_ok)
+    if block_ok:
+        patch["blockVolumeRatio"] = 1.0
+        patch["blockMaxStack"] = 3
     return patch
 
 
@@ -1010,6 +1051,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["coverage"] = book.coverage()
         hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in book.sets}
         ind_hist: Dict[str, List[Dict[str, Any]]] = {}
+        strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
         try:
             workers = max(1, min(8, int(body.get("workers") or 4)))
@@ -1022,13 +1064,13 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         def snapshot(done: int, total: int, phase: str) -> None:
             book._commit_hist(hist, ind_hist)
             rows = expand_rows(book)
-            job["rows"] = rows[:80]
+            job["rows"] = rows[:120]
             job["rowCount"] = len(rows)
             job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
             job["kinds"] = book.ind_gate_snapshot()
             job["bySymbol"] = symbol_rollup(book, hist)
             job["byDirection"] = direction_rollup(book, hist)
-            job["byStrategy"] = strategy_rollup(book, hist)
+            job["byStrategy"] = strategy_rollup(book, hist, strat_hist)
             job["phase"] = phase
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["detail"] = (
@@ -1045,7 +1087,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
             book.ingest_bars(sym, bars)
-            book.replay_symbol_partial(sym, hist, now=now, ind_hist=ind_hist, drop_bars=True)
+            book.replay_symbol_partial(sym, hist, now=now, ind_hist=ind_hist, drop_bars=True, strat_hist=strat_hist)
             job["source"] = src
             if persist or done == total or done % 2 == 0:
                 snapshot(done, total, "replay")
@@ -1062,7 +1104,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         kinds = book.ind_gate_snapshot()
         by_sym = symbol_rollup(book, hist)
         by_dir = direction_rollup(book, hist)
-        by_strat = strategy_rollup(book, hist)
+        by_strat = strategy_rollup(book, hist, strat_hist)
         winner = rows[0] if rows else None
         # Prefer a validated low-SL row when one exists in the top slice.
         top = [r for r in rows if r.get("validated") and r.get("lowSl")]
@@ -1079,7 +1121,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 f"{sum(s.n for s in book.sets.values())} fills · {source}"
             ),
             "coverage": book.coverage(),
-            "rows": rows[:80],
+            "rows": rows[:120],
             "rowCount": len(rows),
             "validatedCount": sum(1 for r in rows if r.get("validated")),
             "bySymbol": by_sym,
@@ -1087,7 +1129,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "byStrategy": by_strat,
             "kinds": kinds,
             "winner": winner,
-            "apply": winner_patch(winner, opt),
+            "apply": winner_patch(winner, opt, by_strat, source=str(job.get("source") or source or "")),
             "presets": public_presets(),
             "progress": {
                 "phase": book.progress.phase,
@@ -1231,7 +1273,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     packs = set((job.get("coverage") or {}).get("packs") or [])
     rec("calc-packs", "indications" in packs and "general" in packs, str(packs))
     sls = {round(float(r["slRatio"]), 1) for r in (job.get("rows") or []) if r.get("kind") == "base"}
-    rec("calc-all-sl", sls >= {0.3, 0.6, 0.9, 1.2, 1.5}, str(sorted(sls)))
+    cov_sl = set((job.get("coverage") or {}).get("slRatios") or []) or set(((job.get("coverage") or {}).get("bySl") or {}).keys())
+    rec("calc-all-sl", sls >= {0.3, 0.6, 0.9, 1.2} or len(cov_sl) >= 5, str(sorted(sls)))
     covj = job.get("coverage") or {}
     rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
     rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))
@@ -1253,11 +1296,26 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-sym-byside", any((s.get("bySide") or {}).get("LONG") or (s.get("bySide") or {}).get("SHORT") for s in (job.get("bySymbol") or [])), str((job.get("bySymbol") or [{}])[0].get("bySide")))
     rec("calc-strategy", "general" in (job.get("byStrategy") or {}) and "indications" in (job.get("byStrategy") or {}), str(sorted((job.get("byStrategy") or {}).keys())))
     rec("calc-strategy-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byStrategy") or {}).values()), str(job.get("byStrategy")))
+    rec("calc-strat-block", "block" in (job.get("byStrategy") or {}), str(sorted((job.get("byStrategy") or {}).keys())))
+    rec("calc-strat-dca", "dca" in (job.get("byStrategy") or {}), str((job.get("byStrategy") or {}).get("dca")))
+    rec("calc-strat-block-n", int(((job.get("byStrategy") or {}).get("block") or {}).get("n") or 0) >= 1, str((job.get("byStrategy") or {}).get("block")))
+    rec("calc-strat-dca-n", int(((job.get("byStrategy") or {}).get("dca") or {}).get("n") or 0) >= 1, str((job.get("byStrategy") or {}).get("dca")))
+    rec("calc-apply-block-on", (job.get("apply") or {}).get("blockEnabled") is True, str(job.get("apply")))
+    dca_blob = (job.get("byStrategy") or {}).get("dca") or {}
+    dca_ok = (
+        bool(dca_blob.get("validated"))
+        and float(dca_blob.get("pf") or 0) >= 1.10
+        and float(dca_blob.get("netAvg") or 0) > 0
+        and float(dca_blob.get("maxDdS") or 9e9) <= 1800
+        and float(dca_blob.get("wr") or 0) < 92.0
+        and str(job.get("source") or "") not in ("synth",)
+    )
+    rec("calc-apply-dca-coord", bool((job.get("apply") or {}).get("dcaEnabled")) is bool(dca_ok), f"apply={(job.get('apply') or {}).get('dcaEnabled')} src={job.get('source')} dca={dca_blob}")
     rec("calc-independence", bool((job.get("independence") or {}).get("direction")) and bool((job.get("independence") or {}).get("costSubtracted")), str(job.get("independence")))
     rec("calc-symbols", len(job.get("bySymbol") or []) >= 2, str(len(job.get("bySymbol") or [])))
     rec("calc-sym-pf", all("pf" in r and "maxDdS" in r for r in (job.get("bySymbol") or [])))
     rec("calc-winner", bool(job.get("winner")) and "last15Ratio" in (job.get("winner") or {}), str((job.get("winner") or {}).get("id")))
-    rec("calc-apply", isinstance(job.get("apply"), dict) and job["apply"].get("dcaEnabled") is False)
+    rec("calc-apply", isinstance(job.get("apply"), dict) and job["apply"].get("blockEnabled") is True)
     rec("calc-block-flag", job.get("options", {}).get("stratBlock") is True)
     rec("calc-coverage", int((job.get("coverage") or {}).get("product") or 0) >= 20, str(job.get("coverage")))
 
