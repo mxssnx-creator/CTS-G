@@ -1,8 +1,8 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..305a607 100644
+index b3a9ff3..7d3da43 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
-@@ -21,7 +21,7 @@ from collections import deque
+@@ -21,7 +21,7 @@
  from concurrent.futures import ThreadPoolExecutor, as_completed
  from dataclasses import dataclass, asdict
  from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -11,7 +11,7 @@ index b3a9ff3..305a607 100644
  from coord_engine import Coordinator
  from bingx_fast import FastBingX, ErrorLog
  from modules import resolve as resolve_modules
-@@ -50,6 +50,7 @@ CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
+@@ -50,6 +50,7 @@
  ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
  LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
  START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
@@ -19,7 +19,15 @@ index b3a9ff3..305a607 100644
  
  UNIVERSE_PATH = os.path.join(DIR, "universe.json")
  MAX_SYMBOLS = 0  # 0 = unlimited
-@@ -144,7 +145,7 @@ SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "lev
+@@ -128,6 +129,7 @@
+ TRAIL_GIVE = 0.0016
+ TIME_STOP_S = 21600
+ MAX_HOLD_S = 21600
++MAX_DD_TIME_S = 0.0  # 0 = off; max seconds a position may stay underwater
+ SCRATCH_S = 600
+ SCRATCH_MIN = 0.0016
+ SCAN_S = 0.20
+@@ -144,7 +146,7 @@
  BALANCE_EVERY = 6.0
  QA_EVERY = 5
  COOLDOWN_S = 9.0
@@ -28,7 +36,7 @@ index b3a9ff3..305a607 100644
  DD_HALT = 0.18
  EQ_MIN = 0.20
  RECV = 5000
-@@ -347,6 +348,18 @@ _LOG_BUF: List[str] = []
+@@ -347,6 +349,18 @@
  _LOG_FLUSH = 0.0
  
  
@@ -47,7 +55,15 @@ index b3a9ff3..305a607 100644
  def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
      global _LOG_N, _LOG_FLUSH
      if every > 0:
-@@ -540,6 +553,7 @@ class Closed:
+@@ -516,6 +530,7 @@
+     liq: float = 0.0
+     position_id: str = ""
+     ctrl_verified: bool = False
++    under_since: float = 0.0
+ 
+ 
+ @dataclass
+@@ -540,6 +555,7 @@
      client_id: str = ""
      ours: bool = True
      conn: str = ""
@@ -55,7 +71,7 @@ index b3a9ff3..305a607 100644
  
  
  class Pulse:
-@@ -632,13 +646,16 @@ class Pulse:
+@@ -632,13 +648,16 @@
          self.last_px: Dict[str, float] = {}
          self.recon_ok = True
          self.recon_detail = "pending"
@@ -73,7 +89,7 @@ index b3a9ff3..305a607 100644
              "blockPauseCountRatio": 1,
              "blockActiveRealEnabled": True,
              "blockActiveLiveEnabled": True,
-@@ -875,9 +892,24 @@ class Pulse:
+@@ -875,9 +894,24 @@
          return max(0.0, float(self.available or 0)) * lev * 0.90
  
      def max_book_notional(self) -> float:
@@ -100,7 +116,7 @@ index b3a9ff3..305a607 100644
          dca_extra = 0.0
          if dca_n > 0:
              try:
-@@ -934,6 +966,10 @@ class Pulse:
+@@ -934,6 +968,10 @@
              return 0.0
          if q * px > room * 1.02:
              return 0.0
@@ -111,7 +127,7 @@ index b3a9ff3..305a607 100644
          return q
  
      def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
-@@ -1142,6 +1178,49 @@ class Pulse:
+@@ -1142,6 +1180,49 @@
              except Exception:
                  pass
          self.last_bal = time.time()
@@ -161,7 +177,7 @@ index b3a9ff3..305a607 100644
          if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
              if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                  self._pre_pause_halt = self.halt_reason
-@@ -1153,10 +1232,14 @@ class Pulse:
+@@ -1153,10 +1234,14 @@
              self.halted = True
              self.halt_reason = "paused"
          elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
@@ -176,7 +192,7 @@ index b3a9ff3..305a607 100644
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -2055,8 +2138,6 @@ class Pulse:
+@@ -2055,8 +2140,6 @@
              return True
          if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
              return True
@@ -185,7 +201,7 @@ index b3a9ff3..305a607 100644
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
-@@ -2435,6 +2516,19 @@ class Pulse:
+@@ -2435,6 +2518,19 @@
              want = 1 if ind.direction == "long" else -1
              if want != direction:
                  return "ind-mismatch"
@@ -205,7 +221,7 @@ index b3a9ff3..305a607 100644
          chosen = None
          try:
              chosen = self.sets.pick_any(pack) if self.sets.enabled else None
-@@ -2445,12 +2539,16 @@ class Pulse:
+@@ -2445,12 +2541,16 @@
          if chosen:
              if self.occupying(sym, side, pack, chosen.id):
                  return "set-slot"
@@ -225,7 +241,7 @@ index b3a9ff3..305a607 100644
          return None
  
      def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
-@@ -2725,6 +2823,30 @@ class Pulse:
+@@ -2725,6 +2825,30 @@
          log(f"GHOST drop {pos.symbol} {pos.side} {why} qty={pos.qty}")
          self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why, exchange=False)
  
@@ -256,7 +272,7 @@ index b3a9ff3..305a607 100644
      def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
          skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
          if exchange:
-@@ -2747,6 +2869,7 @@ class Pulse:
+@@ -2747,6 +2871,7 @@
              time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
              sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
              set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
@@ -264,7 +280,25 @@ index b3a9ff3..305a607 100644
          )
          if pos.client_id:
              self.seen_fill_cids.add(pos.client_id)
-@@ -2921,6 +3044,7 @@ class Pulse:
+@@ -2822,6 +2947,17 @@
+             else:
+                 pnl_pct = (pos.entry - px) / pos.entry
+                 pos.peak = min(pos.peak, px) if pos.peak else px
++            # Max drawdown time: force-close positions that stay underwater
++            # longer than the configured window (0 = off). A small buffer
++            # beyond breakeven keeps fee noise from resetting the clock.
++            if pnl_pct < -0.0005:
++                if not pos.under_since:
++                    pos.under_since = now
++            else:
++                pos.under_since = 0.0
++            if MAX_DD_TIME_S > 0 and pos.under_since and now - pos.under_since >= MAX_DD_TIME_S:
++                self.close_pos(pos, px, "dd-time")
++                continue
+             if pos.side == "LONG" and pos.sl > 0 and pos.sl < pos.entry * 1.0000001 and px <= pos.sl:
+                 self.close_pos(pos, px, "sl")
+                 continue
+@@ -2921,6 +3057,7 @@
                      client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                      ours=bool(rec.get("ours", True)),
                      conn=str(rec.get("conn") or rec.get("connection") or ""),
@@ -272,7 +306,16 @@ index b3a9ff3..305a607 100644
                  )
                  cid = c.client_id
                  if cid and not self.cid_ours(cid):
-@@ -2956,7 +3080,9 @@ class Pulse:
+@@ -2946,7 +3083,7 @@
+ 
+     def apply_live_config(self, initial: bool = False) -> None:
+         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
+-        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
++        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
+         cts = dump_cts_settings()
+         self.cts = cts
+         ov = load_json_file(OVERLAY_PATH)
+@@ -2956,7 +3093,9 @@
          except Exception:
              self.overlay_mtime = 0.0
          if ov.get("targetNotional"):
@@ -283,7 +326,18 @@ index b3a9ff3..305a607 100644
          try:
              self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
          except Exception:
-@@ -3062,7 +3188,7 @@ class Pulse:
+@@ -2982,6 +3121,10 @@
+             TIME_STOP_S = min(MAX_HOLD_S, max(30.0, float(ov["timeStopS"])))
+         else:
+             TIME_STOP_S = MAX_HOLD_S
++        if ov.get("maxDdTimeS") is not None:
++            MAX_DD_TIME_S = min(86400.0, max(0.0, float(ov["maxDdTimeS"])))
++        else:
++            MAX_DD_TIME_S = 0.0
+         if ov.get("scratchS"):
+             SCRATCH_S = float(ov["scratchS"])
+         if ov.get("scratchMinPct") is not None:
+@@ -3062,7 +3205,7 @@
          except Exception:
              b_stack = 0
          b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
@@ -292,7 +346,7 @@ index b3a9ff3..305a607 100644
          b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
          real_pf = 1.2
          try:
-@@ -3073,13 +3199,13 @@ class Pulse:
+@@ -3073,13 +3216,13 @@
          self.block.enabled = bool(b_en) if b_en is not None else True
          if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
              self.block.enabled = True
@@ -308,7 +362,15 @@ index b3a9ff3..305a607 100644
          self.block.pause_ratio = max(0, b_pause)
          self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
          self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
-@@ -3252,6 +3378,7 @@ class Pulse:
+@@ -3183,6 +3326,7 @@
+             "trailArmPct": TRAIL_ARM * 100,
+             "trailGivePct": TRAIL_GIVE * 100,
+             "timeStopS": TIME_STOP_S,
++            "maxDdTimeS": MAX_DD_TIME_S,
+             "scratchS": SCRATCH_S,
+             "scratchMinPct": SCRATCH_MIN * 100,
+             "scanS": SCAN_S,
+@@ -3252,6 +3396,7 @@
              "setMaxDdTimeS": self.sets.max_dd_s,
              "setAutoDeact": self.sets.auto_deact,
              "setUseHistoricGate": self.sets.use_historic_gate,
@@ -316,7 +378,7 @@ index b3a9ff3..305a607 100644
              "setMinSamples": self.sets.min_samples,
              "setReactivate": self.sets.reactivate,
              "setMaxActive": self.sets.max_active,
-@@ -3304,6 +3431,38 @@ class Pulse:
+@@ -3304,6 +3449,38 @@
              "symbolCap": int(getattr(self, "symbol_cap", 0) or 0),
          }
  
@@ -355,7 +417,7 @@ index b3a9ff3..305a607 100644
      def maybe_block_adds(self) -> None:
          """CTS Block Live: add-on only against an existing same-side parent."""
          if self.halted or not self.block.enabled or not self.strat_block:
-@@ -3349,17 +3508,9 @@ class Pulse:
+@@ -3349,17 +3526,9 @@
              if not lane or lane.base_qty <= 0:
                  continue
              # Parent still valid only if pulse score agrees with side (continuation).
@@ -376,7 +438,7 @@ index b3a9ff3..305a607 100644
              d, why, conf = self.score(pos.symbol)
              same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
              if not same:
-@@ -3386,7 +3537,10 @@ class Pulse:
+@@ -3386,7 +3555,10 @@
              if not c or px <= 0:
                  continue
              raw = row["requestedAddQty"]
@@ -388,7 +450,7 @@ index b3a9ff3..305a607 100644
              inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
              room = max(0.0, self.max_book_notional() - pos.qty * px)
              add_cap = min(self.notional_cap() * max(1.0, inc), room)
-@@ -3814,7 +3968,10 @@ class Pulse:
+@@ -3814,7 +3986,10 @@
              else:
                  intern[pack] = True
              intern_any = intern_any or intern[pack]
@@ -400,7 +462,7 @@ index b3a9ff3..305a607 100644
              intern_any = True
              intern["indications"] = intern["general"] = True
          # 0 / missing maxOpen = unlimited. Coord and intern are advisory, never a hard book cap.
-@@ -3874,6 +4031,11 @@ class Pulse:
+@@ -3874,6 +4049,11 @@
                      alt = "general" if pack == "indications" else "indications"
                      if intern.get(alt):
                          pack = alt
@@ -412,7 +474,7 @@ index b3a9ff3..305a607 100644
                      elif intern_any:
                          pack = "general" if intern.get("general") else "indications"
                      else:
-@@ -3885,7 +4047,7 @@ class Pulse:
+@@ -3885,7 +4065,7 @@
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -421,7 +483,7 @@ index b3a9ff3..305a607 100644
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -3912,15 +4074,37 @@ class Pulse:
+@@ -3912,15 +4092,37 @@
          if not isinstance(rows, list):
              return
          live_n = 0
@@ -464,7 +526,7 @@ index b3a9ff3..305a607 100644
          live = set()
          foreign = set()
          for p in rows:
-@@ -4168,9 +4352,9 @@ class Pulse:
+@@ -4168,9 +4370,9 @@
          inc1 = calculate_block_volume_increment_ratio(1, 1.5)
          inc3 = calculate_block_volume_increment_ratio(3, 1.5)
          self.record_test("block-formula-inc", inc1 == 1.5 and inc3 == 4.5, f"inc1={inc1} inc3={inc3}")
@@ -477,7 +539,7 @@ index b3a9ff3..305a607 100644
          self.record_test("block-enabled", bool(self.block.enabled), f"stack={self.block.max_stack}")
          t0 = time.time()
          t2 = self.api.public("/openApi/swap/v2/quote/ticker")
-@@ -4236,7 +4420,8 @@ class Pulse:
+@@ -4236,7 +4438,8 @@
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -487,7 +549,7 @@ index b3a9ff3..305a607 100644
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4274,6 +4459,7 @@ class Pulse:
+@@ -4274,6 +4477,7 @@
          pc["neutral"] = 1.0
          pc["plus1x"] = 1.1
          pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -495,7 +557,7 @@ index b3a9ff3..305a607 100644
          return {
              "running": not self.halted,
              "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
-@@ -4297,6 +4483,9 @@ class Pulse:
+@@ -4297,6 +4501,9 @@
              "losses": self.losses,
              "winRate": round(wr, 1),
              "openCount": len(self.open),
@@ -505,7 +567,7 @@ index b3a9ff3..305a607 100644
              "maxOpen": MAX_OPEN,
              "symbols": SYMBOLS,
              "regime": self.regime,
-@@ -4408,7 +4597,12 @@ class Pulse:
+@@ -4408,7 +4615,12 @@
  
      def _coverage_blob(self) -> Dict[str, Any]:
          catalog = []
@@ -519,7 +581,7 @@ index b3a9ff3..305a607 100644
              f = self.block.formula(1.0, n)
              catalog.append({
                  "n": n,
-@@ -4459,6 +4653,7 @@ class Pulse:
+@@ -4459,6 +4671,7 @@
                  "signals": bool(self.indications.settings.get("typeSignals", True)),
              },
              "indicationHits": hits,
@@ -527,7 +589,7 @@ index b3a9ff3..305a607 100644
              "evals": {
                  "n": eval_n,
                  "symbols": len(getattr(self.indications, "evals", {}) or {}),
-@@ -4508,7 +4703,7 @@ class Pulse:
+@@ -4508,7 +4721,7 @@
                  "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                  "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
              },
@@ -536,7 +598,7 @@ index b3a9ff3..305a607 100644
              "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
              "symbols": len(SYMBOLS),
              "scan": {
-@@ -4529,6 +4724,9 @@ class Pulse:
+@@ -4529,6 +4742,9 @@
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -546,7 +608,7 @@ index b3a9ff3..305a607 100644
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4650,6 +4848,9 @@ class Pulse:
+@@ -4650,6 +4866,9 @@
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -556,7 +618,7 @@ index b3a9ff3..305a607 100644
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4753,7 +4954,8 @@ class Pulse:
+@@ -4753,7 +4972,8 @@
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -566,7 +628,7 @@ index b3a9ff3..305a607 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4893,6 +5095,22 @@ class Pulse:
+@@ -4893,6 +5113,22 @@
              if remain > 0:
                  time.sleep(remain)
  
@@ -589,7 +651,7 @@ index b3a9ff3..305a607 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4904,7 +5122,8 @@ class Pulse:
+@@ -4904,7 +5140,8 @@
              self.halt_reason = "stopped"
              self.priority_controls()
              self.write_stats(force=True)
@@ -599,7 +661,7 @@ index b3a9ff3..305a607 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5135,17 @@ class Pulse:
+@@ -4916,11 +5153,17 @@
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -618,7 +680,7 @@ index b3a9ff3..305a607 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5226,8 @@ class Pulse:
+@@ -5001,6 +5244,8 @@
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
