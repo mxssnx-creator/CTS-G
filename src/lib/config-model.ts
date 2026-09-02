@@ -144,6 +144,9 @@ export type PulseOverlay = {
   axisPauseEnabled: boolean;
   axisPauseMaxWindow: number;
   minPf: number;
+  baseMinPf: number;
+  mainMinPf: number;
+  realMinPf: number;
   positionCostPct: number;
   pfWindow: number;
   slMinPct: number;
@@ -286,6 +289,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
   minPf: 1.1,
+  baseMinPf: 1.05,
+  mainMinPf: 1.08,
+  realMinPf: 1.1,
   positionCostPct: 0.15,
   pfWindow: 15,
   slMinPct: 0.2,
@@ -601,6 +607,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.1),
+    baseMinPf: num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.05),
+    mainMinPf: num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.08),
+    realMinPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.1),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.2),
