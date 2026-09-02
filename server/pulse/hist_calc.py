@@ -498,7 +498,9 @@ def load_universe() -> List[str]:
             raw = json.load(open(path))
         except Exception:
             continue
-        rows = raw if isinstance(raw, list) else (raw.get("symbols") or raw.get("universe") or [])
+        rows = raw if isinstance(raw, list) else (
+            raw.get("selected") or raw.get("ranked") or raw.get("symbols") or raw.get("universe") or raw.get("live") or []
+        )
         for s in rows:
             if isinstance(s, dict):
                 s = s.get("symbol") or s.get("s") or ""
