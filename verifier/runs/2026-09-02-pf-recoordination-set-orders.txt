@@ -1,0 +1,66 @@
+run 2026-09-02 (pf-recoordination-set-orders) — verifier v3
+=============================================================
+Commands + results ( chronological ):
+
+1) python3 scripts/engine-test.py
+   exit 1 (intermediate) — 165/170, 5 assertion bugs in new set_orders_test
+   (snapshot rows key, batch request-body oids, seeded last15_n baseline,
+   fmt_px rounding 50.325->50.32, edit-application miss). Engine behavior
+   itself correct in all 5 (verified via detail output + standalone replays).
+2) python3 scripts/engine-test.py  (after assertion fixes)
+   exit 1 — 170/171, want_tp CCC rounding fix missed by a batched edit.
+3) python3 scripts/engine-test.py  (after solo re-edit, edit verified landed)
+   exit 0 — 171/171 passed fail=0
+   (153 prior + 18 new setord-* assertions; block_calc expectations updated
+   to pfRatio 1.1: minpf(1.2,1.1,4.5)=1.99; count2 gate 1+0.1*1.1*2=1.22)
+4) python3 -m py_compile server/pulse/*.py        -> OK
+5) set_engine self_test                            -> ok
+6) npm run typecheck (tsc --noEmit)                -> exit 0 clean
+7) npm run build                                   -> exit 0 OK
+
+PF recoordination applied (base-1: 1.00=neutral, 0.10=1xPositionCost):
+- blockProfitFactorRatio default/fallback 0.8 -> 1.1: block_engine.py:108,
+  pulse_trader.py x2 (cts defaults + apply fallback), config-model.ts x2,
+  overlay-bingx-x01.json, overlay-bingx-x02.json, engine-test.py configs.
+- Bounds same relation (+0.3): BLOCK_PF_RATIO_MIN 0.2 -> 0.5 (MAX 5.0 hard
+  cap unchanged); engine apply clamp now uses the constants; desk PF-ratio
+  Num min 0.2 -> 0.5.
+- Desk axis-section Min PF Num moved to canonical new-scale range:
+  min 0.8/max 3/step 0.05 -> min 1/max 2.3/step 0.02 (matches main Min PF
+  slider + RATIO_MIN/MAX/STEP).
+- Engine self-test block-min-pf now (1.2,1.1,0.5)=1.11.
+
+set_orders_test (18 assertions) proves per-Set independence in-process on
+real place()/place_ctrl_pair()/close_pos()/SetBook.on_live_close paths:
+3 Sets (general sl0.6 st10 / general sl0.9 st20 / indications sl1.5 st30) ->
+3 independent MARKET entries with unique TAG'd clientOrderIDs that
+parse_track() resolves back to the exact set (id/idx/step/pack/sl); each
+position gets its own SL+TP batch pair (closePosition=true, 6 distinct live
+order ids, controls_ok+ctrl_verified, per-set SL distances 0.27%/0.495%/0.9%
++ per-set TP 0.45%/0.55%/0.65%); close A (+3.0R) cancels ONLY A's exchange
+orders (B/C pairs stay live) and attributes to set A only (live=1, n=1,
+ratio=1.3; B/C untouched); close B (-4.33R) attributes to B only
+(ratio=0.5667); engine wins/losses 1/1 with per-set Closed set_id+client_id;
+snapshot rows per set (liveN 1/1/0, last15Ratio 1.3/0.5667); sim_stats
+real/live/sim 0 then 1. Negative: occupied symbol refused (0 extra posts);
+entry with failing controls scratches (no-ctrl close, book clean, no live
+unprotected orders on the exchange).
+
+8) Edit-application audit (BATCHED same-file edits silently dropped edits —
+   caught by C1 grep audit): pulse_trader 658/3208/4355, block_engine
+   constants, config-model 577, settings 1025, engine-test 782/830 re-applied
+   ONE AT A TIME, each verified by sed/grep after landing.
+9) python3 scripts/engine-test.py -> exit 1 intermediate: block-eval-pick-
+   smallest-unsat pick=None. Root cause: NEW intended semantics — count-2
+   gate is now 1+0.2*1.1*2=1.44, intern 1.4 no longer passes (was 1.32 under
+   0.8). Test lifted to intern 1.5 + NEW assertion block-pick-gated-by-new-
+   ratio locking the 1.44 gate (intern 1.4 refused).
+10) python3 scripts/engine-test.py -> exit 0 — 172/172 passed fail=0
+11) npm run typecheck -> exit 0 clean ; npm run build -> exit 0 OK
+12) Deploy chain: new engine blob 305a6070d98529b304a14450aec82d9f9975218e
+    restore patch regenerated (base b3a9ff3c, 30.6KB); apply-verify:
+    base->patch->blob HASH MATCH + byte-identical (cmp); linux-common.sh
+    pt_want pinned to 305a6070.
+FINAL: 172/172, py_compile all OK, set_engine self_test ok, tsc clean,
+npm build OK, C1 grep audit clean (no 0.8 PF defaults remain; MIN=0.5;
+desk axis Min PF on canonical 1/2.3/0.02), patch chain verified.
