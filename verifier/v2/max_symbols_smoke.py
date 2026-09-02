@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import traceback
 
@@ -21,7 +22,6 @@ DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "serve
 sys.path.insert(0, DIR)
 os.chdir(DIR)
 os.environ.setdefault("PULSE_CONN", "bingx-x01")
-os.makedirs("/opt/grok-x01-pulse", exist_ok=True)
 
 import pulse_trader as pt  # noqa: E402
 
@@ -62,6 +62,26 @@ class StubAPI:
         return {"code": 0, "data": {}}
 
 
+def isolate_runtime(contracts):
+    """Route every Pulse persistence path to a disposable offline fixture."""
+    root = tempfile.mkdtemp(prefix="cts-g-offline-v2-")
+    for name in (
+        "STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "STOP_ALL",
+        "LOG_PATH", "BLOCK_PATH", "OVERLAY_PATH", "OPEN_PATH", "CTS_PATH",
+        "ERR_PATH", "LEV_PATH", "START_EQ_PATH", "RESET_EQ_PATH", "UNIVERSE_PATH",
+    ):
+        setattr(pt, name, os.path.join(root, os.path.basename(str(getattr(pt, name, name)))))
+    with open(pt.OVERLAY_PATH, "w") as f:
+        json.dump({"symbolsAll": True, "symbolCap": 0, "symbols": ["*"], "maxOpen": 0,
+                   "maxPerGroup": 0, "blockMaxStack": 3, "dcaMaxSteps": 4, "indEnabled": True}, f)
+    with open(pt.UNIVERSE_PATH, "w") as f:
+        json.dump({}, f)
+    # Pulse construction normally reads Redis settings and may fetch wildcard
+    # contracts.  Keep this verifier offline and independent of live runtime.
+    pt.dump_cts_settings = lambda: {}
+    pt.load_contracts = lambda want=None: dict(contracts)
+
+
 def synth_bars(n=60, start=100.0, drift=0.001, vol_spike=False):
     """Live engine bars are [o, h, l, c, v] (no timestamp) — see Pulse._parse_klines."""
     bars = []
@@ -90,8 +110,9 @@ def main() -> int:
     names = [f"COIN{i:03d}-USDT" for i in range(N)]
     contracts = {s: pt.Contract(s, 0.01, 0.01, 2, 3, 2.0, 300) for s in names}
     contracts["SOL-USDT"] = pt.Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300)
-    # Keep this verifier genuinely offline: provide the complete fixture
-    # universe before Pulse applies its initial configuration.
+    isolate_runtime(contracts)
+    # Keep the initial fixture universe complete while Pulse exercises the
+    # wildcard x01 configuration from the isolated overlay.
     pt.SYMBOLS[:] = list(contracts)
     p = pt.Pulse(api, contracts)
 
