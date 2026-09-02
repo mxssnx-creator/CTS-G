@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 import { lastNCostPf, formatDuration } from "@/lib/analytics";
 import type { KindStat, LiveClosed, LiveStats, SideStat, StrategyStat } from "@/lib/live-stats";
 
-export const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common"] as const;
-export const STRATEGY_KEYS = ["indications", "general", "block", "trailing", "dca", "exits"] as const;
+const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common"] as const;
+const STRATEGY_KEYS = ["indications", "general", "block", "trailing", "dca", "exits"] as const;
 
 const KIND_SET = new Set<string>(INDICATION_KINDS);
 
@@ -76,7 +76,7 @@ const STRAT_HINT: Record<string, string> = {
   exits: "Lock / peak / rev / time / hard",
 };
 
-export function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
+function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
   const fromBlob = stats?.byIndication || {};
   const fromGate = stats?.sets?.indGate || stats?.coverage?.indicationGate || {};
   const live = stats?.indications?.kindStats || {};
@@ -121,7 +121,7 @@ export function resolveKindStats(stats: LiveStats | null): Record<string, KindSt
   return out;
 }
 
-export function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyStat> {
+function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyStat> {
   const fromBlob = stats?.byStrategy || {};
   const cov = stats?.coverage?.strategies || {};
   const closed = stats?.closed ?? [];

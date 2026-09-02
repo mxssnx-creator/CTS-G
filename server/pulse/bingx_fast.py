@@ -438,9 +438,6 @@ class FastBingX:
         chunk = orders[:5]
         return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
 
-    def cancel_replace(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.post("/openApi/swap/v2/trade/order/cancelReplace", extra or {})
-
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
         self.stats["rest"] += len(reqs)
         self.stats["asyncN"] += len(reqs)

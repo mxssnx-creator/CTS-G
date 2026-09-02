@@ -170,6 +170,7 @@ function SettingsPage() {
   }, []);
 
   const stats = pickView(raw, conn);
+  const calcPhase = calcJob?.phase;
 
   useEffect(() => {
     let alive = true;
@@ -182,14 +183,14 @@ function SettingsPage() {
       if (running) timer = setTimeout(() => void pull(), 1200);
       else setCalcBusy(false);
     };
-    if (calcBusy || (calcJob && ["fetch", "replay", "score", "queued"].includes(calcJob.phase))) {
+    if (calcBusy || (calcPhase && ["fetch", "replay", "score", "queued"].includes(calcPhase))) {
       void pull();
     }
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [calcBusy, calcJob?.phase]);
+  }, [calcBusy, calcPhase]);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
@@ -298,10 +299,6 @@ function SettingsPage() {
     setSaveMsg("Winner applied · Block on · DCA off · save to persist");
   };
 
-  const coord = (cts?.coordination_settings ?? cts?.coordinationSettings ?? {}) as Record<
-    string,
-    unknown
-  >;
   const strategies = (cts?.strategies ?? {}) as {
     main?: Record<string, { enabled?: boolean; min_profit_factor?: number; max_drawdown_time?: number; max_positions?: number }>;
     mainTradePfRatioSemantics?: string;
@@ -982,7 +979,7 @@ function SettingsPage() {
                 <KV k="1.10 = +1× cost" v={`net +${overlay.positionCostPct.toFixed(2)}% · gross ${(overlay.positionCostPct * 2).toFixed(2)}%`} />
                 <KV
                   k={`Last ${overlay.pfWindow} live`}
-                  v={pfLive(stats, overlay)}
+                  v={pfLive(stats)}
                 />
               </div>
               <p className="text-sm text-muted">
@@ -2125,7 +2122,7 @@ function pfHint(ratio: number, cost: number) {
   return `Net +${net.toFixed(2)}% · gross ${gross.toFixed(2)}% (${r.toFixed(2)}× cost)`;
 }
 
-function pfLive(stats: LiveStats | null, overlay: PulseOverlay) {
+function pfLive(stats: LiveStats | null) {
   const p = (stats as LiveStats & { pfCost?: { ratio?: number; avgR?: number; count?: number; pass?: boolean } })?.pfCost;
   if (!p) return "waiting";
   return `${(p.ratio ?? 0).toFixed(2)} · R ${(p.avgR ?? 0).toFixed(2)} · n ${p.count ?? 0} · ${p.pass ? "pass" : "block"}`;
@@ -2250,40 +2247,20 @@ function LiveAxis({
   );
 }
 
-function AxisRow({
-  name,
-  enabled,
-  window,
-  range,
-}: {
-  name: string;
-  enabled: boolean;
-  window: number;
-  range: string;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-lg border border-border bg-bg2 px-3 py-2 text-sm">
-      <span>
-        {name} <span className="font-mono text-xs text-muted">{range}</span>
-      </span>
-      <span className="font-mono text-xs text-muted">
-        {enabled ? "on" : "off"} · window {window}
-      </span>
-    </div>
-  );
-}
-
 function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: PulseOverlay }) {
   const sets = stats?.sets;
   const p = sets?.progress;
   const rows = sets?.rows ?? [];
   const liveOv = sets?.liveOverview;
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
+  const phase = String(p?.phase ?? "idle");
+  const updating = ["fetch", "replay", "score"].includes(phase);
+  const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-border bg-bg2 px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
-          <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}</span>
+          <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}{updating ? " · updating" : ""}{gate}</span>
           <span className="text-muted">
             {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
           </span>
@@ -2293,6 +2270,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         </div>
         <p className="mt-2 font-mono text-[11px] text-muted">
           {p?.detail || "waiting 1m bars"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} {p?.error ? `· ${p.error}` : ""}
+          {updating && p?.ready ? " · prior gate remains active" : ""}
         </p>
         <p className="mt-1 font-mono text-[11px] text-primary">
           live on-exchange {liveOv?.active ?? sets?.liveActive ?? 0}/{liveOv?.processed ?? sets?.liveProcessed ?? 0} processed · fills {liveOv?.fills ?? sets?.liveFills ?? 0} · PF {Number(liveOv?.last15Ratio ?? 0).toFixed(2)} net {(Number(liveOv?.netAvg ?? 0) * 100).toFixed(3)}% · cost subtracted · deact from live only

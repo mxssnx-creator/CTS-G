@@ -2429,31 +2429,19 @@ class Pulse:
             new_sl = self.desired_sl_tp(pos)[0]
         if pos.sl_oid and abs(float(pos.sl or 0) - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, pos.sl):
             return
-        old_oid = real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))
-        replaced = False
-        if old_oid and hasattr(self.api, "cancel_replace"):
-            body = ctrl_payload(
-                pos.symbol, pos.side, "sl", self.fmt_px(c, new_sl), self.fmt_qty(c, pos.qty),
-                self.cid("u", pos=pos), close_pos=True, with_qty=False,
-            )
-            body["cancelOrderId"] = old_oid
-            r = self.api.cancel_replace(body)
-            self.did_io = True
-            if self.ok(r):
-                oid = extract_oid(r) or old_oid
-                pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
-                pos.sl = pos.sec_sl = new_sl
-                replaced = True
-        if not replaced:
-            if pos.sl_oid:
-                self.cancel_order(pos.symbol, pos.sl_oid)
-            if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
-                self.cancel_order(pos.symbol, pos.sec_sl_oid)
-            pos.sl_oid = pos.sec_sl_oid = ""
-            pos.sl = new_sl
-            pos.sec_sl = new_sl
-            oid = self.place_ctrl(pos, "sec-sl", new_sl)
-            pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
+        # BingX Swap does not expose the Binance-style cancelReplace route.
+        # Calling it on every trailing update only creates 100400 API errors
+        # and leaves the old control order in place. Cancel and place are
+        # deliberately separate so the fallback is valid on all BingX lanes.
+        if pos.sl_oid:
+            self.cancel_order(pos.symbol, pos.sl_oid)
+        if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
+            self.cancel_order(pos.symbol, pos.sec_sl_oid)
+        pos.sl_oid = pos.sec_sl_oid = ""
+        pos.sl = new_sl
+        pos.sec_sl = new_sl
+        oid = self.place_ctrl(pos, "sec-sl", new_sl)
+        pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
         want_tp = self.desired_sl_tp(pos)[1]
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
@@ -5418,14 +5406,30 @@ class Pulse:
     def _hist_fetch(self) -> None:
         if not self.sets.enabled:
             return
+        # A refresh can run while the previous historic gate is still valid.
+        # Reset only the displayed work counters here; keep ``ready`` intact
+        # until a replacement replay has completed so live entries do not
+        # flap on a harmless data refresh.
         self.sets.progress.phase = "fetch"
+        self.sets.progress.pct = 0.0
+        self.sets.progress.symbol = ""
+        self.sets.progress.set_id = ""
+        self.sets.progress.bars_done = 0
+        self.sets.progress.bars_total = 0
+        self.sets.progress.sets_done = 0
+        self.sets.progress.sets_total = len(self.sets.sets)
+        self.sets.progress.symbols_done = 0
+        self.sets.progress.symbols_total = len(SYMBOLS)
+        self.sets.progress.elapsed_ms = 0.0
         limit = str(self.sets.lookback)
         reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
         stored = 0
         chunk = 4
         for i in range(0, len(reqs), chunk):
-            self.sets.progress.detail = f"fetch {i}/{len(reqs)}"
-            self.sets.progress.pct = (i / max(1, len(reqs))) * 8.0
+            done = min(i, len(reqs))
+            self.sets.progress.detail = f"fetch {done}/{len(reqs)}"
+            self.sets.progress.symbols_done = done
+            self.sets.progress.pct = (done / max(1, len(reqs))) * 8.0
             batch = reqs[i : i + chunk]
             sd_notify("WATCHDOG=1")
             rows = []
@@ -5442,6 +5446,8 @@ class Pulse:
                     self.sets.ingest_bars(s, bars)
                     stored += 1
             time.sleep(0.12)
+        self.sets.progress.symbols_done = len(SYMBOLS)
+        self.sets.progress.pct = 8.0
         self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
 
     def _hist_loop(self) -> None:
@@ -5452,31 +5458,46 @@ class Pulse:
                     if bars:
                         self.sets.ingest_bars(s, bars)
                 if self.sets.due():
-                    have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                    if have < max(4, len(SYMBOLS) // 2) or time.time() - self.sets.last_run >= self.sets.refresh_s:
-                        self._hist_fetch()
-                    self.hist_busy = True
-                    nbar = [0]
-                    def _hist_step():
-                        nbar[0] += 1
-                        sd_notify("WATCHDOG=1")
-                        time.sleep(0)
-                    try:
-                        b = self._budget()
-                        names = list(SYMBOLS)
-                        if b.scan_chunk and len(names) > b.hist_chunk:
-                            names, self.load.cursor_hist = self.load.scan_window(
-                                names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
-                            )
-                        if b.hist_run:
-                            already = bool(getattr(self.sets, "progress", None) and self.sets.progress.ready)
-                            self.sets.replay_all(
-                                on_step=_hist_step,
-                                symbols=names,
-                                abort=lambda: already and self.load.last_budget.level == "critical",
-                            )
-                    finally:
-                        self.hist_busy = False
+                    # Evaluate the load budget before any REST history fetch.
+                    # Under critical pressure, fetching and then skipping the
+                    # replay only burns bandwidth/CPU and leaves a stale
+                    # partial progress value in the UI.
+                    b = self._budget()
+                    if not b.hist_run:
+                        p = self.sets.progress
+                        p.phase = "deferred"
+                        p.pct = 100.0 if p.ready else 0.0
+                        p.detail = f"history deferred · load {b.level}"
+                    else:
+                        have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
+                        if have < max(4, len(SYMBOLS) // 2) or time.time() - self.sets.last_run >= self.sets.refresh_s:
+                            self._hist_fetch()
+                        self.hist_busy = True
+                        nbar = [0]
+                        def _hist_step():
+                            nbar[0] += 1
+                            sd_notify("WATCHDOG=1")
+                            time.sleep(0)
+                        try:
+                            b = self._budget()
+                            names = list(SYMBOLS)
+                            if b.scan_chunk and len(names) > b.hist_chunk:
+                                names, self.load.cursor_hist = self.load.scan_window(
+                                    names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
+                                )
+                            if b.hist_run:
+                                already = bool(getattr(self.sets, "progress", None) and self.sets.progress.ready)
+                                self.sets.replay_all(
+                                    on_step=_hist_step,
+                                    symbols=names,
+                                    abort=lambda: already and self.load.last_budget.level == "critical",
+                                )
+                            elif self.sets.progress.ready:
+                                self.sets.progress.phase = "deferred"
+                                self.sets.progress.pct = 100.0
+                                self.sets.progress.detail = f"history replay deferred · load {b.level}"
+                        finally:
+                            self.hist_busy = False
             except Exception:
                 self.hist_busy = False
                 self.sets.progress.phase = "error"
