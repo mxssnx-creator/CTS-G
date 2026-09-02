@@ -116,3 +116,14 @@ desk axis Min PF on canonical 1/2.3/0.02), patch chain verified,
 C7 11/11 pushed + sha-verified, remote state documented with 2
 user-action items (deploy --force; x01 key repair) + 2 advisory findings
 (shared-balance anomaly, public engine source exposure).
+
+15) Remote overlay recoordination applied LIVE via sidecar (2026-09-02):
+    remote overlays still held OLD values (x01 blockProfitFactorRatio 0.4,
+    x02 0.8). POST /config.json?conn=bingx-x0{1,2}
+    {"overlay":{"blockProfitFactorRatio":1.1}} -> {ok:true} both;
+    verified read-back pfRatio=1.1. Engines hot-reload overlay on mtime.
+    x01 key install (user-provided creds) prepared as
+    cts-g-remote-apply.sh (Redis HSET connection:bingx-x01, masked
+    last-4 output, deploy --force, restart x01 re-baseline, start x02
+    halt clear, verify) — server shell is user-side (Redis localhost-only,
+    no SSH from here).
