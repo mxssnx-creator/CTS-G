@@ -19,6 +19,9 @@ export type ConnLane = {
   losses?: number;
   pf?: number;
   sessionPnl?: number;
+  systemPnl?: number;
+  systemGrow?: number;
+  systemLoss?: number;
   haltReason?: string;
   paused?: boolean;
   progressPct?: number;

@@ -68,7 +68,9 @@ function DeskPage() {
       ),
     [stats],
   );
-  const session = stats?.sessionPnl ?? 0;
+  const session = stats?.systemPnl ?? stats?.sessionPnl ?? 0;
+  const grow = stats?.systemGrow ?? 0;
+  const loss = stats?.systemLoss ?? 0;
 
   return (
     <DeskShell
@@ -103,12 +105,12 @@ function DeskPage() {
               </p>
               {conn === "overall" ? (
                 <p className="mt-1 font-mono text-sm text-muted">
-                  VST {fmt(stats?.equityVst, 4)} · sess live {fmt(stats?.sessionPnlLive, 4)} / vst {fmt(stats?.sessionPnlVst, 4)}
+                  VST {fmt(stats?.equityVst, 4)} · live {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
                 </p>
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
-                session {session >= 0 ? "+" : ""}
-                {fmt(session, 4)} · {fmt(stats?.pnlPct, 2)}%
+                system {session >= 0 ? "+" : ""}
+                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {fmt(stats?.pnlPct, 2)}%
               </p>
             </div>
             <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
@@ -409,6 +411,14 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               <dt>W / L</dt>
               <dd className="text-right text-fg">
                 {l.wins} / {l.losses}
+              </dd>
+              <dt>Grow / Loss</dt>
+              <dd className={`text-right ${pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}`}>
+                {fmt(l.systemGrow, 3)} / {fmt(l.systemLoss, 3)}
+              </dd>
+              <dt>System PnL</dt>
+              <dd className={`text-right ${pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}`}>
+                {fmt(l.systemPnl ?? l.sessionPnl, 3)}
               </dd>
               <dt>PF</dt>
               <dd className="text-right text-fg">{l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>

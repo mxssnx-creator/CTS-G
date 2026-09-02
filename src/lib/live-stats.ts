@@ -119,6 +119,13 @@ export type LiveStats = {
   unrealized: number;
   realizedPnl: number;
   sessionPnl: number;
+  systemPnl?: number;
+  systemGrow?: number;
+  systemLoss?: number;
+  systemRealized?: number;
+  systemUnrealized?: number;
+  walletEquity?: number;
+  walletUnrealized?: number;
   pnlPct: number;
   drawdownPct: number;
   wins: number;
@@ -371,6 +378,9 @@ export type LiveStats = {
     wins: number;
     losses: number;
     sessionPnl: number;
+    systemPnl?: number;
+    systemGrow?: number;
+    systemLoss?: number;
     pf: number;
     scanMs?: number;
     rssMb?: number;
@@ -408,6 +418,10 @@ export type LiveStats = {
   equityVst?: number;
   sessionPnlLive?: number;
   sessionPnlVst?: number;
+  systemGrowLive?: number;
+  systemLossLive?: number;
+  systemGrowVst?: number;
+  systemLossVst?: number;
   detailConn?: string;
   detailType?: string;
   engine?: {
@@ -746,6 +760,9 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     available: lane.available ?? s.available,
     unrealized: lane.unrealized ?? 0,
     sessionPnl: lane.sessionPnl,
+    systemPnl: lane.systemPnl ?? lane.sessionPnl,
+    systemGrow: lane.systemGrow,
+    systemLoss: lane.systemLoss,
     wins: lane.wins,
     losses: lane.losses,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,

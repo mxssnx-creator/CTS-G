@@ -3091,6 +3091,8 @@ class Pulse:
                     ind_kind=str(rec.get("ind_kind") or rec.get("indKind") or ""),
                 )
                 cid = c.client_id
+                if not self.cid_ours(cid) and not c.set_id:
+                    continue
                 if cid and not self.cid_ours(cid):
                     continue
                 if "oversized" in str(c.reason or "").lower():
@@ -4091,6 +4093,70 @@ class Pulse:
         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
         return tagged if tagged else []
 
+    def system_open_upnl(self) -> float:
+        """Mark-to-market of this connection's system book only. Cost-net."""
+        tot = 0.0
+        for p in self.open.values():
+            if getattr(p, "ours", True) is False:
+                continue
+            cid = getattr(p, "client_id", "") or ""
+            if cid and not self.cid_ours(cid):
+                continue
+            px = float(self.px.get(p.symbol) or 0)
+            if px <= 0 or p.entry <= 0 or p.qty <= 0:
+                continue
+            d = (px - p.entry) / p.entry
+            if p.side != "LONG":
+                d = -d
+            tot += net_pnl_usdt(d, p.qty, p.entry, self.position_cost_pct)
+        return tot
+
+    def system_activity(self) -> Dict[str, Any]:
+        """Grow / loss / balance path from system+connection orders only.
+
+        Wallet deposits, withdrawals, and independent (untagged / other-bot)
+        trades never enter this tape.
+        """
+        closes = self.strategy_closes()
+        grow = sum(float(c.pnl) for c in closes if float(c.pnl) > 0)
+        loss = abs(sum(float(c.pnl) for c in closes if float(c.pnl) < 0))
+        realized = sum(float(c.pnl) for c in closes)
+        upnl = self.system_open_upnl()
+        net = realized + upnl
+        wins = sum(1 for c in closes if float(c.pnl) > 0)
+        losses = sum(1 for c in closes if float(c.pnl) < 0)
+        peak = 0.0
+        eq = 0.0
+        max_dd = 0.0
+        for c in sorted(closes, key=lambda x: float(getattr(x, "t", 0) or 0)):
+            eq += float(c.pnl)
+            if eq > peak:
+                peak = eq
+            if peak - eq > max_dd:
+                max_dd = peak - eq
+        dd_pct = (max_dd / peak * 100.0) if peak > 1e-12 else 0.0
+        traded = sum(abs(float(c.qty) * float(c.entry or 0)) for c in closes)
+        for p in self.open.values():
+            if getattr(p, "ours", True) is False:
+                continue
+            traded += abs(float(p.qty) * float(p.entry or 0))
+        pnl_pct = (net / traded * 100.0) if traded > 1e-12 else 0.0
+        return {
+            "closes": closes,
+            "n": len(closes),
+            "grow": round(grow, 6),
+            "loss": round(loss, 6),
+            "realized": round(realized, 6),
+            "unrealized": round(upnl, 6),
+            "pnl": round(net, 6),
+            "wins": wins,
+            "losses": losses,
+            "drawdownPct": round(max(0.0, dd_pct), 3),
+            "tradedNotional": round(traded, 4),
+            "pnlPct": round(pnl_pct, 3),
+            "source": "system-orders",
+        }
+
     def maybe_entries(self) -> None:
         if self.halted:
             return
@@ -4694,15 +4760,33 @@ class Pulse:
         rk_ok, rk_d = rank_self_test()
         self.record_test("uni-rank-lev-vol1h", rk_ok, rk_d)
         self.record_test("uni-sort-default", coerce_symbol_sort(getattr(self, "symbol_sort", "vol1h")) == "vol1h" or coerce_symbol_sort(self.overlay.get("symbolSort")) in SYMBOL_SORTS, f"sort={self.symbol_sort}")
+        held_closed = list(self.closed)
+        try:
+            ours_cid = f"{TAG}cigen0600000abcd"
+            self.closed = [
+                Closed(time.time(), "SYS-USDT", "LONG", 10.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
+                Closed(time.time(), "SYS-USDT", "SHORT", 10.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
+                Closed(time.time(), "EXT-USDT", "LONG", 99.0, 1.0, 1.2, 9.99, 0.2, "manual", 10.0, client_id="manual-bot", ours=False, conn=CONN_SHORT),
+                Closed(time.time(), "EXT-USDT", "LONG", 5.0, 1.0, 1.1, 0.50, 0.1, "tp", 10.0, client_id="", ours=True, conn=CONN_SHORT),
+            ]
+            act = self.system_activity()
+            self.record_test(
+                "sys-pnl-ours-only",
+                abs(act["grow"] - 0.40) < 1e-9 and abs(act["loss"] - 0.15) < 1e-9 and act["n"] == 2 and abs(act["realized"] - 0.25) < 1e-9,
+                f"n={act['n']} grow={act['grow']} loss={act['loss']} r={act['realized']}",
+            )
+        finally:
+            self.closed = held_closed
 
     def stats(self) -> Dict[str, Any]:
-        realized = sum(c.pnl for c in self.closed)
-        wr = (self.wins / (self.wins + self.losses) * 100) if (self.wins + self.losses) else 0
-        dd = ((self.start_eq - self.equity) / self.start_eq * 100) if self.start_eq else 0
+        act = self.system_activity()
+        realized = float(act["realized"])
+        wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
+        dd = float(act["drawdownPct"])
         age = time.time() - self.started
-        per_min = (self.wins + self.losses) / (age / 60) if age > 1 else 0
+        per_min = (act["wins"] + act["losses"]) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
-        pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
+        pc = last_n_cost_pf(act["closes"], self.pf_window, self.position_cost_pct)
         pc["minPf"] = self.coord.min_pf
         pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
@@ -4711,7 +4795,7 @@ class Pulse:
         sim_n, sim_upnl = self.sim_stats()
         closed_n = 80 if getattr(getattr(self.load, "last_budget", None), "stats_full", True) else 40
         closed_out = []
-        for c in list(self.closed)[-closed_n:][::-1]:
+        for c in list(act["closes"])[-closed_n:][::-1]:
             d = asdict(c)
             d["indKind"] = d.get("ind_kind") or ""
             closed_out.append(d)
@@ -4761,16 +4845,24 @@ class Pulse:
             "now": time.time(),
             "uptimeS": age,
             "equity": round(self.equity, 4),
+            "walletEquity": round(self.equity, 4),
             "startEquity": round(self.start_eq, 4),
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
-            "unrealized": round(self.upnl, 4),
+            "walletUnrealized": round(self.upnl, 4),
+            "unrealized": round(float(act["unrealized"]), 4),
             "realizedPnl": round(realized, 4),
-            "sessionPnl": round(self.equity - self.start_eq, 4) if self.start_eq else 0,
-            "pnlPct": round((self.equity - self.start_eq) / self.start_eq * 100, 3) if self.start_eq else 0,
+            "sessionPnl": round(float(act["pnl"]), 4),
+            "systemPnl": round(float(act["pnl"]), 4),
+            "systemGrow": round(float(act["grow"]), 4),
+            "systemLoss": round(float(act["loss"]), 4),
+            "systemRealized": round(realized, 4),
+            "systemUnrealized": round(float(act["unrealized"]), 4),
+            "systemSource": "system-orders",
+            "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
-            "wins": self.wins,
-            "losses": self.losses,
+            "wins": int(act["wins"]),
+            "losses": int(act["losses"]),
             "winRate": round(wr, 1),
             "openCount": len(self.open),
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
