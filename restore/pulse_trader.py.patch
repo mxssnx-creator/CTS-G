@@ -164,7 +164,7 @@
 +            try:
 +                tmp = START_EQ_PATH + ".tmp"
 +                with open(tmp, "w") as f:
-+                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
+                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
 +                os.replace(tmp, START_EQ_PATH)
 +            except Exception:
 +                pass
@@ -263,7 +263,7 @@
 +            if px > 0 and p.entry > 0:
 +                d = (px - p.entry) / p.entry
 +                if p.side != "LONG":
-                    d = -d
++                    d = -d
 +                upnl += d * p.qty * p.entry
 +        return n, upnl
 +
