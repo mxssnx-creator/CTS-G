@@ -731,8 +731,8 @@ def block_calc_test() -> None:
     rec("block-formula-inc", calculate_block_volume_increment_ratio(3, 1.5) == 4.5,
         str(calculate_block_volume_increment_ratio(3, 1.5)))
     rec("block-formula-minpf",
-        abs(calculate_block_minimum_profit_factor(1.2, 0.8, 4.5) - 1.72) < 1e-9,
-        str(calculate_block_minimum_profit_factor(1.2, 0.8, 4.5)))
+        abs(calculate_block_minimum_profit_factor(1.2, 1.1, 4.5) - 1.99) < 1e-9,
+        str(calculate_block_minimum_profit_factor(1.2, 1.1, 4.5)))
 
     # 2) coverage blob exposes ALL counts (unlimited -> full preview window)
     def mk_cov(stack: int):
@@ -779,7 +779,7 @@ def block_calc_test() -> None:
     # counts never request; pick_emit takes the smallest unsatisfied count
     b = BlockBook(os.path.join(tmp, "block-eval.json"), {
         "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
-        "blockProfitFactorRatio": 0.8, "defaultMinPF": 1.2,
+        "blockProfitFactorRatio": 1.1, "defaultMinPF": 1.2,
         "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
     lane = BlockLane(symbol="TST-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
@@ -797,12 +797,17 @@ def block_calc_test() -> None:
         f"{[r['blockCount'] for r in rows_roll if r['kind'] == 'regular']}")
     lane.satisfied = {1: True}
     lane.confirmed_add = 1.0
-    rows2 = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
+    rows2 = b.evaluate_counts(lane, live_n=1, intern_pf=1.5)
     r1 = [r for r in rows2 if r["kind"] == "regular" and r["blockCount"] == 1][0]
     rec("block-eval-satisfied-no-request", r1["targetSatisfied"] and r1["requestedAddQty"] == 0.0)
     pick = b.pick_emit(rows2)
     rec("block-eval-pick-smallest-unsat", pick is not None and pick["blockCount"] == 2,
         f"pick={pick and pick['blockCount']}")
+    # new base-1 coordination: count-2 gate = 1 + 0.2*1.1*2 = 1.44 — intern 1.4
+    # (passed under the old 0.8 ratio at 1.32) must now be refused
+    rec("block-pick-gated-by-new-ratio",
+        b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.4)) is None,
+        "intern 1.4 < count2 gate 1.44")
 
     # 4) maybe_block_adds end-to-end with a fake exchange
     class FakeApi:
@@ -827,7 +832,7 @@ def block_calc_test() -> None:
         p.halted = False
         p.block = BlockBook(os.path.join(tmp, f"block-trade-{default_min_pf}-{set_ratio}-{set_n}-{confirmed}.json"), {
             "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
-            "blockProfitFactorRatio": 0.8, "defaultMinPF": default_min_pf,
+            "blockProfitFactorRatio": 1.1, "defaultMinPF": default_min_pf,
             "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
         p.strat_block = True
         p.available = 100.0
@@ -863,7 +868,7 @@ def block_calc_test() -> None:
         return p
 
     # 4a) cold set + defaultMinPF 1.1: floor must follow the book default
-    # (count2 effective = 1 + 0.1*0.8*2 = 1.16 > 1.1 -> NO emit; a hardcoded
+    # (count2 effective = 1 + 0.1*1.1*2 = 1.22 > 1.1 -> NO emit; a hardcoded
     # 1.2 floor would wrongly emit here)
     pA = mk_trader(1.1, 1.0, 3, satisfied={1: True}, confirmed=0.05)
     pA.maybe_block_adds()
@@ -910,6 +915,287 @@ def block_calc_test() -> None:
     rec("block-lane-retires-without-parent",
         pE.api.posts == [] and not laneE.active and laneE.base_qty == 0.0,
         f"active={laneE.active} base={laneE.base_qty}")
+
+
+def set_orders_test() -> None:
+    """Per-Set independence: every Set opens its own independent entry order
+    AND its own independent SL/TP control-order pair on the exchange, with
+    correct per-set tracking and stats coordination — proven in-process on
+    the real place() / place_ctrl_pair() / close_pos() / SetBook.on_live_close
+    paths against a recording fake exchange. Covers: unique parseable
+    clientOrderIDs per set, per-position control pairs with per-set SL
+    distances, exchange-side cancel isolation, per-set win/loss attribution,
+    snapshot/sim stats coordination, and negative controls (occupied symbol
+    refused; entry without controls scratches, never unprotected)."""
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    from set_engine import SetBook, SetState, make_set_id
+
+    tmp = tempfile.mkdtemp(prefix="setord-test-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH", "TRADES_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+
+    PXS = {"AAA-USDT": 100.0, "BBB-USDT": 200.0, "CCC-USDT": 50.0, "DDD-USDT": 500.0}
+    ORDER = "/openApi/swap/v2/trade/order"
+
+    class FakeEx:
+        """Recording exchange: entries, batch control pairs, cancels, closes."""
+
+        def __init__(self, fail_controls: bool = False):
+            self.posts: List[tuple] = []
+            self.batches: List[list] = []
+            self.deletes: List[tuple] = []
+            self.orders: Dict[str, dict] = {}
+            self.n = 0
+            self.path_cd: Dict[str, float] = {}
+            self.fail_controls = fail_controls
+            self.fill: Dict[str, float] = {}
+
+        def _oid(self) -> str:
+            self.n += 1
+            return f"EX{self.n:06d}"
+
+        def post(self, path, body):
+            body = dict(body)
+            self.posts.append((path, body))
+            if path == ORDER:
+                if body.get("type") != "MARKET" and self.fail_controls:
+                    return {"code": 100001, "msg": "Signature verification failed due to signature mismatch"}
+                oid = self._oid()
+                if body.get("type") != "MARKET":
+                    row = dict(body)
+                    row["orderId"] = oid
+                    self.orders[oid] = row
+                px = self.fill.get(str(body.get("symbol")), PXS.get(str(body.get("symbol")), 100.0))
+                return {"code": 0, "data": {"order": {"orderId": oid, "avgPrice": str(px), "quantity": str(body.get("quantity") or "0")}}}
+            return {"code": 0, "data": {}}
+
+        def batch_place(self, orders):
+            if self.fail_controls:
+                return {"code": 100001, "msg": "Signature verification failed due to signature mismatch"}
+            rows = []
+            for o in orders:
+                oid = self._oid()
+                row = dict(o)
+                row["orderId"] = oid
+                self.orders[oid] = row
+                rows.append({"code": 0, "orderId": oid, "type": o.get("type"), "clientOrderID": o.get("clientOrderID")})
+            self.batches.append([dict(o) for o in orders])
+            return {"code": 0, "data": {"orders": rows}}
+
+        def get(self, path, params=None):
+            if path == "/openApi/swap/v2/trade/openOrders":
+                return {"code": 0, "data": {"orders": list(self.orders.values())}}
+            return {"code": 0, "data": []}
+
+        def delete(self, path, params=None):
+            self.deletes.append((path, dict(params or {})))
+            self.orders.pop(str((params or {}).get("orderId") or ""), None)
+            return {"code": 0, "data": {}}
+
+    # --- real SetBook with three real Sets (2 general + 1 indications) ---
+    book = SetBook()
+    specs = [("general", 0.6, 10), ("general", 0.9, 20), ("indications", 1.5, 30)]
+    sts: List[SetState] = []
+    for i, (pack, sl, stp) in enumerate(specs):
+        sid = make_set_id(pack, sl, "", stp)
+        st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, trail_key="0.3:0.1",
+                      trail_arm=0.3, trail_give=0.1, step=stp, tp_pct=0.0045 + i * 0.001, idx=i)
+        st.last15_ratio = 1.5
+        st.last15_n = 12
+        book.sets[sid] = st
+        sts.append(st)
+    book.by_idx = list(sts)
+    cur = {"i": 0}
+    book.pick_any = lambda pack: sts[cur["i"]] if cur["i"] < len(sts) else None
+    book.pick_trail = lambda pack: None
+    book.adapt_from_live = lambda rows: None
+    book.indication_ok = lambda kind: True
+
+    def mk_pulse(fx: FakeEx):
+        p = object.__new__(pt.Pulse)
+        p.api = fx
+        p.halted = False
+        p.errors = 0
+        p.last_error = ""
+        p.did_io = False
+        p.cooldown = {}
+        p.ignore_syms = {}
+        p.skip_log = {}
+        p.open = {}
+        p.owned_syms = set()
+        p.px = dict(PXS)
+        p.last_px = {}
+        p.contracts = {s: pt.Contract(s, 0.001, 0.001, 3, 2, 1.0, 100) for s in PXS}
+        p.available = 1000.0
+        p.fees_est = 0.0
+        p._order_est = 0
+        p._order_est_known = True
+        p._oo_cache = {}
+        p.last_entry_ts = 0.0
+        p.entries_blocked = lambda: False
+        p.group_of = lambda s: "g"
+        p.group_count = lambda g: 0
+        p.sets = book
+        p.strat_ind = True
+        p.indications = SimpleNamespace(
+            settings={"enabled": True, "takeProfitRewardRisk": 1.8},
+            match=lambda s, r: SimpleNamespace(direction="long", kind="move", stop_loss_pct=0.0, take_profit_pct=0.0),
+            primary=lambda s: None, best=lambda s: None)
+        p.variants = SimpleNamespace(on_close=lambda rec: None, current_sl=lambda: 0.6,
+                                     current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
+        p.exits = SimpleNamespace(enabled=False, ignore_tp=False, opt_sl_min=0.001, opt_sl_max=0.009,
+                                  on_close=lambda rec: None)
+        p.sl_min = 0.001
+        p.sl_max = 0.02
+        p.tp_min = 0.002
+        p.tp_max = 0.05
+        p.position_cost_pct = 0.15
+        p.tp_cost_ratio = 1.5
+        p.size_qty = lambda c, px: 0.05
+        p.max_book_notional = lambda: 1e9
+        p.ensure_max_leverage = lambda s, force=False: 100
+        p.leverage_for = lambda c: 100
+        p.control_orders = True
+        p.ctrl_skip = {}
+        p.save_open_book = lambda: None
+        p.seen_fill_cids = set()
+        p.signals = []
+        p.block = SimpleNamespace(register_parent=lambda *a, **k: None, on_parent_close=lambda *a, **k: None)
+        p.dca = SimpleNamespace(attach=lambda *a, **k: None, on_close=lambda *a, **k: None, drop=lambda *a, **k: None)
+        p.ban_sym = lambda *a, **k: None
+        p.wins = 0
+        p.losses = 0
+        p.consec_loss = 0
+        p.closed = []
+        p._stats_force = False
+        p.live_pos_keys = None
+        return p
+
+    # === 1) three Sets -> three independent entries + control pairs ===
+    fx = FakeEx()
+    p = mk_pulse(fx)
+    syms = ["AAA-USDT", "BBB-USDT", "CCC-USDT"]
+    reasons = ["gen:alpha", "gen:beta", "ind:move:move:0.90:a3:move:30"]
+    for i, sym in enumerate(syms):
+        cur["i"] = i
+        p.place(sym, 1, reasons[i], 0.9)
+    entries = [b for (path, b) in fx.posts if path == ORDER and b.get("type") == "MARKET" and b.get("side") == "BUY"]
+    rec("setord-3-independent-entries",
+        len(entries) == 3 and [b["symbol"] for b in entries] == syms and p.errors == 0,
+        f"entries={len(entries)} errors={p.errors}")
+    entry_cids = [str(b.get("clientOrderID") or "") for b in entries]
+    rec("setord-entry-cids-unique",
+        len(set(entry_cids)) == 3 and all(p.cid_ours(c) for c in entry_cids), str(entry_cids)[:80])
+    parsed = [p.parse_track(c) or {} for c in entry_cids]
+    rec("setord-entry-cids-resolve-sets",
+        all(parsed[i].get("set_id") == sts[i].id and parsed[i].get("idx") == sts[i].idx
+            and parsed[i].get("step") == sts[i].step and parsed[i].get("pack") == sts[i].pack
+            and abs(float(parsed[i].get("sl", 0)) - sts[i].sl_ratio) < 1e-9 for i in range(3)),
+        str([(x.get("set_id"), x.get("step")) for x in parsed])[:140])
+    rec("setord-positions-track-own-set",
+        all(p.open[syms[i]].set_id == sts[i].id and p.open[syms[i]].set_idx == sts[i].idx
+            and p.open[syms[i]].pack == sts[i].pack and p.open[syms[i]].client_id == entry_cids[i]
+            for i in range(3)),
+        str([(p.open[s].set_id, p.open[s].set_idx) for s in syms])[:140])
+
+    # === 2) each position: own independent SL+TP control pair on the exchange ===
+    rec("setord-3-control-pairs", len(fx.batches) == 3 and all(len(b) == 2 for b in fx.batches),
+        f"batches={len(fx.batches)}")
+    pair_ok = True
+    for i, sym in enumerate(syms):
+        bodies = [b for b in fx.batches[i] if b.get("symbol") == sym]
+        types = {b.get("type") for b in bodies}
+        pair_ok = pair_ok and len(bodies) == 2 and types == {"STOP_MARKET", "TAKE_PROFIT_MARKET"} \
+            and all(b.get("closePosition") == "true" for b in bodies)
+    rec("setord-pairs-wellformed", pair_ok, f"{[(b[0].get('symbol'), len(b)) for b in fx.batches]}")
+    ctrl_cids = [str(b.get("clientOrderID") or "") for batch in fx.batches for b in batch]
+    rec("setord-control-cids-unique",
+        len(set(ctrl_cids)) == 6 and not (set(ctrl_cids) & set(entry_cids)), str(len(set(ctrl_cids))))
+    sl_px = {}
+    tp_px = {}
+    for batch in fx.batches:
+        for b in batch:
+            if b.get("type") == "STOP_MARKET":
+                sl_px[b["symbol"]] = float(b.get("stopPrice") or 0)
+            else:
+                tp_px[b["symbol"]] = float(b.get("stopPrice") or 0)
+    want_sl = {"AAA-USDT": 99.73, "BBB-USDT": 199.01, "CCC-USDT": 49.55}
+    want_tp = {"AAA-USDT": 100.45, "BBB-USDT": 201.1, "CCC-USDT": 50.32}
+    rec("setord-per-set-sl-distances",
+        all(abs(sl_px[s] - want_sl[s]) < 1e-6 and abs(tp_px[s] - want_tp[s]) < 1e-6 for s in syms)
+        and len({sl_px[s] for s in syms}) == 3,
+        f"sl={sl_px} tp={tp_px}")
+    oid_sets = [{p.open[s].sl_oid, p.open[s].tp_oid} for s in syms]
+    all_oids = set().union(*oid_sets)
+    rec("setord-control-oids-independent",
+        all(pt.real_oid(p.open[s].sl_oid) and pt.real_oid(p.open[s].tp_oid) and p.open[s].controls_ok
+            and p.open[s].ctrl_verified for s in syms)
+        and len(all_oids) == 6 and all_oids == set(fx.orders.keys()),
+        f"oids={len(all_oids)} live={len(fx.orders)}")
+
+    # === 3) exchange-side cancel isolation + per-set close attribution ===
+    pre_oids = {s: {oid for oid, row in fx.orders.items() if row.get("symbol") == s} for s in syms}
+    rec("setord-exchange-orders-per-set",
+        all(len(pre_oids[s]) == 2 for s in syms) and len(set().union(*pre_oids.values())) == 6,
+        str({s: sorted(o) for s, o in pre_oids.items()})[:120])
+    fx.fill["AAA-USDT"] = 100.6  # +0.60% gross -> +3.0R net of 1x cost
+    p.close_pos(p.open["AAA-USDT"], 100.6, "tp")
+    del_oids = {str(d[1].get("orderId")) for d in fx.deletes}
+    rec("setord-cancel-isolation",
+        pre_oids["AAA-USDT"] and pre_oids["AAA-USDT"] <= del_oids
+        and not (del_oids - pre_oids["AAA-USDT"])
+        and not (pre_oids["AAA-USDT"] & set(fx.orders.keys()))
+        and pre_oids["BBB-USDT"] <= set(fx.orders.keys()) and pre_oids["CCC-USDT"] <= set(fx.orders.keys()),
+        f"del={len(del_oids)} live={len(fx.orders)}")
+    stA, stB, stC = sts
+    rec("setord-win-attributes-setA",
+        len(stA.live) == 1 and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        and len(stB.live) == 0 and len(stC.live) == 0 and stB.last15_n == 12 and stC.last15_n == 12,
+        f"A n={stA.last15_n} r={stA.last15_ratio} B live={len(stB.live)} C live={len(stC.live)}")
+    fx.fill["BBB-USDT"] = 199.0  # -0.50% gross -> -4.33R net
+    p.close_pos(p.open["BBB-USDT"], 199.0, "sl")
+    rec("setord-loss-attributes-setB",
+        len(stB.live) == 1 and stB.last15_n == 1 and abs(stB.last15_ratio - 0.5667) < 1e-3
+        and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
+        and len(stC.live) == 0 and stC.last15_n == 12,
+        f"B n={stB.last15_n} r={stB.last15_ratio} A r={stA.last15_ratio}")
+    rec("setord-engine-stats-coordination",
+        p.wins == 1 and p.losses == 1 and len(p.closed) == 2
+        and p.closed[0].set_id == stA.id and p.closed[1].set_id == stB.id
+        and p.closed[0].client_id == entry_cids[0] and p.closed[1].client_id == entry_cids[1],
+        f"w={p.wins} l={p.losses} closed={len(p.closed)}")
+    snap = {r["id"]: r for r in book.snapshot().get("rows", [])}
+    rec("setord-snapshot-per-set",
+        snap.get(stA.id, {}).get("liveN") == 1 and snap.get(stB.id, {}).get("liveN") == 1
+        and snap.get(stC.id, {}).get("liveN") == 0
+        and abs(snap.get(stA.id, {}).get("last15Ratio", 0) - 1.3) < 1e-6,
+        str({k: (v.get("liveN"), v.get("last15Ratio")) for k, v in snap.items()})[:140])
+    p.live_pos_keys = {"CCC-USDT:LONG"}
+    sim_n, _sim_u = p.sim_stats()
+    p.live_pos_keys = set()
+    sim_n2, _sim_u2 = p.sim_stats()
+    rec("setord-real-live-sim-coordination", sim_n == 0 and sim_n2 == 1, f"sim={sim_n}/{sim_n2}")
+
+    # === 4) negative controls ===
+    before = len(fx.posts)
+    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # occupied symbol -> refused
+    rec("setord-occupied-symbol-refused", len(fx.posts) == before and p.open["CCC-USDT"].set_id == stC.id,
+        f"posts={len(fx.posts) - before}")
+    cur["i"] = 0
+    fx2 = FakeEx(fail_controls=True)
+    p2 = mk_pulse(fx2)
+    p2.place("DDD-USDT", 1, "gen:gamma", 0.9)
+    fx2_entries = [b for (path, b) in fx2.posts if path == ORDER and b.get("type") == "MARKET"]
+    rec("setord-no-ctrl-scratches",
+        "DDD-USDT" not in p2.open and len(fx2_entries) == 2 and not fx2.orders,
+        f"open={list(p2.open)} market_posts={len(fx2_entries)} live_ctrl={len(fx2.orders)}")
 
 
 def strict_gate_test() -> None:
@@ -1153,6 +1439,7 @@ def main() -> int:
     phantom_recon_test()
     sim_stats_test()
     block_calc_test()
+    set_orders_test()
     strict_gate_test()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
