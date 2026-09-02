@@ -111,7 +111,7 @@ class BlockBook:
         self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
-        self.default_min_pf = float(cfg.get("defaultMinPF", 1.2) or 1.2)
+        self.default_min_pf = float(cfg.get("defaultMinPF", 1.1) or 1.1)
         self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
         self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
         self.lanes: Dict[str, BlockLane] = {}
@@ -231,7 +231,7 @@ class BlockBook:
         intern = float(intern_pf or 1.0)
         if cold:
             observed = intern if intern > 0 else 1.0
-            effective = configured if count > 1 else min(float(self.default_min_pf or 1.2), 1.12)
+            effective = configured if count > 1 else min(float(self.default_min_pf or 1.1), 1.12)
             passes = observed + 1e-9 >= effective
         else:
             effective = calculate_block_effective_minimum_profit_factor(configured, normal)

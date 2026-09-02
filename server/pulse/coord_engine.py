@@ -57,6 +57,9 @@ class Coordinator:
             "pause": Axis(True, 8),
         }
         self.min_pf = 1.1
+        # Stage PositionCost PF floors on the cost scale (1.00 = neutral):
+        # Base 1.05 / Main 1.08 / Real 1.10 (default min 1.1 systemwide).
+        self.stage_min_pf = {"base": 1.05, "main": 1.08, "real": 1.10}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -94,10 +97,32 @@ class Coordinator:
             "pause": ax("pause", "Pause"),
         }
         try:
-            st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
+            stages_cts = (cts.get("strategies") or {}).get("main") or {}
+            st = stages_cts.get("real") or {}
             self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
         except Exception:
             self.min_pf = float(ov.get("minPf") or 1.1)
+        # Per-stage floors: overlay wins, then strategies.main.<stage>, then
+        # the recoordinated defaults (Base 1.05 / Main 1.08 / Real 1.10).
+        try:
+            stages_cts = (cts.get("strategies") or {}).get("main") or {}
+        except Exception:
+            stages_cts = {}
+        for _stage, _dflt in (("base", 1.05), ("main", 1.08), ("real", 1.10)):
+            _v = ov.get(f"{_stage}MinPf")
+            if _v is None:
+                try:
+                    _v = (stages_cts.get(_stage) or {}).get("min_profit_factor")
+                except Exception:
+                    _v = None
+            if _v is None and _stage == "real":
+                _v = self.min_pf
+            try:
+                self.stage_min_pf[_stage] = max(1.0, float(_v)) if _v is not None else _dflt
+            except Exception:
+                self.stage_min_pf[_stage] = _dflt
+        # Strictest stage (Real) is the canonical min PF consumers read.
+        self.min_pf = self.stage_min_pf["real"]
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         if self.position_cost_pct > 2:
@@ -182,6 +207,9 @@ class Coordinator:
             "classicPf15": cost["classicPf"],
             "costPct": cost["costPct"],
             "minPf": self.min_pf,
+            "baseMinPf": float(self.stage_min_pf.get("base", 1.05)),
+            "mainMinPf": float(self.stage_min_pf.get("main", 1.08)),
+            "realMinPf": float(self.stage_min_pf.get("real", 1.10)),
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
@@ -196,15 +224,18 @@ class Coordinator:
         intern_ok = intern_n >= max(5, self.min_samples if hasattr(self, "min_samples") else 5) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.08))
+        real_floor = float(self.stage_min_pf.get("real", 1.10))
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
-            if last_cost["ratio"] + 1e-9 < self.min_pf:
+            if last_cost["ratio"] + 1e-9 < base_floor:
                 allow = False
                 reasons.append(
-                    f"last {int(last_cost['count'])} PF {last_cost['ratio']:.2f}<{self.min_pf:.2f} (1.00=neutral 1.10=+1×cost)"
+                    f"base/last {int(last_cost['count'])} PF {last_cost['ratio']:.2f}<{base_floor:.2f} (1.00=neutral 1.10=+1×cost)"
                 )
         if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
-            floor = self.min_pf * 0.85
+            floor = base_floor * 0.85
             if prev_cost["ratio"] + 1e-9 < floor and cost["ratio"] + 1e-9 < floor:
                 allow = False
                 reasons.append(f"prev PF {prev_cost['ratio']:.2f}<{floor:.2f} (cost-scale)")
@@ -214,15 +245,16 @@ class Coordinator:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["ratio"]) + 1e-9 < 1.0:
-            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<1.00")
-        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["ratio"]) + 1e-9 < 1.0:
-            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<1.00")
+        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["ratio"]) + 1e-9 < main_floor:
+            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<{main_floor:.2f}")
+        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["ratio"]) + 1e-9 < real_floor:
+            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<{real_floor:.2f}")
         stages = {
             "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
-            "main": {"pf": float(main_cost["ratio"]), "n": float(main_cost["count"])},
-            "real": {"pf": float(real_cost["ratio"]), "n": float(real_cost["count"])},
-            "last": {"pf": float(last_cost["ratio"]), "n": float(last_cost["count"])},
+            "base": {"pf": float(cost["ratio"]), "n": float(cost["count"]), "minPf": base_floor},
+            "main": {"pf": float(main_cost["ratio"]), "n": float(main_cost["count"]), "minPf": main_floor},
+            "real": {"pf": float(real_cost["ratio"]), "n": float(real_cost["count"]), "minPf": real_floor},
+            "last": {"pf": float(last_cost["ratio"]), "n": float(last_cost["count"]), "minPf": base_floor},
             "prev": {"pf": float(prev_cost["ratio"]), "n": float(prev_cost["count"])},
         }
         self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
@@ -277,6 +309,7 @@ class Coordinator:
         return {
             "axes": {k: asdict(v) for k, v in self.axes.items()},
             "minPf": self.min_pf,
+            "stageMinPf": dict(self.stage_min_pf),
             "pfWindow": self.pf_window,
             "positionCostPct": self.position_cost_pct,
             "pfNeutral": 1.0,
