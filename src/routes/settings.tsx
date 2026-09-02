@@ -66,6 +66,7 @@ function SettingsPage() {
   const [asDefaultMainnet, setAsDefaultMainnet] = useState(true);
   const [credMsg, setCredMsg] = useState<string | null>(null);
   const [credSaving, setCredSaving] = useState(false);
+  const [resetAsk, setResetAsk] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
 
@@ -83,6 +84,7 @@ function SettingsPage() {
     setCredMsg(null);
     setConnType(conn === "vst" ? "vst" : "mainnet");
     setAsDefaultMainnet(conn !== "vst");
+    setResetAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
     const pull = async () => {
@@ -120,6 +122,16 @@ function SettingsPage() {
       if (timer) clearTimeout(timer);
     };
   }, [conn]);
+
+  useEffect(() => {
+    if (!resetAsk) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setResetAsk(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [resetAsk]);
+
   const stats = pickView(raw, conn);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
@@ -187,6 +199,14 @@ function SettingsPage() {
       setApiSecret("");
       if (r.creds.apiKeyMasked) setApiKey(r.creds.apiKeyMasked);
     }
+  };
+
+  const onResetOverlay = () => {
+    setOverlay(overlayFromCts(cts ?? {}));
+    setDirty(true);
+    dirtyRef.current = true;
+    setSaveMsg("Reset to CTS defaults");
+    setResetAsk(false);
   };
 
   return (
@@ -1371,11 +1391,8 @@ function SettingsPage() {
             )}
             <button
               type="button"
-              onClick={() => {
-                setOverlay(overlayFromCts(cts ?? {}));
-                setDirty(true);
-                setSaveMsg("Reset to CTS defaults");
-              }}
+              onClick={() => setResetAsk(true)}
+              data-testid="reset-overlay"
               className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
             >
               Reset from CTS
@@ -1390,6 +1407,52 @@ function SettingsPage() {
           </div>
         </div>
       </div>
+      {resetAsk ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-bg/80 p-4 sm:items-center"
+          role="presentation"
+          onClick={() => setResetAsk(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-overlay-title"
+            data-testid="reset-confirm"
+            className="w-full max-w-md space-y-4 rounded-radius border border-border bg-surface p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <h2 id="reset-overlay-title" className="text-sm font-medium tracking-wide text-muted uppercase">
+                Reset overlay?
+              </h2>
+              <p className="mt-2 text-sm text-fg">
+                This replaces the current sliders with CTS defaults
+                {conn === "vst" ? " for VST" : conn === "live" ? " for Live" : ""}.
+                Unsaved edits are discarded. Nothing is written until you save.
+              </p>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                data-testid="reset-cancel"
+                onClick={() => setResetAsk(false)}
+                className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="reset-confirm-yes"
+                autoFocus
+                onClick={onResetOverlay}
+                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
+              >
+                Reset overlay
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </DeskShell>
   );
 }
