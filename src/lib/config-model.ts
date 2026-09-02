@@ -735,10 +735,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  out.slToTpMin = Math.max(0.2, Math.min(2.6, num(out.slToTpMin, 0.2)));
-  out.slToTpMax = Math.max(out.slToTpMin, Math.min(2.6, num(out.slToTpMax, 2.6)));
-  out.slToTpStep = Math.max(0.2, Math.min(1.0, num(out.slToTpStep, 0.2)));
-  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), out.slToTpMin, out.slToTpMax, out.slToTpStep);
+  out.slToTpMin = 0.2;
+  out.slToTpMax = 2.6;
+  out.slToTpStep = 0.2;
+  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), 0.2, 2.6, 0.2);
   out.setMinStep = Math.max(3, Math.min(22, Math.round(num(out.setMinStep, 3))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
   out.modules = {

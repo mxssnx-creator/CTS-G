@@ -637,9 +637,9 @@ class SetBook:
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
         self.packs = packs or ["indications"]
-        # Catalog is always the Settings min/max/step ranges. A selected live
-        # slToTpRatio never shrinks the book. An explicit slToTpRatios list is
-        # only a test pin when no range keys are present.
+        # Full SL:TP catalog always. A selected live slToTpRatio never shrinks
+        # the book. An explicit slToTpRatios list is only a test pin when no
+        # range keys are present.
         has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
         raw_ratios = ov.get("slToTpRatios")
         if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):

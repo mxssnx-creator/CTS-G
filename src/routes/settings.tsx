@@ -9,7 +9,6 @@ import {
   num,
   overlayFromCts,
   saveOverlay,
-  snapSlToTp,
   slTpGrid,
   TRAIL_VARIANTS,
   trailGiveFromArm,
@@ -994,73 +993,13 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss ratios vs take profit" hint="Settings min/max/step is the catalog · every value in range is its own Set · highlighted chip is live fallback only">
-              <Grid>
-                <Slider
-                  label="SL:TP min"
-                  value={overlay.slToTpMin ?? 0.2}
-                  min={0.2}
-                  max={2.6}
-                  step={0.2}
-                  hint="Inclusive lower ratio. Every 0.2 step in range is processed."
-                  onChange={(v) => {
-                    const lo = Math.min(v, overlay.slToTpMax ?? 2.6);
-                    patch("slToTpMin", lo);
-                    patch("slToTpRatio", snapSlToTp(overlay.slToTpRatio, lo, overlay.slToTpMax ?? 2.6, overlay.slToTpStep ?? 0.2));
-                  }}
-                />
-                <Slider
-                  label="SL:TP max"
-                  value={overlay.slToTpMax ?? 2.6}
-                  min={0.2}
-                  max={2.6}
-                  step={0.2}
-                  hint="Inclusive upper ratio."
-                  onChange={(v) => {
-                    const hi = Math.max(v, overlay.slToTpMin ?? 0.2);
-                    patch("slToTpMax", hi);
-                    patch("slToTpRatio", snapSlToTp(overlay.slToTpRatio, overlay.slToTpMin ?? 0.2, hi, overlay.slToTpStep ?? 0.2));
-                  }}
-                />
-                <Slider
-                  label="SL:TP step"
-                  value={overlay.slToTpStep ?? 0.2}
-                  min={0.2}
-                  max={0.6}
-                  step={0.2}
-                  hint={`${slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).length} independent SL books`}
-                  onChange={(v) => patch("slToTpStep", v)}
-                />
-              </Grid>
-              <div className="flex flex-wrap gap-2">
-                {slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).map((r) => {
-                  const active = Math.abs(overlay.slToTpRatio - r) < 1e-9;
-                  const tp = overlay.positionCostPct * overlay.tpCostRatio;
-                  const sl = tp * r;
-                  return (
-                    <button
-                      key={r}
-                      type="button"
-                      data-ratio={r}
-                      onClick={() => patch("slToTpRatio", snapSlToTp(r, overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep))}
-                      className={`min-h-11 min-w-20 rounded-lg border px-3 py-2 font-mono text-sm ${
-                        active ? "border-primary bg-primary-dim/40 text-fg" : "border-border text-muted"
-                      }`}
-                    >
-                      <div>{r.toFixed(1)}</div>
-                      <div className="text-[10px] tracking-wide uppercase">
-                        RR {(1 / r).toFixed(2)} · SL {sl.toFixed(2)}%
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+            <Card title="Stop loss vs take profit" hint="All 13 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
               <p className="text-sm text-muted">
-                Catalog = pack × every SL in {overlay.slToTpMin}–{overlay.slToTpMax} step {overlay.slToTpStep} × every TP step {overlay.setMinStep}–{overlay.setStepMax}.
-                Highlighted ratio is only the live fallback attach — it does not hide the other Sets.
+                Catalog is fixed system-wide: SL:TP 0.2–2.6 step 0.2 ({slTpGrid().length} books) × TP steps {overlay.setMinStep}–{overlay.setStepMax}.
+                Every combo is historic-scored and live-gated on its own tape. Nothing in Settings turns a ratio off.
               </p>
               <Grid>
-                <Toggle label="Auto-recalc SL:TP" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
+                <Toggle label="Auto-recalc live attach" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
                 <Slider
                   label="Recalc min samples"
                   value={overlay.slToTpRecalcN}
@@ -1105,13 +1044,12 @@ function SettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).map((r) => {
+                    {slTpGrid().map((r) => {
                       const tp = overlay.positionCostPct * overlay.tpCostRatio;
                       const sl = tp * r;
                       const wr = sl / (sl + tp);
-                      const on = Math.abs(overlay.slToTpRatio - r) < 1e-9;
                       return (
-                        <tr key={r} className={`border-t border-border font-mono ${on ? "text-primary" : ""}`}>
+                        <tr key={r} className="border-t border-border font-mono">
                           <td className="py-1.5">{r.toFixed(1)}</td>
                           <td className="py-1.5">{(1 / r).toFixed(2)}</td>
                           <td className="py-1.5">{sl.toFixed(2)}</td>
@@ -1124,8 +1062,7 @@ function SettingsPage() {
                 </table>
               </div>
               <p className="text-sm text-muted">
-                Active {overlay.slToTpRatio.toFixed(1)} · TP {(overlay.positionCostPct * overlay.tpCostRatio).toFixed(2)}% × ratio → SL{" "}
-                {(overlay.positionCostPct * overlay.tpCostRatio * overlay.slToTpRatio).toFixed(2)}%. Auto picks the ratio with the best last-{overlay.slToTpRecalcN} PositionCost score.
+                All {slTpGrid().length} ratios stay in eval. Auto-recalc only chooses the live attach for a new fill from the scored set — it does not disable the others.
               </p>
             </Card>
           )}
