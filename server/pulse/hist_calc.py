@@ -566,8 +566,8 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setMinSamples": 8,
         "setMinPf": 1.25,
         "setMaxDdTimeS": 1800,
-        "setMinStep": int(opt.get("minStep") or 2),
-        "setStepMax": int(opt.get("stepMax") or 4),
+        "setMinStep": int(opt.get("minStep") or 3),
+        "setStepMax": int(opt.get("stepMax") or 22),
         "stratTrailing": bool(opt.get("trailing", True)),
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
@@ -1288,7 +1288,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-packs", "indications" in packs and "general" in packs, str(packs))
     sls = {round(float(r["slRatio"]), 1) for r in (job.get("rows") or []) if r.get("kind") == "base"}
     cov_sl = set((job.get("coverage") or {}).get("slRatios") or []) or set(((job.get("coverage") or {}).get("bySl") or {}).keys())
-    rec("calc-all-sl", sls >= {0.3, 0.6, 0.9, 1.2} or len(cov_sl) >= 5, str(sorted(sls)))
+    rec("calc-all-sl", sls >= {0.2, 0.6, 1.0, 1.6, 2.6} or len(cov_sl) >= 13, str(sorted(sls)))
     covj = job.get("coverage") or {}
     rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
     rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))

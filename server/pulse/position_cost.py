@@ -17,10 +17,31 @@ RATIO_MIN = 1.02
 RATIO_MAX = 2.30
 RATIO_STEP = 0.02
 LAST_N_DEFAULT = 15
-SL_TP_MIN = 0.3
-SL_TP_MAX = 1.5
-SL_TP_STEP = 0.3
-SL_TP_RATIOS = (0.3, 0.6, 0.9, 1.2, 1.5)
+SL_TP_MIN = 0.2
+SL_TP_MAX = 2.6
+SL_TP_STEP = 0.2
+SL_TP_RATIOS = tuple(round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(int(round((SL_TP_MAX - SL_TP_MIN) / SL_TP_STEP)) + 1))
+
+
+def sl_tp_grid(lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: float = SL_TP_STEP) -> List[float]:
+    """Inclusive SL:TP ratio axis. Default 0.2 … 2.6 step 0.2 → 13 books."""
+    a = finite(lo, SL_TP_MIN)
+    b = finite(hi, SL_TP_MAX)
+    s = finite(step, SL_TP_STEP)
+    if s <= 0:
+        s = SL_TP_STEP
+    if b < a:
+        a, b = b, a
+    a = max(SL_TP_MIN, min(SL_TP_MAX, a))
+    b = max(SL_TP_MIN, min(SL_TP_MAX, b))
+    out: List[float] = []
+    x = a
+    guard = 0
+    while x <= b + 1e-9 and guard < 64:
+        out.append(round(x, 1))
+        x = round(x + s, 10)
+        guard += 1
+    return out or list(SL_TP_RATIOS)
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
@@ -179,8 +200,10 @@ def resolve_sl_tp(
     rr: float = 1.8,
     bind_sl_to_tp: bool = True,
 ) -> tuple[float, float, str]:
-    """Return SL/TP as fractions. TP is primary; SL = TP × snapped ratio."""
-    ratio = snap_ratio(sl_to_tp)
+    """Return SL/TP as fractions. TP is primary; SL = TP × ratio (clamped 0.2–2.6)."""
+    ratio = max(SL_TP_MIN, min(SL_TP_MAX, round(finite(sl_to_tp, 0.6), 1)))
+    if ratio <= 0:
+        ratio = 0.6
     cost_tp = max(tp_min, (cost_pct * tp_cost_ratio) / 100.0)
     if ind_tp > 0:
         tp = clamp_pct(ind_tp, tp_min, tp_max)

@@ -38,7 +38,7 @@ def parse_trail(raw: Any) -> Tuple[float, float]:
         give = float(g)
     except Exception:
         give = arm * TRAIL_GIVE_FACTOR
-    arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+    arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
     give = round(max(TRAIL_GIVE_MIN, min(TRAIL_GIVE_MAX, give)), 2)
     return arm, give
 
@@ -79,10 +79,10 @@ def trail_grid(
             x = nxt
         return out or [round(float(a), 1)]
 
-    arms = _axis(arm_min, arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+    arms = _axis(arm_min, arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
     gives = _axis(give_min, give_max, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
     if len(arms) <= 1:
-        arms = _axis(TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+        arms = _axis(TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
     if len(gives) <= 1:
         gives = _axis(TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
     out: List[Tuple[str, float, float]] = []
@@ -108,8 +108,8 @@ def trail_candidates(
 ) -> List[Tuple[str, float, float]]:
     out: List[Tuple[str, float, float]] = []
     seen = set()
-    lo = snap_ratio(arm_min, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
-    hi = snap_ratio(arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+    lo = snap_ratio(arm_min, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
+    hi = snap_ratio(arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
     if lo > hi:
         lo, hi = hi, lo
     source = list(variants) or list(TRAIL_VARIANTS)
@@ -201,8 +201,8 @@ class VariantBook:
         if isinstance(raw_trails, str):
             raw_trails = [p.strip() for p in raw_trails.split(",") if p.strip()]
         self.trail_variants = [str(x) for x in raw_trails] or list(TRAIL_VARIANTS)
-        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN), TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
-        self.trail_arm_max = snap_ratio(ov.get("trailArmMax", TRAIL_ARM_MAX), TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+        self.trail_arm_min = snap_ratio(ov.get("trailArmMin", TRAIL_ARM_MIN), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
+        self.trail_arm_max = snap_ratio(ov.get("trailArmMax", TRAIL_ARM_MAX), TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
         self.trail_give_min = float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN)
         self.trail_give_max = float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX)
         self.trail_give_factor = float(ov.get("trailGiveFactor") or TRAIL_GIVE_FACTOR)
@@ -215,7 +215,7 @@ class VariantBook:
         if arm is None:
             arm, give2 = parse_trail(self.trail_variants[0])
             give = give if give is not None else give2
-        self.trail_arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+        self.trail_arm = snap_ratio(arm, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
         if give is None:
             self.trail_give = give_from_arm(self.trail_arm, self.trail_give_factor, self.trail_give_min, self.trail_give_max)
         else:
@@ -429,28 +429,28 @@ class VariantBook:
 
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
-    ratios = [snap_ratio(x) for x in (0.3, 0.45, 0.64, 0.9, 1.05, 1.4, 1.5, 1.8)]
-    expect = [0.3, 0.6, 0.6, 0.9, 1.2, 1.5, 1.5, 1.5]
+    ratios = [snap_ratio(x) for x in (0.2, 0.3, 0.45, 0.64, 1.0, 1.4, 2.55, 2.8)]
+    expect = [0.2, 0.4, 0.4, 0.6, 1.0, 1.4, 2.6, 2.6]
     out.append(("var-snap-ratio", ratios == expect, f"{ratios}"))
-    step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(5)]
+    step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(len(SL_TP_RATIOS))]
     out.append(("var-sl-grid", step == list(SL_TP_RATIOS), f"{step}"))
     b = VariantBook()
     b.load({"slToTpRatio": 0.64, "trailArmPct": 0.3, "trailGivePct": 0.1, "trailRecalcGive": True, "trailGiveFactor": 0.333})
     out.append(("var-sl-default", abs(b.sl_ratio - 0.6) < 1e-9, f"sl={b.sl_ratio}"))
     out.append(("var-trail-give", abs(b.trail_give - 0.1) < 0.02, f"arm={b.trail_arm} give={b.trail_give}"))
     # independent recals: SL book does not move trail
-    wins = [{"pnl": 1.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.9, "trail_key": "0.3:0.1"}] * 8
-    loss = [{"pnl": -0.4, "pnl_pct": -0.003, "hold_s": 18, "sl_ratio": 0.3, "trail_key": "1.5:0.5"}] * 8
+    wins = [{"pnl": 1.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.8, "trail_key": "0.3:0.1"}] * 8
+    loss = [{"pnl": -0.4, "pnl_pct": -0.003, "hold_s": 18, "sl_ratio": 0.2, "trail_key": "1.5:0.5"}] * 8
     for r in wins + loss:
         b.on_close(r)
     b.maybe_recalc(force=True)
-    out.append(("var-sl-recalc", abs(b.sl_ratio - 0.9) < 1e-9, f"sl={b.sl_ratio} why={b.last_sl_pick}"))
+    out.append(("var-sl-recalc", abs(b.sl_ratio - 0.8) < 1e-9, f"sl={b.sl_ratio} why={b.last_sl_pick}"))
     out.append(("var-trail-indep", b.trail_arm <= 0.6, f"trail={b.trail_key} why={b.last_trail_pick}"))
     cands = trail_candidates(0.3, 0.9, 0.1, 0.3, 0.333, True, TRAIL_VARIANTS)
     arms = [a for _, a, _ in cands]
     out.append(("var-trail-range", arms == [0.3, 0.6, 0.9], f"{cands}"))
     # ratio 1.5 allowed (SL > TP)
-    out.append(("var-ratio-wide", 1.5 in SL_TP_RATIOS, "1.5"))
+    out.append(("var-ratio-wide", 2.6 in SL_TP_RATIOS and 0.2 in SL_TP_RATIOS, str(SL_TP_RATIOS[:3])))
     grid = trail_grid()
     keys = [k for k, _, _ in grid]
     out.append(("var-trail-grid-n", len(grid) == 25 and len(set(keys)) == 25, f"n={len(grid)} {keys[:6]}"))

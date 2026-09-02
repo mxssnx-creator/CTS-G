@@ -117,11 +117,11 @@
   "setMaxDdTimeS": 1800,
   "setMinPf": 1.25,
   "setMinSamples": 12,
-  "setMinStep": 2,
+  "setMinStep": 3,
   "setPfWindow": 15,
   "setReactivate": true,
   "setStepAdapt": true,
-  "setStepMax": 4,
+  "setStepMax": 22,
   "setUseHistoricGate": true,
   "slMaxPct": 1.2,
   "slMinPct": 0.2,
@@ -174,11 +174,8 @@
   "mainMinPf": 1.25,
   "realMinPf": 1.25,
   "setStrictGate": true,
-  "slToTpRatios": [
-    0.3,
-    0.6,
-    0.9,
-    1.2,
-    1.5
-  ]
+  "slToTpRatios": [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.6],
+  "slToTpMin": 0.2,
+  "slToTpMax": 2.6,
+  "slToTpStep": 0.2
 }

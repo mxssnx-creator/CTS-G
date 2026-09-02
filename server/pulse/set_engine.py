@@ -20,6 +20,10 @@ from position_cost import (
     signed_result_r,
     snap_ratio,
     SL_TP_RATIOS,
+    SL_TP_MIN,
+    SL_TP_MAX,
+    SL_TP_STEP,
+    sl_tp_grid,
     cost_as_frac,
     net_pnl_pct,
     row_net_pnl,
@@ -39,6 +43,7 @@ WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 2
+STEP_LIVE_MIN = 3
 STEP_MAX = 22
 HIST_CAP = 96
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
@@ -483,7 +488,7 @@ class SetState:
     avg_hold_s: float = 0.0
     classic_all: float = 0.0
     exits: Dict[str, int] = field(default_factory=dict)
-    active: bool = True
+    active: bool = False
     deact_reason: str = ""
     locked: bool = False
     source_n: int = 0
@@ -543,8 +548,8 @@ class SetBook:
         self.cooldown_bars = 2
         self.ignore_tp = True
         self.opt_sl = 0.0030
-        self.min_step_cfg = STEP_MIN
-        self.min_step = STEP_MIN
+        self.min_step_cfg = STEP_LIVE_MIN
+        self.min_step = STEP_LIVE_MIN
         self.step_max = STEP_MAX
         self.step_adapt = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
@@ -621,7 +626,7 @@ class SetBook:
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         opt = float(ov.get("exitOptSlPct") or 0.30)
         self.opt_sl = opt / 100.0 if opt > 0.02 else opt
-        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
+        self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_LIVE_MIN)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
         self.step_adapt = bool(ov.get("setStepAdapt", True))
         self.min_step = self.min_step_cfg
@@ -632,14 +637,20 @@ class SetBook:
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
         self.packs = packs or ["indications"]
-        raw_ratios = ov.get("slToTpRatios") or list(SL_TP_RATIOS)
-        ratios: List[float] = []
-        for x in raw_ratios:
-            try:
-                ratios.append(snap_ratio(float(x)))
-            except Exception:
-                continue
-        self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
+        raw_ratios = ov.get("slToTpRatios")
+        if isinstance(raw_ratios, (list, tuple)) and raw_ratios:
+            ratios = []
+            for x in raw_ratios:
+                try:
+                    ratios.append(max(SL_TP_MIN, min(SL_TP_MAX, round(float(x), 2))))
+                except Exception:
+                    continue
+            self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
+        else:
+            lo = finite(ov.get("slToTpMin"), SL_TP_MIN)
+            hi = finite(ov.get("slToTpMax"), SL_TP_MAX)
+            step = finite(ov.get("slToTpStep"), SL_TP_STEP)
+            self.sl_ratios = sl_tp_grid(lo, hi, step)
         self.trail_enabled = bool(ov.get("stratTrailing", True))
         # Always enumerate the full arm×give product as independent Sets
         # alongside Normal (base) SL×TP. A selected live trail does not hide
@@ -1274,84 +1285,109 @@ class SetBook:
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
+        by_pack: Dict[str, List[SetState]] = {}
         for st in self.by_idx:
-            pack_sig = signals.get(st.pack) or [(0, 0.0, "")] * n
-            sl_frac_base = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
-            use_trail = st.kind == "trail"
-            arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
-            give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
-            tp_frac = max(0.0020, st.tp_pct)
-            # LONG and SHORT walk independently so one side never blocks the other.
-            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None and st.kind == "base"
-            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None and st.kind == "base"
+            by_pack.setdefault(st.pack, []).append(st)
+        set_map = {st.id: st for st in self.by_idx}
+        for pack, pack_sets in by_pack.items():
+            pack_sig = signals.get(pack) or [(0, 0.0, "")] * n
+            # Block/DCA hist once per pack, not once per SL×TP book.
+            strat_seed = next((s for s in pack_sets if s.kind == "base"), pack_sets[0] if pack_sets else None)
+            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None and strat_seed is not None
+            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None and strat_seed is not None
             if strat_hist is not None:
                 strat_hist.setdefault("block", [])
                 strat_hist.setdefault("dca", [])
             for want_side in (1, -1):
-                open_pos: Optional[Dict[str, Any]] = None
+                opens: Dict[str, Dict[str, Any]] = {}
+                cools: Dict[str, int] = {}
                 blk_pos: Optional[Dict[str, Any]] = None
                 dca_pos: Optional[Dict[str, Any]] = None
-                cool = 0
                 for i in range(warmup, n):
                     bar = bars[i]
                     ts = base_ts + i * BAR_S
-                    kw = dict(
-                        sl_frac=max(0.0015, sl_frac_base),
-                        tp_frac=tp_frac,
-                        use_trail=use_trail,
-                        arm=arm,
-                        give=give,
-                        time_bars=time_bars,
-                        scratch_bars=scratch_bars,
-                        honor_tp=honor_tp,
-                        ts=ts,
-                        symbol=symbol,
-                        st_id=st.id,
-                        pack=st.pack,
-                    )
-                    if open_pos is not None:
-                        open_pos, rec = self._advance_pos(open_pos, bar, i, strategy="core", **kw)
+                    for sid in list(cools):
+                        if sid in opens:
+                            continue
+                        cools[sid] -= 1
+                        if cools[sid] <= 0:
+                            cools.pop(sid, None)
+                    dead: List[str] = []
+                    for sid, pos in opens.items():
+                        st = set_map[sid]
+                        sl_frac = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
+                        tp_frac = max(0.0020, st.tp_pct)
+                        use_trail = st.kind == "trail"
+                        arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
+                        give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
+                        pos, rec = self._advance_pos(
+                            pos, bar, i, strategy="core",
+                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=use_trail,
+                            arm=arm, give=give, time_bars=time_bars, scratch_bars=scratch_bars,
+                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=st.id, pack=st.pack,
+                        )
                         if rec:
-                            hist.setdefault(st.id, []).append(rec)
-                            cool = self.cooldown_bars
-                    if blk_pos is not None:
-                        blk_pos, recb = self._advance_pos(blk_pos, bar, i, strategy="block", **kw)
+                            hist.setdefault(sid, []).append(rec)
+                            dead.append(sid)
+                            cools[sid] = self.cooldown_bars
+                        else:
+                            opens[sid] = pos
+                    for sid in dead:
+                        opens.pop(sid, None)
+                    if blk_pos is not None and strat_seed is not None:
+                        sl_frac = max(0.0015, strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)))
+                        tp_frac = max(0.0020, strat_seed.tp_pct)
+                        blk_pos, recb = self._advance_pos(
+                            blk_pos, bar, i, strategy="block",
+                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
+                            arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
+                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
+                        )
                         if recb and strat_hist is not None:
                             strat_hist["block"].append(recb)
-                    if dca_pos is not None:
-                        dca_pos, recd = self._advance_pos(dca_pos, bar, i, strategy="dca", **kw)
+                    if dca_pos is not None and strat_seed is not None:
+                        sl_frac = max(0.0015, strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)))
+                        tp_frac = max(0.0020, strat_seed.tp_pct)
+                        dca_pos, recd = self._advance_pos(
+                            dca_pos, bar, i, strategy="dca",
+                            sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
+                            arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
+                            honor_tp=honor_tp, ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
+                        )
                         if recd and strat_hist is not None:
                             strat_hist["dca"].append(recd)
-                    if open_pos is not None or blk_pos is not None or dca_pos is not None:
-                        continue
-                    if cool > 0:
-                        cool -= 1
-                        continue
                     d, conf, why = pack_sig[i]
-                    if d == 0 or conf < 0.58:
-                        continue
-                    if d != want_side:
+                    if d == 0 or conf < 0.58 or d != want_side:
                         continue
                     close = float(bar[3])
-                    sl_frac = max(0.0015, sl_frac_base)
-                    if d > 0:
-                        sl = close * (1 - sl_frac)
-                        tp = close * (1 + tp_frac)
-                    else:
-                        sl = close * (1 + sl_frac)
-                        tp = close * (1 - tp_frac)
-                    seed = self._seed_pos(d, close, sl, tp, i, str(why or ""))
-                    open_pos = dict(seed)
-                    if do_block:
-                        blk_pos = dict(seed)
-                    if do_dca:
-                        dca_pos = dict(seed)
+                    if close <= 0:
+                        continue
+                    for st in pack_sets:
+                        if st.id in opens or cools.get(st.id, 0) > 0:
+                            continue
+                        sl_frac = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
+                        tp_frac = max(0.0020, st.tp_pct)
+                        if d > 0:
+                            sl = close * (1 - sl_frac)
+                            tp = close * (1 + tp_frac)
+                        else:
+                            sl = close * (1 + sl_frac)
+                            tp = close * (1 - tp_frac)
+                        seed = self._seed_pos(d, close, sl, tp, i, str(why or ""))
+                        opens[st.id] = dict(seed)
+                        if do_block and blk_pos is None and st is strat_seed:
+                            blk_pos = dict(seed)
+                        if do_dca and dca_pos is None and st is strat_seed:
+                            dca_pos = dict(seed)
+                    if on_step and i % 80 == 0:
+                        on_step()
             if strat_hist is not None:
                 for k in ("block", "dca"):
                     tape = strat_hist.get(k) or []
                     if len(tape) > 4000:
                         strat_hist[k] = tape[-2400:]
-            self.progress.set_id = st.id
+        if self.by_idx:
+            self.progress.set_id = self.by_idx[-1].id
         if ind_hist is not None and "indications" in self.packs:
             self._replay_kind_tapes(
                 symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
@@ -1494,11 +1530,22 @@ class SetBook:
         }
 
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
-        """Per-side deact from LIVE exchange fills only. Simulated hist never gates a side."""
+        """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
         if not self.auto_deact:
             return True, ""
         live_rows = [r for r in live if isinstance(r, dict)]
+        need = max(self.min_samples, min(self.pf_n, 8))
         if len(live_rows) < 8:
+            if not self.strict_gate:
+                return True, ""
+            if not m:
+                return False, "unproven"
+            n15 = int(m.get("last15_n") or 0)
+            ratio = float(m.get("last15_ratio") or 0)
+            if n15 < need:
+                return False, "unproven"
+            if ratio + 1e-9 < 1.0:
+                return False, f"hist PF {ratio:.2f}"
             return True, ""
         live25 = live_rows[-self.deact_n :]
         live_avg = (
@@ -1603,7 +1650,7 @@ class SetBook:
                 sm["source"] = "live-exchange"
             else:
                 sm["source"] = "hist-sim"
-            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= 8 else None, sub_live)
+            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= 8 else sm, sub_live)
             sm["active"] = active_s
             sm["deact_reason"] = reason_s
             by[side] = sm
@@ -1625,7 +1672,28 @@ class SetBook:
             st.active = True
             st.deact_reason = ""
             return
-        # Deactivation is LIVE on-exchange only. Simulated hist never turns a Set off.
+        need_h = max(self.min_samples, min(self.pf_n, 8))
+        hist_n15 = int(m.get("last15_n") or 0)
+        hist_pf = float(m.get("last15_ratio") or 0)
+        hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= 1.0
+        hist_dd_ok = float(m.get("max_dd_s") or 0) <= self.max_dd_s + 1e-9
+        # Realtime only validated books. Historic still scores every SL×TP;
+        # unproven / hist-losing sets stay off the live path.
+        if live_n < 8:
+            if self.strict_gate:
+                any_side = any(bool((by.get(d) or {}).get("active")) for d in DIRECTIONS)
+                st.active = bool((hist_ok and hist_dd_ok) or any_side)
+                if st.active:
+                    st.deact_reason = ""
+                elif hist_n15 < need_h:
+                    st.deact_reason = "unproven"
+                else:
+                    st.deact_reason = f"hist PF {hist_pf:.2f}<1.00" if not hist_ok else f"hist DDt {m.get('max_dd_s'):.0f}s"
+            else:
+                st.active = True
+                st.deact_reason = ""
+            return
+        # Deactivation of a live-processed Set is LIVE on-exchange only.
         if live_n >= self.deact_n and live_avg < 0:
             st.active = False
             st.deact_reason = f"live last{len(live25)} avg loss {live_avg:.4f}"
@@ -1806,7 +1874,7 @@ class SetBook:
                 blob = (s.by_side or {}).get(want_side)
                 if isinstance(blob, dict) and "active" in blob:
                     return bool(blob.get("active"))
-            return s.active
+            return bool(s.active)
 
         on = [s for s in rows if side_on(s)]
         if on:
@@ -2289,7 +2357,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
     st.live = []
     book._score_one(st)
-    out.append(("set-hist-neg-not-deact", st.active, f"{st.active} {st.deact_reason}"))
+    out.append(("set-hist-neg-off-live", not st.active, f"{st.active} {st.deact_reason}"))
     st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
     out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
@@ -2556,7 +2624,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     g2._score_one(pos_set)
-    out.append(("set-neg-hist-stays", neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    out.append(("set-neg-hist-off-live", not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
     out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
     pk = g2.pick("general")
     out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
@@ -2743,6 +2811,25 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-parallel-fills", sum(s.n for s in bookp.sets.values()) >= 4, f"n={sum(s.n for s in bookp.sets.values())}"))
     out.append(("set-drop-bars", not bookp.bars, f"left={list(bookp.bars)}"))
     out.append(("set-lookback-20h", LOOKBACK_MAX >= 1200 and 1200 <= LOOKBACK_MAX, str(LOOKBACK_MAX)))
+    fulln = SetBook()
+    fulln.load({
+        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "setMinStep": 3, "setStepMax": 22,
+    })
+    sls = list(fulln.sl_ratios)
+    steps = list(fulln.steps)
+    bases = [s for s in fulln.by_idx if s.kind == "base"]
+    out.append(("set-tp-3-22", steps == list(range(3, 23)), f"steps={steps[:4]}..{steps[-2:]} n={len(steps)}"))
+    out.append(("set-sl-0.2-2.6", abs(sls[0] - 0.2) < 1e-9 and abs(sls[-1] - 2.6) < 1e-9 and len(sls) == 13, f"sl={sls}"))
+    out.append(("set-normal-product", len(bases) == 13 * 20, f"base={len(bases)} sl={len(sls)} st={len(steps)}"))
+    out.append(("set-live-unproven-off", all(not s.active for s in bases), f"on={sum(1 for s in bases if s.active)}"))
+    winner = bases[0]
+    winner.hist = [{"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(16)]
+    fulln.min_pf = 1.0
+    fulln._score_one(winner)
+    out.append(("set-hist-valid-on", winner.active and winner.last15_n >= 8, f"on={winner.active} n={winner.last15_n} pf={winner.last15_ratio}"))
+    pkf = fulln.pick("general")
+    out.append(("set-pick-validated-only", pkf is not None and pkf.id == winner.id, f"pick={getattr(pkf, 'id', None)}"))
     return out
 
 
