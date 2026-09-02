@@ -163,7 +163,7 @@
   "trailGiveMin": 0.1,
   "trailGivePct": 0.1,
   "trailRecalcEvery": 8,
-  "trailRecalcGive": true,
+  "trailRecalcGive": false,
   "trailRecalcN": 6,
   "trailingMinStep": 2,
   "useMaxLeverage": true,
@@ -173,5 +173,12 @@
   "baseMinPf": 1.25,
   "mainMinPf": 1.25,
   "realMinPf": 1.25,
-  "setStrictGate": true
+  "setStrictGate": true,
+  "slToTpRatios": [
+    0.3,
+    0.6,
+    0.9,
+    1.2,
+    1.5
+  ]
 }

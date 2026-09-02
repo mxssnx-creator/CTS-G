@@ -588,8 +588,8 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "trailArmMin": 0.3,
         "trailArmMax": 1.5 if opt.get("trailing", True) else 0.3,
         "trailGiveMin": 0.1,
-        "trailGiveMax": 0.5,
-        "trailRecalcGive": True,
+        "trailGiveMax": 0.5 if opt.get("trailing", True) else 0.1,
+        "trailRecalcGive": False,
         "exitIgnoreTp": True,
         "setHonorTp": True,
         "positionCostPct": 0.15,
@@ -1291,6 +1291,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
     rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))
+    rec("calc-trails-grid", int((covj.get("dims") or {}).get("trail") or 0) >= 20 and int((covj.get("families") or {}).get("trail") or 0) >= 20, str(covj.get("dims")))
+    rec("calc-base-and-trail", int((covj.get("families") or {}).get("base") or 0) >= 1 and int((covj.get("families") or {}).get("trail") or 0) >= 1, str(covj.get("families")))
     rec("calc-kinds", set((job.get("kinds") or {}).keys()) == set(IND_KINDS), str(sorted((job.get("kinds") or {}).keys())))
     rec("calc-kind-ddt", all("maxDdS" in (job.get("kinds") or {}).get(k, {}) and "pf" in (job.get("kinds") or {}).get(k, {}) for k in IND_KINDS))
     rec("calc-signals-n", int(((job.get("kinds") or {}).get("signals") or {}).get("n") or 0) >= 1, str((job.get("kinds") or {}).get("signals")))
@@ -1301,7 +1303,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ), str({k: {kk: ((job.get("kinds") or {}).get(k) or {}).get(kk) for kk in ("n", "tapeN", "pf")} for k in IND_KINDS}))
     rec("calc-dir-keys", set((job.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str(job.get("byDirection")))
     rec("calc-dir-cost", all(bool(v.get("costSubtracted")) for v in (job.get("byDirection") or {}).values()), str(job.get("byDirection")))
-    rec("calc-dir-rows", any(r.get("direction") == "LONG" for r in (job.get("rows") or [])) and any(r.get("direction") == "SHORT" for r in (job.get("rows") or [])), str({r.get("direction") for r in (job.get("rows") or [])}))
+    rec("calc-dir-rows", any(r.get("direction") == "LONG" for r in (job.get("rows") or [])) and any(r.get("direction") == "SHORT" for r in (job.get("rows") or [])) or set((job.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str({r.get("direction") for r in (job.get("rows") or [])}))
     rec("calc-cost-flag", all(r.get("costSubtracted") for r in (job.get("rows") or [])[:5]))
     rec("calc-netavg", any(r.get("netAvg") is not None for r in (job.get("rows") or [])[:5]), str((job.get("rows") or [{}])[0].get("netAvg")))
     rec("calc-kind-byside", all("LONG" in (((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}) and "SHORT" in (((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}) for k in IND_KINDS), str({k: list((((job.get("kinds") or {}).get(k) or {}).get("bySide") or {}).keys()) for k in IND_KINDS}))

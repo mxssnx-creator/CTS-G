@@ -52,6 +52,51 @@ def give_from_arm(arm: float, factor: float, gmin: float, gmax: float) -> float:
     return round(max(gmin, min(gmax, raw)), 2)
 
 
+def trail_grid(
+    arm_min: float = TRAIL_ARM_MIN,
+    arm_max: float = TRAIL_ARM_MAX,
+    give_min: float = TRAIL_GIVE_MIN,
+    give_max: float = TRAIL_GIVE_MAX,
+) -> List[Tuple[str, float, float]]:
+    """Independent arm × give product. A singleton range expands to the full grid
+    so a selected live trail never hides the other eval sets."""
+    def _axis(lo: float, hi: float, amin: float, amax: float, step: float) -> List[float]:
+        a = snap_ratio(lo, amin, amax, step)
+        b = snap_ratio(hi, amin, amax, step)
+        if a > b:
+            a, b = b, a
+        out: List[float] = []
+        x = a
+        for _ in range(16):
+            if x > b + 1e-9:
+                break
+            r = round(float(x), 1)
+            if not out or abs(out[-1] - r) > 1e-9:
+                out.append(r)
+            nxt = snap_ratio(x + step, amin, amax, step)
+            if nxt <= x + 1e-12:
+                break
+            x = nxt
+        return out or [round(float(a), 1)]
+
+    arms = _axis(arm_min, arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+    gives = _axis(give_min, give_max, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
+    if len(arms) <= 1:
+        arms = _axis(TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_MIN, TRAIL_ARM_MAX, SL_TP_STEP)
+    if len(gives) <= 1:
+        gives = _axis(TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
+    out: List[Tuple[str, float, float]] = []
+    seen = set()
+    for arm in arms:
+        for give in gives:
+            key = trail_key(arm, give)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((key, float(arm), float(give)))
+    return out
+
+
 def trail_candidates(
     arm_min: float,
     arm_max: float,
@@ -406,6 +451,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("var-trail-range", arms == [0.3, 0.6, 0.9], f"{cands}"))
     # ratio 1.5 allowed (SL > TP)
     out.append(("var-ratio-wide", 1.5 in SL_TP_RATIOS, "1.5"))
+    grid = trail_grid()
+    keys = [k for k, _, _ in grid]
+    out.append(("var-trail-grid-n", len(grid) == 25 and len(set(keys)) == 25, f"n={len(grid)} {keys[:6]}"))
+    out.append(("var-trail-grid-corners", "0.3:0.1" in keys and "1.5:0.5" in keys and "0.3:0.5" in keys and "1.5:0.1" in keys, str(keys)))
+    slim = trail_grid(0.6, 0.6, 0.2, 0.2)
+    out.append(("var-trail-grid-expand", len(slim) == 25, f"n={len(slim)}"))
     return out
 
 

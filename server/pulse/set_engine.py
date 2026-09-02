@@ -27,7 +27,7 @@ from position_cost import (
     filter_side,
 )
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, ohlcv_row
-from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
+from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
@@ -625,18 +625,19 @@ class SetBook:
                 continue
         self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
         self.trail_enabled = bool(ov.get("stratTrailing", True))
-        if self.trail_enabled:
-            self.trails = trail_candidates(
-                float(ov.get("trailArmMin") or 0.3),
-                float(ov.get("trailArmMax") or 1.5),
-                float(ov.get("trailGiveMin") or 0.1),
-                float(ov.get("trailGiveMax") or 0.5),
-                float(ov.get("trailGiveFactor") or 1.0 / 3.0),
-                bool(ov.get("trailRecalcGive", True)),
-                ov.get("trailVariants") or list(TRAIL_VARIANTS),
-            )
-        else:
+        # Always enumerate the full arm×give product as independent Sets
+        # alongside Normal (base) SL×TP. A selected live trail does not hide
+        # the others. Explicit stratTrailing=False drops the trail family
+        # (hist-calc checkbox) — live default stays on.
+        if ov.get("stratTrailing") is False:
             self.trails = []
+        else:
+            self.trails = trail_grid(
+                float(ov.get("trailArmMin") or TRAIL_ARM_MIN),
+                float(ov.get("trailArmMax") or TRAIL_ARM_MAX),
+                float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN),
+                float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX),
+            )
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
         self.ind_settings = {
@@ -688,7 +689,7 @@ class SetBook:
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
-        trails = list(self.trails) if self.trails and getattr(self, "trail_enabled", True) else []
+        trails = list(self.trails) if self.trails else []
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
@@ -1261,8 +1262,8 @@ class SetBook:
             give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
             tp_frac = max(0.0020, st.tp_pct)
             # LONG and SHORT walk independently so one side never blocks the other.
-            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None
-            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None
+            do_block = bool(getattr(self, "hist_block", True)) and strat_hist is not None and st.kind == "base"
+            do_dca = bool(getattr(self, "hist_dca", True)) and strat_hist is not None and st.kind == "base"
             if strat_hist is not None:
                 strat_hist.setdefault("block", [])
                 strat_hist.setdefault("dca", [])
@@ -2423,6 +2424,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
     out.append(("set-idx-unique", idxs == list(range(len(idxs))), f"n={len(idxs)} last={idxs[-1] if idxs else None}"))
     out.append(("set-trail-cover", cov.get("trailCover") and len(trails_in) >= 5 and "trail" in kinds, f"trails={sorted(trails_in)} cover={cov.get('trailCover')}"))
+    out.append(("set-trail-grid-n", len(book4.trails) >= 20 and len(trails_in) >= 20, f"n={len(book4.trails)} keys={sorted(trails_in)[:8]}"))
+    bases = {(s.pack, round(s.sl_ratio, 1), s.step) for s in book4.by_idx if s.kind == "base"}
+    trail_sls = {(s.pack, round(s.sl_ratio, 1), s.step) for s in book4.by_idx if s.kind == "trail"}
+    out.append(("set-trail-parallel-normal", bases and bases <= trail_sls, f"base={len(bases)} trailCombos={len(trail_sls)}"))
+    slim = SetBook()
+    slim.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.6, "trailArmMax": 0.6, "trailGiveMin": 0.2, "trailGiveMax": 0.2})
+    out.append(("set-trail-expand-full", len(slim.trails) >= 20 and any(s.kind == "base" for s in slim.by_idx) and any(s.kind == "trail" for s in slim.by_idx), f"trails={len(slim.trails)} n={len(slim.by_idx)}"))
+    off = SetBook()
+    off.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False})
+    out.append(("set-trail-explicit-off", not off.trails and all(s.kind == "base" for s in off.by_idx), f"n={len(off.by_idx)} kinds={ {s.kind for s in off.by_idx} }"))
     out.append(("set-sl-cover", cov.get("slCover") and len(book4.sl_ratios) >= 5, f"sl={book4.sl_ratios}"))
     out.append(("set-sl-tp-cover", bool(cov.get("slTpCover")), f"slTp={cov.get('slTpCover')} steps={cov.get('steps')} bySl={ {k: v.get('steps') for k, v in (cov.get('bySl') or {}).items()} }"))
     out.append(("set-trail-sl-cover", bool(cov.get("trailSlCover")), f"trailSl={cov.get('trailSlCover')} byTrail={ {k: v.get('sl') for k, v in (cov.get('byTrail') or {}).items()} }"))
