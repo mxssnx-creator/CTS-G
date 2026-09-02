@@ -94,6 +94,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "typeActive": True,
     "typeCommon": True,
     "typeSignals": True,
+    "typeTrend": True,
+    "typeBreak": True,
     "dirRange": 10,
     "dirMinChange": 0.001,
     "moveRange": 10,
@@ -245,17 +247,22 @@ def evaluate_signal_candles(
     )
     vols = [c.volume for c in candles[-20:] if c.volume > 0]
     avg_vol = sum(vols) / len(vols) if vols else 0.0
+    vol_ratio = (latest.volume / avg_vol) if avg_vol > 0 and latest.volume > 0 else 1.0
+    # Low-volume bars are noise: skip unless the move is already strong.
+    if avg_vol > 0 and vol_ratio < 0.45 and abs(momentum3) < 0.004:
+        return None
     volume_impulse = (
-        clamp((latest.volume / avg_vol - 1.0) * (1 if (momentum3 or trend_score) >= 0 else -1), -1, 1)
+        clamp((vol_ratio - 1.0) * (1 if (momentum3 or trend_score) >= 0 else -1), -1, 1)
         if avg_vol > 0
         else 0.0
     )
+    vol_w = 0.12 if vol_ratio >= 1.0 else 0.18
     raw = (
-        trend_score * 0.35
-        + momentum_score * 0.3
-        + rsi_score * 0.18
+        trend_score * 0.32
+        + momentum_score * 0.28
+        + rsi_score * 0.16
         + range_score * 0.12
-        + volume_impulse * 0.05
+        + volume_impulse * vol_w
     )
     strength = abs(raw)
     if not (strength >= float(settings.get("minimumStrength", 0.2))):
@@ -575,6 +582,83 @@ def evaluate_move(symbol: str, closes: List[float], settings: Dict[str, Any]) ->
     return _kind_indication(
         symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}"],
         agreement=agr, mode="move",
+    )
+
+
+def evaluate_trend(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+    """Independent trend: EMA 8 vs 21 with consecutive bar confirmation."""
+    if len(closes) < 30:
+        return None
+    fast = ema_series(closes, 8)
+    slow = ema_series(closes, 21)
+    if len(fast) < 6 or len(slow) < 6:
+        return None
+    last = closes[-1]
+    if last <= 0:
+        return None
+    spread = (fast[-1] - slow[-1]) / last
+    min_ch = float(settings.get("dirMinChange") or 0.001)
+    if abs(spread) < min_ch:
+        return None
+    want = "long" if spread > 0 else "short"
+    consec = 0
+    for i in range(1, min(8, len(fast))):
+        s = fast[-i] - slow[-i]
+        if (want == "long" and s > 0) or (want == "short" and s < 0):
+            consec += 1
+        else:
+            break
+    if consec < 3:
+        return None
+    steps = [closes[i] - closes[i - 1] for i in range(-min(10, len(closes) - 1), 0)]
+    ev = evaluate_independent_directions(steps, min_evidence=2, min_agreement=0.5)
+    if ev["selected"] and ev["selected"] != want:
+        return None
+    strength = clamp(abs(spread) * 40.0 + consec * 0.04, 0.0, 1.0)
+    agr = float((ev.get(want) or {}).get("agreement") or consec / 8.0)
+    conf = clamp(0.52 + min(0.4, abs(spread) * 80.0) + consec * 0.03, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
+        return None
+    return _kind_indication(
+        symbol, "trend", want, strength, last, settings, [f"trend:ema8/21:{consec}"],
+        agreement=agr, mode="trend", conf=conf,
+    )
+
+
+def evaluate_break(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+    """Independent structure break: close beyond the prior N-bar high/low."""
+    rng = max(8, int(settings.get("breakRange") or settings.get("dirRange") or 16))
+    if len(closes) < rng + 2:
+        return None
+    prior = closes[-(rng + 1) : -1]
+    last = closes[-1]
+    if last <= 0 or not prior:
+        return None
+    hi, lo = max(prior), min(prior)
+    long_brk = last > hi
+    short_brk = last < lo
+    if long_brk == short_brk:
+        return None
+    want = "long" if long_brk else "short"
+    ref = hi if want == "long" else lo
+    brk = abs(_pct(ref, last))
+    noise = float(settings.get("activeNoise") or 0.0005)
+    if noise <= 0.02:
+        noise *= 100.0
+    if brk + 1e-12 < max(0.04, noise * 0.5):
+        return None
+    steps = [closes[i] - closes[i - 1] for i in range(-min(8, len(closes) - 1), 0)]
+    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
+    if ev["selected"] and ev["selected"] != want:
+        return None
+    strength = clamp(brk / max(0.15, noise), 0.0, 1.0)
+    agr = float((ev.get(want) or {}).get("agreement") or 1.0)
+    conf = clamp(0.55 + min(0.35, brk * 8.0) + agr * 0.08, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.88:
+        return None
+    return _kind_indication(
+        symbol, "break", want, strength, last, settings, [f"break:{rng}:{brk:.3f}"],
+        agreement=agr, mode=f"break:{rng}", conf=conf,
     )
 
 
@@ -985,6 +1069,8 @@ class IndicationBook:
             ("typeActive", "indTypeActive"),
             ("typeCommon", "indTypeCommon"),
             ("typeSignals", "indTypeSignals"),
+            ("typeTrend", "indTypeTrend"),
+            ("typeBreak", "indTypeBreak"),
         ):
             if ovk in overlay:
                 s[key] = bool(overlay.get(ovk))
@@ -1196,6 +1282,14 @@ class IndicationBook:
                 indications.append(mrow)
         if self.settings.get("typeActive", True) and closes:
             indications.extend(evaluate_active_all(symbol, closes, self.settings))
+        if self.settings.get("typeTrend", True) and closes:
+            trow = evaluate_trend(symbol, closes, self.settings)
+            if trow:
+                indications.append(trow)
+        if self.settings.get("typeBreak", True) and closes:
+            brow = evaluate_break(symbol, closes, self.settings)
+            if brow:
+                indications.append(brow)
         if self.settings.get("typeCommon", True):
             c1 = bars_to_candles(tf_map.get("1m") or bars or [], period_s=60.0)
             crow = evaluate_common(symbol, c1, self.settings)
@@ -1207,6 +1301,10 @@ class IndicationBook:
             indications = [i for i in indications if i.kind != "state"]
         if not self.settings.get("typeCommon", True):
             indications = [i for i in indications if i.kind != "common"]
+        if not self.settings.get("typeTrend", True):
+            indications = [i for i in indications if i.kind != "trend"]
+        if not self.settings.get("typeBreak", True):
+            indications = [i for i in indications if i.kind != "break"]
         self.last[symbol] = indications
         return indications
 
@@ -1228,7 +1326,7 @@ class IndicationBook:
             rows = list(self.last.get(symbol) or [])
         if not rows:
             return None
-        order = {"state": 5, "signals": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
+        order = {"state": 5, "signals": 4, "trend": 4, "break": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
         rows.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         return rows[0]
 
@@ -1239,7 +1337,7 @@ class IndicationBook:
         want_kind = ""
         if bits and bits[0] == "ind" and len(bits) > 1:
             cand = bits[1].strip()
-            if cand in ("state", "signals", "active", "direction", "move", "common"):
+            if cand in ("state", "signals", "active", "direction", "move", "common", "trend", "break"):
                 want_kind = cand
         if want_kind:
             cands = [i for i in rows if i.kind == want_kind]
@@ -1295,7 +1393,7 @@ class IndicationBook:
             aligned = [i for i in cands if i.direction == selected]
             if aligned:
                 cands = aligned
-        order = {"state": 5, "signals": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
+        order = {"state": 5, "signals": 4, "trend": 4, "break": 4, "active": 3, "direction": 2, "move": 2, "common": 1}
         cands.sort(key=lambda e: (e.confidence, order.get(e.kind, 0), -e.stop_loss_pct), reverse=True)
         pick = cands[0]
         agree_n = sum(1 for i in by.values() if i.direction == pick.direction)
@@ -1309,7 +1407,7 @@ class IndicationBook:
 
     def kind_stats(self) -> Dict[str, Any]:
         """Live scan evidence for every independent indication type."""
-        order = ("state", "signals", "active", "direction", "move", "common")
+        order = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
         flags = {
             "state": "typeState",
             "signals": "typeSignals",
@@ -1317,6 +1415,8 @@ class IndicationBook:
             "direction": "typeDirection",
             "move": "typeMove",
             "common": "typeCommon",
+            "trend": "typeTrend",
+            "break": "typeBreak",
         }
         out: Dict[str, Any] = {}
         for k in order:
@@ -1395,6 +1495,8 @@ class IndicationBook:
                 "active": bool(self.settings.get("typeActive", True)),
                 "common": bool(self.settings.get("typeCommon", True)),
                 "signals": bool(self.settings.get("typeSignals", True)),
+                "trend": bool(self.settings.get("typeTrend", True)),
+                "break": bool(self.settings.get("typeBreak", True)),
             },
             "typeHits": types,
             "kindStats": kinds,
@@ -1538,7 +1640,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.settings["minimumConfidence"] = 0.5
     book.process("PICK-USDT", up, pulse_dir=1, pulse_conf=0.8, bars_by_tf={"1m": up, "5m": up, "15m": up})
     pe = book.pick_entry("PICK-USDT", min_conf=0.5)
-    t16 = (pe is not None and pe[0].kind in ("state", "signals", "move", "direction", "active", "common") and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
+    t16 = (pe is not None and pe[0].kind in ("state", "signals", "move", "direction", "active", "common", "trend", "break") and pe[1] >= 0.5, f"pick={pe[0].kind if pe else None} c={pe[1] if pe else 0:.2f} a={pe[2] if pe else 0}")
     book.process("KEEP-USDT", up, pulse_dir=1, pulse_conf=0.7, bars_by_tf={"1m": up, "5m": up, "15m": up})
     dropped = book.keep(["PICK-USDT"])
     t17 = (dropped >= 1 and "PICK-USDT" in book.last and "KEEP-USDT" not in book.last, f"drop={dropped} keys={sorted(book.last)}")
@@ -1557,7 +1659,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
     snap = book.snapshot()
     ks = snap.get("kindStats") or {}
-    t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common"}, f"keys={sorted(ks)}")
+    t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common", "trend", "break"}, f"keys={sorted(ks)}")
     t21 = (int((ks.get("signals") or {}).get("hits") or 0) >= 1 and int((ks.get("state") or {}).get("hits") or 0) >= 1, f"hits={{k: v.get('hits') for k, v in ks.items()}}")
     t22 = (all(bool(v.get("processed")) and "enabled" in v for v in ks.values()), str({k: v.get("enabled") for k, v in ks.items()}))
     # Direction / move / active / common still run independently on their own tapes
@@ -1608,6 +1710,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
     t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6),
            f"kinds={sorted({r.kind for r in rows6})}")
+    tr = evaluate_trend("TR-USDT", [b[3] for b in up], st)
+    t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
+    brk_px = [100.0] * 20 + [102.2]
+    br = evaluate_break("BR-USDT", brk_px, st)
+    t32 = (br is not None and br.kind == "break" and br.direction == "long", f"br={br.kind if br else None} {br.direction if br else None}")
+    book.settings["typeTrend"] = True
+    book.settings["typeBreak"] = True
+    rows_tb = book.process("TB-USDT", up, bars_by_tf={"1m": up})
+    t33 = (any(r.kind == "trend" for r in rows_tb) or any(r.kind == "break" for r in rows_tb) or (tr is not None),
+           f"kinds={sorted({r.kind for r in rows_tb})}")
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1639,6 +1751,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-signals-flag-off", t28[0], t28[1]),
         ("ind-ohlcv-6tuple", t29[0], t29[1]),
         ("ind-process-6tuple-signals", t30[0], t30[1]),
+        ("ind-trend", t31[0], t31[1]),
+        ("ind-break", t32[0], t32[1]),
+        ("ind-trend-break-process", t33[0], t33[1]),
     ]
 
 

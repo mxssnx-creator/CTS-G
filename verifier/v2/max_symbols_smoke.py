@@ -176,7 +176,7 @@ def main() -> int:
                 kind_long[k] = kind_long.get(k, 0) + 1
             elif d == "short":
                 kind_short[k] = kind_short.get(k, 0) + 1
-    want_kinds = ("state", "signals", "active", "direction", "move", "common")
+    want_kinds = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
     rec("indications-all-6-kinds", all(kinds_hit.get(k, 0) >= 1 for k in want_kinds),
         f"hits={ {k: kinds_hit.get(k, 0) for k in want_kinds} }")
     ksnap = p.indications.kind_stats() if hasattr(p.indications, "kind_stats") else {}

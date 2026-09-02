@@ -26,7 +26,7 @@ from position_cost import (
     row_side,
     filter_side,
 )
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, ohlcv_row
+from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 PACKS = ("indications", "general")
@@ -42,8 +42,8 @@ STEP_MIN = 2
 STEP_MAX = 22
 HIST_CAP = 96
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
-IND_KINDS = ("state", "signals", "active", "direction", "move", "common")
-IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common"}
+IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
+IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -305,6 +305,8 @@ def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, A
         "move": bool(settings.get("typeMove", True)),
         "act": bool(settings.get("typeActive", True)),
         "common": bool(settings.get("typeCommon", True)),
+        "trend": bool(settings.get("typeTrend", True)),
+        "brk": bool(settings.get("typeBreak", True)),
     }
     votes: List[Tuple[int, float, str]] = []
     if want["sig"]:
@@ -347,6 +349,20 @@ def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, A
             crow = evaluate_common("hist", candles, settings)
             if crow:
                 votes.append((1 if crow.direction == "long" else -1, float(crow.confidence), "common"))
+        except Exception:
+            pass
+    if want.get("trend") and closes:
+        try:
+            trow = evaluate_trend("hist", closes, settings)
+            if trow:
+                votes.append((1 if trow.direction == "long" else -1, float(trow.confidence), "trend"))
+        except Exception:
+            pass
+    if want.get("brk") and closes:
+        try:
+            brow = evaluate_break("hist", closes, settings)
+            if brow:
+                votes.append((1 if brow.direction == "long" else -1, float(brow.confidence), "brk"))
         except Exception:
             pass
     return votes
@@ -653,6 +669,8 @@ class SetBook:
             "positionCostPct": self.cost_pct,
             "typeState": bool(ov.get("indTypeState", True)),
             "typeSignals": bool(ov.get("indTypeSignals", True)),
+            "typeTrend": bool(ov.get("indTypeTrend", True)),
+            "typeBreak": bool(ov.get("indTypeBreak", True)),
             "typeDirection": bool(ov.get("indTypeDirection", True)),
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeActive": bool(ov.get("indTypeActive", True)),
@@ -1645,16 +1663,9 @@ class SetBook:
         self._live_ov_ts = 0.0
 
     def _cap_active(self) -> None:
-        for kind, cap in (("base", self.max_active), ("trail", max(len(self.trails) * max(1, len(self.packs)), 4))):
-            if kind == "base" and cap <= 0:
-                continue
-            active = [s for s in self.by_idx if s.active and s.kind == kind]
-            if len(active) <= cap:
-                continue
-            active.sort(key=lambda s: (s.last15_ratio, s.last25_avg_r, -s.max_dd_s), reverse=True)
-            for extra in active[cap:]:
-                extra.active = False
-                extra.deact_reason = extra.deact_reason or f"cap>{cap}"
+        # No set-count ceiling. Memory is trimmed by HIST_CAP / load_engine,
+        # not by deactivating independent configs.
+        return
 
     def get_idx(self, idx: int) -> Optional[SetState]:
         if 0 <= idx < len(self.by_idx):
@@ -2658,6 +2669,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indMinConfidence": 0.5, "indMinStrength": 0.05,
         "indTypeSignals": True, "indTypeState": False, "indTypeDirection": False,
         "indTypeMove": False, "indTypeActive": False, "indTypeCommon": False,
+        "indTypeTrend": False, "indTypeBreak": False,
     })
     g8.ingest_bars("ONLY-USDT", synth_trend(180, 40.0, 0.18, 0.04))
     g8.replay_all(now=1_700_001_200)

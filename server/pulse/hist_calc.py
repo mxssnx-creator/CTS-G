@@ -585,6 +585,8 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "indTypeMove": bool(opt.get("indTypeMove", True)),
         "indTypeActive": bool(opt.get("indTypeActive", True)),
         "indTypeCommon": bool(opt.get("indTypeCommon", True)),
+        "indTypeTrend": bool(opt.get("indTypeTrend", True)),
+        "indTypeBreak": bool(opt.get("indTypeBreak", True)),
         "trailArmMin": 0.3,
         "trailArmMax": 1.5 if opt.get("trailing", True) else 0.3,
         "trailGiveMin": 0.1,

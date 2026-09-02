@@ -889,8 +889,17 @@ class Pulse:
                     break
         return s
 
-    def sized_notional(self) -> float:
+    def sized_notional(self, symbol: Optional[str] = None) -> float:
         vf = max(0.05, float(getattr(self, "volume_factor", 1.0) or 1.0))
+        if symbol:
+            v = float(self.vol1h.get(symbol) or 0)
+            refs = [x for x in self.vol1h.values() if x and x > 0]
+            if v > 0 and refs:
+                med = sorted(refs)[len(refs) // 2]
+                if med > 0:
+                    vf *= max(0.35, min(1.0, (v / med) ** 0.5))
+            elif v <= 0:
+                vf *= 0.5
         return max(0.2, float(TARGET_NOTIONAL) * vf)
 
     def notional_cap(self) -> float:
@@ -3750,6 +3759,8 @@ class Pulse:
             return float(pc.get("ratio") or 0)
         except Exception:
             return None
+
+    def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
         if not getattr(self.dca, "enabled", False) or self.halted:
             return
@@ -4879,6 +4890,8 @@ class Pulse:
                 "active": bool(self.indications.settings.get("typeActive", True)),
                 "common": bool(self.indications.settings.get("typeCommon", True)),
                 "signals": bool(self.indications.settings.get("typeSignals", True)),
+                "trend": bool(self.indications.settings.get("typeTrend", True)),
+                "break": bool(self.indications.settings.get("typeBreak", True)),
             },
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
