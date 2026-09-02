@@ -61,6 +61,58 @@ unprotected orders on the exchange).
     restore patch regenerated (base b3a9ff3c, 30.6KB); apply-verify:
     base->patch->blob HASH MATCH + byte-identical (cmp); linux-common.sh
     pt_want pinned to 305a6070.
+
+13) C7 push verification (GitHub mxssnx-creator/CTS-G main) — 11/11 files
+    pushed and sha-verified EXACT against local git hash-object targets:
+    - verifier/v3/criteria.md        ee01c7365bc6a4b21db50d40a21875636f0b5a75 (commit b6f01caca5f8)
+    - verifier/runs/<this file>      7fdbc8a6d4fa4b52ad2e01dfd92340f7844aae88 (commit b6f01caca5f8)
+    - verifier/README.md             d326c715c5553166b6a41a9f01dc2162cf662f01 (commit ddab4ec1c19a)
+    - server/pulse/overlay-bingx-x01.json 01ecfb3d6b5ba0623a6de85bcc075e0a4365ba42
+    - server/pulse/overlay-bingx-x02.json 01ecfb3d6b5ba0623a6de85bcc075e0a4365ba42
+    - deploy/linux-common.sh         6f1895f7e9806fad2472b07ec178ebe65709a4cc (commit db5e387d0d6d)
+    - server/pulse/block_engine.py   c5eb3584fb0ef60173b57382a9f455313f13c149 (commit 7b6ccd9621b0)
+    - src/lib/config-model.ts        42f07aeba0fbd93f552c5b7cbee90a3a2d1431b3 (commit e3532049e0ea)
+    - restore/pulse_trader.py.patch  56c70b466d1cb607636023c4fcc2093cf340411b (commit 51e248ce1c66, 629 lines)
+    - scripts/engine-test.py         04d035ce01a771d6a7ad031ee4baeb7364fd24c1 (commit 2da34bc303d0)
+    - src/routes/settings.tsx        f76d9e099d63f677a6035fad282259783f5bcb8e (commit 4848752199e9)
+    Method: chunked read (80-line py / ~170-line tsx to avoid 10000-char
+    tool truncation; truncation gaps re-read via targeted sed ranges and
+    spliced) -> ONE push_files per file -> get_file_contents SHA compare.
+    11/11 first-attempt exact matches. Real engine source NOT pushed
+    (placeholder-by-design; restore patch chain verified in step 12).
+
+14) Remote post-push check (152.53.114.112:3015, 2026-09-02):
+    - x01 LIVE: running, cycles advancing (78472 -> 79119 in 60s,
+      ~10.8 cyc/s, scanMs ~42), engine qa 187/2. errors ~28.5/s dominated
+      by POST /trade/batchOrders -> 100001 signature mismatch (control
+      pairs failing) + GET /trade/allOrders 109500 + ws drops = the known
+      x01 key-repair issue (USER ACTION: secrets via Redis/UI only).
+      NEW FINDING: x01 startEquity persisted as 0.3656 (bad balance read
+      baselined) -> drawdown-halt protection effectively DISABLED on the
+      LIVE desk (dd always negative). Fixed by new engine on deploy: any
+      explicit start drops reset-eq and re-baselines start_eq to current
+      equity (pulse_trader.py:1181-1191 rescue).
+    - x02 VST: engine alive (cycles 1004276 -> 1014326, scanMs ~1.3,
+      errors 0, qa 401/3) but drawdown halt (37.9% > DD_HALT 0.18) CANNOT
+      be cleared remotely on the old deployed build: old sidecar
+      apply_control("start") only unlinks PAUSE/STOP + systemctl start
+      (no-op on running service) and never drops reset-eq; old engine
+      reloads persisted start-eq-bingx-x02.json (14734.2156) on every
+      start and re-latches. Verified: {"action":"start"} -> rc=0 but
+      halt persisted 20s later. NOT remotely fixable (sidecar exposes no
+      write path to start-eq-*; DD_HALT hardcoded 0.18 in old build).
+      Fixed by deploy: new sidecar drops reset-eq-<conn> on start
+      (pulse_http.py:288) + new engine re-baselines (rescue above).
+    - ANOMALY: x01 and x02 equity track near-identically across polls
+      (9158.1379/9158.1359, then 9157.6812/9157.6947, 9157.5911/9157.6003)
+      — both desks appear to read the SAME underlying account balance.
+      Investigate x01 key set (may point at VST or same account as x02).
+    - SECURITY: sidecar static file server publicly serves the whole
+      pulse dir INCLUDING pulse_trader.py (real engine source) on
+      0.0.0.0:3015 — recommend auth/bind-localhost for the file server.
 FINAL: 172/172, py_compile all OK, set_engine self_test ok, tsc clean,
 npm build OK, C1 grep audit clean (no 0.8 PF defaults remain; MIN=0.5;
-desk axis Min PF on canonical 1/2.3/0.02), patch chain verified.
+desk axis Min PF on canonical 1/2.3/0.02), patch chain verified,
+C7 11/11 pushed + sha-verified, remote state documented with 2
+user-action items (deploy --force; x01 key repair) + 2 advisory findings
+(shared-balance anomaly, public engine source exposure).
