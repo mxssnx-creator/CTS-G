@@ -676,7 +676,7 @@ function SettingsPage() {
                 <Num
                   label="PF ratio"
                   value={overlay.blockProfitFactorRatio}
-                  min={0.2}
+                  min={0.5}
                   max={5}
                   step={0.1}
                   onChange={(v) => patch("blockProfitFactorRatio", v)}
@@ -1022,7 +1022,7 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Min PF" value={overlay.minPf} min={0.8} max={3} step={0.05} onChange={(v) => patch("minPf", v)} />
+                <Num label="Min PF" value={overlay.minPf} min={1} max={2.3} step={0.02} onChange={(v) => patch("minPf", v)} />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
