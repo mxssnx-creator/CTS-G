@@ -97,7 +97,7 @@ else
 fi
 
 [[ -f "$CTS_G_ROOT/deploy/linux-common.sh" ]] || die "install did not land deploy/ in $CTS_G_ROOT"
-chmod 755 "$CTS_G_ROOT/deploy/"*.sh
+find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 
 configure_git "$CTS_G_ROOT"
 seed_env
