@@ -1390,7 +1390,7 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Exact CTS formula · counts 1–12 independent">
+            <Card title="Block strategy" hint="Each count 1–12 is independent · last-N of that count holds the increased factor vs original base until overall pos average is back positive">
               <Grid>
                 <EnableSlider
                   label="Block enabled"

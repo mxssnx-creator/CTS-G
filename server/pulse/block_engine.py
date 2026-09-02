@@ -109,6 +109,7 @@ class BlockLane:
     pf_ring: Dict[int, List[float]] = field(default_factory=dict)
     parent_pf_ring: List[float] = field(default_factory=list)
     satisfied: Dict[int, bool] = field(default_factory=dict)
+    held_factor: Dict[int, float] = field(default_factory=dict)
     active: bool = True
 
 
@@ -137,6 +138,7 @@ class BlockBook:
         self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
         self.lanes: Dict[str, BlockLane] = {}
         self.count_tape: Dict[int, List[float]] = {n: [] for n in range(1, BLOCK_EVAL_N + 1)}
+        self.overall_tape: List[float] = []
         self.load()
 
     def key(self, symbol: str, side: str) -> str:
@@ -163,6 +165,7 @@ class BlockBook:
                 pf_ring={int(a): list(b) for a, b in (v.get("pf_ring") or {}).items()},
                 parent_pf_ring=list(v.get("parent_pf_ring") or []),
                 satisfied={int(a): bool(b) for a, b in (v.get("satisfied") or {}).items()},
+                held_factor={int(a): float(b) for a, b in (v.get("held_factor") or {}).items()},
                 active=bool(v.get("active", True)),
             )
             self.lanes[k] = lane
@@ -171,6 +174,10 @@ class BlockBook:
                 self.count_tape[int(n)] = [float(x) for x in (tape or [])][-self.window :]
             except Exception:
                 continue
+        try:
+            self.overall_tape = [float(x) for x in (raw.get("overallTape") or [])][-self.window :]
+        except Exception:
+            self.overall_tape = []
 
     def save(self) -> None:
         blob = {
@@ -198,9 +205,11 @@ class BlockBook:
                 "pf_ring": {str(a): b for a, b in lane.pf_ring.items()},
                 "parent_pf_ring": lane.parent_pf_ring[-self.window :],
                 "satisfied": {str(a): b for a, b in lane.satisfied.items()},
+                "held_factor": {str(a): b for a, b in (lane.held_factor or {}).items()},
                 "active": lane.active,
             }
         blob["countTape"] = {str(n): list(v)[-self.window :] for n, v in (self.count_tape or {}).items()}
+        blob["overallTape"] = list(self.overall_tape or [])[-self.window :]
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(blob, f)
@@ -212,44 +221,81 @@ class BlockBook:
         if lane and lane.base_qty > 0:
             lane.active = True
             return lane
+        if lane:
+            # Re-entry on the same side: keep per-count tapes and last increased factor.
+            lane.base_qty = float(qty)
+            lane.base_entry = float(entry)
+            lane.confirmed_add = 0.0
+            lane.legs = []
+            lane.satisfied = {}
+            lane.active = True
+            self.save()
+            return lane
         lane = BlockLane(symbol=symbol, side=side, base_qty=qty, base_entry=entry, active=True)
         self.lanes[k] = lane
         self.save()
         return lane
 
-    def vol_scale(self, count: int, lane: Optional[BlockLane] = None) -> float:
-        """1.0 while that count's history is +EV / cold; shrink toward 0.25 while avg is negative.
-
-        Always applied to original base qty, never to the last add.
-        """
-        n = int(count)
+    def last_n_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
+        """Independent last-`count` average for this block count only."""
+        n = max(1, int(count))
         samples: List[float] = []
         if lane is not None:
             samples.extend(list(lane.pf_ring.get(n) or []))
         samples.extend(list((self.count_tape or {}).get(n) or []))
-        samples = samples[-self.window :]
-        if len(samples) < self.min_samples:
-            return 1.0
-        avg = sum(samples) / max(1, len(samples))
-        if avg >= 0:
-            return 1.0
-        return clamp(1.0 + avg * 80.0, 0.25, 1.0)
+        samples = samples[-n:]
+        if not samples:
+            return 0.0, 0
+        return (sum(samples) / len(samples)), len(samples)
 
-    def count_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
-        n = int(count)
+    def overall_avg(self, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
         samples: List[float] = []
         if lane is not None:
-            samples.extend(list(lane.pf_ring.get(n) or []))
-        samples.extend(list((self.count_tape or {}).get(n) or []))
+            samples.extend(list(lane.parent_pf_ring or []))
+        samples.extend(list(self.overall_tape or []))
         samples = samples[-self.window :]
         if not samples:
             return 0.0, 0
         return (sum(samples) / len(samples)), len(samples)
 
+    def vol_factor(self, count: int, lane: Optional[BlockLane] = None) -> float:
+        """Increment factor vs original base. Independent per count.
+
+        Healthy / cold → 1.0 (sequential remainder unit = 1 × vr × base).
+        Last-`count` average not positive → keep the last increased factor
+        (the coming number of pos = this count) until overall position
+        average is positive again. Never compounded off the last add.
+        """
+        n = max(1, int(count))
+        increased = float(n)
+        held = 1.0
+        if lane is not None:
+            try:
+                held = max(1.0, float((lane.held_factor or {}).get(n) or 1.0))
+            except Exception:
+                held = 1.0
+        avg, n_avg = self.last_n_avg(n, lane)
+        overall, n_ov = self.overall_avg(lane)
+        last_n_neg = n_avg >= n and avg < 0
+        overall_pos = n_ov >= max(1, min(self.min_samples, n)) and overall >= 0.0
+        if last_n_neg and not overall_pos:
+            return max(held, increased)
+        return 1.0
+
+    def vol_scale(self, count: int, lane: Optional[BlockLane] = None) -> float:
+        """Back-compat alias of vol_factor (kept ≥ 1.0; no shrink-on-loss)."""
+        return self.vol_factor(count, lane)
+
+    def count_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
+        return self.last_n_avg(count, lane)
+
     def step_qty(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> float:
-        """Latest increment for this count: original base × vr × scale. Not compounded."""
-        scale = self.vol_scale(int(count), lane)
-        return max(0.0, float(base_qty) * float(self.volume_ratio) * scale)
+        """This count's add vs original base: base × vr × factor. Not compounded."""
+        n = max(1, int(count))
+        factor = self.vol_factor(n, lane)
+        if lane is not None:
+            lane.held_factor[n] = float(factor)
+        return max(0.0, float(base_qty) * float(self.volume_ratio) * factor)
 
     def cumulative_target(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> float:
         total = 0.0
@@ -390,6 +436,7 @@ class BlockBook:
                 "independent": True,
                 "avgResult": round(avg, 8),
                 "avgN": n_avg,
+                "heldFactor": round(float(f.get("volScale") or 1), 4),
                 **f,
                 **pf,
                 "evaluated": 1,
@@ -488,19 +535,24 @@ class BlockBook:
         sample = float(pnl_pct) if pnl_pct is not None else float(pnl)
         lane.parent_pf_ring.append(sample)
         lane.parent_pf_ring = lane.parent_pf_ring[-self.window :]
-        # advance every existing pause once
+        self.overall_tape.append(sample)
+        self.overall_tape = self.overall_tape[-self.window :]
+        # advance every existing pause once — each count independently
         for n, rem in list(lane.pause_remaining.items()):
             if rem > 0:
                 lane.pause_remaining[n] = rem - 1
+        used_counts = {int(leg.block_count) for leg in lane.legs if int(leg.block_count or 0) >= 1}
         for n in self._eval_range():
-            used = any(leg.block_count == n for leg in lane.legs)
-            if used:
-                lane.pf_ring.setdefault(n, []).append(sample)
-                lane.pf_ring[n] = lane.pf_ring[n][-self.window :]
-                self.count_tape.setdefault(n, []).append(sample)
-                self.count_tape[n] = self.count_tape[n][-self.window :]
-                lane.pause_remaining[n] = self.pause_ratio
-                lane.pause_until[n] = time.time() + 45 * max(1, self.pause_ratio)
+            if n not in used_counts:
+                continue
+            lane.pf_ring.setdefault(n, []).append(sample)
+            lane.pf_ring[n] = lane.pf_ring[n][-self.window :]
+            self.count_tape.setdefault(n, []).append(sample)
+            self.count_tape[n] = self.count_tape[n][-self.window :]
+            lane.pause_remaining[n] = self.pause_ratio
+            lane.pause_until[n] = time.time() + 45 * max(1, self.pause_ratio)
+            # Refresh held factor from this count's last-N vs overall.
+            lane.held_factor[n] = self.vol_factor(n, lane)
         lane.active = False
         lane.confirmed_add = 0.0
         lane.legs = []
@@ -528,6 +580,7 @@ class BlockBook:
                         "inc": r["volumeIncrement"],
                         "stepQty": round(float(r.get("stepQty") or 0), 8),
                         "volScale": round(float(r.get("volScale") or 1), 4),
+                        "heldFactor": round(float(r.get("heldFactor") or r.get("volScale") or 1), 4),
                         "avgResult": r.get("avgResult"),
                         "avgN": r.get("avgN"),
                         "targetAdd": round(r["targetAddQty"], 8),
@@ -553,6 +606,7 @@ class BlockBook:
                 "inc": f["volumeIncrement"],
                 "stepQty": round(float(f.get("stepQty") or 0), 8),
                 "volScale": round(float(f.get("volScale") or 1), 4),
+                "heldFactor": round(float(f.get("volScale") or 1), 4),
                 "avgResult": round(avg, 8),
                 "avgN": n_avg,
                 "targetAdd": round(f["targetAddQty"], 8),
@@ -697,16 +751,27 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-snap-live-flag", sum(1 for c in snap.get("allCounts") or [] if c.get("liveStack")) == 3)
 
     scale_lane = BlockLane(symbol="SC-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
-    scale_lane.pf_ring[1] = [-0.01] * 8
-    b.count_tape[1] = [-0.01] * 8
-    rec("blk-scale-neg", b.vol_scale(1, scale_lane) < 0.99 and b.vol_scale(1, scale_lane) >= 0.25, str(b.vol_scale(1, scale_lane)))
-    step_neg = b.step_qty(10.0, 1, scale_lane)
-    rec("blk-step-off-base", step_neg < 10.0 and step_neg >= 2.5, str(step_neg))
-    scale_lane.pf_ring[1] = [0.004] * 8
-    b.count_tape[1] = [0.004] * 8
-    rec("blk-scale-restore", abs(b.vol_scale(1, scale_lane) - 1.0) < 1e-9, str(b.vol_scale(1, scale_lane)))
+    scale_lane.pf_ring[1] = [-0.01] * 1
+    b.count_tape[1] = [-0.01] * 1
+    rec("blk-hold-n1-keep", abs(b.vol_factor(1, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(1, scale_lane)))
+    rec("blk-no-shrink", abs(b.step_qty(10.0, 1, scale_lane) - 10.0) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
+    scale_lane.pf_ring[3] = [-0.01] * 3
+    b.count_tape[3] = [-0.01] * 3
+    rec("blk-hold-n3-increased", abs(b.vol_factor(3, scale_lane) - 3.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
+    rec("blk-hold-n3-vs-base", abs(b.step_qty(10.0, 3, scale_lane) - 30.0) < 1e-9, str(b.step_qty(10.0, 3, scale_lane)))
+    rec("blk-n2-indep-scale", abs(b.vol_factor(2, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(2, scale_lane)))
+    scale_lane.pf_ring[3] = [0.004] * 3
+    b.count_tape[3] = [0.004] * 3
+    scale_lane.parent_pf_ring = [-0.01] * 8
+    b.overall_tape = [-0.01] * 8
+    rec("blk-count-pos-overall-neg-release-if-count-ok", abs(b.vol_factor(3, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
+    scale_lane.pf_ring[3] = [-0.01] * 3
+    b.count_tape[3] = [-0.01] * 3
+    rec("blk-hold-until-overall", abs(b.vol_factor(3, scale_lane) - 3.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
+    scale_lane.parent_pf_ring = [0.004] * 8
+    b.overall_tape = [0.004] * 8
+    rec("blk-release-overall-pos", abs(b.vol_factor(3, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
     rec("blk-step-restore-base", abs(b.step_qty(10.0, 1, scale_lane) - 10.0) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
-    rec("blk-n2-indep-scale", abs(b.vol_scale(2, scale_lane) - 1.0) < 1e-9)
     return out
 
 
