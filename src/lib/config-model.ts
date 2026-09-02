@@ -80,12 +80,39 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
+export const SL_TP_MIN = 0.2;
+export const SL_TP_MAX = 2.6;
+export const SL_TP_STEP = 0.2;
+
+export function slTpGrid(lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number[] {
+  const a = Number.isFinite(lo) ? lo : SL_TP_MIN;
+  const b = Number.isFinite(hi) ? hi : SL_TP_MAX;
+  const s = Number.isFinite(step) && step > 0 ? step : SL_TP_STEP;
+  const min = Math.max(SL_TP_MIN, Math.min(a, b));
+  const max = Math.min(SL_TP_MAX, Math.max(a, b));
+  const out: number[] = [];
+  for (let x = min; x <= max + 1e-9 && out.length < 64; x = Math.round((x + s) * 10) / 10) {
+    out.push(Math.round(x * 10) / 10);
+  }
+  return out.length ? out : [0.6];
+}
+
+export const SL_TP_RATIOS = slTpGrid() as readonly number[];
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
 
-export function snapSlToTp(v: number, lo = 0.3, hi = 1.5, step = 0.3): number {
-  const x = Math.min(hi, Math.max(lo, Number.isFinite(v) ? v : 0.6));
-  return Math.round((lo + Math.round((x - lo) / step) * step) * 10) / 10;
+export function snapSlToTp(v: number, lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number {
+  const grid = slTpGrid(lo, hi, step);
+  const x = Number.isFinite(v) ? v : 0.6;
+  let best = grid[0] ?? 0.6;
+  let dist = Math.abs(x - best);
+  for (const g of grid) {
+    const d = Math.abs(x - g);
+    if (d < dist) {
+      best = g;
+      dist = d;
+    }
+  }
+  return best;
 }
 
 export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax = 0.5): number {
@@ -158,6 +185,9 @@ export type PulseOverlay = {
   slToTpAuto: boolean;
   slToTpRecalcN: number;
   slToTpRecalcEvery: number;
+  slToTpMin: number;
+  slToTpMax: number;
+  slToTpStep: number;
   trailAuto: boolean;
   trailRecalcN: number;
   trailRecalcEvery: number;
@@ -304,6 +334,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   slToTpAuto: true,
   slToTpRecalcN: 6,
   slToTpRecalcEvery: 8,
+  slToTpMin: 0.2,
+  slToTpMax: 2.6,
+  slToTpStep: 0.2,
   trailAuto: true,
   trailRecalcN: 6,
   trailRecalcEvery: 8,
@@ -331,7 +364,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeSignals: true,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 2,
+  minStep: 3,
   maxStopLossRatio: 2.5,
   trailingMinStep: 2,
   posCountsVolumeRatio: 0.05,
@@ -362,8 +395,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinSamples: 12,
   setReactivate: true,
   setMaxActive: 0,
-  setMinStep: 2,
-  setStepMax: 4,
+  setMinStep: 3,
+  setStepMax: 22,
   setStepAdapt: true,
   exitEnabled: true,
   exitIgnoreTp: true,
@@ -451,6 +484,9 @@ export type CtsSettings = {
   slToTpAuto?: boolean;
   slToTpRecalcN?: number;
   slToTpRecalcEvery?: number;
+  slToTpMin?: number;
+  slToTpMax?: number;
+  slToTpStep?: number;
   trailAuto?: boolean;
   trailRecalcN?: number;
   trailRecalcEvery?: number;
@@ -624,6 +660,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     slToTpAuto: bool(cts.slToTpAuto, true),
     slToTpRecalcN: num(cts.slToTpRecalcN, 6),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
+    slToTpMin: num(cts.slToTpMin, 0.2),
+    slToTpMax: num(cts.slToTpMax, 2.6),
+    slToTpStep: num(cts.slToTpStep, 0.2),
     trailAuto: bool(cts.trailAuto, true),
     trailRecalcN: num(cts.trailRecalcN, 6),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
@@ -672,8 +711,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinSamples: num(cts.setMinSamples, 12),
     setReactivate: bool(cts.setReactivate, true),
     setMaxActive: num(cts.setMaxActive, 0),
-    setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
-    setStepMax: num(cts.setStepMax, 4),
+    setMinStep: num(cts.setMinStep ?? cts.minStepRange, 3),
+    setStepMax: num(cts.setStepMax, 22),
     setStepAdapt: bool(cts.setStepAdapt, true),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
@@ -696,7 +735,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6));
+  out.slToTpMin = Math.max(0.2, Math.min(2.6, num(out.slToTpMin, 0.2)));
+  out.slToTpMax = Math.max(out.slToTpMin, Math.min(2.6, num(out.slToTpMax, 2.6)));
+  out.slToTpStep = Math.max(0.2, Math.min(1.0, num(out.slToTpStep, 0.2)));
+  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), out.slToTpMin, out.slToTpMax, out.slToTpStep);
+  out.setMinStep = Math.max(3, Math.min(22, Math.round(num(out.setMinStep, 3))));
+  out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),

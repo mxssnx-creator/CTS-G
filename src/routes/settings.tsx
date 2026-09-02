@@ -10,7 +10,7 @@ import {
   overlayFromCts,
   saveOverlay,
   snapSlToTp,
-  SL_TP_RATIOS,
+  slTpGrid,
   TRAIL_VARIANTS,
   trailGiveFromArm,
   syncOverlayFlags,
@@ -994,9 +994,46 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss ratios vs take profit" hint="Every ratio × every TP step is its own set · highlighted is live fallback · independent of trailing">
+            <Card title="Stop loss ratios vs take profit" hint="Settings min/max/step is the catalog · every value in range is its own Set · highlighted chip is live fallback only">
+              <Grid>
+                <Slider
+                  label="SL:TP min"
+                  value={overlay.slToTpMin ?? 0.2}
+                  min={0.2}
+                  max={2.6}
+                  step={0.2}
+                  hint="Inclusive lower ratio. Every 0.2 step in range is processed."
+                  onChange={(v) => {
+                    const lo = Math.min(v, overlay.slToTpMax ?? 2.6);
+                    patch("slToTpMin", lo);
+                    patch("slToTpRatio", snapSlToTp(overlay.slToTpRatio, lo, overlay.slToTpMax ?? 2.6, overlay.slToTpStep ?? 0.2));
+                  }}
+                />
+                <Slider
+                  label="SL:TP max"
+                  value={overlay.slToTpMax ?? 2.6}
+                  min={0.2}
+                  max={2.6}
+                  step={0.2}
+                  hint="Inclusive upper ratio."
+                  onChange={(v) => {
+                    const hi = Math.max(v, overlay.slToTpMin ?? 0.2);
+                    patch("slToTpMax", hi);
+                    patch("slToTpRatio", snapSlToTp(overlay.slToTpRatio, overlay.slToTpMin ?? 0.2, hi, overlay.slToTpStep ?? 0.2));
+                  }}
+                />
+                <Slider
+                  label="SL:TP step"
+                  value={overlay.slToTpStep ?? 0.2}
+                  min={0.2}
+                  max={0.6}
+                  step={0.2}
+                  hint={`${slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).length} independent SL books`}
+                  onChange={(v) => patch("slToTpStep", v)}
+                />
+              </Grid>
               <div className="flex flex-wrap gap-2">
-                {SL_TP_RATIOS.map((r) => {
+                {slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).map((r) => {
                   const active = Math.abs(overlay.slToTpRatio - r) < 1e-9;
                   const tp = overlay.positionCostPct * overlay.tpCostRatio;
                   const sl = tp * r;
@@ -1005,7 +1042,7 @@ function SettingsPage() {
                       key={r}
                       type="button"
                       data-ratio={r}
-                      onClick={() => patch("slToTpRatio", snapSlToTp(r))}
+                      onClick={() => patch("slToTpRatio", snapSlToTp(r, overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep))}
                       className={`min-h-11 min-w-20 rounded-lg border px-3 py-2 font-mono text-sm ${
                         active ? "border-primary bg-primary-dim/40 text-fg" : "border-border text-muted"
                       }`}
@@ -1019,9 +1056,8 @@ function SettingsPage() {
                 })}
               </div>
               <p className="text-sm text-muted">
-                Every combination is its own set: pack × SL ratio × TP step × trail.
-                All {SL_TP_RATIOS.length} ratios × steps {overlay.setMinStep}–{overlay.setStepMax} run independently
-                (same as general config sets). Highlighted ratio is only the live fallback.
+                Catalog = pack × every SL in {overlay.slToTpMin}–{overlay.slToTpMax} step {overlay.slToTpStep} × every TP step {overlay.setMinStep}–{overlay.setStepMax}.
+                Highlighted ratio is only the live fallback attach — it does not hide the other Sets.
               </p>
               <Grid>
                 <Toggle label="Auto-recalc SL:TP" on={overlay.slToTpAuto} onChange={(v) => patch("slToTpAuto", v)} />
@@ -1069,7 +1105,7 @@ function SettingsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {SL_TP_RATIOS.map((r) => {
+                    {slTpGrid(overlay.slToTpMin, overlay.slToTpMax, overlay.slToTpStep).map((r) => {
                       const tp = overlay.positionCostPct * overlay.tpCostRatio;
                       const sl = tp * r;
                       const wr = sl / (sl + tp);
@@ -1113,7 +1149,7 @@ function SettingsPage() {
           {section === "sets" && (
             <Card
               title="Independent Sets · 1m historic"
-              hint="Each pack × SL:TP × TP-step (3–22 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
+              hint="Settings min/max is the catalog. Every pack × SL in range × TP-step in range is its own book. Live only fires validated +EV Sets."
             >
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
@@ -1179,7 +1215,7 @@ function SettingsPage() {
                   min={3}
                   max={22}
                   step={1}
-                  hint={`Default 8 (VST-validated). TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Losing live fills raise min step. Sets below min are not calculated.`}
+                  hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed.`}
                   onChange={(v) => patch("setMinStep", Math.max(3, Math.min(22, Math.round(v))))}
                 />
                 <Slider
@@ -1188,7 +1224,7 @@ function SettingsPage() {
                   min={3}
                   max={22}
                   step={1}
-                  hint="Upper TP step. Default 12 (validated). Range 3–22."
+                  hint="Upper TP step. Every integer from min through max is its own Set."
                   onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 3, Math.min(22, Math.round(v))))}
                 />
                 <Toggle
@@ -1439,7 +1475,7 @@ function SettingsPage() {
           )}
 
           {section === "trailing" && (
-            <Card title="Trailing · independent recals" hint="Own range, own scores — not coupled to SL:TP">
+            <Card title="Trailing · independent recals" hint="Arm min–max × give min–max is the catalog · every combo is its own Set · chips are live fallback only">
               <Grid>
                 <Toggle
                   label="Trailing pack"
@@ -1526,7 +1562,7 @@ function SettingsPage() {
                 <Slider label="Recalc every N closes" value={overlay.trailRecalcEvery} min={3} max={30} step={1} onChange={(v) => patch("trailRecalcEvery", v)} />
               </Grid>
               <p className="text-sm text-muted">
-                Live uses {overlay.trailArmPct.toFixed(1)}:{overlay.trailGivePct.toFixed(1)} locked on the fill. Recals only pick for new entries. Scores are independent of the SL:TP book.
+                Live fallback {overlay.trailArmPct.toFixed(1)}:{overlay.trailGivePct.toFixed(1)}. Catalog is every arm in {overlay.trailArmMin}–{overlay.trailArmMax} × every give in {overlay.trailGiveMin}–{overlay.trailGiveMax}. Recals only pick for new entries. Scores are independent of the SL:TP book.
               </p>
             </Card>
           )}

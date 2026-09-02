@@ -19,7 +19,7 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import SL_TP_RATIOS, last_n_cost_pf, row_net_pnl, filter_side
+from position_cost import SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, SL_TP_STEP, last_n_cost_pf, row_net_pnl, filter_side
 from set_engine import (
     DIRECTIONS,
     IND_KINDS,
@@ -599,7 +599,9 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setScratchMin": 0.0016,
     }
     if opt.get("allConfigs", True):
-        ov["slToTpRatios"] = list(SL_TP_RATIOS)
+        ov["slToTpMin"] = float(opt.get("slToTpMin") or SL_TP_MIN)
+        ov["slToTpMax"] = float(opt.get("slToTpMax") or SL_TP_MAX)
+        ov["slToTpStep"] = float(opt.get("slToTpStep") or SL_TP_STEP)
     else:
         ov["slToTpRatios"] = [0.6]
     if isinstance(extra, dict):

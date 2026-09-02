@@ -637,8 +637,17 @@ class SetBook:
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
         self.packs = packs or ["indications"]
+        # Catalog is always the Settings min/max/step ranges. A selected live
+        # slToTpRatio never shrinks the book. An explicit slToTpRatios list is
+        # only a test pin when no range keys are present.
+        has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
         raw_ratios = ov.get("slToTpRatios")
-        if isinstance(raw_ratios, (list, tuple)) and raw_ratios:
+        if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):
+            lo = finite(ov.get("slToTpMin"), SL_TP_MIN)
+            hi = finite(ov.get("slToTpMax"), SL_TP_MAX)
+            step = finite(ov.get("slToTpStep"), SL_TP_STEP)
+            self.sl_ratios = sl_tp_grid(lo, hi, step)
+        else:
             ratios = []
             for x in raw_ratios:
                 try:
@@ -646,11 +655,6 @@ class SetBook:
                 except Exception:
                     continue
             self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
-        else:
-            lo = finite(ov.get("slToTpMin"), SL_TP_MIN)
-            hi = finite(ov.get("slToTpMax"), SL_TP_MAX)
-            step = finite(ov.get("slToTpStep"), SL_TP_STEP)
-            self.sl_ratios = sl_tp_grid(lo, hi, step)
         self.trail_enabled = bool(ov.get("stratTrailing", True))
         # Always enumerate the full arm×give product as independent Sets
         # alongside Normal (base) SL×TP. A selected live trail does not hide
@@ -2511,7 +2515,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-trail-parallel-normal", bases and bases <= trail_sls, f"base={len(bases)} trailCombos={len(trail_sls)}"))
     slim = SetBook()
     slim.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.6, "trailArmMax": 0.6, "trailGiveMin": 0.2, "trailGiveMax": 0.2})
-    out.append(("set-trail-expand-full", len(slim.trails) >= 20 and any(s.kind == "base" for s in slim.by_idx) and any(s.kind == "trail" for s in slim.by_idx), f"trails={len(slim.trails)} n={len(slim.by_idx)}"))
+    out.append(("set-trail-range-honored", len(slim.trails) == 1 and any(s.kind == "base" for s in slim.by_idx) and any(s.kind == "trail" for s in slim.by_idx), f"trails={len(slim.trails)} n={len(slim.by_idx)}"))
+    fullt = SetBook()
+    fullt.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.3, "trailArmMax": 1.5, "trailGiveMin": 0.1, "trailGiveMax": 0.5})
+    out.append(("set-trail-range-full", len(fullt.trails) >= 20 and any(s.kind == "base" for s in fullt.by_idx), f"trails={len(fullt.trails)} n={len(fullt.by_idx)}"))
     off = SetBook()
     off.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False})
     out.append(("set-trail-explicit-off", not off.trails and all(s.kind == "base" for s in off.by_idx), f"n={len(off.by_idx)} kinds={ {s.kind for s in off.by_idx} }"))
@@ -2830,6 +2837,18 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-hist-valid-on", winner.active and winner.last15_n >= 8, f"on={winner.active} n={winner.last15_n} pf={winner.last15_ratio}"))
     pkf = fulln.pick("general")
     out.append(("set-pick-validated-only", pkf is not None and pkf.id == winner.id, f"pick={getattr(pkf, 'id', None)}"))
+    ranged = SetBook()
+    ranged.load({
+        "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "setMinStep": 5, "setStepMax": 7,
+        "slToTpMin": 0.4, "slToTpMax": 1.0, "slToTpStep": 0.2,
+        "slToTpRatios": [0.6],
+    })
+    rsl = [round(x, 1) for x in ranged.sl_ratios]
+    rst = list(ranged.steps)
+    out.append(("set-range-sl", rsl == [0.4, 0.6, 0.8, 1.0], f"sl={rsl}"))
+    out.append(("set-range-tp", rst == [5, 6, 7], f"steps={rst}"))
+    out.append(("set-range-product", len(ranged.by_idx) == 4 * 3, f"n={len(ranged.by_idx)}"))
     return out
 
 

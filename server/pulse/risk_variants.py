@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP, SL_TP_MIN, SL_TP_MAX
+from position_cost import last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP, SL_TP_MIN, SL_TP_MAX, sl_tp_grid
 
 TRAIL_VARIANTS = ("0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5")
 TRAIL_ARM_MIN = 0.3
@@ -58,8 +58,8 @@ def trail_grid(
     give_min: float = TRAIL_GIVE_MIN,
     give_max: float = TRAIL_GIVE_MAX,
 ) -> List[Tuple[str, float, float]]:
-    """Independent arm × give product. A singleton range expands to the full grid
-    so a selected live trail never hides the other eval sets."""
+    """Independent arm × give product inside the Settings min/max ranges.
+    A singleton range is one trail Set; it does not expand past the knobs."""
     def _axis(lo: float, hi: float, amin: float, amax: float, step: float) -> List[float]:
         a = snap_ratio(lo, amin, amax, step)
         b = snap_ratio(hi, amin, amax, step)
@@ -81,10 +81,6 @@ def trail_grid(
 
     arms = _axis(arm_min, arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
     gives = _axis(give_min, give_max, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
-    if len(arms) <= 1:
-        arms = _axis(TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-    if len(gives) <= 1:
-        gives = _axis(TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, 0.1)
     out: List[Tuple[str, float, float]] = []
     seen = set()
     for arm in arms:
@@ -182,14 +178,22 @@ class VariantBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        raw_ratios = ov.get("slToTpRatios") or list(SL_TP_RATIOS)
-        ratios: List[float] = []
-        for x in raw_ratios:
-            try:
-                ratios.append(snap_ratio(float(x)))
-            except Exception:
-                continue
-        self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
+        has_range = any(k in ov for k in ("slToTpMin", "slToTpMax", "slToTpStep"))
+        raw_ratios = ov.get("slToTpRatios")
+        if has_range or not (isinstance(raw_ratios, (list, tuple)) and raw_ratios):
+            self.sl_ratios = sl_tp_grid(
+                ov.get("slToTpMin") if "slToTpMin" in ov else SL_TP_MIN,
+                ov.get("slToTpMax") if "slToTpMax" in ov else SL_TP_MAX,
+                ov.get("slToTpStep") if "slToTpStep" in ov else SL_TP_STEP,
+            )
+        else:
+            ratios: List[float] = []
+            for x in raw_ratios:
+                try:
+                    ratios.append(snap_ratio(float(x)))
+                except Exception:
+                    continue
+            self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
         self.sl_ratio = snap_ratio(ov.get("slToTpRatio", self.sl_ratio))
         if self.sl_ratio not in self.sl_ratios:
             self.sl_ratio = min(self.sl_ratios, key=lambda r: abs(r - self.sl_ratio))
@@ -456,7 +460,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("var-trail-grid-n", len(grid) == 25 and len(set(keys)) == 25, f"n={len(grid)} {keys[:6]}"))
     out.append(("var-trail-grid-corners", "0.3:0.1" in keys and "1.5:0.5" in keys and "0.3:0.5" in keys and "1.5:0.1" in keys, str(keys)))
     slim = trail_grid(0.6, 0.6, 0.2, 0.2)
-    out.append(("var-trail-grid-expand", len(slim) == 25, f"n={len(slim)}"))
+    out.append(("var-trail-grid-range", len(slim) == 1 and slim[0][0] == "0.6:0.2", f"n={len(slim)} {slim}"))
     return out
 
 
