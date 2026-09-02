@@ -143,8 +143,8 @@ export type HistCalcJob = {
 
 export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   hours: 20,
-  minStep: 2,
-  stepMax: 4,
+  minStep: 3,
+  stepMax: 22,
   trailing: true,
   stratBlock: true,
   stratDca: false,

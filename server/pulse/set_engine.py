@@ -45,7 +45,7 @@ FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = 2
 STEP_LIVE_MIN = 3
 STEP_MAX = 22
-HIST_CAP = 96
+HIST_CAP = 48
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}

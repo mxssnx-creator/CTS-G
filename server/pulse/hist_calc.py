@@ -402,15 +402,15 @@ def public_presets() -> List[Dict[str, Any]]:
 def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
-        "minStep": 2,
-        "stepMax": 4,
+        "minStep": 3,
+        "stepMax": 22,
         "trailing": True,
         "stratBlock": True,
         "stratDca": False,
         "stratIndications": True,
         "stratGeneral": True,
         "allConfigs": True,
-        "allSymbols": False,
+        "allSymbols": True,
         "indTypeSignals": True,
         "indTypeState": True,
         "indTypeDirection": True,
@@ -428,7 +428,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             opt["hours"] = max(2, min(24, int(body["hours"])))
         except Exception:
             pass
-    for k, lo, hi in (("minStep", 2, 22), ("stepMax", 2, 22)):
+    for k, lo, hi in (("minStep", 3, 22), ("stepMax", 3, 22)):
         if body.get(k) is not None:
             try:
                 opt[k] = max(lo, min(hi, int(body[k])))
@@ -542,7 +542,7 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
         names = uni or list(DEFAULT_SYMBOLS)
     seen = set()
     out: List[str] = []
-    cap = 48 if wild else 24
+    cap = 96 if wild else 32
     for s in names:
         if s in seen:
             continue
@@ -618,6 +618,9 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov["trailArmMax"] = 1.5
     ov["trailGiveMin"] = 0.1
     ov["trailGiveMax"] = 0.5
+    ov["setMinStep"] = int(opt.get("minStep") or 3)
+    ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 22))
+    ov["stratTrailing"] = bool(opt.get("trailing", True))
     return ov
 
 
@@ -869,8 +872,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "dcaCooldownSeconds": 45,
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
-        "setMinStep": int(opt.get("minStep") or 2),
-        "setStepMax": int(opt.get("stepMax") or 4),
+        "setMinStep": 3,
+        "setStepMax": 22,
     }
     if not row:
         return patch
@@ -879,7 +882,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         patch["slToTpRatio"] = sl
     step = int(row.get("step") or 0)
     if step >= 3:
-        patch["setMinStep"] = max(int(opt.get("minStep") or 2), step)
+        patch["setMinStep"] = 3
+        patch["setStepMax"] = 22
     arm = float(row.get("trailArm") or 0)
     give = float(row.get("trailGive") or 0)
     if arm > 0:
@@ -1077,34 +1081,37 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
         try:
-            workers = max(1, min(8, int(body.get("workers") or 4)))
+            workers = max(1, min(8, int(body.get("workers") or 8)))
         except Exception:
-            workers = 4
+            workers = 8
         job["workers"] = workers
         job["partial"] = True
         job["async"] = True
 
-        def snapshot(done: int, total: int, phase: str) -> None:
-            book._commit_hist(hist, ind_hist)
-            rows = expand_rows(book)
-            job["rows"] = rows[:120]
-            job["rowCount"] = len(rows)
-            job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
-            job["kinds"] = book.ind_gate_snapshot()
-            job["bySymbol"] = symbol_rollup(book, hist)
-            job["byDirection"] = direction_rollup(book, hist)
-            job["byStrategy"] = strategy_rollup(book, hist, strat_hist)
+        def snapshot(done: int, total: int, phase: str, heavy: bool = False) -> None:
+            fills = sum(len(v) for v in hist.values())
             job["phase"] = phase
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
-            job["detail"] = (
-                f"{phase} {done}/{total} · {job['validatedCount']}/{len(rows)} validated · "
-                f"{sum(len(v) for v in hist.values())} fills"
-            )
             job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
-            if persist and time.time() - float(job.get("_lastWrite") or 0) > 0.45:
+            if heavy:
+                book._commit_hist(hist, ind_hist)
+                rows = expand_rows(book)
+                job["rows"] = rows[:80]
+                job["rowCount"] = len(rows)
+                job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
+                job["kinds"] = book.ind_gate_snapshot()
+                job["byDirection"] = direction_rollup(book, hist)
+                job["byStrategy"] = strategy_rollup(book, hist, strat_hist)
+            job["detail"] = (
+                f"{phase} {done}/{total} · {int(job.get('validatedCount') or 0)}/"
+                f"{int(job.get('rowCount') or len(book.by_idx))} validated · {fills} fills"
+            )
+            if persist and time.time() - float(job.get("_lastWrite") or 0) > 0.8:
                 job["_lastWrite"] = time.time()
                 try:
-                    _atomic_write(job_path(), {k: v for k, v in job.items() if k != "_lastWrite"})
+                    slim = {k: v for k, v in job.items() if k != "_lastWrite"}
+                    slim.pop("bySymbol", None)
+                    _atomic_write(job_path(), slim)
                 except Exception:
                     pass
 
@@ -1112,8 +1119,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             book.ingest_bars(sym, bars)
             book.replay_symbol_partial(sym, hist, now=now, ind_hist=ind_hist, drop_bars=True, strat_hist=strat_hist)
             job["source"] = src
-            if persist or done == total or done % 2 == 0:
-                snapshot(done, total, "replay")
+            heavy = done == total or done % 16 == 0
+            if persist or heavy or done % 8 == 0:
+                snapshot(done, total, "replay", heavy=heavy)
 
         source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
         job["source"] = source
@@ -1262,8 +1270,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-dca-default-off", parse_options({})["stratDca"] is False)
     rec("opt-block-default-on", parse_options({})["stratBlock"] is True)
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
-    rec("opt-all-symbols-default-off", parse_options({})["allSymbols"] is False)
+    rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
+    rec("opt-steps-full-default", parse_options({})["minStep"] == 3 and parse_options({})["stepMax"] == 22, str(parse_options({})))
     rec("opt-ind-types-on", parse_options({})["indTypeSignals"] is True and parse_options({})["indTypeState"] is True)
     rec("opt-hours-20", parse_options({})["hours"] == 20)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
