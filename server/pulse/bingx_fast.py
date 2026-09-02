@@ -323,8 +323,12 @@ class FastBingX:
 
     def _sign(self, params: Dict[str, Any]) -> str:
         items = sorted((k, params[k]) for k in params)
+        # BingX verifies the HMAC over the RAW (unencoded) query string.
+        # For plain alnum values raw == encoded, but the batchOrders JSON
+        # payload differs once percent-encoded and used to fail with 100001.
+        raw = "&".join(f"{k}={v}" for k, v in items)
         qs = urllib.parse.urlencode(items, quote_via=urllib.parse.quote)
-        sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        sig = hmac.new(self.secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
         return qs + "&signature=" + sig
 
     def _take(self, lane: str, path: str = "") -> bool:
