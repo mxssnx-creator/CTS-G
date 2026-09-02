@@ -89,8 +89,8 @@ def main() -> int:
     except Exception as e:
         err = e
     rec("apply-config-no-crash", err is None, repr(err or ""))
-    rec("x01-block-unlimited", int(getattr(p.block, "max_stack", -1) or 0) <= 0 and p.block.unlimited(), f"stack={p.block.max_stack}")
-    rec("x01-dca-unlimited", int(getattr(p.dca, "max_steps", -1) or 0) <= 0 and p.dca.unlimited(), f"steps={p.dca.max_steps}")
+    rec("x01-block-unlimited", int(getattr(p.block, "max_stack", -1) or 0) == 3 and not p.block.unlimited(), f"stack={p.block.max_stack}")
+    rec("x01-dca-unlimited", int(getattr(p.dca, "max_steps", -1) or 0) == 4 and not p.dca.unlimited(), f"steps={p.dca.max_steps}")
     rec("x01-maxopen-unlimited", int(pt.MAX_OPEN or 0) == 0, f"maxOpen={pt.MAX_OPEN}")
     rec("x01-symbolcap-unlimited", int(getattr(p, "symbol_cap", -1) or 0) == 0, f"cap={getattr(p, 'symbol_cap', None)}")
 

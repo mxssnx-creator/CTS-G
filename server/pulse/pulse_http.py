@@ -120,6 +120,158 @@ def resolve_conn(raw: str) -> str:
     return raw.replace("connection:", "")
 
 
+def redis_hgetall(key: str) -> dict:
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=6)
+    except Exception:
+        return {}
+    lines = (p.stdout or "").splitlines()
+    out = {}
+    for i in range(0, len(lines) - 1, 2):
+        out[lines[i]] = lines[i + 1]
+    return out
+
+
+def redis_hset(key: str, mapping: dict) -> bool:
+    args = ["redis-cli", "HSET", key]
+    for k, v in mapping.items():
+        if v is None:
+            continue
+        args.extend([str(k), str(v)])
+    if len(args) <= 3:
+        return False
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=6)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
+def mask_key(k: str) -> str:
+    k = (k or "").strip()
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return "••••"
+    return k[:4] + "…" + k[-4:]
+
+
+def _conn_type_of(cid: str, raw: dict) -> str:
+    if cid == "bingx-x02":
+        return "vst"
+    if cid == "bingx-x01":
+        return "mainnet"
+    test = str(raw.get("is_testnet") or "").strip().lower()
+    if test in ("1", "true", "yes") or "vst" in str(raw.get("base_url") or "").lower():
+        return "vst"
+    return "mainnet"
+
+
+def connection_public(cid: str) -> dict:
+    if cid == "overall":
+        live = connection_public("bingx-x01")
+        vst = connection_public("bingx-x02")
+        return {
+            "ok": True,
+            "conn": "overall",
+            "connType": "overall",
+            "connectionType": "mainnet",
+            "connectionMethod": live.get("connectionMethod") or "library",
+            "exchange": "BingX",
+            "baseUrl": live.get("baseUrl") or "https://open-api.bingx.com",
+            "isTestnet": False,
+            "liveTradeEnabled": True,
+            "apiKeyMasked": live.get("apiKeyMasked") or "",
+            "apiKeySet": bool(live.get("apiKeySet")),
+            "apiSecretSet": bool(live.get("apiSecretSet")),
+            "lastTestStatus": live.get("lastTestStatus") or "",
+            "defaultMainnet": True,
+            "lanes": [live, vst],
+        }
+    raw = redis_hgetall(f"connection:{cid}")
+    ctype = _conn_type_of(cid, raw)
+    method = (raw.get("connection_method") or "library").strip() or "library"
+    default_url = "https://open-api-vst.bingx.com" if ctype == "vst" else "https://open-api.bingx.com"
+    live_en = str(raw.get("live_trade_enabled") or "").strip().lower()
+    return {
+        "ok": True,
+        "conn": cid,
+        "connType": "vst" if "x02" in cid else "live",
+        "connectionType": ctype,
+        "connectionMethod": method,
+        "exchange": "BingX",
+        "baseUrl": (raw.get("base_url") or default_url).rstrip("/"),
+        "isTestnet": ctype == "vst",
+        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype == "mainnet",
+        "apiKeyMasked": mask_key(raw.get("api_key") or ""),
+        "apiKeySet": bool((raw.get("api_key") or "").strip()),
+        "apiSecretSet": bool((raw.get("api_secret") or "").strip()),
+        "lastTestStatus": raw.get("last_test_status") or "",
+        "defaultMainnet": cid == "bingx-x01",
+    }
+
+
+def save_connection(cid: str, body: dict) -> tuple:
+    body = body if isinstance(body, dict) else {}
+    as_default = body.get("as_default_mainnet")
+    if as_default is None:
+        as_default = body.get("asDefaultMainnet")
+    if as_default is None:
+        as_default = cid in ("overall", "bingx-x01", "")
+    as_default = bool(as_default)
+    ctype = str(body.get("connection_type") or body.get("connectionType") or "").strip().lower()
+    method = str(body.get("connection_method") or body.get("connectionMethod") or "library").strip() or "library"
+    if method not in ("library", "rest", "hmac"):
+        method = "library"
+    key = str(body.get("api_key") or body.get("apiKey") or "").strip()
+    secret = str(body.get("api_secret") or body.get("apiSecret") or "").strip()
+    if as_default or ctype == "mainnet" or cid in ("overall", "bingx-x01", ""):
+        target = "bingx-x01"
+        write_type = "mainnet"
+    else:
+        target = cid if cid in TYPE_TO_ID.values() else ("bingx-x02" if "x02" in (cid or "") or ctype == "vst" else "bingx-x01")
+        write_type = "vst" if target == "bingx-x02" else "mainnet"
+        if ctype in ("mainnet", "vst"):
+            write_type = ctype
+            target = "bingx-x02" if write_type == "vst" else "bingx-x01"
+    cur = redis_hgetall(f"connection:{target}")
+    if not key:
+        key = (cur.get("api_key") or "").strip()
+    if not secret:
+        secret = (cur.get("api_secret") or "").strip()
+    if not key or not secret:
+        return False, "api_key and api_secret required", connection_public(target)
+    if write_type == "vst":
+        mapping = {
+            "api_key": key,
+            "api_secret": secret,
+            "is_testnet": "1",
+            "base_url": "https://open-api-vst.bingx.com",
+            "live_trade_enabled": "0",
+            "connection_method": method,
+            "connection_type": "vst",
+            "last_test_status": "saved",
+            "updated_at": str(int(time.time())),
+        }
+    else:
+        mapping = {
+            "api_key": key,
+            "api_secret": secret,
+            "is_testnet": "0",
+            "base_url": "https://open-api.bingx.com",
+            "live_trade_enabled": "1",
+            "connection_method": method,
+            "connection_type": "mainnet",
+            "last_test_status": "saved",
+            "updated_at": str(int(time.time())),
+        }
+    if not redis_hset(f"connection:{target}", mapping):
+        return False, "redis write failed", connection_public(target)
+    pub = connection_public(target)
+    pub["detail"] = f"saved {target} as {write_type} default" if write_type == "mainnet" else f"saved {target}"
+    return True, pub["detail"], pub
+
+
 def overlay_path(conn: str) -> str:
     p = os.path.join(DIR, f"overlay-{conn}.json")
     if os.path.exists(p):
@@ -598,7 +750,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         msg = fmt % args
-        if "GET /stats.json" in msg or "GET /universe.json" in msg or "GET /connections.json" in msg:
+        if "GET /stats.json" in msg or "GET /universe.json" in msg or "GET /connections.json" in msg or "GET /connection.json" in msg:
             return
         try:
             path = os.path.join(DIR, "http.log")
@@ -636,6 +788,9 @@ class Handler(SimpleHTTPRequestHandler):
         conn = resolve_conn(qs(self.path).get("conn", ""))
         if path in ("/connections.json", "/connections"):
             self._json(connections_blob())
+            return
+        if path in ("/connection.json", "/connection"):
+            self._json(connection_public(conn))
             return
         if path in ("/results-export.json", "/results-export", "/results-export.md"):
             ext = ".md" if path.endswith(".md") else ".json"
@@ -754,6 +909,13 @@ class Handler(SimpleHTTPRequestHandler):
             action = str((body or {}).get("action") or "").lower().strip()
             ok, detail = apply_control(conn or "overall", action)
             self._json({"ok": ok, "detail": detail, "conn": conn or "overall", "action": action}, 200 if ok else 400)
+            return
+        if path in ("/connection.json", "/connection"):
+            ok, detail, pub = save_connection(conn or "overall", body if isinstance(body, dict) else {})
+            blob = dict(pub or {})
+            blob["ok"] = ok
+            blob["detail"] = detail
+            self._json(blob, 200 if ok else 400)
             return
         if path not in ("/config.json", "/config"):
             self.send_error(404)

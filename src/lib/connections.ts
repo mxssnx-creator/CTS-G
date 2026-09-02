@@ -121,6 +121,60 @@ export function configUrl(conn: ConnType | string) {
   return `/config.json?conn=${encodeURIComponent(conn)}`;
 }
 
+export type ConnectionCreds = {
+  ok?: boolean;
+  conn?: string;
+  connType?: string;
+  connectionType?: string;
+  connectionMethod?: string;
+  exchange?: string;
+  baseUrl?: string;
+  isTestnet?: boolean;
+  liveTradeEnabled?: boolean;
+  apiKeyMasked?: string;
+  apiKeySet?: boolean;
+  apiSecretSet?: boolean;
+  lastTestStatus?: string;
+  defaultMainnet?: boolean;
+  detail?: string;
+};
+
+export function connectionUrl(conn: ConnType | string) {
+  return `/connection.json?conn=${encodeURIComponent(conn)}`;
+}
+
+export async function fetchConnection(conn: ConnType | string): Promise<ConnectionCreds | null> {
+  const j = (await fetchJson(connectionUrl(conn), 2500)) as ConnectionCreds | null;
+  return j && typeof j === "object" ? j : null;
+}
+
+export async function saveConnection(
+  conn: ConnType | string,
+  body: {
+    api_key?: string;
+    api_secret?: string;
+    connection_type?: string;
+    connection_method?: string;
+    as_default_mainnet?: boolean;
+  },
+): Promise<{ ok: boolean; detail: string; creds?: ConnectionCreds }> {
+  try {
+    const r = await fetch(connectionUrl(conn), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = (await r.json().catch(() => ({}))) as ConnectionCreds & { ok?: boolean; detail?: string };
+    return {
+      ok: r.ok && Boolean(j.ok),
+      detail: String(j.detail || (r.ok ? "saved" : r.status)),
+      creds: j,
+    };
+  } catch (e) {
+    return { ok: false, detail: String(e) };
+  }
+}
+
 export async function postControl(conn: ConnType | string, action: "start" | "stop" | "pause" | "resume") {
   const r = await fetch(`/control.json?conn=${encodeURIComponent(conn)}`, {
     method: "POST",

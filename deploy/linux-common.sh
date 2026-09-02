@@ -270,18 +270,21 @@ EOF
 }
 
 restore_pulse_trader() {
-  # server/pulse/pulse_trader.py is a placeholder in git (233KB engine). Rebuild the
-  # real engine from the pinned base blob + restore/pulse_trader.py.patch and hard
-  # verify both input and output git blob hashes. Runs on every install/update.
+  # Prefer the in-repo engine when it is the real file (not the git PLACEHOLDER).
+  # Fallback rebuilds from the pinned base blob + restore patches.
   local pt="$PULSE_DIR/pulse_trader.py"
+  local src="$CTS_G_ROOT/server/pulse/pulse_trader.py"
   local pt_want="5319e02ae28b6cfb2f2661aed07da1bbec1c0c8d"
   local pt_base="b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
-  # main patch is pinned at commit f76f0423 (byte-exact on GitHub, hash-verified
-  # below); the stage-PF micro patch ships in-repo at restore/pulse_trader_pf.patch
   local pt_patch_sha="aa6cf593268181c0b938bc632f5eb12957091709"
   local pt_patch_url="https://raw.githubusercontent.com/mxssnx-creator/CTS-G/f76f042374efd17a7f2eb61247c56c0d0de021ec/restore/pulse_trader.py.patch"
   local pt_pf_patch="$CTS_G_ROOT/restore/pulse_trader_pf.patch"
   local pt_pf_sha="37ae494b324929d7e139c94d87beeacbfd8a8e6e"
+  if [[ -f "$src" ]] && ! grep -q '^PLACEHOLDER' "$src" && [[ "$(wc -l < "$src" | tr -d ' ')" -gt 200 ]]; then
+    cp -a "$src" "$pt"
+    ok "pulse_trader.py from in-repo engine $(git hash-object "$pt" 2>/dev/null || echo local)"
+    return 0
+  fi
   if [[ "$(git hash-object "$pt" 2>/dev/null || true)" == "$pt_want" ]]; then
     skip "pulse_trader.py already current"
     return 0
@@ -308,6 +311,45 @@ restore_pulse_trader() {
   die "pulse_trader.py restore failed (base/patch/result hash mismatch)"
 }
 
+migrate_overlay_rungs() {
+  # Overlay rsync is excluded so live 0-rung (unbounded pyramid) files survive
+  # updates. Clamp 0 → Block 3 / DCA distance-list so volume cannot balloon.
+  python3 - "$PULSE_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json"):
+    path = os.path.join(root, name)
+    if not os.path.isfile(path):
+        continue
+    with open(path) as f:
+        ov = json.load(f)
+    dirty = False
+    try:
+        dca_n = int(ov.get("dcaMaxSteps") or 0)
+    except Exception:
+        dca_n = 0
+    if dca_n <= 0:
+        dist = ov.get("dcaStepDistancesPct") or [0.5, 1, 1.5, 2]
+        ov["dcaMaxSteps"] = max(len(dist), 4)
+        dirty = True
+    try:
+        stack = int(ov.get("blockMaxStack") or 0)
+    except Exception:
+        stack = 0
+    if stack <= 0:
+        ov["blockMaxStack"] = 3
+        dirty = True
+    if not dirty:
+        continue
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(ov, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    print("migrated", name, "dcaMaxSteps", ov["dcaMaxSteps"], "blockMaxStack", ov["blockMaxStack"])
+PY
+}
+
 sync_pulse_tree() {
   local src="$CTS_G_ROOT/server/pulse"
   [[ -d "$src" ]] || die "pulse tree missing at $src"
@@ -332,6 +374,7 @@ sync_pulse_tree() {
   done
   [[ -f "$src/universe.json" ]] && cp -a "$src/universe.json" "$PULSE_DIR/universe.json"
   restore_pulse_trader
+  migrate_overlay_rungs
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py
   ok "pulse tree $PULSE_DIR"
@@ -503,6 +546,7 @@ print_results() {
   echo "  Pulse VST         ${pulse}/stats.json?conn=vst"
   echo "  Pulse control     ${pulse}/control.json"
   echo "  Pulse config      ${pulse}/config.json?conn=live"
+  echo "  Pulse connection  ${pulse}/connection.json?conn=live"
   echo "  GitHub            https://github.com/mxssnx-creator/CTS-G"
   echo "  Commit            https://github.com/mxssnx-creator/CTS-G/commit/${sha}"
   echo

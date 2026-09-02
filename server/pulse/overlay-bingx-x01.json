@@ -10,7 +10,7 @@
   "blockActiveLive": true,
   "blockActiveReal": true,
   "blockEnabled": true,
-  "blockMaxStack": 0,
+  "blockMaxStack": 3,
   "blockPauseCountRatio": 1,
   "blockProfitFactorRatio": 1.1,
   "blockVolumeRatio": 1,
@@ -21,7 +21,7 @@
   "dcaCooldownSeconds": 30,
   "dcaDeactN": 25,
   "dcaEnabled": true,
-  "dcaMaxSteps": 0,
+  "dcaMaxSteps": 4,
   "dcaMinPf": 1.1,
   "dcaPfWindow": 15,
   "dcaStepDistancesPct": [

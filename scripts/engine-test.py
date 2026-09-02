@@ -106,12 +106,12 @@ def overlay_test() -> None:
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
-    rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 0, str(x01.get("blockMaxStack")))
-    rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 0, str(x01.get("dcaMaxSteps")))
+    rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
+    rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlim", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
     rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
-    rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 0 and int(x02.get("dcaMaxSteps") or 0) == 0)
+    rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
 
@@ -178,7 +178,7 @@ def controls_test() -> None:
 
 def unlimited_test() -> None:
     b = BlockBook("/tmp/block-unlim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 0})
-    rec("block-unlim-stack", b.max_stack <= 0 and b.unlimited(), str(b.max_stack))
+    rec("block-unlim-stack", b.max_stack == 3 and not b.unlimited(), str(b.max_stack))
     lane = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.2)
     rec("block-unlim-eval-bounded", 1 <= len(rows) <= 24, f"n={len(rows)}")
@@ -191,7 +191,7 @@ def unlimited_test() -> None:
     from dca_engine import DcaBook
     d = DcaBook()
     d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
-    rec("dca-unlim-engine", d.max_steps <= 0, str(d.max_steps))
+    rec("dca-unlim-engine", d.max_steps == 2 and not d.unlimited(), str(d.max_steps))
     rec("coord-unlim-already", True)
 
 
@@ -660,9 +660,9 @@ def phantom_recon_test() -> None:
     p.adopt_exchange_positions()
     rec("phantom-streak-resets", p._empty_rest_streak == 0, f"streak={p._empty_rest_streak}")
 
-    # 4) young positions (in-flight entries) survive even a confirmed flat read
+    # 4) young in-flight entries (<20s) survive even a confirmed flat read
     p2 = mk([])
-    p2.open["NEW-USDT"] = pos("NEW-USDT", age=30)
+    p2.open["NEW-USDT"] = pos("NEW-USDT", age=8)
     p2.adopt_exchange_positions()
     p2.adopt_exchange_positions()
     rec("phantom-keeps-young", "NEW-USDT" in p2.open, f"book={list(p2.open)}")
@@ -830,7 +830,7 @@ def block_calc_test() -> None:
         p.strategy_closes = lambda: []
         return p
 
-    want = min(BLOCK_COUNT_PREVIEW, 32)
+    want = 3  # 0 remaps to the default Block stack of 3
     cov = mk_cov(0)._coverage_blob()
     rec("block-coverage-unlimited-all-counts",
         cov["block"]["countN"] == want and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, want + 1)),
@@ -852,15 +852,15 @@ def block_calc_test() -> None:
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     regular = [r for r in rows if r["kind"] == "regular"]
     rec("block-eval-all-counts",
-        [r["blockCount"] for r in regular] == [1, 2, 3, 4] and all(r["evaluated"] == 1 for r in rows),
+        [r["blockCount"] for r in regular] == [1, 2, 3] and all(r["evaluated"] == 1 for r in rows),
         f"regular={[r['blockCount'] for r in regular]} total={len(rows)}")
     rec("block-eval-active-live", any(r["kind"] == "active-live" for r in rows))
-    # unlimited window rolls forward with the satisfied frontier
+    # finite stack stays 1..max — no unbounded roll after satisfied counts
     lane.satisfied = {1: True, 2: True, 3: True}
     lane.confirmed_add = 6.0
     rows_roll = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     rec("block-eval-window-rolls",
-        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == [1, 2, 3, 4, 5, 6, 7],
+        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == [1, 2, 3],
         f"{[r['blockCount'] for r in rows_roll if r['kind'] == 'regular']}")
     lane.satisfied = {1: True}
     lane.confirmed_add = 1.0

@@ -1128,8 +1128,10 @@ class SetBook:
             return True
         if self.strict_gate:
             # Strict: a pack is open only while it has a VALIDATED +
-            # PROFITABLE set to bind. No cold pass — the desk waits for the
-            # first replay instead of trading unproven sets.
+            # PROFITABLE set to bind. While hist is still loading, stay open
+            # so the desk keeps processing instead of freezing.
+            if not getattr(self.progress, "ready", False):
+                return True
             return self.pick_any(pack) is not None
         fills = sum(s.n for s in self.sets.values())
         if fills < 8 or not self.progress.ready:
@@ -1166,6 +1168,8 @@ class SetBook:
         deadlock.
         """
         if not (self.enabled and self.use_historic_gate and self.strict_gate):
+            return True
+        if not getattr(self.progress, "ready", False):
             return True
         k = str(kind or "").strip()
         if k:
@@ -1641,13 +1645,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     neg_set.hist = list(pos_rows)  # ratio 1.10 < min_pf 1.20 -> stays off
     g2._score_one(neg_set)
     out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
-    # cold start (no replay yet): STRICT gate (default) blocks every pick and
-    # closes every pack until a set is validated + profitable by replay;
-    # legacy mode (setStrictGate off) keeps the old cold-pass behavior.
+    # cold start (no replay yet): STRICT pick stays None, but packs stay
+    # open so the desk keeps processing until the first replay finishes.
     g3 = SetBook()
     g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
     pk3 = g3.pick("general")
-    out.append(("set-pick-cold-strict-none", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} pick={getattr(pk3, 'id', None)} open={g3.pack_open('general')}"))
+    out.append(("set-pick-cold-strict-none", pk3 is None and g3.pack_open("general"), f"ready={g3.progress.ready} pick={getattr(pk3, 'id', None)} open={g3.pack_open('general')}"))
     g3.strict_gate = False
     pk3b = g3.pick("general")
     out.append(("set-pick-cold-legacy", pk3b is not None and g3.pack_open("general"), f"legacy {getattr(pk3b, 'id', None)}"))

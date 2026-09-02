@@ -372,7 +372,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/universe.json", "/live-stats.json"];
+        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -429,6 +429,38 @@ function pulseControlPlugin(): Plugin {
           if (pathOnly === "/universe.json") {
             const pulse = await tryPulse("GET", "/universe.json");
             jsonRes(res as ServerResponse, 200, pulse?.json ?? universeFallback());
+            return;
+          }
+          if (pathOnly === "/connection.json") {
+            if (method === "GET") {
+              const pulse = await tryPulse("GET", `/connection.json?conn=${encodeURIComponent(conn)}`);
+              jsonRes(res as ServerResponse, 200, pulse?.json ?? {
+                ok: true,
+                conn,
+                connType: conn,
+                connectionType: conn === "vst" ? "vst" : "mainnet",
+                connectionMethod: "library",
+                exchange: "BingX",
+                apiKeyMasked: "",
+                apiKeySet: false,
+                apiSecretSet: false,
+                lastTestStatus: "",
+                defaultMainnet: conn !== "vst",
+                detail: "sidecar offline",
+              });
+              return;
+            }
+            if (method !== "POST") {
+              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+              return;
+            }
+            const raw = await readReqBody(req);
+            const pulse = await tryPulse("POST", `/connection.json?conn=${encodeURIComponent(conn)}`, raw, 8000);
+            if (pulse) {
+              jsonRes(res as ServerResponse, pulse.status, pulse.json);
+              return;
+            }
+            jsonRes(res as ServerResponse, 503, { ok: false, detail: "pulse sidecar offline — credentials live in Redis on the desk host" });
             return;
           }
           if (pathOnly === "/config.json") {

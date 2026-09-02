@@ -117,10 +117,10 @@ class DcaBook:
             step_n = int(raw_steps if raw_steps is not None else 0)
         except Exception:
             step_n = 0
-        # 0 = unlimited. Seed from configured distances; due() grows steps on demand.
-        self.max_steps = 0 if step_n <= 0 else max(1, step_n)
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
+        # 0 = use the configured distance list (never unbounded grow).
+        self.max_steps = max(1, step_n if step_n > 0 else len(self.distances) or 4)
         if self.max_steps > 0:
             while len(self.distances) < self.max_steps:
                 self.distances.append(self.distances[-1] + 0.005)
@@ -350,14 +350,23 @@ def self_test() -> List[Tuple[str, bool, str]]:
     t10 = (snap["enabled"] and snap["maxSteps"] == 4 and "distancesPct" in snap, str(snap.get("distancesPct")))
     u = DcaBook()
     u.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    t11 = (u.max_steps <= 0 and u.unlimited(), f"steps={u.max_steps}")
+    t11 = (u.max_steps == 2 and not u.unlimited(), f"steps={u.max_steps}")
     ulane = u.attach("UUU-USDT", "LONG", 1.0, 100.0)
-    t12 = (len(ulane.steps) >= 2, f"seed={len(ulane.steps)}")
+    t12 = (len(ulane.steps) == 2, f"seed={len(ulane.steps)}")
     for st in list(ulane.steps):
         st.filled = True
         st.qty = 1.0
     ru = u.due("UUU-USDT", "LONG", 1.0, 100.0, 90.0, now=t0)
-    t13 = (ru is not None and int(ru["n"]) > 2, f"grow={None if ru is None else ru.get('n')}")
+    t13 = (ru is None, f"grow={None if ru is None else ru.get('n')}")
+    # parent qty stays frozen after fills
+    p = DcaBook()
+    p.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+    r1 = p.due("PPP-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
+    t14 = (r1 is not None and abs(r1["qty"] - 1.5) < 1e-9 and abs(r1["lane"].parent_qty - 1.0) < 1e-9, f"parent={None if r1 is None else r1['lane'].parent_qty}")
+    if r1:
+        p.record_fill(r1["lane"], r1["step"], r1["qty"], 99.4, "Gx02p1")
+        p.attach("PPP-USDT", "LONG", 2.5, 99.4)  # later qty must not rewrite parent
+    t15 = (abs(p.lanes["PPP-USDT:LONG"].parent_qty - 1.0) < 1e-9, f"frozen={p.lanes.get('PPP-USDT:LONG') and p.lanes['PPP-USDT:LONG'].parent_qty}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -369,9 +378,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-deact-last25", t8[0], t8[1]),
         ("dca-disabled", t9[0], t9[1]),
         ("dca-snap", t10[0], t10[1]),
-        ("dca-unlim-flag", t11[0], t11[1]),
-        ("dca-unlim-seed", t12[0], t12[1]),
-        ("dca-unlim-grow", t13[0], t13[1]),
+        ("dca-zero-means-list", t11[0], t11[1]),
+        ("dca-zero-seed", t12[0], t12[1]),
+        ("dca-no-unbounded-grow", t13[0], t13[1]),
+        ("dca-parent-step1", t14[0], str(t14[1])[:80]),
+        ("dca-parent-frozen", t15[0], t15[1]),
     ]
 
 
