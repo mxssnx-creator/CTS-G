@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 
 DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "server", "pulse"))
@@ -44,6 +45,26 @@ class StubAPI:
         return {"code": 0, "data": {"order": {"orderId": str(1000 + len(self.orders))}}}
 
 
+def isolate_runtime(contracts):
+    """Route every Pulse persistence path to a disposable offline fixture."""
+    root = tempfile.mkdtemp(prefix="cts-g-offline-v1-")
+    for name in (
+        "STATS_PATH", "TRADES_PATH", "STOP_PATH", "PAUSE_PATH", "STOP_ALL",
+        "LOG_PATH", "BLOCK_PATH", "OVERLAY_PATH", "OPEN_PATH", "CTS_PATH",
+        "ERR_PATH", "LEV_PATH", "START_EQ_PATH", "RESET_EQ_PATH", "UNIVERSE_PATH",
+    ):
+        setattr(pt, name, os.path.join(root, os.path.basename(str(getattr(pt, name, name)))))
+    with open(pt.OVERLAY_PATH, "w") as f:
+        json.dump({"symbolsAll": True, "symbolCap": 0, "symbols": ["*"], "maxOpen": 0,
+                   "maxPerGroup": 0, "blockMaxStack": 3, "dcaMaxSteps": 4, "indEnabled": True}, f)
+    with open(pt.UNIVERSE_PATH, "w") as f:
+        json.dump({}, f)
+    # Pulse construction normally reads Redis settings and may fetch wildcard
+    # contracts.  Keep this verifier offline and independent of live runtime.
+    pt.dump_cts_settings = lambda: {}
+    pt.load_contracts = lambda want=None: dict(contracts)
+
+
 def synth_bars(n=60, start=100.0, drift=0.001):
     bars = []
     px = start
@@ -62,8 +83,9 @@ def main() -> int:
         "SOL-USDT": pt.Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300),
         "XRP-USDT": pt.Contract("XRP-USDT", 0.1, 0.1, 1, 4, 2.0, 150),
     }
-    # Keep this verifier genuinely offline: Pulse construction must not
-    # fetch exchange contracts for symbols that the fixture did not provide.
+    isolate_runtime(contracts)
+    # Keep the initial fixture universe bounded while Pulse exercises the
+    # wildcard x01 configuration from the isolated overlay.
     pt.SYMBOLS[:] = list(contracts)
     p = pt.Pulse(api, contracts)
 
