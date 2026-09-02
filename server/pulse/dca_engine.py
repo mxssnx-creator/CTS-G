@@ -125,6 +125,11 @@ class DcaBook:
             while len(self.distances) < self.max_steps:
                 self.distances.append(self.distances[-1] + 0.005)
             self.distances = self.distances[: self.max_steps]
+        # First add must be a real adverse move, not 0.5% noise.
+        if self.distances:
+            self.distances[0] = max(0.012, float(self.distances[0]))
+            for i in range(1, len(self.distances)):
+                self.distances[i] = max(float(self.distances[i]), self.distances[i - 1] + 0.004)
         mult = ov.get("dcaStepVolumeMultipliers") or coord.get("dcaStepVolumeMultipliers") or cts.get("dcaStepVolumeMultipliers") or DEFAULT_MULT
         self.mults = _mult_list(mult, DEFAULT_MULT)
         if self.max_steps > 0:
@@ -265,12 +270,17 @@ class DcaBook:
     def on_close(self, rec: Dict[str, Any]) -> None:
         why = str(rec.get("reason") or "")
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
-        if "dca" not in why.lower() and not (len(cid) > 4 and cid[4:5] == "d"):
+        sym = str(rec.get("symbol") or "")
+        side = str(rec.get("side") or "")
+        lane = self.lanes.get(self.key(sym, side)) if sym else None
+        used = bool(lane and int(getattr(lane, "filled_n", 0) or 0) > 0)
+        kind_d = len(cid) > 4 and cid[4:5].lower() == "d"
+        if not used and "dca" not in why.lower() and not kind_d:
             return
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]
-        self.drop(str(rec.get("symbol") or ""), str(rec.get("side") or ""))
+        self.drop(sym, side)
         self.score()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -322,21 +332,21 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # no add at entry
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 100.0, now=t0)
     t1 = (r is None, f"flat={r}")
-    # 0.4% adverse < 0.5% step1
+    # 0.4% adverse < 1.2% first step
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.6, now=t0)
     t2 = (r is None, "below")
-    # 0.6% adverse → step 1, qty 1.5
-    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
+    # 1.3% adverse → step 1, qty 1.5
+    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
     t3 = (r is not None and r["n"] == 1 and abs(r["qty"] - 1.5) < 1e-9, f"{r}")
     assert r is not None
-    b.record_fill(r["lane"], r["step"], r["qty"], 99.4, "Gx02dtest1")
-    # cooldown 0, step2 needs 1%
-    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
-    t4 = (r2 is None, "need 1pct")
-    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.6, now=t0)
+    b.record_fill(r["lane"], r["step"], r["qty"], 98.7, "Gx02dtest1")
+    # cooldown 0, step2 needs first+0.4%
+    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
+    t4 = (r2 is None, "need next")
+    r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 97.0, now=t0)
     t5 = (r2 is not None and r2["n"] == 2 and abs(r2["qty"] - 2.0) < 1e-9, f"{r2}")
-    # short side
-    rs = b.due("BBB-USDT", "SHORT", 2.0, 50.0, 50.4, now=t0)  # +0.8% against short, step1=0.5%
+    # short side ≥ first distance
+    rs = b.due("BBB-USDT", "SHORT", 2.0, 50.0, 50.7, now=t0)
     t6 = (rs is not None and rs["n"] == 1, f"short {rs}")
     # independent of block: two symbols
     t7 = (len(b.lanes) >= 2, f"lanes={list(b.lanes)}")
@@ -363,11 +373,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # parent qty stays frozen after fills
     p = DcaBook()
     p.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
-    r1 = p.due("PPP-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
+    r1 = p.due("PPP-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
     t14 = (r1 is not None and abs(r1["qty"] - 1.5) < 1e-9 and abs(r1["lane"].parent_qty - 1.0) < 1e-9, f"parent={None if r1 is None else r1['lane'].parent_qty}")
     if r1:
-        p.record_fill(r1["lane"], r1["step"], r1["qty"], 99.4, "Gx02p1")
-        p.attach("PPP-USDT", "LONG", 2.5, 99.4)  # later qty must not rewrite parent
+        p.record_fill(r1["lane"], r1["step"], r1["qty"], 98.7, "Gx02p1")
+        p.attach("PPP-USDT", "LONG", 2.5, 98.7)  # later qty must not rewrite parent
     t15 = (abs(p.lanes["PPP-USDT:LONG"].parent_qty - 1.0) < 1e-9, f"frozen={p.lanes.get('PPP-USDT:LONG') and p.lanes['PPP-USDT:LONG'].parent_qty}")
     hi = DcaBook()
     hi.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
@@ -376,10 +386,18 @@ def self_test() -> List[Tuple[str, bool, str]]:
     cd.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 30})
     t_open = time.time()
     cd.attach("CD-USDT", "LONG", 1.0, 100.0)
-    rcd = cd.due("CD-USDT", "LONG", 1.0, 100.0, 99.4, now=t_open + 3)
+    rcd = cd.due("CD-USDT", "LONG", 1.0, 100.0, 98.7, now=t_open + 3)
     t17 = (rcd is None, f"early={rcd}")
-    rcd2 = cd.due("CD-USDT", "LONG", 1.0, 100.0, 99.4, now=t_open + 31)
+    rcd2 = cd.due("CD-USDT", "LONG", 1.0, 100.0, 98.7, now=t_open + 31)
     t18 = (rcd2 is not None and rcd2["n"] == 1, f"after={None if rcd2 is None else rcd2.get('n')}")
+    parent = DcaBook()
+    parent.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+    pr = parent.due("QQQ-USDT", "LONG", 1.0, 100.0, 98.7, now=t0)
+    if pr:
+        parent.record_fill(pr["lane"], pr["step"], pr["qty"], 98.7, "Gx01dxx")
+    parent.on_close({"symbol": "QQQ-USDT", "side": "LONG", "reason": "sl", "client_id": "Gx01og060308000ab", "pnl": -0.02, "pnl_pct": -0.002})
+    t19 = (len(parent.closes) == 1, f"parent-close n={len(parent.closes)}")
+    t20 = (parent.distances[0] >= 0.012 - 1e-12, f"minDist={parent.distances}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -399,6 +417,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-mult-clamp", t16[0], t16[1]),
         ("dca-cooldown-from-open", t17[0], t17[1]),
         ("dca-cooldown-elapsed", t18[0], t18[1]),
+        ("dca-parent-close-scores", t19[0], t19[1]),
+        ("dca-min-first-dist", t20[0], t20[1]),
     ]
 
 

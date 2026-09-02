@@ -688,7 +688,7 @@ def phantom_recon_test() -> None:
     p3 = mk([])
     p3.open["CTL-USDT"] = pos("CTL-USDT", age=3600, sl_oid="sl-1")
     p3.adopt_exchange_positions()  # streak 1
-    p3.adopt_exchange_positions()  # streak 2 -> sweep -> _exchange_flat(CTL) -> drop
+    p3.adopt_exchange_positions()  # streak 2 -> flat-ex drop
     rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and p3.cooldown.get("CTL-USDT", 0) > time.time(),
         f"book={list(p3.open)} cool={bool(p3.cooldown.get('CTL-USDT'))}")
 

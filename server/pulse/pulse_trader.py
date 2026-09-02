@@ -3614,15 +3614,11 @@ class Pulse:
                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
             if u < 0.002:
                 continue
-            # Live book losing → don't let historic intern PF authorize more size.
+            # Live book losing → don't pyramid more size.
             try:
-                live_rows = [c for c in (getattr(self, "closed", None) or []) if str(getattr(c, "side", "")).upper() == pos.side][-8:]
-                if len(live_rows) >= 5:
-                    gp = sum(float(getattr(c, "pnl", 0) or 0) for c in live_rows if float(getattr(c, "pnl", 0) or 0) > 0)
-                    gl = abs(sum(float(getattr(c, "pnl", 0) or 0) for c in live_rows if float(getattr(c, "pnl", 0) or 0) < 0))
-                    live_pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
-                    if live_pf + 1e-9 < 1.0:
-                        intern_pf = min(float(intern_pf), float(live_pf))
+                live_pf = self.live_recent_pf(pos.side, n=8)
+                if live_pf is not None and live_pf + 1e-9 < 1.0:
+                    continue
             except Exception:
                 pass
             rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf)
@@ -3740,11 +3736,27 @@ class Pulse:
                 f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
             )
 
-    def maybe_dca_adds(self) -> None:
+    def live_recent_pf(self, side: Optional[str] = None, n: int = 8) -> Optional[float]:
+        """Cost-net PF of recent live closes. None until enough samples."""
+        rows = list(self.closed or [])
+        if side:
+            want = str(side).upper()
+            rows = [c for c in rows if str(getattr(c, "side", "") or "").upper() == want]
+        rows = rows[-max(5, int(n or 8)) :]
+        if len(rows) < 5:
+            return None
+        try:
+            pc = last_n_cost_pf(rows, len(rows), self.position_cost_pct)
+            return float(pc.get("ratio") or 0)
+        except Exception:
+            return None
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
         if not getattr(self.dca, "enabled", False) or self.halted:
             return
         if self.entries_blocked():
+            return
+        live_pf = self.live_recent_pf(n=8)
+        if live_pf is not None and live_pf + 1e-9 < 1.0:
             return
         if time.time() - getattr(self, "dca_last_emit", 0) < 0.35:
             return
@@ -3763,7 +3775,7 @@ class Pulse:
             if px <= 0 or pos.entry <= 0:
                 continue
             age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
-            if age < max(8.0, float(getattr(self.dca, "cooldown_s", 0) or 0)):
+            if age < 45.0:
                 self.dca.skips += 1
                 continue
             if pos.qty * px >= self.max_book_notional():
@@ -4355,24 +4367,34 @@ class Pulse:
                     self.ensure_controls(rec_pos)
         for sym in list(self.open):
             pos = self.open.get(sym)
-            if not pos or pos.symbol in live:
+            if not pos:
+                continue
+            if pos.symbol in live:
+                if hasattr(self, "_absent_n"):
+                    self._absent_n.pop(sym, None)
                 continue
             age = time.time() - float(pos.opened_at or 0)
             key = f"{pos.symbol}:{pos.side}"
             live_keys_now = getattr(self, "live_pos_keys", None) or set()
             still_live = key in live_keys_now
             if still_live:
+                if hasattr(self, "_absent_n"):
+                    self._absent_n.pop(sym, None)
                 continue
-            # In-flight entries need a short window before we treat them as ghosts.
-            # After that, a confirmed-flat exchange or a per-position empty read
-            # drops the local leftover so a manual close cannot freeze the book.
-            if age < 20.0:
+            if age < 45.0:
                 continue
+            misses = int((getattr(self, "_absent_n", None) or {}).get(sym, 0)) + 1
+            if not hasattr(self, "_absent_n"):
+                self._absent_n = {}
+            self._absent_n[sym] = misses
             flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 2 and live_n == 0
+            # Partial list: need 3 misses. Fully-flat exchange already confirmed by streak.
+            if not flat_ex and misses < 3:
+                continue
             has_ctrl = bool(pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
             if has_ctrl and not flat_ex and not self._exchange_flat(pos):
                 continue
-            log(f"DROP stale local {sym} age={age:.0f}s")
+            log(f"DROP stale local {sym} age={age:.0f}s miss={misses}")
             self.open.pop(sym, None)
             self.cooldown[sym] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
@@ -4731,6 +4753,7 @@ class Pulse:
                     "side": p.side,
                     "qty": p.qty,
                     "entry": p.entry,
+                    "notional": round(float(p.qty or 0) * float(p.entry or 0), 6),
                     "px": self.px.get(p.symbol),
                     "uPnlPct": round(((self.px.get(p.symbol, p.entry) - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100, 3),
                     "ageS": round(time.time() - p.opened_at, 1),
