@@ -285,7 +285,17 @@ class FastBingX:
         self.chg: Dict[str, float] = {}
         self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
         self.on_event = None
-        self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
+        self.stats = {
+            "rest": 0,
+            "ws": 0,
+            "wait": 0.0,
+            "rl": 0,
+            "err": 0,
+            "asyncN": 0,
+            "asyncSuppressed": 0,
+            "publicSuppressed": 0,
+            "asyncP50": 0.0,
+        }
         self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err)
         self._ts_lock = threading.Lock()
         self._last_ts = 0
@@ -420,7 +430,11 @@ class FastBingX:
         return self._req("DELETE", path, extra)
 
     def public(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        self._take("public", path)
+        # Public quote endpoints use the same path cooldown as signed calls.
+        # Do not burn a request (or pretend it was sent) while an endpoint is cooled.
+        if not self._take("public", path):
+            self.stats["publicSuppressed"] += 1
+            return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
         qs = urllib.parse.urlencode(extra or {})
         url = path + (f"?{qs}" if qs else "")
         self.stats["rest"] += 1
@@ -430,7 +444,14 @@ class FastBingX:
             self.stats["err"] += 1
             self.err.write("public", path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
-        return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
+        if not isinstance(body, dict):
+            self.stats["err"] += 1
+            body = {"code": -1, "msg": "bad-json", "error": True}
+        else:
+            if body.get("error") and not body.get("cooled"):
+                self.stats["err"] += 1
+            self._trip(path, body)
+        return body
 
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
@@ -439,9 +460,28 @@ class FastBingX:
         return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-        self.stats["rest"] += len(reqs)
-        self.stats["asyncN"] += len(reqs)
-        rows = self.bridge.gather(reqs, timeout=timeout)
+        if not reqs:
+            return []
+        admitted: List[Tuple[str, Dict[str, Any]]] = []
+        rows: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        for path, extra in reqs:
+            if self._take("public", path):
+                admitted.append((path, extra))
+            else:
+                self.stats["asyncSuppressed"] += 1
+                rows.append((path, extra, {"code": 101209, "msg": "cooling", "error": True, "cooled": True}))
+        self.stats["rest"] += len(admitted)
+        self.stats["asyncN"] += len(admitted)
+        if admitted:
+            rows.extend(self.bridge.gather(admitted, timeout=timeout))
+        for path, _extra, body in rows:
+            if not isinstance(body, dict):
+                self.stats["err"] += 1
+                continue
+            if body.get("error") and not body.get("cooled"):
+                self.stats["err"] += 1
+            if not body.get("cooled"):
+                self._trip(path, body)
         snap = self.bridge.latency()
         if snap:
             self.stats["asyncP50"] = snap
@@ -457,6 +497,8 @@ class FastBingX:
             "rateTrips": self.stats["rl"],
             "httpErr": self.stats["err"],
             "asyncN": self.stats.get("asyncN", 0),
+            "asyncSuppressed": self.stats.get("asyncSuppressed", 0),
+            "publicSuppressed": self.stats.get("publicSuppressed", 0),
             "asyncP50": round(self.stats.get("asyncP50", 0.0), 1),
             "errors": self.err.recent(8),
             "errorN": self.err.n,
@@ -515,7 +557,9 @@ class AsyncBridge:
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 
     async def _gather(self, reqs: List[Tuple[str, Dict[str, Any]]]):
-        sem = asyncio.Semaphore(8)
+        # Admission is handled by FastBingX.gather_public; keep the transport
+        # fan-out bounded as a second line of defense against exchange bursts.
+        sem = asyncio.Semaphore(4)
 
         async def one(path: str, extra: Dict[str, Any]):
             async with sem:

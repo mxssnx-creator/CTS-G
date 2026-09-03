@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import traceback
 from typing import Any, Dict, List, Tuple
@@ -24,6 +25,7 @@ from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
 from user_presets import self_test as user_presets_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
+from bingx_fast import ErrorLog, FastBingX
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
 from pulse_trader import (
     coerce_symbol_sort,
@@ -1792,6 +1794,34 @@ def dd_time_test() -> None:
     rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 
+def process_guard_test() -> None:
+    """Regression checks for stuck-loop admission and STOP safety."""
+    with tempfile.NamedTemporaryFile(prefix="cts-engine-test-", delete=True) as f:
+        api = FastBingX("", "", ErrorLog(f.name), base="http://127.0.0.1:1")
+        path = "/openApi/swap/v2/quote/klines"
+        calls = []
+        api._http = lambda method, url: calls.append((method, url)) or {"code": 0, "data": []}
+        api.path_cd[path] = time.time() + 30.0
+        cooled = api.public(path, {"symbol": "BTC-USDT"})
+        rec("public-cooldown-no-request", cooled.get("cooled") is True and not calls, str(cooled))
+        rows = api.gather_public([(path, {"symbol": "ETH-USDT"})])
+        rec("async-cooldown-no-request", rows and rows[0][2].get("cooled") is True and not calls, str(rows))
+        api.path_cd[path] = 0.0
+        api.bridge.gather = lambda reqs, timeout=4.2: [(p, e, {"code": 100410, "msg": "frequency limit"}) for p, e in reqs]
+        api.gather_public([(path, {"symbol": "SOL-USDT"})])
+        rec("async-rate-trip-propagates", api.stats["rl"] == 1 and api.path_cd[path] > time.time(), str(api.snapshot()))
+        rec("suppression-accounting", api.stats["publicSuppressed"] == 1 and api.stats["asyncSuppressed"] == 1 and api.stats["rest"] == 1, str(api.stats))
+
+    trader = open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read()
+    fast = open(os.path.join(DIR, "bingx_fast.py"), encoding="utf-8").read()
+    rec("history-fetch-backoff", "_hist_fetch_next" in trader and "retry in" in trader and "history waiting for bars" in trader)
+    rec("history-no-short-replay", "if b.hist_run and have >= min_ready" in trader)
+    rec("kline-budget-gate", "not bool(getattr(budget, \"kline_rest\", True))" in trader and "kline_batch" in trader)
+    rec("recon-pending-not-failure", "confirmed_book_only" in trader and "pending_absent" in trader)
+    rec("stop-file-negative-control", "os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)" in trader and "halt_reason = \"stopped\"" in trader)
+    rec("async-shared-rate-trip", "self._take(\"public\", path)" in fast and "self._trip(path, body)" in fast)
+
+
 def main() -> int:
     run_units()
     rank_test()
@@ -1812,6 +1842,7 @@ def main() -> int:
     set_orders_test()
     strict_gate_test()
     dd_time_test()
+    process_guard_test()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:
