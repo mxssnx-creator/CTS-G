@@ -91,6 +91,8 @@ export type HistCalcOptions = {
   indTypeMove: boolean;
   indTypeActive: boolean;
   indTypeCommon: boolean;
+  indTypeTrend: boolean;
+  indTypeBreak: boolean;
 };
 
 export type HistCalcJob = {
@@ -104,6 +106,10 @@ export type HistCalcJob = {
   options?: HistCalcOptions;
   coverage?: {
     product?: number;
+    setCount?: number;
+    activeCount?: number;
+    validatedCount?: number;
+    histFills?: number;
     dims?: Record<string, number>;
     families?: { base?: number; trail?: number };
     slTpCover?: boolean;
@@ -158,6 +164,8 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   indTypeMove: true,
   indTypeActive: true,
   indTypeCommon: true,
+  indTypeTrend: true,
+  indTypeBreak: true,
 };
 
 export async function fetchHistCalc(): Promise<HistCalcJob> {

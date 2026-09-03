@@ -107,6 +107,7 @@ def overlay_test() -> None:
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
+        rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 3 and int(ov.get("trailingMinStep") or 0) == 3)
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")

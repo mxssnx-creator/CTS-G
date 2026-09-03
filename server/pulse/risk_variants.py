@@ -102,31 +102,11 @@ def trail_candidates(
     recalc_give: bool,
     variants: Sequence[str],
 ) -> List[Tuple[str, float, float]]:
-    out: List[Tuple[str, float, float]] = []
-    seen = set()
-    lo = snap_ratio(arm_min, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-    hi = snap_ratio(arm_max, TRAIL_ARM_MIN, TRAIL_ARM_MAX, 0.3)
-    if lo > hi:
-        lo, hi = hi, lo
-    source = list(variants) or list(TRAIL_VARIANTS)
-    for raw in source:
-        arm, give = parse_trail(raw)
-        if arm + 1e-9 < lo or arm - 1e-9 > hi:
-            continue
-        if recalc_give:
-            give = give_from_arm(arm, factor, give_min, give_max)
-        if give + 1e-9 < give_min or give - 1e-9 > give_max:
-            continue
-        key = trail_key(arm, give)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append((key, arm, give))
-    if not out:
-        arm = snap_ratio((lo + hi) / 2)
-        give = give_from_arm(arm, factor, give_min, give_max)
-        out.append((trail_key(arm, give), arm, give))
-    return out
+    # Settings ranges define the evaluation catalog. The legacy diagonal
+    # variants are a live default/compatibility input and must not remove
+    # independent arm×give combinations from scoring.
+    del factor, recalc_give, variants
+    return trail_grid(arm_min, arm_max, give_min, give_max)
 
 
 @dataclass
@@ -451,8 +431,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("var-sl-recalc", abs(b.sl_ratio - 0.8) < 1e-9, f"sl={b.sl_ratio} why={b.last_sl_pick}"))
     out.append(("var-trail-indep", b.trail_arm <= 0.6, f"trail={b.trail_key} why={b.last_trail_pick}"))
     cands = trail_candidates(0.3, 0.9, 0.1, 0.3, 0.333, True, TRAIL_VARIANTS)
-    arms = [a for _, a, _ in cands]
-    out.append(("var-trail-range", arms == [0.3, 0.6, 0.9], f"{cands}"))
+    pairs = {(a, g) for _, a, g in cands}
+    out.append(("var-trail-range", len(cands) == 9 and len(pairs) == 9, f"n={len(cands)} {cands}"))
     # ratio 1.5 allowed (SL > TP)
     out.append(("var-ratio-wide", 2.6 in SL_TP_RATIOS and 0.2 in SL_TP_RATIOS, str(SL_TP_RATIOS[:3])))
     grid = trail_grid()

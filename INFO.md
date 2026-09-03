@@ -217,6 +217,32 @@ lanes, configuration persistence, calculation/statistics paths, Redis-backed
 state and the Linux deployment. Merge only intended files; the branch and PR
 must contain no bootstrap transport artifacts or credentials.
 
+Historic validation accepts 2–72 hours (1m bars); the three-day stress run is
+`hours=72` / `lookback=4320`. It processes every enabled pack, SL:TP ratio,
+trailing arm/give pair, step, direction and indication kind, plus independent
+Block and DCA tapes. `validated #/#` means cost-adjusted PF >= 1.0 with the
+required evaluation sample; `active #/#` is intentionally stricter and also
+requires the configured enable PF and drawdown-time limit. Historic row counts
+may exceed the catalog count because LONG, SHORT and BOTH are reported as
+separate views.
+
+The Settings catalog exposes the same bounded ranges used by the engines:
+
+| Axis | Supported range / meaning |
+|---|---|
+| SL:TP | `0.2–2.6`, step `0.2` (13 independent ratios) |
+| TP steps | `3–22`, every integer is a separate Set |
+| Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
+| Historic | `120–4320` 1m bars, `2–72h`; min bars and warmup remain bounded by the replay window |
+| Block | Historic evaluates counts `1–12`; live stack is bounded to `1–6`; `0` selects the default live stack `3` |
+| DCA | `0` uses the configured distance list; explicit max is `1–12`; distance is clamped to `0.05–8%`, first add is at least `1.2%`, later adds are at least `0.4%` apart, multiplier is `0.25–2.5×` |
+| Indications | `state`, `direction`, `move`, `active`, `common`, `signals`, `trend`, `break`; each has independent LONG/SHORT statistics |
+
+The UI's `Validated rows` count includes expanded LONG/SHORT/BOTH report views;
+`Catalog valid sets` is the actual Set catalog count. Overview, Results and
+the live Settings table show `valid #/#` and `active #/#` from the same backend
+snapshot, so displayed counts cannot be inferred from a truncated top-N table.
+
 After merge, update `/workspace/CTS-G`, deploy with the repository scripts,
 verify all services, and create a new post-merge checkpoint.
 

@@ -15,6 +15,7 @@ from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_resu
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
+DCA_STEPS_MAX = 12
 
 
 def _pct_list(raw: Any, fallback: List[float]) -> List[float]:
@@ -120,7 +121,9 @@ class DcaBook:
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
         # 0 = use the configured distance list (never unbounded grow).
-        self.max_steps = max(1, step_n if step_n > 0 else len(self.distances) or 4)
+        # Zero means the configured distance list, never an unbounded book.
+        # A hard ceiling prevents malformed settings from allocating huge lanes.
+        self.max_steps = max(1, min(DCA_STEPS_MAX, step_n if step_n > 0 else len(self.distances) or 4))
         if self.max_steps > 0:
             while len(self.distances) < self.max_steps:
                 self.distances.append(self.distances[-1] + 0.005)
@@ -382,6 +385,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     hi = DcaBook()
     hi.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
     t16 = (max(hi.mults) <= 2.5 and abs(hi.mults[0] - 2.1) < 1e-9, f"mults={hi.mults}")
+    capped = DcaBook()
+    capped.load({"dcaEnabled": True, "dcaMaxSteps": 999, "dcaStepDistancesPct": [1], "dcaCooldownSeconds": 0})
+    t16b = (capped.max_steps == DCA_STEPS_MAX and len(capped.distances) == DCA_STEPS_MAX, f"steps={capped.max_steps}")
     cd = DcaBook()
     cd.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 30})
     t_open = time.time()
@@ -415,6 +421,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-parent-step1", t14[0], str(t14[1])[:80]),
         ("dca-parent-frozen", t15[0], t15[1]),
         ("dca-mult-clamp", t16[0], t16[1]),
+        ("dca-hard-step-cap", t16b[0], t16b[1]),
         ("dca-cooldown-from-open", t17[0], t17[1]),
         ("dca-cooldown-elapsed", t18[0], t18[1]),
         ("dca-parent-close-scores", t19[0], t19[1]),
