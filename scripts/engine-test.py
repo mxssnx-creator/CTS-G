@@ -40,6 +40,7 @@ from pulse_trader import (
     ctrl_err_kind,
     SL_TYPES,
     TP_TYPES,
+    order_fill_qty,
 )
 
 out: List[Tuple[str, bool, str]] = []
@@ -181,6 +182,15 @@ def controls_test() -> None:
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
     rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+
+
+def fill_accounting_test() -> None:
+    """Exchange fill fields must not overstate positions or debited margin."""
+    rec("fill-executed-priority", abs(order_fill_qty({"executedQty": "0.02", "quantity": "0.05"}, 0.05) - 0.02) < 1e-12)
+    rec("fill-explicit-zero-stays-zero", order_fill_qty({"executedQty": "0", "quantity": "0.05"}, 0.05) == 0.0)
+    rec("fill-capped-to-request", order_fill_qty({"executedQty": "0.08"}, 0.05) == 0.05)
+    rec("fill-fallback-requested", order_fill_qty({"orderId": "x"}, 0.05) == 0.05)
+    rec("fill-malformed-fallback", order_fill_qty({"executedQty": "nan"}, 0.05) == 0.05)
 
 
 def unlimited_test() -> None:
@@ -1789,6 +1799,7 @@ def main() -> int:
     cost_test()
     contract_test()
     controls_test()
+    fill_accounting_test()
     cancel_replace_regression_test()
     coord_test()
     stage_min_pf_test()
