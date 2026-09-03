@@ -46,7 +46,9 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 20
-HOURS_MAX = 72
+# Five-day validation is the maximum supported public window. Keep the
+# exchange request bounded to avoid unbounded RAM/CPU growth.
+HOURS_MAX = 120
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
@@ -464,9 +466,15 @@ def default_options() -> Dict[str, Any]:
 def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body = body if isinstance(body, dict) else {}
     opt = default_options()
-    if body.get("hours") is not None:
+    raw_hours = body.get("hours")
+    if raw_hours is None and body.get("lookback") is not None:
         try:
-            opt["hours"] = max(2, min(HOURS_MAX, int(body["hours"])))
+            raw_hours = float(body["lookback"]) / BARS_PER_HOUR
+        except Exception:
+            raw_hours = None
+    if raw_hours is not None:
+        try:
+            opt["hours"] = max(2, min(HOURS_MAX, int(float(raw_hours))))
         except Exception:
             pass
     for k, lo, hi in (("minStep", 3, 22), ("stepMax", 3, 22)):
@@ -1066,6 +1074,21 @@ def pipeline_symbols(
     return "live"
 
 
+def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:
+    requested = max(0, int(requested))
+    completed = max(0, min(requested, int(completed)))
+    skipped = max(0, int(skipped))
+    failed = max(0, int(failed))
+    return {
+        "requested": requested,
+        "started": min(requested, completed + skipped + failed),
+        "completed": completed,
+        "skipped": skipped,
+        "failed": failed,
+        "coveragePct": round(100.0 * completed / requested, 2) if requested else 100.0,
+    }
+
+
 def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dict[str, Any]:
     """Synchronous calc. persist=True writes hist-calc.json as it goes."""
     body = body if isinstance(body, dict) else {}
@@ -1089,6 +1112,23 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         "options": opt,
         "startedAt": t0,
         "independent": True,
+        "coverage": {
+            **SetBook().coverage(),
+            "symbols": coverage_counter(len(symbols), 0),
+            "bars": coverage_counter(len(symbols) * lookback, 0),
+            "sets": coverage_counter(0, 0),
+            "evaluations": coverage_counter(0, 0),
+        },
+        "checkpoint": {
+            "cycle": 1,
+            "symbolCursor": 0,
+            "symbol": "",
+            "barsProcessed": 0,
+            "setsProcessed": 0,
+            "evaluationsProcessed": 0,
+            "fills": 0,
+            "source": "",
+        },
     }
 
     def prog(phase: str, pct: float, detail: str) -> None:
@@ -1113,7 +1153,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
         try:
-            workers = max(1, min(2, int(body.get("workers") or 2)))
+            cpu = max(1, int(os.cpu_count() or 1))
+            requested_workers = int(body.get("workers") or min(4, cpu))
+            workers = max(1, min(8, cpu, requested_workers))
         except Exception:
             workers = 2
         job["workers"] = workers
@@ -1121,6 +1163,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["async"] = True
         from set_engine import HIST_CAP as _HC
         hist_cap = max(24, min(48, int(_HC or 48)))
+        symbol_tapes: Dict[str, List[Dict[str, Any]]] = {}
+        requested_sets = len(book.by_idx) * len(symbols)
 
         def _trim_maps() -> None:
             for k, v in list(hist.items()):
@@ -1132,9 +1176,33 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             for k, v in list(strat_hist.items()):
                 if len(v) > 400:
                     strat_hist[k] = v[-240:]
+            for k, v in list(symbol_tapes.items()):
+                if len(v) > hist_cap:
+                    symbol_tapes[k] = v[-hist_cap:]
+
+        def update_coverage(done: int, bars_done: int, fills: int, source: str) -> None:
+            job["coverage"] = {
+                **book.coverage(),
+                "symbols": coverage_counter(len(symbols), done),
+                "bars": coverage_counter(len(symbols) * lookback, bars_done),
+                "sets": coverage_counter(requested_sets, done * len(book.by_idx)),
+                "evaluations": coverage_counter(requested_sets, done * len(book.by_idx)),
+                "source": source,
+            }
+            job["checkpoint"] = {
+                "cycle": 1,
+                "symbolCursor": done,
+                "symbol": job.get("checkpoint", {}).get("symbol", ""),
+                "barsProcessed": bars_done,
+                "setsProcessed": done * len(book.by_idx),
+                "evaluationsProcessed": done * len(book.by_idx),
+                "fills": fills,
+                "source": source,
+            }
 
         def snapshot(done: int, total: int, phase: str, heavy: bool = False) -> None:
-            fills = sum(len(v) for v in hist.values())
+            fills = sum(int(st.n or 0) for st in book.sets.values())
+            update_coverage(done, int(job.get("_barsDone") or 0), fills, str(job.get("source") or ""))
             job["phase"] = phase
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
@@ -1161,19 +1229,34 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                     pass
 
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
+            # Keep only one symbol's replay evidence in memory. Commit that
+            # slice atomically before advancing coverage; a restart therefore
+            # replays the same symbol instead of skipping a progression unit.
             book.ingest_bars(sym, bars)
-            book.replay_symbol_partial(sym, hist, now=now, ind_hist=ind_hist, drop_bars=True, strat_hist=strat_hist)
-            _trim_maps()
+            local_hist: Dict[str, List[Dict[str, Any]]] = {}
+            local_ind: Dict[str, List[Dict[str, Any]]] = {}
+            nbar = book.replay_symbol_partial(
+                sym, local_hist, now=now, ind_hist=local_ind, drop_bars=True, strat_hist=strat_hist
+            )
+            book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+            symbol_tapes.setdefault(sym, []).extend(
+                row for rows in local_hist.values() for row in rows if isinstance(row, dict)
+            )
+            job["_barsDone"] = int(job.get("_barsDone") or 0) + nbar
+            job["checkpoint"]["symbol"] = sym
             job["source"] = src
-            heavy = done == total or done % 16 == 0
-            if persist or heavy or done % 8 == 0:
+            _trim_maps()
+            heavy = done == total or done % 8 == 0
+            if persist or heavy or done % 4 == 0:
                 snapshot(done, total, "replay", heavy=heavy)
 
         source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")
-        book._commit_hist(hist, ind_hist)
+        # Each completed symbol was already committed atomically in on_item.
+        # Do not replay an empty aggregate here: _commit_hist(..., merge=False)
+        # would erase the completed symbol tapes and make coverage look empty.
         book.progress.phase = "ready"
         book.progress.ready = True
         book.progress.pct = 100.0
