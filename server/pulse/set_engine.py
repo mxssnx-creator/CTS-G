@@ -562,7 +562,7 @@ class SetBook:
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = 1.15
-        self.max_dd_s = 1800.0
+        self.max_dd_s = 27000.0
         self.auto_deact = True
         self.use_historic_gate = True
         self.min_samples = 8
@@ -1703,7 +1703,7 @@ class SetBook:
         enable_pf = float(self.min_pf or 1.15)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
-        dd_ok = dd_s <= float(self.max_dd_s or 1800) + 1e-9
+        dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
         return {
             "n": int(hist_n if hist_n is not None else len(ordered)),
             "wins": wins,
@@ -1752,7 +1752,7 @@ class SetBook:
             if ratio + 1e-9 < enable_pf:
                 return False, f"hist PF {ratio:.2f}<{enable_pf:.2f}"
             dd_s = float(m.get("max_dd_s") or 0)
-            if dd_s > float(self.max_dd_s or 1800) + 1e-9:
+            if dd_s > float(self.max_dd_s or 27000) + 1e-9:
                 return False, f"hist DDt {dd_s:.0f}s"
             return True, ""
         live25 = live_rows[-self.deact_n :]
@@ -1776,7 +1776,7 @@ class SetBook:
         if n15 >= need and ratio + 1e-9 < enable_pf:
             return False, f"live last{n15} PF {ratio:.2f}<{enable_pf:.2f}"
         dd_s = float(m.get("max_dd_s") or 0)
-        if n15 >= need and dd_s > float(self.max_dd_s or 1800) + 1e-9:
+        if n15 >= need and dd_s > float(self.max_dd_s or 27000) + 1e-9:
             return False, f"live DDt {dd_s:.0f}s"
         return True, ""
 
