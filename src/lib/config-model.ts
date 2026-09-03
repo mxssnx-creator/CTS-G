@@ -225,6 +225,8 @@ export type PulseOverlay = {
   indTypeActive: boolean;
   indTypeCommon: boolean;
   indTypeSignals: boolean;
+  indTypeTrend: boolean;
+  indTypeBreak: boolean;
   noise: number;
   volWeight: number;
   minStep: number;
@@ -374,11 +376,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeActive: true,
   indTypeCommon: true,
   indTypeSignals: true,
+  indTypeTrend: true,
+  indTypeBreak: true,
   noise: 0.05,
   volWeight: 0.3,
   minStep: 3,
   maxStopLossRatio: 2.5,
-  trailingMinStep: 2,
+  trailingMinStep: 3,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
   rearrangeGap: 0.22,
@@ -524,6 +528,8 @@ export type CtsSettings = {
   indTypeActive?: boolean;
   indTypeCommon?: boolean;
   indTypeSignals?: boolean;
+  indTypeTrend?: boolean;
+  indTypeBreak?: boolean;
   activeNoiseFilter?: number;
   activeVolatilityWeight?: number;
   posCountsVolumeRatio?: number;
@@ -700,11 +706,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTypeActive: bool(cts.indTypeActive, true),
     indTypeCommon: bool(cts.indTypeCommon, true),
     indTypeSignals: bool(cts.indTypeSignals, true),
+    indTypeTrend: bool(cts.indTypeTrend, true),
+    indTypeBreak: bool(cts.indTypeBreak, true),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
-    minStep: num((coord as { minStep?: number }).minStep, 2),
+    minStep: num((coord as { minStep?: number }).minStep, 3),
     maxStopLossRatio: num((coord as { maxStopLossRatio?: number }).maxStopLossRatio, 2.5),
-    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 2),
+    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 3),
     posCountsVolumeRatio: num(cts.posCountsVolumeRatio ?? (coord as { posCountsVolumeRatio?: number }).posCountsVolumeRatio, 0.05),
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),

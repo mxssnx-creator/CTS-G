@@ -38,7 +38,7 @@ DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 480
-LOOKBACK_MAX = 1440
+LOOKBACK_MAX = 4320  # three days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -1946,6 +1946,12 @@ class SetBook:
             )
             for t in trails for sl in self.sl_ratios for step in self.steps
         ) if trails and self.sl_ratios and self.steps else True
+        need = self.eval_need()
+        validated_count = sum(
+            1
+            for st in self.sets.values()
+            if int(st.last15_n or 0) >= need and float(st.last15_ratio or 0) + 1e-9 >= 1.0
+        )
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -1960,6 +1966,11 @@ class SetBook:
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
             "product": len(self.by_idx),
+            "setCount": len(self.sets),
+            "activeCount": sum(1 for st in self.sets.values() if st.active),
+            "validatedCount": validated_count,
+            "validationNeed": need,
+            "histFills": sum(st.n for st in self.sets.values()),
             "indexed": True,
             "independentTrail": bool(getattr(self, "trail_enabled", True)),
             "independentDirection": True,
@@ -2286,6 +2297,7 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
+                    "validated": bool(st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= 1.0),
                     "gp": st.gp,
                     "gl": st.gl,
                     "costSubtracted": True,
@@ -2349,6 +2361,7 @@ class SetBook:
         rows = rows[:16]
         p = self.progress
         cover = self.coverage()
+        validated_count = int(cover.get("validatedCount") or 0)
         live_ov = self.live_overview()
         # Never dump the full 1000+ set index into the hot stats JSON.
         index = []
@@ -2389,6 +2402,8 @@ class SetBook:
             "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
+            "validatedCount": validated_count,
+            "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "coverage": cover,
             "liveOverview": live_ov,
             "liveFills": int(live_ov.get("fills") or 0),
@@ -2457,6 +2472,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     dd = drawdown_time(rows, now=520)
     out.append(("set-dd-episodes", dd["episodes"] == 2.0, f"{dd}"))
     out.append(("set-dd-max", dd["maxS"] >= 120, f"{dd['maxS']}"))
+    boundary = drawdown_time(
+        [
+            {"t": 100, "pnl": 1.0},
+            {"t": 120, "pnl": -0.2},
+            {"t": 150, "pnl": -0.1},
+            {"t": 180, "pnl": 0.3},
+            {"t": 200, "pnl": -0.4},
+        ],
+        now=260,
+    )
+    out.append(("set-dd-recovery-boundary", boundary["episodes"] == 2.0 and boundary["maxS"] == 60.0 and boundary["avgS"] == 60.0, f"{boundary}"))
     # last-25 negative deactivates
     book = SetBook()
     book.load(
@@ -2853,6 +2879,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
         g4._score_one(x)
     pk4 = g4.pick("general")
     out.append(("set-strict-pick-validated", pk4 is not None and pk4.id == gb[0].id and pk4.last15_ratio >= 1.0 and pk4.last15_n >= 8, f"{getattr(pk4, 'id', None)} pf={getattr(pk4, 'last15_ratio', 0)}"))
+    g4snap = g4.snapshot(full=True)
+    g4valid = sum(1 for x in g4.sets.values() if x.last15_n >= g4.eval_need() and x.last15_ratio + 1e-9 >= 1.0)
+    out.append(("set-validated-count-pf-positive", g4snap.get("validatedCount") == g4valid and g4valid >= 1, f"{g4snap.get('validatedCount')}/{g4snap.get('setCount')} need={g4snap.get('validationNeed')}"))
+    out.append(("set-validated-row-flags", any(bool(r.get("validated")) and float(r.get("last15Ratio") or 0) >= 1.0 for r in g4snap.get("rows") or []), "positive PF rows carry validated=true"))
     out.append(("set-strict-pack-open-winner", g4.pack_open("general") and not g4.pack_open("indications"), f"gen={g4.pack_open('general')} ind={g4.pack_open('indications')}"))
     # strict: once the only winner turns cold (no samples), pack closes again
     gb[0].hist = []

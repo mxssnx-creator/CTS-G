@@ -123,7 +123,7 @@ class ExitBook:
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.scratch_s = float(ov.get("scratchS") or 600)
         self.scratch_min = pct_to_frac(float(ov.get("scratchMin") or ov.get("scratchMinPct") or 0.25))
-        self.trail_min_step = float(ov.get("trailingMinStep") or 6)
+        self.trail_min_step = float(ov.get("trailingMinStep") or 3)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or 1.10)

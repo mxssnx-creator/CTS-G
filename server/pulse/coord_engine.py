@@ -69,9 +69,9 @@ class Coordinator:
         self.prev_window = 25
         self.main_eval = 5
         self.real_eval = 3
-        self.min_step = 2
+        self.min_step = 3
         self.max_sl_ratio = 2.5
-        self.trailing_min_step = 2
+        self.trailing_min_step = 3
         self.pos_count_vol_ratio = 0.05
         self.rearrange = True
         self.rearrange_gap = 0.22
@@ -138,9 +138,9 @@ class Coordinator:
         self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
         self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)
         self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
-        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 2)
+        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 3)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
-        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 2)
+        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 3)
         self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)

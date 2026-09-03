@@ -232,7 +232,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
   return (
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
-        gate {gate?.allow ? "open" : "paused"} · intern {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
+        gate {gate?.allow ? "open" : "paused"} · valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · active {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
       </p>
       {gate?.reasons?.length ? (
         <p className="mb-3 font-mono text-xs text-danger">{gate.reasons.join(" · ")}</p>

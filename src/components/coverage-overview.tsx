@@ -1,7 +1,7 @@
 import type { LiveStats } from "@/lib/live-stats";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
-const TYPES = ["state", "direction", "move", "active", "common", "signals"] as const;
+const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break"] as const;
 
 export function CoverageBar({ live }: { live: LiveStats | null }) {
   if (!live) return null;
@@ -13,6 +13,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
   const sets = (cov?.sets ?? {}) as {
     setCount?: number;
     activeCount?: number;
+    validatedCount?: number;
     histFills?: number;
     liveFills?: number;
     liveProcessed?: number;
@@ -43,7 +44,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           coverage · px {px}/{n || "—"} · 1m {scan?.kl1m ?? "—"} · 5m {scan?.kl5m ?? "—"} · 15m {scan?.kl15m ?? "—"} · ind {scan?.indications ?? "—"}
         </span>
         <span className="text-muted">
-          sets {sets.activeCount ?? 0}/{sets.setCount ?? 0}
+          valid {sets.validatedCount ?? 0}/{sets.setCount ?? 0} · active {sets.activeCount ?? 0}/{sets.setCount ?? 0}
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
@@ -117,6 +118,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const sets = (cov?.sets ?? {}) as {
     setCount?: number;
     activeCount?: number;
+    validatedCount?: number;
     histFills?: number;
     liveFills?: number;
     liveProcessed?: number;
@@ -150,7 +152,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
         <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
-        <KV k="Sets" v={`${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.activeCount ?? 0) > 0} />
+        <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
         <KV
           k="Live sets (cost-net)"
           v={`${sets.liveActive ?? liveSets?.active ?? 0}/${sets.liveProcessed ?? liveSets?.processed ?? 0} processed · PF ${Number(sets.livePf ?? liveSets?.last15Ratio ?? 0).toFixed(2)} · n ${sets.liveFills ?? liveSets?.fills ?? 0}`}

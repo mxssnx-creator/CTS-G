@@ -312,6 +312,7 @@ export type LiveStats = {
       families?: { base?: number; trail?: number };
       setCount?: number;
       activeCount?: number;
+      validatedCount?: number;
       histFills?: number;
       liveFills?: number;
       liveProcessed?: number;
@@ -409,6 +410,7 @@ export type LiveStats = {
     controlsOk?: number;
     controlsMissing?: number;
     controlsSecurity?: number;
+    validatedSetCount?: number;
     symbolCount?: number;
     lastError?: string;
     trackPrefix?: string;
@@ -526,6 +528,7 @@ export type LiveStats = {
     stepAdapt?: boolean;
     steps?: number[];
     activeCount?: number;
+    validatedCount?: number;
     histFills?: number;
     liveFills?: number;
     liveProcessed?: number;
@@ -568,6 +571,7 @@ export type LiveStats = {
         cycle?: number;
       };
       activeCount?: number;
+      validatedCount?: number;
       setCount?: number;
       ready?: boolean;
       histFills?: number;
