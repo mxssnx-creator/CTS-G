@@ -5474,7 +5474,7 @@ class Pulse:
         limit = str(self.sets.lookback)
         reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
         stored = 0
-        chunk = 4
+        chunk = 10
         for i in range(0, len(reqs), chunk):
             done = min(i, len(reqs))
             self.sets.progress.detail = f"fetch {done}/{len(reqs)}"
@@ -5483,12 +5483,20 @@ class Pulse:
             batch = reqs[i : i + chunk]
             sd_notify("WATCHDOG=1")
             rows = []
-            if hasattr(self.api, "gather_public"):
-                rows = self.api.gather_public(batch, timeout=6.0)
-            else:
-                for path, extra in batch:
-                    body = self.api.public(path, extra)
-                    rows.append((path, extra, body))
+            try:
+                if hasattr(self.api, "gather_public"):
+                    rows = self.api.gather_public(batch, timeout=6.0)
+                else:
+                    for path, extra in batch:
+                        try:
+                            body = self.api.public(path, extra)
+                            rows.append((path, extra, body))
+                        except Exception as e:
+                            print(f"fetch-err {extra.get('symbol')}: {e}")
+                            rows.append((path, extra, None))
+            except Exception as e:
+                print(f"batch-err {i}: {e}")
+                rows = [(r[0], r[1], None) for r in batch]
             for _path, extra, body in rows:
                 s = extra.get("symbol")
                 bars = self._parse_klines((body or {}).get("data"))
