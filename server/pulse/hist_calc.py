@@ -1202,14 +1202,16 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
             if heavy:
-                book._commit_hist(hist, ind_hist)
+                # Each symbol is committed atomically in on_item(). Replaying
+                # the still-empty aggregate maps here would erase those tapes
+                # and make indications appear gate-closed at the end of a run.
                 rows = expand_rows(book)
                 job["rows"] = rows[:80]
                 job["rowCount"] = len(rows)
                 job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
                 job["kinds"] = book.ind_gate_snapshot()
-                job["byDirection"] = direction_rollup(book, hist)
-                job["byStrategy"] = strategy_rollup(book, hist, strat_hist)
+                job["byDirection"] = direction_rollup(book)
+                job["byStrategy"] = strategy_rollup(book, strat=strat_hist)
             job["detail"] = (
                 f"{phase} {done}/{total} · {int(job.get('validatedCount') or 0)}/"
                 f"{int(job.get('rowCount') or len(book.by_idx))} validated · {fills} fills"
