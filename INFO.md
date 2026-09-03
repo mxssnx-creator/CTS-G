@@ -128,10 +128,15 @@ ssh -i /secure/path/snet-ln-deb01.txt -p 2222 root@127.0.0.1 \
 
 The 2026-09-03 revalidation confirmed the pinned fingerprint, the proxied
 Chisel session, SSH authentication as `root`, and the SSH service behind the
-forward. The prior deployment validation reached hostname
-`v2202607384858486523`, found `/opt/cts-g` at commit
-`bf8afab66251e6170f3d7297cd0003676222e02e`, and returned `active` for the desk,
-sidecar, both pulse engines and Redis.
+forward. The latest deployment reached hostname `v2202607384858486523` and
+installed commit `6296ebfa7b6aef7ddae92579961fe5e8e9e7d32c` in both
+`/opt/cts-g` and `/workspace/CTS-G`. Desk, pulse HTTP and Redis were healthy;
+the two pulse instances were then intentionally stopped after the remote
+resolver returned `Temporary failure in name resolution` for the exchange
+endpoint, so no retry loop or order activity is created. The read-only public
+overview recovered to `OPERATIONAL` and reported CTS-G `up` with HTTP 200.
+The verified post-deploy checkpoint is
+`/workspace/backups/CTS-G/20260903T070101Z-post-deploy-signals-block`.
 
 ### Failure interpretation
 
