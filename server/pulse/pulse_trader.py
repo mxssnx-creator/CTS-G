@@ -21,7 +21,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from typing import Any, Deque, Dict, List, Optional, Tuple
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -239,6 +239,42 @@ def extract_oid(r: Any) -> str:
                         if oid:
                             return oid
     return real_oid(r.get("orderId") or r.get("orderID"))
+
+
+def order_fill_qty(data: Any, requested: float = 0.0) -> float:
+    """Read executed quantity without turning an unfilled order into a fill.
+
+    BingX responses vary by endpoint: market responses may expose quantity or
+    origQty, while fill/order responses expose executedQty. An explicit zero
+    must remain zero, and a malformed or oversized response is never allowed
+    to inflate the local position, Block lane, DCA lane, or balance estimate.
+    """
+    try:
+        want = max(0.0, float(requested or 0.0))
+    except Exception:
+        want = 0.0
+
+    def number(value: Any) -> Optional[float]:
+        try:
+            parsed = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(parsed) or parsed < 0:
+            return None
+        return parsed
+
+    if isinstance(data, dict):
+        for key in ("executedQty", "filledQty", "cumQty", "filled"):
+            if key in data and data.get(key) not in (None, ""):
+                parsed = number(data.get(key))
+                if parsed is not None:
+                    return min(parsed, want) if want > 0 else parsed
+        for key in ("quantity", "origQty"):
+            if key in data and data.get(key) not in (None, ""):
+                parsed = number(data.get(key))
+                if parsed is not None:
+                    return min(parsed, want) if want > 0 else parsed
+    return want
 
 
 def ctrl_payload(
@@ -2737,7 +2773,11 @@ class Pulse:
         data = (r.get("data") or {}).get("order") or r.get("data") or {}
         self.last_error = ""
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
-        filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+        filled = order_fill_qty(data, qty)
+        if filled <= 0:
+            self.cooldown[sym] = time.time() + 12.0
+            log(f"ENTRY no fill {sym} {side}", every=20.0, key=f"nofill:{sym}")
+            return
         attached_sl = extract_oid(data.get("stopLoss") if isinstance(data.get("stopLoss"), dict) else {"data": {"stopLoss": data.get("stopLoss")}}) if isinstance(data, dict) else ""
         attached_tp = extract_oid(data.get("takeProfit") if isinstance(data.get("takeProfit"), dict) else {"data": {"takeProfit": data.get("takeProfit")}}) if isinstance(data, dict) else ""
         ind = None
@@ -2803,7 +2843,8 @@ class Pulse:
             self.seen_fill_cids.add(cid)
         self.last_entry_ts = time.time()
         self.fees_est += filled * avg * 0.0005
-        self.available = max(0.0, self.available - margin)
+        actual_margin = (filled * avg) / max(1, lev)
+        self.available = max(0.0, self.available - actual_margin)
         if getattr(self, "control_orders", True):
             pos.ctrl_verified = False
             self.place_ctrl_pair(pos)
@@ -3236,9 +3277,9 @@ class Pulse:
             b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
         except Exception:
             b_stack = 0
-        b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
-        b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1)
-        b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
+        b_ratio = finite_number(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1, 1.0)
+        b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
+        b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
         real_pf = 1.1
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
@@ -3774,7 +3815,11 @@ class Pulse:
                     continue
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
-            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+            filled = order_fill_qty(data, qty)
+            if filled <= 0:
+                self.block_last_emit = time.time()
+                log(f"BLOCK NO FILL {pos.symbol} #{row['blockCount']}", every=20.0, key=f"block-nofill:{pos.symbol}")
+                continue
             oid = str(data.get("orderId") or "")
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
@@ -3782,7 +3827,8 @@ class Pulse:
             # weighted entry
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
             pos.notional = pos.qty * pos.entry
-            self.available = max(0.0, self.available - margin)
+            actual_margin = (filled * avg) / max(1, self.leverage_for(c))
+            self.available = max(0.0, self.available - actual_margin)
             if getattr(self, "control_orders", True):
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False
@@ -3919,7 +3965,11 @@ class Pulse:
                 continue
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
-            filled = float(data.get("quantity") or data.get("origQty") or qty) or qty
+            filled = order_fill_qty(data, qty)
+            if filled <= 0:
+                self.dca_last_emit = time.time()
+                log(f"DCA NO FILL {pos.symbol} #{row['n']}", every=20.0, key=f"dca-nofill:{pos.symbol}")
+                continue
             self.dca.record_fill(row["lane"], row["step"], filled, avg, cid)
             pos.qty += filled
             pos.entry = ((pos.entry * (pos.qty - filled)) + avg * filled) / pos.qty if pos.qty else avg
@@ -3936,7 +3986,8 @@ class Pulse:
                 pos.sl = pos.entry * (1 - sl_pct) if pos.side == "LONG" else pos.entry * (1 + sl_pct)
             except Exception:
                 pass
-            self.available = max(0.0, self.available - margin)
+            actual_margin = (filled * avg) / max(1, self.leverage_for(c))
+            self.available = max(0.0, self.available - actual_margin)
             if getattr(self, "control_orders", True):
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False

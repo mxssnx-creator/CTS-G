@@ -21,6 +21,14 @@ BLOCK_PF_RATIO_MIN = 0.5
 BLOCK_PF_RATIO_MAX = 5.0
 
 
+def finite_number(value: Any, fallback: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return fallback
+    return parsed if parsed == parsed and abs(parsed) != float("inf") else fallback
+
+
 def clamp(n: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, n))
 
@@ -128,9 +136,9 @@ class BlockBook:
         # Live adds: 1..6 (default 3). Evals always walk 1..12 independently.
         self.max_stack = clamp_stack(raw_stack)
         self.eval_n = BLOCK_EVAL_N
-        self.volume_ratio = clamp(float(cfg.get("blockVolumeRatio", 1) or 1), 0.25, 3.0)
-        self.pf_ratio = clamp(float(cfg.get("blockProfitFactorRatio", 1.1) or 1.1), BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
-        self.pause_ratio = max(0, int(cfg.get("blockPauseCountRatio", 1) or 1))
+        self.volume_ratio = clamp(finite_number(cfg.get("blockVolumeRatio", 1) or 1, 1.0), 0.25, 3.0)
+        self.pf_ratio = clamp(finite_number(cfg.get("blockProfitFactorRatio", 1.1) or 1.1, 1.1), BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
+        self.pause_ratio = max(0, int(finite_number(cfg.get("blockPauseCountRatio", 1) or 1, 1.0)))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
         self.default_min_pf = float(cfg.get("defaultMinPF", 1.25) or 1.25)
@@ -148,14 +156,32 @@ class BlockBook:
         if not os.path.exists(self.path):
             return
         try:
-            raw = json.load(open(self.path))
+            with open(self.path) as state_file:
+                raw = json.load(state_file)
         except Exception:
             return
+        if not isinstance(raw, dict):
+            return
+        leg_fields = set(BlockLeg.__dataclass_fields__)
         for k, v in (raw.get("lanes") or {}).items():
-            legs = [BlockLeg(**leg) for leg in v.get("legs") or []]
+            if not isinstance(v, dict):
+                continue
+            symbol = str(v.get("symbol") or "").strip().upper()
+            side = str(v.get("side") or "").strip().upper()
+            if not symbol or side not in ("LONG", "SHORT"):
+                continue
+            legs: List[BlockLeg] = []
+            for raw_leg in v.get("legs") or []:
+                if not isinstance(raw_leg, dict):
+                    continue
+                try:
+                    leg = BlockLeg(**{name: raw_leg[name] for name in leg_fields if name in raw_leg})
+                except (TypeError, ValueError):
+                    continue
+                legs.append(leg)
             lane = BlockLane(
-                symbol=v["symbol"],
-                side=v["side"],
+                symbol=symbol,
+                side=side,
                 base_qty=float(v.get("base_qty") or 0),
                 base_entry=float(v.get("base_entry") or 0),
                 confirmed_add=float(v.get("confirmed_add") or 0),
@@ -342,7 +368,11 @@ class BlockBook:
         return pf, len(ring)
 
     def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = 1.0) -> Dict[str, Any]:
-        inc = calculate_block_volume_increment_ratio(count, self.volume_ratio)
+        # Gate against the same cumulative target used by the order planner.
+        # This keeps PF coordination honest when a loss-held factor changes the
+        # actual volume target; count × configured ratio would understate it.
+        formula = self.formula(lane.base_qty, count, lane)
+        inc = float(formula.get("volumeIncrement") or 0.0)
         configured = calculate_block_minimum_profit_factor(self.default_min_pf, self.pf_ratio, inc)
         normal = self.normal_pf(lane)
         observed, n = self.observed_pf(lane, count)
@@ -736,6 +766,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
     d_win = b.pf_decision(lane4, 2, intern_pf=1.0)
     rec("blk-warm-win-passes", d_win["passesProfitFactor"] is True and d_win["observedProfitFactor"] >= 1.0,
         str(d_win))
+
+    # PF gates must use the same cumulative target as volume planning when a
+    # loss-held factor changes a rung; count×ratio would understate the gate.
+    held_lane = BlockLane(symbol="HELD-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
+    held_lane.pf_ring[2] = [-0.01] * 5
+    held_lane.parent_pf_ring = [-0.01] * 8
+    held_lane.held_factor[2] = 2.0
+    held_decision = b.pf_decision(held_lane, 2, intern_pf=1.5)
+    rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - 1.33) < 1e-9,
+        str(held_decision))
 
     # parent close isolates sides + stores cost-net fraction
     b.on_parent_close("SOL-USDT", "LONG", 1.5, pnl_pct=0.0015)
