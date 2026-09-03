@@ -299,7 +299,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
-  maxDdTimeS: 0,
+  maxDdTimeS: 27000,
   scratchS: 600,
   scratchMinPct: 0.16,
   scanS: 0.2,
@@ -404,7 +404,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setPfWindow: 15,
   setDeactN: 25,
   setMinPf: 1.15,
-  setMaxDdTimeS: 1800,
+  setMaxDdTimeS: 27000,
   setAutoDeact: true,
   setUseHistoricGate: true,
   setStrictGate: true,
@@ -724,7 +724,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, 1.15),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 1800),
+    setMaxDdTimeS: num(cts.setMaxDdTimeS, 27000),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),
@@ -765,6 +765,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.trailGiveMax = 0.5;
   out.setMinStep = Math.max(3, Math.min(22, Math.round(num(out.setMinStep, 3))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
+  out.maxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.maxDdTimeS, 27000) / 600) * 600));
+  out.setMaxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.setMaxDdTimeS, 27000) / 600) * 600));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),

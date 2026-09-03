@@ -42,7 +42,7 @@ LOOKBACK_MAX = 4320  # three days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
-STEP_MIN = 2
+STEP_MIN = 3
 STEP_LIVE_MIN = 3
 STEP_MAX = 22
 HIST_CAP = 48
@@ -626,7 +626,7 @@ class SetBook:
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.15)
-        self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
+        self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 8)))
@@ -1521,6 +1521,76 @@ class SetBook:
             self._replay_kind_tapes(
                 symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
             )
+        # Signals are an independent execution lane. Keep a dedicated Block
+        # tape instead of only attributing Block results to the aggregate
+        # indications pack.
+        if (
+            strat_hist is not None
+            and "indications" in self.packs
+            and bool(getattr(self, "hist_block", True))
+        ):
+            signal_sigs = kind_sigs.get("signals") or []
+            if any(d != 0 for d, _ in signal_sigs):
+                self._replay_kind_strategy_tape(
+                    symbol, bars, signal_sigs, strat_hist.setdefault("block:signals", []),
+                    now, warmup, time_bars, scratch_bars, honor_tp,
+                    kind="signals",
+                )
+
+    def _replay_kind_strategy_tape(
+        self,
+        symbol: str,
+        bars: Sequence[Sequence[float]],
+        sigs: Sequence[Tuple[int, float]],
+        output: List[Dict[str, Any]],
+        now: float,
+        warmup: int,
+        time_bars: int,
+        scratch_bars: int,
+        honor_tp: bool,
+        *,
+        kind: str,
+    ) -> None:
+        """Replay one indication kind through the independent Block strategy."""
+        n = len(bars)
+        if n <= warmup:
+            return
+        base_ts = now - (n - 1) * BAR_S
+        tp_frac = max(0.0020, step_tp_pct(self.min_step_cfg, self.cost_pct))
+        sl_frac = max(0.0015, tp_frac * 0.6)
+        for want_side in (1, -1):
+            open_pos: Optional[Dict[str, Any]] = None
+            cool = 0
+            for i in range(warmup, n):
+                bar = bars[i]
+                ts = base_ts + i * BAR_S
+                if open_pos is not None:
+                    open_pos, rec = self._advance_pos(
+                        open_pos, bar, i, strategy="block",
+                        sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
+                        arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
+                        honor_tp=honor_tp, ts=ts, symbol=symbol,
+                        st_id=f"indications:{kind}:block", pack="indications",
+                    )
+                    if rec:
+                        rec["ind_kind"] = kind
+                        rec["reason"] = f"block:{kind}:{rec.get('reason') or 'exit'}"
+                        output.append(rec)
+                        cool = self.cooldown_bars
+                    if open_pos is not None:
+                        continue
+                if cool > 0:
+                    cool -= 1
+                    continue
+                d, conf = sigs[i]
+                if d == 0 or conf < 0.52 or d != want_side:
+                    continue
+                close = float(bar[3])
+                if close <= 0:
+                    continue
+                sl = close * (1 - sl_frac) if d > 0 else close * (1 + sl_frac)
+                tp = close * (1 + tp_frac) if d > 0 else close * (1 - tp_frac)
+                open_pos = self._seed_pos(d, close, sl, tp, i, f"ind:{kind}")
 
     def _replay_kind_tapes(
         self,
@@ -2923,6 +2993,24 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ind_fills = sum(len(v) for v in g6.ind_hist.values())
     out.append(("ind-hist-kinds", ind_fills >= 4 and set(g6.ind_hist) == {"signals", "direction"}, f"kinds={sorted(g6.ind_hist)} n={ind_fills}"))
     out.append(("ind-hist-validated-kind", g6.ind_stats("signals")["validated"], f"{g6.ind_stats('signals')}"))
+    # Signals must also have an independently attributable historic Block tape.
+    g6b = SetBook()
+    g6b.load({
+        "histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20,
+        "stratIndications": True, "stratGeneral": False, "stratTrailing": False,
+        "stratBlock": True, "histSimulateBlock": True, "setMinStep": 3, "setStepMax": 3,
+        "slToTpRatios": [0.6], "setHonorTp": True, "setHistTimeBars": 12,
+    })
+    g6b.ingest_bars("BLOCK-SIG-USDT", synth_trend(240, 42.0, 0.2, 0.05))
+    _orig_votes_b = indication_kind_votes
+    globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig")]
+    block_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
+    try:
+        g6b.replay_symbol_partial("BLOCK-SIG-USDT", {}, now=1_700_000_500, strat_hist=block_hist, drop_bars=False)
+    finally:
+        globals()["indication_kind_votes"] = _orig_votes_b
+    signal_block = block_hist.get("block:signals") or []
+    out.append(("ind-block-signals-independent", len(signal_block) >= 1 and all(r.get("ind_kind") == "signals" for r in signal_block), f"n={len(signal_block)}"))
     # Real synth: Signals / State / Move fire independently (no mock)
     g7 = SetBook()
     g7.load({

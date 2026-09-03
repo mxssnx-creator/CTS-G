@@ -190,8 +190,11 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
         keys.append(pack)
     reason = str(r.get("reason") or "").lower()
     head = reason.split(":")[0].split()[0] if reason else ""
+    kind = _kind_of(r)
     if head.startswith("block") or pack == "block":
         keys.append("block")
+        if kind == "signals":
+            keys.append("block:signals")
     if head.startswith("dca") or pack == "dca":
         keys.append("dca")
     trail = str(r.get("trail_key") or r.get("trailKey") or "")
@@ -199,7 +202,6 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
         keys.append("trailing")
     if any(tok in reason for tok in ("lock", "peak", "rev", "time-exit", "hard", "exit:")) or head in ("sl", "tp", "trail"):
         keys.append("exits")
-    kind = _kind_of(r)
     if kind:
         keys.append("indications")
         keys.append(f"indications:{kind}")
@@ -268,7 +270,7 @@ def by_strategy(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, An
         blob = _bucket_stats(v, cost_pct)
         blob["strategy"] = k
         out[k] = blob
-    for k in STRAT_KEYS:
+    for k in STRAT_KEYS + ("block:signals",):
         out.setdefault(k, {**_bucket_stats([], cost_pct), "strategy": k})
     return out
 
