@@ -609,7 +609,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setAutoDeact": True,
         "setMinSamples": 8,
         "setMinPf": 1.15,
-        "setMaxDdTimeS": 1800,
+        "setMaxDdTimeS": 27000,
         "setMinStep": int(opt.get("minStep") or 3),
         "setStepMax": int(opt.get("stepMax") or 22),
         "stratTrailing": bool(opt.get("trailing", True)),
