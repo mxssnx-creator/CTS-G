@@ -129,7 +129,7 @@ TRAIL_ARM = 0.0032
 TRAIL_GIVE = 0.0016
 TIME_STOP_S = 21600
 MAX_HOLD_S = 21600
-MAX_DD_TIME_S = 0.0  # 0 = off; max seconds a position may stay underwater
+MAX_DD_TIME_S = 27000.0  # default 450 minutes; configurable 10..650 minutes
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
@@ -3154,7 +3154,7 @@ class Pulse:
         else:
             TIME_STOP_S = MAX_HOLD_S
         if ov.get("maxDdTimeS") is not None:
-            MAX_DD_TIME_S = min(86400.0, max(0.0, float(ov["maxDdTimeS"])))
+            MAX_DD_TIME_S = min(650.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
         else:
             MAX_DD_TIME_S = 0.0
         if ov.get("scratchS"):

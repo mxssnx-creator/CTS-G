@@ -220,7 +220,9 @@ must contain no bootstrap transport artifacts or credentials.
 Historic validation accepts 2–72 hours (1m bars); the three-day stress run is
 `hours=72` / `lookback=4320`. It processes every enabled pack, SL:TP ratio,
 trailing arm/give pair, step, direction and indication kind, plus independent
-Block and DCA tapes. `validated #/#` means cost-adjusted PF >= 1.0 with the
+Block and DCA tapes. Signals additionally publish a separate `block:signals`
+historic ledger by symbol and direction; this is evaluation evidence for the
+same-parent live Block add-on, not a standalone order. `validated #/#` means cost-adjusted PF >= 1.0 with the
 required evaluation sample; `active #/#` is intentionally stricter and also
 requires the configured enable PF and drawdown-time limit. Historic row counts
 may exceed the catalog count because LONG, SHORT and BOTH are reported as
@@ -235,8 +237,11 @@ The Settings catalog exposes the same bounded ranges used by the engines:
 | Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
 | Historic | `120–4320` 1m bars, `2–72h`; min bars and warmup remain bounded by the replay window |
 | Block | Historic evaluates counts `1–12`; live stack is bounded to `1–6`; `0` selects the default live stack `3` |
+| Block + Signals | `block:signals` is independently replayed and attributed by `ind_kind=signals`; live Block remains parent-only and cannot open standalone |
 | DCA | `0` uses the configured distance list; explicit max is `1–12`; distance is clamped to `0.05–8%`, first add is at least `1.2%`, later adds are at least `0.4%` apart, multiplier is `0.25–2.5×` |
 | Indications | `state`, `direction`, `move`, `active`, `common`, `signals`, `trend`, `break`; each has independent LONG/SHORT statistics |
+| Drawdown time | `10–650 min`, step `10`, default `450 min`; backend stores seconds and applies the same bounds to historic Set gates and live underwater force-close |
+| Min step | System minimum `3`; every configured step from min through max is processed |
 
 The UI's `Validated rows` count includes expanded LONG/SHORT/BOTH report views;
 `Catalog valid sets` is the actual Set catalog count. Overview, Results and
