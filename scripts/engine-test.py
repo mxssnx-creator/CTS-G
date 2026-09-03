@@ -254,9 +254,9 @@ def stage_min_pf_test() -> None:
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.1, "main": 1.1, "real": 1.1},
+        c.stage_min_pf == {"base": 1.0, "main": 1.0, "real": 1.0},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.1) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.0) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -295,14 +295,14 @@ def stage_min_pf_test() -> None:
     # 5) main/real stages report floors in the stages snapshot
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
-        stages.get("base", {}).get("minPf") == 1.1
-        and stages.get("main", {}).get("minPf") == 1.1
-        and stages.get("real", {}).get("minPf") == 1.1,
+        stages.get("base", {}).get("minPf") == 1.0
+        and stages.get("main", {}).get("minPf") == 1.0
+        and stages.get("real", {}).get("minPf") == 1.0,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.1, "main": 1.1, "real": 1.1},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.0, "main": 1.0, "real": 1.0},
         str(snap.get("stageMinPf")))
 
 
