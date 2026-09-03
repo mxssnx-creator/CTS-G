@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 import { lastNCostPf, formatDuration } from "@/lib/analytics";
 import type { KindStat, LiveClosed, LiveStats, SideStat, StrategyStat } from "@/lib/live-stats";
 
-const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common"] as const;
-const STRATEGY_KEYS = ["indications", "general", "block", "trailing", "dca", "exits"] as const;
+const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const;
+const STRATEGY_KEYS = ["indications", "general", "block", "block:signals", "trailing", "dca", "exits"] as const;
 
 const KIND_SET = new Set<string>(INDICATION_KINDS);
 
@@ -24,7 +24,10 @@ function stratsOf(c: LiveClosed): string[] {
   if (["indications", "general", "block", "dca"].includes(pack)) keys.push(pack);
   const reason = String(c.reason || "").toLowerCase();
   const head = reason.split(":")[0].split(" ")[0] || "";
-  if (head.startsWith("block") || pack === "block") keys.push("block");
+  if (head.startsWith("block") || pack === "block") {
+    keys.push("block");
+    if (kindOf(c) === "signals") keys.push("block:signals");
+  }
   if (head.startsWith("dca") || pack === "dca") keys.push("dca");
   const trail = String(c.trail_key || "");
   if (trail && trail !== "0" && trail !== "off") keys.push("trailing");
@@ -65,12 +68,15 @@ const KIND_HINT: Record<string, string> = {
   direction: "Two-window reversal",
   move: "Same-window displacement",
   common: "RSI + MACD + EMA + Bollinger",
+  trend: "Multi-window trend slope",
+  break: "Breakout / range escape",
 };
 
 const STRAT_HINT: Record<string, string> = {
   indications: "Indication pack entries",
   general: "General pack entries",
   block: "Count stack on a live parent",
+  "block:signals": "Signals-specific Block ledger",
   trailing: "Arm / give trail family",
   dca: "Adverse-step book",
   exits: "Lock / peak / rev / time / hard",

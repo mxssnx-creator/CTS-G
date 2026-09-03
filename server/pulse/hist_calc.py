@@ -778,18 +778,18 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         groups.setdefault(st.kind, []).extend(rows)
         groups.setdefault(f"{st.pack}:{st.kind}", []).extend(rows)
         groups.setdefault("core", []).extend(rows)
-    for key in ("block", "dca"):
+    for key in ("block", "block:signals", "dca"):
         groups.setdefault(key, list((strat or {}).get(key) or []))
     if strat:
         for key, tape in strat.items():
-            if key in ("block", "dca"):
+            if key in ("block", "block:signals", "dca"):
                 continue
             if tape:
                 groups[str(key)] = list(tape)
     out: Dict[str, Any] = {}
     for key, tape in groups.items():
         win = book.pf_n
-        if key in ("block", "dca", "core"):
+        if key in ("block", "block:signals", "dca", "core"):
             win = max(book.pf_n, min(80, len(tape) or 1))
         pf = last_n_cost_pf(tape, win, book.cost_pct)
         nets = [row_net_pnl(r, book.cost_pct) for r in tape]

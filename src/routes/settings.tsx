@@ -1191,13 +1191,13 @@ function SettingsPage() {
                 />
                 <Slider
                   label="Max DD time"
-                  value={overlay.setMaxDdTimeS}
-                  min={60}
-                  max={3600}
-                  step={30}
-                  unit="s"
-                  hint="Enable a Set only if its max underwater time stays under this. Rank prefers lower DDt."
-                  onChange={(v) => patch("setMaxDdTimeS", v)}
+                  value={Math.round(overlay.setMaxDdTimeS / 60)}
+                  min={10}
+                  max={650}
+                  step={10}
+                  unit="min"
+                  hint="10–650 min · default 450 · a Set must stay under this DDt cap"
+                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)}
                 />
                 <Slider
                   label="Min samples"
@@ -1331,7 +1331,7 @@ function SettingsPage() {
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
                 <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
                 <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
-                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 5))} />
+                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 3))} />
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
               </Grid>
             </Card>
@@ -1700,7 +1700,7 @@ function SettingsPage() {
                 <Num label="Min PF" value={overlay.minPf} min={1} max={2.3} step={0.02} onChange={(v) => patch("minPf", v)} />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={overlay.minStep} min={1} max={12} step={1} onChange={(v) => patch("minStep", v)} />
+                <Num label="Min step" value={Math.max(3, overlay.minStep)} min={3} max={12} step={1} hint="System minimum is 3" onChange={(v) => patch("minStep", Math.max(3, Math.min(12, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
@@ -1843,7 +1843,7 @@ function SettingsPage() {
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time s" value={overlay.maxDdTimeS} min={0} max={86400} step={60} hint="0 = off · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", v)} />
+                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={650} step={10} hint="10–650 min · default 450 · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={300} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>

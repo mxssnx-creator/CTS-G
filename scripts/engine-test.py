@@ -1778,8 +1778,8 @@ def dd_time_test() -> None:
     # 7) config model + desk expose the field
     cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
     st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
-    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 0," in cm)
-    rec("dd-time-settings-ui", 'Max DD time s' in st and 'patch("maxDdTimeS", v)' in st)
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 27000," in cm)
+    rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 
 def main() -> int:
