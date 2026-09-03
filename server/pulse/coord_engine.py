@@ -56,10 +56,10 @@ class Coordinator:
             "cont": Axis(True, 8),
             "pause": Axis(True, 8),
         }
-        self.min_pf = 1.25
+        self.min_pf = 1.1
         # Stage PositionCost PF floors on the cost scale (1.00 = neutral):
         # Base / Main / Real all 1.25 systemwide.
-        self.stage_min_pf = {"base": 1.25, "main": 1.25, "real": 1.25}
+        self.stage_min_pf = {"base": 1.1, "main": 1.1, "real": 1.1}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -99,7 +99,7 @@ class Coordinator:
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
             st = stages_cts.get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.25)
+            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.1)
         except Exception:
             self.min_pf = float(ov.get("minPf") or 1.25)
         # Per-stage floors: overlay wins, then strategies.main.<stage>, then 1.25.
@@ -107,7 +107,7 @@ class Coordinator:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
         except Exception:
             stages_cts = {}
-        for _stage, _dflt in (("base", 1.25), ("main", 1.25), ("real", 1.25)):
+        for _stage, _dflt in (("base", 1.1), ("main", 1.1), ("real", 1.1)):
             _v = ov.get(f"{_stage}MinPf")
             if _v is None:
                 try:

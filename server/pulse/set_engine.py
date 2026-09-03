@@ -199,6 +199,7 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
         "episodes": float(episodes),
         "maxS": round(max_s, 1),
         "avgS": round(total_s / episodes, 1) if episodes else 0.0,
+        "totalS": total_s,
         "currentS": round(current, 1),
         "maxDepth": round(max_depth, 6),
         "inDd": 1.0 if started is not None else 0.0,
@@ -219,10 +220,11 @@ def drawdown_time_by_symbol(rows: Sequence[Dict[str, Any]], now: Optional[float]
     if not parts:
         return drawdown_time(rows, now)
     episodes = sum(p["episodes"] for p in parts)
+    total_s = sum(p["totalS"] for p in parts)
     return {
         "episodes": float(episodes),
         "maxS": round(max(p["maxS"] for p in parts), 1),
-        "avgS": round(sum(p["avgS"] for p in parts) / len(parts), 1),
+        "avgS": round(total_s / episodes, 1) if episodes else 0.0,
         "currentS": round(max(p["currentS"] for p in parts), 1),
         "maxDepth": round(max(p["maxDepth"] for p in parts), 6),
         "inDd": 1.0 if any(p["inDd"] for p in parts) else 0.0,
@@ -625,7 +627,7 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.15)
+        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.1)
         self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
@@ -1153,7 +1155,7 @@ class SetBook:
                 replayed_symbols=processed_symbols if merge else names,
             )
             coverage_done = len(self._hist_seen) if merge else (done if aborted else len(names))
-            complete = (not merge and not aborted) or (merge and symbols_total > 0 and coverage_done >= symbols_total)
+            complete = (not merge and not aborted) or (merge and coverage_done >= symbols_total)
             if complete:
                 self.progress.phase = "ready"
                 self.progress.pct = 100.0
