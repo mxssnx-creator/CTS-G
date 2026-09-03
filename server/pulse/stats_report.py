@@ -532,6 +532,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "setStepMax": sets.get("stepMax"),
         "setCount": sets.get("setCount"),
         "setActive": sets.get("activeCount"),
+        "setValidated": sets.get("validatedCount"),
         "histFills": sets.get("histFills"),
         "liveFills": sets.get("liveFills"),
         "liveProcessed": sets.get("liveProcessed"),
@@ -583,9 +584,9 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             **(st.get("coverage") or {}),
         },
         "defaults": {
-            "setMinStep": 8,
-            "setStepMax": 12,
-            "minStep": 6,
+            "setMinStep": 3,
+            "setStepMax": 22,
+            "minStep": 3,
             "exitRevOn": False,
             "exitMinHoldS": 45,
             "useMaxLeverage": True,
@@ -676,13 +677,13 @@ def render_md(blob: Dict[str, Any]) -> str:
     types = cov.get("indicationTypes") or {}
     hits = cov.get("indicationHits") or {}
     lines.append("- strategies: " + ", ".join(f"{k}={'ON' if v else 'off'}" for k, v in strat.items()))
-    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in ("state", "direction", "move", "active", "common", "signals")))
+    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in ("state", "direction", "move", "active", "common", "signals", "trend", "break")))
     bcov = cov.get("block") or {}
     lines.append(f"- block enabled={bcov.get('enabled')} counts={bcov.get('countN')} stack={bcov.get('maxStack')} liveLanes={bcov.get('liveLanes')}")
     for c in bcov.get("allCounts") or []:
         lines.append(f"  n={c.get('n')} inc={c.get('inc')}× add={c.get('targetAdd')} tot={c.get('targetBlock')} minPF={c.get('minPF')}")
     scov = cov.get("sets") or {}
-    lines.append(f"- sets {scov.get('activeCount')}/{scov.get('setCount')} histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}")
+    lines.append(f"- sets valid {scov.get('validatedCount')}/{scov.get('setCount')} · active {scov.get('activeCount')}/{scov.get('setCount')} histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}")
     cc = cov.get("controls") or {}
     lines.append(f"- controls ok={cc.get('ok')} missing={cc.get('missing')} open={cc.get('open')}")
     lines += ["", "## Block strategy", ""]

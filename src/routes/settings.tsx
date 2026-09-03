@@ -620,7 +620,7 @@ function SettingsPage() {
                     label="Hours"
                     value={calcOpt.hours}
                     min={8}
-                    max={24}
+                    max={72}
                     step={1}
                     hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
@@ -689,6 +689,16 @@ function SettingsPage() {
                     on={calcOpt.indTypeCommon}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeCommon: v }))}
                   />
+                  <EnableSlider
+                    label="Trend"
+                    on={calcOpt.indTypeTrend}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeTrend: v }))}
+                  />
+                  <EnableSlider
+                    label="Break"
+                    on={calcOpt.indTypeBreak}
+                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeBreak: v }))}
+                  />
                 </Grid>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -722,7 +732,11 @@ function SettingsPage() {
                       <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, calcJob.pct || 0))}%` }} />
                     </div>
                     <div className="grid gap-3 sm:grid-cols-3">
-                      <KV k="Validated sets" v={`${calcJob.validatedCount ?? 0}/${calcJob.rowCount ?? 0}`} />
+                      <KV k="Validated rows" v={`${calcJob.validatedCount ?? 0}/${calcJob.rowCount ?? 0}`} />
+                      <KV
+                        k="Catalog valid sets"
+                        v={`${calcJob.coverage?.validatedCount ?? 0}/${calcJob.coverage?.setCount ?? calcJob.coverage?.product ?? 0}`}
+                      />
                       <KV k="Source" v={String(calcJob.source || "—")} />
                       <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
                       <KV
@@ -1067,14 +1081,14 @@ function SettingsPage() {
           {section === "packs" && (
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
-                <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals" onChange={(v) => patch("stratIndications", v)} />
+                <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
-                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts, 0 = unlimited" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
+                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="historic counts 1–12 · live stack 1–6 · 0 uses default 3" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block adds on a live parent for every count (max stack {overlay.blockMaxStack || "unlimited"}).
+                Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–12).
                 Trailing only moves SL after min-step. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
@@ -1095,7 +1109,7 @@ function SettingsPage() {
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
                   min={120}
-                  max={1440}
+                  max={4320}
                   step={60}
                   hint={`${overlay.histLookbackBars} × 1m = ${(overlay.histLookbackBars / 60).toFixed(1)}h`}
                   onChange={(v) => patch("histLookbackBars", v)}
@@ -1346,9 +1360,9 @@ function SettingsPage() {
                   label="Max stack"
                   value={overlay.blockMaxStack}
                   min={0}
-                  max={10000}
+                  max={6}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="0 = default 3 · live is capped at 6 · historic evaluates counts 1–12"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
@@ -1533,9 +1547,9 @@ function SettingsPage() {
                   label="Max steps"
                   value={overlay.dcaMaxSteps}
                   min={0}
-                  max={10000}
+                  max={12}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="0 = configured distance list (default 4) · hard max 12"
                   onChange={(v) => patch("dcaMaxSteps", v)}
                 />
                 <Num
@@ -1619,9 +1633,10 @@ function SettingsPage() {
                     key={`mult-${i}`}
                     label={`Vol × #${i + 1}`}
                     value={m}
-                    min={0.5}
-                    max={8}
+                    min={0.25}
+                    max={2.5}
                     step={0.1}
+                    hint="Backend clamp 0.25–2.5×"
                     onChange={(v) => {
                       const next = [...(overlay.dcaStepVolumeMultipliers || [])];
                       next[i] = v;
@@ -1789,7 +1804,7 @@ function SettingsPage() {
           )}
 
           {section === "indication" && (
-            <Card title="Indications" hint="CTS types: State is the consensus Indication · Direction / Move / Active / Common / Signals run independently">
+            <Card title="Indications" hint="CTS types: State is the consensus Indication · Direction / Move / Active / Common / Signals / Trend / Break run independently">
               <Grid>
                 <EnableSlider label="Indications on" on={overlay.indEnabled} onChange={(v) => patch("indEnabled", v)} />
                 <EnableSlider label="State" on={overlay.indTypeState !== false} hint="tf_combined + low-stop consensus — the Indication" onChange={(v) => patch("indTypeState", v)} />
@@ -1798,6 +1813,8 @@ function SettingsPage() {
                 <EnableSlider label="Active" on={overlay.indTypeActive !== false} hint="outbreak 3/5/10 vs previous window" onChange={(v) => patch("indTypeActive", v)} />
                 <EnableSlider label="Common" on={overlay.indTypeCommon !== false} hint="RSI + MACD + EMA + Bollinger" onChange={(v) => patch("indTypeCommon", v)} />
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
+                <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
+                <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />
                 <Num label="Min agreement" value={overlay.indMinAgreement} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinAgreement", v)} />
@@ -1811,7 +1828,7 @@ function SettingsPage() {
                 <KV k="Noise filter" v={String(num(cts?.activeNoiseFilter, 0.05))} />
               </Grid>
               <p className="mt-3 text-xs text-muted">
-                State is the actual Indication (combined TF + multi-source consensus). Direction, Move, Active, Common and Signals
+                State is the actual Indication (combined TF + multi-source consensus). Direction, Move, Active, Common, Signals, Trend and Break
                 process additionally and independently when their slider is ON.
               </p>
             </Card>
@@ -2262,7 +2279,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
           <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}{updating ? " · updating" : ""}{gate}</span>
           <span className="text-muted">
-            {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
+            valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
           </span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">

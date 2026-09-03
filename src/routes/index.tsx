@@ -563,7 +563,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={p?.ready ? "text-primary" : "text-warn"}>
-          sets · {p?.phase ?? "idle"} · {active}/{s?.setCount ?? 0} live
+          sets · {p?.phase ?? "idle"} · valid {s?.validatedCount ?? 0}/{s?.setCount ?? 0} · active {active}/{s?.setCount ?? 0}
           {updating ? " · updating" : ""}{gate}
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
         </span>
@@ -582,7 +582,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
               <div key={ln.id || ln.type}>
                 <div className="flex justify-between text-muted">
                   <span className={ln.running && !ln.halted ? "text-primary" : "text-faint"}>
-                    {ln.type} {ln.activeCount ?? 0}/{ln.setCount ?? 0}
+                    {ln.type} valid {ln.validatedCount ?? 0}/{ln.setCount ?? 0} · active {ln.activeCount ?? 0}/{ln.setCount ?? 0}
                   </span>
                   <span>{ln.progress?.phase ?? "idle"}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>

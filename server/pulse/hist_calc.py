@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent 20h historic calc — no Pulse.run() / grok-pulse@ required.
+"""Independent historic calc — no Pulse.run() / grok-pulse@ required.
 
 Walks every selected pack × SL:TP × trail × step across all symbols on 1m
 bars, scores PositionCost PF + drawdown-time, and ranks for positive PF
@@ -46,6 +46,7 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 20
+HOURS_MAX = 72
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
@@ -278,26 +279,12 @@ PRESETS: List[Dict[str, Any]] = [
         },
     },
 ]
-for _p in PRESETS:
-    _pt = _p["patch"]
-    _pt["setMinStep"] = 2
-    _pt["setStepMax"] = 4
-    _pt["setMinPf"] = 1.15
-    _pt["minPf"] = 1.25
-    _pt["baseMinPf"] = 1.25
-    _pt["mainMinPf"] = 1.25
-    _pt["realMinPf"] = 1.25
-    _pt["blockProfitFactorRatio"] = 1.25
-    _pt["dcaMinPf"] = 1.25
-    _pt["exitMinPf"] = 1.25
-
-
 def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
     try:
         h = float(hours)
     except Exception:
         h = float(default)
-    h = max(2.0, min(24.0, h))
+    h = max(2.0, min(HOURS_MAX, h))
     return max(120, min(LOOKBACK_MAX, int(round(h * BARS_PER_HOUR))))
 
 
@@ -469,6 +456,8 @@ def default_options() -> Dict[str, Any]:
         "indTypeMove": True,
         "indTypeActive": True,
         "indTypeCommon": True,
+        "indTypeTrend": True,
+        "indTypeBreak": True,
     }
 
 
@@ -477,7 +466,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     opt = default_options()
     if body.get("hours") is not None:
         try:
-            opt["hours"] = max(2, min(24, int(body["hours"])))
+            opt["hours"] = max(2, min(HOURS_MAX, int(body["hours"])))
         except Exception:
             pass
     for k, lo, hi in (("minStep", 3, 22), ("stepMax", 3, 22)):
@@ -489,7 +478,8 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if opt["stepMax"] < opt["minStep"]:
         opt["stepMax"] = opt["minStep"]
     for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs", "allSymbols",
-              "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon"):
+              "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon",
+              "indTypeTrend", "indTypeBreak"):
         if k in body:
             opt[k] = bool(body[k])
     if not opt["stratIndications"] and not opt["stratGeneral"]:
@@ -1282,7 +1272,7 @@ def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     seed.update({
         "phase": "queued",
         "pct": 0.5,
-        "detail": "starting independent 20h calc",
+        "detail": "starting independent historic calc",
         "options": parse_options(body),
         "hours": parse_options(body)["hours"],
         "startedAt": time.time(),
@@ -1344,7 +1334,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("preset-low-sl", all(float(p["patch"].get("slToTpRatio") or 9) <= 0.6 + 1e-9 for p in PRESETS), str([p["patch"].get("slToTpRatio") for p in PRESETS]))
     rec("preset-gate", all(p["patch"].get("setUseHistoricGate") and p["patch"].get("setStrictGate") for p in PRESETS))
     rec("preset-lookback", all(int(p["patch"].get("histLookbackBars") or 0) >= 720 for p in PRESETS))
+    step_grid = [int(p["patch"].get("setMinStep") or 0) for p in PRESETS]
+    step_max = [int(p["patch"].get("setStepMax") or 0) for p in PRESETS]
+    rec("preset-step-grid-preserved", step_grid == [12, 10, 8, 10, 10, 8, 12, 8], str(step_grid))
+    rec("preset-step-bounds", all(3 <= lo <= hi <= 22 for lo, hi in zip(step_grid, step_max)), str(list(zip(step_grid, step_max))))
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
+    rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-clamp", hours_to_bars(99) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
     rec("opt-dca-default-off", parse_options({})["stratDca"] is False)
     rec("opt-block-default-on", parse_options({})["stratBlock"] is True)
@@ -1352,7 +1347,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
     rec("opt-steps-full-default", parse_options({})["minStep"] == 3 and parse_options({})["stepMax"] == 22, str(parse_options({})))
-    rec("opt-ind-types-on", parse_options({})["indTypeSignals"] is True and parse_options({})["indTypeState"] is True)
+    rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
+        "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
+        "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
+    )))
     rec("opt-hours-20", parse_options({})["hours"] == 20)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
@@ -1380,13 +1378,15 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-ready", job.get("phase") == "ready" and not job.get("error"), f"{job.get('phase')} {job.get('error')}")
     rec("calc-independent", job.get("independent") is True)
     rec("calc-rows", int(job.get("rowCount") or 0) >= 20, str(job.get("rowCount")))
+    covj = job.get("coverage") or {}
+    rec("calc-validated-count", 0 <= int(job.get("validatedCount") or 0) <= int(job.get("rowCount") or 0) and 0 <= int(covj.get("validatedCount") or 0) <= int(covj.get("setCount") or covj.get("product") or 0), f"rows={job.get('validatedCount')}/{job.get('rowCount')} catalog={covj.get('validatedCount')}/{covj.get('setCount')}")
+    rec("calc-positive-pf-validation", all(float(r.get("last15Ratio") or 0) + 1e-9 >= 1.0 for r in (job.get("rows") or []) if r.get("validated")), "validated rows have PF >= 1.0 after cost")
     rec("calc-source", job.get("source") in ("synth", "mixed"), str(job.get("source")))
     packs = set((job.get("coverage") or {}).get("packs") or [])
     rec("calc-packs", "indications" in packs and "general" in packs, str(packs))
     sls = {round(float(r["slRatio"]), 1) for r in (job.get("rows") or []) if r.get("kind") == "base"}
     cov_sl = set((job.get("coverage") or {}).get("slRatios") or []) or set(((job.get("coverage") or {}).get("bySl") or {}).keys())
     rec("calc-all-sl", sls >= {0.2, 0.6, 1.0, 1.6, 2.6} or len(cov_sl) >= 13, str(sorted(sls)))
-    covj = job.get("coverage") or {}
     rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
     rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))
