@@ -32,11 +32,13 @@ from set_engine import SetBook, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
+from storage_paths import DATA_DIR
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
 BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
-DIR = "/opt/grok-x01-pulse"
+# Runtime state lives outside the checkout so reinstalling code preserves it.
+DIR = str(DATA_DIR)
 STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
 TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
 STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")
