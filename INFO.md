@@ -37,28 +37,49 @@ Q0MxL4WHKwM2JbRy6/6fAUee3600R7pPo1CKov8/EPc=
 Managed ChatGPT/Codex workers may be unable to open a raw socket to the public
 IP even though the VPS ports are healthy. Chisel therefore **must use the same
 HTTP/HTTPS network proxy already configured in the workspace**. Direct Chisel
-failed in that environment; the proxied command and the complete SSH round
-trip were verified on 2026-09-02.
+repeatedly failed with `network is unreachable`; the proxied command and the
+complete SSH round trip were revalidated on 2026-09-03.
 
-Load `CHISEL_AUTH` only from the protected access info. Never paste it into a
-command committed to Git, a workflow, a log, or this document.
+The working architecture has four separate values/roles:
+
+| Item | Role | Safe handling |
+|---|---|---|
+| Chisel server key (`ck-...`) | Verifies the server fingerprint | Never use it as an SSH login key |
+| Chisel auth (`user:password`) | Authenticates the Chisel client | Read only from protected access info |
+| SSH ED25519 identity | Authenticates `root` through the tunnel | `0600`, outside Git and logs |
+| Pinned fingerprint | Detects a wrong Chisel server | Keep exact; never skip verification |
+
+Load `CHISEL_AUTH` only from the protected access info. Never paste the value
+into a command committed to Git, a workflow, a log, or this document. Prefer
+the `AUTH` environment variable supported by Chisel so the credential is not
+placed in the process argument list:
 
 ```bash
-test -n "$HTTPS_PROXY"
+set -euo pipefail
+test -n "${HTTPS_PROXY:-}"
 
-chisel client \
+PROTECTED_ACCESS_INFO=/secure/path/ssh-chisel.txt
+CHISEL_AUTH="$(sed -n 's/.*--auth[[:space:]]\+\([^[:space:]]*\).*/\1/p' "$PROTECTED_ACCESS_INFO" | head -n 1)"
+test -n "$CHISEL_AUTH"
+
+AUTH="$CHISEL_AUTH" chisel client \
   --proxy "$HTTPS_PROXY" \
   --fingerprint 'Q0MxL4WHKwM2JbRy6/6fAUee3600R7pPo1CKov8/EPc=' \
-  --auth "$CHISEL_AUTH" \
   http://152.53.114.112:8090 \
   127.0.0.1:2222:127.0.0.1:22
 ```
 
-Keep that client running, then connect through the local endpoint in another
-terminal:
+If the protected file uses a plain `CHISEL_AUTH=...` entry instead, source it
+only in a protected shell and keep the value out of command history and output.
+The older `--auth "$CHISEL_AUTH"` form is equivalent, but less private because
+the value can be visible in process arguments.
+
+Keep the client running, then connect through the local endpoint:
 
 ```bash
+chmod 600 /secure/path/snet-ln-deb01.txt
 ssh \
+  -o BatchMode=yes \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=accept-new \
   -i /secure/path/snet-ln-deb01.txt \
@@ -66,13 +87,51 @@ ssh \
 ```
 
 In execution environments where background processes and subsequent commands
-use isolated network namespaces, start Chisel and run SSH in the same execution
-session. On an ordinary host that can reach `152.53.114.112:8090` directly,
-`--proxy "$HTTPS_PROXY"` may be omitted. It is not optional in the managed
-workspace described above.
+use isolated network namespaces, start Chisel and run SSH in the **same
+execution session**, not merely in two visually adjacent terminals. A reliable
+sequence is: start the client, wait until its local listener exists, run
+`ssh-keyscan -p 2222 127.0.0.1` into a protected temporary `known_hosts` file,
+then run SSH from that same session. On an ordinary host that can reach
+`152.53.114.112:8090` directly, `--proxy "$HTTPS_PROXY"` may be omitted. It is
+not optional in the managed workspace described above.
 
-The mapping is always local port **2222** to remote port **22**. `222` and
-`22222` are incorrect.
+The mapping is always local port **2222** to remote port **22**.
+`222` and `22222` are incorrect. Do not use a second Chisel client on the same
+local port; stop the stale client or document a deliberate temporary port.
+
+### Independent server-key check
+
+The attached `ck-...` value is an inline Chisel ECDSA private key. It is not a
+Root SSH identity. When that protected server-key file is available, verify its
+fingerprint locally without contacting the VPS:
+
+```bash
+chisel server --host 127.0.0.1 --port 0 \
+  --keyfile /secure/path/chisel-server-key.txt 2>&1 \
+  | sed -n '/Fingerprint/p'
+```
+
+The expected fingerprint is the pinned value above. Stop on any mismatch; do
+not replace the pin based on a single untrusted route.
+
+### Read-only validation
+
+After the tunnel is established, use the separate SSH identity for a safe
+round-trip check:
+
+```bash
+ssh -i /secure/path/snet-ln-deb01.txt -p 2222 root@127.0.0.1 \
+  'set -eu; hostname; id -u; git -C /opt/cts-g rev-parse HEAD; \
+   systemctl is-active redis-server grok-desk grok-pulse-http \
+   grok-pulse@bingx-x02 grok-pulse@bingx-x01'
+```
+
+The 2026-09-03 revalidation confirmed the pinned fingerprint, the proxied
+Chisel session, SSH authentication as `root`, and the SSH service behind the
+forward. The prior deployment validation reached hostname
+`v2202607384858486523`, found `/opt/cts-g` at commit
+`bf8afab66251e6170f3d7297cd0003676222e02e`, and returned `active` for the desk,
+sidecar, both pulse engines and Redis.
 
 ### Failure interpretation
 
@@ -81,21 +140,31 @@ The mapping is always local port **2222** to remote port **22**. `222` and
 | Raw IP reports `network is unreachable`, but proxy is configured | Use `--proxy "$HTTPS_PROXY"`; do not change the forwarding ports. |
 | Chisel reports fingerprint mismatch | Stop. Independently verify the new fingerprint from a trusted route before changing the pinned value. |
 | Chisel returns unauthorized | The protected auth value is stale; do not remove authentication or print the value. |
-| Tunnel connects but SSH fails | Confirm the identity, its `0600` permission, `IdentitiesOnly=yes`, and that the mapping is `2222:127.0.0.1:22`. |
+| Tunnel listener exists but Chisel later says authentication failed | A local listener can appear before server authentication completes; wait for the authenticated connection log, then test SSH. |
+| SSH says `Permission denied (publickey,password)` | The Chisel `ck-...` server key is the wrong key for SSH. Use the separate authorized ED25519 identity, its `0600` permission, and `IdentitiesOnly=yes`. |
+| Tunnel connects but SSH handshake fails | Confirm the same-session rule, `2222:127.0.0.1:22` mapping, and that the remote SSH service is listening on `127.0.0.1:22`. |
 | Local port 2222 is occupied | Stop the stale local client or deliberately select another local port and document that temporary deviation. |
+| Remote `git fetch` hangs | Do not depend on VPS-to-GitHub egress. Transfer a locally verified Git bundle through the SSH tunnel and fetch from that local bundle after creating a remote checkpoint. |
 
-### Read-only validation
+### Remote update path when VPS GitHub egress is blocked
 
-After the tunnel is established, a safe validation is:
+The VPS may have a healthy application network while outbound GitHub fetches
+stall. After the read-only check and a verified backup, transfer the already
+verified local bundle through the same tunnel:
 
 ```bash
+scp -P 2222 -i /secure/path/snet-ln-deb01.txt \
+  /secure/local/cts-g-main-<sha>.bundle root@127.0.0.1:/tmp/cts-g-main.bundle
+
 ssh -i /secure/path/snet-ln-deb01.txt -p 2222 root@127.0.0.1 \
-  'hostname; git -C /opt/cts-g rev-parse HEAD; systemctl is-active redis-server grok-desk grok-pulse-http grok-pulse@bingx-x02 grok-pulse@bingx-x01'
+  'set -eu; git bundle verify /tmp/cts-g-main.bundle; \
+   git -C /workspace/CTS-G fetch /tmp/cts-g-main.bundle \
+   refs/remotes/github/main:refs/remotes/github/main'
 ```
 
-The 2026-09-02 validation reached hostname `v2202607384858486523`, found
-`/opt/cts-g` at commit `bf8afab66251e6170f3d7297cd0003676222e02e`, and returned
-`active` for the desk, sidecar, both pulse engines and Redis.
+Compare the fetched commit to the GitHub-approved SHA before deploying. Keep
+the bundle outside Git and remove it through the approved cleanup procedure
+after the post-deployment checkpoint; never copy credentials with it.
 
 ## Access priority
 
