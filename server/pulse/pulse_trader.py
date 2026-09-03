@@ -32,11 +32,13 @@ from set_engine import SetBook, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
+from storage_paths import DATA_DIR
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
 BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
-DIR = "/opt/grok-x01-pulse"
+# Runtime state lives outside the checkout so reinstalling code preserves it.
+DIR = str(DATA_DIR)
 STATS_PATH = os.path.join(DIR, f"stats-{CONN_SHORT}.json")
 TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
 STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")
@@ -677,6 +679,11 @@ class Pulse:
         self._warm_stop = False
         self._stats_lock = threading.Lock()
         self.hist_busy = False
+        self._hist_fetch_next = 0.0
+        self._hist_fetch_failures = 0
+        self._hist_fetch_last = 0.0
+        self._hist_fetch_stored = 0
+        self._hist_deferred = ""
         self._stats_ts = 0.0
         self._stats_force = False
         self.last_scan_io = False
@@ -1662,14 +1669,25 @@ class Pulse:
         self.seed_px_bars()
         self.rollup_tf()
         if now < self.kline_ban:
+            self._kline_deferred = f"exchange cooldown {max(0.0, self.kline_ban - now):.1f}s"
             return
+        budget = self._budget()
+        if not bool(getattr(budget, "kline_rest", True)):
+            self._kline_deferred = f"load budget {getattr(budget, 'level', 'unknown')}"
+            return
+        self._kline_deferred = ""
         ready1 = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or []) >= 20)
         need1 = len(SYMBOLS) if len(SYMBOLS) <= 48 else max(32, len(SYMBOLS) // 2)
         filling = ready1 < max(1, need1)
         reqs = []
-        tfs = tuple(TF_EVERY.keys())
         if filling:
-            tfs = ("1m", "5m")
+            tfs = ["1m"] + (["5m"] if bool(getattr(budget, "tf_5m", True)) else [])
+        else:
+            tfs = [
+                tf for tf in TF_EVERY
+                if tf == "1m" or (tf == "5m" and bool(getattr(budget, "tf_5m", True)))
+                or (tf == "15m" and bool(getattr(budget, "tf_15m", True)))
+            ]
         for tf in tfs:
             every = TF_EVERY.get(tf, 2.0)
             if not self.tf_on.get(tf, True):
@@ -1678,7 +1696,8 @@ class Pulse:
             if not due:
                 continue
             due.sort(key=lambda s: self.kline_ts_tf[tf].get(s, 0))
-            batch = due[: TF_BATCH.get(tf, 4)]
+            batch_limit = max(1, min(TF_BATCH.get(tf, 4), int(getattr(budget, "kline_batch", 4) or 1)))
+            batch = due[:batch_limit]
             for s in batch:
                 reqs.append(("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": tf, "limit": str(KLINE_LIMIT)}))
         if not reqs:
@@ -1711,7 +1730,10 @@ class Pulse:
                 _store(extra.get("symbol") or "", extra.get("interval") or "1m", body)
         self.klines = self.klines_tf["1m"]
         self.kline_ts = self.kline_ts_tf["1m"]
-        self.last_kline = now
+        # A cooled, failed, or budget-suppressed batch must remain due. Only
+        # successful storage advances the aggregate refresh marker.
+        if stored:
+            self.last_kline = now
 
     def ema(self, xs: List[float], n: int) -> float:
         if not xs:
@@ -4595,13 +4617,17 @@ class Pulse:
         ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
         book_syms = set(self.open)
         issues = []
+        confirmed_book_only = []
         for pos in self.open.values():
             if pos.symbol not in live:
                 if pos.symbol in pending_absent:
                     continue
+                confirmed_book_only.append(pos.symbol)
                 issues.append(f"book-only {pos.symbol}")
-        if abs(len(self.open) - len(book_syms & live)) > 0 and book_syms - live:
-            issues.append(f"count book={len(self.open)} live_ours={len(live - {x.split(':')[0] for x in foreign})}")
+        # Count mismatches only from confirmed absences. Pending entries are
+        # inside the exchange confirmation window and must not fail QA.
+        if confirmed_book_only:
+            issues.append(f"count confirmed={len(confirmed_book_only)} live_ours={len(live - {x.split(':')[0] for x in foreign})}")
         self.recon_pending = bool(pending_absent)
         self.recon_ok = not issues
         if issues:
@@ -5078,6 +5104,7 @@ class Pulse:
                 hits[i.kind] = hits.get(i.kind, 0) + 1
         scov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
         live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
+        progress = getattr(self.sets, "progress", None)
         stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
         ours_open = [p for p in self.open.values() if getattr(p, "ours", True)]
         with_set = sum(1 for p in ours_open if getattr(p, "set_id", ""))
@@ -5143,6 +5170,16 @@ class Pulse:
                 "allCounts": catalog,
                 "liveLanes": sum(1 for ln in self.block.lanes.values() if ln.active),
                 "activeReal": bool(getattr(self.block, "active_real", True)),
+            },
+            "history": {
+                "busy": bool(getattr(self, "hist_busy", False)),
+                "phase": getattr(progress, "phase", "idle"),
+                "ready": bool(getattr(progress, "ready", False)),
+                "detail": str(getattr(progress, "detail", ""))[:180],
+                "fetchStored": int(getattr(self, "_hist_fetch_stored", 0) or 0),
+                "fetchFailures": int(getattr(self, "_hist_fetch_failures", 0) or 0),
+                "fetchNext": float(getattr(self, "_hist_fetch_next", 0.0) or 0.0),
+                "deferred": str(getattr(self, "_hist_deferred", "") or "")[:180],
             },
             "sets": {
                 "families": scov.get("families"),
@@ -5504,9 +5541,18 @@ class Pulse:
             str(tr_g),
         )
 
-    def _hist_fetch(self) -> None:
+    def _hist_fetch(self) -> bool:
         if not self.sets.enabled:
-            return
+            return False
+        now = time.time()
+        if now < float(getattr(self, "_hist_fetch_next", 0.0) or 0.0):
+            self._hist_deferred = f"history fetch backoff {self._hist_fetch_next - now:.1f}s"
+            self.sets.progress.phase = "deferred"
+            self.sets.progress.pct = 100.0 if self.sets.progress.ready else 0.0
+            self.sets.progress.detail = self._hist_deferred
+            return False
+        self._hist_fetch_last = now
+        self._hist_deferred = ""
         # A refresh can run while the previous historic gate is still valid.
         # Reset only the displayed work counters here; keep ``ready`` intact
         # until a replacement replay has completed so live entries do not
@@ -5557,7 +5603,17 @@ class Pulse:
             time.sleep(0.12)
         self.sets.progress.symbols_done = len(SYMBOLS)
         self.sets.progress.pct = 8.0
-        self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)}"
+        self._hist_fetch_stored = stored
+        if stored:
+            self._hist_fetch_failures = 0
+            self._hist_fetch_next = time.time() + 30.0
+            self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)} · next fetch in 30s"
+        else:
+            self._hist_fetch_failures = min(6, int(self._hist_fetch_failures) + 1)
+            delay = min(300.0, 15.0 * (2 ** (self._hist_fetch_failures - 1)))
+            self._hist_fetch_next = time.time() + delay
+            self.sets.progress.detail = f"fetch empty {stored}/{len(SYMBOLS)} · retry in {delay:.0f}s"
+        return bool(stored)
 
     def _hist_loop(self) -> None:
         while not self._hist_stop:
@@ -5579,9 +5635,20 @@ class Pulse:
                         p.detail = f"history deferred · load {b.level}"
                     else:
                         have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                        if have < max(4, len(SYMBOLS) // 2) or time.time() - self.sets.last_run >= self.sets.refresh_s:
+                        min_ready = max(4, len(SYMBOLS) // 2)
+                        fetch_needed = have < min_ready
+                        if fetch_needed or time.time() - self.sets.last_run >= self.sets.refresh_s:
                             self._hist_fetch()
-                        self.hist_busy = True
+                            have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
+                        # Do not enter replay with an unfillable cache. The old
+                        # path replayed an empty/short book every 2.4s, keeping
+                        # hist_busy asserted and starving the warm feed.
+                        if have < min_ready:
+                            p = self.sets.progress
+                            p.phase = "deferred"
+                            p.pct = 100.0 if p.ready else 0.0
+                            p.detail = self._hist_deferred or f"history waiting for bars {have}/{min_ready}"
+                        self.hist_busy = have >= min_ready
                         nbar = [0]
                         def _hist_step():
                             nbar[0] += 1
@@ -5594,7 +5661,7 @@ class Pulse:
                                 names, self.load.cursor_hist = self.load.scan_window(
                                     names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
                                 )
-                            if b.hist_run:
+                            if b.hist_run and have >= min_ready:
                                 already = bool(getattr(self.sets, "progress", None) and self.sets.progress.ready)
                                 self.sets.replay_all(
                                     on_step=_hist_step,

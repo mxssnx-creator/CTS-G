@@ -12,9 +12,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
+from storage_paths import DATA_DIR, atomic_write, path_for, storage_info
 
-DIR = "/opt/grok-x01-pulse"
-STOP_ALL_PATH = os.path.join(DIR, "STOP")
+DIR = str(DATA_DIR)
+STOP_ALL_PATH = path_for("STOP")
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [

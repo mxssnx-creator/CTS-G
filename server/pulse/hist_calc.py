@@ -30,6 +30,7 @@ from set_engine import (
     drawdown_time_by_symbol,
     synth_trend,
 )
+from storage_paths import path_for
 
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
@@ -294,14 +295,7 @@ def job_path() -> str:
     env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
     if env:
         return env
-    here = os.path.dirname(os.path.abspath(__file__))
-    for d in (here, "/opt/grok-x01-pulse", "/tmp"):
-        try:
-            if os.path.isdir(d) and os.access(d, os.W_OK):
-                return os.path.join(d, "hist-calc.json")
-        except Exception:
-            continue
-    return os.path.join(here, "hist-calc.json")
+    return path_for("hist-calc.json")
 
 
 def req_path() -> str:
@@ -540,6 +534,7 @@ def load_universe() -> List[str]:
     names: List[str] = []
     here = os.path.dirname(os.path.abspath(__file__))
     for path in (
+        path_for("universe.json"),
         os.path.join(os.path.dirname(job_path()), "universe.json"),
         os.path.join(here, "universe.json"),
         "/opt/grok-x01-pulse/universe.json",
@@ -1207,14 +1202,16 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["pct"] = round(8.0 + (done / max(1, total)) * 82.0, 1)
             job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
             if heavy:
-                book._commit_hist(hist, ind_hist)
+                # Each symbol is committed atomically in on_item(). Replaying
+                # the still-empty aggregate maps here would erase those tapes
+                # and make indications appear gate-closed at the end of a run.
                 rows = expand_rows(book)
                 job["rows"] = rows[:80]
                 job["rowCount"] = len(rows)
                 job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
                 job["kinds"] = book.ind_gate_snapshot()
-                job["byDirection"] = direction_rollup(book, hist)
-                job["byStrategy"] = strategy_rollup(book, hist, strat_hist)
+                job["byDirection"] = direction_rollup(book)
+                job["byStrategy"] = strategy_rollup(book, strat=strat_hist)
             job["detail"] = (
                 f"{phase} {done}/{total} · {int(job.get('validatedCount') or 0)}/"
                 f"{int(job.get('rowCount') or len(book.by_idx))} validated · {fills} fills"
