@@ -303,6 +303,8 @@ def order_fill_qty(data: Any, requested: float = 0.0) -> float:
     origQty, while fill/order responses expose executedQty. An explicit zero
     must remain zero, and a malformed or oversized response is never allowed
     to inflate the local position, Block lane, DCA lane, or balance estimate.
+    Partial fills are valid progress even while an order remains open; only a
+    response with no execution fields may use the legacy requested-size fallback.
     """
     try:
         want = max(0.0, float(requested or 0.0))
@@ -318,24 +320,29 @@ def order_fill_qty(data: Any, requested: float = 0.0) -> float:
             return None
         return parsed
 
+    terminal = {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}
     if isinstance(data, dict):
+        # Executed fields win over order quantity, including a non-zero
+        # PARTIALLY_FILLED/CANCELED order that has already filled some size.
         for key in ("executedQty", "filledQty", "cumQty", "filled"):
             if key in data and data.get(key) not in (None, ""):
                 parsed = number(data.get(key))
                 if parsed is not None:
                     return min(parsed, want) if want > 0 else parsed
         status = str(data.get("status") or data.get("orderStatus") or data.get("state") or "").strip().upper()
-        if status and status not in {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}:
-            # Quantity on a NEW/PARTIALLY_FILLED order is the requested size,
-            # not executed size. Leave the order pending for the next poll.
+        if status and status not in terminal:
+            # quantity/origQty is the requested size on NEW and PARTIALLY_FILLED
+            # responses, not an executed fill. Keep it pending for polling.
             return 0.0
         for key in ("quantity", "origQty"):
             if key in data and data.get(key) not in (None, ""):
                 parsed = number(data.get(key))
                 if parsed is not None:
                     return min(parsed, want) if want > 0 else parsed
-        if status in {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}:
+        if status in terminal:
             return want
+    # Existing market-order responses without a status/execution field have
+    # historically meant "the requested market size was filled".
     return want
 
 
@@ -865,22 +872,31 @@ class Pulse:
         """Attach a restart-safe control identity and bounded lineage metadata."""
         if legacy is not None:
             pos.legacy_aggregate = bool(legacy)
+        # Old snapshots may not have explicit percentages. Derive identity from
+        # the current baseline without rewriting their persisted trigger prices.
+        sl_value = _sf(getattr(pos, "sl_pct", 0), SL_PCT) or SL_PCT
+        tp_value = _sf(getattr(pos, "tp_pct", 0), TP_PCT) or TP_PCT
         if self.per_config_controls(pos):
-            pos.control_sl_bp = normalize_control_pct(pos.sl_pct)
-            pos.control_tp_bp = normalize_control_pct(pos.tp_pct)
-            pos.control_range_key = control_range_key(pos.sl_pct, pos.tp_pct)
+            pos.control_sl_bp = normalize_control_pct(sl_value)
+            pos.control_tp_bp = normalize_control_pct(tp_value)
+            pos.control_range_key = control_range_key(sl_value, tp_value)
             pos.control_group_key = pos.control_group_key or make_control_group_key(
-                pos.symbol, pos.side, pos.sl_pct, pos.tp_pct
+                pos.symbol, pos.side, sl_value, tp_value
             )
         else:
-            pos.control_group_key = pos.control_group_key or ""
-            pos.control_range_key = pos.control_range_key or "aggregate"
+            # Aggregate mode is one symbol/direction scope. Never let a stale
+            # range key make the disabled mode look like per-config controls.
+            pos.control_group_key = ""
+            pos.control_range_key = "aggregate"
+            pos.control_sl_bp = 0
+            pos.control_tp_bp = 0
         for attr, value in (
             ("lineage_set_ids", getattr(pos, "set_id", "")),
             ("lineage_parent_set_ids", getattr(pos, "parent_set_id", "")),
             ("lineage_axis_keys", getattr(pos, "axis_key", "")),
             ("lineage_packs", getattr(pos, "pack", "")),
             ("member_client_ids", getattr(pos, "client_id", "")),
+            ("member_order_ids", getattr(pos, "order_id", "")),
         ):
             rows = getattr(pos, attr, None)
             if not isinstance(rows, list):
@@ -891,13 +907,14 @@ class Pulse:
         pos.member_count = max(1, int(getattr(pos, "member_count", 1) or 1))
         return pos
 
+    def legacy_position_key(self, pos: Position) -> str:
+        """The aggregate control scope is symbol + hedge direction."""
+        return f"{str(getattr(pos, 'symbol', '') or '').upper()}:{str(getattr(pos, 'side', '') or '').upper()}"
+
     def position_key(self, pos: Position) -> str:
         if self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
             return str(pos.control_group_key)
-        # Legacy mode intentionally keeps the historical one-record-per-symbol
-        # representation. Existing symbol-keyed state must not be re-keyed into
-        # a range group merely because the default mode is enabled on restart.
-        return str(getattr(pos, "symbol", ""))
+        return self.legacy_position_key(pos)
 
     def logical_group_key(self, pos: Position) -> str:
         return self.position_key(pos) if self.per_config_controls(pos) else ""
@@ -1339,9 +1356,78 @@ class Pulse:
         log(f"FLATTEN untracked {symbol} {side} q={qty} n={(qty*(px or 0)):.1f} ok={ok}")
         return ok
 
+    def _reconcile_control_mode(self, per_config: bool) -> None:
+        """Re-key the in-memory book without dropping a group on a toggle.
+
+        Existing aggregate records stay aggregate when the default-on mode is
+        enabled. Disabling the mode merges same-symbol/same-side groups and
+        clears their old per-range controls before rebuilding one legacy pair.
+        """
+        rows = list(getattr(self, "open", {}).values())
+        if not rows:
+            return
+        if per_config:
+            next_book: Dict[str, Position] = {}
+            for pos in rows:
+                self.prepare_position_group(pos)
+                key = self.position_key(pos)
+                existing = next_book.get(key)
+                if existing is None:
+                    next_book[key] = pos
+                else:
+                    self.merge_position(existing, pos)
+                    self.clear_position_controls(existing)
+            self.open = next_book
+            return
+
+        grouped: Dict[Tuple[str, str], Position] = {}
+        for pos in rows:
+            try:
+                self.cancel_controls(pos.symbol, pos=pos)
+            except Exception:
+                pass
+            pos.legacy_aggregate = True
+            pos.control_group_key = ""
+            pos.control_range_key = "aggregate"
+            pos.control_sl_bp = 0
+            pos.control_tp_bp = 0
+            key = (str(pos.symbol or ""), str(pos.side or "").upper())
+            existing = grouped.get(key)
+            if existing is None:
+                grouped[key] = pos
+            else:
+                self.merge_position(existing, pos)
+                self.clear_position_controls(existing)
+                existing.sl_pct = max(float(existing.sl_pct or 0), float(pos.sl_pct or 0))
+                existing.tp_pct = max(float(existing.tp_pct or 0), float(pos.tp_pct or 0))
+                existing.sl, existing.tp = self.security_prices(existing)
+        next_book: Dict[str, Position] = {}
+        by_symbol: Dict[str, List[Position]] = {}
+        for pos in grouped.values():
+            by_symbol.setdefault(pos.symbol, []).append(pos)
+        for symbol, positions in by_symbol.items():
+            for pos in positions:
+                key = symbol if len(positions) == 1 else f"{symbol}:{pos.side}"
+                next_book[key] = pos
+        self.open = next_book
+        if getattr(self, "control_orders", True):
+            for pos in self.open.values():
+                try:
+                    self.ensure_controls(pos)
+                except Exception:
+                    pass
+
     def save_open_book(self) -> None:
         try:
-            blob = {self.position_key(p): asdict(p) for p in self.open.values()}
+            blob: Dict[str, Any] = {}
+            for pos in self.open.values():
+                base = self.position_key(pos) or str(pos.symbol or "position")
+                key = base
+                suffix = 2
+                while key in blob:
+                    key = f"{base}:{suffix}"
+                    suffix += 1
+                blob[key] = asdict(pos)
             tmp = OPEN_PATH + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(blob, f)
@@ -1475,7 +1561,9 @@ class Pulse:
             # an already-open position and place an unsafe second control pair.
             is_legacy = not bool(rec.get("control_group_key"))
             self.prepare_position_group(pos, legacy=is_legacy)
-            key = str(stored_key or pos.symbol) if is_legacy else self.position_key(pos)
+            # Re-key legacy symbol records by hedge side so LONG and SHORT
+            # aggregates cannot overwrite one another on restart.
+            key = self.position_key(pos)
             if key in self.open:
                 existing = self.open[key]
                 old_qty = max(0.0, float(existing.qty or 0))
@@ -3378,16 +3466,34 @@ class Pulse:
         self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
         return pos
 
-    def _upsert_pending_entry(self, row: Dict[str, Any], delta_qty: float, fill_px: float, order_id: str = "") -> Optional[Position]:
+    def _upsert_pending_entry(
+        self,
+        row: Dict[str, Any],
+        delta_qty: float,
+        fill_px: float,
+        order_id: str = "",
+        pending_qty: Optional[float] = None,
+    ) -> Optional[Position]:
         cid = str(row.get("client_id") or "")
         existing = self._position_for_client(cid)
         if existing is not None:
-            self._apply_position_fill(existing, delta_qty, fill_px, order_id=order_id)
+            self._apply_position_fill(
+                existing,
+                delta_qty,
+                fill_px,
+                order_id=order_id,
+                pending_qty=pending_qty,
+            )
+            self.save_open_book()
             return existing
         pos = self._pending_position(row, delta_qty, fill_px)
         if pos is None:
             return None
-        existing = self.position_for_group(pos.control_group_key) if self.per_config_controls(pos) else self.open.get(pos.symbol)
+        if pending_qty is not None:
+            pos.pending_qty = max(0.0, float(pending_qty or 0.0))
+        existing = self.position_for_group(pos.control_group_key) if self.per_config_controls(pos) else next(
+            iter(self.positions_for(pos.symbol, pos.side)), None
+        )
         if existing is not None:
             self.merge_position(existing, pos)
             pos = existing
@@ -3460,17 +3566,6 @@ class Pulse:
         px = self.px.get(sym) or 0
         if not c or px <= 0:
             return
-        qty = self.size_qty(c, px)
-        if qty <= 0:
-            return
-        notional = qty * px
-        if notional > self.max_book_notional() * 1.02:
-            return
-        self.ensure_max_leverage(sym)
-        lev = self.leverage_for(c)
-        margin = notional / max(1, lev)
-        if margin > float(self.available or 0) * 0.95:
-            return
         order_side = "BUY" if direction > 0 else "SELL"
         chosen = None
         try:
@@ -3515,6 +3610,8 @@ class Pulse:
         notional = qty * px
         if notional > self.max_book_notional(ratio=position_ratio) * 1.02:
             return
+        self.ensure_max_leverage(sym)
+        lev = self.leverage_for(c)
         margin = notional / max(1, lev)
         if margin > float(self.available or 0) * 0.95:
             return
@@ -3568,6 +3665,17 @@ class Pulse:
             "trail_arm": trail_arm / 100.0,
             "trail_give": trail_give / 100.0,
         }
+        pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a)
+        pending_meta["control_group_key"] = pending_group_key
+        self._remember_pending(
+            kind="entry",
+            cid=cid,
+            symbol=sym,
+            side=side,
+            requested_qty=qty,
+            group_key=pending_group_key,
+            metadata=pending_meta,
+        )
         # Entry is market-only. Nested SL/TP JSON on the same POST makes BingX
         # report "signature mismatch". Security SL/TP go on via control orders.
         attach: Dict[str, str] = {}
@@ -3606,7 +3714,7 @@ class Pulse:
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
-                cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
+                # Retry the same client id so the request remains idempotent.
                 r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
                 self.did_io = True
         if not self.ok(r):
@@ -3621,7 +3729,7 @@ class Pulse:
                     self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
                 self.lev_map[sym] = cap
                 self._persist_lev()
-                cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
+                # Retry the same client id after leverage discovery.
                 r = self.api.post(
                     "/openApi/swap/v2/trade/order",
                     _entry_body(qty, cid),
@@ -3631,11 +3739,12 @@ class Pulse:
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
             if m2 and not self.ok(r):
                 need = float(m2.group(1))
-                c.min_qty = max(float(c.min_qty or 0), need)
-                qty = self.round_qty_up(c, need)
-                if qty > 0:
-                    cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
-                    r = self.api.post(
+                    c.min_qty = max(float(c.min_qty or 0), need)
+                    qty = self.round_qty_up(c, need)
+                    if qty > 0:
+                        # Retry the same client id after correcting quantity.
+                        r = self.api.post(
+
                         "/openApi/swap/v2/trade/order",
                         _entry_body(qty, cid),
                     )
@@ -3682,6 +3791,19 @@ class Pulse:
         self.last_error = ""
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
         filled = order_fill_qty(data, qty)
+        order_id = extract_oid(data)
+        self._remember_pending(
+            kind="entry",
+            cid=cid,
+            symbol=sym,
+            side=side,
+            requested_qty=qty,
+            filled_qty=filled,
+            order_id=order_id,
+            avg_price=avg,
+            group_key=pending_group_key,
+            metadata=pending_meta,
+        )
         if filled <= 0:
             self.cooldown[sym] = time.time() + 12.0
             log(f"ENTRY no fill {sym} {side}", every=20.0, key=f"nofill:{sym}")
@@ -3742,6 +3864,9 @@ class Pulse:
             axis_key=str(getattr(chosen, "axis_key", "") or ""),
             relative_count=int(getattr(chosen, "relative_count", 1) or 1),
             volume_ratio=float(getattr(chosen, "volume_ratio", 1.0) or 1.0),
+            exchange_qty=filled,
+            pending_qty=max(0.0, qty - filled),
+            last_fill_at=time.time(),
         )
         pos.sl, pos.tp = self.security_prices(pos)
         if attached_sl:
@@ -3749,6 +3874,23 @@ class Pulse:
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
         self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
+        pending_meta.update({
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "control_group_key": getattr(pos, "control_group_key", "") or pending_group_key,
+        })
+        self._remember_pending(
+            kind="entry",
+            cid=cid,
+            symbol=sym,
+            side=side,
+            requested_qty=qty,
+            filled_qty=filled,
+            order_id=order_id,
+            avg_price=avg,
+            group_key=getattr(pos, "control_group_key", "") or pending_group_key,
+            metadata=pending_meta,
+        )
         merged = False
         if self.per_config_controls(pos):
             existing = self.position_for_group(pos.control_group_key)
@@ -3762,7 +3904,7 @@ class Pulse:
             else:
                 self.open[self.position_key(pos)] = pos
         else:
-            self.open[sym] = pos
+            self.open[self.position_key(pos)] = pos
         self.record_event(
             "position_open",
             stable_key(CONN_SHORT, "position_open", self.position_key(pos), cid),
@@ -3784,7 +3926,11 @@ class Pulse:
         self.owned_syms.add(sym)
         self.save_open_book()
         if cid:
-            self.seen_fill_cids.add(cid)
+            if filled + 1e-12 >= qty:
+                self._clear_pending(cid)
+                self.seen_fill_cids.add(cid)
+            else:
+                self.seen_fill_cids.discard(cid)
         self.last_entry_ts = time.time()
         self.fees_est += filled * avg * 0.0005
         actual_margin = (filled * avg) / max(1, lev)
@@ -4190,6 +4336,57 @@ class Pulse:
         except Exception:
             pass
 
+    def _set_control_mode(self, enabled: bool) -> None:
+        """Switch control grouping without losing position ownership."""
+        enabled = bool(enabled)
+        previous = bool(getattr(self, "control_orders_per_config", True))
+        self.control_orders_per_config = enabled
+        if previous == enabled:
+            return
+        if enabled:
+            # Ambiguous aggregate positions stay aggregate after enabling. A
+            # restart cannot safely infer their historical range from one pair
+            # of controls; only newly confirmed entries become range groups.
+            for pos in self.open.values():
+                if not getattr(pos, "legacy_aggregate", False):
+                    self.prepare_position_group(pos)
+            self.save_open_book()
+            return
+
+        # Disabling the mode intentionally collapses all known range groups by
+        # symbol + hedge side. Cancel the old quantity controls before merging
+        # so no stale range pair can remain active against the aggregate book.
+        merged: Dict[str, Position] = {}
+        for pos in list(self.open.values()):
+            if getattr(self, "control_orders", True):
+                try:
+                    self.cancel_controls(pos.symbol, pos=pos)
+                except Exception:
+                    pass
+            pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
+            pos.ctrl_verified = False
+            pos.controls_ok = False
+            pos.legacy_aggregate = True
+            self.prepare_position_group(pos, legacy=True)
+            key = self.position_key(pos)
+            current = merged.get(key)
+            if current is None:
+                merged[key] = pos
+            else:
+                self.merge_position(current, pos)
+                self.prepare_position_group(current, legacy=True)
+                current.sl_oid = current.tp_oid = current.sec_sl_oid = current.sec_tp_oid = ""
+                current.ctrl_verified = False
+                current.controls_ok = False
+        self.open = merged
+        self.save_open_book()
+        if getattr(self, "control_orders", True):
+            for pos in self.open.values():
+                try:
+                    self.place_ctrl_pair(pos)
+                except Exception:
+                    pass
+
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
@@ -4344,12 +4541,16 @@ class Pulse:
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
-        self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
-        self.control_orders_per_config = bool(
+        self.control_orders = _bool_setting(ov.get("controlOrders", cts.get("control_orders", True)), True)
+        control_orders_per_config = _bool_setting(
             ov.get(
                 "controlOrdersPerConfig",
-                ov.get("control_orders_per_config", cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", True))),
-            )
+                ov.get(
+                    "control_orders_per_config",
+                    cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", True)),
+                ),
+            ),
+            True,
         )
         self.coord.load(cts, ov)
         self.indications.load(ov)
@@ -4375,7 +4576,8 @@ class Pulse:
             self.block.enabled = False
         elif self.strat_block and ov.get("blockEnabled", True):
             self.block.enabled = True
-        self.control_orders = bool(self.mods.get("exec.controls", self.control_orders))
+        self.control_orders = _bool_setting(self.mods.get("exec.controls", self.control_orders), self.control_orders)
+        self._set_control_mode(control_orders_per_config)
         self.coord.rearrange = bool(self.mods.get("strategy.rearrange", self.coord.rearrange))
         if not self.mods.get("strategy.indications", True):
             self.indications.settings["enabled"] = False
@@ -4818,6 +5020,32 @@ class Pulse:
                 continue
             order_side = "BUY" if pos.side == "LONG" else "SELL"
             cid = self.cid("b", pos=pos)
+            block_group_key = self.logical_group_key(pos)
+            self._remember_pending(
+                kind="block",
+                cid=cid,
+                symbol=pos.symbol,
+                side=pos.side,
+                requested_qty=qty,
+                group_key=block_group_key,
+                metadata={
+                    "parent_client_id": pos.client_id,
+                    "set_id": pos.set_id,
+                    "set_idx": pos.set_idx,
+                    "pack": pos.pack,
+                    "parent_set_id": pos.parent_set_id,
+                    "axis_key": pos.axis_key,
+                    "relative_count": pos.relative_count,
+                    "volume_ratio": pos.volume_ratio,
+                    "block_count": int(row.get("blockCount") or 0),
+                    "set_key": str(row.get("setKey") or ""),
+                    "group_key": block_group_key,
+                    "sl_pct": pos.sl_pct,
+                    "tp_pct": pos.tp_pct,
+                    "sl_ratio": pos.sl_ratio,
+                    "trail_key": pos.trail_key,
+                },
+            )
             r = self.api.post(
                 "/openApi/swap/v2/trade/order",
                 {
@@ -5402,10 +5630,14 @@ class Pulse:
             u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
             opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
         swap = self.coord.pick_rearrange(opens, ranked, slot_cap)
-        if swap and swap["from"] in self.open:
-            pos = self.open[swap["from"]]
-            self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
-            log(f"COORD rearr {swap['from']} -> {swap['to']} gap={swap['conf']:.2f}")
+        if swap:
+            from_key = str(swap.get("from") or "")
+            pos = self.position_for_group(from_key)
+            if pos is None:
+                pos = next((p for p in self.positions_for(from_key)), None)
+            if pos is not None:
+                self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
+                log(f"COORD rearr {from_key} -> {swap['to']} gap={swap['conf']:.2f}")
         if len(self.open) >= slot_cap:
             self.maybe_block_adds()
             self.maybe_dca_adds()
@@ -5641,7 +5873,7 @@ class Pulse:
             # Without persisted lineage, recovery is intentionally aggregate:
             # never invent a per-config group from one ambiguous control order.
             self.prepare_position_group(rec_pos, legacy=True)
-            self.open[self.position_key(rec_pos) if self.per_config_controls(rec_pos) else sym] = rec_pos
+            self.open[self.position_key(rec_pos)] = rec_pos
             self.ensure_strategy_lanes(rec_pos)
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
@@ -5718,8 +5950,163 @@ class Pulse:
         )
         self.save_open_book()
 
+    def _pending_row_from_exchange(
+        self,
+        order: Dict[str, Any],
+        cid: str,
+        track: Dict[str, Any],
+        kind: str,
+    ) -> Tuple[Dict[str, Any], float, float, str]:
+        """Build one bounded pending row and return (row, cumulative, px, oid)."""
+        old = dict(self.pending_orders.get(cid) or {})
+        symbol = str(order.get("symbol") or old.get("symbol") or "").upper()
+        side = str(order.get("positionSide") or old.get("side") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            side = "LONG" if str(order.get("side") or "").upper() == "BUY" else "SHORT"
+        requested = max(
+            0.0,
+            _sf(old.get("requested_qty") or old.get("requestedQty")),
+            _sf(order.get("origQty") or order.get("quantity") or order.get("orderQty")),
+        )
+        oid = real_oid(order.get("orderId") or order.get("orderID") or order.get("orderid"))
+        px = max(
+            0.0,
+            _sf(order.get("avgPrice") or order.get("fillPrice") or order.get("executedPrice") or order.get("price")),
+            _sf(old.get("avg_price") or old.get("avgPrice")),
+        )
+        meta = dict(old.get("metadata") or {})
+        for key, value in (
+            ("set_id", track.get("set_id")),
+            ("set_idx", track.get("idx")),
+            ("pack", track.get("pack")),
+            ("parent_set_id", track.get("parent_set_id")),
+            ("axis_key", track.get("axis_key")),
+            ("relative_count", track.get("relative_count")),
+            ("volume_ratio", track.get("volume_ratio")),
+            ("ind_kind", track.get("ind_kind")),
+            ("sl_ratio", track.get("sl")),
+            ("trail_key", track.get("trail")),
+        ):
+            if value not in (None, ""):
+                meta.setdefault(key, value)
+        if _sf(meta.get("sl_pct")) <= 0 or _sf(meta.get("tp_pct")) <= 0:
+            try:
+                sl_pct, tp_pct, _ = resolve_sl_tp(
+                    base_sl=SL_PCT,
+                    base_tp=TP_PCT,
+                    sl_min=self.sl_min,
+                    sl_max=self.sl_max,
+                    tp_min=self.tp_min,
+                    tp_max=self.tp_max,
+                    sl_to_tp=_sf(meta.get("sl_ratio"), self.variants.current_sl()),
+                    bind_sl_to_tp=True,
+                    cost_pct=self.position_cost_pct,
+                    tp_cost_ratio=self.tp_cost_ratio,
+                )
+                meta.setdefault("sl_pct", sl_pct)
+                meta.setdefault("tp_pct", tp_pct)
+            except Exception:
+                pass
+        group_key = str(old.get("group_key") or meta.get("control_group_key") or "")
+        if not group_key and symbol and side:
+            token = str(track.get("group_token") or "")
+            bound = self.position_for_group_token(symbol, side, token) if token else None
+            group_key = str(getattr(bound, "control_group_key", "") or "")
+        if not group_key and symbol and side:
+            group_key = make_control_group_key(symbol, side, meta.get("sl_pct") or SL_PCT, meta.get("tp_pct") or TP_PCT)
+        status = str(order.get("status") or order.get("orderStatus") or order.get("state") or "").upper()
+        has_fill_field = any(order.get(key) not in (None, "") for key in ("executedQty", "filledQty", "cumQty", "filled", "quantity", "origQty"))
+        cumulative = order_fill_qty(order, requested)
+        if not has_fill_field and status not in {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}:
+            cumulative = 0.0
+        previous = max(0.0, _sf(old.get("filled_qty") or old.get("filledQty")))
+        if requested > 0:
+            cumulative = min(cumulative, requested)
+        cumulative = max(previous, cumulative)
+        row = {
+            "kind": kind,
+            "client_id": cid,
+            "order_id": oid or str(old.get("order_id") or ""),
+            "symbol": symbol,
+            "side": side,
+            "requested_qty": requested,
+            "filled_qty": cumulative,
+            "avg_price": px,
+            "group_key": group_key,
+            "created_at": _sf(old.get("created_at") or old.get("createdAt"), time.time()),
+            "updated_at": time.time(),
+            "metadata": meta,
+        }
+        return row, cumulative, px, oid
+
+    def _sync_pending_fill(self, order: Dict[str, Any], cid: str, track: Dict[str, Any], kind: str) -> bool:
+        row, cumulative, px, oid = self._pending_row_from_exchange(order, cid, track, kind)
+        previous = max(0.0, _sf((self.pending_orders.get(cid) or {}).get("filled_qty")))
+        delta = max(0.0, cumulative - previous)
+        if delta > 0 and px > 0:
+            if kind == "o":
+                pos = self._upsert_pending_entry(
+                    row,
+                    delta,
+                    px,
+                    oid,
+                    pending_qty=max(0.0, row["requested_qty"] - cumulative),
+                )
+            else:
+                pos = self.position_for_group(str(row.get("group_key") or ""))
+                if pos is None:
+                    pos = self._position_for_client(str(row.get("metadata", {}).get("parent_client_id") or ""))
+                if pos is None:
+                    pos = next(iter(self.positions_for(row["symbol"], row["side"])), None)
+                if pos is not None:
+                    self._apply_position_fill(
+                        pos,
+                        delta,
+                        px,
+                        order_id=oid,
+                        pending_qty=max(0.0, row["requested_qty"] - cumulative),
+                    )
+                else:
+                    return False
+            if pos is None:
+                return False
+            self.record_event(
+                "fill",
+                stable_key(CONN_SHORT, "fill", cid, kind, round(cumulative, 12)),
+                status="filled",
+                symbol=row["symbol"],
+                side=row["side"],
+                set_id=row["metadata"].get("set_id", ""),
+                parent_set_id=row["metadata"].get("parent_set_id", ""),
+                indication_kind=row["metadata"].get("ind_kind", ""),
+                strategy=row["metadata"].get("pack", ""),
+                client_id=cid,
+                order_id=oid,
+                qty=delta,
+                price=px,
+                metadata={"kind": kind, "cumulativeQty": cumulative},
+            )
+        if cumulative > previous or cid in self.pending_orders:
+            self._remember_pending(
+                kind="entry" if kind == "o" else ("dca" if kind == "d" else "block"),
+                cid=cid,
+                symbol=row["symbol"],
+                side=row["side"],
+                requested_qty=row["requested_qty"],
+                filled_qty=cumulative,
+                order_id=oid,
+                avg_price=px,
+                group_key=str(row.get("group_key") or ""),
+                metadata=row.get("metadata") or {},
+            )
+        requested = max(0.0, float(row.get("requested_qty") or 0))
+        if requested > 0 and cumulative + 1e-12 >= requested:
+            self._clear_pending(cid)
+            self.seen_fill_cids.add(cid)
+        return delta > 0
+
     def sync_own_fills(self) -> None:
-        """Pull FILLED orders with our tracking id. Ignore everything else. Feed Set live tape."""
+        """Pull exchange fills for this connection and apply only new deltas."""
         request_key = stable_key(CONN_SHORT, "fills", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
         self.record_event("exchange_request", request_key, status="pending", detail="fill polling", metadata={"path": "/openApi/swap/v2/trade/allOrders"})
         self.did_io = True
@@ -5737,34 +6124,45 @@ class Pulse:
             return
         self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed" if self.ok(r) else "error", code=r.get("code"), qty=len(orders), detail="fill polling", metadata={"rows": len(orders)})
         n = 0
+        terminal = {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}
         for o in orders:
-            cid = self.order_cid(o)
-            if not cid or not self.cid_ours(cid) or cid in self.seen_fill_cids:
+            if not isinstance(o, dict):
                 continue
-            status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
-            if status and status not in ("FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY"):
+            cid = self.order_cid(o)
+            if not cid or not self.cid_ours(cid):
                 continue
             track = self.parse_track(cid) or {}
-            kind = track.get("kind") or ""
-            if kind not in ("c", "s", "t"):
-                if kind == "o":
-                    self.seen_fill_cids.add(cid)
+            kind = str(track.get("kind") or "")
+            status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
+            if kind in ("o", "d", "b"):
+                if cid in self.seen_fill_cids:
+                    continue
+                if self._sync_pending_fill(o, cid, track, kind):
                     if o.get("symbol"):
-                        self.owned_syms.add(str(o.get("symbol")))
+                        self.owned_syms.add(str(o.get("symbol")).upper())
+                    n += 1
+                continue
+            if cid in self.seen_fill_cids:
+                continue
+            if status and status not in terminal:
                 continue
             try:
-                qty = float(o.get("executedQty") or o.get("origQty") or o.get("quantity") or 0)
-                px = float(o.get("avgPrice") or o.get("price") or 0)
+                qty = float(o.get("executedQty") or o.get("filledQty") or o.get("origQty") or o.get("quantity") or 0)
+                px = float(o.get("avgPrice") or o.get("fillPrice") or o.get("price") or 0)
                 pnl = float(o.get("profit") or o.get("realizedPnl") or o.get("pnl") or 0)
             except Exception:
                 continue
             if qty <= 0 or px <= 0:
                 continue
+            symbol = str(o.get("symbol") or "").upper()
+            close_side = str(o.get("positionSide") or "").upper()
+            if close_side not in ("LONG", "SHORT"):
+                close_side = "LONG" if str(o.get("side") or "").upper() == "SELL" else "SHORT"
             pnl_pct = pnl / (qty * px) if qty * px else 0.0
             rec = {
                 "t": time.time(),
-                "symbol": str(o.get("symbol") or ""),
-                "side": str(o.get("positionSide") or ""),
+                "symbol": symbol,
+                "side": close_side,
                 "qty": qty,
                 "entry": px,
                 "exit": px,
@@ -5779,7 +6177,10 @@ class Pulse:
                 "conn": CONN_SHORT,
                 "sl_ratio": track.get("sl") or 0.6,
                 "trail_key": track.get("trail") or "",
+                "control_group_key": track.get("control_group_key") or "",
+                "control_range_key": track.get("control_range_key") or "",
             }
+            oid = real_oid(o.get("orderId") or o.get("orderID") or o.get("orderid"))
             self.record_event(
                 "fill",
                 stable_key(CONN_SHORT, "fill", cid),
@@ -5791,12 +6192,12 @@ class Pulse:
                 indication_kind=track.get("ind_kind") or track.get("indKind") or "",
                 strategy=track.get("strategy") or rec.get("pack") or "",
                 client_id=cid,
-                order_id=real_oid(o.get("orderId") or o.get("orderID") or o.get("orderid")),
+                order_id=oid,
                 qty=qty,
                 price=px,
                 pnl=pnl,
                 fee=abs(qty * px) * cost_as_frac(self.position_cost_pct),
-                metadata={"kind": kind, "status": status},
+                metadata={"kind": kind, "status": status, "groupKey": rec["control_group_key"]},
             )
             self.seen_fill_cids.add(cid)
             try:
