@@ -109,6 +109,8 @@ def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> 
 
 def control_group_token(group_key: Any) -> str:
     raw = re.sub(r"[^a-z0-9]", "", str(group_key or "").lower())
+    if not raw:
+        return ""
     return (raw[-8:] if len(raw) >= 8 else raw).ljust(8, "0")
 
 
@@ -871,6 +873,18 @@ class Pulse:
         if pos is not None:
             return pos
         return next((p for p in self.open.values() if getattr(p, "control_group_key", "") == group_key), None)
+
+    def position_for_group_token(self, symbol: str, side: str, token: str) -> Optional[Position]:
+        token = str(token or "")
+        if not token:
+            return None
+        return next(
+            (
+                p for p in self.positions_for(symbol, side)
+                if control_group_token(getattr(p, "control_group_key", "")) == token
+            ),
+            None,
+        )
 
     def remove_position(self, pos: Position) -> Optional[Position]:
         key = self.position_key(pos)
@@ -2815,8 +2829,7 @@ class Pulse:
             pos.sec_sl_oid, pos.sec_sl = pos.sl_oid, pos.sl
         if not pos.sec_tp_oid and pos.tp_oid:
             pos.sec_tp_oid, pos.sec_tp = pos.tp_oid, pos.tp
-        if sec_sls or pos.sl_oid:
-            pos.close_position = True
+        pos.close_position = not self.per_config_controls(pos)
         now = time.time()
         last_sync = float(self.ctrl_skip.get(f"sync:{scope}", 0) or 0)
         can_replace = now >= last_sync
@@ -3327,6 +3340,7 @@ class Pulse:
                 self.open[self.position_key(pos)] = pos
         else:
             self.open[sym] = pos
+        self.record_event(
             "position_open",
             stable_key(CONN_SHORT, "position_open", cid),
             status="confirmed",
@@ -3395,7 +3409,7 @@ class Pulse:
         return True
 
     def drop_ghost(self, pos: Position, why: str) -> None:
-        if self.open.get(pos.symbol) is None:
+        if not any(candidate is pos for candidate in self.open.values()):
             return
         if not self._exchange_flat(pos):
             log(f"GHOST skip still-live {pos.symbol} {pos.side} {why}", every=20.0, key=f"ghost:{pos.symbol}")
@@ -3445,7 +3459,7 @@ class Pulse:
                 price=px,
                 detail=f"close {reason}",
             )
-            self.cancel_controls(pos.symbol)
+            self.cancel_controls(pos.symbol, pos=pos)
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
             ok, exit_px = self.market_close(pos)
             self.record_event(
@@ -3464,7 +3478,7 @@ class Pulse:
             )
             if not ok:
                 if skip_eval:
-                    self.ban_sym(pos.symbol)
+                    self.ban_sym(pos.symbol, clear_open=False)
                 self.record_event("error", stable_key(close_key, "error"), status="error", symbol=pos.symbol, side=pos.side, client_id=pos.client_id, detail="close failed")
                 return
         else:
@@ -3526,8 +3540,8 @@ class Pulse:
         if pos.client_id:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
-            self.open.pop(pos.symbol, None)
-            self.ban_sym(pos.symbol)
+            self.remove_position(pos)
+            self.ban_sym(pos.symbol, clear_open=False)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
             self.save_open_book()
             self._stats_force = True
@@ -3546,14 +3560,19 @@ class Pulse:
             self.exits.on_close(rec)
         except Exception:
             pass
-        try:
-            self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
-                "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
-                "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
-            })
-            self.dca.drop(pos.symbol, pos.side)
-        except Exception:
-            pass
+        sibling_open = any(
+            other is not pos and other.symbol == pos.symbol and other.side == pos.side
+            for other in self.open.values()
+        )
+        if not sibling_open:
+            try:
+                self.dca.on_close(asdict(rec) if hasattr(rec, "__dataclass_fields__") else {
+                    "symbol": rec.symbol, "side": rec.side, "reason": rec.reason,
+                    "client_id": getattr(rec, "client_id", ""), "pnl": rec.pnl, "pnl_pct": rec.pnl_pct,
+                })
+                self.dca.drop(pos.symbol, pos.side)
+            except Exception:
+                pass
         if pnl >= 0:
             self.wins += 1
             self.consec_loss = 0
@@ -3565,8 +3584,9 @@ class Pulse:
                 self.consec_loss = 4
                 log("pause new entries 120s after cold streak")
         self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
-        self.block.on_parent_close(pos.symbol, pos.side, pnl, pnl_pct=net_pnl_pct(pnl_pct, self.position_cost_pct))
-        self.open.pop(pos.symbol, None)
+        if not sibling_open:
+            self.block.on_parent_close(pos.symbol, pos.side, pnl, pnl_pct=net_pnl_pct(pnl_pct, self.position_cost_pct))
+        self.remove_position(pos)
         self.save_open_book()
         try:
             with open(TRADES_PATH, "a") as f:
@@ -3583,12 +3603,13 @@ class Pulse:
             px = self.px.get(pos.symbol) or 0
             if px <= 0:
                 continue
+            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
             age = now - pos.opened_at
             if age >= MAX_HOLD_S:
                 self.close_pos(pos, px, "max-hold-6h")
                 continue
             if getattr(self, "control_orders", True):
-                if time.time() >= self.ctrl_skip.get(pos.symbol, 0):
+                if time.time() >= self.ctrl_skip.get(scope, 0):
                     if self.missing_controls(pos):
                         self.ensure_controls(pos)
             if pos.side == "LONG":
@@ -3650,7 +3671,7 @@ class Pulse:
                     continue
                 if dec.action == "tighten" and dec.sl:
                     moved = abs(dec.sl - pos.sl) / max(pos.entry, 1e-9)
-                    if moved >= 0.004 and time.time() >= self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
+                    if moved >= 0.004 and time.time() >= self.ctrl_skip.get(f"sync:{scope}", 0):
                         pos.trail_armed = True
                         pos.trail = dec.sl
                         self.replace_sl(pos, dec.sl)
@@ -3888,6 +3909,12 @@ class Pulse:
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
         self.control_orders = bool(ov.get("controlOrders", cts.get("control_orders", True)))
+        self.control_orders_per_config = bool(
+            ov.get(
+                "controlOrdersPerConfig",
+                ov.get("control_orders_per_config", cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", True))),
+            )
+        )
         self.coord.load(cts, ov)
         self.indications.load(ov)
         self.sets.load(ov, cts)
@@ -3994,6 +4021,7 @@ class Pulse:
             "cooldownS": COOLDOWN_S,
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
+            "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
@@ -4413,8 +4441,9 @@ class Pulse:
             if getattr(self, "control_orders", True):
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False
-                self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-                self.ctrl_skip.pop(pos.symbol, None)
+                scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+                self.ctrl_skip.pop(f"sync:{scope}", None)
+                self.ctrl_skip.pop(scope, None)
                 self.ensure_controls(pos)
             self.block_last_emit = time.time()
             emitted += 1
@@ -4572,8 +4601,9 @@ class Pulse:
             if getattr(self, "control_orders", True):
                 pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ""
                 pos.ctrl_verified = False
-                self.ctrl_skip.pop(f"sync:{pos.symbol}", None)
-                self.ctrl_skip.pop(pos.symbol, None)
+                scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+                self.ctrl_skip.pop(f"sync:{scope}", None)
+                self.ctrl_skip.pop(scope, None)
                 self.ensure_controls(pos)
             self.dca_last_emit = time.time()
             emitted += 1
@@ -5074,7 +5104,8 @@ class Pulse:
             side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
-            ours = next((pos for pos in self.open.values() if pos.symbol == sym and pos.side == side), None)
+            candidates = self.positions_for(sym, side)
+            ours = candidates[0] if candidates else None
             live.add(sym)
             live_lev = 0
             try:
@@ -5086,7 +5117,13 @@ class Pulse:
                 tagged = [o for o in self.our_orders(sym) if str(o.get("positionSide") or "").upper() in (side, "")]
             except Exception:
                 tagged = []
-            owned = bool(ours and getattr(ours, "ours", True) and (ours.client_id and self.cid_ours(ours.client_id) or ours.sl_oid or ours.tp_oid))
+            owned = bool(
+                any(
+                    getattr(candidate, "ours", True)
+                    and (candidate.client_id and self.cid_ours(candidate.client_id) or candidate.sl_oid or candidate.tp_oid)
+                    for candidate in candidates
+                )
+            )
             if not tagged and not owned:
                 foreign.add(f"{sym}:{side}")
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
@@ -5098,26 +5135,32 @@ class Pulse:
             except Exception:
                 liq = 0.0
             pid = str(p.get("positionId") or p.get("positionID") or "")
-            if ours is not None:
-                if liq > 0:
-                    ours.liq = liq
-                if pid:
-                    ours.position_id = pid
-                if px > 0:
-                    ours.qty = qty
-                    ours.entry = px
-                    ours.notional = qty * px
-                    ours.ours = True
-                if not getattr(ours, "set_id", "") and tagged:
-                    try:
-                        trk = self.parse_track(self.order_cid(tagged[0])) or {}
-                        if trk.get("set_id"):
-                            ours.set_id = str(trk.get("set_id"))
-                            idxv = trk.get("idx")
-                            ours.set_idx = int(idxv) if idxv is not None else -1
-                            ours.pack = str(trk.get("pack") or ours.pack)
-                    except Exception:
-                        pass
+            if candidates:
+                total_book_qty = sum(max(0.0, float(getattr(candidate, "qty", 0) or 0)) for candidate in candidates)
+                for candidate in candidates:
+                    if liq > 0:
+                        candidate.liq = liq
+                    if pid:
+                        candidate.position_id = pid
+                    if px > 0:
+                        if len(candidates) == 1 or total_book_qty <= 0:
+                            candidate.qty = qty
+                        else:
+                            candidate.qty = qty * max(0.0, float(candidate.qty or 0)) / total_book_qty
+                        candidate.entry = px
+                        candidate.notional = candidate.qty * px
+                        candidate.ours = True
+                    if not getattr(candidate, "set_id", "") and tagged:
+                        try:
+                            trk = self.parse_track(self.order_cid(tagged[0])) or {}
+                            if trk.get("set_id"):
+                                candidate.set_id = str(trk.get("set_id"))
+                                idxv = trk.get("idx")
+                                candidate.set_idx = int(idxv) if idxv is not None else -1
+                                candidate.pack = str(trk.get("pack") or candidate.pack)
+                        except Exception:
+                            pass
+                    self.prepare_position_group(candidate)
                 continue
             if px <= 0:
                 continue
@@ -5139,7 +5182,7 @@ class Pulse:
             cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
             set_id = str(track.get("set_id") or "")
             pack = str(track.get("pack") or ("indications" if set_id.startswith("ind") else "general"))
-            self.open[sym] = Position(
+            rec_pos = Position(
                 symbol=sym, side=side, qty=qty, entry=px, opened_at=time.time(),
                 sl=sl, tp=tp, peak=px, notional=qty * px, reason=f"recover {src} set={set_id or 'def'}", conf=0.35,
                 sl_ratio=sl_ratio, trail_key=trail_key,
@@ -5154,7 +5197,8 @@ class Pulse:
                 volume_ratio=float(track.get("volume_ratio") or 1.0),
                 ind_kind=str(track.get("ind_kind") or ""),
             )
-            rec_pos = self.open[sym]
+            self.prepare_position_group(rec_pos)
+            self.open[self.position_key(rec_pos) if self.per_config_controls(rec_pos) else sym] = rec_pos
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
             if getattr(self, "control_orders", True):
@@ -5163,41 +5207,38 @@ class Pulse:
                 if self.missing_controls(rec_pos):
                     self.ensure_controls(rec_pos)
         pending_absent: List[str] = []
-        for sym in list(self.open):
-            pos = self.open.get(sym)
-            if not pos:
-                continue
+        for stored_key, pos in list(self.open.items()):
             if pos.symbol in live:
                 if hasattr(self, "_absent_n"):
-                    self._absent_n.pop(sym, None)
+                    self._absent_n.pop(stored_key, None)
                 continue
             age = time.time() - float(pos.opened_at or 0)
-            key = f"{pos.symbol}:{pos.side}"
+            exchange_key = f"{pos.symbol}:{pos.side}"
             live_keys_now = getattr(self, "live_pos_keys", None) or set()
-            still_live = key in live_keys_now
+            still_live = exchange_key in live_keys_now
             if still_live:
                 if hasattr(self, "_absent_n"):
-                    self._absent_n.pop(sym, None)
+                    self._absent_n.pop(stored_key, None)
                 continue
             if age < 45.0:
-                pending_absent.append(sym)
+                pending_absent.append(stored_key)
                 continue
-            misses = int((getattr(self, "_absent_n", None) or {}).get(sym, 0)) + 1
+            misses = int((getattr(self, "_absent_n", None) or {}).get(stored_key, 0)) + 1
             if not hasattr(self, "_absent_n"):
                 self._absent_n = {}
-            self._absent_n[sym] = misses
+            self._absent_n[stored_key] = misses
             flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 2 and live_n == 0
             # Partial list: need 3 misses. Fully-flat exchange already confirmed by streak.
             if not flat_ex and misses < 3:
-                pending_absent.append(sym)
+                pending_absent.append(stored_key)
                 continue
             has_ctrl = bool(pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
             if has_ctrl and not flat_ex and not self._exchange_flat(pos):
-                pending_absent.append(sym)
+                pending_absent.append(stored_key)
                 continue
-            log(f"DROP stale local {sym} age={age:.0f}s miss={misses}")
-            self.open.pop(sym, None)
-            self.cooldown[sym] = time.time() + 12.0
+            log(f"DROP stale local {pos.symbol} {pos.side} group={stored_key[:16]} age={age:.0f}s miss={misses}")
+            self.remove_position(pos)
+            self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
         ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
         book_syms = set(self.open)
@@ -5205,10 +5246,11 @@ class Pulse:
         confirmed_book_only = []
         for pos in self.open.values():
             if pos.symbol not in live:
-                if pos.symbol in pending_absent:
+                group_key = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+                if group_key in pending_absent:
                     continue
-                confirmed_book_only.append(pos.symbol)
-                issues.append(f"book-only {pos.symbol}")
+                confirmed_book_only.append(group_key)
+                issues.append(f"book-only {pos.symbol} {pos.side} group={group_key[:16]}")
         # Count mismatches only from confirmed absences. Pending entries are
         # inside the exchange confirmation window and must not fail QA.
         if confirmed_book_only:
@@ -5624,7 +5666,7 @@ class Pulse:
             "indications": ind_snap,
             "dca": self.dca.snapshot(),
             "api": snap,
-            "cts": {"blockMaxStack": self.cts.get("blockMaxStack"), "variantBlockEnabled": self.cts.get("variantBlockEnabled"), "blockVolumeRatio": self.cts.get("blockVolumeRatio"), "blockProfitFactorRatio": self.cts.get("blockProfitFactorRatio"), "position_mode": self.cts.get("position_mode"), "margin_mode": self.cts.get("margin_mode"), "control_orders": self.cts.get("control_orders")},
+            "cts": {"blockMaxStack": self.cts.get("blockMaxStack"), "variantBlockEnabled": self.cts.get("variantBlockEnabled"), "blockVolumeRatio": self.cts.get("blockVolumeRatio"), "blockProfitFactorRatio": self.cts.get("blockProfitFactorRatio"), "position_mode": self.cts.get("position_mode"), "margin_mode": self.cts.get("margin_mode"), "control_orders": self.cts.get("control_orders"), "controlOrdersPerConfig": self.cts.get("controlOrdersPerConfig", self.cts.get("control_orders_per_config"))},
             "open": [
                 {
                     "symbol": p.symbol,
@@ -5647,6 +5689,17 @@ class Pulse:
                     "controls": p.controls_ok,
                     "overall": bool(getattr(p, "overall", True)),
                     "closePosition": bool(getattr(p, "close_position", True)),
+                    "controlMode": "per-config" if self.per_config_controls(p) else "aggregate",
+                    "controlGroupKey": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
+                    "controlGroupToken": control_group_token(getattr(p, "control_group_key", "")),
+                    "controlRangeKey": getattr(p, "control_range_key", "") or "aggregate",
+                    "controlRangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
+                    "memberCount": int(getattr(p, "member_count", 1) or 1),
+                    "lineageSetIds": list(getattr(p, "lineage_set_ids", []) or [])[:24],
+                    "lineageParentSetIds": list(getattr(p, "lineage_parent_set_ids", []) or [])[:24],
+                    "lineageAxisKeys": list(getattr(p, "lineage_axis_keys", []) or [])[:24],
+                    "lineagePacks": list(getattr(p, "lineage_packs", []) or [])[:24],
+                    "controlStatus": "protected" if bool(getattr(p, "controls_ok", False)) else "missing",
                     "ctrlQty": getattr(p, "ctrl_qty", p.qty),
                     "slRangePct": [round(self.opt_fracs(p)[2] * 100, 3), round(self.opt_fracs(p)[3] * 100, 3)],
                     "tpRangePct": [round(self.tp_min * 100, 3), round(self.tp_max * 100, 3)],
@@ -5870,6 +5923,22 @@ class Pulse:
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
+                "mode": "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate",
+                "groupCount": len(self.open),
+                "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
+                "groups": [
+                    {
+                        "key": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
+                        "symbol": p.symbol,
+                        "side": p.side,
+                        "range": getattr(p, "control_range_key", "") or "aggregate",
+                        "qty": float(p.qty or 0),
+                        "memberCount": int(getattr(p, "member_count", 1) or 1),
+                        "protected": bool(getattr(p, "controls_ok", False)),
+                    }
+                    for p in self.open.values()
+                ],
             },
             "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
             "activity": activity,

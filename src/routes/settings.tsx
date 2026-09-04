@@ -1819,25 +1819,33 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Per-order SL+TP plus symbol+direction security range · hedge, no reduceOnly">
-              <Toggle
-                label="Place SL/TP on exchange"
-                on={overlay.controlOrders}
-                onChange={(v) => patch("controlOrders", v)}
-              />
+            <Card title="Control orders" hint="Hedge-safe TP/SL protection · quantity-matched by symbol, direction and range">
+              <div className="flex flex-col gap-2">
+                <Toggle
+                  label="Place SL/TP on exchange"
+                  on={overlay.controlOrders}
+                  onChange={(v) => patch("controlOrders", v)}
+                />
+                <Toggle
+                  label="Separate controls by symbol + direction + range"
+                  on={overlay.controlOrdersPerConfig}
+                  onChange={(v) => patch("controlOrdersPerConfig", v)}
+                />
+              </div>
               <Grid>
                 <Num label="Stop %" value={overlay.slPct} min={0.1} max={5} step={0.02} onChange={(v) => patch("slPct", v)} />
                 <Num label="Take profit %" value={overlay.tpPct} min={0.1} max={8} step={0.05} onChange={(v) => patch("tpPct", v)} />
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />
+                <KV k="Applied control mode" v={overlay.controlOrdersPerConfig ? "PER-CONFIG RANGE" : "AGGREGATE"} />
                 <KV k="Working type" v="MARK_PRICE" />
               </Grid>
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
-                After every parent fill and every Block add, protection is rebuilt for the exact
-                aggregate quantity. Trail replaces the live STOP_MARKET. Security SL/TP always exist
-                on the symbol+direction book using the widest order range.
+                {overlay.controlOrdersPerConfig
+                  ? "Each symbol + direction + normalized SL/TP range receives its own quantity-matched TP/SL pair. Identical ranges merge by quantity and weighted entry, while Set lineage stays attached."
+                  : "Controls use the legacy aggregate symbol + direction pair and widest range. Turn on per-config mode to isolate independent ranges without closePosition fallback."}
               </p>
             </Card>
           )}
@@ -2456,27 +2464,40 @@ function connHint(conn: string, stats: LiveStats | null) {
 function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const c = stats?.coverage?.controls;
   const open = stats?.open ?? [];
-  const missing = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid));
+  const groups = c?.groups ?? open.map((p) => ({
+    key: p.controlGroupKey ?? `${p.symbol}:${p.side}`,
+    symbol: p.symbol,
+    side: p.side,
+    range: p.controlRangeKey ?? "aggregate",
+    qty: p.qty,
+    memberCount: p.memberCount ?? 1,
+    protected: Boolean(p.controls),
+  }));
+  const missing = groups.filter((group) => !group.protected);
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
+  const mode = c?.mode ?? (stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
-        <span className={(c?.missing ?? missing.length) ? "text-danger" : "text-primary"}>
-          live controls · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
+        <span className={missing.length ? "text-danger" : "text-primary"}>
+          live controls · {mode} · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {c?.missing ?? missing.length}</span>
       </div>
+      <p className="mt-1 text-muted">
+        {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
+      </p>
       {missing.length ? (
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
-          {missing.slice(0, 12).map((p) => (
-            <span key={`${p.symbol}-${p.side}`}>
-              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {p.controls ? "" : "SL/TP"} {p.secSlOid && p.secTpOid ? "" : "SEC"}
+          {missing.slice(0, 12).map((group) => (
+            <span key={group.key}>
+              {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"}
             </span>
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">Every open has SL + TP and a symbol+direction security pair</p>
+        <p className="mt-2 text-muted">Every logical group has quantity-matched SL + TP protection</p>
       )}
     </div>
   );

@@ -18,6 +18,17 @@ export type LiveOpen = {
   controls?: boolean;
   overall?: boolean;
   security?: boolean;
+  controlMode?: "per-config" | "aggregate" | string;
+  controlGroupKey?: string;
+  controlGroupToken?: string;
+  controlRangeKey?: string;
+  controlRangeBp?: { sl?: number; tp?: number };
+  controlStatus?: "protected" | "missing" | string;
+  memberCount?: number;
+  lineageSetIds?: string[];
+  lineageParentSetIds?: string[];
+  lineageAxisKeys?: string[];
+  lineagePacks?: string[];
   connection?: string;
   connType?: string;
   unit?: string;
@@ -435,7 +446,25 @@ export type LiveStats = {
       steps?: number[];
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
-    controls?: { open?: number; ok?: number; missing?: number; security?: number };
+    controls?: {
+    open?: number;
+    ok?: number;
+    missing?: number;
+    security?: number;
+    mode?: string;
+    groupCount?: number;
+    protectedGroups?: number;
+    mergedMembers?: number;
+    groups?: Array<{
+      key?: string;
+      symbol?: string;
+      side?: string;
+      range?: string;
+      qty?: number;
+      memberCount?: number;
+      protected?: boolean;
+    }>;
+  };
     recon?: { ok?: boolean; pending?: boolean; detail?: string };
     activity?: ActivitySummary;
     events?: ActivityEvent[];
