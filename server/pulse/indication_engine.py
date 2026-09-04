@@ -1468,7 +1468,11 @@ class IndicationBook:
                 primaries.append(rec)
         primaries.sort(key=lambda r: r["confidence"], reverse=True)
         kinds = self.kind_stats()
-        types = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
+        # `types` is the configuration contract consumed by the UI and QA;
+        # hit counts belong in the separate `typeHits` field. A quiet kind
+        # must not look disabled merely because it has no current hit.
+        types = {k: bool(v.get("enabled")) for k, v in kinds.items()}
+        type_hits = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
         keys = sorted(self.last.keys())
         eval_items = list(self.evals.items())
         last_items = list(self.last.items())
@@ -1498,7 +1502,7 @@ class IndicationBook:
                 "trend": bool(self.settings.get("typeTrend", True)),
                 "break": bool(self.settings.get("typeBreak", True)),
             },
-            "typeHits": types,
+            "typeHits": type_hits,
             "kindStats": kinds,
             "minSources": self.settings.get("minimumSourceSignals"),
             "minAgreement": self.settings.get("minimumAgreement"),
