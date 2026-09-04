@@ -14,6 +14,11 @@ export type UserPreset = {
 };
 
 const LOCAL_KEY = "x01-user-presets";
+export const DEFAULT_PRESET_ID = "up-default";
+
+function isDefaultPreset(p: Pick<UserPreset, "id" | "name">): boolean {
+  return p.id === DEFAULT_PRESET_ID || p.name.trim().toLowerCase() === "default";
+}
 
 export function overlayOverview(ov: Partial<PulseOverlay> | PulseOverlay): string {
   const sl = Number(ov.slToTpRatio);
@@ -174,14 +179,67 @@ export async function renameUserPreset(id: string, name: string) {
 }
 
 export async function deleteUserPreset(id: string) {
+  const local = readLocal();
+  if (local.some((p) => p.id === id && isDefaultPreset(p))) {
+    return { ok: false, detail: "Default is protected", presets: local };
+  }
   const r = await post({ action: "delete", id });
   if (r.ok && r.presets) {
     writeLocal(r.presets);
     return { ok: true, detail: r.detail, presets: r.presets };
   }
-  const presets = readLocal().filter((p) => p.id !== id);
+  const presets = local.filter((p) => p.id !== id);
   writeLocal(presets);
   return { ok: true, detail: "deleted (local)", presets };
+}
+
+export async function saveDefaultUserPreset(args: {
+  overlay: PulseOverlay;
+  calcOpt?: Partial<HistCalcOptions>;
+}): Promise<{ ok: boolean; detail: string; preset?: UserPreset; presets: UserPreset[] }> {
+  const r = await post({
+    action: "save_default",
+    name: "Default",
+    id: DEFAULT_PRESET_ID,
+    overlay: args.overlay,
+    calcOpt: args.calcOpt || {},
+  });
+  if (r.ok && r.presets) {
+    writeLocal(r.presets);
+    return { ok: true, detail: r.detail, preset: r.preset, presets: r.presets };
+  }
+  const local = readLocal();
+  const now = Date.now() / 1000;
+  const old = local.find(isDefaultPreset);
+  const row: UserPreset = {
+    id: DEFAULT_PRESET_ID,
+    name: "Default",
+    hint: overlayOverview(args.overlay),
+    overview: overlayOverview(args.overlay),
+    overlay: args.overlay,
+    calcOpt: args.calcOpt,
+    created: old?.created ?? now,
+    updated: now,
+    system: true,
+  };
+  const presets = old ? local.map((p) => (isDefaultPreset(p) ? row : p)) : [row, ...local];
+  writeLocal(presets);
+  return { ok: true, detail: "saved Default (local)", preset: row, presets };
+}
+
+export async function deleteAllExceptDefaultUserPresets(): Promise<{ ok: boolean; detail: string; presets: UserPreset[] }> {
+  const r = await post({ action: "delete_except_default" });
+  if (r.ok && r.presets) {
+    writeLocal(r.presets);
+    return { ok: true, detail: r.detail, presets: r.presets };
+  }
+  const local = readLocal();
+  const keep = local.find(isDefaultPreset);
+  if (!keep) return { ok: false, detail: "Save the Default preset before cleanup", presets: local };
+  const row = { ...keep, id: DEFAULT_PRESET_ID, name: "Default" };
+  const presets = [row];
+  writeLocal(presets);
+  return { ok: true, detail: "deleted all presets except Default (local)", presets };
 }
 
 export async function loadUserPreset(id: string) {

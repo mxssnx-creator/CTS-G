@@ -12,7 +12,7 @@ workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
 ## What it does
 
 - **Overall / Live / VST** — three views, no identity bleed. Live and VST keep their own overlay, universe, tape, and control orders.
-- **Indications** — state, direction, move, active, common, signals; independent 1m / 5m / 15m lanes plus combined eval.
+- **Indications** — state, direction, move, active, common, signals, trend and break; independent 1m / 5m / 15m lanes plus combined eval.
 - **Sets** — pack × SL:TP × trail × step product, historic replay, CID tracking (`Gx01` / `Gx02`).
 - **Coordination stages** — intern / main / real / last / prev as advisory gates.
 - **Block, DCA, trailing, exits, rearrange** — each pack independently enabled.
@@ -29,7 +29,7 @@ workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
 | `server/pulse/overlay-bingx-x02.json` | VST overlay (full USDT-M universe) |
 | `deploy/install-linux.sh` | First-time Linux install (packages, systemd, Redis, desk + engines) |
 | `deploy/update-linux.sh` | In-place Linux update (keeps overlays and open positions) |
-| `deploy/grok-pulse@.service` | systemd unit for a connection slot |
+| `deploy/grok-pulse@.service` | template rendered as `<name>-pulse@.service` |
 | `scripts/` | test / smoke / PWA / preview helpers |
 
 Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They are never stored in this repo.
@@ -58,26 +58,26 @@ If direct SSH is unavailable, establish the documented Chisel tunnel first;
 see [Remote access](INFO.md#remote-access-canonical-solution). Do not put its
 credentials or SSH private keys in this repository.
 
-Installs Node 22, Python 3, Redis, pulse engine at `/opt/grok-x01-pulse`, desk at `/opt/cts-g`. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`).
+Installs Node 22, Python 3, Redis, the scoped pulse engine at `/opt/cts-g-pulse`, and the desk at `/opt/cts-g` for the default `cts-g` name. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`). Unit names are scoped to the install name so another checkout cannot overwrite CTS-G.
 
 | Unit | Role |
 |---|---|
-| `grok-pulse-http` | Stats/control sidecar on :3015 |
-| `grok-desk` | Desk UI on :3102 |
-| `grok-pulse@bingx-x02` | VST engine |
-| `grok-pulse@bingx-x01` | Live engine (starts when Redis keys exist, or pass `--start-live`) |
+| `cts-g-pulse-http` | Stats/control sidecar on :3015 |
+| `cts-g-desk` | Desk UI on :3102 |
+| `cts-g-pulse@bingx-x02` | VST engine |
+| `cts-g-pulse@bingx-x01` | Live engine (stopped/disabled by default; start only with explicit `--start-live`) |
 
 ```bash
 sudo /opt/cts-g/deploy/update-linux.sh          # git pull, restart, keep overlays + opens
 sudo /opt/cts-g/deploy/update-linux.sh --force  # match origin/main exactly
 ```
 
-Keys stay in Redis, never in git:
+Credentials stay in the protected `/etc/cts-g/credentials.env` and the matching Redis connection hash, never in git. X01 remains stopped unless live operation has been explicitly approved:
 
 ```bash
 redis-cli HSET connection:bingx-x01 api_key '…' api_secret '…'
 redis-cli HSET connection:bingx-x02 api_key '…' api_secret '…'
-sudo systemctl restart grok-pulse@bingx-x01
+sudo systemctl stop cts-g-pulse@bingx-x01
 ```
 
 `update-linux.sh` does not flatten exchange positions.

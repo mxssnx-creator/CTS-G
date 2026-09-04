@@ -10,7 +10,24 @@ export type HistCalcKind = {
   side?: string;
   netAvg?: number;
   costSubtracted?: boolean;
+  evaluationWindows?: Record<string, EvaluationWindow>;
   bySide?: Record<string, HistCalcKind>;
+};
+
+export type EvaluationWindow = {
+  requestedN?: number;
+  n?: number;
+  available?: boolean;
+  requiredSamples?: number;
+  validated?: boolean;
+  pf?: number;
+  classicPf?: number;
+  avgR?: number;
+  netAvg?: number;
+  netPct?: number;
+  costPct?: number;
+  costSamples?: number;
+  costSubtracted?: boolean;
 };
 
 export type HistCalcRow = {
@@ -36,6 +53,7 @@ export type HistCalcRow = {
   lowSl?: boolean;
   deactReason?: string;
   costSubtracted?: boolean;
+  evaluationWindows?: Record<string, EvaluationWindow>;
   bySide?: Record<string, { n: number; pf: number; validated?: boolean; maxDdS?: number }>;
 };
 
@@ -48,6 +66,7 @@ export type HistCalcSymbol = {
   validated?: boolean;
   netAvg?: number;
   costSubtracted?: boolean;
+  evaluationWindows?: Record<string, EvaluationWindow>;
   bySide?: Record<string, { n: number; pf: number; validated?: boolean }>;
 };
 
@@ -60,6 +79,7 @@ export type HistCalcDirection = {
   validated?: boolean;
   netAvg?: number;
   costSubtracted?: boolean;
+  evaluationWindows?: Record<string, EvaluationWindow>;
 };
 
 export type HistCalcStrategy = {
@@ -71,6 +91,7 @@ export type HistCalcStrategy = {
   validated?: boolean;
   netAvg?: number;
   costSubtracted?: boolean;
+  evaluationWindows?: Record<string, EvaluationWindow>;
   bySide?: Record<string, { n: number; pf: number; validated?: boolean; netAvg?: number }>;
 };
 
@@ -93,6 +114,14 @@ export type HistCalcOptions = {
   indTypeCommon: boolean;
   indTypeTrend: boolean;
   indTypeBreak: boolean;
+  /** Prefer the smallest stable ranges after PF/DD/sample gates. */
+  preferMinimalRange: boolean;
+  /** Evaluate the independent 50+ close coordination window. */
+  additionalCoordination: boolean;
+  /** @deprecated accepted when reading older persisted jobs. */
+  preferMinimalPositive?: boolean;
+  minimalPositiveCoordination?: boolean;
+  coordOptimizationN: number;
 };
 
 export type HistCalcJob = {
@@ -123,6 +152,13 @@ export type HistCalcJob = {
   byDirection?: Record<string, HistCalcDirection>;
   byStrategy?: Record<string, HistCalcStrategy>;
   kinds?: Record<string, HistCalcKind>;
+  evaluationWindows?: {
+    windows?: number[];
+    directions?: Record<string, Record<string, EvaluationWindow>>;
+    strategies?: Record<string, Record<string, EvaluationWindow>>;
+    indications?: Record<string, Record<string, EvaluationWindow>>;
+    symbols?: Record<string, Record<string, EvaluationWindow>>;
+  };
   winner?: HistCalcRow | null;
   apply?: Record<string, unknown>;
   presets?: Array<{ id: string; name: string; hint: string }>;
@@ -166,6 +202,9 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   indTypeCommon: true,
   indTypeTrend: true,
   indTypeBreak: true,
+  preferMinimalRange: false,
+  additionalCoordination: false,
+  coordOptimizationN: 50,
 };
 
 export async function fetchHistCalc(): Promise<HistCalcJob> {
@@ -182,10 +221,19 @@ export async function startHistCalc(
   body: Partial<HistCalcOptions> & { symbols?: string[] },
 ): Promise<HistCalcJob> {
   try {
+    const legacy = body as Partial<HistCalcOptions> & {
+      preferMinimalPositive?: boolean;
+      minimalPositiveCoordination?: boolean;
+    };
+    const migrated = {
+      ...body,
+      preferMinimalRange: body.preferMinimalRange ?? legacy.preferMinimalPositive,
+      additionalCoordination: body.additionalCoordination ?? legacy.minimalPositiveCoordination,
+    };
     const r = await fetch("/hist-calc.json", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...DEFAULT_CALC_OPTIONS, ...body, allConfigs: true }),
+      body: JSON.stringify({ ...DEFAULT_CALC_OPTIONS, ...migrated, allConfigs: true }),
     });
     const j = (await r.json().catch(() => ({}))) as HistCalcJob;
     if (!r.ok) {

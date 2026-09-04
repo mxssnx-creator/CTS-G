@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
-import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, type LiveClosed, type LiveStats } from "@/lib/live-stats";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
@@ -11,14 +11,29 @@ import { CoveragePanel } from "@/components/coverage-overview";
 import { IndicationKindsPanel, StrategyStatsPanel } from "@/components/kind-strategy-stats";
 import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
+import type { EvaluationWindow } from "@/lib/hist-calc";
+
+type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors";
+
+const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
+  { id: "overview", label: "Overview", hint: "equity, tape and headline metrics" },
+  { id: "coverage", label: "Coverage", hint: "symbols, sets and processing coverage" },
+  { id: "indications", label: "Indications", hint: "all indication kinds and sides" },
+  { id: "strategies", label: "Strategies", hint: "Block, DCA, exits and strategy lanes" },
+  { id: "sets", label: "Sets", hint: "independent configurations and validation" },
+  { id: "controls", label: "Controls", hint: "exchange actions and protection parity" },
+  { id: "errors", label: "Errors", hint: "recorded failures and rejected actions" },
+];
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
 
 function ResultsPage() {
   const { conn } = useConnection();
   const [raw, setRaw] = useState<LiveStats | null>(null);
+  const [statsTab, setStatsTab] = useState<ResultTab>("overview");
   useEffect(() => {
     let alive = true;
+    setStatsTab("overview");
     setRaw(null);
     let timer: ReturnType<typeof setTimeout> | null = null;
     const pull = async () => {
@@ -86,119 +101,296 @@ function ResultsPage() {
         />
       </section>
 
-      <CoveragePanel live={stats} />
-      <ActivityPanel stats={stats} />
-      <IndicationKindsPanel stats={stats} />
-      <StrategyStatsPanel stats={stats} />
-      <InternResults stats={stats} />
-      <SetResults stats={stats} />
-      <ExitResults stats={stats} />
-      <BlockResults stats={stats} />
-      <DcaResults stats={stats} />
+      <EvaluationWindowsStrip stats={stats} />
+      <ResultsTabs value={statsTab} onChange={setStatsTab} stats={stats} />
 
-      <section className="grid gap-3 lg:grid-cols-2">
-        <Card title="Equity curve">
-          <EquityArea data={d.equityCurve} />
-        </Card>
-        <Card title="Per-trade PnL">
-          <TradeBars data={d.tradeBars} />
-        </Card>
-      </section>
+      {statsTab === "coverage" ? <div id="results-panel-coverage" role="tabpanel"><CoveragePanel live={stats} /></div> : null}
+      {statsTab === "indications" ? <div id="results-panel-indications" role="tabpanel"><IndicationKindsPanel stats={stats} /></div> : null}
+      {statsTab === "strategies" ? (
+        <div id="results-panel-strategies" className="grid gap-3" role="tabpanel">
+          <StrategyStatsPanel stats={stats} />
+          <ExitResults stats={stats} />
+          <BlockResults stats={stats} />
+          <DcaResults stats={stats} />
+        </div>
+      ) : null}
+      {statsTab === "sets" ? (
+        <div id="results-panel-sets" className="grid gap-3" role="tabpanel">
+          <InternResults stats={stats} />
+          <SetResults stats={stats} />
+        </div>
+      ) : null}
+      {statsTab === "controls" ? (
+        <div id="results-panel-controls" className="grid gap-3" role="tabpanel">
+          <ControlHealthPanel stats={stats} />
+          <ActivityPanel stats={stats} />
+        </div>
+      ) : null}
+      {statsTab === "errors" ? <ErrorsPanel stats={stats} /> : null}
 
-      <section className="grid gap-3 lg:grid-cols-2">
-        <Card title="By symbol">
-          <SymbolBars data={d.bySymbol} />
-        </Card>
-        <Card title="Exit reasons">
-          {d.byReason.length === 0 ? (
-            <p className="flex h-52 items-center justify-center text-sm text-muted">No exits yet</p>
-          ) : (
-            <ul className="space-y-3">
-              {d.byReason.map((r) => {
-                const max = Math.max(...d.byReason.map((x) => x.n), 1);
-                return (
-                  <li key={r.reason}>
-                    <div className="mb-1 flex justify-between text-sm">
-                      <span>{r.reason}</span>
-                      <span className={`font-mono tabular-nums ${r.pnl >= 0 ? "text-primary" : "text-danger"}`}>
-                        {r.n} · {r.pnl >= 0 ? "+" : ""}
-                        {r.pnl.toFixed(4)}
-                      </span>
-                    </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-bg2">
-                      <div
-                        className="h-full rounded-full bg-primary-dim"
-                        style={{ width: `${(r.n / max) * 100}%` }}
-                      />
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-      </section>
+      {statsTab === "overview" ? (
+        <div id="results-panel-overview" className="grid gap-3" role="tabpanel">
+          <section className="grid gap-3 lg:grid-cols-2">
+            <Card title="Equity curve">
+              <EquityArea data={d.equityCurve} />
+            </Card>
+            <Card title="Per-trade PnL">
+              <TradeBars data={d.tradeBars} />
+            </Card>
+          </section>
 
-      <Card title="Closed tape">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-3xl text-left text-sm">
-            <thead className="font-mono text-xs text-muted">
-              <tr>
-                <th className="pb-2 font-medium">Time</th>
-                <th className="pb-2 font-medium">Sym</th>
-                <th className="pb-2 font-medium">Side</th>
-                <th className="pb-2 font-medium">Route</th>
-                <th className="pb-2 font-medium">PnL</th>
-                <th className="pb-2 font-medium">Hold</th>
-                <th className="pb-2 font-medium">Why</th>
-              </tr>
-            </thead>
-            <tbody>
-              {closed.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="py-8 text-center text-muted">
-                    Closed fills stream here
-                  </td>
-                </tr>
+          <section className="grid gap-3 lg:grid-cols-2">
+            <Card title="By symbol">
+              <SymbolBars data={d.bySymbol} />
+            </Card>
+            <Card title="Exit reasons">
+              {d.byReason.length === 0 ? (
+                <p className="flex h-52 items-center justify-center text-sm text-muted">No exits yet</p>
               ) : (
-                closed.map((c, i) => (
-                  <tr key={`${c.t}-${i}`} className="border-t border-border">
-                    <td className="py-2.5 font-mono text-xs text-muted">
-                      {new Date(c.t * 1000).toLocaleTimeString()}
-                    </td>
-                    <td className="py-2.5 font-medium">{c.symbol.replace("-USDT", "")}</td>
-                    <td className="py-2.5">
-                      <span
-                        className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs ${
-                          c.side === "LONG" ? "bg-primary-dim/40 text-primary" : "bg-danger/15 text-danger"
-                        }`}
-                      >
-                        {c.side === "LONG" ? (
-                          <ArrowUpRight className="size-3" />
-                        ) : (
-                          <ArrowDownRight className="size-3" />
-                        )}
-                        {c.side}
-                      </span>
-                    </td>
-                    <td className="py-2.5 font-mono text-xs">
-                      {c.entry.toPrecision(5)} → {c.exit.toPrecision(5)}
-                    </td>
-                    <td className={`py-2.5 font-mono tabular-nums ${c.pnl >= 0 ? "text-primary" : "text-danger"}`}>
-                      {c.pnl >= 0 ? "+" : ""}
-                      {c.pnl.toFixed(4)}
-                      <span className="ml-1 text-faint">({(c.pnl_pct * 100).toFixed(3)}%)</span>
-                    </td>
-                    <td className="py-2.5 font-mono text-muted">{c.hold_s.toFixed(0)}s</td>
-                    <td className="py-2.5 text-xs text-muted">{c.reason}</td>
-                  </tr>
-                ))
+                <ul className="space-y-3">
+                  {d.byReason.map((r) => {
+                    const max = Math.max(...d.byReason.map((x) => x.n), 1);
+                    return (
+                      <li key={r.reason}>
+                        <div className="mb-1 flex justify-between text-sm">
+                          <span>{r.reason}</span>
+                          <span className={`font-mono tabular-nums ${r.pnl >= 0 ? "text-primary" : "text-danger"}`}>
+                            {r.n} · {r.pnl >= 0 ? "+" : ""}
+                            {r.pnl.toFixed(4)}
+                          </span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-bg2">
+                          <div
+                            className="h-full rounded-full bg-primary-dim"
+                            style={{ width: `${(r.n / max) * 100}%` }}
+                          />
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
               )}
+            </Card>
+          </section>
+
+          <ClosedTape rows={closed} />
+        </div>
+      ) : null}
+    </DeskShell>
+  );
+}
+
+const EVALUATION_WINDOW_KEYS = ["last5", "last10", "last15", "last25", "last50", "last75"] as const;
+
+function EvaluationWindowsStrip({ stats }: { stats: LiveStats | null }) {
+  const windows = (stats?.pfCost?.evaluationWindows ?? stats?.sets?.liveOverview?.evaluationWindows ?? {}) as Record<
+    string,
+    EvaluationWindow
+  >;
+  const sets = stats?.sets;
+  return (
+    <section className="rounded-radius border border-border bg-surface p-4" data-testid="evaluation-windows">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Evaluation windows · cost-net PF</h2>
+          <p className="mt-1 text-xs text-muted">Independent recent-position checks; a window is valid only when its requested sample is available.</p>
+        </div>
+        <span className="font-mono text-xs text-muted">
+          Sets valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · active {sets?.activeCount ?? 0}/{sets?.setCount ?? 0}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {EVALUATION_WINDOW_KEYS.map((key) => {
+          const metric = windows[key] ?? {};
+          const requested = Number(metric.requestedN ?? Number(key.replace("last", "")));
+          const n = Number(metric.n ?? 0);
+          const available = metric.available ?? n >= requested;
+          const validated = Boolean(metric.validated && available);
+          const tone = validated ? "text-primary" : available ? "text-warn" : "text-muted";
+          return (
+            <div key={key} className="rounded-lg border border-border bg-bg2 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-muted">
+                <span>{key.replace("last", "Last ")}</span>
+                <span>{n}/{requested}</span>
+              </div>
+              <div className={`mt-1 font-mono text-lg tabular-nums ${tone}`}>
+                {Number.isFinite(Number(metric.pf)) ? Number(metric.pf).toFixed(2) : "—"}
+              </div>
+              <div className={`text-[10px] uppercase ${tone}`}>{validated ? "valid" : available ? "review" : "waiting"}</div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ResultsTabs({
+  value,
+  onChange,
+  stats,
+}: {
+  value: ResultTab;
+  onChange: (value: ResultTab) => void;
+  stats: LiveStats | null;
+}) {
+  const failedTests = stats?.tests?.filter((test) => !test.pass).length ?? 0;
+  const errorCount = Math.max(Number(stats?.errors ?? 0), Number(stats?.activity?.errorCount ?? 0), failedTests);
+  return (
+    <nav className="overflow-x-auto rounded-radius border border-border bg-bg2 p-1" aria-label="Results sections" role="tablist">
+      <div className="flex min-w-max gap-1">
+        {RESULT_TABS.map((tab) => {
+          const selected = tab.id === value;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`results-panel-${tab.id}`}
+              data-testid={`results-tab-${tab.id}`}
+              title={tab.hint}
+              onClick={() => onChange(tab.id)}
+              className={`min-h-11 rounded-lg px-3 text-left text-xs transition-colors ${
+                selected ? "bg-surface text-fg shadow-sm" : "text-muted hover:bg-surface/70 hover:text-fg"
+              }`}
+            >
+              <span className="block font-medium">{tab.label}{tab.id === "errors" && errorCount ? ` · ${errorCount}` : ""}</span>
+              <span className="hidden text-[10px] text-muted lg:block">{tab.hint}</span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
+  const controls = stats?.coverage?.controls;
+  const open = Number(controls?.open ?? stats?.openCount ?? 0);
+  const protectedCount = Number(controls?.ok ?? stats?.open?.filter((position) => position.controls).length ?? 0);
+  const missing = Number(controls?.missing ?? Math.max(0, open - protectedCount));
+  const mode = controls?.mode ?? ((stats?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
+  return (
+    <section className="rounded-radius border border-border bg-surface p-4" data-testid="control-health-panel">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Exchange control health</h2>
+          <p className="mt-1 text-xs text-muted">Protection orders are reconciled independently from foreign positions and orders.</p>
+        </div>
+        <span className="font-mono text-xs text-muted">mode {mode}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <HealthMetric label="Open positions" value={open} />
+        <HealthMetric label="SL + TP protected" value={`${protectedCount}/${open}`} good={missing === 0} />
+        <HealthMetric label="Control groups" value={Number(controls?.groupCount ?? controls?.groups?.length ?? 0)} />
+        <HealthMetric label="Reconciliation" value={stats?.coverage?.recon?.pending ? "pending" : stats?.coverage?.recon?.ok === false ? "review" : "ok"} good={stats?.coverage?.recon?.ok !== false && !stats?.coverage?.recon?.pending} />
+      </div>
+      {missing > 0 ? <p className="mt-3 text-xs text-warn">{missing} protection group{missing === 1 ? "" : "s"} pending reconciliation; details remain in the activity and error tabs.</p> : null}
+    </section>
+  );
+}
+
+function HealthMetric({ label, value, good }: { label: string; value: number | string; good?: boolean }) {
+  return (
+    <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+      <div className="font-mono text-[10px] text-muted uppercase">{label}</div>
+      <div className={`mt-1 font-mono text-lg tabular-nums ${good === true ? "text-primary" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
+function ErrorsPanel({ stats }: { stats: LiveStats | null }) {
+  const failedTests = (stats?.tests ?? []).filter((test) => !test.pass);
+  const events = [...(stats?.activity?.tail ?? stats?.events ?? [])]
+    .filter((event) => {
+      const type = String(event.event_type ?? "").toLowerCase();
+      const status = String(event.status ?? "").toLowerCase();
+      return type === "error" || type === "rejected" || ["error", "rejected", "discrepant"].includes(status);
+    })
+    .slice(0, 24);
+  const hasErrors = Boolean(stats?.lastError) || failedTests.length > 0 || events.length > 0 || Number(stats?.errors ?? 0) > 0;
+  return (
+    <section id="results-panel-errors" className="rounded-radius border border-border bg-surface p-4" data-testid="errors-panel" role="tabpanel">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Recorded errors and rejected actions</h2>
+          <p className="mt-1 text-xs text-muted">Operational notices stay in their normal panels; actionable failures are collected here.</p>
+        </div>
+        <span className={hasErrors ? "font-mono text-xs text-warn" : "font-mono text-xs text-primary"}>
+          {hasErrors ? "review required" : "no recorded errors"}
+        </span>
+      </div>
+      {stats?.lastError ? <div className="mb-3 rounded-lg border border-border bg-bg2 p-3 text-sm"><span className="text-muted">Latest:</span> {stats.lastError}</div> : null}
+      {failedTests.length ? (
+        <div className="mb-3 space-y-2">
+          {failedTests.map((test) => <div key={test.name} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs"><span className="text-warn">{test.name}</span> · {test.detail}</div>)}
+        </div>
+      ) : null}
+      {events.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[680px] text-left text-xs">
+            <thead className="font-mono text-muted"><tr><th className="pb-2 font-medium">Time</th><th className="pb-2 font-medium">Event</th><th className="pb-2 font-medium">Status</th><th className="pb-2 font-medium">Code</th><th className="pb-2 font-medium">Detail</th></tr></thead>
+            <tbody>
+              {events.map((event, index) => (
+                <tr key={event.event_id || `${event.ts}-${index}`} className="border-t border-border font-mono">
+                  <td className="py-2 text-muted">{event.ts ? new Date(event.ts * 1000).toLocaleTimeString() : "—"}</td>
+                  <td className="py-2">{String(event.event_type || "event").replaceAll("_", " ")}</td>
+                  <td className="py-2 text-warn">{event.status || "—"}</td>
+                  <td className="py-2 text-muted">{event.code || event.order_id || "—"}</td>
+                  <td className="max-w-[360px] truncate py-2 text-muted">{event.detail || "—"}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-      </Card>
-    </DeskShell>
+      ) : null}
+      {!hasErrors ? <p className="rounded-lg border border-border bg-bg2 p-6 text-center text-sm text-muted">No recorded errors. Healthy state and notices remain visible in Coverage, Controls, and Activity.</p> : null}
+    </section>
+  );
+}
+
+function ClosedTape({ rows }: { rows: LiveClosed[] }) {
+  return (
+    <Card title="Closed tape">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-3xl text-left text-sm">
+          <thead className="font-mono text-xs text-muted">
+            <tr>
+              <th className="pb-2 font-medium">Time</th>
+              <th className="pb-2 font-medium">Sym</th>
+              <th className="pb-2 font-medium">Side</th>
+              <th className="pb-2 font-medium">Route</th>
+              <th className="pb-2 font-medium">PnL</th>
+              <th className="pb-2 font-medium">Hold</th>
+              <th className="pb-2 font-medium">Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={7} className="py-8 text-center text-muted">Closed fills stream here</td></tr>
+            ) : rows.map((c, i) => (
+              <tr key={`${c.t}-${i}`} className="border-t border-border">
+                <td className="py-2.5 font-mono text-xs text-muted">{new Date(c.t * 1000).toLocaleTimeString()}</td>
+                <td className="py-2.5 font-medium">{c.symbol.replace("-USDT", "")}</td>
+                <td className="py-2.5">
+                  <span className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs ${c.side === "LONG" ? "bg-primary-dim/40 text-primary" : "bg-danger/15 text-danger"}`}>
+                    {c.side === "LONG" ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
+                    {c.side}
+                  </span>
+                </td>
+                <td className="py-2.5 font-mono text-xs">{c.entry.toPrecision(5)} → {c.exit.toPrecision(5)}</td>
+                <td className={`py-2.5 font-mono tabular-nums ${c.pnl >= 0 ? "text-primary" : "text-danger"}`}>
+                  {c.pnl >= 0 ? "+" : ""}{c.pnl.toFixed(4)}<span className="ml-1 text-faint">({(c.pnl_pct * 100).toFixed(3)}%)</span>
+                </td>
+                <td className="py-2.5 font-mono text-muted">{c.hold_s.toFixed(0)}s</td>
+                <td className="py-2.5 text-xs text-muted">{c.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 

@@ -62,6 +62,15 @@ class Coordinator:
         self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
+        # The optional additional coordination evaluates the newest 50+
+        # closed positions as one independent coordination window. It only
+        # changes the evidence window used for coordination; the full Set
+        # catalog is still built and scored by SetBook, with PF unchanged.
+        self.optimization_n = 50
+        self.additional_coordination = True
+        # Deprecated internal alias for older callers during migration.
+        self.minimal_positive_coordination = self.additional_coordination
+        self.optimization_stats: Dict[str, Any] = {}
         self.noise = 0.05
         self.vol_weight = 0.3
         self.outbreak = [3, 5, 10]
@@ -144,6 +153,14 @@ class Coordinator:
             self.position_cost_pct = self.position_cost_pct / 100.0
         if self.position_cost_pct > 1:
             self.position_cost_pct = POSITION_COST_PCT_DEFAULT
+        try:
+            self.optimization_n = max(50, min(200, int(ov.get("coordOptimizationN") or 50)))
+        except Exception:
+            self.optimization_n = 50
+        self.additional_coordination = bool(
+            ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
+        )
+        self.minimal_positive_coordination = self.additional_coordination
         self.noise = float(ov.get("noise") or cts.get("activeNoiseFilter") or 0.05)
         self.vol_weight = float(ov.get("volWeight") or cts.get("activeVolatilityWeight") or 0.3)
         raw_ob = ov.get("outbreak") or cts.get("activeOutbreakRanges") or [3, 5, 10]
@@ -193,19 +210,25 @@ class Coordinator:
         intern: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[str], Dict[str, float]]:
         reasons: List[str] = []
+        ordered = sorted(
+            [row for row in closed_rows if row is not None],
+            key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
+        )
+        window_limit = max(50, int(self.optimization_n or 50))
+        coord_rows = ordered[-window_limit:] if self.additional_coordination else ordered
         pnls = []
-        for row in closed_rows:
+        for row in coord_rows:
             if isinstance(row, dict):
                 pnls.append(float(row.get("pnl") or 0))
             else:
                 pnls.append(float(getattr(row, "pnl", 0) or 0))
         last_w = self.axes["last"].max_window
         prev_w = min(self.prev_window, self.axes["prev"].max_window * 2)
-        cost = last_n_cost_pf(closed_rows, self.pf_window, self.position_cost_pct)
-        last_cost = last_n_cost_pf(closed_rows, last_w, self.position_cost_pct)
-        prev_cost = last_n_cost_pf(closed_rows, prev_w, self.position_cost_pct)
-        main_cost = last_n_cost_pf(closed_rows, max(3, self.main_eval), self.position_cost_pct)
-        real_cost = last_n_cost_pf(closed_rows, max(3, self.real_eval), self.position_cost_pct)
+        cost = last_n_cost_pf(coord_rows, self.pf_window, self.position_cost_pct)
+        last_cost = last_n_cost_pf(coord_rows, last_w, self.position_cost_pct)
+        prev_cost = last_n_cost_pf(coord_rows, prev_w, self.position_cost_pct)
+        main_cost = last_n_cost_pf(coord_rows, max(3, self.main_eval), self.position_cost_pct)
+        real_cost = last_n_cost_pf(coord_rows, max(3, self.real_eval), self.position_cost_pct)
         intern = intern or {}
         intern_pf = float(intern.get("pf") or intern.get("indications") or intern.get("general") or 0)
         intern_n = float(intern.get("n") or 0)
@@ -230,7 +253,35 @@ class Coordinator:
             "mainN": float(main_cost["count"]),
             "realPf": round(float(real_cost["ratio"]), 4),
             "realN": float(real_cost["count"]),
+            "optimizationN": float(len(coord_rows)),
+            "optimizationWindow": float(window_limit if self.additional_coordination else len(ordered)),
+            "optimizationEnabled": 1.0 if self.additional_coordination else 0.0,
         }
+        if coord_rows:
+            net = sum(float(row.get("pnl") or 0) if isinstance(row, dict) else float(getattr(row, "pnl", 0) or 0) for row in coord_rows)
+            self.optimization_stats = {
+                "n": len(coord_rows),
+                "positive": sum(1 for value in pnls if value > 0),
+                "positiveRate": round(sum(1 for value in pnls if value > 0) / len(coord_rows), 4),
+                "pf": float(cost.get("ratio") or 1.0),
+                "netAvg": round(net / len(coord_rows), 8),
+                "costPct": float(cost.get("costPct") or self.position_cost_pct),
+                "costSource": cost.get("costSource") or "manual-fallback",
+                "window": window_limit if self.additional_coordination else len(ordered),
+                "enabled": bool(self.additional_coordination),
+            }
+        else:
+            self.optimization_stats = {
+                "n": 0,
+                "positive": 0,
+                "positiveRate": 0.0,
+                "pf": 1.0,
+                "netAvg": 0.0,
+                "costPct": self.position_cost_pct,
+                "costSource": "manual-fallback",
+                "window": window_limit if self.additional_coordination else 0,
+                "enabled": bool(self.additional_coordination),
+            }
         allow = True
         sample_ok = cost["count"] >= min(8, self.pf_window)
         intern_ok = intern_n >= max(3, int(self.prev_min_count or 5)) and intern_pf + 1e-9 >= 1.0
@@ -304,7 +355,11 @@ class Coordinator:
         position into the Prev tape. Every child keeps the Base parent ID and a
         stable dedupe key; 100 relative positions equals one parent volume.
         """
-        closed = [r for r in closed_rows if r is not None]
+        ordered = sorted(
+            [r for r in closed_rows if r is not None],
+            key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
+        )
+        closed = ordered[-max(50, int(self.optimization_n or 50)) :] if self.additional_coordination else ordered
         _ = list(open_rows or ())  # explicit boundary: never mixed into closed
         out: List[Dict[str, Any]] = []
         for axis, spec in AXIS_SPECS.items():
@@ -504,6 +559,11 @@ class Coordinator:
             "stageMinPf": dict(self.stage_min_pf),
             "pfWindow": self.pf_window,
             "positionCostPct": self.position_cost_pct,
+            "additionalCoordination": self.additional_coordination,
+            # Deprecated response alias for older clients.
+            "minimalPositiveCoordination": self.additional_coordination,
+            "optimizationN": self.optimization_n,
+            "optimization": dict(self.optimization_stats or {}),
             "pfNeutral": 1.0,
             "pfPlus1xCost": 1.1,
             "noise": self.noise,

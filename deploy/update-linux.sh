@@ -91,13 +91,14 @@ seed_env
 sync_pulse_tree
 npm_install_desk
 install_units
+enforce_retention
 
 if [[ "$NO_RESTART" -eq 1 ]]; then
   skip "restart"
   print_results
 else
   live_was_on=0
-  if systemctl is-active --quiet "grok-pulse@${LIVE_SLOT}.service"; then
+  if systemctl is-active --quiet "$(pulse_instance_unit "$LIVE_SLOT")"; then
     live_was_on=1
   fi
   start_live="$START_LIVE"

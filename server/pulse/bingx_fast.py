@@ -48,6 +48,8 @@ try:
 except Exception:
     _ws = None
 
+from storage_paths import append_bounded_line, retain_last_lines
+
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
 RECV = 10000
@@ -110,8 +112,7 @@ class ErrorLog:
         line = dumps(rec) + "\n"
         with self.lock:
             try:
-                with open(self.path, "a") as f:
-                    f.write(line)
+                append_bounded_line(self.path, line)
                 if self.n % 80 == 0:
                     self._rotate()
             except Exception:
@@ -119,17 +120,7 @@ class ErrorLog:
 
     def _rotate(self) -> None:
         try:
-            import os
-            if os.path.getsize(self.path) < 120_000:
-                return
-            with open(self.path, "rb") as f:
-                f.seek(-min(160_000, os.path.getsize(self.path)), 2)
-                f.readline()
-                tail = f.read()
-            tmp = self.path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(tail)
-            os.replace(tmp, self.path)
+            retain_last_lines(self.path)
         except Exception:
             pass
 

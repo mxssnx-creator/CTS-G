@@ -80,9 +80,11 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
-export const SL_TP_MIN = 0.2;
-export const SL_TP_MAX = 2.6;
-export const SL_TP_STEP = 0.2;
+// Full independent risk catalog. PF remains the coordinator's primary
+// objective; this axis controls the evaluated SL:TP range only.
+export const SL_TP_MIN = 0.1;
+export const SL_TP_MAX = 3.0;
+export const SL_TP_STEP = 0.1;
 
 export const PF_MIN = 0.8;
 export const PF_MAX = 2.5;
@@ -197,6 +199,15 @@ export type PulseOverlay = {
   mainMinPf: number;
   realMinPf: number;
   positionCostPct: number;
+  useLivePositionCosts: boolean;
+  /** Prefer the smallest stable ranges after PF/DD/sample gates. */
+  preferMinimalRange: boolean;
+  /** Evaluate the independent 50+ close coordination window. */
+  additionalCoordination: boolean;
+  /** @deprecated Read-only compatibility aliases for older overlays. */
+  preferMinimalPositive?: boolean;
+  minimalPositiveCoordination?: boolean;
+  coordOptimizationN: number;
   pfWindow: number;
   slMinPct: number;
   slMaxPct: number;
@@ -265,6 +276,7 @@ export type PulseOverlay = {
   setMinPf: number;
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
+  setLiveNegativeDeact: boolean;
   setUseHistoricGate: boolean;
   setStrictGate: boolean;
   setMinSamples: number;
@@ -349,19 +361,33 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   mainMinPf: 1.1,
   realMinPf: 1.15,
   positionCostPct: 0.15,
+  // Static/manual PositionCost remains the safe default. Live fee discovery
+  // is opt-in and falls back to positionCostPct when no complete exchange
+  // fee sample is available.
+  useLivePositionCosts: false,
+  // Evaluate the full catalog, then (optionally) prefer the smallest stable
+  // ranges after PF/DD/sample gates. PF remains the primary objective.
+  // Additional 50+ close coordination is independently switchable and does
+  // not shrink historic coverage.
+  // Optional optimization layers are deliberately opt-in.  The complete
+  // catalog is still evaluated when historic calculation runs; these flags
+  // only alter live selection/coordination after that evidence exists.
+  preferMinimalRange: false,
+  additionalCoordination: false,
+  coordOptimizationN: 50,
   pfWindow: 15,
   slMinPct: 0.2,
-  slMaxPct: 1.2,
-  tpMinPct: 0.35,
-  tpMaxPct: 2.4,
+  slMaxPct: 3.0,
+  tpMinPct: 0.3,
+  tpMaxPct: 3.0,
   tpCostRatio: 5,
   slToTpRatio: 0.6,
   slToTpAuto: true,
   slToTpRecalcN: 6,
   slToTpRecalcEvery: 8,
-  slToTpMin: 0.2,
-  slToTpMax: 2.6,
-  slToTpStep: 0.2,
+  slToTpMin: SL_TP_MIN,
+  slToTpMax: SL_TP_MAX,
+  slToTpStep: SL_TP_STEP,
   trailAuto: true,
   trailRecalcN: 6,
   trailRecalcEvery: 8,
@@ -417,6 +443,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinPf: 1.05,
   setMaxDdTimeS: 27000,
   setAutoDeact: true,
+  // Live negative-result deactivation is an explicit safety policy, not an
+  // implicit default for a newly created settings profile.
+  setLiveNegativeDeact: false,
   setUseHistoricGate: true,
   setStrictGate: true,
   setMinSamples: 8,
@@ -686,19 +715,32 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15), 1.15),
 
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
+    useLivePositionCosts: bool(
+      live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
+      false,
+    ),
+    preferMinimalRange: bool(
+      live?.preferMinimalRange ?? live?.preferMinimalPositive ?? cts.preferMinimalRange ?? cts.preferMinimalPositive,
+      false,
+    ),
+    additionalCoordination: bool(
+      live?.additionalCoordination ?? live?.minimalPositiveCoordination ?? cts.additionalCoordination ?? cts.minimalPositiveCoordination,
+      false,
+    ),
+    coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.2),
-    slMaxPct: num(cts.slMaxPct, 1.2),
-    tpMinPct: num(cts.tpMinPct, 0.35),
-    tpMaxPct: num(cts.tpMaxPct, 2.4),
+    slMaxPct: num(cts.slMaxPct, 3.0),
+    tpMinPct: num(cts.tpMinPct, 0.3),
+    tpMaxPct: num(cts.tpMaxPct, 3.0),
     tpCostRatio: num(cts.tpCostRatio, 5),
     slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
     slToTpAuto: bool(cts.slToTpAuto, true),
     slToTpRecalcN: num(cts.slToTpRecalcN, 6),
     slToTpRecalcEvery: num(cts.slToTpRecalcEvery, 8),
-    slToTpMin: num(cts.slToTpMin, 0.2),
-    slToTpMax: num(cts.slToTpMax, 2.6),
-    slToTpStep: num(cts.slToTpStep, 0.2),
+    slToTpMin: num(cts.slToTpMin, SL_TP_MIN),
+    slToTpMax: num(cts.slToTpMax, SL_TP_MAX),
+    slToTpStep: num(cts.slToTpStep, SL_TP_STEP),
     trailAuto: bool(cts.trailAuto, true),
     trailRecalcN: num(cts.trailRecalcN, 6),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
@@ -744,6 +786,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.05),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 27000),
     setAutoDeact: bool(cts.setAutoDeact, true),
+    setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),
     setMinSamples: num(cts.setMinSamples, 8),
@@ -773,10 +816,16 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  out.slToTpMin = 0.2;
-  out.slToTpMax = 2.6;
-  out.slToTpStep = 0.2;
-  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), 0.2, 2.6, 0.2);
+  const pct = (value: number, fallback: number): number =>
+    Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 10) / 10;
+  out.slMinPct = pct(out.slMinPct, 0.2);
+  out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
+  out.tpMinPct = pct(out.tpMinPct, 0.3);
+  out.tpMaxPct = Math.max(out.tpMinPct, pct(out.tpMaxPct, 3.0));
+  out.slToTpMin = SL_TP_MIN;
+  out.slToTpMax = SL_TP_MAX;
+  out.slToTpStep = SL_TP_STEP;
+  out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), SL_TP_MIN, SL_TP_MAX, SL_TP_STEP);
   out.trailArmMin = 0.3;
   out.trailArmMax = 1.5;
   out.trailGiveMin = 0.1;
@@ -870,6 +919,18 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     next.symbolsAll = false;
     if (!next.symbols.length) next.symbols = [...PULSE_SYMBOLS];
   }
+  // Migrate the old names at the boundary so the rest of the UI and API
+  // always expose the actual policy: minimal ranges, PF-first ranking.
+  next.preferMinimalRange = bool(
+    next.preferMinimalRange ?? next.preferMinimalPositive,
+    false,
+  );
+  next.additionalCoordination = bool(
+    next.additionalCoordination ?? next.minimalPositiveCoordination,
+    false,
+  );
+  delete next.preferMinimalPositive;
+  delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.symbolsDynamic = next.symbolsDynamic !== false;

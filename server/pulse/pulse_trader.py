@@ -27,14 +27,29 @@ from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLO
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, cost_as_frac, net_pnl_pct, net_pnl_usdt
+from position_cost import (
+    last_n_cost_pf,
+    evaluation_windows,
+    resolve_sl_tp,
+    POSITION_COST_PCT_DEFAULT,
+    SL_TP_RATIOS,
+    SL_TP_MIN,
+    SL_TP_MAX,
+    cost_as_frac,
+    net_pnl_pct,
+    net_pnl_usdt,
+    normalize_position_cost_pct,
+    effective_position_cost_pct,
+    exchange_order_cost_sample,
+    row_fee_usdt,
+)
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
-from storage_paths import DATA_DIR
+from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
 from contracts import INDICATION_KINDS, stable_key
 
@@ -59,6 +74,8 @@ EVENTS_PATH = os.path.join(DIR, f"events-{CONN_SHORT}.json")
 LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
 START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
 RESET_EQ_PATH = os.path.join(DIR, f"reset-eq-{CONN_SHORT}")
+LIVE_COST_PATH = os.path.join(DIR, f"live-position-cost-{CONN_SHORT}.json")
+CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited
@@ -520,12 +537,12 @@ def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> Non
         _LOG_BUF.append(line + "\n")
         now = time.time()
         if len(_LOG_BUF) >= 8 or now - _LOG_FLUSH >= 1.2:
-            with open(LOG_PATH, "a") as f:
-                f.writelines(_LOG_BUF)
+            batch = list(_LOG_BUF)
+            append_bounded_lines(LOG_PATH, batch)
             _LOG_BUF.clear()
             _LOG_FLUSH = now
-            _LOG_N += 8
-            if _LOG_N % 200 == 0:
+            _LOG_N += len(batch)
+            if _LOG_N // 200 > (_LOG_N - len(batch)) // 200:
                 rotate_log(LOG_PATH, 220_000)
     except Exception:
         _LOG_BUF.clear()
@@ -533,16 +550,10 @@ def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> Non
 
 def rotate_log(path: str, max_bytes: int) -> None:
     try:
-        if os.path.getsize(path) < max_bytes:
-            return
-        with open(path, "rb") as f:
-            f.seek(-min(max_bytes // 2, os.path.getsize(path)), os.SEEK_END)
-            f.readline()
-            tail = f.read()
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(tail)
-        os.replace(tmp, path)
+        # Keep the compatibility argument for callers, but use the shared
+        # line/byte cap so every engine log has the same retention contract.
+        del max_bytes
+        retain_last_lines(path)
     except Exception:
         pass
 
@@ -572,13 +583,32 @@ def rss_mb() -> float:
 
 
 def redis_hget(field: str) -> str:
+    """Read a connection value, with a protected environment fallback.
+
+    Redis remains the normal source.  The fallback allows a service to start
+    from a 0600 systemd EnvironmentFile during recovery/bootstrap without
+    putting credentials in the repository or command line.  It is deliberately
+    connection-scoped so x01 and x02 can never cross-read each other.
+    """
     try:
         p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-        return (p.stdout or "").strip()
+        value = (p.stdout or "").strip()
+        if value and value != "(nil)":
+            return value
     except FileNotFoundError:
-        return ""
+        pass
     except Exception:
-        return ""
+        pass
+    suffix = re.sub(r"[^A-Za-z0-9]", "_", CONN_SHORT).upper()
+    field_name = re.sub(r"[^A-Za-z0-9]", "_", str(field or "")).upper()
+    for name in (
+        f"CTS_{suffix}_{field_name}",
+        f"BINGX_{suffix}_{field_name}",
+    ):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def load_json_file(path: str) -> dict:
@@ -651,6 +681,9 @@ class Position:
     peak: float
     trail_armed: bool = False
     trail: Optional[float] = None
+    # Desired protective trail waiting for a retry after a transient exchange
+    # rejection. It never loosens the currently installed stop.
+    trail_pending: Optional[float] = None
     order_id: str = ""
     sl_oid: str = ""
     tp_oid: str = ""
@@ -704,6 +737,8 @@ class Position:
     pending_qty: float = 0.0
     pending_close_qty: float = 0.0
     last_fill_at: float = 0.0
+    entry_fee: float = 0.0
+    entry_notional: float = 0.0
 
 
 @dataclass
@@ -737,6 +772,11 @@ class Closed:
     control_range_key: str = ""
     control_mode: str = ""
     member_count: int = 1
+    entry_fee: float = 0.0
+    exit_fee: float = 0.0
+    fee_total: float = 0.0
+    position_cost_pct: float = POSITION_COST_PCT_DEFAULT
+    cost_source: str = "manual-fallback"
 
 
 class Pulse:
@@ -890,6 +930,29 @@ class Pulse:
         self.flatten_skip: Dict[str, float] = {}
         self.cts: Dict[str, Any] = {}
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
+        self.manual_position_cost_pct = POSITION_COST_PCT_DEFAULT
+        self.use_live_position_costs = False
+        self.position_cost_source = "manual-fallback"
+        self.live_position_cost_pct = 0.0
+        self.live_position_cost_samples = 0
+        self.live_position_cost_complete = False
+        self.live_position_cost_notional = 0.0
+        self.live_position_cost_updated = 0.0
+        self._live_cost_rows: List[Dict[str, Any]] = []
+        self._live_cost_seen: Dict[str, str] = {}
+        self._live_cost_lock = threading.RLock()
+        self._load_live_cost_state()
+        self._config_evidence_lock = threading.RLock()
+        self.config_evidence: Dict[str, Any] = {
+            "version": 1,
+            "connection": CONN_SHORT,
+            "updatedAt": 0.0,
+            "configs": {},
+        }
+        self._config_evidence_seen: BoundedSet = BoundedSet(4000)
+        self._config_evidence_cache: Dict[str, Any] = {}
+        self._config_evidence_cache_ts = 0.0
+        self._load_config_evidence()
         self.pf_window = 15
         self.sl_min = 0.0020
         self.sl_max = 0.0120
@@ -1104,6 +1167,12 @@ class Pulse:
         target.entry = ((target.entry * old_qty) + (incoming.entry * add_qty)) / total
         target.qty = total
         target.notional = total * target.entry
+        target.entry_fee = max(0.0, float(getattr(target, "entry_fee", 0.0) or 0.0)) + max(
+            0.0, float(getattr(incoming, "entry_fee", 0.0) or 0.0)
+        )
+        target.entry_notional = max(0.0, float(getattr(target, "entry_notional", 0.0) or 0.0)) + max(
+            0.0, float(getattr(incoming, "entry_notional", 0.0) or 0.0)
+        )
         target.opened_at = min(float(target.opened_at or time.time()), float(incoming.opened_at or time.time()))
         if target.side == "LONG":
             target.peak = max(float(target.peak or target.entry), float(incoming.peak or incoming.entry))
@@ -1111,6 +1180,16 @@ class Pulse:
             target.peak = min(float(target.peak or target.entry), float(incoming.peak or incoming.entry))
         target.conf = max(float(target.conf or 0), float(incoming.conf or 0))
         target.reason = incoming.reason or target.reason
+        target.volume_ratio = max(
+            1.0,
+            float(getattr(target, "volume_ratio", 1.0) or 1.0),
+            float(getattr(incoming, "volume_ratio", 1.0) or 1.0),
+        )
+        target.relative_count = max(
+            1,
+            int(getattr(target, "relative_count", 1) or 1),
+            int(getattr(incoming, "relative_count", 1) or 1),
+        )
         target.member_count = min(256, max(1, int(getattr(target, "member_count", 1) or 1)) + max(1, int(getattr(incoming, "member_count", 1) or 1)))
         for attr in ("lineage_set_ids", "lineage_parent_set_ids", "lineage_axis_keys", "lineage_packs", "member_client_ids", "member_order_ids"):
             values = list(getattr(target, attr, []) or []) + list(getattr(incoming, attr, []) or [])
@@ -1600,6 +1679,7 @@ class Pulse:
                 "side": str(value.get("side") or "").upper(),
                 "requested_qty": requested,
                 "filled_qty": min(filled, requested) if requested > 0 else filled,
+                "fee_total": max(0.0, _sf(value.get("fee_total") or value.get("feeTotal"))),
                 "avg_price": max(0.0, float(value.get("avg_price") or value.get("avgPrice") or 0)),
                 "group_key": str(value.get("group_key") or value.get("groupKey") or ""),
                 "created_at": created,
@@ -1635,6 +1715,7 @@ class Pulse:
         order_id: str = "",
         avg_price: float = 0.0,
         group_key: str = "",
+        fee_total: float = 0.0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         cid = str(cid or "")
@@ -1660,6 +1741,7 @@ class Pulse:
             "side": str(side or old.get("side") or "").upper(),
             "requested_qty": requested,
             "filled_qty": filled,
+            "fee_total": max(float(old.get("fee_total") or 0.0), max(0.0, float(fee_total or 0.0))),
             "avg_price": max(0.0, float(avg_price or old.get("avg_price") or 0)),
             "group_key": str(group_key or old.get("group_key") or ""),
             "created_at": float(old.get("created_at") or now),
@@ -3458,38 +3540,61 @@ class Pulse:
             with_qty=grouped,
         )
 
-    def replace_sl(self, pos: Position, new_sl: float) -> None:
+    def replace_sl(self, pos: Position, new_sl: float) -> bool:
+        """Install a tighter stop without leaving a position unprotected.
+
+        BingX has no atomic cancel/replace route. Place the replacement first
+        and cancel old protection only after a distinct order id is confirmed.
+        A failed update preserves the old stop; the event loop can retry it.
+        """
         now = time.time()
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
         if now < self.ctrl_skip.get(f"sync:{scope}", 0):
-            return
+            return False
+        old_sl = float(pos.sl or 0.0)
+        old_ids = {
+            oid for oid in (real_oid(pos.sl_oid), real_oid(getattr(pos, "sec_sl_oid", ""))) if oid
+        }
         c = self.contracts.get(pos.symbol)
         if c:
             new_sl = self.round_px(c, new_sl)
         new_sl = self.clamp_ctrl_price(pos, "sl", new_sl)
         if not self.sl_legal(pos, new_sl):
             new_sl = self.desired_sl_tp(pos)[0]
-        if pos.sl_oid and abs(float(pos.sl or 0) - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, pos.sl):
-            return
-        # BingX Swap does not expose the Binance-style cancelReplace route.
-        # Calling it on every trailing update only creates 100400 API errors
-        # and leaves the old control order in place. Cancel and place are
-        # deliberately separate so the fallback is valid on all BingX lanes.
-        if pos.sl_oid:
-            self.cancel_order(pos.symbol, pos.sl_oid)
-        if pos.sec_sl_oid and pos.sec_sl_oid != pos.sl_oid:
-            self.cancel_order(pos.symbol, pos.sec_sl_oid)
-        pos.sl_oid = pos.sec_sl_oid = ""
+        # A trailing stop is monotonic. A mark-price clamp must never turn an
+        # improvement into a looser stop during a fast move or API retry.
+        if old_sl > 0 and self.sl_legal(pos, old_sl):
+            if pos.side == "LONG" and new_sl <= old_sl * 1.000001:
+                return True
+            if pos.side == "SHORT" and new_sl >= old_sl * 0.999999:
+                return True
+        if old_ids and abs(old_sl - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, old_sl):
+            return True
+
+        # BingX Swap does not expose an atomic cancelReplace route. Keep the
+        # old order live while placing the new one. ``place_ctrl`` may return
+        # the old id when the exchange is cooling or reports an existing
+        # order; that is a safe no-op, not a successful replacement.
+        pos.sec_sl = new_sl
+        oid = real_oid(self.place_ctrl(pos, "sec-sl", new_sl))
+        if not oid or oid in old_ids:
+            pos.sec_sl = old_sl
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+            return False
+
+        for old_oid in sorted(old_ids):
+            if old_oid != oid:
+                self.cancel_order(pos.symbol, old_oid)
+        pos.sl_oid = pos.sec_sl_oid = oid
         pos.sl = new_sl
         pos.sec_sl = new_sl
-        oid = self.place_ctrl(pos, "sec-sl", new_sl)
-        pos.sl_oid = pos.sec_sl_oid = real_oid(oid)
         want_tp = self.desired_sl_tp(pos)[1]
         if not real_oid(pos.tp_oid):
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
             pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         self.ctrl_skip[f"sync:{scope}"] = now + 12.0
+        return True
 
     def market_close(self, pos: Position) -> Tuple[bool, float]:
         close_side = "SELL" if pos.side == "LONG" else "BUY"
@@ -3502,6 +3607,7 @@ class Pulse:
             "filled_qty": 0.0,
             "order_id": "",
             "avg_price": 0.0,
+            "fee": 0.0,
             "status": "",
         }
         # Every fallback form must keep the same client id. Otherwise an
@@ -3539,6 +3645,7 @@ class Pulse:
                     "order_id": oid,
                     "avg_price": px,
                     "filled_qty": min(requested_qty, max(0.0, filled)),
+                    "fee": row_fee_usdt(data) if isinstance(data, dict) else 0.0,
                     "status": status or "ACCEPTED",
                 })
                 return True, px
@@ -3666,6 +3773,7 @@ class Pulse:
         order_id: str = "",
         pending_qty: Optional[float] = None,
         source: str = "",
+        fee: float = 0.0,
     ) -> float:
         """Apply only an exchange-confirmed delta to one logical position."""
         add_qty = max(0.0, float(qty or 0.0))
@@ -3693,7 +3801,34 @@ class Pulse:
             pos.entry = ((float(pos.entry or fill_px) * old_qty) + fill_px * add_qty) / total
         pos.qty = total
         pos.notional = total * pos.entry
+        pos.entry_fee = max(0.0, float(getattr(pos, "entry_fee", 0.0) or 0.0)) + max(0.0, float(fee or 0.0))
+        pos.entry_notional = max(0.0, float(getattr(pos, "entry_notional", 0.0) or 0.0)) + add_qty * fill_px
         pos.exchange_qty = max(0.0, float(getattr(pos, "exchange_qty", 0.0) or 0.0)) + add_qty
+        fill_source = str(source or "").strip().lower()
+        if fill_source in {"block", "dca"}:
+            # Block/DCA additions are the only live size increases.  Keep the
+            # effective volume multiplier on the logical position so close
+            # evidence and restart recovery cannot misclassify an add-on as a
+            # base-only fill.
+            anchor = 0.0
+            try:
+                lane = (
+                    self.block.lanes.get(self.block_lane_key(pos))
+                    if fill_source == "block"
+                    else self.dca.lanes.get(self.dca_lane_key(pos))
+                )
+                anchor = float(
+                    getattr(lane, "base_qty", 0.0) if fill_source == "block"
+                    else getattr(lane, "parent_qty", 0.0)
+                )
+            except Exception:
+                anchor = 0.0
+            if anchor > 0:
+                pos.volume_ratio = max(
+                    1.0,
+                    float(getattr(pos, "volume_ratio", 1.0) or 1.0),
+                    total / anchor,
+                )
         if pending_qty is not None:
             pos.pending_qty = max(0.0, float(pending_qty or 0.0))
         else:
@@ -3789,6 +3924,8 @@ class Pulse:
             exchange_qty=fill_qty,
             pending_qty=max(0.0, float(row.get("requested_qty") or 0.0) - fill_qty),
             last_fill_at=time.time(),
+            entry_fee=max(0.0, _sf(row.get("fee_total") or row.get("feeTotal"))),
+            entry_notional=fill_qty * entry,
         )
         self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
         return pos
@@ -3800,6 +3937,7 @@ class Pulse:
         fill_px: float,
         order_id: str = "",
         pending_qty: Optional[float] = None,
+        fee: float = 0.0,
     ) -> Optional[Position]:
         cid = str(row.get("client_id") or "")
         existing = self._position_for_client(cid)
@@ -3811,6 +3949,7 @@ class Pulse:
                 order_id=order_id,
                 pending_qty=pending_qty,
                 source="entry",
+                fee=fee,
             )
             self.save_open_book()
             return existing
@@ -4138,6 +4277,9 @@ class Pulse:
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
         filled = order_fill_qty(data, qty)
         order_id = extract_oid(data)
+        entry_fee = row_fee_usdt(data) if isinstance(data, dict) else 0.0
+        if entry_fee > 0:
+            pending_meta["entry_fee"] = entry_fee
         self._remember_pending(
             kind="entry",
             cid=cid,
@@ -4148,6 +4290,7 @@ class Pulse:
             order_id=order_id,
             avg_price=avg,
             group_key=pending_group_key,
+            fee_total=entry_fee,
             metadata=pending_meta,
         )
         if filled <= 0:
@@ -4195,7 +4338,9 @@ class Pulse:
         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
         if self.exits.enabled and self.exits.ignore_tp:
-            tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
+            # Ignore-TP means the normal target is not an early close; the
+            # exchange safety target still respects the configured 3% ceiling.
+            tp_pct = min(self.tp_max, max(tp_pct, sl_pct * 3.0))
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
             symbol=sym, side=side, qty=filled, entry=avg, opened_at=time.time(),
@@ -4213,6 +4358,8 @@ class Pulse:
             exchange_qty=filled,
             pending_qty=max(0.0, qty - filled),
             last_fill_at=time.time(),
+            entry_fee=entry_fee,
+            entry_notional=filled * avg,
         )
         pos.sl, pos.tp = self.security_prices(pos)
         if attached_sl:
@@ -4235,6 +4382,7 @@ class Pulse:
             order_id=order_id,
             avg_price=avg,
             group_key=getattr(pos, "control_group_key", "") or pending_group_key,
+            fee_total=entry_fee,
             metadata=pending_meta,
         )
         merged = False
@@ -4271,6 +4419,7 @@ class Pulse:
             client_id=cid,
             qty=filled,
             price=avg,
+            fee=entry_fee,
             detail="position opened",
             metadata={"confidence": conf, "reason": reason},
         )
@@ -4405,6 +4554,7 @@ class Pulse:
         close_oid: str = "",
         status: str = "",
         cumulative_qty: float = 0.0,
+        exit_fee: float = 0.0,
         skip_eval: Optional[bool] = None,
     ) -> bool:
         """Apply one exchange-confirmed close delta to exactly one position.
@@ -4431,10 +4581,23 @@ class Pulse:
             pnl_pct = (exit_px - pos.entry) / pos.entry
         else:
             pnl_pct = (pos.entry - exit_px) / pos.entry
-        pnl = net_pnl_usdt(pnl_pct, fill_qty, pos.entry, self.position_cost_pct)
-        hold = max(0.0, time.time() - float(pos.opened_at or time.time()))
         remaining = max(0.0, current_qty - fill_qty)
         final_fill = remaining <= max(1e-12, current_qty * 1e-9)
+        entry_fee = max(0.0, float(getattr(pos, "entry_fee", 0.0) or 0.0))
+        allocated_entry_fee = entry_fee if final_fill else entry_fee * (fill_qty / max(current_qty, 1e-12))
+        measured_exit_fee = max(0.0, float(exit_fee or 0.0))
+        fee_total = allocated_entry_fee + measured_exit_fee
+        close_notional = max(0.0, fill_qty * float(pos.entry or 0.0))
+        measured_roundtrip = measured_exit_fee > 0 and fee_total > 0 and close_notional > 0
+        fill_cost = (
+            normalize_position_cost_pct(fee_total / close_notional * 100.0, self.position_cost_pct)
+            if measured_roundtrip
+            else self.position_cost_pct
+        )
+        position_cost_source = str(getattr(self, "position_cost_source", "manual-fallback") or "manual-fallback")
+        fill_cost_source = "live-exchange" if measured_roundtrip or position_cost_source == "live-exchange" else position_cost_source
+        pnl = net_pnl_usdt(pnl_pct, fill_qty, pos.entry, fill_cost)
+        hold = max(0.0, time.time() - float(pos.opened_at or time.time()))
         sequence = float(cumulative_qty or 0.0) if cumulative_qty else fill_qty
         close_key = stable_key(
             CONN_SHORT,
@@ -4458,6 +4621,11 @@ class Pulse:
             control_range_key=str(getattr(pos, "control_range_key", "") or "aggregate"),
             control_mode="per-config" if self.per_config_controls(pos) else "aggregate",
             member_count=max(1, int(getattr(pos, "member_count", 1) or 1)),
+            entry_fee=allocated_entry_fee,
+            exit_fee=measured_exit_fee,
+            fee_total=fee_total,
+            position_cost_pct=fill_cost,
+            cost_source=fill_cost_source,
         )
         self.record_event(
             "close",
@@ -4475,7 +4643,7 @@ class Pulse:
             qty=fill_qty,
             price=exit_px,
             pnl=pnl,
-            fee=abs(fill_qty * pos.entry) * cost_as_frac(self.position_cost_pct),
+            fee=measured_exit_fee,
             detail=reason,
             metadata={
                 "realized": not skip,
@@ -4486,6 +4654,11 @@ class Pulse:
                 "holdS": hold,
                 "pnlPct": pnl_pct,
                 "skipEvaluation": skip,
+                "entryFee": allocated_entry_fee,
+                "exitFee": measured_exit_fee,
+                "feeTotal": fee_total,
+                "positionCostPct": fill_cost,
+                "costSource": fill_cost_source,
             },
         )
         if not skip:
@@ -4509,6 +4682,13 @@ class Pulse:
                 pass
             try:
                 self.sets.on_live_close(rec)
+            except Exception:
+                pass
+            try:
+                self._record_config_evidence(rec, close_cid=close_cid, close_oid=close_oid)
+            except Exception:
+                pass
+            try:
                 self.sets.adapt_from_live(self.strategy_closes())
             except Exception:
                 pass
@@ -4521,6 +4701,8 @@ class Pulse:
         # never folded into this position and is intentionally left untouched.
         pos.qty = remaining
         pos.notional = remaining * float(pos.entry or 0.0)
+        pos.entry_fee = max(0.0, entry_fee - allocated_entry_fee)
+        pos.entry_notional = max(0.0, float(getattr(pos, "entry_notional", 0.0) or 0.0) - close_notional)
         pos.exchange_qty = max(0.0, float(getattr(pos, "exchange_qty", current_qty) or 0.0) - fill_qty)
         pos.last_fill_at = time.time()
 
@@ -4563,8 +4745,7 @@ class Pulse:
             self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
             self.remove_position(pos)
             try:
-                with open(TRADES_PATH, "a") as f:
-                    f.write(json.dumps(asdict(rec)) + "\n")
+                append_bounded_line(TRADES_PATH, json.dumps(asdict(rec)) + "\n")
             except Exception:
                 pass
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
@@ -4660,6 +4841,7 @@ class Pulse:
                 order_id=close_oid,
                 avg_price=exit_px,
                 group_key=group_key,
+                fee_total=max(0.0, float(close_result.get("fee") or 0.0)),
                 metadata=pending_meta,
             )
             pos.pending_close_qty = max(0.0, requested_qty - filled_qty)
@@ -4682,6 +4864,7 @@ class Pulse:
                 close_oid=close_oid,
                 status="confirmed" if filled_qty + 1e-12 >= requested_qty else "partial",
                 cumulative_qty=filled_qty,
+                exit_fee=max(0.0, float(close_result.get("fee") or 0.0)),
                 skip_eval=skip_eval,
             )
             if filled_qty + 1e-12 >= requested_qty:
@@ -4699,6 +4882,7 @@ class Pulse:
                     order_id=close_oid,
                     avg_price=exit_px,
                     group_key=group_key,
+                    fee_total=max(0.0, float(close_result.get("fee") or 0.0)),
                     metadata=pending_meta,
                 )
             return
@@ -4807,22 +4991,35 @@ class Pulse:
                     moved = abs(dec.sl - pos.sl) / max(pos.entry, 1e-9)
                     if moved >= 0.004 and time.time() >= self.ctrl_skip.get(f"sync:{scope}", 0):
                         pos.trail_armed = True
-                        pos.trail = dec.sl
-                        self.replace_sl(pos, dec.sl)
+                        if self.replace_sl(pos, dec.sl):
+                            pos.trail = pos.sl
+                            pos.trail_pending = None
+                        else:
+                            pos.trail_pending = dec.sl
                     continue
             if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
                 pos.trail_armed = True
                 give = pos.trail_give or TRAIL_GIVE
                 if pos.side == "LONG":
                     trail = max(pos.peak * (1 - give), pos.entry * (1 + 0.0004))
-                    if pos.trail is None or trail > pos.trail + 1e-12:
-                        pos.trail = trail
-                        self.replace_sl(pos, trail)
+                    pending = float(pos.trail_pending or 0.0)
+                    desired = max(trail, pending)
+                    if pos.trail is None or desired > pos.trail + 1e-12:
+                        if self.replace_sl(pos, desired):
+                            pos.trail = pos.sl
+                            pos.trail_pending = None
+                        else:
+                            pos.trail_pending = desired
                 else:
                     trail = min(pos.peak * (1 + give), pos.entry * (1 - 0.0004))
-                    if pos.trail is None or trail < pos.trail - 1e-12:
-                        pos.trail = trail
-                        self.replace_sl(pos, trail)
+                    pending = float(pos.trail_pending or 0.0)
+                    desired = min(trail, pending) if pending > 0 else trail
+                    if pos.trail is None or desired < pos.trail - 1e-12:
+                        if self.replace_sl(pos, desired):
+                            pos.trail = pos.sl
+                            pos.trail_pending = None
+                        else:
+                            pos.trail_pending = desired
             if not self.exits.enabled:
                 age = now - pos.opened_at
                 if age >= TIME_STOP_S and (pnl_pct >= 0.0012 or pnl_pct <= -0.0025):
@@ -4834,14 +5031,243 @@ class Pulse:
 
 
 
+    @staticmethod
+    def _evidence_step(rec: Dict[str, Any]) -> int:
+        raw = rec.get("step")
+        try:
+            step = int(raw or 0)
+        except Exception:
+            step = 0
+        if step > 0:
+            return step
+        match = re.search(r"(?:^|:)st(\d+)(?::|$)", str(rec.get("set_id") or rec.get("setId") or ""))
+        return int(match.group(1)) if match else 0
+
+    def _load_config_evidence(self) -> None:
+        """Load bounded, connection-scoped live configuration evidence."""
+        try:
+            if os.path.getsize(CONFIG_EVIDENCE_PATH) > MAX_RETAINED_FILE_BYTES:
+                return
+            with open(CONFIG_EVIDENCE_PATH, encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return
+        if not isinstance(raw, dict):
+            return
+        owner = str(raw.get("connection") or "")
+        if owner and owner != CONN_SHORT:
+            return
+        source = raw.get("configs")
+        if not isinstance(source, dict):
+            return
+        configs: Dict[str, Dict[str, Any]] = {}
+        for raw_key, raw_item in source.items():
+            if not isinstance(raw_item, dict):
+                continue
+            rows = [row for row in (raw_item.get("rows") or []) if isinstance(row, dict)][-80:]
+            if not rows:
+                continue
+            item = {
+                key: raw_item.get(key)
+                for key in (
+                    "setId", "parentSetId", "pack", "side", "step", "slRatio", "tpPct",
+                    "trailKey", "axisKey", "relativeCount", "volumeRatio", "indicationKind",
+                    "controlRangeKey",
+                )
+                if raw_item.get(key) is not None
+            }
+            item["rows"] = rows
+            item["lastAt"] = max((_sf(row.get("t"), 0.0) for row in rows), default=0.0)
+            configs[str(raw_key)] = item
+            for row in rows:
+                fill_id = str(row.get("fillId") or "")
+                if fill_id:
+                    self._config_evidence_seen.add(fill_id)
+        ordered = sorted(configs.items(), key=lambda pair: float(pair[1].get("lastAt") or 0.0), reverse=True)[:512]
+        self.config_evidence = {
+            "version": 1,
+            "connection": CONN_SHORT,
+            "updatedAt": float(raw.get("updatedAt") or 0.0),
+            "configs": dict(ordered),
+        }
+
+    def _config_evidence_key(self, rec: Dict[str, Any]) -> str:
+        return stable_key(
+            "config-evidence",
+            CONN_SHORT,
+            str(rec.get("set_id") or rec.get("setId") or ""),
+            str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
+            str(rec.get("pack") or ""),
+            str(rec.get("side") or ""),
+            self._evidence_step(rec),
+            round(float(rec.get("sl_ratio") or rec.get("slRatio") or 0.0), 6),
+            round(float(rec.get("tp_pct") or rec.get("tpPct") or 0.0), 8),
+            str(rec.get("trail_key") or rec.get("trailKey") or ""),
+            str(rec.get("axis_key") or rec.get("axisKey") or ""),
+            int(rec.get("relative_count") or rec.get("relativeCount") or 1),
+            str(rec.get("ind_kind") or rec.get("indKind") or ""),
+            str(rec.get("control_range_key") or rec.get("controlRangeKey") or ""),
+        )
+
+    def _save_config_evidence(self) -> None:
+        try:
+            atomic_write(CONFIG_EVIDENCE_PATH, self.config_evidence)
+        except Exception:
+            pass
+
+    def _record_config_evidence(
+        self,
+        rec: Any,
+        *,
+        close_cid: str = "",
+        close_oid: str = "",
+    ) -> None:
+        """Persist one confirmed own exchange close under its exact Set key."""
+        try:
+            row = asdict(rec) if not isinstance(rec, dict) else dict(rec)
+        except Exception:
+            return
+        conn = str(row.get("conn") or row.get("connection") or CONN_SHORT)
+        if not bool(row.get("ours", True)) or conn != CONN_SHORT:
+            return
+        if not row.get("set_id") and not row.get("setId"):
+            return
+        fill_id = stable_key(
+            "fill-evidence",
+            CONN_SHORT,
+            str(row.get("client_id") or row.get("clientId") or ""),
+            str(close_cid or ""),
+            str(close_oid or ""),
+            round(_sf(row.get("t"), time.time()), 6),
+            str(row.get("symbol") or ""),
+            str(row.get("side") or ""),
+            round(_sf(row.get("qty"), 0.0), 12),
+            round(_sf(row.get("pnl"), 0.0), 10),
+        )
+        with self._config_evidence_lock:
+            if fill_id in self._config_evidence_seen:
+                return
+            self._config_evidence_seen.add(fill_id)
+            key = self._config_evidence_key(row)
+            configs = self.config_evidence.setdefault("configs", {})
+            item = configs.setdefault(
+                key,
+                {
+                    "setId": str(row.get("set_id") or row.get("setId") or ""),
+                    "parentSetId": str(row.get("parent_set_id") or row.get("parentSetId") or ""),
+                    "pack": str(row.get("pack") or ""),
+                    "side": str(row.get("side") or ""),
+                    "step": self._evidence_step(row),
+                    "slRatio": _sf(row.get("sl_ratio") or row.get("slRatio"), 0.0),
+                    "tpPct": _sf(row.get("tp_pct") or row.get("tpPct"), 0.0),
+                    "trailKey": str(row.get("trail_key") or row.get("trailKey") or ""),
+                    "axisKey": str(row.get("axis_key") or row.get("axisKey") or ""),
+                    "relativeCount": max(1, int(_sf(row.get("relative_count") or row.get("relativeCount"), 1))),
+                    "volumeRatio": max(1.0, _sf(row.get("volume_ratio") or row.get("volumeRatio"), 1.0)),
+                    "indicationKind": str(row.get("ind_kind") or row.get("indKind") or ""),
+                    "controlRangeKey": str(row.get("control_range_key") or row.get("controlRangeKey") or ""),
+                    "rows": [],
+                },
+            )
+            rows = item.setdefault("rows", [])
+            rows.append(
+                {
+                    "fillId": fill_id,
+                    "t": _sf(row.get("t"), time.time()),
+                    "symbol": str(row.get("symbol") or ""),
+                    "side": str(row.get("side") or ""),
+                    "qty": _sf(row.get("qty"), 0.0),
+                    "entry": _sf(row.get("entry"), 0.0),
+                    "exit": _sf(row.get("exit"), 0.0),
+                    "pnl": _sf(row.get("pnl"), 0.0),
+                    "pnl_pct": _sf(row.get("pnl_pct"), 0.0),
+                    "hold_s": _sf(row.get("hold_s"), 0.0),
+                    "reason": str(row.get("reason") or ""),
+                    "fee_total": _sf(row.get("fee_total"), 0.0),
+                    "position_cost_pct": _sf(row.get("position_cost_pct"), self.position_cost_pct),
+                    "cost_source": str(row.get("cost_source") or self.position_cost_source),
+                }
+            )
+            rows.sort(key=lambda value: _sf(value.get("t"), 0.0))
+            item["rows"] = rows[-80:]
+            item["lastAt"] = _sf(item["rows"][-1].get("t"), time.time())
+            if len(configs) > 512:
+                keep = sorted(configs.items(), key=lambda pair: _sf(pair[1].get("lastAt"), 0.0), reverse=True)[:512]
+                self.config_evidence["configs"] = dict(keep)
+            self.config_evidence["updatedAt"] = time.time()
+            self._config_evidence_cache_ts = 0.0
+            self._save_config_evidence()
+
+    def _config_evidence_snapshot(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        if self._config_evidence_cache and now - self._config_evidence_cache_ts < 3.0:
+            return self._config_evidence_cache
+        with self._config_evidence_lock:
+            source = dict(self.config_evidence.get("configs") or {})
+        try:
+            need = self.sets.eval_need()
+            real_floor = float(self.sets.real_min_pf or 1.15)
+        except Exception:
+            need, real_floor = 8, 1.15
+        rows_out: List[Dict[str, Any]] = []
+        promoted = 0
+        for key, item in source.items():
+            if not isinstance(item, dict):
+                continue
+            tape = [row for row in (item.get("rows") or []) if isinstance(row, dict)]
+            if not tape:
+                continue
+            windows = evaluation_windows(tape, self.position_cost_pct, required_samples=need)
+            usable = [metric for metric in windows.values() if int(metric.get("n") or 0) >= need]
+            windows_ok = bool(usable) and all(float(metric.get("pf") or 0.0) >= 1.0 for metric in usable)
+            primary = windows.get("last15") or {}
+            pf = float(primary.get("pf") or 0.0)
+            promoted_flag = bool(len(tape) >= need and windows_ok and pf + 1e-9 >= real_floor)
+            promoted += int(promoted_flag)
+            stamps = sorted(_sf(row.get("t"), 0.0) for row in tape)
+            span_h = max(1.0 / 60.0, (stamps[-1] - stamps[0]) / 3600.0) if len(stamps) > 1 else 0.0
+            tph = len(tape) / span_h if span_h > 0 else 0.0
+            rows_out.append(
+                {
+                    "key": str(key),
+                    **{name: item.get(name) for name in (
+                        "setId", "parentSetId", "pack", "side", "step", "slRatio", "tpPct",
+                        "trailKey", "axisKey", "relativeCount", "volumeRatio", "indicationKind",
+                        "controlRangeKey",
+                    )},
+                    "n": len(tape),
+                    "pf": round(pf, 4),
+                    "evaluationWindows": windows,
+                    "windowsOk": windows_ok,
+                    "promoted": promoted_flag,
+                    "status": "promoted" if promoted_flag else ("positive" if windows_ok else "not-promoted"),
+                    "tradesPerHour": round(tph, 4),
+                    "lastAt": max(stamps),
+                    "costSubtracted": True,
+                    "source": "live-exchange",
+                }
+            )
+        rows_out.sort(key=lambda row: (not bool(row.get("promoted")), -float(row.get("tradesPerHour") or 0.0), -float(row.get("pf") or 0.0), -float(row.get("lastAt") or 0.0)))
+        out = {
+            "connection": CONN_SHORT,
+            "source": "live-exchange",
+            "configCount": len(rows_out),
+            "promotedCount": promoted,
+            "requiredSamples": need,
+            "realMinPf": real_floor,
+            "priority": "eligible PF/stability first, then tradesPerHour, then PF and lower range",
+            "rows": rows_out[:64],
+            "updatedAt": float(self.config_evidence.get("updatedAt") or 0.0),
+        }
+        self._config_evidence_cache = out
+        self._config_evidence_cache_ts = now
+        return out
+
     def _load_trade_history(self) -> None:
         if not os.path.exists(TRADES_PATH):
             return
         try:
-            with open(TRADES_PATH) as f:
-                lines = f.readlines()[-80:]
-            for line in lines:
-                rec = json.loads(line)
+            for rec in read_jsonl(TRADES_PATH, max_rows=MAX_RETAINED_LINES)[-80:]:
                 c = Closed(
                     t=float(rec.get("t") or 0),
                     symbol=str(rec.get("symbol") or ""),
@@ -4867,6 +5293,14 @@ class Pulse:
                     control_range_key=str(rec.get("control_range_key") or rec.get("controlRangeKey") or ""),
                     control_mode=str(rec.get("control_mode") or rec.get("controlMode") or ""),
                     member_count=max(1, int(rec.get("member_count") or rec.get("memberCount") or 1)),
+                    entry_fee=max(0.0, _sf(rec.get("entry_fee") or rec.get("entryFee"))),
+                    exit_fee=max(0.0, _sf(rec.get("exit_fee") or rec.get("exitFee"))),
+                    fee_total=max(0.0, _sf(rec.get("fee_total") or rec.get("feeTotal"))),
+                    position_cost_pct=normalize_position_cost_pct(
+                        rec.get("position_cost_pct") or rec.get("positionCostPct") or POSITION_COST_PCT_DEFAULT,
+                        POSITION_COST_PCT_DEFAULT,
+                    ),
+                    cost_source=str(rec.get("cost_source") or rec.get("costSource") or "manual-fallback"),
                 )
                 cid = c.client_id
                 if not self.cid_ours(cid) and not c.set_id:
@@ -4943,6 +5377,170 @@ class Pulse:
                 except Exception:
                     pass
 
+    def _load_live_cost_state(self) -> None:
+        """Restore the last measured own-exchange PositionCost summary."""
+        try:
+            state = load_json_file(LIVE_COST_PATH)
+            cost = normalize_position_cost_pct(state.get("costPct"), 0.0)
+            samples = max(0, int(state.get("sampleCount") or 0))
+            notional = max(0.0, _sf(state.get("notional")))
+            if cost <= 0 or samples <= 0 or notional <= 0:
+                return
+            self.live_position_cost_pct = cost
+            self.live_position_cost_samples = samples
+            self.live_position_cost_complete = bool(state.get("complete", True))
+            self.live_position_cost_notional = notional
+            self.live_position_cost_updated = max(0.0, _sf(state.get("updatedAt")))
+        except Exception:
+            # A corrupt measurement must never prevent the engine from using
+            # the configured manual fallback.
+            return
+
+    def _save_live_cost_state(self) -> None:
+        try:
+            os.makedirs(DIR, exist_ok=True)
+            blob = {
+                "version": 1,
+                "connection": CONN_SHORT,
+                "costPct": round(float(self.live_position_cost_pct or 0.0), 8),
+                "sampleCount": int(self.live_position_cost_samples or 0),
+                "notional": round(float(self.live_position_cost_notional or 0.0), 8),
+                "complete": bool(self.live_position_cost_complete),
+                "updatedAt": float(self.live_position_cost_updated or time.time()),
+                "source": "live-exchange",
+            }
+            tmp = LIVE_COST_PATH + ".tmp"
+            with open(tmp, "w") as state_file:
+                json.dump(blob, state_file, separators=(",", ":"))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, LIVE_COST_PATH)
+        except Exception:
+            pass
+
+    def _position_cost_config(self, ov: Dict[str, Any], cts: Dict[str, Any]) -> Tuple[float, bool]:
+        manual = ov.get("positionCostFallbackPct")
+        if manual is None:
+            manual = ov.get("positionCostPct")
+        if manual is None:
+            manual = cts.get("exchangePositionCost") or cts.get("positionCost")
+        fallback = normalize_position_cost_pct(manual, POSITION_COST_PCT_DEFAULT)
+        enabled = _bool_setting(
+            ov.get(
+                "useLivePositionCosts",
+                ov.get(
+                    "useExchangePositionCost",
+                    ov.get("livePositionCostEnabled", False),
+                ),
+            ),
+            False,
+        )
+        return fallback, enabled
+
+    def _apply_effective_position_cost(self, value: float, source: str = "manual-fallback", *, rebuild: bool = False) -> None:
+        """Propagate one cost contract to every live calculator atomically."""
+        cost = normalize_position_cost_pct(value, self.manual_position_cost_pct)
+        self.position_cost_pct = cost
+        self.position_cost_source = str(source or "manual-fallback")
+        for component in (
+            getattr(self, "coord", None),
+            getattr(self, "sets", None),
+            getattr(self, "dca", None),
+            getattr(self, "exits", None),
+        ):
+            if component is not None and hasattr(component, "cost_pct"):
+                component.cost_pct = cost
+        if getattr(self, "coord", None) is not None:
+            self.coord.position_cost_pct = cost
+        if getattr(self, "indications", None) is not None:
+            self.indications.settings["positionCostPct"] = cost
+        if getattr(self, "sets", None) is not None:
+            self.sets.cost_pct = cost
+            self.sets.cost_source = self.position_cost_source
+            if rebuild:
+                try:
+                    self.sets._rebuild_sets()
+                except Exception:
+                    pass
+            for st in getattr(self.sets, "by_idx", []) or []:
+                st.position_cost_pct = cost
+                try:
+                    self.sets._score_one(st)
+                except Exception:
+                    pass
+        self._score_cache.clear()
+        self._stats_force = True
+
+    def _update_live_position_costs(self, orders: List[Dict[str, Any]]) -> None:
+        """Measure only this connection's filled orders and update the PF cost.
+
+        Exchange rows are cumulative, so one order is replaced by its newest
+        cumulative fee sample instead of being counted on every poll. Control
+        orders are included only when their client id belongs to this engine;
+        foreign orders and positions never enter the estimator.
+        """
+        if not bool(getattr(self, "use_live_position_costs", False)):
+            return
+        replacements: Dict[str, Dict[str, Any]] = {}
+        with self._live_cost_lock:
+            for order in orders:
+                if not isinstance(order, dict):
+                    continue
+                cid = self.order_cid(order)
+                if not cid or not self.cid_ours(cid):
+                    continue
+                track = self.parse_track(cid) or {}
+                kind = str(track.get("kind") or "")
+                if kind not in ("o", "d", "b", "c"):
+                    continue
+                filled = order_fill_qty(order, 0.0)
+                if filled <= 1e-12:
+                    continue
+                px = max(
+                    0.0,
+                    _sf(order.get("avgPrice") or order.get("fillPrice") or order.get("executedPrice") or order.get("price")),
+                )
+                if px <= 0:
+                    continue
+                row = dict(order)
+                row["qty"] = filled
+                row["notional"] = filled * px
+                sample = exchange_order_cost_sample(row, self.manual_position_cost_pct)
+                if not sample or sample.get("costPct", 0.0) <= 0:
+                    continue
+                oid = real_oid(order.get("orderId") or order.get("orderID") or order.get("orderid"))
+                key = oid or cid
+                fee = row_fee_usdt(row)
+                rate = str(order.get("feeRate") or order.get("commissionRate") or "")
+                signature = f"{filled:.12g}:{fee:.12g}:{rate}:{sample['costPct']:.8f}"
+                if self._live_cost_seen.get(key) == signature:
+                    continue
+                self._live_cost_seen[key] = signature
+                row.update({
+                    "positionCostPct": float(sample["costPct"]),
+                    "costSource": "live-exchange",
+                    "fee_total": fee,
+                    "costNotional": float(sample.get("notional") or row["notional"]),
+                })
+                replacements[key] = row
+            if replacements:
+                by_key = {
+                    str(r.get("_costKey") or r.get("orderId") or r.get("clientOrderID") or r.get("clientOrderId") or ""): r
+                    for r in self._live_cost_rows
+                }
+                for key, row in replacements.items():
+                    row["_costKey"] = key
+                    by_key[key] = row
+                self._live_cost_rows = list(by_key.values())[-128:]
+                summary = effective_position_cost_pct(self._live_cost_rows, self.manual_position_cost_pct)
+                if summary.get("sampleCount", 0) > 0:
+                    self.live_position_cost_pct = float(summary.get("costPct") or self.manual_position_cost_pct)
+                    self.live_position_cost_samples = int(summary.get("sampleCount") or 0)
+                    self.live_position_cost_complete = bool(summary.get("complete"))
+                    self.live_position_cost_notional = float(summary.get("notional") or 0.0)
+                    self.live_position_cost_updated = time.time()
+                    self._save_live_cost_state()
+                    self._apply_effective_position_cost(self.live_position_cost_pct, "live-exchange", rebuild=True)
+
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
@@ -4997,14 +5595,34 @@ class Pulse:
             COOLDOWN_S = float(ov["cooldownS"])
         if ov.get("staggerS"):
             STAGGER_S = float(ov["staggerS"])
-        self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
+        manual_cost, use_live_costs = self._position_cost_config(ov, cts)
+        self.manual_position_cost_pct = manual_cost
+        self.use_live_position_costs = use_live_costs
+        measured_cost = normalize_position_cost_pct(self.live_position_cost_pct, 0.0)
+        if use_live_costs and measured_cost > 0 and self.live_position_cost_samples > 0:
+            effective_cost = measured_cost
+            effective_source = "live-exchange"
+        else:
+            effective_cost = manual_cost
+            effective_source = "manual-fallback"
+        self._apply_effective_position_cost(effective_cost, effective_source)
+        calc_ov = dict(ov)
+        calc_ov["positionCostPct"] = effective_cost
+        calc_ov["positionCostSource"] = effective_source
         self.pf_window = int(ov.get("pfWindow") or 15)
-        self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
-        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
-        self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
-        self.tp_max = float(ov.get("tpMaxPct") or 2.40) / 100.0
+        def _risk_pct(key: str, fallback: float) -> float:
+            try:
+                value = float(ov.get(key) if ov.get(key) is not None else fallback)
+            except Exception:
+                value = fallback
+            return max(0.1, min(3.0, value)) / 100.0
+
+        self.sl_min = _risk_pct("slMinPct", 0.20)
+        self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
+        self.tp_min = _risk_pct("tpMinPct", 0.30)
+        self.tp_max = max(self.tp_min, _risk_pct("tpMaxPct", 3.0))
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
-        self.variants.load(ov, cts)
+        self.variants.load(calc_ov, cts)
         self.sl_to_tp = self.variants.current_sl()
         TRAIL_ARM, TRAIL_GIVE = self.variants.trail_frac()
         self.tf_on = {
@@ -5108,11 +5726,14 @@ class Pulse:
             ),
             True,
         )
-        self.coord.load(cts, ov)
-        self.indications.load(ov)
-        self.sets.load(ov, cts)
-        self.exits.load(ov, cts)
-        self.dca.load(ov, cts)
+        self.coord.load(cts, calc_ov)
+        self.indications.load(calc_ov)
+        self.sets.load(calc_ov, cts)
+        self.exits.load(calc_ov, cts)
+        self.dca.load(calc_ov, cts)
+        # Component loaders establish their own state; this final propagation
+        # keeps the live measured/manual source and every SetState in sync.
+        self._apply_effective_position_cost(effective_cost, effective_source)
         if initial:
             try:
                 self.variants.seed_history(list(self.strategy_closes()))
@@ -5149,7 +5770,7 @@ class Pulse:
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
-        # SL:TP ratios use the full configured 0.2–2.6 risk grid. Do not cap
+        # SL:TP ratios use the full configured 0.1–3.0 risk grid. Do not cap
         # TP against maxStopLossRatio.
         if not initial:
             log(
@@ -5242,6 +5863,12 @@ class Pulse:
             "axisPauseMaxWindow": self.coord.axes["pause"].max_window,
             "minPf": self.coord.min_pf,
             "positionCostPct": self.position_cost_pct,
+            "positionCostFallbackPct": self.manual_position_cost_pct,
+            "useLivePositionCosts": bool(self.use_live_position_costs),
+            "positionCostSource": self.position_cost_source,
+            "livePositionCostPct": self.live_position_cost_pct,
+            "livePositionCostSamples": self.live_position_cost_samples,
+            "livePositionCostComplete": bool(self.live_position_cost_complete),
             "pfWindow": self.pf_window,
             "slMinPct": self.sl_min * 100,
             "slMaxPct": self.sl_max * 100,
@@ -5290,6 +5917,26 @@ class Pulse:
             "setMinPf": self.sets.min_pf,
             "setMaxDdTimeS": self.sets.max_dd_s,
             "setAutoDeact": self.sets.auto_deact,
+            "setLiveNegativeDeact": bool(getattr(self.sets, "live_negative_deact", False)),
+            "liveTestMode": bool(getattr(self.sets, "live_test_mode", False)),
+            "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 12) or 12),
+            "liveTestMinSamples": int(getattr(self.sets, "live_test_min_samples", self.sets.eval_need()) or self.sets.eval_need()),
+            "effectiveMinStep": int(getattr(self.sets, "min_step", 1) or 1),
+            "configuredMinStep": int(getattr(self.sets, "min_step_cfg", 1) or 1),
+            "preferMinimalRange": bool(
+                getattr(self.sets, "prefer_minimal_range", getattr(self.sets, "prefer_minimal_positive", False))
+            ),
+            "additionalCoordination": bool(
+                getattr(self.sets, "additional_coordination", getattr(self.sets, "minimal_positive_coordination", False))
+            ),
+            # Deprecated response aliases for older dashboards.
+            "preferMinimalPositive": bool(
+                getattr(self.sets, "prefer_minimal_range", getattr(self.sets, "prefer_minimal_positive", False))
+            ),
+            "minimalPositiveCoordination": bool(
+                getattr(self.sets, "additional_coordination", getattr(self.sets, "minimal_positive_coordination", False))
+            ),
+            "coordOptimizationN": int(getattr(self.sets, "optimization_n", 50) or 50),
             "setUseHistoricGate": self.sets.use_historic_gate,
             "setStrictGate": bool(getattr(self.sets, "strict_gate", True)),
             "setMinSamples": self.sets.min_samples,
@@ -5679,7 +6326,7 @@ class Pulse:
                 continue
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
-            self._apply_position_fill(pos, filled, avg, order_id=oid)
+            self._apply_position_fill(pos, filled, avg, order_id=oid, source="block")
             actual_margin = (filled * avg) / max(1, self.leverage_for(c))
             self.available = max(0.0, self.available - actual_margin)
             if filled + 1e-12 >= qty:
@@ -5876,7 +6523,7 @@ class Pulse:
                 cid,
                 requested_qty=float(row.get("requestedQty") or qty),
             )
-            self._apply_position_fill(pos, filled, avg, order_id=oid)
+            self._apply_position_fill(pos, filled, avg, order_id=oid, source="dca")
             actual_margin = (filled * avg) / max(1, self.leverage_for(c))
             self.available = max(0.0, self.available - actual_margin)
             if filled + 1e-12 >= qty:
@@ -6877,6 +7524,9 @@ class Pulse:
         if not has_fill_field and status not in {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}:
             cumulative = 0.0
         previous = max(0.0, _sf(old.get("filled_qty") or old.get("filledQty")))
+        previous_fee = max(0.0, _sf(old.get("fee_total") or old.get("feeTotal")))
+        observed_fee = max(0.0, row_fee_usdt(order))
+        fee_total = max(previous_fee, observed_fee)
         if requested > 0:
             cumulative = min(cumulative, requested)
         cumulative = max(previous, cumulative)
@@ -6888,6 +7538,7 @@ class Pulse:
             "side": side,
             "requested_qty": requested,
             "filled_qty": cumulative,
+            "fee_total": fee_total,
             "avg_price": px,
             "group_key": group_key,
             "created_at": _sf(old.get("created_at") or old.get("createdAt"), time.time()),
@@ -6899,6 +7550,8 @@ class Pulse:
     def _sync_pending_fill(self, order: Dict[str, Any], cid: str, track: Dict[str, Any], kind: str) -> bool:
         row, cumulative, px, oid = self._pending_row_from_exchange(order, cid, track, kind)
         previous = max(0.0, _sf((self.pending_orders.get(cid) or {}).get("filled_qty")))
+        previous_fee = max(0.0, _sf((self.pending_orders.get(cid) or {}).get("fee_total")))
+        fee_delta = max(0.0, float(row.get("fee_total") or 0.0) - previous_fee)
         delta = max(0.0, cumulative - previous)
         pos: Optional[Position] = None
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
@@ -6943,6 +7596,7 @@ class Pulse:
                     px,
                     oid,
                     pending_qty=max(0.0, row["requested_qty"] - cumulative),
+                    fee=fee_delta,
                 )
             elif kind == "c":
                 if pos is None:
@@ -6964,6 +7618,7 @@ class Pulse:
                         order_id=oid,
                         avg_price=px,
                         group_key=str(row.get("group_key") or ""),
+                        fee_total=float(row.get("fee_total") or 0.0),
                         metadata={**meta, "observedCumulativeQty": cumulative},
                     )
                     return False
@@ -6977,6 +7632,7 @@ class Pulse:
                     close_oid=oid,
                     status="confirmed" if row["requested_qty"] > 0 and cumulative + 1e-12 >= row["requested_qty"] else "partial",
                     cumulative_qty=cumulative,
+                    exit_fee=fee_delta,
                     skip_eval=bool(meta.get("skipEvaluation") or meta.get("skip_eval")),
                 )
                 if not applied:
@@ -7027,6 +7683,8 @@ class Pulse:
                     px,
                     order_id=oid,
                     pending_qty=max(0.0, row["requested_qty"] - cumulative),
+                    source="block" if kind == "b" else ("dca" if kind == "d" else "entry"),
+                    fee=fee_delta,
                 )
             if pos is None:
                 return False
@@ -7058,6 +7716,7 @@ class Pulse:
                 order_id=oid,
                 avg_price=px,
                 group_key=str(row.get("group_key") or ""),
+                fee_total=float(row.get("fee_total") or 0.0),
                 metadata=row.get("metadata") or {},
             )
         requested = max(0.0, float(row.get("requested_qty") or 0))
@@ -7085,6 +7744,7 @@ class Pulse:
         if not isinstance(orders, list):
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill payload malformed")
             return
+        self._update_live_position_costs(orders)
         self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed" if self.ok(r) else "error", code=r.get("code"), qty=len(orders), detail="fill polling", metadata={"rows": len(orders)})
         n = 0
         terminal = {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}
@@ -7310,6 +7970,17 @@ class Pulse:
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
+        position_cost = {
+            "manualPct": float(self.manual_position_cost_pct),
+            "effectivePct": float(self.position_cost_pct),
+            "useLive": bool(self.use_live_position_costs),
+            "source": self.position_cost_source,
+            "samples": int(self.live_position_cost_samples or 0),
+            "complete": bool(self.live_position_cost_complete),
+            "notional": round(float(self.live_position_cost_notional or 0.0), 8),
+            "updatedAt": float(self.live_position_cost_updated or 0.0),
+            "fallback": "manual-position-cost",
+        }
         sim_n, sim_upnl = self.sim_stats()
         closed_n = 80 if getattr(getattr(self.load, "last_budget", None), "stats_full", True) else 40
         closed_out = []
@@ -7321,6 +7992,7 @@ class Pulse:
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
         sets_snap = self.sets.snapshot(full=False)
+        config_evidence = self._config_evidence_snapshot()
         try:
             from stats_report import merge_kind_stats, merge_strategy_stats
             now_m = time.monotonic()
@@ -7418,6 +8090,7 @@ class Pulse:
             "pulse": self.pulse_snapshot(),
             "coord": self.coord.snapshot(),
             "pfCost": pc,
+            "positionCost": position_cost,
             "profitFactor": pc["ratio"],
             "pf": pc["ratio"],
             "pfNeutral": 1.0,
@@ -7425,6 +8098,7 @@ class Pulse:
             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
             "variants": self.variants.snapshot(),
             "sets": sets_snap,
+            "configEvidence": config_evidence,
             "exits": self.exits.snapshot(),
             "indications": ind_snap,
             "dca": self.dca.snapshot(),
@@ -7477,6 +8151,8 @@ class Pulse:
                     "trailKey": p.trail_key,
                     "slPct": round(p.sl_pct * 100, 3),
                     "tpPct": round(p.tp_pct * 100, 3),
+                    "trail": p.trail,
+                    "trailPending": getattr(p, "trail_pending", None),
                     "setId": p.set_id,
                     "parentSetId": getattr(p, "parent_set_id", "") or p.set_id,
                     "axisKey": getattr(p, "axis_key", ""),
@@ -7624,6 +8300,15 @@ class Pulse:
             "evaluations": {
                 "requiredSamples": int(getattr(self.sets, "eval_need", lambda: 8)()),
                 "positionCostPct": float(getattr(self.sets, "cost_pct", cost_default) or cost_default),
+                "positionCostSource": str(getattr(self, "position_cost_source", "manual-fallback")),
+                "lastPositionOptimizationN": int(getattr(self.sets, "optimization_n", 50) or 50),
+                "lastPositionOptimization": dict(getattr(self.sets, "optimization_stats", {}) or {}),
+                "windows": {
+                    "pf": int(getattr(self.sets, "pf_n", 15) or 15),
+                    "deactivation": int(getattr(self.sets, "deact_n", 25) or 25),
+                    "coordination": int(getattr(self.coord, "optimization_n", 50) or 50),
+                    "live": int(getattr(self.sets, "optimization_n", 50) or 50),
+                },
                 "pairedNormalAdjusted": True,
                 "costSubtracted": True,
             },
@@ -7643,6 +8328,15 @@ class Pulse:
                 "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),
                 "openN": len(self.open),
                 "axes": {k: {"enabled": bool(getattr(v, "enabled", False)), "maxWindow": int(getattr(v, "max_window", 0) or 0)} for k, v in coord_axes.items()},
+                "additionalCoordination": bool(
+                    getattr(self.coord, "additional_coordination", getattr(self.coord, "minimal_positive_coordination", False))
+                ),
+                # Deprecated response alias for older dashboards.
+                "minimalPositiveCoordination": bool(
+                    getattr(self.coord, "additional_coordination", getattr(self.coord, "minimal_positive_coordination", False))
+                ),
+                "optimizationN": int(getattr(self.coord, "optimization_n", 50) or 50),
+                "optimization": dict(getattr(self.coord, "optimization_stats", {}) or {}),
                 "variants": axis_aggregate,
                 "coordination": {axis: dict(coord_coordination.get(axis) or {}) for axis in ("prev", "last", "cont", "pause")},
                 "volumeRatioUnit": 0.01,

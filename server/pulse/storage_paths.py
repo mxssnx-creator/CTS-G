@@ -12,9 +12,11 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Deque, Dict, Iterable, List, Tuple
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ENV_DATA_DIR = (os.environ.get("CTS_DATA_DIR") or os.environ.get("CTS_STATE_DIR") or "").strip()
@@ -54,6 +56,25 @@ _COPY_PREFIXES = (
     "results-export-",
     "history-",
 )
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+# Runtime evidence is intentionally bounded.  The exact line cap is shared by
+# engine logs, HTTP logs, error JSONL and trade JSONL so an active installation
+# cannot grow without limit while still retaining a useful recent tail.
+MAX_RETAINED_LINES = min(
+    1000,
+    max(32, _safe_int(os.environ.get("CTS_MAX_RETAINED_LINES", "1000"), 1000)),
+)
+MAX_RETAINED_LINE_BYTES = 16 * 1024
+MAX_RETAINED_FILE_BYTES = 8 * 1024 * 1024
+_APPEND_LOCK = threading.RLock()
+_APPEND_COUNTS: Dict[str, int] = {}
 
 
 def _writable(path: Path) -> bool:
@@ -133,9 +154,157 @@ def atomic_write(path: str, value: Any) -> None:
     os.replace(tmp, target)
 
 
-def read_jsonl(path: str, *, cutoff: float = 0.0) -> List[Dict[str, Any]]:
-    """Read valid, retained JSONL rows without allowing one bad line to abort."""
-    out: List[Dict[str, Any]] = []
+def _tail_lines_locked(
+    target: Path,
+    *,
+    max_lines: int = MAX_RETAINED_LINES,
+    max_bytes: int = MAX_RETAINED_FILE_BYTES,
+) -> int:
+    """Rewrite a text file to a bounded tail while using bounded RAM.
+
+    ``readline`` is capped so a corrupt or unexpectedly verbose single line
+    cannot allocate unbounded memory.  The final file is limited by both line
+    count and bytes; the newest complete lines win.
+    """
+    if not target.is_file():
+        return 0
+    line_limit = min(1000, max(1, _safe_int(max_lines, MAX_RETAINED_LINES)))
+    byte_limit = max(1024, _safe_int(max_bytes, MAX_RETAINED_FILE_BYTES))
+    lines: Deque[bytes] = deque(maxlen=line_limit)
+    try:
+        with target.open("rb") as handle:
+            while True:
+                raw = handle.readline(MAX_RETAINED_LINE_BYTES + 1)
+                if not raw:
+                    break
+                # If the bounded read stopped in the middle of an oversized
+                # line, consume only the remainder of that one line before
+                # moving on.  Keep a bounded prefix and a normal newline.
+                if len(raw) > MAX_RETAINED_LINE_BYTES and not raw.endswith(b"\n"):
+                    while True:
+                        remainder = handle.readline(MAX_RETAINED_LINE_BYTES + 1)
+                        if not remainder or remainder.endswith(b"\n"):
+                            break
+                line = raw[:MAX_RETAINED_LINE_BYTES]
+                if not line.endswith(b"\n"):
+                    line += b"\n"
+                lines.append(line)
+    except OSError:
+        return 0
+
+    selected: List[bytes] = []
+    total = 0
+    for line in reversed(lines):
+        if selected and total + len(line) > byte_limit:
+            break
+        if not selected and len(line) > byte_limit:
+            line = line[-byte_limit:]
+            if b"\n" in line[:-1]:
+                line = line[line.rfind(b"\n", 0, -1) + 1 :]
+        selected.append(line)
+        total += len(line)
+    payload = b"".join(reversed(selected))
+    try:
+        mode = target.stat().st_mode & 0o777
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_name, mode)
+            os.replace(tmp_name, target)
+        except Exception:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        return 0
+    return len(selected)
+
+
+def retain_last_lines(
+    path: str,
+    *,
+    max_lines: int = MAX_RETAINED_LINES,
+    max_bytes: int = MAX_RETAINED_FILE_BYTES,
+) -> int:
+    """Keep at most the newest bounded text lines in ``path``."""
+    with _APPEND_LOCK:
+        return _tail_lines_locked(Path(path), max_lines=max_lines, max_bytes=max_bytes)
+
+
+def append_bounded_lines(
+    path: str,
+    lines: Iterable[str],
+    *,
+    max_lines: int = MAX_RETAINED_LINES,
+    max_bytes: int = MAX_RETAINED_FILE_BYTES,
+    compact_every: int = 128,
+) -> int:
+    """Append lines and periodically compact the file to the shared tail cap."""
+    line_limit = min(1000, max(1, _safe_int(max_lines, MAX_RETAINED_LINES)))
+    values: Deque[str] = deque(maxlen=line_limit)
+    for line in lines:
+        if line is None:
+            continue
+        value = str(line)
+        values.append(value if value.endswith("\n") else value + "\n")
+    if not values:
+        return 0
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    key = str(target)
+    with _APPEND_LOCK:
+        known = _APPEND_COUNTS.get(key)
+        if known is None:
+            known = _tail_lines_locked(target, max_lines=line_limit, max_bytes=max_bytes)
+        try:
+            with target.open("a", encoding="utf-8") as handle:
+                handle.writelines(values)
+        except OSError:
+            return 0
+        pending = known + len(values)
+        try:
+            too_large = target.stat().st_size > max_bytes
+        except OSError:
+            too_large = False
+        # ``known`` is the retained line count from the last write. Compact
+        # immediately on a cap/byte breach; this prevents the application
+        # writers from accumulating an unbounded tail between timer passes.
+        # Keep compact_every as a compatibility knob for callers that want
+        # extra normalization, but never allow it to weaken the hard cap.
+        normalize = pending >= max(1, int(compact_every)) and pending >= line_limit
+        if pending > line_limit or too_large or normalize:
+            kept = _tail_lines_locked(target, max_lines=line_limit, max_bytes=max_bytes)
+            _APPEND_COUNTS[key] = kept
+            return kept
+        _APPEND_COUNTS[key] = min(line_limit, pending)
+        return pending
+
+
+def append_bounded_line(
+    path: str,
+    line: str,
+    *,
+    max_lines: int = MAX_RETAINED_LINES,
+    max_bytes: int = MAX_RETAINED_FILE_BYTES,
+) -> int:
+    """Append one line using the shared bounded writer."""
+    return append_bounded_lines(path, (line,), max_lines=max_lines, max_bytes=max_bytes)
+
+
+def read_jsonl(
+    path: str,
+    *,
+    cutoff: float = 0.0,
+    max_rows: int = MAX_RETAINED_LINES,
+) -> List[Dict[str, Any]]:
+    """Read valid JSONL rows without allowing history to grow in RAM."""
+    limit = min(1000, max(1, _safe_int(max_rows, MAX_RETAINED_LINES)))
+    out: Deque[Dict[str, Any]] = deque(maxlen=limit)
     try:
         with Path(path).open(encoding="utf-8") as handle:
             for line in handle:
@@ -148,7 +317,7 @@ def read_jsonl(path: str, *, cutoff: float = 0.0) -> List[Dict[str, Any]]:
                     out.append(row)
     except OSError:
         pass
-    return out
+    return list(out)
 
 
 def append_jsonl(path: str, rows: Iterable[Dict[str, Any]], *, cutoff: float) -> int:
@@ -172,7 +341,7 @@ def append_jsonl(path: str, rows: Iterable[Dict[str, Any]], *, cutoff: float) ->
         key = str(row.get("eventId") or "")
         if key:
             current[key] = row
-    ordered = sorted(current.values(), key=lambda row: float(row.get("t") or 0))
+    ordered = sorted(current.values(), key=lambda row: float(row.get("t") or 0))[-MAX_RETAINED_LINES:]
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as handle:
         for row in ordered:
@@ -181,6 +350,37 @@ def append_jsonl(path: str, rows: Iterable[Dict[str, Any]], *, cutoff: float) ->
         os.fsync(handle.fileno())
     os.replace(tmp, target)
     return len(ordered)
+
+
+def self_test() -> List[Tuple[str, bool, str]]:
+    """Exercise the bounded text/JSONL paths entirely inside a temp dir."""
+    with tempfile.TemporaryDirectory(prefix="cts-storage-test-") as root:
+        log_path = Path(root) / "engine.log"
+        log_path.write_text("".join(f"line-{i}\n" for i in range(1205)), encoding="utf-8")
+        kept = retain_last_lines(str(log_path))
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        rows: List[Tuple[str, bool, str]] = []
+        rows.append(("tail-count", kept == 1000 and len(lines) == 1000, f"kept={kept} lines={len(lines)}"))
+        rows.append(("tail-last", lines[-1:] == ["line-1204"], str(lines[-1:])))
+
+        for i in range(1205, 1305):
+            append_bounded_line(str(log_path), f"line-{i}")
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        rows.append(("append-hard-cap", len(lines) <= 1000 and lines[-1:] == ["line-1304"], f"lines={len(lines)}"))
+
+        jsonl_path = Path(root) / "events.jsonl"
+        jsonl_path.write_text(
+            "".join(json.dumps({"t": i, "eventId": str(i)}) + "\n" for i in range(1205)),
+            encoding="utf-8",
+        )
+        parsed = read_jsonl(str(jsonl_path))
+        rows.append(("jsonl-hard-cap", len(parsed) == 1000 and parsed[0].get("t") == 205, f"rows={len(parsed)}"))
+
+        huge_path = Path(root) / "huge.log"
+        huge_path.write_text("old\n" + ("x" * (MAX_RETAINED_FILE_BYTES + 1024)) + "\nnew\n", encoding="utf-8")
+        retain_last_lines(str(huge_path))
+        rows.append(("byte-cap", huge_path.stat().st_size <= MAX_RETAINED_FILE_BYTES, str(huge_path.stat().st_size)))
+        return rows
 
 
 def storage_info() -> Dict[str, Any]:
@@ -194,6 +394,9 @@ def storage_info() -> Dict[str, Any]:
         "recognizedFiles": names,
         "retentionDays": 35,
         "retentionSeconds": 35 * 24 * 60 * 60,
+        "maxRetainedLines": MAX_RETAINED_LINES,
+        "maxRetainedLineBytes": MAX_RETAINED_LINE_BYTES,
+        "maxRetainedFileBytes": MAX_RETAINED_FILE_BYTES,
         "updatedAt": time.time(),
     }
 
@@ -214,4 +417,19 @@ def ensure_storage_info() -> Dict[str, Any]:
 ensure_storage_info()
 
 
-__all__ = ["DATA_DIR", "path_for", "atomic_write", "read_jsonl", "append_jsonl", "storage_info", "ensure_storage_info"]
+__all__ = [
+    "DATA_DIR",
+    "MAX_RETAINED_LINES",
+    "MAX_RETAINED_LINE_BYTES",
+    "MAX_RETAINED_FILE_BYTES",
+    "path_for",
+    "atomic_write",
+    "read_jsonl",
+    "append_jsonl",
+    "append_bounded_line",
+    "append_bounded_lines",
+    "retain_last_lines",
+    "storage_info",
+    "self_test",
+    "ensure_storage_info",
+]

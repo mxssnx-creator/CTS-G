@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CTS-G bounded runtime retention
+Documentation=https://github.com/mxssnx-creator/CTS-G
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=grok-retention.service
+
+[Install]
+WantedBy=timers.target

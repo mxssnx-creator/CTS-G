@@ -23,10 +23,10 @@ Independent BingX pulse desks with a full indication / Set / coordination stack 
 
 ### Engine (Pulse)
 - `python3 scripts/engine-test.py`: Run engine-level tests (sets, indications, rank, etc.)
-- `sudo systemctl restart grok-pulse@bingx-x01`: Restart Live engine
-- `sudo systemctl restart grok-pulse@bingx-x02`: Restart VST engine
-- `sudo systemctl restart grok-desk`: Restart Desk UI service
-- `sudo systemctl restart grok-pulse-http`: Restart Pulse HTTP sidecar
+- `sudo systemctl restart cts-g-pulse@bingx-x01`: Restart Live engine
+- `sudo systemctl restart cts-g-pulse@bingx-x02`: Restart VST engine
+- `sudo systemctl restart cts-g-desk`: Restart Desk UI service
+- `sudo systemctl restart cts-g-pulse-http`: Restart Pulse HTTP sidecar
 
 ### General
 - `npm run lint`: Lint UI code

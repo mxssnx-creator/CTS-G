@@ -11,6 +11,7 @@ NotifyAccess=all
 WatchdogSec=300
 WatchdogSignal=SIGKILL
 EnvironmentFile=-/etc/cts-g/cts-g.env
+EnvironmentFile=-/etc/cts-g/credentials.env
 WorkingDirectory=/opt/grok-x01-pulse
 ExecStart=/usr/bin/python3 -O /opt/grok-x01-pulse/pulse_trader.py
 Restart=always
@@ -30,8 +31,8 @@ MemoryMax=640M
 TasksMax=128
 LimitNOFILE=4096
 OOMPolicy=kill
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/cts-g/pulse-%i.log
+StandardError=append:/var/log/cts-g/pulse-%i.err.log
 SyslogIdentifier=grok-pulse-%i
 
 [Install]

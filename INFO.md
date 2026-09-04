@@ -99,6 +99,17 @@ The mapping is always local port **2222** to remote port **22**.
 `222` and `22222` are incorrect. Do not use a second Chisel client on the same
 local port; stop the stale client or document a deliberate temporary port.
 
+### Project-scoped service ownership
+
+CTS-G renders systemd units from the deployment templates with the install
+name as prefix: the default units are `cts-g-desk.service`,
+`cts-g-pulse-http.service`, `cts-g-pulse@<slot>.service` and
+`cts-g-pulse.target`. This prefix is required on a shared VPS. Never overwrite
+or restart an unscoped `grok-desk`/`grok-pulse*` unit because it may belong to
+another checkout such as CTS-GX; a port or service-name collision can create
+the exact restart race that the scoped units prevent. The installer preserves
+foreign units and only controls the units rendered for `CTS_G_NAME`.
+
 ### Independent server-key check
 
 The attached `ck-...` value is an inline Chisel ECDSA private key. It is not a
@@ -122,8 +133,8 @@ round-trip check:
 ```bash
 ssh -i /secure/path/snet-ln-deb01.txt -p 2222 root@127.0.0.1 \
   'set -eu; hostname; id -u; git -C /opt/cts-g rev-parse HEAD; \
-   systemctl is-active redis-server grok-desk grok-pulse-http \
-   grok-pulse@bingx-x02 grok-pulse@bingx-x01'
+   systemctl is-active redis-server cts-g-desk cts-g-pulse-http \
+   cts-g-pulse@bingx-x02 cts-g-pulse@bingx-x01'
 ```
 
 The 2026-09-03 revalidation confirmed the pinned fingerprint, the proxied
@@ -286,17 +297,39 @@ The reproducible offline VST evidence is
 python3 scripts/generate-72h-report.py --symbols 12 --workers 4
 ```
 
-The latest complete run covered 72 hours × 12 symbols, 13,520 catalog Sets
-per symbol, 40,560 expanded Set/direction views and 39,163 validated rows;
-all eight indication kinds, both directions, the full trailing product and
-Block/DCA lanes were included. This is synthetic/offline evidence only and
-does not claim live exchange profitability or submit orders.
+The previous complete run covered 72 hours × 12 symbols, 13,520 catalog Sets
+per symbol, 40,560 expanded Set/direction views and 39,163 validated rows.
+After the full-range update, the same run is regenerated with 30 SL:TP ratios
+and the resulting catalog dimensions are recorded in the HTML report. All
+eight indication kinds, both directions, the full trailing product and
+Block/DCA lanes are included. This is synthetic/offline evidence only and does
+not claim live exchange profitability or submit orders.
+
+The current full-range verification completed before publication with the
+following reproducible runs (all synthetic/offline, no exchange orders):
+
+| Run | Result |
+|---|---|
+| 72h × 1 symbol, one worker | `31,200` catalog Sets, `68,094` rows, `4,718` validated, `504.1s`, ready |
+| 72h × 4 symbols, four workers | `31,200` catalog Sets per symbol, `68,848` aggregate rows, `65,590` validated, `826.3s`, ready |
+| 4h active matrix, extra coordination on/off | both `31,200 / 93,600 / 14,059`, all eight kinds and six windows, ready |
+| 4h baseline without trailing/Block/DCA | `1,200 / 3,600 / 615`, ready; catalog reduction is intentional |
+| 4h active reinitialization A/B | identical counts, kinds, strategy groups and windows, ready |
+
+The active matrices used all eight indication kinds (`state`, `direction`,
+`move`, `active`, `common`, `signals`, `trend`, `break`), both directions,
+Normal plus all 25 trailing arm/give pairs, all 30 SL:TP ratios, every step,
+Block, DCA, and both evaluation coordination flags. The multi-worker run
+remained swap-free; observed host usage peaked below 13 GiB of 22 GiB. The
+report committed with this verification is
+`reports/cts-g-72h-active-coordination.html`. It is an evidence report, not a
+profitability guarantee; live X01 remained disabled.
 
 The Settings catalog exposes the same bounded ranges used by the engines:
 
 | Axis | Supported range / meaning |
 |---|---|
-| SL:TP | `0.2–2.6`, step `0.2` (13 independent ratios) |
+| SL:TP | `0.1–3.0`, step `0.1` (30 independent ratios) |
 | TP steps | `3–22`, every integer is a separate Set |
 | Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
 | Historic | `120–4320` 1m bars, `2–72h`; min bars and warmup remain bounded by the replay window |
@@ -306,6 +339,17 @@ The Settings catalog exposes the same bounded ranges used by the engines:
 | Indications | `state`, `direction`, `move`, `active`, `common`, `signals`, `trend`, `break`; each has independent LONG/SHORT statistics |
 | Drawdown time | `10–650 min`, step `10`, default `450 min`; backend stores seconds and applies the same bounds to historic Set gates and live underwater force-close |
 | Min step | System minimum `3`; every configured step from min through max is processed |
+
+The optional Minimal Range Configuration, additional last-50+ coordination,
+and per-set live-negative deactivation controls are disabled in a newly created
+profile. Minimal Range Configuration only breaks ties after cost-net PF,
+drawdown-time, sample, and stability gates; Profit Factor is always optimized
+as high as possible and is never minimized to obtain a smaller range. The
+shipped X01/X02 overlays explicitly opt into the coordination profile used by
+the VST report; historic replay always reports the full matrix, including
+configurations that are not selected for live use. Persisted legacy names
+`preferMinimalPositive` and `minimalPositiveCoordination` are read as aliases
+and are migrated to `preferMinimalRange` and `additionalCoordination`.
 
 The UI's `Validated rows` count includes expanded LONG/SHORT/BOTH report views;
 `Catalog valid sets` is the actual Set catalog count. Overview, Results and
