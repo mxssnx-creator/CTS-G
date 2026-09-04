@@ -808,8 +808,10 @@ class Pulse:
         self._empty_rest_streak = 0
         self.live_pos_keys: Optional[set] = None  # None = exchange truth unknown
         self._load_trade_history()
-        self._load_open_book()
+        # Load unresolved order intents before the open book so a partially
+        # filled entry is not mistaken for an already-consumed client id.
         self._load_pending_orders()
+        self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
             "blockMaxStack": 3,
@@ -1613,7 +1615,13 @@ class Pulse:
             self.open[key] = pos
             self.owned_syms.add(pos.symbol)
             if pos.client_id:
-                self.seen_fill_cids.add(pos.client_id)
+                pending = self.pending_orders.get(pos.client_id) or {}
+                requested = max(0.0, _sf(pending.get("requested_qty") or pending.get("requestedQty")))
+                filled = max(0.0, _sf(pending.get("filled_qty") or pending.get("filledQty")))
+                if requested > filled + 1e-12:
+                    pos.pending_qty = max(float(getattr(pos, "pending_qty", 0.0) or 0.0), requested - filled)
+                else:
+                    self.seen_fill_cids.add(pos.client_id)
 
     def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1) -> str:
         kind = (kind or "o")[:1]
@@ -5924,6 +5932,8 @@ class Pulse:
                             candidate.qty = qty * max(0.0, float(candidate.qty or 0)) / total_book_qty
                         candidate.entry = px
                         candidate.notional = candidate.qty * px
+                        candidate.exchange_qty = candidate.qty
+                        candidate.foreign_qty = 0.0
                         candidate.ours = True
                     if not getattr(candidate, "set_id", "") and tagged:
                         try:
@@ -5936,6 +5946,17 @@ class Pulse:
                         except Exception:
                             pass
                     self.prepare_position_group(candidate)
+                    matched = [o for o in tagged if self._order_matches_position(o, candidate)]
+                    sl_rows = [o for o in matched if self._order_is_sl(o)]
+                    tp_rows = [o for o in matched if self._order_is_tp(o)]
+                    if sl_rows:
+                        candidate.sl_oid = real_oid(sl_rows[0].get("orderId") or sl_rows[0].get("orderID")) or candidate.sl_oid
+                        candidate.sec_sl_oid = candidate.sl_oid
+                    if tp_rows:
+                        candidate.tp_oid = real_oid(tp_rows[0].get("orderId") or tp_rows[0].get("orderID")) or candidate.tp_oid
+                        candidate.sec_tp_oid = candidate.tp_oid
+                    candidate.controls_ok = bool(candidate.sl_oid and candidate.tp_oid)
+                    candidate.ctrl_verified = candidate.controls_ok
                     self.ensure_strategy_lanes(candidate)
                 continue
             if px <= 0:
@@ -5967,6 +5988,7 @@ class Pulse:
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
                 liq=liq, position_id=pid,
+                exchange_qty=qty, foreign_qty=0.0,
                 parent_set_id=str(track.get("parent_set_id") or set_id),
                 axis_key=str(track.get("axis_key") or ""),
                 relative_count=int(track.get("relative_count") or 1),
@@ -6667,6 +6689,9 @@ class Pulse:
                     "controls": p.controls_ok,
                     "overall": bool(getattr(p, "overall", True)),
                     "closePosition": bool(getattr(p, "close_position", True)),
+                    "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
+                    "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
+                    "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "controlMode": "per-config" if self.per_config_controls(p) else "aggregate",
                     "controlGroupKey": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
                     "controlGroupToken": control_group_token(getattr(p, "control_group_key", "")),
@@ -6911,9 +6936,18 @@ class Pulse:
                         "symbol": p.symbol,
                         "side": p.side,
                         "range": getattr(p, "control_range_key", "") or "aggregate",
+                        "rangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
                         "qty": float(p.qty or 0),
+                        "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
+                        "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                         "memberCount": int(getattr(p, "member_count", 1) or 1),
                         "protected": bool(getattr(p, "controls_ok", False)),
+                        "status": "protected" if bool(getattr(p, "controls_ok", False)) else "missing",
+                        "slOid": real_oid(getattr(p, "sl_oid", "")),
+                        "tpOid": real_oid(getattr(p, "tp_oid", "")),
+                        "secSlOid": real_oid(getattr(p, "sec_sl_oid", "")),
+                        "secTpOid": real_oid(getattr(p, "sec_tp_oid", "")),
+                        "lineageSetIds": list(getattr(p, "lineage_set_ids", []) or [])[:24],
                     }
                     for p in self.open.values()
                 ],
