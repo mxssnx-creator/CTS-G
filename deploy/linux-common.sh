@@ -76,7 +76,9 @@ apply_name() {
   CTS_G_NAME="${1:-$CTS_G_NAME}"
   [[ "$CTS_G_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid instance name"
   CTS_G_ROOT="/opt/${CTS_G_NAME}"
-  STATE_DIR="/var/lib/cts/instances/${CTS_G_NAME}"
+  if [[ "${STATE_EXPLICIT:-0}" != "1" ]]; then
+    STATE_DIR="/var/lib/cts/instances/${CTS_G_NAME}"
+  fi
   CTS_DATA_DIR="$STATE_DIR/data"
   PULSE_DIR="/opt/${CTS_G_NAME}-pulse"
   ETC_DIR="/etc/${CTS_G_NAME}"
@@ -625,6 +627,7 @@ migrate_legacy_state() {
     hist-calc-checkpoint.json overlay.json overlay-bingx-x01.json
     overlay-bingx-x02.json STOP STOP-bingx-x01 STOP-bingx-x02
     PAUSE-bingx-x01 PAUSE-bingx-x02 RUN-bingx-x01 RUN-bingx-x02
+    credentials-bingx-x01.json credentials-bingx-x02.json
   )
   local pattern
   for pattern in stats-*.json trades-*.jsonl block-state-*.json open-*.json pending-*.json \

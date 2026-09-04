@@ -134,6 +134,8 @@ printf ok`;
     });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "ok");
+    const named = spawnSync("bash", ["-c", 'source deploy/linux-common.sh; STATE_DIR=/var/lib/cts/custom-blue; STATE_EXPLICIT=1; apply_name blue; test "$STATE_DIR" = /var/lib/cts/custom-blue; test "$CTS_DATA_DIR" = /var/lib/cts/custom-blue/data'], { cwd: ROOT });
+    assert.equal(named.status, 0, named.stderr.toString());
     const invalid = spawnSync("bash", ["-c", 'source deploy/linux-common.sh; apply_name ".."'], { cwd: ROOT });
     assert.notEqual(invalid.status, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -184,4 +186,44 @@ test("stop intent is kept across installs and healing requires explicit run inte
   assert.doesNotMatch(http, /return super\(\)\.do_GET/);
   assert.match(http, /n > 1048576/);
   assert.doesNotMatch(common, /redis\.call\("KEYS"/);
+});
+
+test("connection cards and engines recover scoped credentials without exposing secrets", () => {
+  const root = mkdtempSync(join(tmpdir(), "cts-credentials-test-"));
+  try {
+    const code = String.raw`
+import json, os, subprocess
+from pathlib import Path
+import pulse_http as h
+def unavailable(*args, **kwargs):
+    raise FileNotFoundError("offline fixture")
+h.subprocess.run = unavailable
+cid = "bingx-x02"
+os.environ["CTS_BINGX_X02_API_KEY"] = "fixture-key"
+os.environ["CTS_BINGX_X02_API_SECRET"] = "fixture-secret"
+pub = h.connection_public(cid)
+assert pub["apiKeySet"] and pub["apiSecretSet"]
+assert "fixture-secret" not in json.dumps(pub)
+assert not h.connection_public("bingx-x01")["apiKeySet"]
+h.redis_hset = lambda *args, **kwargs: True
+ok, detail, pub = h.save_connection(cid, {"connectionMethod": "rest"})
+assert ok, detail
+p = Path(h.path_for("credentials-bingx-x02.json"))
+assert p.stat().st_mode & 0o777 == 0o600
+del os.environ["CTS_BINGX_X02_API_KEY"]
+del os.environ["CTS_BINGX_X02_API_SECRET"]
+assert h.connection_public(cid)["apiSecretSet"]
+os.environ["PULSE_CONN"] = cid
+import pulse_trader as t
+assert t.redis_hget("api_key") == "fixture-key"
+assert t.redis_hget("api_secret") == "fixture-secret"
+print("ok")
+`;
+    const result = spawnSync("python3", ["-c", code], {
+      cwd: join(ROOT, "server/pulse"), encoding: "utf8",
+      env: { ...process.env, CTS_DATA_DIR: join(root, "data"), CTS_LOG_DIR: join(root, "logs"), CTS_G_NAME: "cts-credential-fixture" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "ok");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

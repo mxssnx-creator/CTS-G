@@ -149,12 +149,21 @@ def resolve_conn(raw: str) -> str:
 def redis_hgetall(key: str) -> dict:
     try:
         p = subprocess.run(redis_cli_args("HGETALL", key), capture_output=True, text=True, timeout=6)
+        lines = (p.stdout or "").splitlines() if p.returncode == 0 else []
     except Exception:
-        return {}
-    lines = (p.stdout or "").splitlines()
+        lines = []
     out = {}
     for i in range(0, len(lines) - 1, 2):
         out[lines[i]] = lines[i + 1]
+    cid = key.removeprefix("connection:")
+    if key.startswith("connection:") and cid in ID_TO_LANE:
+        saved = load_json(path_for(f"credentials-{cid}.json"))
+        suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
+        for field in ("api_key", "api_secret", "base_url", "is_testnet", "connection_method", "live_trade_enabled"):
+            if not str(out.get(field) or "").strip():
+                value = saved.get(field) or os.environ.get(f"CTS_{suffix}_{field.upper()}") or os.environ.get(f"BINGX_{suffix}_{field.upper()}")
+                if value:
+                    out[field] = str(value)
     return out
 
 
@@ -293,6 +302,10 @@ def save_connection(cid: str, body: dict) -> tuple:
         }
     if not redis_hset(f"connection:{target}", mapping):
         return False, "redis write failed", connection_public(target)
+    try:
+        atomic_write(path_for(f"credentials-{target}.json"), mapping)
+    except OSError:
+        return False, "saved in Redis, but durable credential backup failed", connection_public(target)
     pub = connection_public(target)
     pub["detail"] = f"saved {target} as {write_type} default" if write_type == "mainnet" else f"saved {target}"
     return True, pub["detail"], pub

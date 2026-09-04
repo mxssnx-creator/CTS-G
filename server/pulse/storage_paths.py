@@ -3,8 +3,8 @@
 
 The project checkout is disposable. On a managed server, state is kept in
 CTS_DATA_DIR when set, otherwise /var/lib/cts/instances/<name>/data. Existing
-installations using /opt/grok-x01-pulse are discovered and copied forward once,
-so reinstalling code does not reset settings, presets, reports, or engine state.
+installations migrate only from an explicitly configured legacy data directory;
+reinstalling code does not reset settings, presets, reports, or engine state.
 """
 from __future__ import annotations
 
@@ -60,6 +60,7 @@ _COPY_PREFIXES = (
     "pending-",
     "events-",
     "live-position-cost-",
+    "credentials-",
     "stats-",
     "trades-",
     "block-state-",

@@ -415,6 +415,10 @@ work. The earlier worktree and its uncommitted report were preserved separately.
   data directories remain authoritative. `--state-dir` migrates recognized
   files while preserving STOP/PAUSE/RUN intent. DB files live under state/db.
   `/etc/<name>/credentials.env` is backed up and is never overwritten.
+  Connection saves additionally persist owner-only `credentials-<slot>.json`
+  under the instance data directory. HTTP and engine readers recover absent
+  Redis fields from that file, then scoped environment values; UI responses
+  expose presence flags, never secrets. A Redis write error remains an error.
 - Redis DB 0 remains reserved for CTS-K-N. Additional CTS-G installs require
   an explicit unused DB. Do not give simultaneous VST engines the same account
   unless their order ownership has been independently verified.
@@ -424,12 +428,14 @@ work. The earlier worktree and its uncommitted report were preserved separately.
   preview sign-in now requires server-side `GROK_PREVIEW_CLIENT_SECRET`.
   Broker-side revocation/rotation is still required: Git history is not erased.
 
-Verification: 279/279 engine checks; six retention/isolation/concurrency
+Verification: 279/279 engine checks; seven retention/isolation/concurrency
 regressions; TypeScript, ESLint and native production build passed. The offline
 production check passed 105 assertions across two simultaneous instances,
 including SSR routes, settings and connection POSTs, stop-state propagation,
 80 concurrent-batch stats reads, response bounds and embedded-DB reopen.
 No exchange orders are submitted by this verification harness.
+The dependency lock includes Nitro's optional LRU peer so clean npm 10 and
+npm 11 installations agree; the CI npm 10 install was reproduced locally.
 
 Run after building: `node scripts/verify-production-runtime.mjs`. GitHub's
 Runtime verification workflow now repeats the local gates for PRs and main.

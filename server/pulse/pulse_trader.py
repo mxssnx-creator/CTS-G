@@ -593,14 +593,17 @@ def redis_hget(field: str) -> str:
     connection-scoped so x01 and x02 can never cross-read each other.
     """
     try:
-        p = subprocess.run(redis_cli_args("HGET", REDIS_CONN, field), capture_output=True, text=True)
+        p = subprocess.run(redis_cli_args("HGET", REDIS_CONN, field), capture_output=True, text=True, timeout=6)
         value = (p.stdout or "").strip()
-        if value and value != "(nil)":
+        if p.returncode == 0 and value and value != "(nil)" and not value.startswith(("ERR ", "NOAUTH ", "OOM ", "(error)")):
             return value
     except FileNotFoundError:
         pass
     except Exception:
         pass
+    saved = load_json_file(os.path.join(DIR, f"credentials-{CONN_SHORT}.json"))
+    if str(saved.get(field) or "").strip():
+        return str(saved[field]).strip()
     suffix = re.sub(r"[^A-Za-z0-9]", "_", CONN_SHORT).upper()
     field_name = re.sub(r"[^A-Za-z0-9]", "_", str(field or "")).upper()
     for name in (
