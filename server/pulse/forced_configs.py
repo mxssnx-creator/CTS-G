@@ -78,6 +78,9 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
     gp = gl = train_gp = train_gl = test_gp = test_gl = 0.0
     n = train_n = test_n = censored = 0
     equity = peak = drawdown = hold_sum = 0.0
+    dd_start = None
+    dd_total = dd_max = 0.0
+    dd_episodes = 0
     tape: deque = deque(maxlen=MAX_TAPE)
     for i in range(warmup, nbar):
         if i == split and entry:
@@ -110,6 +113,15 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
                 equity += net
                 peak = max(peak, equity)
                 drawdown = max(drawdown, peak - equity)
+                if equity >= peak - 1e-12:
+                    if dd_start is not None:
+                        duration = (i - dd_start) * BAR_S
+                        dd_total += duration
+                        dd_max = max(dd_max, duration)
+                        dd_start = None
+                elif dd_start is None:
+                    dd_start = i
+                    dd_episodes += 1
                 hold_sum += (i - entered) * BAR_S
                 tape.append({"t": now - (nbar - 1 - i) * BAR_S, "pnl": net,
                              "pnl_pct": raw, "costPct": cost_pct,
@@ -121,6 +133,15 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
         if not entry and direction == side and conf >= .58:
             entry, entered = close, i
     windows = evaluation_windows(list(tape), cost_pct, required_samples=need)
+    # Diagnostic windows are separate from the eligibility policy. A partial
+    # window remains partial; never label 7 closes as a last-8 PF.
+    recent = evaluation_windows(list(tape), cost_pct, windows=(8, 25, 75), required_samples=need)
+    recent = {key: {k: metric[k] for k in ("n", "requestedN", "available", "classicPf")}
+              for key, metric in recent.items()}
+    if dd_start is not None:
+        duration = (nbar - 1 - dd_start) * BAR_S
+        dd_total += duration
+        dd_max = max(dd_max, duration)
     windows_ok = all(m["classicPf"] > 1 and m["netAvg"] > 0
                      for m in windows.values() if m["n"] >= m["requiredSamples"])
     pf, train_pf, test_pf = _pf(gp, gl), _pf(train_gp, train_gl), _pf(test_gp, test_gl)
@@ -137,6 +158,9 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
             "netPct": round((gp - gl) * 100, 6), "netAvgPct": round((gp - gl) * 100 / max(1, n), 6),
             "maxDrawdownR": round(dd_r, 6), "tradesPerHour": round(n / hours, 6),
             "avgHoldS": round(hold_sum / max(1, n), 2), "openUnresolved": int(bool(entry)),
+            "recentPf": recent, "ddEpisodes": dd_episodes,
+            "avgDdS": round(dd_total / dd_episodes, 2) if dd_episodes else 0.0,
+            "maxDdS": round(dd_max, 2),
             "splitCensored": censored, "eligible": eligible, "status": reason,
             "evaluationWindows": windows}
 

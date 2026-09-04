@@ -61,9 +61,9 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 20
-# Five-day validation is the maximum supported public window. Keep the
-# exchange request bounded to avoid unbounded RAM/CPU growth.
-HOURS_MAX = 120
+# The bounded three-day/72-hour validation window is the maximum supported
+# public window. Keep the exchange request bounded to avoid unbounded RAM/CPU.
+HOURS_MAX = LOOKBACK_MAX // 60  # never claim more history than the bounded replay holds
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
@@ -1315,7 +1315,8 @@ def run_forced_calc(body: Dict[str, Any], persist: bool = True) -> Dict[str, Any
     book.load({"stratGeneral": False, "stratIndications": True, "stratTrailing": False,
                "slToTpRatios": [.6], "setMinStep": 1, "setStepMax": 1})
     job: Dict[str, Any] = {"phase": "fetch", "pct": 0, "detail": "Forced baseline sweep",
-                           "options": opt, "startedAt": now, "forcedOnly": True}
+                           "options": opt, "startedAt": now, "forcedOnly": True,
+                           "hours": opt["hours"], "lookback": hours_to_bars(opt["hours"])}
     _set_running(True)
     if persist:
         _write_pid()
@@ -1774,6 +1775,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-clamp", hours_to_bars(99) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
+    range_series = {hours: hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120)}
+    rec(
+        "hours-range-series",
+        range_series == {2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 4320},
+        str(range_series),
+    )
+    bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
+    rec("options-range-step-clamp", bounded["hours"] == HOURS_MAX and bounded["minStep"] == 1 and bounded["stepMax"] == 22, str(bounded))
     rec("opt-dca-default-off", parse_options({})["stratDca"] is False)
     rec("opt-block-default-on", parse_options({})["stratBlock"] is True)
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
