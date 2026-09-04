@@ -1063,8 +1063,39 @@ class SetBook:
             # counted during the first partial replay of the new catalog.
             for st in self.by_idx:
                 st.hist = []
-                st.n = 0
-                self._score_one(st)
+                # Empty sets do not need a full metric/ledger object graph.
+                # Scoring 34k fresh states here allocated evaluation windows,
+                # stage dictionaries and side maps for every state before any
+                # bars existed, pushing a small VPS into swap during boot.
+                # Keep scalar defaults lazy; live evidence on a reused state
+                # still gets scored immediately and remains independent.
+                if st.live:
+                    self._score_one(st)
+                else:
+                    st.n = 0
+                    st.wins = 0
+                    st.gp = st.gl = st.wr = st.expectancy = 0.0
+                    st.avg_hold_s = st.classic_all = 0.0
+                    st.last15_ratio = 1.0
+                    st.last15_classic = st.last15_r = 0.0
+                    st.last15_n = st.last25_n = 0
+                    st.last25_avg_r = st.last25_avg_pnl = 0.0
+                    st.max_dd_s = st.avg_dd_s = 0.0
+                    st.dd_episodes = 0
+                    st.source_n = 0
+                    st.exits = {}
+                    st.active = False
+                    st.deact_reason = ""
+                    st.base_pf = st.main_pf = st.real_pf = 0.0
+                    st.stage_ledger = {}
+                    st.by_side = {}
+                    st.live_eval = {}
+                    st.gross_pf = st.net_pf = st.gross_ev = st.net_ev = 0.0
+                    st.evaluation = {}
+                    st.evaluation_windows = {}
+                    st.normal_evaluation = {}
+                    st.adjusted_evaluation = {}
+                    st.adjustment_deltas = {}
             # A changed set catalog invalidates the old gate until the new
             # catalog has been replayed over the full configured universe.
             self.progress.ready = False

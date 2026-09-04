@@ -26,8 +26,14 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
 Nice=-5
 CPUWeight=200
-MemoryHigh=400M
-MemoryMax=640M
+# A full 34,320-set catalog plus bounded multi-symbol history needs headroom
+# above the reclaim threshold; keeping the cap explicit avoids swap-thrashing
+# and watchdog resets while still bounding each connection lane. Swap is
+# disabled for this lane so reclaim cannot turn a bounded replay into a silent
+# multi-minute D-state stall.
+MemoryHigh=1536M
+MemoryMax=2048M
+MemorySwapMax=0
 TasksMax=128
 LimitNOFILE=4096
 OOMPolicy=kill
