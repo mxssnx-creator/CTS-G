@@ -53,6 +53,11 @@ HOURS_MAX = 120
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
+KLINE_PAGE_MAX = 1440
+_PUBLIC_REQUEST_INTERVAL_S = 1.05
+_PUBLIC_REQUEST_LOCK = threading.Lock()
+_PUBLIC_REQUEST_LAST = 0.0
 
 # Coordinated low-DD books. Block ON, DCA OFF, SL 0.3 or 0.6, tight DD.
 _SHARED = {
@@ -514,20 +519,99 @@ def parse_klines(data: Any) -> List[List[float]]:
     return [x for x in bars if x[0] > 0 and x[3] > 0 and x[1] > 0 and x[2] > 0]
 
 
-def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 8.0) -> List[List[float]]:
-    limit = max(60, min(LOOKBACK_MAX, int(limit)))
-    qs = urllib.parse.urlencode({"symbol": symbol, "interval": "1m", "limit": str(limit)})
-    for base in (KLINE_URL, KLINE_URL_V3):
+def _public_json(url: str, timeout: float = 12.0) -> Any:
+    """Globally pace public BingX calls; the documented quote limit is 1/s/IP."""
+    global _PUBLIC_REQUEST_LAST
+    with _PUBLIC_REQUEST_LOCK:
+        wait_s = _PUBLIC_REQUEST_INTERVAL_S - (time.monotonic() - _PUBLIC_REQUEST_LAST)
+        if wait_s > 0:
+            time.sleep(wait_s)
+        req = urllib.request.Request(url, headers={"User-Agent": "cts-g-hist-calc/1.0"})
         try:
-            req = urllib.request.Request(f"{base}?{qs}", headers={"User-Agent": "cts-g-hist-calc/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = json.loads(resp.read().decode() or "{}")
-            bars = parse_klines(body.get("data") if isinstance(body, dict) else body)
-            if len(bars) >= 60:
-                return bars[-limit:]
-        except Exception:
+                return json.loads(resp.read().decode() or "{}")
+        finally:
+            _PUBLIC_REQUEST_LAST = time.monotonic()
+
+
+def _timed_klines(data: Any) -> List[Tuple[int, List[float]]]:
+    rows: List[Tuple[int, List[float]]] = []
+    if not isinstance(data, list):
+        return rows
+    for i, raw in enumerate(data):
+        parsed = parse_klines([raw])
+        if not parsed:
             continue
-    return []
+        ts = 0
+        try:
+            if isinstance(raw, dict):
+                ts = int(raw.get("time") or raw.get("timestamp") or raw.get("t") or 0)
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 6:
+                ts = int(raw[0])
+        except Exception:
+            ts = 0
+        rows.append((ts or i + 1, parsed[0]))
+    return rows
+
+
+def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 12.0) -> List[List[float]]:
+    """Fetch the full requested 1m window using BingX's 1,440-candle pages."""
+    limit = max(60, min(LOOKBACK_MAX, int(limit)))
+    end_ms = int(time.time() // 60 * 60 * 1000)
+    start_ms = end_ms - limit * 60_000
+    pages: Dict[int, List[float]] = {}
+    cursor = start_ms
+    while cursor < end_ms and len(pages) < limit:
+        page_end = min(end_ms, cursor + KLINE_PAGE_MAX * 60_000)
+        page_limit = min(KLINE_PAGE_MAX, max(1, (page_end - cursor) // 60_000))
+        params = {
+            "symbol": symbol,
+            "interval": "1m",
+            "startTime": str(cursor),
+            "endTime": str(page_end),
+            "limit": str(page_limit),
+        }
+        got: List[Tuple[int, List[float]]] = []
+        for base in (KLINE_URL_V3, KLINE_URL):
+            try:
+                body = _public_json(f"{base}?{urllib.parse.urlencode(params)}", timeout=timeout)
+                got = _timed_klines(body.get("data") if isinstance(body, dict) else body)
+                if got:
+                    break
+            except Exception:
+                continue
+        if not got:
+            break
+        for ts, bar in got:
+            pages[ts] = bar
+        cursor = page_end
+    return [bar for _ts, bar in sorted(pages.items())][-limit:]
+
+
+def fetch_exchange_universe() -> List[str]:
+    """Return every currently open USDT perpetual exposed by BingX."""
+    try:
+        body = _public_json(CONTRACTS_URL, timeout=20.0)
+        rows = body.get("data") if isinstance(body, dict) else []
+    except Exception:
+        rows = []
+    now_ms = int(time.time() * 1000)
+    names: List[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol.endswith("-USDT"):
+            continue
+        status = str(row.get("status") or "").lower()
+        open_state = str(row.get("apiStateOpen") or "").lower()
+        launch_ms = int(row.get("launchTime") or 0)
+        if status in ("0", "offline", "close", "closed", "delisted"):
+            continue
+        if open_state == "false" or (launch_ms and launch_ms > now_ms):
+            continue
+        names.append(symbol)
+    return list(dict.fromkeys(names))
 
 
 def load_universe() -> List[str]:
@@ -586,17 +670,14 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
                 names.append(t)
     if wild or not names:
         uni = load_universe()
-        names = uni or list(DEFAULT_SYMBOLS)
+        names = uni or fetch_exchange_universe() or list(DEFAULT_SYMBOLS)
     seen = set()
     out: List[str] = []
-    cap = 24 if wild else 12
     for s in names:
         if s in seen:
             continue
         seen.add(s)
         out.append(s)
-        if len(out) >= cap:
-            break
     return out or list(DEFAULT_SYMBOLS)
 
 
