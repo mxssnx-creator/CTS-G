@@ -1193,6 +1193,7 @@ class SetBook:
         *,
         merge: bool = False,
         replayed_symbols: Optional[Sequence[str]] = None,
+        hist_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
         if not merge:
@@ -1218,7 +1219,10 @@ class SetBook:
                         symbol = str(row.get("symbol") or "")
                         counts[symbol] = counts.get(symbol, 0) + 1
                 for symbol in names:
-                    counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
+                    if hist_counts is not None and st.id in hist_counts:
+                        counts[symbol] = max(0, int(hist_counts[st.id]))
+                    else:
+                        counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
                 st.hist = merge_hist_rows(st.hist, full, names)
                 self._score_one(st)
                 st.n = sum(counts.values())
@@ -1240,6 +1244,7 @@ class SetBook:
         drop_bars: bool = True,
         strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         set_ids: Optional[Sequence[str]] = None,
+        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
     ) -> int:
         """Replay one symbol into hist and drop its bars. Independent of other names."""
         if symbol not in self.bars:
@@ -1250,7 +1255,15 @@ class SetBook:
                 self.bars.pop(symbol, None)
             return 0
         now = now or time.time()
-        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist, strat_hist=strat_hist, set_ids=set_ids)
+        self._replay_symbol(
+            symbol,
+            hist,
+            now,
+            ind_hist=ind_hist,
+            strat_hist=strat_hist,
+            set_ids=set_ids,
+            prepared=prepared,
+        )
         if drop_bars:
             self.bars.pop(symbol, None)
         return nbar
@@ -1397,27 +1410,22 @@ class SetBook:
         }
         return None, rec
 
-    def _replay_symbol(
+    def prepare_replay_signals(
         self,
         symbol: str,
-        hist: Dict[str, List[Dict[str, Any]]],
-        now: float,
+        now: Optional[float] = None,
         on_step: Optional[Callable[[], None]] = None,
-        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-        set_ids: Optional[Sequence[str]] = None,
-    ) -> None:
+    ) -> Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]:
+        """Build the symbol signal lanes once before replaying config chunks."""
         bars = self.bars[symbol]
-        selected = {str(s) for s in (set_ids or self.sets)}
-        replay_sets = [st for st in self.by_idx if st.id in selected]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = (now or time.time()) - (n - 1) * BAR_S
         for i in range(warmup, n):
-            lo = i + 1 - 60
-            window = bars[lo if lo > 0 else 0 : i + 1]
+            lo = max(0, i + 1 - 60)
+            window = bars[lo : i + 1]
             ts = base_ts + i * BAR_S
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
@@ -1430,6 +1438,28 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
             if on_step and i % 50 == 0:
                 on_step()
+        return signals, kind_sigs, warmup
+
+    def _replay_symbol(
+        self,
+        symbol: str,
+        hist: Dict[str, List[Dict[str, Any]]],
+        now: float,
+        on_step: Optional[Callable[[], None]] = None,
+        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        set_ids: Optional[Sequence[str]] = None,
+        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
+    ) -> None:
+        bars = self.bars[symbol]
+        selected = {str(s) for s in (set_ids or self.sets)}
+        replay_sets = [st for st in self.by_idx if st.id in selected]
+        n = len(bars)
+        if prepared is None:
+            signals, kind_sigs, warmup = self.prepare_replay_signals(symbol, now, on_step=on_step)
+        else:
+            signals, kind_sigs, warmup = prepared
+        base_ts = now - (n - 1) * BAR_S
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))

@@ -18,7 +18,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, SL_TP_STEP, last_n_cost_pf, row_net_pnl, filter_side
@@ -1152,6 +1152,51 @@ def pipeline_symbols(
     return "live"
 
 
+_HIST_WORKER_OVERLAY: Optional[Dict[str, Any]] = None
+
+
+def _init_replay_worker(overlay: Dict[str, Any]) -> None:
+    global _HIST_WORKER_OVERLAY
+    _HIST_WORKER_OVERLAY = overlay
+
+
+def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
+    str, int, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, int]
+]:
+    """Replay one symbol in a separate process so CPU-heavy configs run in parallel."""
+    sym, bars, now = payload
+    book = SetBook()
+    book.load(dict(_HIST_WORKER_OVERLAY or {}))
+    book.ingest_bars(sym, bars)
+    prepared = book.prepare_replay_signals(sym, now)
+    set_ids = [st.id for st in book.by_idx]
+    chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
+    strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
+    nbar = len(bars)
+    for chunk_i, chunk_ids in enumerate(chunks):
+        local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
+        local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
+        book.replay_symbol_partial(
+            sym,
+            local_hist,
+            now=now,
+            ind_hist=local_ind,
+            drop_bars=chunk_i == len(chunks) - 1,
+            strat_hist=strat_hist if chunk_i == 0 else None,
+            set_ids=chunk_ids,
+            prepared=prepared,
+        )
+        book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+    return (
+        sym,
+        nbar,
+        {st.id: list(st.hist) for st in book.by_idx if st.hist},
+        {k: list(v) for k, v in book.ind_hist.items()},
+        strat_hist,
+        {st.id: int(st.n or 0) for st in book.by_idx},
+    )
+
+
 def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:
     requested = max(0, int(requested))
     completed = max(0, min(requested, int(completed)))
@@ -1221,6 +1266,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 pass
 
     prog("fetch", 2.0, f"async {len(symbols)} × {lookback} 1m")
+    replay_pool: Optional[ProcessPoolExecutor] = None
     try:
         ov = overlay_from_options(opt, extra)
         book = SetBook()
@@ -1305,11 +1351,43 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 except Exception:
                     pass
 
+        replay_pending: List[Tuple[Any, str, str]] = []
+        replay_done = 0
+
+        def commit_replay(result: Tuple[Any, ...], src: str, total: int) -> None:
+            nonlocal replay_done
+            sym, nbar, local_hist, local_ind, local_strat, local_counts = result
+            book._commit_hist(
+                local_hist,
+                local_ind,
+                merge=True,
+                replayed_symbols=[sym],
+                hist_counts=local_counts,
+            )
+            for key, rows in local_strat.items():
+                strat_hist.setdefault(key, []).extend(rows)
+            job["_barsDone"] = int(job.get("_barsDone") or 0) + int(nbar)
+            replay_done += 1
+            job["checkpoint"]["symbol"] = sym
+            job["source"] = src
+            _trim_maps()
+            heavy = replay_done == total or replay_done % 8 == 0
+            if persist or heavy or replay_done % 4 == 0:
+                snapshot(replay_done, total, "replay", heavy=heavy)
+
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
-            # Keep only one symbol's replay evidence in memory. Commit that
-            # slice atomically before advancing coverage; a restart therefore
-            # replays the same symbol instead of skipping a progression unit.
+            # Fetching is I/O-bound, while replay is CPU-bound. Use separate
+            # processes for replay so requested workers actually use all cores.
+            if replay_pool is not None:
+                replay_pending.append((replay_pool.submit(_replay_symbol_worker, (sym, bars, now)), sym, src))
+                if len(replay_pending) < workers:
+                    return
+                future, _queued_sym, queued_src = replay_pending.pop(0)
+                commit_replay(future.result(), queued_src, total)
+                return
+
             book.ingest_bars(sym, bars)
+            prepared = book.prepare_replay_signals(sym, now)
             set_ids = [st.id for st in book.by_idx]
             chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
             nbar = 0
@@ -1317,28 +1395,28 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
                 local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
                 chunk_nbar = book.replay_symbol_partial(
-                    sym,
-                    local_hist,
-                    now=now,
-                    ind_hist=local_ind,
+                    sym, local_hist, now=now, ind_hist=local_ind,
                     drop_bars=chunk_i == len(chunks) - 1,
                     strat_hist=strat_hist if chunk_i == 0 else None,
-                    set_ids=chunk_ids,
+                    set_ids=chunk_ids, prepared=prepared,
                 )
                 nbar = max(nbar, chunk_nbar)
                 book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
-                del local_hist, local_ind
-                if chunk_i % 4 == 0:
-                    gc.collect()
-            job["_barsDone"] = int(job.get("_barsDone") or 0) + nbar
-            job["checkpoint"]["symbol"] = sym
-            job["source"] = src
-            _trim_maps()
-            heavy = done == total or done % 8 == 0
-            if persist or heavy or done % 4 == 0:
-                snapshot(done, total, "replay", heavy=heavy)
+            commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}), src, total)
 
+        if workers > 1:
+            replay_pool = ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_replay_worker,
+                initargs=(ov,),
+            )
         source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
+        while replay_pending:
+            future, _queued_sym, queued_src = replay_pending.pop(0)
+            commit_replay(future.result(), queued_src, len(symbols))
+        if replay_pool is not None:
+            replay_pool.shutdown(wait=True, cancel_futures=True)
+            replay_pool = None
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")
@@ -1423,6 +1501,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 pass
         return job
     finally:
+        if replay_pool is not None:
+            replay_pool.shutdown(wait=False, cancel_futures=True)
         _set_running(False)
         if persist:
             _clear_pid()
