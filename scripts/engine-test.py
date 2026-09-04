@@ -1341,8 +1341,11 @@ def set_orders_test() -> None:
         p.ensure_max_leverage = lambda s, force=False: 100
         p.leverage_for = lambda c: 100
         p.control_orders = True
+        p.control_orders_per_config = True
         p.ctrl_skip = {}
         p.save_open_book = lambda: None
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
         p.seen_fill_cids = set()
         p.signals = []
         p.block = SimpleNamespace(register_parent=lambda *a, **k: None, on_parent_close=lambda *a, **k: None)
@@ -1355,6 +1358,9 @@ def set_orders_test() -> None:
         p._stats_force = False
         p.live_pos_keys = None
         return p
+
+    def pos_for(pulse, symbol: str, side: str = "LONG"):
+        return next(iter(pulse.positions_for(symbol, side)), None)
 
     # === 1) three Sets -> three independent entries + control pairs ===
     fx = FakeEx()
@@ -1378,10 +1384,12 @@ def set_orders_test() -> None:
             and abs(float(parsed[i].get("sl", 0)) - sts[i].sl_ratio) < 1e-9 for i in range(3)),
         str([(x.get("set_id"), x.get("step")) for x in parsed])[:140])
     rec("setord-positions-track-own-set",
-        all(p.open[syms[i]].set_id == sts[i].id and p.open[syms[i]].set_idx == sts[i].idx
-            and p.open[syms[i]].pack == sts[i].pack and p.open[syms[i]].client_id == entry_cids[i]
+        all(pos_for(p, syms[i]) is not None and pos_for(p, syms[i]).set_id == sts[i].id
+            and pos_for(p, syms[i]).set_idx == sts[i].idx
+            and pos_for(p, syms[i]).pack == sts[i].pack
+            and pos_for(p, syms[i]).client_id == entry_cids[i]
             for i in range(3)),
-        str([(p.open[s].set_id, p.open[s].set_idx) for s in syms])[:140])
+        str([(pos_for(p, s).set_id, pos_for(p, s).set_idx) for s in syms])[:140])
 
     # === 2) each position: own independent SL+TP control pair on the exchange ===
     rec("setord-3-control-pairs", len(fx.batches) == 3 and all(len(b) == 2 for b in fx.batches),
@@ -1391,7 +1399,7 @@ def set_orders_test() -> None:
         bodies = [b for b in fx.batches[i] if b.get("symbol") == sym]
         types = {b.get("type") for b in bodies}
         pair_ok = pair_ok and len(bodies) == 2 and types == {"STOP_MARKET", "TAKE_PROFIT_MARKET"} \
-            and all(b.get("closePosition") == "true" for b in bodies)
+            and all("quantity" in b and "closePosition" not in b and "reduceOnly" not in b for b in bodies)
     rec("setord-pairs-wellformed", pair_ok, f"{[(b[0].get('symbol'), len(b)) for b in fx.batches]}")
     ctrl_cids = [str(b.get("clientOrderID") or "") for batch in fx.batches for b in batch]
     rec("setord-control-cids-unique",
@@ -1410,11 +1418,11 @@ def set_orders_test() -> None:
         all(abs(sl_px[s] - want_sl[s]) < 1e-6 and abs(tp_px[s] - want_tp[s]) < 1e-6 for s in syms)
         and len({sl_px[s] for s in syms}) == 3,
         f"sl={sl_px} tp={tp_px}")
-    oid_sets = [{p.open[s].sl_oid, p.open[s].tp_oid} for s in syms]
+    oid_sets = [{pos_for(p, s).sl_oid, pos_for(p, s).tp_oid} for s in syms]
     all_oids = set().union(*oid_sets)
     rec("setord-control-oids-independent",
-        all(pt.real_oid(p.open[s].sl_oid) and pt.real_oid(p.open[s].tp_oid) and p.open[s].controls_ok
-            and p.open[s].ctrl_verified for s in syms)
+        all(pt.real_oid(pos_for(p, s).sl_oid) and pt.real_oid(pos_for(p, s).tp_oid)
+            and pos_for(p, s).controls_ok and pos_for(p, s).ctrl_verified for s in syms)
         and len(all_oids) == 6 and all_oids == set(fx.orders.keys()),
         f"oids={len(all_oids)} live={len(fx.orders)}")
 
@@ -1424,7 +1432,7 @@ def set_orders_test() -> None:
         all(len(pre_oids[s]) == 2 for s in syms) and len(set().union(*pre_oids.values())) == 6,
         str({s: sorted(o) for s, o in pre_oids.items()})[:120])
     fx.fill["AAA-USDT"] = 100.6  # +0.60% gross -> +3.0R net of 1x cost
-    p.close_pos(p.open["AAA-USDT"], 100.6, "tp")
+    p.close_pos(pos_for(p, "AAA-USDT"), 100.6, "tp")
     del_oids = {str(d[1].get("orderId")) for d in fx.deletes}
     rec("setord-cancel-isolation",
         pre_oids["AAA-USDT"] and pre_oids["AAA-USDT"] <= del_oids
@@ -1438,7 +1446,7 @@ def set_orders_test() -> None:
         and len(stB.live) == 0 and len(stC.live) == 0 and stB.last15_n == 12 and stC.last15_n == 12,
         f"A n={stA.last15_n} r={stA.last15_ratio} B live={len(stB.live)} C live={len(stC.live)}")
     fx.fill["BBB-USDT"] = 199.0  # -0.50% gross -> -4.33R net
-    p.close_pos(p.open["BBB-USDT"], 199.0, "sl")
+    p.close_pos(pos_for(p, "BBB-USDT"), 199.0, "sl")
     rec("setord-loss-attributes-setB",
         len(stB.live) == 1 and stB.last15_n == 1 and abs(stB.last15_ratio - 0.5667) < 1e-3
         and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
@@ -1464,7 +1472,7 @@ def set_orders_test() -> None:
     # === 4) negative controls ===
     before = len(fx.posts)
     p.place("CCC-USDT", 1, "gen:dup", 0.9)  # occupied symbol -> refused
-    rec("setord-occupied-symbol-refused", len(fx.posts) == before and p.open["CCC-USDT"].set_id == stC.id,
+    rec("setord-occupied-symbol-refused", len(fx.posts) == before and pos_for(p, "CCC-USDT").set_id == stC.id,
         f"posts={len(fx.posts) - before}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)

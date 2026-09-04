@@ -1519,14 +1519,18 @@ class Pulse:
         if not cid or not self.cid_ours(cid):
             return
         now = time.time()
-        old = self.pending_orders.get(cid) or {}
+        pending = getattr(self, "pending_orders", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self.pending_orders = pending
+        old = pending.get(cid) or {}
         requested = max(float(old.get("requested_qty") or 0), max(0.0, float(requested_qty or 0)))
         filled = max(float(old.get("filled_qty") or 0), max(0.0, float(filled_qty or 0)))
         if requested > 0:
             filled = min(filled, requested)
         merged_meta = dict(old.get("metadata") or {})
         merged_meta.update(metadata or {})
-        self.pending_orders[cid] = {
+        pending[cid] = {
             "kind": str(kind or old.get("kind") or "entry"),
             "client_id": cid,
             "order_id": real_oid(order_id) or str(old.get("order_id") or ""),
@@ -1543,8 +1547,11 @@ class Pulse:
         self._save_pending_orders()
 
     def _clear_pending(self, cid: str) -> None:
-        if str(cid or "") in self.pending_orders:
-            self.pending_orders.pop(str(cid), None)
+        pending = getattr(self, "pending_orders", None)
+        if not isinstance(pending, dict):
+            return
+        if str(cid or "") in pending:
+            pending.pop(str(cid), None)
             self._save_pending_orders()
 
     def _pending_add_open(self, pos: Position, kind: str) -> bool:
@@ -6784,6 +6791,8 @@ class Pulse:
         live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
         progress = getattr(self.sets, "progress", None)
         stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
+        stage_flow_fn = getattr(self.sets, "stage_flow", None)
+        stage_flow = stage_flow_fn() if callable(stage_flow_fn) else {}
         axis_aggregate: Dict[str, Any] = {
             "parentCount": 0,
             "childCount": 0,
@@ -6818,6 +6827,7 @@ class Pulse:
         except Exception:
             mods = {}
         activity = self.event_summary()
+        cost_default = float(getattr(self, "position_cost_pct", POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT)
         return {
             "strategies": {
                 "indications": bool(self.strat_ind and self.indications.settings.get("enabled", True)),
@@ -6844,10 +6854,10 @@ class Pulse:
             },
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
-            "stageFlow": scov.get("stageFlow") or self.sets.stage_flow(),
+            "stageFlow": scov.get("stageFlow") or stage_flow,
             "evaluations": {
                 "requiredSamples": int(getattr(self.sets, "eval_need", lambda: 8)()),
-                "positionCostPct": float(getattr(self.sets, "cost_pct", self.position_cost_pct) or self.position_cost_pct),
+                "positionCostPct": float(getattr(self.sets, "cost_pct", cost_default) or cost_default),
                 "pairedNormalAdjusted": True,
                 "costSubtracted": True,
             },
