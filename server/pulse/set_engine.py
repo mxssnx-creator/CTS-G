@@ -764,6 +764,22 @@ class SetBook:
         self.live_test_candidates = 12
         self.live_test_min_samples = 8
 
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return a copy-safe state for isolated historic replays.
+
+        ``SetBook`` is snapshotted while the live lane continues processing
+        exchange events.  The selection lock protects the live book but is
+        not itself copyable; omitting it from the snapshot lets deepcopy
+        recreate an independent lock in ``__setstate__``.
+        """
+        state = dict(self.__dict__)
+        state.pop("_pick_lock", None)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._pick_lock = threading.RLock()
+
     def load(
         self,
         ov: Dict[str, Any],

@@ -27,6 +27,7 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --name NAME       Install name (default: cts-g) → /opt/NAME, /etc/NAME
   --port N          Desk listen port (default: 3102)
   --desk-port N     Same as --port
+  --pulse-port N    Separate loopback API port (default: desk + 1)
   --host HOST       Public hostname/IP for result URLs (default: 152.53.114.112)
   --from-dir PATH   Copy this checkout into /opt/NAME (default: this repo)
   --clone           git clone REPO_URL into /opt/NAME
@@ -45,6 +46,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name|-n) apply_name "${2:-}"; NAME_EXPLICIT=1; shift 2 ;;
+    --pulse-port) PULSE_PORT="${2:-}"; PULSE_PORT_EXPLICIT=1; shift 2 ;;
     --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
     --host) PUBLIC_HOST="${2:-}"; REMOTE_HOST="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
@@ -67,17 +69,14 @@ log "unattended — no prompts; skip software already present"
 
 ensure_base_packages
 ensure_node
+validate_instance
 ensure_dirs
 ensure_redis
 
 if [[ "$DO_CLONE" -eq 1 ]]; then
   if [[ -d "$CTS_G_ROOT/.git" ]]; then
     log "existing clone at $CTS_G_ROOT — fetch $BRANCH"
-    git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null \
-      || git -C "$CTS_G_ROOT" remote add origin "$REPO_URL"
-    git -C "$CTS_G_ROOT" fetch --prune origin
-    git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
-    git -C "$CTS_G_ROOT" reset --hard "origin/$BRANCH"
+    fast_forward_app
     ok "git updated $CTS_G_ROOT"
   elif [[ -f "$CTS_G_ROOT/server/pulse/pulse_trader.py" ]]; then
     skip "tree already at $CTS_G_ROOT (not a clone)"
@@ -100,8 +99,10 @@ fi
 find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 
 configure_git "$CTS_G_ROOT"
+migrate_redis_scope
 seed_env
 sync_pulse_tree
+ensure_python_deps
 npm_install_desk
 install_units
 enforce_retention

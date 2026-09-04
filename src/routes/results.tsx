@@ -12,8 +12,9 @@ import { IndicationKindsPanel, StrategyStatsPanel } from "@/components/kind-stra
 import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
+import { ForcedConfigsPanel } from "@/components/forced-configs";
 
-type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors";
+type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests";
 
 const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "overview", label: "Overview", hint: "equity, tape and headline metrics" },
@@ -21,6 +22,7 @@ const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "indications", label: "Indications", hint: "all indication kinds and sides" },
   { id: "strategies", label: "Strategies", hint: "Block, DCA, exits and strategy lanes" },
   { id: "sets", label: "Sets", hint: "independent configurations and validation" },
+  { id: "tests", label: "Tests", hint: "forced baseline configurations and VST evidence" },
   { id: "controls", label: "Controls", hint: "exchange actions and protection parity" },
   { id: "errors", label: "Errors", hint: "recorded failures and rejected actions" },
 ];
@@ -103,6 +105,7 @@ function ResultsPage() {
 
       <EvaluationWindowsStrip stats={stats} />
       <ResultsTabs value={statsTab} onChange={setStatsTab} stats={stats} />
+      {statsTab === "tests" ? <div id="results-panel-tests" role="tabpanel"><ForcedConfigsPanel live={stats?.forcedConfigs} /></div> : null}
 
       {statsTab === "coverage" ? <div id="results-panel-coverage" role="tabpanel"><CoveragePanel live={stats} /></div> : null}
       {statsTab === "indications" ? <div id="results-panel-indications" role="tabpanel"><IndicationKindsPanel stats={stats} /></div> : null}

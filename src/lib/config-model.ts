@@ -417,9 +417,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeBreak: true,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 3,
+  minStep: 1,
   maxStopLossRatio: 2.5,
-  trailingMinStep: 3,
+  trailingMinStep: 1,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
   rearrangeGap: 0.22,
@@ -451,7 +451,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinSamples: 8,
   setReactivate: true,
   setMaxActive: 0,
-  setMinStep: 3,
+  setMinStep: 1,
   setStepMax: 22,
   setStepAdapt: true,
   exitEnabled: true,
@@ -770,9 +770,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTypeBreak: bool(cts.indTypeBreak, true),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
-    minStep: num((coord as { minStep?: number }).minStep, 3),
+    minStep: num((coord as { minStep?: number }).minStep, 1),
     maxStopLossRatio: num((coord as { maxStopLossRatio?: number }).maxStopLossRatio, 2.5),
-    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 3),
+    trailingMinStep: num((coord as { trailingMinStep?: number }).trailingMinStep, 1),
     posCountsVolumeRatio: num(cts.posCountsVolumeRatio ?? (coord as { posCountsVolumeRatio?: number }).posCountsVolumeRatio, 0.05),
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
@@ -792,7 +792,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinSamples: num(cts.setMinSamples, 8),
     setReactivate: bool(cts.setReactivate, true),
     setMaxActive: num(cts.setMaxActive, 0),
-    setMinStep: num(cts.setMinStep ?? cts.minStepRange, 3),
+    setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
     setStepMax: num(cts.setStepMax, 22),
     setStepAdapt: bool(cts.setStepAdapt, true),
     exitEnabled: bool(cts.exitEnabled, true),
@@ -830,7 +830,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.trailArmMax = 1.5;
   out.trailGiveMin = 0.1;
   out.trailGiveMax = 0.5;
-  out.setMinStep = Math.max(3, Math.min(22, Math.round(num(out.setMinStep, 3))));
+  out.setMinStep = Math.max(1, Math.min(22, Math.round(num(out.setMinStep, 1))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
   out.maxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.maxDdTimeS, 27000) / 600) * 600));
   out.setMaxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.setMaxDdTimeS, 27000) / 600) * 600));

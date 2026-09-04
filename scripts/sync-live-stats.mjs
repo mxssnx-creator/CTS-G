@@ -1,6 +1,6 @@
-const PULSE_BASE = (process.env.PULSE_URL || "http://152.53.114.112:3015").replace(/\/$/, "");
+const PULSE_BASE = (process.env.PULSE_URL || "http://127.0.0.1:3015").replace(/\/$/, "");
 const PULSE = `${PULSE_BASE}/stats.json?conn=overall`;
-const CTS = (process.env.CTS_URL || "http://152.53.114.112").replace(/\/$/, "");
+const CTS = (process.env.CTS_URL || "").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
 const DEST = new URL("../public/live-stats.json", import.meta.url);

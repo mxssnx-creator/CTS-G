@@ -90,6 +90,10 @@ def _writable(path: Path) -> bool:
 
 def data_dir() -> Path:
     """Return the durable data root, preferring the explicit env override."""
+    if ENV_DATA_DIR:
+        if not PRIMARY_DIR.is_absolute() or not _writable(PRIMARY_DIR):
+            raise RuntimeError("Explicit CTS_DATA_DIR must be absolute and writable")
+        return PRIMARY_DIR
     candidates = [PRIMARY_DIR, *LEGACY_DIRS]
     for candidate in candidates:
         if _writable(candidate):
@@ -114,7 +118,7 @@ def _managed_names(source: Path) -> Iterable[str]:
 
 def migrate_legacy_state() -> List[str]:
     """Copy recognized legacy state into the primary directory exactly once."""
-    if DATA_DIR != PRIMARY_DIR and ENV_DATA_DIR:
+    if ENV_DATA_DIR:
         # Explicit test/container dirs should never absorb unrelated host data.
         return []
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -146,12 +150,15 @@ def path_for(name: str) -> str:
 def atomic_write(path: str, value: Any) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, separators=(",", ":"))
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, target)
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, separators=(",", ":"), allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _tail_lines_locked(

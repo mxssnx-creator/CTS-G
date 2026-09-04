@@ -124,7 +124,26 @@ export type HistCalcOptions = {
   coordOptimizationN: number;
 };
 
+export type ForcedConfigRow = {
+  id: string; symbol: string; indication: string; direction: string;
+  tpPct: number; slPct: number; slRatio: number; rank?: number;
+  n: number; trainN: number; holdoutN: number; pf: number; trainPf: number; holdoutPf: number;
+  costRatio: number; netPct: number; maxDrawdownR: number; tradesPerHour: number;
+  avgHoldS: number; eligible: boolean; status: string; source: string; settingsKey: string;
+  evaluationWindows?: Record<string, EvaluationWindow>;
+  liveN?: number; livePf?: number; liveStatus?: string; liveEnabled?: boolean;
+  measuredCosts?: boolean; openUnresolved?: number;
+};
+
+export type ForcedConfigSummary = {
+  rows?: ForcedConfigRow[]; symbols?: string[]; completed?: number; requested?: number;
+  coveragePct?: number; selectedCount?: number; eligibleCount?: number;
+  minPf?: number; updatedAt?: number; baselineOnly?: boolean; mainnetReady?: boolean;
+  connection?: string; trialMode?: boolean;
+};
+
 export type HistCalcJob = {
+  forcedConfigs?: ForcedConfigSummary;
   ok?: boolean;
   phase: string;
   pct: number;
@@ -185,7 +204,7 @@ export type HistCalcJob = {
 
 export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   hours: 20,
-  minStep: 3,
+  minStep: 1,
   stepMax: 22,
   trailing: true,
   stratBlock: true,
@@ -218,7 +237,7 @@ export async function fetchHistCalc(): Promise<HistCalcJob> {
 }
 
 export async function startHistCalc(
-  body: Partial<HistCalcOptions> & { symbols?: string[] },
+  body: Partial<HistCalcOptions> & { symbols?: string[]; forcedOnly?: boolean },
 ): Promise<HistCalcJob> {
   try {
     const legacy = body as Partial<HistCalcOptions> & {

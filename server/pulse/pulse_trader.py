@@ -1178,8 +1178,12 @@ class Pulse:
         old_qty = max(0.0, float(target.qty or 0))
         add_qty = max(0.0, float(incoming.qty or 0))
         total = old_qty + add_qty
-        if float(getattr(pos, "close_started_qty", 0) or 0) > 0:
-            pos.close_started_qty += add_qty
+        # A close request is tracked on the logical aggregate.  Merging a
+        # later fill into that aggregate must preserve the already-started
+        # close quantity and extend it by the newly merged quantity; `pos`
+        # is not in scope here and used to make same-group fills crash.
+        if float(getattr(target, "close_started_qty", 0) or 0) > 0:
+            target.close_started_qty += add_qty
         if total <= 0:
             return target
         target.entry = ((target.entry * old_qty) + (incoming.entry * add_qty)) / total

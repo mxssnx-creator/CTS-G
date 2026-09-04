@@ -48,6 +48,21 @@ def select_best(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for i, row in enumerate(sorted(groups[key], key=rank_key)[:TOP_N])]
 
 
+def valid_candidate(row: Dict[str, Any]) -> bool:
+    """Fail closed before a historical row can enter the VST trial lane."""
+    try:
+        metrics = [float(row[k]) for k in ("pf", "trainPf", "holdoutPf", "maxDrawdownR")]
+        return bool(row.get("eligible") and row.get("source") == "historical-market"
+                    and row.get("symbol") in FORCED_SYMBOLS and row.get("indication") in IND_KINDS
+                    and row.get("direction") in ("LONG", "SHORT")
+                    and all(math.isfinite(v) for v in metrics)
+                    and min(metrics[:3]) > MIN_PF and 0 <= metrics[3] <= 6
+                    and int(row["trainN"]) >= 8 and int(row["holdoutN"]) >= 8
+                    and float(row["tpPct"]) in TP_GRID and float(row["slPct"]) in SL_GRID)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, floor, dd_limit):
     """One independent lane. Fixed 80-close tape; full-period exact totals.
 

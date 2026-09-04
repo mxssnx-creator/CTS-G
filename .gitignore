@@ -1,4 +1,8 @@
 node_modules/
+.venv/
+deploy/units/
+deploy/instance.json
+.cts-deps.sha256
 .vercel/
 .tanstack/
 .nitro/

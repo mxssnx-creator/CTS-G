@@ -43,6 +43,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { ForcedConfigsPanel } from "@/components/forced-configs";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -1016,6 +1017,7 @@ function SettingsPage() {
           )}
 
           {section === "profit" && (
+            <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
               hint="1.00 = Neutral after cost · 1.10 = +1× PositionCost net · last 15 closes"
@@ -1111,6 +1113,8 @@ function SettingsPage() {
                 gross-profit / gross-loss. Classic PF still shows on Results.
               </p>
             </Card>
+            <ForcedConfigsPanel live={stats?.forcedConfigs} />
+            </div>
           )}
 
           {section === "risk" && (
@@ -1270,20 +1274,20 @@ function SettingsPage() {
                 <Slider
                   label="Minimal Step Range"
                   value={overlay.setMinStep}
-                  min={3}
+                  min={1}
                   max={22}
                   step={1}
                   hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed.`}
-                  onChange={(v) => patch("setMinStep", Math.max(3, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(22, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
-                  min={3}
+                  min={1}
                   max={22}
                   step={1}
                   hint="Upper TP step. Every integer from min through max is its own Set."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 3, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(22, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -1828,7 +1832,7 @@ function SettingsPage() {
                 />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={Math.max(3, overlay.minStep)} min={3} max={12} step={1} hint="System minimum is 3" onChange={(v) => patch("minStep", Math.max(3, Math.min(12, Math.round(v))))} />
+                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={22} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(22, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
