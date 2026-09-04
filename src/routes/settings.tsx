@@ -32,9 +32,11 @@ import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
 import {
   applyUserPreset,
   deleteUserPreset,
+  deleteAllExceptDefaultUserPresets,
   fetchUserPresets,
   loadUserPreset,
   renameUserPreset,
+  saveDefaultUserPreset,
   saveUserPreset,
   suggestPresetName,
   overlayOverview,
@@ -96,6 +98,7 @@ function SettingsPage() {
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameVal, setRenameVal] = useState("");
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [cleanupAsk, setCleanupAsk] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
 
@@ -114,6 +117,7 @@ function SettingsPage() {
     setConnType(conn === "vst" ? "vst" : "mainnet");
     setAsDefaultMainnet(conn !== "vst");
     setResetAsk(false);
+    setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
     const pull = async () => {
@@ -236,6 +240,26 @@ function SettingsPage() {
     setSaveMsg(r.ok ? `${r.preset?.name || userName} saved · overall system (Live + VST)` : r.detail);
   };
 
+  const onSaveDefault = async () => {
+    setUserBusy(true);
+    const r = await saveDefaultUserPreset({ overlay, calcOpt });
+    setUserBusy(false);
+    setUserPresets(r.presets);
+    if (r.preset) setUserSel(r.preset.id);
+    setSaveMsg(r.ok ? "Default saved · active settings named Default" : r.detail);
+  };
+
+  const onDeleteExceptDefault = async () => {
+    setUserBusy(true);
+    const r = await deleteAllExceptDefaultUserPresets();
+    setUserBusy(false);
+    setCleanupAsk(false);
+    setUserPresets(r.presets);
+    setUserSel(r.presets.find((p) => p.name.toLowerCase() === "default")?.id ?? null);
+    setUserName(suggestPresetName(r.presets));
+    setSaveMsg(r.detail);
+  };
+
   const onLoadSystemPreset = async (id: string) => {
     setUserBusy(true);
     const r = await loadUserPreset(id);
@@ -250,12 +274,14 @@ function SettingsPage() {
     setDirty(false);
     setPresetId(null);
     setUserSel(id);
-    if (r.calcOpt) setCalcOpt((o) => ({ ...o, ...r.calcOpt }));
+    const nextCalcOpt = r.calcOpt ? { ...calcOpt, ...r.calcOpt } : calcOpt;
+    if (r.calcOpt) setCalcOpt(nextCalcOpt);
     const live = await saveOverlay(next, "live");
     const vst = await saveOverlay(next, "vst");
     setUserBusy(false);
     const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
-    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"}`);
+    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · recalculating/coordinating`);
+    if (next.histEnabled) void onCalcAll(next, nextCalcOpt);
   };
 
   const onRenameSystemPreset = async () => {
@@ -280,15 +306,18 @@ function SettingsPage() {
     setSaveMsg(r.ok ? "Preset deleted" : r.detail);
   };
 
-  const onCalcAll = async () => {
+  const onCalcAll = async (activeOverlay = overlay, activeCalcOpt = calcOpt) => {
     setCalcBusy(true);
     setSaveMsg(null);
-    const allSym = calcOpt.allSymbols || overlay.symbolsAll || overlay.symbols.includes("*");
+    const allSym = activeCalcOpt.allSymbols || activeOverlay.symbolsAll || activeOverlay.symbols.includes("*");
     const j = await startHistCalc({
-      ...calcOpt,
+      ...activeCalcOpt,
       allConfigs: true,
       allSymbols: allSym,
-      symbols: allSym ? ["*"] : overlay.symbols,
+      symbols: allSym ? ["*"] : activeOverlay.symbols,
+      preferMinimalRange: activeOverlay.preferMinimalRange,
+      additionalCoordination: activeOverlay.additionalCoordination,
+      coordOptimizationN: activeOverlay.coordOptimizationN,
     });
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
@@ -330,6 +359,11 @@ function SettingsPage() {
       dirtyRef.current = false;
       setDirty(false);
       if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
+      setSaveMsg(`${r.detail} · recalculating/coordinating`);
+      // The sidecar reloads and schedules its next coordination tick after an
+      // atomic overlay write. Trigger the independent historic worker too so
+      // the UI never shows a stale Set matrix after a settings change.
+      if (overlay.histEnabled) void onCalcAll(overlay);
     }
   };
 
@@ -525,6 +559,29 @@ function SettingsPage() {
                     {userBusy ? "Saving…" : "Save as system preset"}
                   </button>
                 </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="user-preset-save-default"
+                    disabled={userBusy || !ready}
+                    onClick={() => void onSaveDefault()}
+                    className="min-h-11 rounded-lg border border-primary px-4 text-sm text-primary disabled:opacity-40"
+                  >
+                    {userBusy ? "Saving…" : "Save active as Default"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="user-preset-delete-except-default"
+                    disabled={userBusy || !userPresets.some((p) => p.name.trim().toLowerCase() === "default")}
+                    onClick={() => setCleanupAsk(true)}
+                    className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted disabled:opacity-40"
+                  >
+                    Delete all except Default
+                  </button>
+                  <span className="font-mono text-[11px] text-muted">
+                    {userPresets.some((p) => p.name.trim().toLowerCase() === "default") ? "Default protected" : "Save Default first"}
+                  </span>
+                </div>
                 <p className="font-mono text-[11px] text-muted">{overlayOverview(overlay)}</p>
                 {userPresets.length === 0 ? (
                   <p className="text-sm text-muted">No saved system presets yet. Tune sliders, then save.</p>
@@ -583,10 +640,11 @@ function SettingsPage() {
                                   </button>
                                   <button
                                     type="button"
-                                    className="min-h-11 rounded-lg border border-border px-3 text-sm text-muted"
+                                    disabled={p.name.trim().toLowerCase() === "default"}
+                                    className="min-h-11 rounded-lg border border-border px-3 text-sm text-muted disabled:cursor-not-allowed disabled:opacity-50"
                                     onClick={() => setDeleteId(p.id)}
                                   >
-                                    Delete
+                                    {p.name.trim().toLowerCase() === "default" ? "Protected" : "Delete"}
                                   </button>
                                 </div>
                               </div>
@@ -1013,6 +1071,32 @@ function SettingsPage() {
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
                 />
+                <Toggle
+                  label="Use live exchange costs"
+                  on={overlay.useLivePositionCosts}
+                  onChange={(v) => patch("useLivePositionCosts", v)}
+                />
+                <Toggle
+                  label="Minimal range configuration"
+                  on={overlay.preferMinimalRange}
+                  hint="After validation gates, prefer the smallest stable ranges; PF is always ranked first and never minimized."
+                  onChange={(v) => patch("preferMinimalRange", v)}
+                />
+                <Toggle
+                  label="Additional 50+ coordination"
+                  on={overlay.additionalCoordination}
+                  hint="Evaluate the independent last-50+ position coordination window without reducing the full historic matrix."
+                  onChange={(v) => patch("additionalCoordination", v)}
+                />
+                <Slider
+                  label="Coordination last-N"
+                  value={overlay.coordOptimizationN}
+                  min={50}
+                  max={200}
+                  step={10}
+                  hint="Independent live optimization window; historic catalog coverage is unchanged."
+                  onChange={(v) => patch("coordOptimizationN", Math.max(50, Math.min(200, Math.round(v / 10) * 10)))}
+                />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
                 <KV k="1.00 Neutral" v={`net 0 · gross ${overlay.positionCostPct.toFixed(2)}%`} />
@@ -1030,9 +1114,9 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss vs take profit" hint="All 13 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
+            <Card title="Stop loss vs take profit" hint="All 30 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
               <p className="text-sm text-muted">
-                Catalog is fixed system-wide: SL:TP 0.2–2.6 step 0.2 ({slTpGrid().length} books) × TP steps {overlay.setMinStep}–{overlay.setStepMax}.
+                Catalog is fixed system-wide: SL:TP 0.1–3.0 step 0.1 ({slTpGrid().length} books) × TP steps {overlay.setMinStep}–{overlay.setStepMax}.
                 Every combo is historic-scored and live-gated on its own tape. Nothing in Settings turns a ratio off.
               </p>
               <Grid>
@@ -1054,10 +1138,10 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={0.05} max={1} step={0.01} unit="%" onChange={(v) => patch("slMinPct", v)} />
-                <Slider label="SL max" value={overlay.slMaxPct} min={0.2} max={3} step={0.05} unit="%" onChange={(v) => patch("slMaxPct", v)} />
-                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={2} step={0.05} unit="%" onChange={(v) => patch("tpMinPct", v)} />
-                <Slider label="TP max" value={overlay.tpMaxPct} min={0.4} max={6} step={0.05} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
+                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Slider label="TP max" value={overlay.tpMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
                   value={overlay.tpCostRatio}
@@ -1115,7 +1199,7 @@ function SettingsPage() {
               </Grid>
               <p className="text-sm text-muted">
                 Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–12).
-                Trailing only moves SL after min-step. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
+                Trailing only moves SL after min-step, only in the protective direction, and retries a failed exchange update while retaining the old stop. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
           )}
@@ -1205,6 +1289,11 @@ function SettingsPage() {
                   label="Adapt min step from live"
                   on={overlay.setStepAdapt !== false}
                   onChange={(v) => patch("setStepAdapt", v)}
+                />
+                <Toggle
+                  label="Deactivate set on negative live PF"
+                  on={overlay.setLiveNegativeDeact}
+                  onChange={(v) => patch("setLiveNegativeDeact", v)}
                 />
                 <Slider
                   label="Set min PF"
@@ -2044,6 +2133,29 @@ function SettingsPage() {
           </div>
         </div>
       ) : null}
+      {cleanupAsk ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4">
+            <h3 className="text-sm font-medium">Delete all system presets except Default?</h3>
+            <p className="mt-2 text-sm text-muted">
+              Every saved preset except the protected Default will be removed. The currently applied overlay is not changed.
+            </p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button type="button" className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setCleanupAsk(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="user-preset-delete-except-default-yes"
+                className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
+                onClick={() => void onDeleteExceptDefault()}
+              >
+                Delete others
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {deleteId ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4">
@@ -2260,11 +2372,13 @@ function Toggle({
   on,
   onChange,
   locked,
+  hint,
 }: {
   label: string;
   on: boolean;
   onChange: (v: boolean) => void;
   locked?: boolean;
+  hint?: string;
 }) {
   return (
     <button
@@ -2273,9 +2387,12 @@ function Toggle({
       onClick={() => onChange(!on)}
       className="flex min-h-11 items-center justify-between rounded-lg border border-border bg-bg2 px-3 text-left text-sm disabled:opacity-70"
     >
-      <span>
-        {label}
-        {locked ? <span className="ml-2 font-mono text-xs text-faint">CTS</span> : null}
+      <span className="pr-3">
+        <span>
+          {label}
+          {locked ? <span className="ml-2 font-mono text-xs text-faint">CTS</span> : null}
+        </span>
+        {hint ? <span className="mt-0.5 block text-xs text-muted">{hint}</span> : null}
       </span>
       <span className={`font-mono text-xs ${on ? "text-primary" : "text-muted"}`}>{on ? "ON" : "OFF"}</span>
     </button>

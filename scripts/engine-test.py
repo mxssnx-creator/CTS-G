@@ -24,6 +24,7 @@ from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
 from user_presets import self_test as user_presets_self_test
+from storage_paths import self_test as storage_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
 from bingx_fast import ErrorLog, FastBingX
 from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
@@ -70,6 +71,7 @@ def run_units() -> None:
         (load_self_test, "load"),
         (hist_calc_self_test, "histcalc"),
         (user_presets_self_test, "upreset"),
+        (storage_self_test, "storage"),
     ):
         try:
             rows = fn()
@@ -117,6 +119,8 @@ def overlay_test() -> None:
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 3 and int(ov.get("trailingMinStep") or 0) == 3)
+        rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
+        rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
@@ -757,7 +761,7 @@ def control_coord_test() -> None:
 
 
 def cancel_replace_regression_test() -> None:
-    """BingX trailing SL updates must use cancel + place, never cancelReplace."""
+    """BingX trailing updates place first and preserve protection on failure."""
     import pulse_trader as pt
 
     class RejectCancelReplace:
@@ -771,6 +775,8 @@ def cancel_replace_regression_test() -> None:
     p.px = {"AAA-USDT": 100.0}
     p.last_px = {}
     p.did_io = False
+    p.per_config_controls = lambda _pos: False
+    p.position_key = lambda pos: f"{pos.symbol}:{pos.side}"
     p.sl_legal = lambda _pos, _px: True
     p.clamp_ctrl_price = lambda _pos, _kind, px: float(px)
     p.desired_sl_tp = lambda _pos: (99.5, 101.0, 99.5, 101.0)
@@ -786,10 +792,34 @@ def cancel_replace_regression_test() -> None:
     p.replace_sl(pos, 99.5)
     rec(
         "ctrl-replace-bingx-safe",
-        calls == [("cancel", ("AAA-USDT", "old-sl")), ("place", (pos, "sec-sl", 99.5))]
+        calls == [("place", (pos, "sec-sl", 99.5)), ("cancel", ("AAA-USDT", "old-sl"))]
         and pos.sl_oid == "new-sl" and pos.sec_sl_oid == "new-sl"
         and pos.controls_ok and pos.tp_oid == "old-tp",
         f"calls={[name for name, _args in calls]} sl={pos.sl_oid}",
+    )
+    # A rejected replacement must never clear the existing order or advance
+    # the local trailing price. The next event-loop pass can retry it.
+    p.ctrl_skip = {}
+    calls.clear()
+    p.place_ctrl = lambda *args: calls.append(("place", args)) or ""
+    old_sl = pos.sl
+    old_oid = pos.sl_oid
+    ok = p.replace_sl(pos, 99.8)
+    rec(
+        "ctrl-replace-failure-keeps-old",
+        not ok and calls and calls[0][0] == "place"
+        and pos.sl_oid == old_oid and pos.sec_sl_oid == old_oid and pos.sl == old_sl
+        and not any(name == "cancel" for name, _args in calls),
+        f"ok={ok} calls={[name for name, _args in calls]} sl={pos.sl} oid={pos.sl_oid}",
+    )
+    p.ctrl_skip = {}
+    calls.clear()
+    p.place_ctrl = lambda *args: calls.append(("place", args)) or "unexpected"
+    ok = p.replace_sl(pos, 99.4)
+    rec(
+        "ctrl-replace-monotonic",
+        ok and calls == [] and pos.sl == old_sl and pos.sl_oid == old_oid,
+        f"ok={ok} calls={[name for name, _args in calls]} sl={pos.sl}",
     )
 
 

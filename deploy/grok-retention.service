@@ -1,0 +1,19 @@
+[Unit]
+Description=CTS-G bounded runtime retention
+Documentation=https://github.com/mxssnx-creator/CTS-G
+After=local-fs.target
+PartOf=grok-pulse.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/cts-g/cts-g.env
+WorkingDirectory=/opt/cts-g
+ExecStart=/opt/cts-g/deploy/retention.sh --once
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=90
+StandardOutput=append:/var/log/cts-g/retention.log
+StandardError=append:/var/log/cts-g/retention.err.log
+

@@ -12,10 +12,16 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
-from storage_paths import DATA_DIR, atomic_write, path_for, storage_info
+from storage_paths import DATA_DIR, append_bounded_line, atomic_write, path_for, storage_info
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
+CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
+
+
+def engine_unit(cid: str) -> str:
+    """Return the install-scoped engine unit; never control generic grok-* units."""
+    return f"{CTS_G_NAME}-pulse@{cid}"
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [
@@ -422,7 +428,7 @@ def unit_state(cid: str, fresh: bool = False) -> str:
     hit = _STATE_CACHE.get(cid)
     if not fresh and hit and now - hit[0] < 3.0:
         return hit[1]
-    rc, out = _sysctl("is-active", f"grok-pulse@{cid}", timeout=6)
+    rc, out = _sysctl("is-active", engine_unit(cid), timeout=6)
     state = (out.splitlines() or [""])[0].strip() if out else ""
     if state not in ("active", "inactive", "failed", "activating", "deactivating"):
         state = "failed" if rc not in (0,) and state == "" else (state or "unknown")
@@ -454,7 +460,7 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
         reset_eq = os.path.join(DIR, f"reset-eq-{cid}")
-        unit = f"grok-pulse@{cid}"
+        unit = engine_unit(cid)
         if action == "pause":
             _unlink(stop)
             _touch(pause)
@@ -901,8 +907,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             path = os.path.join(DIR, "http.log")
-            with open(path, "a") as f:
-                f.write("%s - %s\n" % (self.address_string(), msg))
+            append_bounded_line(path, "%s - %s\n" % (self.address_string(), msg))
         except Exception:
             pass
 
@@ -1096,6 +1101,13 @@ class Handler(SimpleHTTPRequestHandler):
                     )
                     self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": f"saved {row.get('name')}"})
                     return
+                if action in ("save_default", "default"):
+                    row = PRESET_STORE.save_default(
+                        overlay=body.get("overlay") if isinstance(body.get("overlay"), dict) else {},
+                        calc_opt=body.get("calcOpt") if isinstance(body.get("calcOpt"), dict) else {},
+                    )
+                    self._json({"ok": True, "preset": row, "presets": PRESET_STORE.list(), "detail": "saved Default"})
+                    return
                 if action == "rename":
                     row = PRESET_STORE.rename(str(body.get("id") or ""), str(body.get("name") or ""))
                     if not row:
@@ -1105,7 +1117,12 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 if action == "delete":
                     okd = PRESET_STORE.delete(str(body.get("id") or ""))
-                    self._json({"ok": okd, "presets": PRESET_STORE.list(), "detail": "deleted" if okd else "preset not found"}, 200 if okd else 404)
+                    detail = "deleted" if okd else "Default is protected or preset not found"
+                    self._json({"ok": okd, "presets": PRESET_STORE.list(), "detail": detail}, 200 if okd else 400)
+                    return
+                if action in ("delete_except_default", "cleanup"):
+                    removed = PRESET_STORE.delete_all_except_default()
+                    self._json({"ok": True, "removed": removed, "presets": PRESET_STORE.list(), "detail": f"deleted {removed} presets; Default kept"})
                     return
                 if action == "load":
                     row, applied = PRESET_STORE.apply(str(body.get("id") or ""), apply_all=body.get("applyAll") is not False)
@@ -1175,18 +1192,22 @@ def heal_loop() -> None:
                     now = time.time()
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
-                    try:
-                        p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
-                        if not (p.stdout or "").strip():
-                            continue  # no keys — engine would exit instantly
-                    except Exception:
-                        continue
+                    suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
+                    env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
+                    if not env_key:
+                        try:
+                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
+                            env_key = (p.stdout or "").strip()
+                        except Exception:
+                            env_key = ""
+                    if not env_key:
+                        continue  # no keys — engine would exit instantly
                     last[cid] = now
-                    _sysctl("reset-failed", f"grok-pulse@{cid}", timeout=8)
-                    rc, out = _sysctl("start", f"grok-pulse@{cid}")
+                    unit = engine_unit(cid)
+                    _sysctl("reset-failed", unit, timeout=8)
+                    rc, out = _sysctl("start", unit)
                 try:
-                    with open(os.path.join(DIR, "http.log"), "a") as f:
-                        f.write(f"heal {cid} rc={rc} {out[:120]}\n")
+                    append_bounded_line(os.path.join(DIR, "http.log"), f"heal {cid} rc={rc} {out[:120]}\n")
                 except Exception:
                     pass
         except Exception:

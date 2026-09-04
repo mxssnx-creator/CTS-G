@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "server", "pulse"))
 
-from hist_calc import DEFAULT_SYMBOLS, run_calc  # noqa: E402
+from hist_calc import DEFAULT_SYMBOLS, EVALUATION_WINDOWS, run_calc  # noqa: E402
 
 
 def esc(value: Any) -> str:
@@ -86,6 +86,38 @@ def stat_card(label: str, value: Any, note: str = "") -> str:
     return f"<article class=card><div class=eyebrow>{esc(label)}</div><div class=value>{esc(value)}</div><div class=note>{esc(note)}</div></article>"
 
 
+def window_cells(item: Dict[str, Any]) -> str:
+    windows = item.get("evaluationWindows") if isinstance(item.get("evaluationWindows"), dict) else {}
+    cells: List[str] = []
+    for requested in EVALUATION_WINDOWS:
+        metric = windows.get(f"last{requested}") if isinstance(windows, dict) else {}
+        metric = metric if isinstance(metric, dict) else {}
+        n = int(metric.get("n") or 0)
+        req = int(metric.get("requestedN") or requested)
+        pf = metric.get("pf")
+        available = bool(metric.get("available"))
+        valid = bool(metric.get("validated")) and available
+        tone = "good" if valid else "warn" if available else ""
+        value = num(pf, 2) if n else "—"
+        cells.append(f"<td><span class={tone}>{value}</span><span class=window-sub>{n}/{req} · {'valid' if valid else 'partial' if available else 'waiting'}</span></td>")
+    return "".join(cells)
+
+
+def window_table_rows(items: Iterable[Dict[str, Any]], label_key: str) -> str:
+    rows = list(items)
+    if not rows:
+        return '<tr><td class=empty colspan=7>No evaluated rows</td></tr>'
+    return "\n".join(
+        f"<tr><td>{esc(item.get(label_key) or '—')}</td>{window_cells(item)}</tr>"
+        for item in rows
+    )
+
+
+def window_table(items: Iterable[Dict[str, Any]], label_key: str) -> str:
+    headers = "".join(f"<th>Last {n}</th>" for n in EVALUATION_WINDOWS)
+    return f"<table><thead><tr><th>{esc(label_key)}</th>{headers}</tr></thead><tbody>{window_table_rows(items, label_key)}</tbody></table>"
+
+
 def build_html(job: Dict[str, Any], symbols: List[str], workers: int) -> str:
     coverage = job.get("coverage") if isinstance(job.get("coverage"), dict) else {}
     catalog = coverage
@@ -102,6 +134,8 @@ def build_html(job: Dict[str, Any], symbols: List[str], workers: int) -> str:
     is_ready = str(job.get("phase") or "") == "ready" and not job.get("error")
     options = job.get("options") if isinstance(job.get("options"), dict) else {}
     progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    evaluation_summary = job.get("evaluationWindows") if isinstance(job.get("evaluationWindows"), dict) else {}
+    winner = job.get("winner") if isinstance(job.get("winner"), dict) else {}
     empty_blob: Dict[str, Any] = {}
     data = json.dumps(job, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
 
@@ -125,7 +159,7 @@ p {{ color:var(--muted); }} .hero {{ display:flex; justify-content:space-between
 .badge {{ display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:5px 10px; color:var(--cyan); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }} .status {{ border-radius:14px; padding:12px 15px; border:1px solid var(--line); min-width:280px; }} .status.ok {{ color:var(--green); border-color:#236e55; background:#0b2a27; }} .status.bad {{ color:var(--red); border-color:#713344; background:#2b101c; }}
 .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:18px 0 28px; }} .card,.panel {{ background:linear-gradient(145deg,rgba(17,39,62,.95),rgba(8,21,36,.96)); border:1px solid var(--line); border-radius:16px; box-shadow:0 14px 42px rgba(0,0,0,.16); }} .card {{ padding:16px; min-height:112px; }} .eyebrow {{ color:var(--muted); font-size:11px; letter-spacing:.1em; text-transform:uppercase; }} .value {{ font-size:28px; margin:8px 0 2px; font-weight:720; letter-spacing:-.03em; }} .note {{ color:var(--muted); font-size:12px; }}
 .panel {{ padding:20px; margin:16px 0; overflow:hidden; }} .panel p:first-child {{ margin-top:0; }} .two {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }} .three {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }}
-table {{ width:100%; border-collapse:collapse; }} th,td {{ border-bottom:1px solid rgba(130,170,205,.14); padding:9px 8px; text-align:left; vertical-align:top; }} th {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; font-weight:600; }} td {{ color:#dbe8f4; }} .empty {{ text-align:center; color:var(--muted); padding:24px; }} .good {{ color:var(--green); }} .warn {{ color:var(--amber); }} .badtext {{ color:var(--red); }}
+table {{ width:100%; border-collapse:collapse; }} th,td {{ border-bottom:1px solid rgba(130,170,205,.14); padding:9px 8px; text-align:left; vertical-align:top; }} th {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.07em; font-weight:600; }} td {{ color:#dbe8f4; }} .window-sub {{ display:block; color:var(--muted); font-size:10px; margin-top:2px; white-space:nowrap; }} .empty {{ text-align:center; color:var(--muted); padding:24px; }} .good {{ color:var(--green); }} .warn {{ color:var(--amber); }} .badtext {{ color:var(--red); }}
 pre {{ white-space:pre-wrap; overflow:auto; background:#06101b; border:1px solid var(--line); border-radius:12px; padding:14px; color:#b9d7ec; font-size:12px; }} code {{ color:var(--cyan); }} .foot {{ color:var(--muted); font-size:12px; margin-top:24px; }}
 @media(max-width:980px) {{ .grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .hero,.two,.three {{ grid-template-columns:1fr; display:grid; }} .status {{ min-width:0; }} }} @media(max-width:600px) {{ main {{ width:min(100% - 24px,1440px); padding-top:26px; }} .grid {{ grid-template-columns:1fr; }} .panel {{ padding:14px; overflow:auto; }} table {{ min-width:620px; }} }}
 </style></head><body><main>
@@ -144,6 +178,12 @@ pre {{ white-space:pre-wrap; overflow:auto; background:#06101b; border:1px solid
 <section class=panel><h2>Direction controls</h2><table><thead><tr><th>Direction</th><th>All fills</th><th>Last-N PF</th><th>Last-N</th><th>Win rate</th><th>DD time</th><th>Validated</th></tr></thead><tbody>
 {table_rows(direction_items, [('direction','text'),('n','int'),('pf','pf'),('last15N','int'),('wr','pct'),('maxDdS','ddt'),('validated','bool')])}
 </tbody></table></section>
+<section class=panel><h2>Multi-window consistency and active coordination</h2><p>Each aggregate is checked independently over the last 5, 10, 15, 25, 50 and 75 positions. “Valid” requires the requested window to be available and the configured sample/PF gate to pass; shorter histories remain visible as partial evidence.</p><div class=grid>
+{stat_card('Coordination', 'enabled' if options.get('additionalCoordination') else 'baseline', f"minimal range {'on' if options.get('preferMinimalRange') else 'off'} · PF-first · optimization N {options.get('coordOptimizationN', 50)}")}
+{stat_card('Window catalog', ', '.join(f"last{n}" for n in EVALUATION_WINDOWS), f"{len(evaluation_summary.get('directions') or {})} directions · {len(evaluation_summary.get('strategies') or {})} strategies")}
+{stat_card('Winner stability', num(((winner.get('evaluationWindows') or {}).get('last75') or {}).get('pf'), 2) if winner else '—', f"winner {winner.get('id', '—')} · last75")}
+{stat_card('Coverage', 'complete' if set(evaluation_summary.get('windows') or []) >= set(EVALUATION_WINDOWS) else 'partial', f"{len(evaluation_summary.get('indications') or {})} indication kinds · {len(evaluation_summary.get('symbols') or {})} symbols")}
+</div><div class=three><div><h3>Directions</h3>{window_table(direction_items, 'direction')}</div><div><h3>Strategies</h3>{window_table(strategy_items, 'strategy')}</div><div><h3>Indications</h3>{window_table(kind_items, 'kind')}</div></div></section>
 <section class=panel><h2>Strategy groups</h2><p>Groups are independently attributed. Block/DCA rows are not allowed to inflate the normal Base/Real Set tape.</p><table><thead><tr><th>Strategy / pack</th><th>Fills</th><th>PF</th><th>Last-N</th><th>Net avg</th><th>Win rate</th><th>DD time</th><th>Validated</th></tr></thead><tbody>
 {table_rows(strategy_items, [('strategy','text'),('n','int'),('pf','pf'),('last15N','int'),('netAvg','pf'),('wr','pct'),('maxDdS','ddt'),('validated','bool')])}
 </tbody></table></section>
@@ -186,6 +226,9 @@ def main() -> int:
         "indTypeCommon": True,
         "indTypeTrend": True,
         "indTypeBreak": True,
+        "preferMinimalRange": True,
+        "additionalCoordination": True,
+        "coordOptimizationN": 50,
         "workers": max(1, min(8, int(args.workers or 4))),
         "synth": True,
     }
@@ -203,6 +246,12 @@ def main() -> int:
         "setCount": (job.get("coverage") or {}).get("setCount"),
         "rowCount": job.get("rowCount"),
         "validatedCount": job.get("validatedCount"),
+        "evaluationWindows": (job.get("evaluationWindows") or {}).get("windows") or [],
+        "activeCoordination": {
+            "preferMinimalRange": body["preferMinimalRange"],
+            "additionalCoordination": body["additionalCoordination"],
+            "coordOptimizationN": body["coordOptimizationN"],
+        },
         "elapsedMs": job.get("elapsedMs"),
         "error": job.get("error") or "",
     }, separators=(",", ":")))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent SL:TP ratio sets and trailing recals.
 
-SL is bound to TP on the discrete CTS grid 0.2–2.6 step 0.2.
+SL is bound to TP on the discrete CTS grid 0.1–3.0 step 0.1.
 Trailing arm/give is a separate book with its own optimal range and recals.
 Neither book writes the other.
 """
@@ -414,7 +414,7 @@ class VariantBook:
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     ratios = [snap_ratio(x) for x in (0.2, 0.3, 0.45, 0.64, 1.0, 1.4, 2.55, 2.8)]
-    expect = [0.2, 0.4, 0.4, 0.6, 1.0, 1.4, 2.6, 2.6]
+    expect = [0.2, 0.3, 0.5, 0.6, 1.0, 1.4, 2.6, 2.8]
     out.append(("var-snap-ratio", ratios == expect, f"{ratios}"))
     step = [round(SL_TP_MIN + i * SL_TP_STEP, 1) for i in range(len(SL_TP_RATIOS))]
     out.append(("var-sl-grid", step == list(SL_TP_RATIOS), f"{step}"))
@@ -434,7 +434,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pairs = {(a, g) for _, a, g in cands}
     out.append(("var-trail-range", len(cands) == 9 and len(pairs) == 9, f"n={len(cands)} {cands}"))
     # ratio 1.5 allowed (SL > TP)
-    out.append(("var-ratio-wide", 2.6 in SL_TP_RATIOS and 0.2 in SL_TP_RATIOS, str(SL_TP_RATIOS[:3])))
+    out.append(("var-ratio-wide", len(SL_TP_RATIOS) == 30 and 0.1 in SL_TP_RATIOS and 3.0 in SL_TP_RATIOS, str(SL_TP_RATIOS[:3] + SL_TP_RATIOS[-3:])))
     grid = trail_grid()
     keys = [k for k, _, _ in grid]
     out.append(("var-trail-grid-n", len(grid) == 25 and len(set(keys)) == 25, f"n={len(grid)} {keys[:6]}"))

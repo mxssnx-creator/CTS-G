@@ -1,3 +1,5 @@
+import type { EvaluationWindow } from "./hist-calc";
+
 export type LiveOpen = {
   symbol: string;
   side: string;
@@ -34,6 +36,8 @@ export type LiveOpen = {
   unit?: string;
   slRatio?: number;
   trailKey?: string;
+  trail?: number | null;
+  trailPending?: number | null;
   slPct?: number;
   tpPct?: number;
   setId?: string;
@@ -113,6 +117,7 @@ export type KindStat = {
   avgStrength?: number;
   costSubtracted?: boolean;
   bySide?: Record<string, SideStat>;
+  evaluationWindows?: Record<string, EvaluationWindow>;
 };
 
 export type StrategyStat = {
@@ -134,6 +139,7 @@ export type StrategyStat = {
   rejected?: number;
   costSubtracted?: boolean;
   bySide?: Record<string, SideStat>;
+  evaluationWindows?: Record<string, EvaluationWindow>;
 };
 
 export type ActivityEvent = {
@@ -640,6 +646,7 @@ export type LiveStats = {
     scale?: string;
     neutral?: number;
     plus1x?: number;
+    evaluationWindows?: Record<string, EvaluationWindow>;
   };
   profitFactor?: number;
   pf?: number;
@@ -689,6 +696,7 @@ export type LiveStats = {
       fills?: number;
       last15Ratio?: number;
       last15N?: number;
+      evaluationWindows?: Record<string, EvaluationWindow>;
       netAvg?: number;
       wr?: number;
       maxDdS?: number;
@@ -786,6 +794,7 @@ export type LiveStats = {
       grossEv?: number;
       netEv?: number;
       evaluation?: Record<string, unknown>;
+      evaluationWindows?: Record<string, EvaluationWindow>;
       pairedEvaluation?: { normal?: Record<string, unknown>; adjusted?: Record<string, unknown>; deltas?: Record<string, unknown> };
       adjustmentDeltas?: Record<string, unknown>;
       avgHoldS?: number;
@@ -811,6 +820,7 @@ export type LiveStats = {
         n?: number;
         last15Ratio?: number;
         last15N?: number;
+        evaluationWindows?: Record<string, EvaluationWindow>;
         netAvg?: number;
         wr?: number;
         maxDdS?: number;

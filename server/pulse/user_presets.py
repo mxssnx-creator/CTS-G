@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 MAX_PRESETS = 24
 NAME_PREFIX = "Preset-"
+DEFAULT_ID = "up-default"
 
 WriteFn = Callable[[str, Dict[str, Any]], None]
 
@@ -70,6 +71,11 @@ def normalize_name(raw: Any, rows: List[Dict[str, Any]], exclude_id: Optional[st
     while f"{base}-{n}" in used:
         n += 1
     return f"{base}-{n}"[:56]
+
+
+def is_default(row: Dict[str, Any]) -> bool:
+    """Default is a protected, single-name system preset."""
+    return str(row.get("id") or "") == DEFAULT_ID or str(row.get("name") or "").strip().lower() == "default"
 
 
 def _public(row: Dict[str, Any], include_overlay: bool = True) -> Dict[str, Any]:
@@ -173,6 +179,33 @@ class UserPresetStore:
             self._write(rows)
             return _public(row)
 
+    def save_default(
+        self,
+        overlay: Dict[str, Any],
+        calc_opt: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create/update the protected ``Default`` preset without duplication."""
+        if not isinstance(overlay, dict):
+            overlay = {}
+        with self.lock:
+            rows = self._read()
+            row = next((r for r in rows if is_default(r)), None)
+            now = time.time()
+            if row is None:
+                if len(rows) >= MAX_PRESETS:
+                    raise ValueError(f"max {MAX_PRESETS} system presets")
+                row = {"id": DEFAULT_ID, "name": "Default", "created": now}
+                rows.insert(0, row)
+            row["id"] = DEFAULT_ID
+            row["name"] = "Default"
+            row["overlay"] = overlay
+            row["overview"] = overview(overlay)
+            row["hint"] = row["overview"]
+            row["calcOpt"] = calc_opt if isinstance(calc_opt, dict) else {}
+            row["updated"] = now
+            self._write(rows)
+            return _public(row)
+
     def rename(self, preset_id: str, name: str) -> Optional[Dict[str, Any]]:
         with self.lock:
             rows = self._read()
@@ -187,11 +220,28 @@ class UserPresetStore:
     def delete(self, preset_id: str) -> bool:
         with self.lock:
             rows = self._read()
+            if any(str(r.get("id") or "") == str(preset_id or "") and is_default(r) for r in rows):
+                return False
             nxt = [r for r in rows if r.get("id") != preset_id]
             if len(nxt) == len(rows):
                 return False
             self._write(nxt)
             return True
+
+    def delete_all_except_default(self) -> int:
+        """Delete all user presets while retaining exactly the protected Default."""
+        with self.lock:
+            rows = self._read()
+            keep = [r for r in rows if is_default(r)]
+            if not keep:
+                raise ValueError("save the Default preset before cleanup")
+            default = keep[0]
+            default["id"] = DEFAULT_ID
+            default["name"] = "Default"
+            nxt = [default]
+            removed = max(0, len(rows) - 1)
+            self._write(nxt)
+            return removed
 
     def get(self, preset_id: str) -> Optional[Dict[str, Any]]:
         with self.lock:
@@ -261,6 +311,11 @@ def self_test(tmp: Optional[str] = None) -> List[Tuple[str, bool, str]]:
     rec("up-apply-ov", written[0][1].get("slToTpRatio") == 0.3 if written else False, str(written[:1]))
     rec("up-delete", store.delete(row2["id"]) and len(store.list()) == 1, str(len(store.list())))
     rec("up-delete-miss", store.delete("nope") is False)
+    default = store.save_default(ov, {"hours": 20})
+    rec("up-default", default.get("id") == DEFAULT_ID and default.get("name") == "Default", str(default.get("name")))
+    rec("up-default-update", store.save_default({**ov, "setMinStep": 3}).get("id") == DEFAULT_ID and len(store.list()) == 2, str(len(store.list())))
+    rec("up-default-protected", store.delete(DEFAULT_ID) is False and len(store.list()) == 2, str(len(store.list())))
+    rec("up-delete-except-default", store.delete_all_except_default() == 1 and len(store.list()) == 1 and store.list()[0].get("name") == "Default", str(store.list()))
     rec("up-norm-empty", normalize_name("", []) == "Preset-1")
     rec("up-norm-dup", normalize_name("Preset-1", [{"id": "x", "name": "Preset-1"}]) == "Preset-1-2")
     return out

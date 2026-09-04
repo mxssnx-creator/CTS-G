@@ -32,7 +32,7 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
-  --start-live      Start grok-pulse@bingx-x01
+  --start-live      Start <name>-pulse@bingx-x01
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
   -h, --help
@@ -104,6 +104,7 @@ seed_env
 sync_pulse_tree
 npm_install_desk
 install_units
+enforce_retention
 enable_stack
 
 if [[ "$NO_START" -eq 1 ]]; then

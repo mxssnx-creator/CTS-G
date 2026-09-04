@@ -21,14 +21,26 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, SL_TP_STEP, last_n_cost_pf, row_net_pnl, filter_side
+from position_cost import (
+    EVALUATION_WINDOWS,
+    SL_TP_RATIOS,
+    SL_TP_MIN,
+    SL_TP_MAX,
+    SL_TP_STEP,
+    evaluation_windows,
+    last_n_cost_pf,
+    row_net_pnl,
+    filter_side,
+)
 from set_engine import (
     DIRECTIONS,
+    HIST_CAP,
     IND_KINDS,
     LOOKBACK_MAX,
     SetBook,
     drawdown_time,
     drawdown_time_by_symbol,
+    last_n_balanced,
     synth_trend,
 )
 from storage_paths import path_for
@@ -397,6 +409,7 @@ def idle_job() -> Dict[str, Any]:
         "byDirection": {},
         "byStrategy": {},
         "kinds": {},
+        "evaluationWindows": {"windows": list(EVALUATION_WINDOWS)},
         "winner": None,
         "presets": public_presets(),
         "error": "",
@@ -461,6 +474,11 @@ def default_options() -> Dict[str, Any]:
         "indTypeCommon": True,
         "indTypeTrend": True,
         "indTypeBreak": True,
+        # These live-selection coordination layers are opt-in. A historic
+        # matrix still evaluates every catalog row regardless of these flags.
+        "preferMinimalRange": False,
+        "additionalCoordination": False,
+        "coordOptimizationN": 50,
     }
 
 
@@ -488,9 +506,21 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         opt["stepMax"] = opt["minStep"]
     for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs", "allSymbols",
               "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon",
-              "indTypeTrend", "indTypeBreak"):
+              "indTypeTrend", "indTypeBreak", "preferMinimalRange", "additionalCoordination",
+              "preferMinimalPositive", "minimalPositiveCoordination"):
         if k in body:
             opt[k] = bool(body[k])
+    # Read old persisted names, but emit and process only the explicit
+    # semantic names. The range option never changes the PF objective.
+    if "preferMinimalRange" not in body and "preferMinimalPositive" in body:
+        opt["preferMinimalRange"] = bool(body["preferMinimalPositive"])
+    if "additionalCoordination" not in body and "minimalPositiveCoordination" in body:
+        opt["additionalCoordination"] = bool(body["minimalPositiveCoordination"])
+    if body.get("coordOptimizationN") is not None:
+        try:
+            opt["coordOptimizationN"] = max(50, min(200, int(body["coordOptimizationN"])))
+        except Exception:
+            pass
     if not opt["stratIndications"] and not opt["stratGeneral"]:
         opt["stratIndications"] = True
     return opt
@@ -623,8 +653,11 @@ def load_universe() -> List[str]:
         path_for("universe.json"),
         os.path.join(os.path.dirname(job_path()), "universe.json"),
         os.path.join(here, "universe.json"),
+        os.path.join(os.environ.get("PULSE_DIR", ""), "universe.json") if os.environ.get("PULSE_DIR") else "",
         "/opt/grok-x01-pulse/universe.json",
     ):
+        if not path:
+            continue
         try:
             raw = json.load(open(path))
         except Exception:
@@ -698,10 +731,14 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "histWarmup": 30,
         "setUseHistoricGate": True,
         "setStrictGate": True,
+        "preferMinimalRange": bool(opt.get("preferMinimalRange", opt.get("preferMinimalPositive", False))),
+        "additionalCoordination": bool(opt.get("additionalCoordination", opt.get("minimalPositiveCoordination", False))),
+        "coordOptimizationN": int(opt.get("coordOptimizationN") or 50),
         "setAutoDeact": True,
         "setMinSamples": 8,
         "setMinPf": 1.15,
         "setMaxDdTimeS": 27000,
+        "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 3),
         "setStepMax": int(opt.get("stepMax") or 22),
         "stratTrailing": bool(opt.get("trailing", True)),
@@ -794,6 +831,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
                 "expectancy": float(v.get("expectancy") or 0),
                 "validated": bool(v.get("validated")),
                 "costSubtracted": True,
+                "evaluationWindows": dict(v.get("evaluation_windows") or {}),
             }
             for d, v in raw.items()
             if isinstance(v, dict)
@@ -814,6 +852,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "last15Ratio": round(pf, 4),
         "last15N": n15,
         "last15R": round(float(g("last15_r", st.last15_r) or 0), 4),
+        "evaluationWindows": dict(g("evaluation_windows", getattr(st, "evaluation_windows", {})) or {}),
         "last25AvgR": round(float(g("last25_avg_r", st.last25_avg_r) or 0), 4),
         "maxDdS": float(g("max_dd_s", st.max_dd_s) or 0),
         "avgDdS": float(g("avg_dd_s", st.avg_dd_s) or 0),
@@ -842,7 +881,8 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
     out: Dict[str, Any] = {}
     for d in DIRECTIONS:
         sub = filter_side(tapes, d)
-        pf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+        balanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
+        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct)
         nets = [row_net_pnl(r, book.cost_pct) for r in sub]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
@@ -857,6 +897,7 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
+            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
         }
     return out
 
@@ -883,7 +924,8 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         win = book.pf_n
         if key in ("block", "block:signals", "dca", "core"):
             win = max(book.pf_n, min(80, len(tape) or 1))
-        pf = last_n_cost_pf(tape, win, book.cost_pct)
+        balanced = last_n_balanced(tape, max(win, max(EVALUATION_WINDOWS)))
+        pf = last_n_cost_pf(balanced, win, book.cost_pct)
         nets = [row_net_pnl(r, book.cost_pct) for r in tape]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
@@ -893,13 +935,15 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             sub = filter_side(tape, d)
             if not sub:
                 continue
-            spf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+            sbalanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
+            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct)
             by_dir[d] = {
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
                 "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
                 "costSubtracted": True,
+                "evaluationWindows": evaluation_windows(sbalanced, book.cost_pct, required_samples=book.eval_need()),
             }
         out[key] = {
             "strategy": key,
@@ -911,6 +955,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
+            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
             "bySide": by_dir,
         }
     return out
@@ -942,7 +987,8 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
                 by.setdefault(s, []).append(r)
     out: List[Dict[str, Any]] = []
     for s, tape in by.items():
-        pf = last_n_cost_pf(tape, book.pf_n, book.cost_pct)
+        balanced = last_n_balanced(tape, max(book.pf_n, max(EVALUATION_WINDOWS)))
+        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct)
         # One symbol's fills still mix many sets — DDT per set, then max.
         by_set: Dict[str, List[Dict[str, Any]]] = {}
         for r in tape:
@@ -963,12 +1009,14 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             sub = filter_side(tape, d)
             if not sub:
                 continue
-            spf = last_n_cost_pf(sub, book.pf_n, book.cost_pct)
+            sbalanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
+            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct)
             by_dir[d] = {
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
                 "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
+                "evaluationWindows": evaluation_windows(sbalanced, book.cost_pct, required_samples=book.eval_need()),
             }
         out.append({
             "symbol": s,
@@ -981,6 +1029,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
+            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
             "bySide": by_dir,
         })
     out.sort(key=lambda r: (0 if r["validated"] else 1, -r["pf"], r["maxDdS"]))
@@ -995,6 +1044,10 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "histEnabled": True,
         "setUseHistoricGate": True,
         "setStrictGate": True,
+        "preferMinimalRange": bool(opt.get("preferMinimalRange", opt.get("preferMinimalPositive", False))),
+        "additionalCoordination": bool(opt.get("additionalCoordination", opt.get("minimalPositiveCoordination", False))),
+        "coordOptimizationN": int(opt.get("coordOptimizationN") or 50),
+        "setLiveNegativeDeact": False,
         "stratTrailing": bool(opt.get("trailing", True)),
         "stratBlock": bool(opt.get("stratBlock", True)),
         "blockEnabled": bool(opt.get("stratBlock", True)),
@@ -1180,6 +1233,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
     strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
     accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
     accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
+    accumulated_counts: Dict[str, int] = {}
     nbar = len(bars)
     for chunk_i, chunk_ids in enumerate(chunks):
         local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
@@ -1200,12 +1254,27 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
         # quadratic and looked like a hung worker.
         for sid, rows in local_hist.items():
             if rows:
-                accumulated_hist.setdefault(sid, []).extend(rows)
+                # A worker may produce millions of fills for one symbol. The
+                # parent only needs the bounded recent tape for PF/DDT; keep
+                # the exact full count separately so validation and coverage
+                # still report every processed execution without retaining the
+                # complete raw replay in every process.
+                tail = accumulated_hist.get(sid) or []
+                accumulated_hist[sid] = (tail + rows)[-HIST_CAP:]
+                accumulated_counts[sid] = int(accumulated_counts.get(sid, 0)) + len(rows)
         if local_ind:
             for kind, rows in local_ind.items():
                 if rows:
-                    accumulated_ind.setdefault(kind, []).extend(rows)
-    book._commit_hist(accumulated_hist, accumulated_ind, merge=True, replayed_symbols=[sym], score=False)
+                    tail = accumulated_ind.get(kind) or []
+                    accumulated_ind[kind] = (tail + rows)[-HIST_CAP:]
+    book._commit_hist(
+        accumulated_hist,
+        accumulated_ind,
+        merge=True,
+        replayed_symbols=[sym],
+        hist_counts=accumulated_counts,
+        score=False,
+    )
     book._score_all()
     return (
         sym,
@@ -1306,7 +1375,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["partial"] = True
         job["async"] = True
         from set_engine import HIST_CAP as _HC
-        hist_cap = max(24, min(48, int(_HC or 48)))
+        hist_cap = max(24, min(80, int(_HC or 80)))
         requested_sets = len(book.by_idx) * len(symbols)
 
         def _trim_maps() -> None:
@@ -1417,6 +1486,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
             accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
             accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
+            accumulated_counts: Dict[str, int] = {}
             nbar = 0
             for chunk_i, chunk_ids in enumerate(chunks):
                 local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
@@ -1430,12 +1500,22 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 nbar = max(nbar, chunk_nbar)
                 for sid, rows in local_hist.items():
                     if rows:
-                        accumulated_hist.setdefault(sid, []).extend(rows)
+                        tail = accumulated_hist.get(sid) or []
+                        accumulated_hist[sid] = (tail + rows)[-hist_cap:]
+                        accumulated_counts[sid] = int(accumulated_counts.get(sid, 0)) + len(rows)
                 if local_ind:
                     for kind, rows in local_ind.items():
                         if rows:
-                            accumulated_ind.setdefault(kind, []).extend(rows)
-            book._commit_hist(accumulated_hist, accumulated_ind, merge=True, replayed_symbols=[sym], score=False)
+                            tail = accumulated_ind.get(kind) or []
+                            accumulated_ind[kind] = (tail + rows)[-hist_cap:]
+            book._commit_hist(
+                accumulated_hist,
+                accumulated_ind,
+                merge=True,
+                replayed_symbols=[sym],
+                hist_counts=accumulated_counts,
+                score=False,
+            )
             commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}), src, total)
 
         if workers > 1:
@@ -1469,6 +1549,13 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         by_sym = symbol_rollup(book, hist)
         by_dir = direction_rollup(book, hist)
         by_strat = strategy_rollup(book, hist, strat_hist)
+        evaluation_summary = {
+            "windows": list(EVALUATION_WINDOWS),
+            "directions": {k: v.get("evaluationWindows") or {} for k, v in by_dir.items()},
+            "strategies": {k: v.get("evaluationWindows") or {} for k, v in by_strat.items()},
+            "indications": {k: v.get("evaluationWindows") or {} for k, v in kinds.items() if isinstance(v, dict)},
+            "symbols": {str(v.get("symbol")): v.get("evaluationWindows") or {} for v in by_sym if isinstance(v, dict)},
+        }
         winner = rows[0] if rows else None
         # Prefer a validated low-SL row when one exists in the top slice.
         top = [r for r in rows if r.get("validated") and r.get("lowSl")]
@@ -1492,6 +1579,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "byDirection": by_dir,
             "byStrategy": by_strat,
             "kinds": kinds,
+            "evaluationWindows": evaluation_summary,
             "winner": winner,
             "apply": winner_patch(winner, opt, by_strat, source=str(job.get("source") or source or "")),
             "presets": public_presets(),
@@ -1670,12 +1758,18 @@ def self_test() -> List[Tuple[str, bool, str]]:
     covj = job.get("coverage") or {}
     rec("calc-validated-count", 0 <= int(job.get("validatedCount") or 0) <= int(job.get("rowCount") or 0) and 0 <= int(covj.get("validatedCount") or 0) <= int(covj.get("setCount") or covj.get("product") or 0), f"rows={job.get('validatedCount')}/{job.get('rowCount')} catalog={covj.get('validatedCount')}/{covj.get('setCount')}")
     rec("calc-positive-pf-validation", all(float(r.get("last15Ratio") or 0) + 1e-9 >= 1.0 for r in (job.get("rows") or []) if r.get("validated")), "validated rows have PF >= 1.0 after cost")
+    rec(
+        "calc-evaluation-windows",
+        set((job.get("evaluationWindows") or {}).get("windows") or []) == set(EVALUATION_WINDOWS)
+        and all(set((r.get("evaluationWindows") or {}).keys()) >= {"last5", "last15", "last50", "last75"} for r in (job.get("rows") or [])[:8]),
+        str((job.get("evaluationWindows") or {}).get("windows")),
+    )
     rec("calc-source", job.get("source") in ("synth", "mixed"), str(job.get("source")))
     packs = set((job.get("coverage") or {}).get("packs") or [])
     rec("calc-packs", "indications" in packs and "general" in packs, str(packs))
     sls = {round(float(r["slRatio"]), 1) for r in (job.get("rows") or []) if r.get("kind") == "base"}
     cov_sl = set((job.get("coverage") or {}).get("slRatios") or []) or set(((job.get("coverage") or {}).get("bySl") or {}).keys())
-    rec("calc-all-sl", sls >= {0.2, 0.6, 1.0, 1.6, 2.6} or len(cov_sl) >= 13, str(sorted(sls)))
+    rec("calc-all-sl", sls >= {0.1, 0.6, 1.0, 1.6, 2.6, 3.0} or len(cov_sl) >= 30, str(sorted(sls)))
     rec("calc-sl-tp-cover", bool(covj.get("slTpCover")) and bool(covj.get("independentSlTp")), str({k: covj.get(k) for k in ("slTpCover", "trailSlTpCover", "product", "families")}))
     rec("calc-full-combo", bool(covj.get("trailSlTpCover")) and bool(covj.get("independentConfigs")) and int(covj.get("product") or 0) >= 20, str(covj.get("families")))
     rec("calc-trails", any(r.get("kind") == "trail" for r in job.get("rows") or []))

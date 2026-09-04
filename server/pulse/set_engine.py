@@ -17,6 +17,8 @@ from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
     cost_aware_metrics,
+    EVALUATION_WINDOWS,
+    evaluation_windows,
     last_n_cost_pf,
     normalize_pf,
     signed_result_r,
@@ -29,6 +31,7 @@ from position_cost import (
     cost_as_frac,
     net_pnl_pct,
     row_net_pnl,
+    row_position_cost_pct,
     row_side,
     filter_side,
 )
@@ -50,10 +53,16 @@ LOOKBACK_MAX = 4320  # three days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
-STEP_MIN = 3
-STEP_LIVE_MIN = 3
+# The catalog must test the complete configured axis.  No example threshold
+# is treated as an empirical result; live VST evidence decides which step is
+# eventually preferred for live selection.
+STEP_MIN = 1
+STEP_LIVE_MIN = 1
 STEP_MAX = 22
-HIST_CAP = 48
+# Keep enough recent fills for the 5/10/15/25/50/75 evaluation windows while
+# retaining a hard per-set memory bound.  trim_hist distributes this cap over
+# symbols, so a busy multi-symbol book cannot grow without limit.
+HIST_CAP = 80
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}
@@ -68,7 +77,7 @@ def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
 
 
 def step_tp_pct(step: int, cost_pct: float) -> float:
-    """TP fraction = step × position cost. Cost 0.15 means 0.15% → step 3 = 0.45%."""
+    """TP fraction = step × position cost; the VST tape chooses the winner."""
     c = max(1e-9, float(cost_pct))
     if c > 0.05:
         c = c / 100.0
@@ -81,6 +90,22 @@ def finite(v: Any, fallback: float = 0.0) -> float:
     except Exception:
         return fallback
     return n if n == n and abs(n) != float("inf") else fallback
+
+
+def trades_per_hour(rows: Sequence[Any]) -> float:
+    """Return observed close throughput from a timestamped live tape."""
+    ordered = sorted(
+        [row for row in rows if row is not None],
+        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+    )
+    if len(ordered) < 2:
+        return 0.0
+    first = finite(ordered[0].get("t") if isinstance(ordered[0], dict) else getattr(ordered[0], "t", 0))
+    last = finite(ordered[-1].get("t") if isinstance(ordered[-1], dict) else getattr(ordered[-1], "t", 0))
+    # Duplicate/near-duplicate exchange timestamps must not create an
+    # infinite score or make a tiny test burst look like a stable rate.
+    span_h = max(1.0 / 60.0, (last - first) / 3600.0)
+    return len(ordered) / span_h
 
 
 def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
@@ -562,7 +587,7 @@ class SetState:
     trail_key: str
     trail_arm: float
     trail_give: float
-    step: int = 3
+    step: int = STEP_MIN
     tp_pct: float = 0.0045
     idx: int = 0
     pack_i: int = 0
@@ -615,6 +640,7 @@ class SetState:
     gross_ev: float = 0.0
     net_ev: float = 0.0
     evaluation: Dict[str, Any] = field(default_factory=dict)
+    evaluation_windows: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     normal_evaluation: Dict[str, Any] = field(default_factory=dict)
     adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
     adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
@@ -666,6 +692,19 @@ class SetBook:
         self.strict_gate = True
         self.max_active = 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_source = "manual-fallback"
+        # Optional live-selection policy: prefer the smallest stable
+        # configuration ranges only after PF/DD/sample gates have passed.
+        # Profit Factor remains the primary ranking objective.
+        self.prefer_minimal_range = True
+        self.additional_coordination = True
+        # Deprecated internal aliases kept while older persisted overlays
+        # and remote clients migrate to the explicit names above.
+        self.prefer_minimal_positive = self.prefer_minimal_range
+        self.minimal_positive_coordination = self.additional_coordination
+        self.optimization_n = 50
+        self.optimization_stats: Dict[str, Any] = {}
+        self.live_negative_deact = True
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
         self.scratch_s = 90.0
@@ -709,11 +748,19 @@ class SetBook:
         self._snap_ts = 0.0
         self._live_ov_cache: Optional[Dict[str, Any]] = None
         self._live_ov_ts = 0.0
+        self._pick_lock = threading.RLock()
+        self._pick_cursor = 0
         self.hist_block = True
         self.hist_dca = True
         self.block_vr = 1.0
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
+        # VST-only exploration is opt-in through the X02 overlay.  It rotates
+        # a small, historic-qualified candidate set until each candidate has
+        # enough real exchange fills; X01 never enables this by default.
+        self.live_test_mode = False
+        self.live_test_candidates = 12
+        self.live_test_min_samples = 8
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
@@ -735,8 +782,30 @@ class SetBook:
         self.real_min_pf = self.stage_min_pf["real"]
         self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
+        self.live_negative_deact = bool(ov.get("setLiveNegativeDeact", ov.get("liveNegativeSetDeactivation", False)))
+        self.prefer_minimal_range = bool(
+            ov.get("preferMinimalRange", ov.get("preferMinimalPositive", False))
+        )
+        self.additional_coordination = bool(
+            ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
+        )
+        self.live_test_mode = bool(ov.get("liveTestMode", False))
+        try:
+            self.live_test_candidates = max(2, min(32, int(ov.get("liveTestCandidates") or 12)))
+        except Exception:
+            self.live_test_candidates = 12
+        self.prefer_minimal_positive = self.prefer_minimal_range
+        self.minimal_positive_coordination = self.additional_coordination
+        try:
+            self.optimization_n = max(50, min(200, int(ov.get("coordOptimizationN") or 50)))
+        except Exception:
+            self.optimization_n = 50
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 8)))
+        try:
+            self.live_test_min_samples = max(5, min(25, int(ov.get("liveTestMinSamples") or self.eval_need())))
+        except Exception:
+            self.live_test_min_samples = self.eval_need()
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
         # PROFITABLE (cost-adjusted PF > 1.15) + DDt under the cap may
@@ -752,6 +821,7 @@ class SetBook:
             self.cost_pct = self.cost_pct / 100.0
         if self.cost_pct > 1:
             self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_source = str(ov.get("positionCostSource") or "manual-fallback")
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
         self.scratch_s = float(ov.get("scratchS") or 90)
@@ -970,38 +1040,140 @@ class SetBook:
             self.progress.ready = False
             self.progress.phase = "idle"
 
+    @staticmethod
+    def _record_step(rec: Any) -> int:
+        """Read a Set step from explicit metadata or its stable Set ID."""
+        raw = rec.get("step") if isinstance(rec, dict) else getattr(rec, "step", 0)
+        try:
+            step = int(raw or 0)
+        except Exception:
+            step = 0
+        if step > 0:
+            return step
+        set_id = str((rec.get("set_id") if isinstance(rec, dict) else getattr(rec, "set_id", "")) or "")
+        for token in reversed(set_id.split(":")):
+            if token.startswith("st"):
+                try:
+                    return int(token[2:])
+                except Exception:
+                    break
+        return 0
+
+    def _live_windows_ok(
+        self,
+        rows: Sequence[Dict[str, Any]],
+        *,
+        minimum_pf: float = 1.0,
+    ) -> Tuple[bool, str, Dict[str, Dict[str, Any]]]:
+        """Require every sufficiently sampled live window to clear its floor.
+
+        A short positive tail cannot hide a longer negative tail.  Windows
+        that do not yet have the configured sample minimum remain explicitly
+        cold and do not veto an otherwise valid candidate.
+        """
+        ordered = sorted((r for r in rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        need = self.eval_need()
+        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need)
+        checked = 0
+        for name, metric in windows.items():
+            n = int(metric.get("n") or 0)
+            if n < need:
+                continue
+            checked += 1
+            pf = float(metric.get("pf") or 0.0)
+            if pf + 1e-9 < float(minimum_pf):
+                return False, f"live {name} PF {pf:.2f}<{float(minimum_pf):.2f}", windows
+        return True, "" if checked else "cold", windows
+
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
-        """If live average is a loss, raise min step to # of positive/successful fills."""
+        """Derive the preferred minimum from actual per-Set live evidence.
+
+        The global tape is diagnostic only.  A negative aggregate cannot make
+        the engine invent a step threshold, and a positive aggregate cannot
+        promote every Set.  A step becomes preferred only when one or more
+        independently tagged Sets at that step have enough live samples, a
+        positive cost-net window at every available horizon, and the normal
+        real-stage PF floor on the primary window.
+        """
         floor = self.min_step_cfg
-        if not self.step_adapt:
-            nxt = floor
-        else:
-            rows = list(closed)[-max(self.deact_n, 15) :]
-            if len(rows) < 8:
-                return
-            pnls: List[float] = []
-            n_ok = 0
-            n_pos = 0
-            for rec in rows:
-                if isinstance(rec, dict):
-                    pnl = finite(rec.get("pnl"))
-                    pct = finite(rec.get("pnl_pct"))
-                else:
-                    pnl = finite(getattr(rec, "pnl", 0))
-                    pct = finite(getattr(rec, "pnl_pct", 0))
-                pnls.append(pnl)
-                if pnl > 0:
-                    n_pos += 1
-                if signed_result_r(pct if pct else pnl, self.cost_pct) > 0:
-                    n_ok += 1
-            avg = sum(pnls) / len(pnls) if pnls else 0.0
-            if avg < 0:
-                n = n_ok if n_ok else n_pos
-                nxt = clamp_step(n if n else floor, floor, self.step_max)
-            else:
-                nxt = floor
+        self.optimization_stats: Dict[str, Any] = getattr(self, "optimization_stats", {}) or {}
+        all_rows = sorted(
+            list(closed),
+            key=lambda r: finite(r.get("t") if isinstance(r, dict) else getattr(r, "t", 0)),
+        )
+        # The extra 50+ window is an explicit coordination option. The
+        # legacy/off mode keeps the normal deactivation tape independent.
+        window = max(50, self.deact_n, self.optimization_n) if self.additional_coordination else max(self.deact_n, 15)
+        rows = all_rows[-window:]
+        if len(rows) < 8:
+            self.optimization_stats = {
+                "n": len(rows),
+                "positive": sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0),
+                "positiveRate": 0.0,
+                "pf": 1.0,
+                "netAvg": 0.0,
+                "maxDdS": 0.0,
+                "costPct": self.cost_pct,
+                "costSource": self.cost_source,
+                "window": window,
+                "enabled": bool(self.additional_coordination),
+                "configuredMinStep": floor,
+                "effectiveMinStep": floor,
+                "candidateSteps": [],
+                "status": "insufficient-live-sample",
+            }
+            self.min_step = floor
+            return
+
+        n_pos = sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0)
+        avg = sum(row_net_pnl(rec, self.cost_pct) for rec in rows) / len(rows) if rows else 0.0
+        opt_pf = last_n_cost_pf(rows, len(rows), self.cost_pct)
+        opt_dd = drawdown_time_by_symbol(rows)
+        by_step: Dict[int, List[Dict[str, Any]]] = {}
+        for rec in rows:
+            step = self._record_step(rec)
+            if step >= floor:
+                by_step.setdefault(step, []).append(rec if isinstance(rec, dict) else asdict(rec))
+        candidates: List[Dict[str, Any]] = []
+        promoted_steps: List[int] = []
+        for step in sorted(by_step):
+            tape = by_step[step]
+            if len(tape) < self.eval_need():
+                continue
+            ok, reason, windows = self._live_windows_ok(tape, minimum_pf=1.0)
+            last15 = windows.get("last15") or {}
+            primary_pf = float(last15.get("pf") or 0.0)
+            promoted = bool(ok and int(last15.get("n") or 0) >= self.eval_need() and primary_pf + 1e-9 >= self.real_min_pf)
+            if promoted:
+                promoted_steps.append(step)
+            candidates.append({
+                "step": step,
+                "n": len(tape),
+                "last15Pf": round(primary_pf, 4),
+                "windowPf": {name: round(float(metric.get("pf") or 0.0), 4) for name, metric in windows.items()},
+                "windowsOk": bool(ok),
+                "status": "promoted" if promoted else (reason or "not-promoted"),
+            })
+        nxt = min(promoted_steps) if self.step_adapt and promoted_steps else floor
+        self.optimization_stats = {
+            "n": len(rows),
+            "positive": n_pos,
+            "positiveRate": round(n_pos / len(rows), 4) if rows else 0.0,
+            "pf": float(opt_pf.get("ratio") or 1.0),
+            "netAvg": round(avg, 8),
+            "maxDdS": float(opt_dd.get("maxS") or 0.0),
+            "costPct": float(opt_pf.get("costPct") or self.cost_pct),
+            "costSource": opt_pf.get("costSource") or self.cost_source,
+            "window": window,
+            "enabled": bool(self.additional_coordination),
+            "configuredMinStep": floor,
+            "effectiveMinStep": nxt,
+            "candidateSteps": candidates[: self.step_max],
+            "status": "promoted" if promoted_steps else "no-live-promoted-step",
+        }
         self.min_step = nxt
-        # Prefer a higher step when picking; never drop SL×TP sets.
+        # This is only a selection floor. The full configured Set catalog stays
+        # evaluated and every non-promoted candidate remains visible.
 
     def ingest_bars(self, symbol: str, bars: Sequence[Sequence[float]]) -> None:
         if not bars:
@@ -1771,7 +1943,8 @@ class SetBook:
                         why = "sl" if bool(sl_hit[j]) else ("tp" if bool(tp_hit[j]) else ("time" if bool(time_exit[j]) else "scratch+"))
                         qty = 1.0
                         move = float(raw[j])
-                        hist.setdefault(pack_sets[j].id, []).append({
+                        bucket = hist.setdefault(pack_sets[j].id, [])
+                        bucket.append({
                             "t": ts,
                             "symbol": symbol,
                             "side": "LONG" if want_side > 0 else "SHORT",
@@ -1787,6 +1960,12 @@ class SetBook:
                             "adds": 0,
                             "strategy": "core",
                         })
+                        # The scorer only needs the newest bounded evaluation
+                        # tape. Trim at append time so a full matrix cannot
+                        # retain millions of raw fills before the chunk
+                        # boundary gets a chance to compact it.
+                        if len(bucket) > HIST_CAP:
+                            del bucket[:-HIST_CAP]
                     if exit_indices.size:
                         active[exited] = False
                         cooldown[exited] = cooldown_n
@@ -2148,9 +2327,14 @@ class SetBook:
         pf_tape = last_n_balanced(ordered, self.pf_n)
         last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
         evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
+        # Use one bounded, symbol-balanced tape for every named last-N view.
+        # This keeps the 50+/75-position coordinations reproducible without
+        # retaining the complete history in each Set.
+        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
+        windows = evaluation_windows(window_tape, self.cost_pct, required_samples=self.eval_need())
         last25 = ordered[-self.deact_n :]
         if last25:
-            rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
+            rs = [signed_result_r(finite(r.get("pnl_pct")), row_position_cost_pct(r, self.cost_pct)) for r in last25]
             last25_avg_r = sum(rs) / len(rs)
             last25_avg_pnl = sum(row_net_pnl(r, self.cost_pct) for r in last25) / len(last25)
         else:
@@ -2197,6 +2381,7 @@ class SetBook:
             "gross_ev": float(evaluation.get("grossEv") or 0.0),
             "net_ev": float(evaluation.get("netEv") or 0.0),
             "evaluation": evaluation,
+            "evaluation_windows": windows,
             "proven_neg": proven_neg,
         }
 
@@ -2227,6 +2412,7 @@ class SetBook:
         st.real_pf = round(pf, 6) if main else 0.0
         st.position_cost_pct = self.cost_pct
         st.evaluation = dict(m.get("evaluation") or {})
+        st.evaluation_windows = dict(m.get("evaluation_windows") or {})
         st.normal_evaluation = {
             "pf": float(m.get("gross_pf") or 0.0),
             "ev": float(m.get("gross_ev") or 0.0),
@@ -2424,7 +2610,7 @@ class SetBook:
         """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
         if not self.auto_deact:
             return True, ""
-        live_rows = [r for r in live if isinstance(r, dict)]
+        live_rows = sorted((r for r in live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
         enable_pf = float(self.real_min_pf or 1.15)
         if len(live_rows) < need:
@@ -2442,6 +2628,9 @@ class SetBook:
             if dd_s > float(self.max_dd_s or 27000) + 1e-9:
                 return False, f"hist DDt {dd_s:.0f}s"
             return True, ""
+        window_ok, window_reason, _windows = self._live_windows_ok(live_rows, minimum_pf=1.0)
+        if not window_ok:
+            return False, window_reason
         live25 = live_rows[-self.deact_n :]
         live_avg = (
             sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25) if live25 else 0.0
@@ -2450,17 +2639,17 @@ class SetBook:
         live_tail_avg = (
             sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail) if live_tail else 0.0
         )
-        if len(live25) >= self.deact_n and live_avg < 0:
+        if self.live_negative_deact and len(live25) >= self.deact_n and live_avg < 0:
             return False, f"live last{len(live25)} avg loss {live_avg:.4f}"
-        if len(live_rows) >= need and live_tail_avg < 0:
+        if self.live_negative_deact and len(live_rows) >= need and live_tail_avg < 0:
             return False, f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
         if not m:
             return True, ""
         n15 = int(m.get("last15_n") or 0)
         ratio = float(m.get("last15_ratio") or 0)
-        if n15 >= need and ratio + 1e-9 < 1.0:
+        if self.live_negative_deact and n15 >= need and ratio + 1e-9 < 1.0:
             return False, f"live last{n15} PF {ratio:.2f}<1.00 neg"
-        if n15 >= need and ratio + 1e-9 < enable_pf:
+        if self.live_negative_deact and n15 >= need and ratio + 1e-9 < enable_pf:
             return False, f"live last{n15} PF {ratio:.2f}<{enable_pf:.2f}"
         dd_s = float(m.get("max_dd_s") or 0)
         if n15 >= need and dd_s > float(self.max_dd_s or 27000) + 1e-9:
@@ -2523,11 +2712,20 @@ class SetBook:
         st.stage_ledger = self._stage_qualification(st, m)
         need = self.eval_need()
         live_m = self._score_metrics(st.live)
+        live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
+        live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
+        live_opt_dd = drawdown_time_by_symbol(live_opt_window) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+        live_opt_avg = (
+            sum(row_net_pnl(r, self.cost_pct) for r in live_opt_window) / len(live_opt_window)
+            if live_opt_window else 0.0
+        )
         st.live_eval = {
             "n": len(st.live),
             "last15N": int(live_m["last15_n"]),
             "last15Ratio": round(float(live_m["last15_ratio"]), 4),
             "last15R": round(float(live_m["last15_r"]), 4),
+            "evaluationWindows": dict(live_m.get("evaluation_windows") or {}),
             "netAvg": round(float(live_m["net_avg"]), 6),
             "expectancy": float(live_m["expectancy"]),
             "wr": float(live_m["wr"]),
@@ -2538,6 +2736,15 @@ class SetBook:
             "validated": bool(live_m["validated"]),
             "costSubtracted": True,
             "source": "live-exchange",
+            "optimizationN": len(live_opt_window),
+            "optimizationWindow": max(50, self.deact_n, self.optimization_n),
+            "optimizationPf": round(float(live_opt_pf.get("ratio") or 1.0), 4),
+            "optimizationNetAvg": round(live_opt_avg, 8),
+            "optimizationMaxDdS": round(float(live_opt_dd.get("maxS") or 0.0), 1),
+            "optimizationPositive": live_opt_avg >= 0.0,
+            "tradesPerHour": round(trades_per_hour(st.live), 4),
+            "costPct": float(live_opt_pf.get("costPct") or self.cost_pct),
+            "costSource": live_opt_pf.get("costSource") or self.cost_source,
         }
         need = self.eval_need()
         enable_pf = float(self.min_pf or 1.15)
@@ -2554,12 +2761,14 @@ class SetBook:
                 "last15_n": lm["last15_n"],
                 "last15_ratio": lm["last15_ratio"],
                 "last15_r": lm["last15_r"],
+                "evaluation_windows": dict(lm.get("evaluation_windows") or {}),
                 "net_avg": lm["net_avg"],
                 "expectancy": lm["expectancy"],
                 "max_dd_s": lm["max_dd_s"],
                 "wr": lm["wr"],
                 "validated": lm["validated"],
                 "cost_subtracted": True,
+                "optimization_n": len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):]),
             }
             sm["liveN"] = len(sub_live)
             if len(sub_live) >= self.eval_need():
@@ -2578,12 +2787,14 @@ class SetBook:
             sm["deact_reason"] = reason_s
             by[side] = sm
         st.by_side = by
-        live25 = st.live[-self.deact_n :]
+        live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        live25 = live_ordered[-self.deact_n :]
         live_avg = 0.0
         if live25:
             live_avg = sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25)
         live_n = len(st.live)
-        live_tail = st.live[-max(8, min(self.deact_n, 15)) :]
+        live_window_ok, live_window_reason, _live_windows = self._live_windows_ok(st.live, minimum_pf=1.0)
+        live_tail = live_ordered[-max(8, min(self.deact_n, 15)) :]
         live_tail_avg = 0.0
         if live_tail:
             live_tail_avg = sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail)
@@ -2619,13 +2830,20 @@ class SetBook:
                 st.deact_reason = ""
             return
         # Deactivation of a live-processed Set is LIVE on-exchange only.
-        if live_n >= self.deact_n and live_avg < 0:
+        # Use all available recent live fills, with a 50+ sample optimization
+        # window once available. The current Set alone is evaluated here, so
+        # one losing ratio/trail/step can never deactivate its siblings.
+        if self.live_negative_deact and live_n >= self.deact_n and live_opt_avg < 0:
             st.active = False
-            st.deact_reason = f"live last{len(live25)} avg loss {live_avg:.4f}"
-            st.last25_avg_pnl = live_avg
-            st.last25_n = len(live25)
+            st.deact_reason = f"live last{len(live_opt_window)} avg loss {live_opt_avg:.4f}"
+            st.last25_avg_pnl = live_opt_avg
+            st.last25_n = len(live_opt_window)
             return
-        if live_n >= need_h and live_tail_avg < 0:
+        if live_n >= need_h and not live_window_ok:
+            st.active = False
+            st.deact_reason = live_window_reason
+            return
+        if self.live_negative_deact and live_n >= need_h and live_tail_avg < 0:
             st.active = False
             st.deact_reason = f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
             st.last25_avg_pnl = live_tail_avg
@@ -2633,7 +2851,7 @@ class SetBook:
         notes = []
         live_ratio = float(live_m["last15_ratio"])
         live_n15 = int(live_m["last15_n"])
-        if live_n15 >= need and live_ratio + 1e-9 < 1.0:
+        if self.live_negative_deact and live_n15 >= need and live_ratio + 1e-9 < 1.0:
             st.active = False
             st.deact_reason = f"live last{live_n15} PF {live_ratio:.2f}<1.00 neg"
             return
@@ -2870,20 +3088,99 @@ class SetBook:
             passing = [s for s in rows if side_on(s)] or list(rows)
         if not passing:
             return None
+
+        def live_rows(s: SetState) -> List[Dict[str, Any]]:
+            return sorted(
+                filter_side(s.live, want_side if use_side else None),
+                key=lambda r: finite(r.get("t")),
+            )
+
         def live_ok(s: SetState) -> bool:
-            tail = filter_side(s.live, want_side if use_side else None)[-8:]
-            if len(tail) < 8:
-                return True
-            return sum(row_net_pnl(r, self.cost_pct) for r in tail) / len(tail) >= 0.0
+            scoped = live_rows(s)
+            ok, _reason, _windows = self._live_windows_ok(scoped, minimum_pf=1.0)
+            return ok
         live_pass = [s for s in passing if live_ok(s)]
-        chosen = live_pass or passing
-        chosen.sort(key=lambda s: (
-            float(view(s).get("last15_ratio") or 0),
-            1 if (s.kind != "base" or int(s.step or 0) >= int(self.min_step or 0)) else 0,
-            float(view(s).get("last25_avg_r") or 0),
-            -float(view(s).get("max_dd_s") or 0),
-            int(view(s).get("n") or 0),
-        ), reverse=True)
+        live_evidenced = [s for s in live_pass if len(live_rows(s)) >= need]
+        # Once a Set has enough own exchange evidence, do not let a merely
+        # historic sibling win by default.  This keeps the measured live pool
+        # separate from cold candidates and makes throughput meaningful.
+        chosen = live_evidenced or passing
+        if self.live_test_mode and kind == "base":
+            # Exploration is deliberately bounded to the best historic
+            # candidates and only rotates candidates that are still cold. A
+            # candidate with negative live windows is already deactivated by
+            # _score_one/_side_active_flags and cannot be reintroduced here.
+            exploratory = sorted(
+                passing,
+                key=lambda s: (
+                    -float(view(s).get("last15_ratio") or 0),
+                    -float(view(s).get("last25_avg_r") or 0),
+                    float(view(s).get("max_dd_s") or 0),
+                    int(s.step or 0),
+                    float(s.sl_ratio or 0),
+                    float(s.trail_arm or 0),
+                    float(s.trail_give or 0),
+                ),
+            )[: self.live_test_candidates]
+            if self.prefer_minimal_range and self.additional_coordination:
+                floor_rows = [s for s in exploratory if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
+                if floor_rows:
+                    exploratory = floor_rows
+            cold = [
+                s for s in exploratory
+                if len(filter_side(s.live, want_side if use_side else None)) < self.live_test_min_samples
+            ]
+            pool = cold or live_evidenced or exploratory
+            if pool:
+                with self._pick_lock:
+                    selected = pool[self._pick_cursor % len(pool)]
+                    self._pick_cursor = (self._pick_cursor + 1) % max(1, len(pool))
+                chosen = [selected]
+        if self.prefer_minimal_range and kind == "base" and self.additional_coordination:
+            # A loss-driven 50+ optimization window may raise the effective
+            # minimum step. This is a range floor only; PF remains the
+            # primary objective for the final selection.
+            floor_rows = [s for s in chosen if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
+            if floor_rows:
+                chosen = floor_rows
+        if live_evidenced and not (self.live_test_mode and kind == "base" and any(
+            len(live_rows(s)) < self.live_test_min_samples for s in chosen
+        )):
+            # Safety/quality gates have already run above.  Among measured
+            # positive live configs, observed trade throughput is the primary
+            # economic tie-breaker, followed by PF and DD-time/range.
+            chosen.sort(key=lambda s: (
+                -trades_per_hour(live_rows(s)),
+                -float(view(s).get("last15_ratio") or 0),
+                -float(view(s).get("last25_avg_r") or 0),
+                float(view(s).get("max_dd_s") or 0),
+                int(s.step or 0),
+                float(s.sl_ratio or 0),
+                float(s.trail_arm or 0),
+                float(s.trail_give or 0),
+                -int(view(s).get("n") or 0),
+            ))
+        elif self.prefer_minimal_range:
+            # Cold VST exploration and historic-only operation remain
+            # deterministic: PF first, then expectancy/DD-time, then range.
+            chosen.sort(key=lambda s: (
+                -float(view(s).get("last15_ratio") or 0),
+                -float(view(s).get("last25_avg_r") or 0),
+                float(view(s).get("max_dd_s") or 0),
+                int(s.step or 0),
+                float(s.sl_ratio or 0),
+                float(s.trail_arm or 0),
+                float(s.trail_give or 0),
+                -int(view(s).get("n") or 0),
+            ))
+        else:
+            chosen.sort(key=lambda s: (
+                -float(view(s).get("last15_ratio") or 0),
+                -float(view(s).get("last25_avg_r") or 0),
+                float(view(s).get("max_dd_s") or 0),
+                0 if (s.kind != "base" or int(s.step or 0) >= int(self.min_step or 0)) else 1,
+                -int(view(s).get("n") or 0),
+            ))
         return chosen[0]
 
     def pick_trail(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
@@ -2928,12 +3225,15 @@ class SetBook:
         tape.sort(key=lambda r: finite(r.get("t")))
         dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
-            last = last_n_cost_pf(last_n_balanced(tape, self.pf_n), self.pf_n, self.cost_pct)
+            balanced = last_n_balanced(tape, max(self.pf_n, max(EVALUATION_WINDOWS)))
+            last = last_n_cost_pf(balanced, self.pf_n, self.cost_pct)
+            windows = evaluation_windows(balanced, self.cost_pct, required_samples=need)
             n = int(last["count"])
             pf = float(last["ratio"])
             net_avg = float(last.get("netAvg") or 0)
         else:
             n, pf, net_avg = 0, 0.0, 0.0
+            windows = evaluation_windows([], self.cost_pct, required_samples=need)
         need = self.eval_need()
         by_side: Dict[str, Any] = {}
         if not side:
@@ -2945,6 +3245,7 @@ class SetBook:
             "n": n,
             "tapeN": len(tape),
             "pf": round(pf, 4),
+            "evaluationWindows": windows,
             "netAvg": round(net_avg, 6),
             "costSubtracted": True,
             "validated": n >= need,
@@ -3022,9 +3323,11 @@ class SetBook:
                 "n": int(ev.get("n") or len(s.live)),
                 "last15Ratio": float(ev.get("last15Ratio") or 0),
                 "last15N": int(ev.get("last15N") or 0),
+                "evaluationWindows": dict(ev.get("evaluationWindows") or {}),
                 "netAvg": float(ev.get("netAvg") or 0),
                 "wr": float(ev.get("wr") or 0),
                 "maxDdS": float(ev.get("maxDdS") or 0),
+                "tradesPerHour": round(float(ev.get("tradesPerHour") or 0.0), 4),
                 "validated": bool(ev.get("validated")),
                 "active": s.active,
                 "deactReason": s.deact_reason,
@@ -3051,6 +3354,7 @@ class SetBook:
             "fills": len(fills),
             "last15Ratio": round(float(m["last15_ratio"]), 4),
             "last15N": int(m["last15_n"]),
+            "evaluationWindows": dict(m.get("evaluation_windows") or {}),
             "netAvg": round(float(m["net_avg"]), 6),
             "wr": float(m["wr"]),
             "maxDdS": float(m["max_dd_s"]),
@@ -3094,7 +3398,8 @@ class SetBook:
                     "netPf": st.net_pf,
                     "grossEv": st.gross_ev,
                     "netEv": st.net_ev,
-                    "evaluation": st.evaluation,
+                "evaluation": st.evaluation,
+                "evaluationWindows": st.evaluation_windows,
                     "pairedEvaluation": {
                         "normal": st.normal_evaluation,
                         "adjusted": st.adjusted_evaluation,
@@ -3140,30 +3445,14 @@ class SetBook:
                     "netAvg": round(st.expectancy, 6),
                     "live": st.live_eval or {},
                     "source": "live-exchange" if st.live else "hist-sim",
-                    "last15Ratio": round(st.last15_ratio, 4),
-                    "last15Classic": round(st.last15_classic, 3),
-                    "last15N": st.last15_n,
-                    "last15R": round(st.last15_r, 4),
-                    "last25AvgR": round(st.last25_avg_r, 4),
-                    "last25N": st.last25_n,
-                    "last25AvgPnl": round(st.last25_avg_pnl, 6),
-                    "maxDdS": st.max_dd_s,
-                    "avgDdS": st.avg_dd_s,
-                    "ddEpisodes": st.dd_episodes,
-                    "wr": st.wr,
-                    "expectancy": st.expectancy,
-                    "avgHoldS": st.avg_hold_s,
-                    "classicPf": st.classic_all,
-                    "gp": st.gp,
-                    "gl": st.gl,
-                    "costSubtracted": True,
-                    "netAvg": round(st.expectancy, 6),
+                    "evaluationWindows": st.evaluation_windows,
                     "bySide": {
                         d: {
                             "n": int(v.get("n") or 0),
                             "pf": round(float(v.get("last15_ratio") or 0), 4),
                             "last15N": int(v.get("last15_n") or 0),
                             "last15R": round(float(v.get("last15_r") or 0), 4),
+                            "evaluationWindows": dict(v.get("evaluation_windows") or {}),
                             "expectancy": float(v.get("expectancy") or 0),
                             "netAvg": round(float(v.get("net_avg") or v.get("expectancy") or 0), 6),
                             "maxDdS": float(v.get("max_dd_s") or 0),
@@ -3206,6 +3495,7 @@ class SetBook:
                 "n": int(metrics.get("source_n") or 0),
                 "last15N": int(metrics.get("last15_n") or 0),
                 "last15Ratio": round(float(metrics.get("last15_ratio") or 0), 4),
+                "evaluationWindows": dict(metrics.get("evaluation_windows") or {}),
                 "netAvg": round(float(metrics.get("net_avg") or 0), 6),
                 "maxDdS": round(float(metrics.get("max_dd_s") or 0), 1),
                 "costSubtracted": True,
@@ -3240,6 +3530,17 @@ class SetBook:
             "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,
             "autoDeact": self.auto_deact,
+            "liveNegativeDeact": self.live_negative_deact,
+            "preferMinimalRange": self.prefer_minimal_range,
+            "additionalCoordination": self.additional_coordination,
+            # Deprecated response aliases for older UI/remote clients.
+            "preferMinimalPositive": self.prefer_minimal_range,
+            "minimalPositiveCoordination": self.additional_coordination,
+            "optimizationN": self.optimization_n,
+            "optimization": dict(getattr(self, "optimization_stats", {}) or {}),
+            "liveTestMode": bool(self.live_test_mode),
+            "liveTestCandidates": int(self.live_test_candidates),
+            "liveTestMinSamples": int(self.live_test_min_samples),
             "useHistoricGate": self.use_historic_gate,
             "strictGate": bool(self.strict_gate),
             "indGate": self.ind_gate_snapshot(),
@@ -3344,6 +3645,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setMaxDdTimeS": 10_000,
             "setMinSamples": 8,
             "setAutoDeact": True,
+            # Live negative-result deactivation is opt-in in production
+            # defaults; enable it explicitly for this safety-policy fixture.
+            "setLiveNegativeDeact": True,
             "setMinStep": 3,
             "setStepMax": 6,
             "setStepAdapt": True,
@@ -3671,6 +3975,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
+            "setLiveNegativeDeact": True,
             "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6, 0.9],
             "trailArmMin": 0.3, "trailArmMax": 0.3,
         }
@@ -3688,6 +3993,31 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
     pk = g2.pick("general")
     out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
+    # Minimal Range Configuration is PF-first: a wider range with materially
+    # better cost-net PF must beat a smaller range; the option only breaks
+    # ties after the quality gates.
+    pfbook = SetBook()
+    pfbook.load({
+        "histEnabled": True, "setPfWindow": 15, "setDeactN": 25,
+        "setMinPf": 1.15, "setMinSamples": 8, "setAutoDeact": True,
+        "setMinStep": 3, "setStepMax": 6, "slToTpRatios": [0.6, 0.9],
+        "stratIndications": False, "stratGeneral": True,
+        "trailArmMin": 0.3, "trailArmMax": 0.3,
+        "preferMinimalRange": True, "additionalCoordination": False,
+    })
+    pfbook.progress.ready = True
+    pf_candidates = [s for s in pfbook.by_idx if s.pack == "general" and s.kind == "base"]
+    pf_small = min(pf_candidates, key=lambda s: (s.step, s.sl_ratio))
+    pf_large = max(pf_candidates, key=lambda s: (s.step, s.sl_ratio))
+    pf_small.hist = [{"t": 6500 + i * 60, "pnl": 0.003, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    pf_large.hist = [{"t": 6500 + i * 60, "pnl": 0.008, "pnl_pct": 0.012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    pfbook._score_one(pf_small)
+    pfbook._score_one(pf_large)
+    pfpick = pfbook.pick("general")
+    out.append(("set-min-range-pf-first", pfpick is pf_large and pf_large.last15_ratio > pf_small.last15_ratio, f"pick={getattr(pfpick, 'id', None)} small={pf_small.last15_ratio} large={pf_large.last15_ratio}"))
+    aliasbook = SetBook()
+    aliasbook.load({"preferMinimalPositive": True, "minimalPositiveCoordination": True, "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    out.append(("set-min-range-alias", aliasbook.prefer_minimal_range is True and aliasbook.additional_coordination is True, f"range={aliasbook.prefer_minimal_range} add={aliasbook.additional_coordination}"))
     pos_set.active = False
     for ts in g2.by_idx:
         if ts.kind == "trail":
@@ -3902,8 +4232,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     steps = list(fulln.steps)
     bases = [s for s in fulln.by_idx if s.kind == "base"]
     out.append(("set-tp-3-22", steps == list(range(3, 23)), f"steps={steps[:4]}..{steps[-2:]} n={len(steps)}"))
-    out.append(("set-sl-0.2-2.6", abs(sls[0] - 0.2) < 1e-9 and abs(sls[-1] - 2.6) < 1e-9 and len(sls) == 13, f"sl={sls}"))
-    out.append(("set-normal-product", len(bases) == 13 * 20, f"base={len(bases)} sl={len(sls)} st={len(steps)}"))
+    out.append(("set-sl-0.1-3.0", abs(sls[0] - 0.1) < 1e-9 and abs(sls[-1] - 3.0) < 1e-9 and len(sls) == 30, f"sl={sls}"))
+    out.append(("set-normal-product", len(bases) == 30 * 20, f"base={len(bases)} sl={len(sls)} st={len(steps)}"))
     out.append(("set-live-unproven-off", all(not s.active for s in bases), f"on={sum(1 for s in bases if s.active)}"))
     winner = bases[0]
     winner.hist = [{"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(16)]

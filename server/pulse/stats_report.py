@@ -10,9 +10,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import (
     POSITION_COST_PCT_DEFAULT,
     cost_as_frac,
+    evaluation_windows,
     last_n_cost_pf,
     net_pnl_pct,
     net_pnl_usdt,
+    row_net_pnl,
+    row_pnl_pct,
+    row_position_cost_pct,
     signed_result_r,
 )
 from set_engine import drawdown_time_by_symbol, IND_KINDS
@@ -38,6 +42,12 @@ def _row(c: Any) -> Dict[str, Any]:
             "exit": _f(c.get("exit") or c.get("exit_px")),
             "pnl": _f(c.get("pnl")),
             "pnl_pct": _f(c.get("pnl_pct")),
+            "entry_fee": _f(c.get("entry_fee") or c.get("entryFee")),
+            "exit_fee": _f(c.get("exit_fee") or c.get("exitFee")),
+            "fee_total": _f(c.get("fee_total") or c.get("feeTotal") or c.get("totalFee")),
+            "position_cost_pct": c.get("position_cost_pct") if c.get("position_cost_pct") is not None else c.get("positionCostPct"),
+            "cost_source": str(c.get("cost_source") or c.get("costSource") or ""),
+            "fee": _f(c.get("fee")),
             "_pnl_pct_present": has_pct,
             "hold_s": _f(c.get("hold_s") or c.get("holdS")),
             "reason": str(c.get("reason") or ""),
@@ -58,6 +68,12 @@ def _row(c: Any) -> Dict[str, Any]:
         "exit": _f(getattr(c, "exit", 0)),
         "pnl": _f(getattr(c, "pnl", 0)),
         "pnl_pct": _f(getattr(c, "pnl_pct", 0)),
+        "entry_fee": _f(getattr(c, "entry_fee", 0)),
+        "exit_fee": _f(getattr(c, "exit_fee", 0)),
+        "fee_total": _f(getattr(c, "fee_total", 0)),
+        "position_cost_pct": getattr(c, "position_cost_pct", None),
+        "cost_source": str(getattr(c, "cost_source", "") or ""),
+        "fee": _f(getattr(c, "fee", 0)),
         "_pnl_pct_present": getattr(c, "pnl_pct", None) is not None,
         "hold_s": _f(getattr(c, "hold_s", 0)),
         "reason": str(getattr(c, "reason", "") or ""),
@@ -73,22 +89,25 @@ def _row(c: Any) -> Dict[str, Any]:
 
 def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     notion = max(0.0, row["qty"] * row["entry"])
+    row_cost = row_position_cost_pct(row, cost_pct)
     if not row.get("_pnl_pct_present", True) and notion > 1e-12:
         # Persisted Closed.pnl is net of one PositionCost. Reconstruct the
         # gross move before applying cost again.
-        gross_pct = row["pnl"] / notion + cost_as_frac(cost_pct)
+        gross_pct = row["pnl"] / notion + cost_as_frac(row_cost)
     else:
-        gross_pct = row["pnl_pct"]
-    net_pct = net_pnl_pct(gross_pct, cost_pct)
-    net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], cost_pct) if notion else row["pnl"]
-    r = signed_result_r(gross_pct, cost_pct)
+        gross_pct = row_pnl_pct(row, row_cost)
+    net_pct = net_pnl_pct(gross_pct, row_cost)
+    net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], row_cost) if notion else row["pnl"]
+    r = signed_result_r(gross_pct, row_cost)
     row["notional"] = round(notion, 6)
     row["grossPnlPct"] = round(gross_pct, 8)
+    row["grossPnl"] = round(notion * gross_pct, 8)
     row["netPnlPct"] = round(net_pct, 8)
     row["netPnl"] = round(net_usdt, 8)
     row["resultR"] = round(r, 4)
-    row["costPct"] = cost_pct
-    row["costUsdt"] = round(notion * cost_as_frac(cost_pct), 8)
+    row["costPct"] = row_cost
+    row["costSource"] = row.get("cost_source") or ("live-exchange" if row_cost != cost_pct else "manual-fallback")
+    row["costUsdt"] = round(notion * cost_as_frac(row_cost), 8)
     row.pop("_pnl_pct_present", None)
     return row
 
@@ -101,7 +120,7 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
     wins = losses = 0
     holds: List[float] = []
     for r in src:
-        pnl = _f(r.get("pnl"))
+        pnl = _f(r.get("grossPnl", r.get("pnl")))
         net = _f(r.get("netPnl"), pnl)
         if pnl > 0:
             wins += 1
@@ -430,6 +449,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
     pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
+    windows = evaluation_windows(closed, cost_pct)
     ddt = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r.get("netPnl", r["pnl"])} for r in closed])
     ddt_gross = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r["pnl"]} for r in closed])
     occ = occupancy(st.get("open") or [])
@@ -464,6 +484,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "avgHoldS": r.get("avgHoldS"),
             "classicPf": r.get("classicPf"),
             "last15Ratio": r.get("last15Ratio"),
+            "evaluationWindows": r.get("evaluationWindows") or {},
             "last15Classic": r.get("last15Classic"),
             "last15R": r.get("last15R"),
             "last25AvgR": r.get("last25AvgR"),
@@ -515,6 +536,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "costFrac": cost_as_frac(cost_pct),
             "rule": "1.00 PF = net 0 after 1× PositionCost; 1.10 = +1× PositionCost. All intern PF/R/E deduct cost once from gross price-move.",
             "last15": pc,
+            "evaluationWindows": windows,
             "pass": bool(pc.get("count", 0) < 8 or float(pc.get("ratio") or 1) + 1e-9 >= float((st.get("pfCost") or {}).get("minPf") or 1.1)),
             "minPf": (st.get("pfCost") or {}).get("minPf"),
         },
@@ -522,6 +544,9 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "last5": pf_window(closed, 5, cost_pct),
             "last15": pf_window(closed, 15, cost_pct),
             "last25": pf_window(closed, 25, cost_pct),
+            "last50": pf_window(closed, 50, cost_pct),
+            "last75": pf_window(closed, 75, cost_pct),
+            "evaluationWindows": windows,
             "all": pf_window(closed, None, cost_pct),
         },
         "drawdownTime": {

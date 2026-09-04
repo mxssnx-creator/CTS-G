@@ -15,10 +15,13 @@ export npm_config_yes=true
 
 CTS_G_NAME="${CTS_G_NAME:-cts-g}"
 CTS_G_ROOT="${CTS_G_ROOT:-/opt/${CTS_G_NAME}}"
-PULSE_DIR="${PULSE_DIR:-/opt/grok-x01-pulse}"
+PULSE_DIR="${PULSE_DIR:-/opt/${CTS_G_NAME}-pulse}"
+CTS_DATA_DIR="${CTS_DATA_DIR:-/var/lib/${CTS_G_NAME}}"
+LEGACY_PULSE_DIR="${CTS_LEGACY_PULSE_DIR:-/opt/grok-x01-pulse}"
 ETC_DIR="${ETC_DIR:-/etc/${CTS_G_NAME}}"
 LOG_DIR="${LOG_DIR:-/var/log/${CTS_G_NAME}}"
 ENV_FILE="${ENV_FILE:-$ETC_DIR/cts-g.env}"
+CREDENTIALS_ENV_FILE="${CREDENTIALS_ENV_FILE:-$ETC_DIR/credentials.env}"
 REPO_URL="${REPO_URL:-https://github.com/mxssnx-creator/CTS-G.git}"
 BRANCH="${BRANCH:-main}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
@@ -64,15 +67,30 @@ script_repo_root() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 apply_name() {
-  # --name changes install root / etc / logs. Pulse dir stays hardcoded in the engine.
+  # --name changes every CTS-owned path. A separate pulse/data root prevents
+  # another checkout using generic grok-* runtime files on the same host.
   CTS_G_NAME="${1:-$CTS_G_NAME}"
   CTS_G_NAME="${CTS_G_NAME//[^A-Za-z0-9._-]/}"
   [[ -n "$CTS_G_NAME" ]] || CTS_G_NAME=cts-g
   CTS_G_ROOT="/opt/${CTS_G_NAME}"
+  PULSE_DIR="${CTS_PULSE_DIR:-/opt/${CTS_G_NAME}-pulse}"
+  CTS_DATA_DIR="${CTS_DATA_DIR:-/var/lib/${CTS_G_NAME}}"
   ETC_DIR="/etc/${CTS_G_NAME}"
   LOG_DIR="/var/log/${CTS_G_NAME}"
   ENV_FILE="$ETC_DIR/cts-g.env"
+  CREDENTIALS_ENV_FILE="$ETC_DIR/credentials.env"
 }
+
+# Unit names are scoped to the installation name. Older releases used the
+# shared grok-* names, which allowed another checkout on the same host to
+# overwrite this project's desk or restart it with a different port.
+desk_unit() { printf '%s-desk.service' "$CTS_G_NAME"; }
+pulse_http_unit() { printf '%s-pulse-http.service' "$CTS_G_NAME"; }
+pulse_template_unit() { printf '%s-pulse@.service' "$CTS_G_NAME"; }
+pulse_instance_unit() { printf '%s-pulse@%s.service' "$CTS_G_NAME" "$1"; }
+pulse_target_unit() { printf '%s-pulse.target' "$CTS_G_NAME"; }
+retention_service_unit() { printf '%s-retention.service' "$CTS_G_NAME"; }
+retention_timer_unit() { printf '%s-retention.timer' "$CTS_G_NAME"; }
 
 detect_pkg() {
   if have apt-get; then echo apt
@@ -210,9 +228,11 @@ cap_redis_memory() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
-  chmod 755 "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR" "$LOG_DIR"
-  ok "dirs $CTS_G_ROOT $PULSE_DIR $ETC_DIR $LOG_DIR"
+  mkdir -p "$CTS_G_ROOT" "$PULSE_DIR" "$CTS_DATA_DIR" "$ETC_DIR" "$LOG_DIR"
+  chmod 755 "$CTS_G_ROOT" "$PULSE_DIR" "$ETC_DIR"
+  chmod 750 "$LOG_DIR"
+  chmod 750 "$CTS_DATA_DIR"
+  ok "dirs $CTS_G_ROOT $PULSE_DIR $CTS_DATA_DIR $ETC_DIR $LOG_DIR"
 }
 
 write_env_file() {
@@ -226,6 +246,11 @@ PYTHONUNBUFFERED=1
 PYTHONDONTWRITEBYTECODE=1
 CTS_G_NAME=${CTS_G_NAME}
 CTS_G_ROOT=${CTS_G_ROOT}
+PULSE_DIR=${PULSE_DIR}
+CTS_DATA_DIR=${CTS_DATA_DIR}
+CTS_STATE_DIR=${CTS_DATA_DIR}
+LOG_DIR=${LOG_DIR}
+CTS_MAX_RETAINED_LINES=1000
 EOF
   chmod 0644 "$ENV_FILE"
 }
@@ -250,6 +275,22 @@ seed_env() {
     else
       skip "env $ENV_FILE"
     fi
+    for pair in \
+      "CTS_G_NAME=$CTS_G_NAME" \
+      "CTS_G_ROOT=$CTS_G_ROOT" \
+      "PULSE_DIR=$PULSE_DIR" \
+      "CTS_DATA_DIR=$CTS_DATA_DIR" \
+      "CTS_STATE_DIR=$CTS_DATA_DIR" \
+      "LOG_DIR=$LOG_DIR" \
+      "CTS_MAX_RETAINED_LINES=1000"; do
+      key="${pair%%=*}"
+      value="${pair#*=}"
+      if grep -q "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+      else
+        printf '%s\n' "$pair" >>"$ENV_FILE"
+      fi
+    done
   fi
 }
 
@@ -393,6 +434,7 @@ sync_pulse_tree() {
   local src="$CTS_G_ROOT/server/pulse"
   [[ -d "$src" ]] || die "pulse tree missing at $src"
   mkdir -p "$PULSE_DIR"
+  migrate_legacy_state
   local keep_overlay=0
   [[ -f "$PULSE_DIR/overlay-${LIVE_SLOT}.json" ]] && keep_overlay=1
 
@@ -423,6 +465,47 @@ sync_pulse_tree() {
   python3 -m py_compile "$PULSE_DIR"/pulse_trader.py "$PULSE_DIR"/pulse_http.py \
     "$PULSE_DIR"/block_engine.py "$PULSE_DIR"/dca_engine.py "$PULSE_DIR"/set_engine.py
   ok "pulse tree $PULSE_DIR"
+}
+
+migrate_legacy_state() {
+  # The former CTS-G install kept durable state beside its source tree. Copy
+  # only recognized state files, only when the new scoped data root is empty
+  # for that name; never move/delete legacy files and never copy code/logs.
+  local legacy="$LEGACY_PULSE_DIR" src name copied=0
+  [[ -d "$legacy" && "$legacy" != "$CTS_DATA_DIR" ]] || return 0
+  local names=(
+    universe.json user-presets.json hist-calc.json hist-calc-req.json
+    hist-calc-checkpoint.json overlay.json overlay-bingx-x01.json
+    overlay-bingx-x02.json
+  )
+  local pattern
+  for pattern in stats-*.json trades-*.jsonl block-state-*.json open-*.json pending-*.json \
+    cts-settings-*.json errors-*.jsonl lev-set-*.json start-eq-*.json \
+    results-export-*.json results-export-*.md events-*.json live-position-cost-*.json; do
+    names+=("$pattern")
+  done
+  shopt -s nullglob
+  for name in "${names[@]}"; do
+    local matches=()
+    if [[ "$name" == *'*'* ]]; then
+      matches=("$legacy"/$name)
+    else
+      matches=("$legacy/$name")
+    fi
+    for src in "${matches[@]}"; do
+      [[ -f "$src" ]] || continue
+      local base="${src##*/}" dst="$CTS_DATA_DIR/${src##*/}"
+      [[ -e "$dst" ]] && continue
+      cp -a "$src" "$dst"
+      copied=$((copied + 1))
+    done
+  done
+  shopt -u nullglob
+  if [[ "$copied" -gt 0 ]]; then
+    ok "legacy state migrated $copied file(s) $legacy -> $CTS_DATA_DIR"
+  else
+    skip "legacy state (already scoped or empty)"
+  fi
 }
 
 sync_app_tree() {
@@ -456,19 +539,49 @@ render_unit() {
   local src="$1" dest="$2"
   sed \
     -e "s|/opt/cts-g|${CTS_G_ROOT}|g" \
+    -e "s|/opt/grok-x01-pulse|${PULSE_DIR}|g" \
     -e "s|/etc/cts-g|${ETC_DIR}|g" \
+    -e "s|/var/log/cts-g|${LOG_DIR}|g" \
+    -e "s|grok-pulse@|${CTS_G_NAME}-pulse@|g" \
+    -e "s|grok-pulse-http|${CTS_G_NAME}-pulse-http|g" \
+    -e "s|grok-desk|${CTS_G_NAME}-desk|g" \
+    -e "s|grok-pulse.target|${CTS_G_NAME}-pulse.target|g" \
+    -e "s|grok-retention|${CTS_G_NAME}-retention|g" \
     -e "s|:3102|:${DESK_PORT}|g" \
     -e "s|PORT=3102|PORT=${DESK_PORT}|g" \
     -e "s|CTS-G desk UI|${CTS_G_NAME} desk UI|g" \
     "$src" >"$dest"
 }
 
-install_units() {
+legacy_cts_unit() {
+  local unit="$1" body
+  body="$(systemctl cat "$unit" 2>/dev/null || true)"
+  [[ "$body" == *"/opt/grok-x01-pulse"* || "$body" == *"/etc/cts-g/cts-g.env"* || "$body" == *"WorkingDirectory=/opt/cts-g"* ]]
+}
+
+retire_legacy_cts_units() {
+  # Do not touch another project's grok-desk/grok-pulse units. Only retire a
+  # generic unit whose loaded definition proves it belongs to the old CTS-G
+  # paths; the new cts-g-* units are independent.
   local unit
-  for unit in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target; do
-    render_unit "$CTS_G_ROOT/deploy/$unit" "/etc/systemd/system/$unit"
+  for unit in grok-pulse@bingx-x01.service grok-pulse@bingx-x02.service \
+    grok-pulse-http.service grok-pulse.target grok-desk.service; do
+    if legacy_cts_unit "$unit"; then
+      systemctl disable --now "$unit" >/dev/null 2>&1 || true
+      ok "retired legacy $unit"
+    fi
   done
+}
+
+install_units() {
+  render_unit "$CTS_G_ROOT/deploy/grok-pulse@.service" "/etc/systemd/system/$(pulse_template_unit)"
+  render_unit "$CTS_G_ROOT/deploy/grok-pulse-http.service" "/etc/systemd/system/$(pulse_http_unit)"
+  render_unit "$CTS_G_ROOT/deploy/grok-desk.service" "/etc/systemd/system/$(desk_unit)"
+  render_unit "$CTS_G_ROOT/deploy/grok-pulse.target" "/etc/systemd/system/$(pulse_target_unit)"
+  render_unit "$CTS_G_ROOT/deploy/grok-retention.service" "/etc/systemd/system/$(retention_service_unit)"
+  render_unit "$CTS_G_ROOT/deploy/grok-retention.timer" "/etc/systemd/system/$(retention_timer_unit)"
   systemctl daemon-reload
+  retire_legacy_cts_units
   ok "systemd units"
 }
 
@@ -500,26 +613,40 @@ redis_has_keys() {
 }
 
 enable_stack() {
-  systemctl enable grok-pulse.target grok-pulse-http.service grok-desk.service >/dev/null 2>&1 || true
-  systemctl enable "grok-pulse@${VST_SLOT}.service" >/dev/null 2>&1 || true
-  systemctl enable "grok-pulse@${LIVE_SLOT}.service" >/dev/null 2>&1 || true
+  systemctl enable "$(pulse_target_unit)" "$(pulse_http_unit)" "$(desk_unit)" >/dev/null 2>&1 || true
+  systemctl enable "$(pulse_instance_unit "$VST_SLOT")" >/dev/null 2>&1 || true
+  systemctl enable --now "$(retention_timer_unit)" >/dev/null 2>&1 || true
+  # Live is opt-in and must never become a boot dependency merely because
+  # credentials exist. Operators must pass --start-live explicitly.
+  systemctl disable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null 2>&1 || true
   ok "units enabled"
 }
 
 start_stack() {
   local start_live="${1:-0}"
-  systemctl restart grok-pulse-http.service || fail "start grok-pulse-http"
-  systemctl restart grok-desk.service || fail "start grok-desk"
-  systemctl restart "grok-pulse@${VST_SLOT}.service" || fail "start vst"
+  "$CTS_G_ROOT/deploy/retention.sh" --once >/dev/null 2>&1 || warn "retention pass failed"
+  systemctl start "$(retention_timer_unit)" >/dev/null 2>&1 || true
+  systemctl restart "$(pulse_http_unit)" || fail "start $(pulse_http_unit)"
+  systemctl restart "$(desk_unit)" || fail "start $(desk_unit)"
+  systemctl restart "$(pulse_instance_unit "$VST_SLOT")" || fail "start vst"
   if [[ "$start_live" == "1" ]]; then
-    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
-  elif redis_has_keys "$LIVE_SLOT"; then
-    log "Live keys present — starting $LIVE_SLOT"
-    systemctl restart "grok-pulse@${LIVE_SLOT}.service" || fail "start live"
+    systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null 2>&1 || true
+    systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")" || fail "start live"
   else
-    skip "live engine (no Redis api_key/api_secret)"
+    systemctl stop "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null 2>&1 || true
+    systemctl disable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null 2>&1 || true
+    skip "live engine (opt-in only; no live start requested)"
   fi
-  systemctl start grok-pulse.target >/dev/null 2>&1 || true
+  systemctl start "$(pulse_target_unit)" >/dev/null 2>&1 || true
+}
+
+enforce_retention() {
+  if [[ -x "$CTS_G_ROOT/deploy/retention.sh" ]]; then
+    "$CTS_G_ROOT/deploy/retention.sh" --once >/dev/null 2>&1 || warn "retention pass failed"
+    ok "runtime retention (last 1000 lines / 8 MiB per file)"
+  else
+    warn "retention helper missing at $CTS_G_ROOT/deploy/retention.sh"
+  fi
 }
 
 wait_http() {
@@ -577,10 +704,11 @@ print_results() {
   echo "desk bind   ${DESK_HOST}:${DESK_PORT}"
   echo
   echo "units"
-  printf '  %-36s %s\n' grok-pulse-http.service "$(unit_state grok-pulse-http.service)"
-  printf '  %-36s %s\n' grok-desk.service "$(unit_state grok-desk.service)"
-  printf '  %-36s %s\n' "grok-pulse@${VST_SLOT}.service" "$(unit_state "grok-pulse@${VST_SLOT}.service")"
-  printf '  %-36s %s\n' "grok-pulse@${LIVE_SLOT}.service" "$(unit_state "grok-pulse@${LIVE_SLOT}.service")"
+  printf '  %-36s %s\n' "$(pulse_http_unit)" "$(unit_state "$(pulse_http_unit)")"
+  printf '  %-36s %s\n' "$(desk_unit)" "$(unit_state "$(desk_unit)")"
+  printf '  %-36s %s\n' "$(pulse_instance_unit "$VST_SLOT")" "$(unit_state "$(pulse_instance_unit "$VST_SLOT")")"
+  printf '  %-36s %s\n' "$(pulse_instance_unit "$LIVE_SLOT")" "$(unit_state "$(pulse_instance_unit "$LIVE_SLOT")")"
+  printf '  %-36s %s\n' "$(retention_timer_unit)" "$(unit_state "$(retention_timer_unit)")"
   echo
   echo "packages installed  ${PKG_INSTALLED[*]:-(none)}"
   echo "packages skipped    ${PKG_SKIPPED[*]:-(none)}"
@@ -606,7 +734,7 @@ print_results() {
   else
     echo "Live keys           missing — set then restart:"
     echo "  redis-cli HSET connection:${LIVE_SLOT} api_key '…' api_secret '…'"
-    echo "  systemctl restart grok-pulse@${LIVE_SLOT}"
+    echo "  systemctl restart $(pulse_instance_unit "$LIVE_SLOT")"
   fi
   echo "=============================================="
 }

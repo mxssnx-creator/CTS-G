@@ -8,6 +8,7 @@ PartOf=grok-pulse.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/cts-g/cts-g.env
+EnvironmentFile=-/etc/cts-g/credentials.env
 WorkingDirectory=/opt/cts-g
 ExecStart=/opt/cts-g/deploy/cts-g-desk.sh
 Restart=always
@@ -22,8 +23,8 @@ Environment=PULSE_URL=http://127.0.0.1:3015
 Environment=CTS_URL=http://127.0.0.1
 Environment=PATH=/opt/cts-g/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LimitNOFILE=8192
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/var/log/cts-g/desk.log
+StandardError=append:/var/log/cts-g/desk.err.log
 SyslogIdentifier=grok-desk
 
 [Install]
