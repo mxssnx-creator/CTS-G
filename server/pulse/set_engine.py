@@ -1205,6 +1205,11 @@ class SetBook:
                 for k in keys
             }
         for st in self.by_idx:
+            # A bounded replay may commit one configuration slice at a time.
+            # Do not treat a not-yet-replayed set as an empty result or erase
+            # its already committed symbol evidence.
+            if merge and st.id not in hist:
+                continue
             full = hist.get(st.id, [])
             if merge:
                 counts = self._hist_counts.setdefault(st.id, {})
@@ -1234,6 +1239,7 @@ class SetBook:
         ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         drop_bars: bool = True,
         strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        set_ids: Optional[Sequence[str]] = None,
     ) -> int:
         """Replay one symbol into hist and drop its bars. Independent of other names."""
         if symbol not in self.bars:
@@ -1244,7 +1250,7 @@ class SetBook:
                 self.bars.pop(symbol, None)
             return 0
         now = now or time.time()
-        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist, strat_hist=strat_hist)
+        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist, strat_hist=strat_hist, set_ids=set_ids)
         if drop_bars:
             self.bars.pop(symbol, None)
         return nbar
@@ -1391,8 +1397,19 @@ class SetBook:
         }
         return None, rec
 
-    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+    def _replay_symbol(
+        self,
+        symbol: str,
+        hist: Dict[str, List[Dict[str, Any]]],
+        now: float,
+        on_step: Optional[Callable[[], None]] = None,
+        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        set_ids: Optional[Sequence[str]] = None,
+    ) -> None:
         bars = self.bars[symbol]
+        selected = {str(s) for s in (set_ids or self.sets)}
+        replay_sets = [st for st in self.by_idx if st.id in selected]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
@@ -1417,9 +1434,9 @@ class SetBook:
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
         by_pack: Dict[str, List[SetState]] = {}
-        for st in self.by_idx:
+        for st in replay_sets:
             by_pack.setdefault(st.pack, []).append(st)
-        set_map = {st.id: st for st in self.by_idx}
+        set_map = {st.id: st for st in replay_sets}
         for pack, pack_sets in by_pack.items():
             pack_sig = signals.get(pack) or [(0, 0.0, "")] * n
             # Block/DCA hist once per pack, not once per SL×TP book.
@@ -1517,8 +1534,8 @@ class SetBook:
                     tape = strat_hist.get(k) or []
                     if len(tape) > 4000:
                         strat_hist[k] = tape[-2400:]
-        if self.by_idx:
-            self.progress.set_id = self.by_idx[-1].id
+        if replay_sets:
+            self.progress.set_id = replay_sets[-1].id
         if ind_hist is not None and "indications" in self.packs:
             self._replay_kind_tapes(
                 symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,

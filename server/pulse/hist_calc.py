@@ -8,6 +8,7 @@ is unreachable (sandbox / tests).
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
@@ -55,6 +56,7 @@ KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
 CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 KLINE_PAGE_MAX = 1440
+REPLAY_SET_CHUNK = 96
 _PUBLIC_REQUEST_INTERVAL_S = 1.05
 _PUBLIC_REQUEST_LOCK = threading.Lock()
 _PUBLIC_REQUEST_LAST = 0.0
@@ -1239,10 +1241,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["async"] = True
         from set_engine import HIST_CAP as _HC
         hist_cap = max(24, min(48, int(_HC or 48)))
-        symbol_tapes: Dict[str, List[Dict[str, Any]]] = {}
         requested_sets = len(book.by_idx) * len(symbols)
 
         def _trim_maps() -> None:
+
             for k, v in list(hist.items()):
                 if len(v) > hist_cap:
                     hist[k] = v[-hist_cap:]
@@ -1252,9 +1254,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             for k, v in list(strat_hist.items()):
                 if len(v) > 400:
                     strat_hist[k] = v[-240:]
-            for k, v in list(symbol_tapes.items()):
-                if len(v) > hist_cap:
-                    symbol_tapes[k] = v[-hist_cap:]
 
         def update_coverage(done: int, bars_done: int, fills: int, source: str) -> None:
             job["coverage"] = {
@@ -1311,15 +1310,26 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             # slice atomically before advancing coverage; a restart therefore
             # replays the same symbol instead of skipping a progression unit.
             book.ingest_bars(sym, bars)
-            local_hist: Dict[str, List[Dict[str, Any]]] = {}
-            local_ind: Dict[str, List[Dict[str, Any]]] = {}
-            nbar = book.replay_symbol_partial(
-                sym, local_hist, now=now, ind_hist=local_ind, drop_bars=True, strat_hist=strat_hist
-            )
-            book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
-            symbol_tapes.setdefault(sym, []).extend(
-                row for rows in local_hist.values() for row in rows if isinstance(row, dict)
-            )
+            set_ids = [st.id for st in book.by_idx]
+            chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
+            nbar = 0
+            for chunk_i, chunk_ids in enumerate(chunks):
+                local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
+                local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
+                chunk_nbar = book.replay_symbol_partial(
+                    sym,
+                    local_hist,
+                    now=now,
+                    ind_hist=local_ind,
+                    drop_bars=chunk_i == len(chunks) - 1,
+                    strat_hist=strat_hist if chunk_i == 0 else None,
+                    set_ids=chunk_ids,
+                )
+                nbar = max(nbar, chunk_nbar)
+                book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+                del local_hist, local_ind
+                if chunk_i % 4 == 0:
+                    gc.collect()
             job["_barsDone"] = int(job.get("_barsDone") or 0) + nbar
             job["checkpoint"]["symbol"] = sym
             job["source"] = src
@@ -1659,6 +1669,40 @@ def self_test() -> List[Tuple[str, bool, str]]:
     return out
 
 
+def cli_options(args: Sequence[str]) -> Dict[str, Any]:
+    """Translate direct CLI flags into the same request schema used by the UI."""
+    body: Dict[str, Any] = {}
+    value_flags = {"--hours": "hours", "--workers": "workers", "--min-step": "minStep", "--step-max": "stepMax"}
+    for flag, key in value_flags.items():
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                raw = args[i + 1]
+                try:
+                    body[key] = float(raw) if key == "hours" else int(raw)
+                except ValueError:
+                    pass
+    bool_flags = {
+        "--all-symbols": "allSymbols",
+        "--all-configs": "allConfigs",
+        "--all-steps": "allSteps",
+        "--trailing": "trailing",
+        "--block": "stratBlock",
+        "--general": "stratGeneral",
+        "--indications": "stratIndications",
+    }
+    for flag, key in bool_flags.items():
+        if flag in args:
+            body[key] = True
+    if "--indication-types" in args:
+        i = args.index("--indication-types")
+        if i + 1 < len(args):
+            kinds = {x.strip().lower() for x in args[i + 1].split(",") if x.strip()}
+            for kind in IND_KINDS:
+                body[f"indType{kind.title()}"] = kind in kinds
+    return body
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--self-test" in args or "--test" in args:
@@ -1673,7 +1717,7 @@ if __name__ == "__main__":
     if "--status" in args:
         print(json.dumps(read_job()))
         raise SystemExit(0)
-    body: Dict[str, Any] = {}
+    body: Dict[str, Any] = cli_options(args)
     if "--req" in args:
         i = args.index("--req")
         path = args[i + 1] if i + 1 < len(args) else req_path()
