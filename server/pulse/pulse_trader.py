@@ -5979,7 +5979,7 @@ class Pulse:
         total_weight = sum(weights) or float(len(specs))
         remaining = float(qty)
         recovered: List[Position] = []
-        trail_key, trail_arm, trail_give = self.variants.current_trail()
+        default_trail_key, default_trail_arm, default_trail_give = self.variants.current_trail()
         entry_tag = next((order for order in tagged if self._cid_kind(order) == "o"), None)
         entry_oid = real_oid(
             entry_tag.get("orderId") or entry_tag.get("orderID")
@@ -5991,8 +5991,9 @@ class Pulse:
             if allocated <= 0:
                 continue
             track = spec.get("track") or {}
-            if track.get("trail"):
-                trail_key = str(track.get("trail"))
+            group_trail_key = str(track.get("trail") or default_trail_key)
+            group_trail_arm = _sf(track.get("trail_arm"), default_trail_arm)
+            group_trail_give = _sf(track.get("trail_give"), default_trail_give)
             controls = spec.get("orders") or []
             sl_row = next((order for order in controls if self._order_is_sl(order)), None)
             tp_row = next((order for order in controls if self._order_is_tp(order)), None)
@@ -6003,6 +6004,10 @@ class Pulse:
             if tp_row:
                 tp = _sf(tp_row.get("stopPrice"), tp) or tp
             group_cid = self.order_cid(sl_row or tp_row) if (sl_row or tp_row) else ""
+            try:
+                group_set_idx = int(track.get("idx") if track.get("idx") is not None else -1)
+            except (TypeError, ValueError):
+                group_set_idx = -1
             pos = Position(
                 symbol=symbol,
                 side=side,
@@ -6017,13 +6022,13 @@ class Pulse:
                 reason=f"recover grouped {spec['range_key']}",
                 conf=0.35,
                 sl_ratio=_sf(track.get("sl"), self.variants.current_sl()),
-                trail_key=trail_key,
-                trail_arm=trail_arm / 100.0,
-                trail_give=trail_give / 100.0,
+                trail_key=group_trail_key,
+                trail_arm=group_trail_arm / 100.0,
+                trail_give=group_trail_give / 100.0,
                 sl_pct=spec["sl_pct"],
                 tp_pct=spec["tp_pct"],
                 set_id=str(track.get("set_id") or ""),
-                set_idx=int(track.get("idx") if track.get("idx") is not None else -1),
+                set_idx=group_set_idx,
                 pack=str(track.get("pack") or "general"),
                 client_id=group_cid,
                 ours=True,
