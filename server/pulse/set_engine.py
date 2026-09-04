@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
+    cost_aware_metrics,
     last_n_cost_pf,
     normalize_pf,
     signed_result_r,
@@ -31,6 +32,7 @@ from position_cost import (
     row_side,
     filter_side,
 )
+from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -496,10 +498,17 @@ class StageRecord:
     ddt_s: float
     sample_count: int
     volume_ratio: float
+    ev: float = 0.0
+    gross_ev: float = 0.0
+    confidence: float = 0.0
+    uncertainty: float = 1.0
+    required_samples: int = 8
+    insufficient_sample: bool = True
     axis_key: str = ""
     relative_count: int = 1
     indication_kind: str = ""
     strategy_adjustments: Tuple[Tuple[str, Any], ...] = ()
+    adjustment_deltas: Tuple[Tuple[str, Any], ...] = ()
     qualification_reason: str = ""
     dedupe_key: str = ""
 
@@ -513,13 +522,20 @@ class StageRecord:
             "positionCostPct": self.position_cost_pct,
             "ddtS": self.ddt_s,
             "sampleCount": self.sample_count,
+            "requiredSamples": self.required_samples,
+            "ev": self.ev,
+            "grossEv": self.gross_ev,
+            "confidence": self.confidence,
+            "uncertainty": self.uncertainty,
+            "insufficientSample": self.insufficient_sample,
             "volumeRatio": self.volume_ratio,
             "axisKey": self.axis_key,
             "relativeCount": self.relative_count,
             "indicationKind": self.indication_kind,
             "strategyAdjustments": dict(self.strategy_adjustments),
+            "adjustmentDeltas": dict(self.adjustment_deltas),
             "qualificationReason": self.qualification_reason,
-            "dedupeKey": self.dedupe_key or f"{self.set_id}|{self.stage}",
+            "dedupeKey": self.dedupe_key or stable_key(self.set_id, self.stage),
         }
 
 
@@ -580,6 +596,14 @@ class SetState:
     source_n: int = 0
     by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     live_eval: Dict[str, Any] = field(default_factory=dict)
+    gross_pf: float = 0.0
+    net_pf: float = 0.0
+    gross_ev: float = 0.0
+    net_ev: float = 0.0
+    evaluation: Dict[str, Any] = field(default_factory=dict)
+    normal_evaluation: Dict[str, Any] = field(default_factory=dict)
+    adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
+    adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
 
     def tape(self) -> List[Dict[str, Any]]:
         return list(self.hist) + list(self.live)
@@ -1035,6 +1059,13 @@ class SetBook:
                 "hold_s": finite(rec.get("hold_s")),
                 "reason": str(rec.get("reason") or ""),
                 "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
+                "set_id": str(rec.get("set_id") or rec.get("setId") or ""),
+                "parent_set_id": str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
+                "axis_key": str(rec.get("axis_key") or rec.get("axisKey") or ""),
+                "relative_count": int(rec.get("relative_count") or rec.get("relativeCount") or 1),
+                "volume_ratio": finite(rec.get("volume_ratio") or rec.get("volumeRatio") or VOLUME_RATIO_UNIT),
+                "strategy": str(rec.get("strategy") or ""),
+                "pack": str(rec.get("pack") or ""),
             }
             ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "").strip().lower()
         else:
@@ -1050,6 +1081,13 @@ class SetBook:
                 "hold_s": finite(getattr(rec, "hold_s", 0)),
                 "reason": str(getattr(rec, "reason", "")),
                 "client_id": str(getattr(rec, "client_id", "") or ""),
+                "set_id": str(getattr(rec, "set_id", "") or ""),
+                "parent_set_id": str(getattr(rec, "parent_set_id", "") or ""),
+                "axis_key": str(getattr(rec, "axis_key", "") or ""),
+                "relative_count": int(getattr(rec, "relative_count", 1) or 1),
+                "volume_ratio": finite(getattr(rec, "volume_ratio", VOLUME_RATIO_UNIT) or VOLUME_RATIO_UNIT),
+                "strategy": str(getattr(rec, "strategy", "") or ""),
+                "pack": str(getattr(rec, "pack", "") or ""),
             }
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
         if ind_kind not in IND_KINDS:
@@ -1069,7 +1107,8 @@ class SetBook:
                 step = self.min_step
             sid = make_set_id(pack, sl, "", step)
         row["set_id"] = sid
-        row["pack"] = "indications" if ind_kind else ("indications" if "ind:" in row["reason"] else "general")
+        row["parent_set_id"] = row.get("parent_set_id") or sid
+        row["pack"] = row.get("pack") or ("indications" if ind_kind else ("indications" if "ind:" in row["reason"] else "general"))
         if ind_kind:
             row["ind_kind"] = ind_kind
             row["indKind"] = ind_kind
@@ -1878,6 +1917,7 @@ class SetBook:
         classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
         pf_tape = last_n_balanced(ordered, self.pf_n)
         last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
+        evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
         last25 = ordered[-self.deact_n :]
         if last25:
             rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
@@ -1922,14 +1962,21 @@ class SetBook:
             "cost_subtracted": True,
             "cost_pct": self.cost_pct,
             "net_avg": float(last15.get("netAvg") or expectancy),
+            "gross_pf": float(evaluation.get("grossPf") or 0.0),
+            "net_pf": float(evaluation.get("netPf") or 0.0),
+            "gross_ev": float(evaluation.get("grossEv") or 0.0),
+            "net_ev": float(evaluation.get("netEv") or 0.0),
+            "evaluation": evaluation,
+            "proven_neg": proven_neg,
         }
 
     def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
         """Derive the monotonic Base -> Main -> Real qualification ledger.
 
-        Each stage is a stricter view of the same cost-net tape. A child stage
-        never creates another parent count; lineage stays anchored to the
-        canonical Base Set ID.
+        Main consumes only Base-qualified evidence and Real consumes only
+        Main-qualified evidence. The ledger stores the decision at each
+        boundary, so retries and restarts can replay the same parent without
+        creating another count.
         """
         need = self.eval_need()
         n = int(m.get("last15_n") or 0)
@@ -1949,6 +1996,25 @@ class SetBook:
         st.main_pf = round(pf, 6) if base else 0.0
         st.real_pf = round(pf, 6) if main else 0.0
         st.position_cost_pct = self.cost_pct
+        st.evaluation = dict(m.get("evaluation") or {})
+        st.normal_evaluation = {
+            "pf": float(m.get("gross_pf") or 0.0),
+            "ev": float(m.get("gross_ev") or 0.0),
+            "sampleCount": n,
+            "source": "gross-price-move",
+        }
+        st.adjusted_evaluation = {
+            "pf": float(m.get("net_pf") or 0.0),
+            "ev": float(m.get("net_ev") or 0.0),
+            "ratio": pf,
+            "sampleCount": n,
+            "source": "cost-net",
+        }
+        st.adjustment_deltas = {
+            "pf": round(float(m.get("net_pf") or 0.0) - float(m.get("gross_pf") or 0.0), 6),
+            "ev": round(float(m.get("net_ev") or 0.0) - float(m.get("gross_ev") or 0.0), 8),
+            "costPct": self.cost_pct,
+        }
         reasons: List[str] = []
         if n < need:
             reasons.append(f"sample {n}/{need}")
@@ -1960,12 +2026,18 @@ class SetBook:
             reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
         if not dd_ok:
             reasons.append("DDt cap")
+        reason = "; ".join(reasons)
         st.strategy_adjustments = {
-            "base": {"qualified": base, "minPf": base_floor},
-            "main": {"qualified": main, "minPf": main_floor},
-            "real": {"qualified": real, "minPf": real_floor},
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor},
             "live": {"evaluation": False, "source": "real"},
             "exchange": {"trackingOnly": True},
+        }
+        records = {
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Real": {"evaluated": main, "qualified": real, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
         }
         return {
             "stage": st.stage,
@@ -1978,7 +2050,9 @@ class SetBook:
             "mainPf": st.main_pf,
             "realPf": st.real_pf,
             "positionCostPct": self.cost_pct,
-            "reason": "; ".join(reasons),
+            "reason": reason,
+            "records": records,
+            "dedupeKey": stable_key(st.parent_set_id, st.id, "qualification", n, round(pf, 6)),
         }
 
     def stage_record(self, st: SetState, stage: str, *, reason: str = "") -> StageRecord:
@@ -1992,28 +2066,111 @@ class SetBook:
             "main": st.main_pf,
             "real": st.real_pf,
         }
+        record = (ledger.get("records") or {}).get(name.title()) if isinstance(ledger.get("records"), dict) else {}
         qualified = bool(ledger.get(name, False)) if name in ("base", "main", "real") else name in ("live", "exchange")
+        evaluation = st.evaluation or {}
         return StageRecord(
             set_id=st.id,
             parent_set_id=st.parent_set_id or st.id,
             stage=name.title(),
-            gross_pf=round(float(st.last15_classic or 0.0), 6),
-            net_pf=round(float(stage_pf.get(name, st.last15_ratio) or 0.0), 6),
+            gross_pf=round(float(st.normal_evaluation.get("pf") or st.gross_pf or st.last15_classic or 0.0), 6),
+            net_pf=round(float(st.adjusted_evaluation.get("pf") or st.net_pf or stage_pf.get(name, st.last15_ratio) or 0.0), 6),
             position_cost_pct=float(st.position_cost_pct or self.cost_pct),
             ddt_s=float(st.max_dd_s or 0.0),
-            sample_count=int(st.last15_n or 0),
+            sample_count=int(record.get("sampleCount") or evaluation.get("sampleCount") or st.last15_n or 0),
             volume_ratio=float(st.volume_ratio or 1.0),
+            ev=float(st.adjusted_evaluation.get("ev") or evaluation.get("netEv") or st.expectancy or 0.0),
+            gross_ev=float(st.normal_evaluation.get("ev") or evaluation.get("grossEv") or 0.0),
+            confidence=float(evaluation.get("confidence") or 0.0),
+            uncertainty=float(evaluation.get("uncertainty") or 1.0),
+            required_samples=int(evaluation.get("requiredSamples") or self.eval_need()),
+            insufficient_sample=bool(evaluation.get("insufficientSample", True)),
             axis_key=st.axis_key,
             relative_count=int(st.relative_count or 1),
             indication_kind=st.indication_kind,
-            strategy_adjustments=(("qualified", qualified),),
-            qualification_reason=reason or ("qualified" if qualified else str(ledger.get("reason") or "not qualified")),
+            strategy_adjustments=tuple((str(k), v) for k, v in (st.strategy_adjustments or {}).items()),
+            adjustment_deltas=tuple((str(k), v) for k, v in (st.adjustment_deltas or {}).items()),
+            qualification_reason=reason or str(record.get("reason") or ledger.get("reason") or ("qualified" if qualified else "not qualified")),
+            dedupe_key=str(ledger.get("dedupeKey") or stable_key(st.parent_set_id or st.id, st.id, name, st.last15_n, st.last15_ratio)),
         )
 
     def stage_records(self, stage: str, pack: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return stable records; parent IDs are retained for aggregate dedupe."""
         want = str(pack or "")
         return [self.stage_record(st, stage).as_dict() for st in self.by_idx if not want or st.pack == want]
+
+    def stage_flow(self) -> Dict[str, Any]:
+        """Aggregate stage boundaries with parent dedupe and sample confidence."""
+        names = ("Base", "Main", "Real")
+        flow: Dict[str, Dict[str, Any]] = {
+            name: {
+                "evaluated": 0,
+                "qualified": 0,
+                "blocked": 0,
+                "rejected": 0,
+                "selected": 0,
+                "entered": 0,
+                "exited": 0,
+                "parents": 0,
+                "sampleCount": 0,
+                "confidence": 0.0,
+                "insufficientSample": 0,
+                "volumeRatio": 0.0,
+            }
+            for name in names
+        }
+        parent_sets: Dict[str, set[str]] = {name: set() for name in names}
+        for st in self.by_idx:
+            ledger = st.stage_ledger or {}
+            records = ledger.get("records") if isinstance(ledger.get("records"), dict) else {}
+            for name in names:
+                key = name.lower()
+                evaluated = bool((records.get(name) or {}).get("evaluated", key == "base"))
+                qualified = bool(ledger.get(key, False))
+                if not evaluated:
+                    continue
+                bucket = flow[name]
+                bucket["evaluated"] += 1
+                parent = st.parent_set_id or st.id
+                parent_sets[name].add(parent)
+                if qualified:
+                    bucket["qualified"] += 1
+                    bucket["volumeRatio"] += float(st.volume_ratio or 1.0)
+                else:
+                    bucket["blocked"] += 1
+                    bucket["rejected"] += 1
+                evaluation = st.evaluation or {}
+                bucket["sampleCount"] += int(evaluation.get("sampleCount") or st.last15_n or 0)
+                bucket["confidence"] += float(evaluation.get("confidence") or 0.0)
+                bucket["insufficientSample"] += int(bool(evaluation.get("insufficientSample", True)))
+                if qualified and st.active:
+                    bucket["selected"] += 1
+                if st.live:
+                    bucket["entered"] += 1
+                    bucket["exited"] += len(st.live)
+        for name in names:
+            bucket = flow[name]
+            evaluated = int(bucket["evaluated"] or 0)
+            bucket["parents"] = len(parent_sets[name])
+            bucket["confidence"] = round(float(bucket["confidence"]) / evaluated, 4) if evaluated else 0.0
+            bucket["volumeRatio"] = round(float(bucket["volumeRatio"]), 6)
+        return {
+            "stages": flow,
+            "stageOrder": list(names),
+            "parentRule": "one parent Set is counted once; Main requires Base; Real requires Main",
+            "costSubtracted": True,
+            "requiredSamples": self.eval_need(),
+        }
+
+    def axis_variants(self, coordinator: Any) -> Dict[str, Any]:
+        """Generate axis children only from qualified Base parents."""
+        rows: List[Dict[str, Any]] = []
+        for parent_id in self.qualified_stage_ids("base"):
+            st = self.sets.get(parent_id)
+            if st is None:
+                continue
+            rows.extend(coordinator.axis_variants(parent_id, st.hist + st.live, []))
+        return coordinator.aggregate_axis_variants(rows)
 
     def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:
         """Return unique parent Set IDs qualified for a downstream stage."""
@@ -2092,6 +2249,29 @@ class SetBook:
         st.gl = m["gl"]
         st.wr = m["wr"]
         st.expectancy = m["expectancy"]
+        st.gross_pf = float(m.get("gross_pf") or 0.0)
+        st.net_pf = float(m.get("net_pf") or 0.0)
+        st.gross_ev = float(m.get("gross_ev") or 0.0)
+        st.net_ev = float(m.get("net_ev") or 0.0)
+        st.evaluation = dict(m.get("evaluation") or {})
+        st.normal_evaluation = {
+            "pf": st.gross_pf,
+            "ev": st.gross_ev,
+            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
+            "source": "gross-price-move",
+        }
+        st.adjusted_evaluation = {
+            "pf": st.net_pf,
+            "ev": st.net_ev,
+            "ratio": float(m.get("last15_ratio") or 0.0),
+            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
+            "source": "cost-net",
+        }
+        st.adjustment_deltas = {
+            "pf": round(st.net_pf - st.gross_pf, 6),
+            "ev": round(st.net_ev - st.gross_ev, 8),
+            "costPct": self.cost_pct,
+        }
         st.avg_hold_s = m["avg_hold_s"]
         st.classic_all = m["classic_all"]
         counts: Dict[str, int] = {}
@@ -2373,6 +2553,7 @@ class SetBook:
             "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
             "stageCounts": stage_counts,
             "stageParentCounts": {k: len(v) for k, v in stage_parent_counts.items()},
+            "stageFlow": self.stage_flow(),
             "qualifiedParentIds": {
                 "base": self.qualified_stage_ids("base"),
                 "main": self.qualified_stage_ids("main"),
@@ -2681,6 +2862,17 @@ class SetBook:
                     "volumeRatio": st.volume_ratio,
                     "indicationKind": st.indication_kind,
                     "strategyAdjustments": st.strategy_adjustments,
+                    "adjustmentDeltas": st.adjustment_deltas,
+                    "grossPf": st.gross_pf,
+                    "netPf": st.net_pf,
+                    "grossEv": st.gross_ev,
+                    "netEv": st.net_ev,
+                    "evaluation": st.evaluation,
+                    "pairedEvaluation": {
+                        "normal": st.normal_evaluation,
+                        "adjusted": st.adjusted_evaluation,
+                        "deltas": st.adjustment_deltas,
+                    },
                     "pack": st.pack,
                     "packI": st.pack_i,
                     "tf": st.tf,
@@ -2834,6 +3026,7 @@ class SetBook:
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "coverage": cover,
+            "stageFlow": self.stage_flow(),
             "liveOverview": live_ov,
             "strategyHistory": strategy_history,
             "liveFills": int(live_ov.get("fills") or 0),
