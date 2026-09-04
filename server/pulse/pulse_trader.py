@@ -1098,6 +1098,11 @@ class Pulse:
         target.foreign_qty = max(0.0, float(getattr(target, "foreign_qty", 0) or 0))
         target.pending_qty = max(0.0, float(getattr(target, "pending_qty", 0) or 0)) + max(0.0, float(getattr(incoming, "pending_qty", 0) or 0))
         target.last_fill_at = max(float(getattr(target, "last_fill_at", 0) or 0), float(getattr(incoming, "last_fill_at", 0) or 0), time.time())
+        if not getattr(target, "control_group_key", "") and getattr(incoming, "control_group_key", ""):
+            target.control_group_key = incoming.control_group_key
+            target.control_range_key = getattr(incoming, "control_range_key", "")
+            target.control_sl_bp = int(getattr(incoming, "control_sl_bp", 0) or 0)
+            target.control_tp_bp = int(getattr(incoming, "control_tp_bp", 0) or 0)
         if bool(getattr(target, "legacy_aggregate", False)) or bool(getattr(incoming, "legacy_aggregate", False)):
             # Legacy mode keeps one symbol/side pair and must use the widest
             # effective range represented by any merged member.
@@ -1459,6 +1464,11 @@ class Pulse:
                 if existing is None:
                     next_book[key] = pos
                 else:
+                    if getattr(self, "control_orders", True):
+                        try:
+                            self.cancel_controls(pos.symbol, pos=pos)
+                        except Exception:
+                            pass
                     self.merge_position(existing, pos)
                     self.clear_position_controls(existing)
             self.open = next_book
@@ -2986,6 +2996,18 @@ class Pulse:
                         live = real_oid(o.get("orderId") or o.get("orderID"))
                         if not live:
                             continue
+                        if self.per_config_controls(pos):
+                            try:
+                                existing_qty = float(o.get("origQty") or o.get("quantity") or o.get("orderQty") or 0)
+                            except Exception:
+                                existing_qty = 0.0
+                            wanted_qty = max(0.0, float(pos.qty or 0.0))
+                            # A same-token order with an old quantity must be
+                            # canceled before retrying. Rebinding it would
+                            # leave this range group under-protected.
+                            if existing_qty <= 0 or not (wanted_qty * 0.95 <= existing_qty <= wanted_qty * 1.05):
+                                self.cancel_order(pos.symbol, live, self.order_cid(o))
+                                continue
                         if is_sl and (typ in SL_TYPES or self._cid_kind(o) in ("s", "u")):
                             return live
                         if (not is_sl) and (typ in TP_TYPES or self._cid_kind(o) in ("t", "v")):
@@ -3121,6 +3143,17 @@ class Pulse:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return
+        # A range pair is quantity-matched. If the parent grew since the last
+        # placement, remove only this group's old pair before creating the new
+        # one; aggregate closePosition controls do not need this treatment.
+        if self.per_config_controls(pos):
+            previous_qty = max(0.0, float(getattr(pos, "ctrl_qty", 0.0) or 0.0))
+            if previous_qty > 0 and abs(previous_qty - float(pos.qty or 0.0)) > max(1e-9, abs(float(pos.qty or 0.0)) * 0.005):
+                try:
+                    self.cancel_controls(pos.symbol, pos=pos)
+                except Exception:
+                    pass
+                self.clear_position_controls(pos)
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
             return
@@ -3544,6 +3577,21 @@ class Pulse:
         fill_px = max(0.0, float(price or 0.0))
         if add_qty <= 0:
             return 0.0
+        # A fill changes this logical group's quantity. Cancel only its
+        # controls before rebuilding them so a smaller pair cannot remain
+        # active after a partial or same-range entry merge.
+        if getattr(self, "control_orders", True):
+            try:
+                self.cancel_controls(pos.symbol, pos=pos)
+            except Exception:
+                pass
+            self.clear_position_controls(pos)
+        # Seed the add-on lanes with the pre-fill parent, then merge this
+        # confirmed entry delta below. This avoids double-counting a new lane.
+        try:
+            self.ensure_strategy_lanes(pos)
+        except Exception:
+            pass
         old_qty = max(0.0, float(pos.qty or 0.0))
         total = old_qty + add_qty
         if fill_px > 0:
@@ -3680,6 +3728,15 @@ class Pulse:
             iter(self.positions_for(pos.symbol, pos.side)), None
         )
         if existing is not None:
+            if getattr(self, "control_orders", True):
+                try:
+                    self.cancel_controls(pos.symbol, pos=existing)
+                except Exception:
+                    pass
+                self.clear_position_controls(existing)
+            # Seed the parent lane before adding this new entry member, then
+            # update its weighted anchor by exactly the confirmed delta.
+            self.ensure_strategy_lanes(existing)
             self.merge_position(existing, pos)
             self.merge_parent_lanes(existing, float(pos.qty or 0), float(pos.entry or 0))
             pos = existing
@@ -4092,13 +4149,17 @@ class Pulse:
                 if getattr(self, "control_orders", True):
                     self.cancel_controls(sym, pos=existing)
                     self.clear_position_controls(existing)
+                self.ensure_strategy_lanes(existing)
                 self.merge_position(existing, pos)
+                self.merge_parent_lanes(existing, filled, avg)
                 pos = existing
                 merged = True
             else:
                 self.open[self.position_key(pos)] = pos
+                self.ensure_strategy_lanes(pos)
         else:
             self.open[self.position_key(pos)] = pos
+            self.ensure_strategy_lanes(pos)
         self.record_event(
             "position_open",
             stable_key(CONN_SHORT, "position_open", self.position_key(pos), cid),
@@ -4110,6 +4171,7 @@ class Pulse:
             axis_key=str(getattr(chosen, "axis_key", "") or ""),
             indication_kind=ind_kind,
             strategy=pack,
+            **self.control_event_fields(pos),
             order_id=real_oid(data.get("orderId") or data.get("orderID")),
             client_id=cid,
             qty=filled,
@@ -6611,6 +6673,7 @@ class Pulse:
                 parent_set_id=row["metadata"].get("parent_set_id", ""),
                 indication_kind=row["metadata"].get("ind_kind", ""),
                 strategy=row["metadata"].get("pack", ""),
+                **self.control_event_fields(pos),
                 client_id=cid,
                 order_id=oid,
                 qty=delta,

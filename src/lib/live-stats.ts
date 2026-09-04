@@ -149,6 +149,10 @@ export type ActivityEvent = {
   axis_key?: string;
   indication_kind?: string;
   strategy?: string;
+  control_group_key?: string;
+  control_range_key?: string;
+  control_mode?: string;
+  member_count?: number;
   order_id?: string;
   client_id?: string;
   code?: string;

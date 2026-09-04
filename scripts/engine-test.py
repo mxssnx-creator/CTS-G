@@ -43,6 +43,11 @@ from pulse_trader import (
     SL_TYPES,
     TP_TYPES,
     order_fill_qty,
+    normalize_control_pct,
+    control_range_key,
+    parse_control_range,
+    make_control_group_key,
+    control_group_token,
 )
 
 out: List[Tuple[str, bool, str]] = []
@@ -108,6 +113,7 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
+        rec(f"{name}-per-config-controls", ov.get("controlOrdersPerConfig", True) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 3 and int(ov.get("trailingMinStep") or 0) == 3)
@@ -1496,6 +1502,187 @@ def set_orders_test() -> None:
         f"open={list(p2.open)} market_posts={len(fx2_entries)} live_ctrl={len(fx2.orders)}")
 
 
+def grouped_control_test() -> None:
+    """Range-group controls stay isolated, quantity matched, and restartable."""
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    from dca_engine import DcaBook
+
+    tmp = tempfile.mkdtemp(prefix="group-control-test-")
+
+    class GroupApi:
+        def __init__(self):
+            self.posts = []
+            self.orders = {}
+            self.path_cd: Dict[str, float] = {}
+
+        def batch_place(self, bodies):
+            rows = []
+            for body in bodies:
+                oid = f"ctrl-{len(self.orders) + 1}"
+                saved = dict(body)
+                saved["orderId"] = oid
+                saved["origQty"] = body.get("quantity", "")
+                self.orders[oid] = saved
+                self.posts.append(("batch", saved))
+                rows.append({
+                    "code": 0,
+                    "orderId": oid,
+                    "type": body.get("type"),
+                    "clientOrderID": body.get("clientOrderID"),
+                })
+            return {"code": 0, "data": {"orders": rows}}
+
+        def post(self, path, body):
+            self.posts.append((path, dict(body)))
+            if body.get("type") == "MARKET":
+                return {"code": 0, "data": {"order": {
+                    "orderId": f"close-{len(self.posts)}",
+                    "avgPrice": "100",
+                    "quantity": str(body.get("quantity") or ""),
+                }}}
+            return {"code": 0, "data": {"order": {
+                "orderId": f"single-{len(self.posts)}",
+                "avgPrice": "100",
+                "quantity": str(body.get("quantity") or ""),
+            }}}
+
+        def delete(self, _path, params):
+            self.orders.pop(str(params.get("orderId") or ""), None)
+            return {"code": 0, "data": {}}
+
+        def get(self, path, _params=None):
+            if "openOrders" in path:
+                return {"code": 0, "data": list(self.orders.values())}
+            return {"code": 0, "data": []}
+
+    fx = GroupApi()
+    p = object.__new__(pt.Pulse)
+    p.api = fx
+    p.contracts = {"AAA-USDT": Contract("AAA-USDT", 0.01, 0.01, 2, 2, 1.0, 150)}
+    p.px = {"AAA-USDT": 100.0}
+    p.last_px = {}
+    p.open = {}
+    p.control_orders = True
+    p.control_orders_per_config = True
+    p.ctrl_skip = {}
+    p._oo_cache = {}
+    p.did_io = False
+    p.errors = 0
+    p.last_error = ""
+    p.record_event = lambda *args, **kwargs: True
+    p.save_open_book = lambda: None
+    p.sl_min, p.sl_max = 0.002, 0.012
+    p.tp_min, p.tp_max = 0.0035, 0.024
+    p.position_cost_pct = 0.15
+    p.tp_cost_ratio = 5.0
+    p.exits = SimpleNamespace(enabled=False, ignore_tp=False)
+    p.block = BlockBook(os.path.join(tmp, "block.json"), {
+        "variantBlockEnabled": True,
+        "blockMaxStack": 3,
+        "blockVolumeRatio": 1.0,
+        "blockProfitFactorRatio": 1.1,
+    })
+    p.dca = DcaBook()
+
+    def make_pos(side: str, sl_pct: float, tp_pct: float, qty: float, entry: float, cid: str):
+        pos = Position(
+            symbol="AAA-USDT",
+            side=side,
+            qty=qty,
+            entry=entry,
+            opened_at=time.time() - 60,
+            sl=entry * (1 - sl_pct) if side == "LONG" else entry * (1 + sl_pct),
+            tp=entry * (1 + tp_pct) if side == "LONG" else entry * (1 - tp_pct),
+            peak=entry,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            client_id=cid,
+            set_id=cid,
+            pack="general",
+        )
+        p.prepare_position_group(pos)
+        return pos
+
+    # Normalization is deliberately tolerant of fractional and percent input.
+    rec("group-normalize-fraction", normalize_control_pct(0.0048) == 48)
+    rec("group-normalize-percent", normalize_control_pct(0.48) == 48)
+    rec("group-range-stable", control_range_key(0.0048001, 0.0075001) == "sl0048-tp0075")
+    rec("group-range-parse", parse_control_range("SL0048-TP0075") == (48, 75))
+    rec("group-range-reject", parse_control_range("aggregate") == (0, 0))
+
+    long_a = make_pos("LONG", 0.0048, 0.0075, 1.0, 100.0, "set-a")
+    long_b = make_pos("LONG", 0.0064, 0.0100, 2.0, 102.0, "set-b")
+    short_a = make_pos("SHORT", 0.0048, 0.0075, 1.0, 100.0, "set-c")
+    rec("group-symbol-side-range-separate",
+        len({long_a.control_group_key, long_b.control_group_key, short_a.control_group_key}) == 3)
+    rec("group-token-range", control_group_token(long_a.control_group_key, long_a.control_range_key) == "r048075")
+
+    p.open[p.position_key(long_a)] = long_a
+    p.open[p.position_key(long_b)] = long_b
+    p.place_ctrl_pair(long_a)
+    p.place_ctrl_pair(long_b)
+    a_ids = {long_a.sl_oid, long_a.tp_oid}
+    b_ids = {long_b.sl_oid, long_b.tp_oid}
+    control_bodies = [body for _kind, body in fx.posts if body.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET")]
+    rec("group-two-pairs-four-controls",
+        len(a_ids) == 2 and len(b_ids) == 2 and len(fx.orders) == 4,
+        f"orders={len(fx.orders)}")
+    rec("group-controls-quantity-no-close",
+        all("quantity" in body and "closePosition" not in body and "reduceOnly" not in body for body in control_bodies),
+        str(control_bodies)[:200])
+    rec("group-cancel-isolated",
+        (p.cancel_controls("AAA-USDT", pos=long_a) is None)
+        and not (a_ids & set(fx.orders)) and b_ids <= set(fx.orders),
+        f"remaining={sorted(fx.orders)}")
+
+    # The same normalized range merges by weighted quantity and weighted entry.
+    p.clear_position_controls(long_a)
+    long_a.ctrl_qty = 0.0
+    p.ensure_strategy_lanes(long_a)
+    incoming_same = make_pos("LONG", 0.0048001, 0.0075001, 2.0, 110.0, "set-a2")
+    p.merge_position(long_a, incoming_same)
+    p.merge_parent_lanes(long_a, incoming_same.qty, incoming_same.entry)
+    rec("group-same-range-merge",
+        long_a.qty == 3.0 and abs(long_a.entry - (100.0 + 220.0) / 3.0) < 1e-9
+        and long_a.member_count == 2 and long_a.control_group_key == incoming_same.control_group_key,
+        f"qty={long_a.qty} entry={long_a.entry}")
+    lane = p.block.lanes.get(p.block_lane_key(long_a))
+    dca_lane = p.dca.lanes.get(p.dca_lane_key(long_a))
+    rec("group-parent-lanes-merge",
+        lane is not None and abs(lane.base_qty - 3.0) < 1e-9
+        and dca_lane is not None and abs(dca_lane.parent_qty - 3.0) < 1e-9,
+        f"block={getattr(lane, 'base_qty', None)} dca={getattr(dca_lane, 'parent_qty', None)}")
+
+    # A restart can recover the normalized range from the compact control CID.
+    cid = p.cid("u", pos=long_a)
+    track = p.parse_track(cid) or {}
+    rec("group-cid-restart-range",
+        track.get("group_token") == "r048075"
+        and track.get("control_range_key") == "sl0048-tp0075"
+        and track.get("control_sl_bp") == 48
+        and track.get("control_tp_bp") == 75,
+        str(track))
+
+    p.clear_position_controls(long_a)
+    p.place_ctrl_pair(long_a)
+    ok_close, _ = p.market_close(long_a)
+    market = next((body for kind, body in reversed(fx.posts) if body.get("type") == "MARKET"), {})
+    rec("group-close-quantity-matched",
+        ok_close and market.get("quantity") == long_a.qty
+        and "closePosition" not in market and "reduceOnly" not in market
+        and b_ids <= set(fx.orders),
+        str(market))
+
+    p.control_orders_per_config = False
+    aggregate = make_pos("LONG", 0.0048, 0.0075, 1.0, 100.0, "legacy")
+    p.prepare_position_group(aggregate, legacy=True)
+    rec("group-legacy-disables-key", not p.per_config_controls(aggregate) and aggregate.control_range_key == "aggregate")
+    legacy_payload = ctrl_payload("AAA-USDT", "LONG", "sl", "99", "1", "legacy", close_pos=True, with_qty=True)
+    rec("group-legacy-close-position", legacy_payload.get("closePosition") == "true" and "quantity" not in legacy_payload)
+
+
 def strict_gate_test() -> None:
     """Strict validation gate: only VALIDATED (last-N samples >=
     max(minSamples, 8)) AND PROFITABLE (cost-adjusted PF >= 1.00) strategy
@@ -1863,6 +2050,7 @@ def main() -> int:
     sim_stats_test()
     block_calc_test()
     set_orders_test()
+    grouped_control_test()
     strict_gate_test()
     dd_time_test()
     process_guard_test()
