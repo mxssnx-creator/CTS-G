@@ -118,7 +118,7 @@ def overlay_test() -> None:
         rec(f"{name}-per-config-controls", ov.get("controlOrdersPerConfig", True) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
-        rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 3 and int(ov.get("trailingMinStep") or 0) == 3)
+        rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("setMinStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
         rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))

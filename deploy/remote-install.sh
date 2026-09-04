@@ -10,6 +10,8 @@ REMOTE_USER="${REMOTE_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 IDENTITY="${IDENTITY:-}"
 START_LIVE=0
+PORT_EXPLICIT=0
+PULSE_PORT_EXPLICIT=0
 
 usage() {
   cat <<'EOF'
@@ -19,6 +21,8 @@ Usage: ./deploy/remote-install.sh [options]
 
   --name NAME       Install name on the server (default: cts-g)
   --port N          Desk listen port (default: 3102)
+  --pulse-port N    Pulse HTTP port (default: 3015)
+  --redis-db N      Independent Redis DB (default: 1)
   --host HOST       SSH host (default: 152.53.114.112)
   --user USER       SSH user (default: root)
   --ssh-port N      SSH port (default: 22)
@@ -34,7 +38,9 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name|-n) apply_name "${2:-}"; shift 2 ;;
-    --port|-p|--desk-port) DESK_PORT="${2:-}"; shift 2 ;;
+    --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
+    --pulse-port) PULSE_PORT="${2:-}"; PULSE_PORT_EXPLICIT=1; shift 2 ;;
+    --redis-db) REDIS_DB="${2:-}"; shift 2 ;;
     --host) REMOTE_HOST="${2:-}"; PUBLIC_HOST="${2:-}"; shift 2 ;;
     --user) REMOTE_USER="${2:-}"; shift 2 ;;
     --ssh-port) SSH_PORT="${2:-}"; shift 2 ;;
@@ -47,6 +53,11 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
+
+if [[ "$PORT_EXPLICIT" == "1" && "$PULSE_PORT_EXPLICIT" != "1" && "$DESK_PORT" != "3102" ]]; then
+  PULSE_PORT=$((DESK_PORT + 1))
+fi
+validate_instance_config
 
 ssh_cmd=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12 -p "$SSH_PORT")
 [[ -n "$IDENTITY" ]] && ssh_cmd+=(-i "$IDENTITY")
@@ -66,19 +77,13 @@ elif command -v apt-get >/dev/null; then
   apt-get update -y -qq
   apt-get install -y -qq --no-install-recommends git ca-certificates curl
 fi
-if [[ -d $CTS_G_ROOT/.git ]]; then
-  git -C $CTS_G_ROOT remote set-url origin '$REPO_URL' || git -C $CTS_G_ROOT remote add origin '$REPO_URL'
-  git -C $CTS_G_ROOT fetch --prune origin
-  git -C $CTS_G_ROOT checkout -f $BRANCH || git -C $CTS_G_ROOT checkout -B $BRANCH
-  git -C $CTS_G_ROOT reset --hard origin/$BRANCH
-elif [[ -f $CTS_G_ROOT/server/pulse/pulse_trader.py ]]; then
-  true
-else
-  mkdir -p $(dirname $CTS_G_ROOT)
-  git clone --branch $BRANCH --depth 1 '$REPO_URL' $CTS_G_ROOT
-fi
-find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
-$CTS_G_ROOT/deploy/install-linux.sh --yes --name $CTS_G_NAME --port $DESK_PORT --host $REMOTE_HOST --from-dir $CTS_G_ROOT $LIVE_FLAG
+stage_dir="\$(mktemp -d /tmp/cts-g-stage.XXXXXX)"
+trap '[[ "\$stage_dir" == /tmp/cts-g-stage.* ]] && rm -rf -- "\$stage_dir"' EXIT
+git clone --branch '$BRANCH' --depth 1 '$REPO_URL' "\$stage_dir"
+find "\$stage_dir/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
+"\$stage_dir/deploy/install-linux.sh" --yes --name '$CTS_G_NAME' --port '$DESK_PORT' \
+  --pulse-port '$PULSE_PORT' --redis-db '$REDIS_DB' --host '$REMOTE_HOST' \
+  --from-dir "\$stage_dir" $LIVE_FLAG
 EOF
 )
 

@@ -14,6 +14,8 @@ import urllib.parse
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from storage_paths import LOG_MAX_BYTES, trim_text_log
+
 try:
     import orjson
 
@@ -99,6 +101,10 @@ class ErrorLog:
         self._last: Dict[str, float] = {}
 
     def write(self, kind: str, **kw: Any) -> None:
+        with self.lock:
+            self._write_locked(kind, **kw)
+
+    def _write_locked(self, kind: str, **kw: Any) -> None:
         rec = {"t": round(time.time(), 3), "kind": kind}
         rec.update(kw)
         self.ring.appendleft(rec)
@@ -108,24 +114,21 @@ class ErrorLog:
             now = time.time()
             if now - self._last.get(key, 0.0) < 8.0:
                 return
+            if len(self._last) >= 1000 and key not in self._last:
+                self._last.pop(next(iter(self._last)))
             self._last[key] = now
         line = dumps(rec) + "\n"
-        with self.lock:
-            try:
-                append_bounded_line(self.path, line)
-                if self.n % 80 == 0:
-                    self._rotate()
-            except Exception:
-                pass
-
-    def _rotate(self) -> None:
         try:
-            retain_last_lines(self.path)
+            append_bounded_line(self.path, line)
         except Exception:
             pass
 
+    def _rotate(self) -> None:
+        trim_text_log(self.path, max_bytes=min(160_000, LOG_MAX_BYTES))
+
     def recent(self, n: int = 12) -> List[Dict[str, Any]]:
-        return list(self.ring)[:n]
+        with self.lock:
+            return list(self.ring)[:max(0, min(80, n))]
 
 
 class PriceHub:

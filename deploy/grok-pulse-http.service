@@ -21,6 +21,8 @@ LimitNOFILE=4096
 StandardOutput=append:/var/log/cts-g/pulse-http.log
 StandardError=append:/var/log/cts-g/pulse-http.err.log
 SyslogIdentifier=grok-pulse-http
+LogRateLimitIntervalSec=300s
+LogRateLimitBurst=300
 
 [Install]
 WantedBy=multi-user.target

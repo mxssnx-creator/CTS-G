@@ -49,7 +49,7 @@ from set_engine import SetBook, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
-from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
+from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, LOG_MAX_BYTES, log_path, redis_cli_args, trim_text_log, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
 from contracts import INDICATION_KINDS, stable_key
 
@@ -63,13 +63,13 @@ TRADES_PATH = os.path.join(DIR, f"trades-{CONN_SHORT}.jsonl")
 STOP_PATH = os.path.join(DIR, f"STOP-{CONN_SHORT}")
 PAUSE_PATH = os.path.join(DIR, f"PAUSE-{CONN_SHORT}")
 STOP_ALL = os.path.join(DIR, "STOP")
-LOG_PATH = os.path.join(DIR, f"pulse-{CONN_SHORT}.log")
+LOG_PATH = log_path(f"pulse-{CONN_SHORT}.log")
 BLOCK_PATH = os.path.join(DIR, f"block-state-{CONN_SHORT}.json")
 OVERLAY_PATH = os.path.join(DIR, f"overlay-{CONN_SHORT}.json")
 OPEN_PATH = os.path.join(DIR, f"open-{CONN_SHORT}.json")
 PENDING_PATH = os.path.join(DIR, f"pending-{CONN_SHORT}.json")
 CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
-ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
+ERR_PATH = log_path(f"errors-{CONN_SHORT}.jsonl")
 EVENTS_PATH = os.path.join(DIR, f"events-{CONN_SHORT}.json")
 LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
 START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
@@ -508,6 +508,7 @@ _LOG_N = 0
 _LOG_LAST: Dict[str, float] = {}
 _LOG_BUF: List[str] = []
 _LOG_FLUSH = 0.0
+_ENGINE_LOG_LOCK = threading.RLock()
 
 
 def ctrl_mtimes(paths) -> Dict[str, float]:
@@ -523,12 +524,19 @@ def ctrl_mtimes(paths) -> Dict[str, float]:
 
 
 def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
+    with _ENGINE_LOG_LOCK:
+        _log_locked(msg, every, key, quiet)
+
+
+def _log_locked(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
     global _LOG_N, _LOG_FLUSH
     if every > 0:
         k = key or msg[:48]
         now = time.time()
         if now - _LOG_LAST.get(k, 0.0) < every:
             return
+        if len(_LOG_LAST) >= 1000 and k not in _LOG_LAST:
+            _LOG_LAST.pop(next(iter(_LOG_LAST)))
         _LOG_LAST[k] = now
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}"
     if not quiet:
@@ -549,13 +557,7 @@ def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> Non
 
 
 def rotate_log(path: str, max_bytes: int) -> None:
-    try:
-        # Keep the compatibility argument for callers, but use the shared
-        # line/byte cap so every engine log has the same retention contract.
-        del max_bytes
-        retain_last_lines(path)
-    except Exception:
-        pass
+    trim_text_log(path, max_bytes=min(max_bytes, LOG_MAX_BYTES))
 
 
 def sd_notify(msg: str) -> None:
@@ -591,7 +593,7 @@ def redis_hget(field: str) -> str:
     connection-scoped so x01 and x02 can never cross-read each other.
     """
     try:
-        p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
+        p = subprocess.run(redis_cli_args("HGET", REDIS_CONN, field), capture_output=True, text=True)
         value = (p.stdout or "").strip()
         if value and value != "(nil)":
             return value
@@ -622,7 +624,11 @@ def load_json_file(path: str) -> dict:
 
 def dump_cts_settings() -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", f"settings:connection_settings:{CONN_SHORT}"], capture_output=True, text=True)
+        p = subprocess.run(
+            redis_cli_args("HGETALL", f"settings:connection_settings:{CONN_SHORT}"),
+            capture_output=True,
+            text=True,
+        )
     except Exception:
         return {}
     lines = (p.stdout or "").splitlines()
@@ -8931,7 +8937,7 @@ class Pulse:
                 if target is not None:
                     target.live = copy.deepcopy(current.live)
             replay_book.ind_live = copy.deepcopy(source.ind_live)
-            replay_book.bars = copy.deepcopy(source.bars)
+            replay_book.bars = dict(source.bars)
             replay_book._snap_cache = None
             replay_book._live_ov_cache = None
             replay_book._score_all()
@@ -9283,6 +9289,8 @@ def main() -> None:
         BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
     else:
         BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
+    if CONN_SHORT == "bingx-x02" and BASE != "https://open-api-vst.bingx.com":
+        raise RuntimeError("X02 is VST-only; refusing a non-VST exchange endpoint")
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
     Pulse(api, load_contracts()).run()
 

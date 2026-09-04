@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import threading
+import copy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -762,6 +763,25 @@ class SetBook:
         self.live_test_candidates = 12
         self.live_test_min_samples = 8
 
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "SetBook":
+        # Locks are process-local coordination, never snapshot data. OHLC
+        # arrays are replaced (not mutated) by ingest/clamp and replay only
+        # reads them, so sharing those immutable arrays avoids a second copy
+        # of the entire max-symbol history while isolating the dictionary.
+        with self._pick_lock:
+            result = type(self).__new__(type(self))
+            memo[id(self)] = result
+            for key, value in self.__dict__.items():
+                if key == "_pick_lock":
+                    result.__dict__[key] = threading.RLock()
+                elif key == "bars":
+                    result.__dict__[key] = dict(value)
+                elif key in ("_snap_cache", "_live_ov_cache"):
+                    result.__dict__[key] = None
+                else:
+                    result.__dict__[key] = copy.deepcopy(value, memo)
+            return result
+
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
@@ -1050,7 +1070,7 @@ class SetBook:
             step = 0
         if step > 0:
             return step
-        set_id = str((rec.get("set_id") if isinstance(rec, dict) else getattr(rec, "set_id", "")) or "")
+        set_id = str((rec.get("set_id") or rec.get("setId") if isinstance(rec, dict) else getattr(rec, "set_id", "")) or "")
         for token in reversed(set_id.split(":")):
             if token.startswith("st"):
                 try:
@@ -1129,15 +1149,17 @@ class SetBook:
         avg = sum(row_net_pnl(rec, self.cost_pct) for rec in rows) / len(rows) if rows else 0.0
         opt_pf = last_n_cost_pf(rows, len(rows), self.cost_pct)
         opt_dd = drawdown_time_by_symbol(rows)
-        by_step: Dict[int, List[Dict[str, Any]]] = {}
+        by_set: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
         for rec in rows:
             step = self._record_step(rec)
-            if step >= floor:
-                by_step.setdefault(step, []).append(rec if isinstance(rec, dict) else asdict(rec))
+            row = rec if isinstance(rec, dict) else asdict(rec)
+            sid = str(row.get("set_id") or row.get("setId") or "")
+            if floor <= step <= self.step_max and sid in self.sets:
+                by_set.setdefault((sid, step), []).append(row)
         candidates: List[Dict[str, Any]] = []
         promoted_steps: List[int] = []
-        for step in sorted(by_step):
-            tape = by_step[step]
+        for sid, step in sorted(by_set):
+            tape = by_set[(sid, step)]
             if len(tape) < self.eval_need():
                 continue
             ok, reason, windows = self._live_windows_ok(tape, minimum_pf=1.0)
@@ -1147,6 +1169,7 @@ class SetBook:
             if promoted:
                 promoted_steps.append(step)
             candidates.append({
+                "setId": sid,
                 "step": step,
                 "n": len(tape),
                 "last15Pf": round(primary_pf, 4),
@@ -3676,7 +3699,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book._rebuild_sets()
     mixed = [{"pnl": -0.02, "pnl_pct": -0.003}] * 20 + [{"pnl": 0.02, "pnl_pct": 0.004}] * 5
     book.adapt_from_live(mixed)
-    out.append(("set-adapt-min", book.min_step == 5, f"min={book.min_step} n={len(book.sets)}"))
+    out.append(("set-adapt-untagged-keeps-floor", book.min_step == 3, f"min={book.min_step} n={len(book.sets)}"))
+    promoted_ids = [s.id for s in book.sets.values() if s.kind == "base" and s.step == 5]
+    split = [{"t": i, "set_id": promoted_ids[i % 2], "pnl_pct": 0.01, "pnl": 1.0} for i in range(8)]
+    book.adapt_from_live(split)
+    out.append(("set-adapt-no-cross-set-samples", book.min_step == 3, f"min={book.min_step}"))
+    qualified = [{"t": i, "set_id": promoted_ids[0], "pnl_pct": 0.01, "pnl": 1.0} for i in range(15)]
+    book.adapt_from_live(qualified)
+    out.append(("set-adapt-qualified-set", book.min_step == 5, f"min={book.min_step}"))
     out.append(("set-adapt-keeps-grid", sorted({s.step for s in book.sets.values() if s.kind == "base"}) == list(range(3, 7)), f"steps={sorted({s.step for s in book.sets.values() if s.kind == 'base'})}"))
     sid = next(iter(book.sets))
     st = book.sets[sid]

@@ -19,6 +19,7 @@ os.environ.setdefault("PULSE_CONN", "bingx-x02")
 
 from bingx_fast import FastBingX, ErrorLog
 from pulse_trader import Pulse, TAG, CONN_SHORT, redis_hget, BASE
+from storage_paths import redis_cli_args
 from set_engine import self_test as sets_self_test
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
@@ -31,7 +32,7 @@ def rec(name: str, ok: bool, detail: str, out: List[Tuple[str, bool, str]]) -> N
 
 
 def redis(field: str) -> str:
-    r = subprocess.run(["redis-cli", "hget", f"connection:{CONN_SHORT}", field], capture_output=True, text=True)
+    r = subprocess.run(redis_cli_args("hget", f"connection:{CONN_SHORT}", field), capture_output=True, text=True)
     return (r.stdout or "").strip() or redis_hget(field)
 
 
