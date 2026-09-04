@@ -214,6 +214,7 @@ export type ActivitySummary = {
 };
 
 export type LiveStats = {
+  forcedConfigs?: import("./hist-calc").ForcedConfigSummary;
   running: boolean;
   mode: string;
   connection: string;

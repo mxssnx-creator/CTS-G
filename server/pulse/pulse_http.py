@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import DATA_DIR, append_bounded_line, atomic_write, path_for, storage_info
+from runtime_scope import redis_key
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
@@ -63,6 +64,8 @@ def _short_err(msg) -> str:
 
 
 DETAIL_KEYS = (
+    "forcedConfigs",
+    "configEvidence",
     "coord",
     "pulse",
     "indications",
@@ -139,7 +142,7 @@ def resolve_conn(raw: str) -> str:
 
 def redis_hgetall(key: str) -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=6)
+        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
     except Exception:
         return {}
     lines = (p.stdout or "").splitlines()
@@ -150,7 +153,7 @@ def redis_hgetall(key: str) -> dict:
 
 
 def redis_hset(key: str, mapping: dict) -> bool:
-    args = ["redis-cli", "HSET", key]
+    args = ["redis-cli", "HSET", redis_key(key)]
     for k, v in mapping.items():
         if v is None:
             continue
@@ -504,7 +507,7 @@ def load_cts(conn: str) -> dict:
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True)
+    p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
     lines = (p.stdout or "").splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
@@ -1196,7 +1199,7 @@ def heal_loop() -> None:
                     env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
                     if not env_key:
                         try:
-                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
+                            p = subprocess.run(["redis-cli", "HGET", redis_key(f"connection:{cid}"), "api_key"], capture_output=True, text=True, timeout=6)
                             env_key = (p.stdout or "").strip()
                         except Exception:
                             env_key = ""
@@ -1218,4 +1221,4 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
-    ThreadingHTTPServer(("0.0.0.0", 3015), Handler).serve_forever()
+    ThreadingHTTPServer((os.environ.get("PULSE_HOST", "127.0.0.1"), int(os.environ.get("PULSE_PORT", "3015"))), Handler).serve_forever()

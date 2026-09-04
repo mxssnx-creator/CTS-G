@@ -331,6 +331,44 @@ def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
 
 
+def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
+    """Aggregate confirmed close legs; partial fills are not extra samples."""
+    groups: Dict[tuple, list] = {}
+    seen: set = set()
+    for raw in rows:
+        row = raw if isinstance(raw, dict) else vars(raw)
+        if not row.get("exchange_confirmed") or not row.get("client_id"):
+            continue
+        fill_key = row.get("close_fill_id") or row.get("fillId")
+        if fill_key and fill_key in seen:
+            continue
+        if fill_key:
+            seen.add(fill_key)
+        key = (row.get("conn"), row.get("symbol"), row.get("side"), row["client_id"])
+        groups.setdefault(key, []).append(row)
+    out = []
+    for legs in groups.values():
+        legs.sort(key=lambda row: finite(row.get("t")))
+        if legs[-1].get("partial"):
+            continue
+        row = dict(legs[-1])
+        notion = sum(row_notional(leg) for leg in legs)
+        if notion <= 0:
+            continue
+        qty = sum(finite(leg.get("qty")) for leg in legs)
+        expected_qty = max(finite(leg.get("roundtrip_qty")) for leg in legs)
+        if expected_qty > 0 and qty < expected_qty * (1 - 1e-8):
+            continue  # incomplete retained history cannot promote this config
+        cost = sum(row_position_cost_pct(leg) * row_notional(leg) for leg in legs) / notion
+        row.update(qty=qty, entry=notion / max(qty, 1e-12),
+                   pnl=sum(finite(leg.get("pnl")) for leg in legs),
+                   pnl_pct=sum(row_pnl_pct(leg) * row_notional(leg) for leg in legs) / notion,
+                   fee_total=sum(finite(leg.get("fee_total")) for leg in legs),
+                   position_cost_pct=cost, partial=False, closeLegs=len(legs))
+        out.append(row)
+    return sorted(out, key=lambda row: finite(row.get("t")))
+
+
 def row_side(row: Any) -> str:
     raw = ""
     if isinstance(row, dict):

@@ -1,0 +1,5 @@
+# Isolated runtime, Python >=3.11; all four acceleration/network paths required.
+numpy==2.3.5
+httpx==0.28.1
+websocket-client==1.8.0
+orjson==3.11.3

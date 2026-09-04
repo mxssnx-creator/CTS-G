@@ -15,7 +15,7 @@ import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
 
 const PULSE = (process.env.PULSE_URL || "http://127.0.0.1:3015").replace(/\/$/, "");
-const CTS = (process.env.CTS_URL || "http://152.53.114.112").replace(/\/$/, "");
+const CTS = (process.env.CTS_URL || "").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
 
@@ -176,6 +176,7 @@ function laneLabel(id: string) {
 }
 
 async function ctsJson(method: string, path: string, body?: unknown, ms = 12000) {
+  if (!CTS) throw new Error("Legacy cross-project fallback is disabled");
   const r = await fetch(CTS + path, {
     method,
     headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },

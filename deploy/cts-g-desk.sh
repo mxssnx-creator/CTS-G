@@ -8,7 +8,7 @@ cd "$ROOT"
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-3102}"
 export PULSE_URL="${PULSE_URL:-http://127.0.0.1:3015}"
-export CTS_URL="${CTS_URL:-http://127.0.0.1}"
+export CTS_URL="${CTS_URL:-}"
 export PATH="${ROOT}/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 mkdir -p "$LOG_DIR"
@@ -22,4 +22,4 @@ if [[ ! -e "$VITE" ]]; then
   exit 127
 fi
 # Absolute vite path: systemd PATH does not include node_modules/.bin.
-exec node scripts/with-app-env.mjs "$VITE" dev --host "$HOST" --port "$PORT"
+exec node scripts/with-app-env.mjs "$VITE" dev --host "$HOST" --port "$PORT" --strictPort

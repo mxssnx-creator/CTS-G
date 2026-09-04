@@ -24,7 +24,7 @@ Usage: sudo ./deploy/update-linux.sh [options]
   --from-dir PATH   Update from this checkout instead of git pull
   --repo URL        Origin URL
   --branch NAME     Branch (default: main)
-  --force           git reset --hard origin/BRANCH
+  --pulse-port N    Separate loopback API port
   --no-restart      Sync files only
   --start-live      Ensure Live engine is started
   --yes             No-op (update never prompts)
@@ -37,12 +37,13 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name|-n) apply_name "${2:-}"; shift 2 ;;
+    --pulse-port) PULSE_PORT="${2:-}"; PULSE_PORT_EXPLICIT=1; shift 2 ;;
     --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
     --host) PUBLIC_HOST="${2:-}"; REMOTE_HOST="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
-    --force) FORCE=1; shift ;;
+    --force) die "--force removed: preserve and review local edits before updating" ;;
     --no-restart) NO_RESTART=1; shift ;;
     --start-live) START_LIVE=1; shift ;;
     --yes|-y) shift ;;
@@ -61,6 +62,9 @@ log "update  name=$CTS_G_NAME  root=$CTS_G_ROOT  desk=:${DESK_PORT}"
 
 ensure_base_packages
 ensure_node
+validate_instance
+ensure_dirs
+ensure_redis
 
 if [[ -n "$FROM_DIR" ]]; then
   [[ -f "$FROM_DIR/server/pulse/pulse_trader.py" ]] || die "not a CTS-G tree: $FROM_DIR"
@@ -71,24 +75,17 @@ if [[ -n "$FROM_DIR" ]]; then
   fi
 elif [[ -d "$CTS_G_ROOT/.git" ]]; then
   configure_git "$CTS_G_ROOT"
-  git -C "$CTS_G_ROOT" fetch --prune "$GIT_REMOTE"
-  git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
-  if [[ "$FORCE" -eq 1 ]]; then
-    git -C "$CTS_G_ROOT" reset --hard "$GIT_REMOTE/$BRANCH"
-    ok "hard reset $GIT_REMOTE/$BRANCH"
-  else
-    git -C "$CTS_G_ROOT" merge --ff-only "$GIT_REMOTE/$BRANCH" \
-      || git -C "$CTS_G_ROOT" reset --hard "$GIT_REMOTE/$BRANCH"
-    ok "fast-forward $BRANCH"
-  fi
+  fast_forward_app
 else
   die "no git clone at $CTS_G_ROOT and no --from-dir given"
 fi
 
 find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 configure_git "$CTS_G_ROOT"
+migrate_redis_scope
 seed_env
 sync_pulse_tree
+ensure_python_deps
 npm_install_desk
 install_units
 enforce_retention

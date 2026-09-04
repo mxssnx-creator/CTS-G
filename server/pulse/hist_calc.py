@@ -44,6 +44,7 @@ from set_engine import (
     synth_trend,
 )
 from storage_paths import path_for
+from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
@@ -457,7 +458,7 @@ def public_presets() -> List[Dict[str, Any]]:
 def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
-        "minStep": 3,
+        "minStep": 1,
         "stepMax": 22,
         "trailing": True,
         "stratBlock": True,
@@ -496,7 +497,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             opt["hours"] = max(2, min(HOURS_MAX, int(float(raw_hours))))
         except Exception:
             pass
-    for k, lo, hi in (("minStep", 3, 22), ("stepMax", 3, 22)):
+    for k, lo, hi in (("minStep", 1, 22), ("stepMax", 1, 22)):
         if body.get(k) is not None:
             try:
                 opt[k] = max(lo, min(hi, int(body[k])))
@@ -719,7 +720,7 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
             continue
         seen.add(s)
         out.append(s)
-    return out or list(DEFAULT_SYMBOLS)
+    return mandatory_symbols(out or list(DEFAULT_SYMBOLS))
 
 
 def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -739,7 +740,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setMinPf": 1.15,
         "setMaxDdTimeS": 27000,
         "setLiveNegativeDeact": False,
-        "setMinStep": int(opt.get("minStep") or 3),
+        "setMinStep": int(opt.get("minStep") or 1),
         "setStepMax": int(opt.get("stepMax") or 22),
         "stratTrailing": bool(opt.get("trailing", True)),
         "stratIndications": bool(opt.get("stratIndications", True)),
@@ -791,7 +792,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov["trailArmMax"] = 1.5
     ov["trailGiveMin"] = 0.1
     ov["trailGiveMax"] = 0.5
-    ov["setMinStep"] = int(opt.get("minStep") or 3)
+    ov["setMinStep"] = int(opt.get("minStep") or 1)
     ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 22))
     ov["stratTrailing"] = bool(opt.get("trailing", True))
     return ov
@@ -1061,7 +1062,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "dcaCooldownSeconds": 45,
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
-        "setMinStep": 3,
+        "setMinStep": 1,
         "setStepMax": 22,
     }
     if not row:
@@ -1071,7 +1072,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         patch["slToTpRatio"] = sl
     step = int(row.get("step") or 0)
     if step >= 3:
-        patch["setMinStep"] = 3
+        patch["setMinStep"] = 1
         patch["setStepMax"] = 22
     arm = float(row.get("trailArm") or 0)
     give = float(row.get("trailGive") or 0)
@@ -1228,6 +1229,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
     book.load(dict(_HIST_WORKER_OVERLAY or {}))
     book.ingest_bars(sym, bars)
     prepared = book.prepare_replay_signals(sym, now)
+    forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
     set_ids = [st.id for st in book.by_idx]
     chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
     strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
@@ -1283,6 +1285,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
         {k: list(v) for k, v in book.ind_hist.items()},
         strat_hist,
         {st.id: int(st.n or 0) for st in book.by_idx},
+        forced,
     )
 
 
@@ -1301,9 +1304,54 @@ def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: i
     }
 
 
+def run_forced_calc(body: Dict[str, Any], persist: bool = True) -> Dict[str, Any]:
+    """Focused forced sweep; same public data path, no full-catalog allocation."""
+    opt = parse_options(body)
+    now = time.time()
+    results: List[Dict[str, Any]] = []
+    sources: Dict[str, str] = {}
+    book = SetBook()
+    # Only construct one normal Set to obtain the shared indication settings.
+    book.load({"stratGeneral": False, "stratIndications": True, "stratTrailing": False,
+               "slToTpRatios": [.6], "setMinStep": 1, "setStepMax": 1})
+    job: Dict[str, Any] = {"phase": "fetch", "pct": 0, "detail": "Forced baseline sweep",
+                           "options": opt, "startedAt": now, "forcedOnly": True}
+    _set_running(True)
+    if persist:
+        _write_pid()
+    try:
+        def item(sym, bars, src, done, total):
+            results.append(evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct))
+            sources[sym] = "historical-market" if src == "live" else src
+            job.update(phase="replay", pct=round(done / total * 95, 1),
+                       detail=f"{done}/{total} forced symbols", forcedConfigs=forced_summary(results, sources, now))
+            if persist:
+                _atomic_write(job_path(), job)
+        source = pipeline_symbols(list(FORCED_SYMBOLS), hours_to_bars(opt["hours"]), bool(body.get("synth")), 2, item)
+        result = forced_summary(results, sources, now)
+        job.update(phase="ready", pct=100, ready=True, source=source, forcedConfigs=result,
+                   detail=f"{result['completed']}/{result['requested']} baseline configs · {result['selectedCount']} selected",
+                   elapsedMs=round((time.time() - now) * 1000, 1), finishedAt=time.time())
+        if persist:
+            _atomic_write(path_for("forced-configs.json"), {**result, "matrix": results})
+            _atomic_write(job_path(), job)
+        return job
+    except Exception:
+        job.update(phase="error", error=traceback.format_exc()[-400:], detail="Forced calculation failed")
+        if persist:
+            _atomic_write(job_path(), job)
+        return job
+    finally:
+        _set_running(False)
+        if persist:
+            _clear_pid()
+
+
 def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dict[str, Any]:
     """Synchronous calc. persist=True writes hist-calc.json as it goes."""
     body = body if isinstance(body, dict) else {}
+    if body.get("forcedOnly"):
+        return run_forced_calc(body, persist=persist)
     opt = parse_options(body)
     symbols = resolve_symbols(body)
     lookback = hours_to_bars(opt["hours"])
@@ -1377,6 +1425,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         from set_engine import HIST_CAP as _HC
         hist_cap = max(24, min(80, int(_HC or 80)))
         requested_sets = len(book.by_idx) * len(symbols)
+        forced_results: List[Dict[str, Any]] = []
+        forced_sources: Dict[str, str] = {}
 
         def _trim_maps() -> None:
 
@@ -1449,7 +1499,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def commit_replay(result: Tuple[Any, ...], src: str, total: int) -> None:
             nonlocal replay_done
-            sym, nbar, local_hist, local_ind, local_strat, local_counts = result
+            sym, nbar, local_hist, local_ind, local_strat, local_counts, forced = result
+            if forced.get("completed"):
+                forced_results.append(forced)
+                forced_sources[sym] = "historical-market" if src == "live" else src
             book._commit_hist(
                 local_hist,
                 local_ind,
@@ -1482,6 +1535,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
             book.ingest_bars(sym, bars)
             prepared = book.prepare_replay_signals(sym, now)
+            forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
             set_ids = [st.id for st in book.by_idx]
             chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
             accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
@@ -1516,7 +1570,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 hist_counts=accumulated_counts,
                 score=False,
             )
-            commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}), src, total)
+            commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}, forced), src, total)
 
         if workers > 1:
             replay_pool = ProcessPoolExecutor(
@@ -1580,6 +1634,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "byStrategy": by_strat,
             "kinds": kinds,
             "evaluationWindows": evaluation_summary,
+            "forcedConfigs": forced_summary(forced_results, forced_sources, now),
             "winner": winner,
             "apply": winner_patch(winner, opt, by_strat, source=str(job.get("source") or source or "")),
             "presets": public_presets(),
@@ -1612,6 +1667,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         })
         job.pop("_lastWrite", None)
         if persist:
+            _atomic_write(path_for("forced-configs.json"), {**job["forcedConfigs"], "matrix": forced_results})
             _atomic_write(job_path(), job)
         return job
     except Exception:
@@ -1723,7 +1779,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
-    rec("opt-steps-full-default", parse_options({})["minStep"] == 3 and parse_options({})["stepMax"] == 22, str(parse_options({})))
+    rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 22, str(parse_options({})))
     rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
@@ -1895,6 +1951,7 @@ def cli_options(args: Sequence[str]) -> Dict[str, Any]:
                 except ValueError:
                     pass
     bool_flags = {
+        "--forced-only": "forcedOnly",
         "--all-symbols": "allSymbols",
         "--all-configs": "allConfigs",
         "--all-steps": "allSteps",
@@ -1943,7 +2000,7 @@ if __name__ == "__main__":
             body = json.loads(args[i + 1] if i + 1 < len(args) else "{}")
         except Exception:
             body = {}
-    else:
+    elif not body:
         try:
             if os.path.exists(req_path()):
                 body = json.loads(open(req_path()).read() or "{}")
