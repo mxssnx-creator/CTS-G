@@ -36,6 +36,10 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
   const px = cov?.px ?? scan?.px ?? 0;
   const n = cov?.symbols ?? scan?.universe ?? live.symbolCount ?? 0;
   const full = n > 0 && px >= n;
+  const perConfig = (live.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig !== false;
+  const controlMode = ctrl?.mode ?? (perConfig ? "per-config" : "aggregate");
+  const groupCount = ctrl?.groupCount ?? ctrl?.open ?? live.openCount ?? 0;
+  const mergedMembers = ctrl?.mergedMembers;
   const miss = ctrl?.missing ?? 0;
   return (
     <div className="rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="coverage-strip">
@@ -72,7 +76,8 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span className={miss ? "text-danger" : "text-primary"}>
-          controls {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {ctrl?.security ?? 0} sec
+          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {ctrl?.security ?? 0} sec · {groupCount} groups
+          {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
         </span>
         <span className={recon?.ok === false ? "text-danger" : recon?.pending ? "text-warn" : "text-primary"}>
           recon {recon?.ok === false ? recon.detail || "gap" : recon?.pending ? recon.detail || "pending" : "ok"}
@@ -142,6 +147,11 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const px = cov?.px ?? scan?.px ?? 0;
   const n = cov?.symbols ?? scan?.universe ?? live?.symbolCount ?? 0;
   const open = live?.open ?? [];
+  const perConfig = (live?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig !== false;
+  const controlMode = ctrl?.mode ?? (perConfig ? "per-config" : "aggregate");
+  const groupCount = ctrl?.groupCount ?? ctrl?.open ?? open.length;
+  const mergedMembers = ctrl?.mergedMembers;
+  const groupGaps = (ctrl?.groups ?? []).filter((group) => !group.protected).slice(0, 10);
   const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 10);
   return (
     <div className="space-y-3" data-testid="coverage-panel">
@@ -152,13 +162,14 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
         <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
+        <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} />
         <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
         <KV
           k="Live sets (cost-net)"
           v={`${sets.liveActive ?? liveSets?.active ?? 0}/${sets.liveProcessed ?? liveSets?.processed ?? 0} processed · PF ${Number(sets.livePf ?? liveSets?.last15Ratio ?? 0).toFixed(2)} · n ${sets.liveFills ?? liveSets?.fills ?? 0}`}
           ok={(sets.liveProcessed ?? liveSets?.processed ?? 0) >= 0}
         />
-        <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
+        <KV k="Set families" v={`base ${sets.families?.base ?? "���"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
         <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
         <KV
           k="Stages intern/main/real"
@@ -236,12 +247,16 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
           </table>
         </div>
       ) : null}
-      {gaps.length ? (
+      {groupGaps.length ? (
+        <p className="font-mono text-xs text-danger">
+          range gap {groupGaps.map((group) => `${group.symbol?.replace("-USDT", "")} ${group.side === "LONG" ? "L" : "S"} ${group.range ?? "aggregate"}`).join(" · ")}
+        </p>
+      ) : gaps.length ? (
         <p className="font-mono text-xs text-danger">
           control gap {gaps.map((p) => `${p.symbol.replace("-USDT", "")} ${p.side === "LONG" ? "L" : "S"}`).join(" · ")}
         </p>
       ) : (
-        <p className="font-mono text-xs text-muted">Every open has order SL+TP and symbol+direction security</p>
+        <p className="font-mono text-xs text-muted">Every logical group has order SL+TP and symbol+direction security</p>
       )}
       {counts.length > 0 ? (
         <div className="overflow-x-auto">

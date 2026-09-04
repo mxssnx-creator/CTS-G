@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
+    cost_aware_metrics,
     last_n_cost_pf,
+    normalize_pf,
     signed_result_r,
     snap_ratio,
     SL_TP_RATIOS,
@@ -30,6 +32,7 @@ from position_cost import (
     row_side,
     filter_side,
 )
+from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -482,6 +485,60 @@ class SimTrade:
     source: str = "hist"
 
 
+@dataclass(frozen=True)
+class StageRecord:
+    """Stable audit record for one Set at one processing boundary."""
+
+    set_id: str
+    parent_set_id: str
+    stage: str
+    gross_pf: float
+    net_pf: float
+    position_cost_pct: float
+    ddt_s: float
+    sample_count: int
+    volume_ratio: float
+    ev: float = 0.0
+    gross_ev: float = 0.0
+    confidence: float = 0.0
+    uncertainty: float = 1.0
+    required_samples: int = 8
+    insufficient_sample: bool = True
+    axis_key: str = ""
+    relative_count: int = 1
+    indication_kind: str = ""
+    strategy_adjustments: Tuple[Tuple[str, Any], ...] = ()
+    adjustment_deltas: Tuple[Tuple[str, Any], ...] = ()
+    qualification_reason: str = ""
+    dedupe_key: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "setId": self.set_id,
+            "parentSetId": self.parent_set_id,
+            "stage": self.stage,
+            "grossPf": self.gross_pf,
+            "netPf": self.net_pf,
+            "positionCostPct": self.position_cost_pct,
+            "ddtS": self.ddt_s,
+            "sampleCount": self.sample_count,
+            "requiredSamples": self.required_samples,
+            "ev": self.ev,
+            "grossEv": self.gross_ev,
+            "confidence": self.confidence,
+            "uncertainty": self.uncertainty,
+            "insufficientSample": self.insufficient_sample,
+            "volumeRatio": self.volume_ratio,
+            "axisKey": self.axis_key,
+            "relativeCount": self.relative_count,
+            "indicationKind": self.indication_kind,
+            "strategyAdjustments": dict(self.strategy_adjustments),
+            "adjustmentDeltas": dict(self.adjustment_deltas),
+            "qualificationReason": self.qualification_reason,
+            "dedupeKey": self.dedupe_key or stable_key(self.set_id, self.stage),
+        }
+
+
 @dataclass
 class SetState:
     id: str
@@ -499,6 +556,19 @@ class SetState:
     tr_i: int = 0
     step_i: int = 0
     kind: str = "base"
+    parent_set_id: str = ""
+    stage: str = "Base"
+    stage_qualified: str = ""
+    base_pf: float = 0.0
+    main_pf: float = 0.0
+    real_pf: float = 0.0
+    position_cost_pct: float = POSITION_COST_PCT_DEFAULT
+    axis_key: str = ""
+    relative_count: int = 1
+    volume_ratio: float = 1.0
+    indication_kind: str = ""
+    strategy_adjustments: Dict[str, Any] = field(default_factory=dict)
+    stage_ledger: Dict[str, Any] = field(default_factory=dict)
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
     last15_ratio: float = 1.0
@@ -526,6 +596,14 @@ class SetState:
     source_n: int = 0
     by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     live_eval: Dict[str, Any] = field(default_factory=dict)
+    gross_pf: float = 0.0
+    net_pf: float = 0.0
+    gross_ev: float = 0.0
+    net_ev: float = 0.0
+    evaluation: Dict[str, Any] = field(default_factory=dict)
+    normal_evaluation: Dict[str, Any] = field(default_factory=dict)
+    adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
+    adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
 
     def tape(self) -> List[Dict[str, Any]]:
         return list(self.hist) + list(self.live)
@@ -563,7 +641,9 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.15
+        self.min_pf = 1.05
+        self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
+        self.real_min_pf = 1.15
         self.max_dd_s = 27000.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -600,6 +680,9 @@ class SetBook:
         # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
         self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
+        # Main-stage strategy tapes are kept separately from the canonical
+        # Set tape so Block/DCA evidence cannot inflate Base/Real counts.
+        self.strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
         # Partial load-sliced replays retain bounded evidence from symbols
         # already covered in the current cycle. Per-symbol counts keep
         # histFills meaningful even though each Set tape is capped for RAM.
@@ -627,7 +710,15 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.0)
+        def _pf(key: str, fallback: float) -> float:
+            return normalize_pf(ov.get(key, fallback), fallback)
+        self.stage_min_pf = {
+            "base": _pf("baseMinPf", 1.05),
+            "main": _pf("mainMinPf", 1.10),
+            "real": _pf("realMinPf", float(ov.get("setMinPf") or 1.15)),
+        }
+        self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
+        self.real_min_pf = self.stage_min_pf["real"]
         self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
@@ -836,6 +927,16 @@ class SetBook:
                         _put(st)
         self.sets = next_sets
         self.by_idx = by_idx
+        for st in by_idx:
+            st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
+            st.stage = "Base"
+            st.stage_qualified = ""
+            st.position_cost_pct = self.cost_pct
+            st.axis_key = ""
+            st.relative_count = 1
+            st.volume_ratio = 1.0
+            st.indication_kind = "" if st.pack != "indications" else "signals"
+            st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
         signature = tuple(next_sets)
         if signature != self._hist_set_signature:
@@ -920,6 +1021,10 @@ class SetBook:
             if len(tape) > lc:
                 self.ind_live[k] = tape[-lc:]
                 n += 1
+        for k, tape in list(self.strategy_hist.items()):
+            if len(tape) > hc:
+                self.strategy_hist[k] = tape[-hc:]
+                n += 1
         return n
 
     def trim_bars(self, keep: Sequence[str]) -> int:
@@ -954,8 +1059,15 @@ class SetBook:
                 "hold_s": finite(rec.get("hold_s")),
                 "reason": str(rec.get("reason") or ""),
                 "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
+                "set_id": str(rec.get("set_id") or rec.get("setId") or ""),
+                "parent_set_id": str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
+                "axis_key": str(rec.get("axis_key") or rec.get("axisKey") or ""),
+                "relative_count": int(rec.get("relative_count") or rec.get("relativeCount") or 1),
+                "volume_ratio": finite(rec.get("volume_ratio") or rec.get("volumeRatio") or VOLUME_RATIO_UNIT),
+                "strategy": str(rec.get("strategy") or ""),
+                "pack": str(rec.get("pack") or ""),
             }
-            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "")
+            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "").strip().lower()
         else:
             if getattr(rec, "ours", True) is False:
                 return
@@ -969,16 +1081,17 @@ class SetBook:
                 "hold_s": finite(getattr(rec, "hold_s", 0)),
                 "reason": str(getattr(rec, "reason", "")),
                 "client_id": str(getattr(rec, "client_id", "") or ""),
+                "set_id": str(getattr(rec, "set_id", "") or ""),
+                "parent_set_id": str(getattr(rec, "parent_set_id", "") or ""),
+                "axis_key": str(getattr(rec, "axis_key", "") or ""),
+                "relative_count": int(getattr(rec, "relative_count", 1) or 1),
+                "volume_ratio": finite(getattr(rec, "volume_ratio", VOLUME_RATIO_UNIT) or VOLUME_RATIO_UNIT),
+                "strategy": str(getattr(rec, "strategy", "") or ""),
+                "pack": str(getattr(rec, "pack", "") or ""),
             }
-            ind_kind = str(getattr(rec, "ind_kind", "") or "")
-        # Per-kind live evidence feeds the indication gate even when the close
-        # cannot be attributed to a known set below.
-        if ind_kind:
-            tape = self.ind_live.setdefault(ind_kind, [])
-            cid0 = row.get("client_id") or ""
-            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
-                tape.append(dict(row))
-                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
+            ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
+        if ind_kind not in IND_KINDS:
+            ind_kind = ""
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
             sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
@@ -993,6 +1106,17 @@ class SetBook:
             if not step:
                 step = self.min_step
             sid = make_set_id(pack, sl, "", step)
+        row["set_id"] = sid
+        row["parent_set_id"] = row.get("parent_set_id") or sid
+        row["pack"] = row.get("pack") or ("indications" if ind_kind else ("indications" if "ind:" in row["reason"] else "general"))
+        if ind_kind:
+            row["ind_kind"] = ind_kind
+            row["indKind"] = ind_kind
+            tape = self.ind_live.setdefault(ind_kind, [])
+            cid0 = row.get("client_id") or ""
+            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
+                tape.append(dict(row))
+                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
         extra = ""
         if isinstance(rec, dict):
             extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
@@ -1079,18 +1203,27 @@ class SetBook:
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
+            strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
             processed_symbols: set[str] = set()
             aborted = False
             w = max(1, min(int(workers or 1), 8, len(names) or 1))
             lock = threading.Lock()
 
-            def _merge(symbol: str, local: Dict[str, List[Dict[str, Any]]], local_ind: Dict[str, List[Dict[str, Any]]]) -> None:
+            def _merge(
+                symbol: str,
+                local: Dict[str, List[Dict[str, Any]]],
+                local_ind: Dict[str, List[Dict[str, Any]]],
+                local_strategy: Dict[str, List[Dict[str, Any]]],
+            ) -> None:
                 for sid, rows in local.items():
                     if rows:
                         hist.setdefault(sid, []).extend(rows)
                 for k, rows in local_ind.items():
                     if rows:
                         ind_hist.setdefault(k, []).extend(rows)
+                for k, rows in local_strategy.items():
+                    if rows:
+                        strategy_hist.setdefault(k, []).extend(rows)
                 nbar = len(self.bars.get(symbol) or [])
                 if drop_bars:
                     self.bars.pop(symbol, None)
@@ -1099,11 +1232,26 @@ class SetBook:
                     self._hist_seen.add(symbol)
                     processed_symbols.add(symbol)
 
-            def _one(symbol: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+            def _one(
+                symbol: str,
+            ) -> Tuple[
+                str,
+                Dict[str, List[Dict[str, Any]]],
+                Dict[str, List[Dict[str, Any]]],
+                Dict[str, List[Dict[str, Any]]],
+            ]:
                 local: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 local_ind: Dict[str, List[Dict[str, Any]]] = {}
-                self._replay_symbol(symbol, local, now, on_step=None, ind_hist=local_ind)
-                return symbol, local, local_ind
+                local_strategy: Dict[str, List[Dict[str, Any]]] = {}
+                self._replay_symbol(
+                    symbol,
+                    local,
+                    now,
+                    on_step=None,
+                    ind_hist=local_ind,
+                    strat_hist=local_strategy,
+                )
+                return symbol, local, local_ind, local_strategy
 
             done = 0
             if w <= 1 or len(names) <= 1:
@@ -1117,35 +1265,57 @@ class SetBook:
                     self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                     self.progress.elapsed_ms = (time.time() - t0) * 1000
                     self.progress.detail = f"replay {symbol} {i + 1}/{len(names)}"
-                    _sym, local, local_ind = _one(symbol)
-                    _merge(_sym, local, local_ind)
+                    _sym, local, local_ind, local_strategy = _one(symbol)
+                    _merge(_sym, local, local_ind, local_strategy)
                     done += 1
                     if on_symbol:
                         on_symbol(symbol, done, len(names))
                     if on_step:
                         on_step()
             else:
+                # Keep at most one worker's worth of symbols in flight. The old
+                # submit-all approach retained every future and its captured
+                # payload until the slowest symbol finished.
                 with ThreadPoolExecutor(max_workers=w, thread_name_prefix="set-replay") as pool:
-                    futs = {pool.submit(_one, s): s for s in names}
-                    for fut in as_completed(futs):
+                    pending: Dict[Any, Tuple[str, int]] = {}
+                    next_i = 0
+                    retries: Dict[str, int] = {}
+                    while pending or next_i < len(names):
+                        while not aborted and len(pending) < w and next_i < len(names):
+                            symbol = names[next_i]
+                            next_i += 1
+                            pending[pool.submit(_one, symbol)] = (symbol, 0)
+                        if not pending:
+                            break
                         if abort and abort():
                             aborted = True
-                            for pending in futs:
-                                pending.cancel()
+                            for future in pending:
+                                future.cancel()
                             break
-                        symbol, local, local_ind = fut.result()
-                        with lock:
-                            _merge(symbol, local, local_ind)
-                            done += 1
-                            self.progress.symbol = symbol
-                            self.progress.symbols_done = done
-                            self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
-                            self.progress.elapsed_ms = (time.time() - t0) * 1000
-                            self.progress.detail = f"replay {symbol} {done}/{len(names)}"
-                        if on_symbol:
-                            on_symbol(symbol, done, len(names))
-                        if on_step:
-                            on_step()
+                        finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                        for fut in finished:
+                            symbol, _attempt = pending.pop(fut)
+                            try:
+                                result_symbol, local, local_ind, local_strategy = fut.result()
+                            except Exception:
+                                attempt = retries.get(symbol, 0) + 1
+                                retries[symbol] = attempt
+                                if attempt <= 1 and not (abort and abort()):
+                                    pending[pool.submit(_one, symbol)] = (symbol, attempt)
+                                    continue
+                                raise
+                            with lock:
+                                _merge(result_symbol, local, local_ind, local_strategy)
+                                done += 1
+                                self.progress.symbol = result_symbol
+                                self.progress.symbols_done = done
+                                self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
+                                self.progress.elapsed_ms = (time.time() - t0) * 1000
+                                self.progress.detail = f"replay {result_symbol} {done}/{len(names)}"
+                            if on_symbol:
+                                on_symbol(result_symbol, done, len(names))
+                            if on_step:
+                                on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
             self._commit_hist(
@@ -1154,6 +1324,17 @@ class SetBook:
                 merge=merge,
                 replayed_symbols=processed_symbols if merge else names,
             )
+            strategy_names = processed_symbols if merge else names
+            if not merge:
+                self.strategy_hist = {
+                    k: trim_hist(rows, HIST_CAP) for k, rows in strategy_hist.items()
+                }
+            else:
+                keys = set(self.strategy_hist) | set(strategy_hist)
+                self.strategy_hist = {
+                    k: merge_hist_rows(self.strategy_hist.get(k) or [], strategy_hist.get(k) or [], strategy_names)
+                    for k in keys
+                }
             coverage_done = len(self._hist_seen) if merge else (done if aborted else len(names))
             complete = (not merge and not aborted) or (merge and coverage_done >= symbols_total)
             if complete:
@@ -1193,6 +1374,7 @@ class SetBook:
         *,
         merge: bool = False,
         replayed_symbols: Optional[Sequence[str]] = None,
+        hist_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
         if not merge:
@@ -1205,6 +1387,11 @@ class SetBook:
                 for k in keys
             }
         for st in self.by_idx:
+            # A bounded replay may commit one configuration slice at a time.
+            # Do not treat a not-yet-replayed set as an empty result or erase
+            # its already committed symbol evidence.
+            if merge and st.id not in hist:
+                continue
             full = hist.get(st.id, [])
             if merge:
                 counts = self._hist_counts.setdefault(st.id, {})
@@ -1213,7 +1400,10 @@ class SetBook:
                         symbol = str(row.get("symbol") or "")
                         counts[symbol] = counts.get(symbol, 0) + 1
                 for symbol in names:
-                    counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
+                    if hist_counts is not None and st.id in hist_counts:
+                        counts[symbol] = max(0, int(hist_counts[st.id]))
+                    else:
+                        counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
                 st.hist = merge_hist_rows(st.hist, full, names)
                 self._score_one(st)
                 st.n = sum(counts.values())
@@ -1234,6 +1424,8 @@ class SetBook:
         ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         drop_bars: bool = True,
         strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        set_ids: Optional[Sequence[str]] = None,
+        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
     ) -> int:
         """Replay one symbol into hist and drop its bars. Independent of other names."""
         if symbol not in self.bars:
@@ -1244,7 +1436,15 @@ class SetBook:
                 self.bars.pop(symbol, None)
             return 0
         now = now or time.time()
-        self._replay_symbol(symbol, hist, now, ind_hist=ind_hist, strat_hist=strat_hist)
+        self._replay_symbol(
+            symbol,
+            hist,
+            now,
+            ind_hist=ind_hist,
+            strat_hist=strat_hist,
+            set_ids=set_ids,
+            prepared=prepared,
+        )
         if drop_bars:
             self.bars.pop(symbol, None)
         return nbar
@@ -1391,16 +1591,22 @@ class SetBook:
         }
         return None, rec
 
-    def _replay_symbol(self, symbol: str, hist: Dict[str, List[Dict[str, Any]]], now: float, on_step: Optional[Callable[[], None]] = None, ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> None:
+    def prepare_replay_signals(
+        self,
+        symbol: str,
+        now: Optional[float] = None,
+        on_step: Optional[Callable[[], None]] = None,
+    ) -> Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]:
+        """Build the symbol signal lanes once before replaying config chunks."""
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
-        base_ts = now - (n - 1) * BAR_S
+        base_ts = (now or time.time()) - (n - 1) * BAR_S
         for i in range(warmup, n):
-            lo = i + 1 - 60
-            window = bars[lo if lo > 0 else 0 : i + 1]
+            lo = max(0, i + 1 - 60)
+            window = bars[lo : i + 1]
             ts = base_ts + i * BAR_S
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
@@ -1413,13 +1619,35 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
             if on_step and i % 50 == 0:
                 on_step()
+        return signals, kind_sigs, warmup
+
+    def _replay_symbol(
+        self,
+        symbol: str,
+        hist: Dict[str, List[Dict[str, Any]]],
+        now: float,
+        on_step: Optional[Callable[[], None]] = None,
+        ind_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        set_ids: Optional[Sequence[str]] = None,
+        prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
+    ) -> None:
+        bars = self.bars[symbol]
+        selected = {str(s) for s in (set_ids or self.sets)}
+        replay_sets = [st for st in self.by_idx if st.id in selected]
+        n = len(bars)
+        if prepared is None:
+            signals, kind_sigs, warmup = self.prepare_replay_signals(symbol, now, on_step=on_step)
+        else:
+            signals, kind_sigs, warmup = prepared
+        base_ts = now - (n - 1) * BAR_S
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
         by_pack: Dict[str, List[SetState]] = {}
-        for st in self.by_idx:
+        for st in replay_sets:
             by_pack.setdefault(st.pack, []).append(st)
-        set_map = {st.id: st for st in self.by_idx}
+        set_map = {st.id: st for st in replay_sets}
         for pack, pack_sets in by_pack.items():
             pack_sig = signals.get(pack) or [(0, 0.0, "")] * n
             # Block/DCA hist once per pack, not once per SL×TP book.
@@ -1517,8 +1745,8 @@ class SetBook:
                     tape = strat_hist.get(k) or []
                     if len(tape) > 4000:
                         strat_hist[k] = tape[-2400:]
-        if self.by_idx:
-            self.progress.set_id = self.by_idx[-1].id
+        if replay_sets:
+            self.progress.set_id = replay_sets[-1].id
         if ind_hist is not None and "indications" in self.packs:
             self._replay_kind_tapes(
                 symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
@@ -1689,6 +1917,7 @@ class SetBook:
         classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
         pf_tape = last_n_balanced(ordered, self.pf_n)
         last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
+        evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
         last25 = ordered[-self.deact_n :]
         if last25:
             rs = [signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25]
@@ -1702,7 +1931,7 @@ class SetBook:
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         validated = n15 >= need and ratio + 1e-9 >= 1.0
-        enable_pf = float(self.min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.15)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
@@ -1733,7 +1962,233 @@ class SetBook:
             "cost_subtracted": True,
             "cost_pct": self.cost_pct,
             "net_avg": float(last15.get("netAvg") or expectancy),
+            "gross_pf": float(evaluation.get("grossPf") or 0.0),
+            "net_pf": float(evaluation.get("netPf") or 0.0),
+            "gross_ev": float(evaluation.get("grossEv") or 0.0),
+            "net_ev": float(evaluation.get("netEv") or 0.0),
+            "evaluation": evaluation,
+            "proven_neg": proven_neg,
         }
+
+    def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive the monotonic Base -> Main -> Real qualification ledger.
+
+        Main consumes only Base-qualified evidence and Real consumes only
+        Main-qualified evidence. The ledger stores the decision at each
+        boundary, so retries and restarts can replay the same parent without
+        creating another count.
+        """
+        need = self.eval_need()
+        n = int(m.get("last15_n") or 0)
+        pf = float(m.get("last15_ratio") or 0.0)
+        dd_ok = bool(m.get("ddOk", True))
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.10))
+        real_floor = float(self.stage_min_pf.get("real", 1.15))
+        base = n >= need and pf + 1e-9 >= base_floor and dd_ok
+        main = base and pf + 1e-9 >= main_floor
+        real = main and pf + 1e-9 >= real_floor
+        qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
+        st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
+        st.stage = qualified or "Unqualified"
+        st.stage_qualified = qualified
+        st.base_pf = round(pf, 6)
+        st.main_pf = round(pf, 6) if base else 0.0
+        st.real_pf = round(pf, 6) if main else 0.0
+        st.position_cost_pct = self.cost_pct
+        st.evaluation = dict(m.get("evaluation") or {})
+        st.normal_evaluation = {
+            "pf": float(m.get("gross_pf") or 0.0),
+            "ev": float(m.get("gross_ev") or 0.0),
+            "sampleCount": n,
+            "source": "gross-price-move",
+        }
+        st.adjusted_evaluation = {
+            "pf": float(m.get("net_pf") or 0.0),
+            "ev": float(m.get("net_ev") or 0.0),
+            "ratio": pf,
+            "sampleCount": n,
+            "source": "cost-net",
+        }
+        st.adjustment_deltas = {
+            "pf": round(float(m.get("net_pf") or 0.0) - float(m.get("gross_pf") or 0.0), 6),
+            "ev": round(float(m.get("net_ev") or 0.0) - float(m.get("gross_ev") or 0.0), 8),
+            "costPct": self.cost_pct,
+        }
+        reasons: List[str] = []
+        if n < need:
+            reasons.append(f"sample {n}/{need}")
+        if pf + 1e-9 < base_floor:
+            reasons.append(f"base PF {pf:.2f}<{base_floor:.2f}")
+        elif pf + 1e-9 < main_floor:
+            reasons.append(f"main PF {pf:.2f}<{main_floor:.2f}")
+        elif pf + 1e-9 < real_floor:
+            reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
+        if not dd_ok:
+            reasons.append("DDt cap")
+        reason = "; ".join(reasons)
+        st.strategy_adjustments = {
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor},
+            "live": {"evaluation": False, "source": "real"},
+            "exchange": {"trackingOnly": True},
+        }
+        records = {
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Real": {"evaluated": main, "qualified": real, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+        }
+        return {
+            "stage": st.stage,
+            "qualified": qualified,
+            "parentSetId": st.parent_set_id,
+            "base": base,
+            "main": main,
+            "real": real,
+            "basePf": st.base_pf,
+            "mainPf": st.main_pf,
+            "realPf": st.real_pf,
+            "positionCostPct": self.cost_pct,
+            "reason": reason,
+            "records": records,
+            "dedupeKey": stable_key(st.parent_set_id, st.id, "qualification", n, round(pf, 6)),
+        }
+
+    def stage_record(self, st: SetState, stage: str, *, reason: str = "") -> StageRecord:
+        """Materialize one idempotent stage record without evaluating again."""
+        name = str(stage or "").strip().lower()
+        if name not in {"base", "main", "real", "live", "exchange"}:
+            raise ValueError(f"unknown stage: {stage}")
+        ledger = st.stage_ledger or {}
+        stage_pf = {
+            "base": st.base_pf,
+            "main": st.main_pf,
+            "real": st.real_pf,
+        }
+        record = (ledger.get("records") or {}).get(name.title()) if isinstance(ledger.get("records"), dict) else {}
+        qualified = bool(ledger.get(name, False)) if name in ("base", "main", "real") else name in ("live", "exchange")
+        evaluation = st.evaluation or {}
+        return StageRecord(
+            set_id=st.id,
+            parent_set_id=st.parent_set_id or st.id,
+            stage=name.title(),
+            gross_pf=round(float(st.normal_evaluation.get("pf") or st.gross_pf or st.last15_classic or 0.0), 6),
+            net_pf=round(float(st.adjusted_evaluation.get("pf") or st.net_pf or stage_pf.get(name, st.last15_ratio) or 0.0), 6),
+            position_cost_pct=float(st.position_cost_pct or self.cost_pct),
+            ddt_s=float(st.max_dd_s or 0.0),
+            sample_count=int(record.get("sampleCount") or evaluation.get("sampleCount") or st.last15_n or 0),
+            volume_ratio=float(st.volume_ratio or 1.0),
+            ev=float(st.adjusted_evaluation.get("ev") or evaluation.get("netEv") or st.expectancy or 0.0),
+            gross_ev=float(st.normal_evaluation.get("ev") or evaluation.get("grossEv") or 0.0),
+            confidence=float(evaluation.get("confidence") or 0.0),
+            uncertainty=float(evaluation.get("uncertainty") or 1.0),
+            required_samples=int(evaluation.get("requiredSamples") or self.eval_need()),
+            insufficient_sample=bool(evaluation.get("insufficientSample", True)),
+            axis_key=st.axis_key,
+            relative_count=int(st.relative_count or 1),
+            indication_kind=st.indication_kind,
+            strategy_adjustments=tuple((str(k), v) for k, v in (st.strategy_adjustments or {}).items()),
+            adjustment_deltas=tuple((str(k), v) for k, v in (st.adjustment_deltas or {}).items()),
+            qualification_reason=reason or str(record.get("reason") or ledger.get("reason") or ("qualified" if qualified else "not qualified")),
+            dedupe_key=str(ledger.get("dedupeKey") or stable_key(st.parent_set_id or st.id, st.id, name, st.last15_n, st.last15_ratio)),
+        )
+
+    def stage_records(self, stage: str, pack: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return stable records; parent IDs are retained for aggregate dedupe."""
+        want = str(pack or "")
+        return [self.stage_record(st, stage).as_dict() for st in self.by_idx if not want or st.pack == want]
+
+    def stage_flow(self) -> Dict[str, Any]:
+        """Aggregate stage boundaries with parent dedupe and sample confidence."""
+        names = ("Base", "Main", "Real")
+        flow: Dict[str, Dict[str, Any]] = {
+            name: {
+                "evaluated": 0,
+                "qualified": 0,
+                "blocked": 0,
+                "rejected": 0,
+                "selected": 0,
+                "entered": 0,
+                "exited": 0,
+                "parents": 0,
+                "sampleCount": 0,
+                "confidence": 0.0,
+                "insufficientSample": 0,
+                "volumeRatio": 0.0,
+            }
+            for name in names
+        }
+        parent_sets: Dict[str, set[str]] = {name: set() for name in names}
+        for st in self.by_idx:
+            ledger = st.stage_ledger or {}
+            records = ledger.get("records") if isinstance(ledger.get("records"), dict) else {}
+            for name in names:
+                key = name.lower()
+                evaluated = bool((records.get(name) or {}).get("evaluated", key == "base"))
+                qualified = bool(ledger.get(key, False))
+                if not evaluated:
+                    continue
+                bucket = flow[name]
+                bucket["evaluated"] += 1
+                parent = st.parent_set_id or st.id
+                parent_sets[name].add(parent)
+                if qualified:
+                    bucket["qualified"] += 1
+                    bucket["volumeRatio"] += float(st.volume_ratio or 1.0)
+                else:
+                    bucket["blocked"] += 1
+                    bucket["rejected"] += 1
+                evaluation = st.evaluation or {}
+                bucket["sampleCount"] += int(evaluation.get("sampleCount") or st.last15_n or 0)
+                bucket["confidence"] += float(evaluation.get("confidence") or 0.0)
+                bucket["insufficientSample"] += int(bool(evaluation.get("insufficientSample", True)))
+                if qualified and st.active:
+                    bucket["selected"] += 1
+                if st.live:
+                    bucket["entered"] += 1
+                    bucket["exited"] += len(st.live)
+        for name in names:
+            bucket = flow[name]
+            evaluated = int(bucket["evaluated"] or 0)
+            bucket["parents"] = len(parent_sets[name])
+            bucket["confidence"] = round(float(bucket["confidence"]) / evaluated, 4) if evaluated else 0.0
+            bucket["volumeRatio"] = round(float(bucket["volumeRatio"]), 6)
+        return {
+            "stages": flow,
+            "stageOrder": list(names),
+            "parentRule": "one parent Set is counted once; Main requires Base; Real requires Main",
+            "costSubtracted": True,
+            "requiredSamples": self.eval_need(),
+        }
+
+    def axis_variants(self, coordinator: Any) -> Dict[str, Any]:
+        """Generate axis children only from qualified Base parents."""
+        rows: List[Dict[str, Any]] = []
+        for parent_id in self.qualified_stage_ids("base"):
+            st = self.sets.get(parent_id)
+            if st is None:
+                continue
+            rows.extend(coordinator.axis_variants(parent_id, st.hist + st.live, []))
+        return coordinator.aggregate_axis_variants(rows)
+
+    def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:
+        """Return unique parent Set IDs qualified for a downstream stage."""
+        name = str(stage or "").strip().lower()
+        if name not in {"base", "main", "real"}:
+            raise ValueError(f"qualification stage must be Base, Main, or Real: {stage}")
+        out: List[str] = []
+        seen: set[str] = set()
+        for st in self.by_idx:
+            if pack and st.pack != pack:
+                continue
+            if not bool((st.stage_ledger or {}).get(name)):
+                continue
+            parent = st.parent_set_id or st.id
+            if parent not in seen:
+                seen.add(parent)
+                out.append(parent)
+        return out
 
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
@@ -1741,7 +2196,7 @@ class SetBook:
             return True, ""
         live_rows = [r for r in live if isinstance(r, dict)]
         need = self.eval_need()
-        enable_pf = float(self.min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.15)
         if len(live_rows) < need:
             if not self.strict_gate:
                 return True, ""
@@ -1794,6 +2249,29 @@ class SetBook:
         st.gl = m["gl"]
         st.wr = m["wr"]
         st.expectancy = m["expectancy"]
+        st.gross_pf = float(m.get("gross_pf") or 0.0)
+        st.net_pf = float(m.get("net_pf") or 0.0)
+        st.gross_ev = float(m.get("gross_ev") or 0.0)
+        st.net_ev = float(m.get("net_ev") or 0.0)
+        st.evaluation = dict(m.get("evaluation") or {})
+        st.normal_evaluation = {
+            "pf": st.gross_pf,
+            "ev": st.gross_ev,
+            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
+            "source": "gross-price-move",
+        }
+        st.adjusted_evaluation = {
+            "pf": st.net_pf,
+            "ev": st.net_ev,
+            "ratio": float(m.get("last15_ratio") or 0.0),
+            "sampleCount": int(st.evaluation.get("sampleCount") or 0),
+            "source": "cost-net",
+        }
+        st.adjustment_deltas = {
+            "pf": round(st.net_pf - st.gross_pf, 6),
+            "ev": round(st.net_ev - st.gross_ev, 8),
+            "costPct": self.cost_pct,
+        }
         st.avg_hold_s = m["avg_hold_s"]
         st.classic_all = m["classic_all"]
         counts: Dict[str, int] = {}
@@ -1812,6 +2290,7 @@ class SetBook:
         st.avg_dd_s = m["avg_dd_s"]
         st.dd_episodes = m["dd_episodes"]
         st.source_n = m["source_n"]
+        st.stage_ledger = self._stage_qualification(st, m)
         need = self.eval_need()
         live_m = self._score_metrics(st.live)
         st.live_eval = {
@@ -1975,6 +2454,19 @@ class SetBook:
             "active": st.active,
             "last15Ratio": round(st.last15_ratio, 4),
             "maxDdS": st.max_dd_s,
+            "parentSetId": st.parent_set_id or st.id,
+            "stage": st.stage,
+            "stageQualified": st.stage_qualified,
+            "stageLedger": st.stage_ledger,
+            "basePf": st.base_pf,
+            "mainPf": st.main_pf,
+            "realPf": st.real_pf,
+            "positionCostPct": st.position_cost_pct,
+            "axisKey": st.axis_key,
+            "relativeCount": st.relative_count,
+            "volumeRatio": st.volume_ratio,
+            "indicationKind": st.indication_kind,
+            "strategyAdjustments": st.strategy_adjustments,
         }
 
     def coverage(self) -> Dict[str, Any]:
@@ -2024,6 +2516,13 @@ class SetBook:
             for st in self.sets.values()
             if int(st.last15_n or 0) >= need and float(st.last15_ratio or 0) + 1e-9 >= 1.0
         )
+        stage_counts = {"Base": 0, "Main": 0, "Real": 0, "Unqualified": 0}
+        stage_parent_counts = {k: set() for k in stage_counts}
+        for st in self.by_idx:
+            stage = st.stage if st.stage in stage_counts else "Unqualified"
+            stage_counts[stage] += 1
+            stage_parent_counts[stage].add(st.parent_set_id or st.id)
+        axis_counts = {a: sum(1 for st in self.by_idx if st.axis_key.startswith(a + ":")) for a in ("prev", "last", "cont", "pause")}
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -2051,6 +2550,17 @@ class SetBook:
             "independentSlTp": True,
             "independentConfigs": True,
             "costSubtracted": True,
+            "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
+            "stageCounts": stage_counts,
+            "stageParentCounts": {k: len(v) for k, v in stage_parent_counts.items()},
+            "stageFlow": self.stage_flow(),
+            "qualifiedParentIds": {
+                "base": self.qualified_stage_ids("base"),
+                "main": self.qualified_stage_ids("main"),
+                "real": self.qualified_stage_ids("real"),
+            },
+            "axisCounts": axis_counts,
+            "axisVolumeRatio": 0.01,
             "directions": list(DIRECTIONS),
             "byTrail": by_tr,
             "bySl": by_sl,
@@ -2075,7 +2585,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.min_pf or 1.15),
+                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.real_min_pf or 1.15),
                 "active": st.active,
             }
         return blob
@@ -2117,7 +2627,7 @@ class SetBook:
 
         passing = [
             s for s in rows
-            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.min_pf
+            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.real_min_pf
         ]
         if not passing and not self.strict_gate:
             passing = [
@@ -2339,6 +2849,30 @@ class SetBook:
                     "kind": st.kind,
                     "idx": st.idx,
                     "id": st.id,
+                    "parentSetId": st.parent_set_id or st.id,
+                    "stage": st.stage,
+                    "stageQualified": st.stage_qualified,
+                    "stageLedger": st.stage_ledger,
+                    "basePf": st.base_pf,
+                    "mainPf": st.main_pf,
+                    "realPf": st.real_pf,
+                    "positionCostPct": st.position_cost_pct,
+                    "axisKey": st.axis_key,
+                    "relativeCount": st.relative_count,
+                    "volumeRatio": st.volume_ratio,
+                    "indicationKind": st.indication_kind,
+                    "strategyAdjustments": st.strategy_adjustments,
+                    "adjustmentDeltas": st.adjustment_deltas,
+                    "grossPf": st.gross_pf,
+                    "netPf": st.net_pf,
+                    "grossEv": st.gross_ev,
+                    "netEv": st.net_ev,
+                    "evaluation": st.evaluation,
+                    "pairedEvaluation": {
+                        "normal": st.normal_evaluation,
+                        "adjusted": st.adjusted_evaluation,
+                        "deltas": st.adjustment_deltas,
+                    },
                     "pack": st.pack,
                     "packI": st.pack_i,
                     "tf": st.tf,
@@ -2369,7 +2903,10 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
-                    "validated": bool(st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= 1.0),
+                    "validated": bool(st.stage_qualified),
+                    "baseQualified": bool((st.stage_ledger or {}).get("base")),
+                    "mainQualified": bool((st.stage_ledger or {}).get("main")),
+                    "realQualified": bool((st.stage_ledger or {}).get("real")),
                     "gp": st.gp,
                     "gl": st.gl,
                     "costSubtracted": True,
@@ -2435,6 +2972,18 @@ class SetBook:
         cover = self.coverage()
         validated_count = int(cover.get("validatedCount") or 0)
         live_ov = self.live_overview()
+        strategy_history = {}
+        for strategy, tape in (self.strategy_hist or {}).items():
+            metrics = self._score_metrics(tape)
+            strategy_history[str(strategy)] = {
+                "n": int(metrics.get("source_n") or 0),
+                "last15N": int(metrics.get("last15_n") or 0),
+                "last15Ratio": round(float(metrics.get("last15_ratio") or 0), 4),
+                "netAvg": round(float(metrics.get("net_avg") or 0), 6),
+                "maxDdS": round(float(metrics.get("max_dd_s") or 0), 1),
+                "costSubtracted": True,
+                "source": "hist-sim",
+            }
         # Never dump the full 1000+ set index into the hot stats JSON.
         index = []
         if full:
@@ -2459,7 +3008,7 @@ class SetBook:
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
-            "minPf": self.min_pf,
+            "minPf": self.real_min_pf,
             "enablePf": 1.15 if float(self.min_pf or 0) <= 0 else self.min_pf,
             "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,
@@ -2477,7 +3026,9 @@ class SetBook:
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "coverage": cover,
+            "stageFlow": self.stage_flow(),
             "liveOverview": live_ov,
+            "strategyHistory": strategy_history,
             "liveFills": int(live_ov.get("fills") or 0),
             "liveProcessed": int(live_ov.get("processed") or 0),
             "liveActive": int(live_ov.get("active") or 0),

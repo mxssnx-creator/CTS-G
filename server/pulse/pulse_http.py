@@ -67,6 +67,8 @@ DETAIL_KEYS = (
     "dca",
     "api",
     "coverage",
+    "activity",
+    "events",
     "byIndication",
     "byStrategy",
     "klinesTf",
@@ -618,6 +620,82 @@ def lane_summary(lane: dict) -> dict:
     }
 
 
+def merge_activity_summaries(summaries: list) -> dict:
+    """Aggregate committed event ledgers without re-counting event tails."""
+    scalar_keys = (
+        "eventCount", "grossPnl", "fees", "duplicateCount", "requestCount", "responseCount",
+        "fillCount", "openEventCount", "closeEventCount", "protectionEventCount", "cancellationCount",
+        "errorCount", "internalClosed", "pendingCount", "recoveredCount", "discrepantCount",
+    )
+    out = {key: 0 for key in scalar_keys}
+    out.update({"internalOpen": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
+    exchange_known = True
+    parity_bad = False
+
+    def add_map(target: dict, source: object) -> None:
+        if not isinstance(source, dict):
+            return
+        for key, value in source.items():
+            if isinstance(value, dict):
+                bucket = target.setdefault(str(key), {})
+                for name, amount in value.items():
+                    try:
+                        bucket[str(name)] = int(bucket.get(str(name), 0) or 0) + int(amount or 0)
+                    except Exception:
+                        continue
+            else:
+                try:
+                    target[str(key)] = int(target.get(str(key), 0) or 0) + int(value or 0)
+                except Exception:
+                    continue
+
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        for key in scalar_keys:
+            try:
+                out[key] += float(summary.get(key) or 0) if key in ("grossPnl", "fees") else int(summary.get(key) or 0)
+            except Exception:
+                continue
+        try:
+            out["internalOpen"] += int(summary.get("internalOpen") or 0)
+        except Exception:
+            pass
+        try:
+            exchange = int(summary.get("exchangeOpen", -1))
+        except Exception:
+            exchange = -1
+        if exchange < 0:
+            exchange_known = False
+        else:
+            out["exchangeOpen"] += exchange
+        add_map(out["byType"], summary.get("byType"))
+        add_map(out["byStatus"], summary.get("byStatus"))
+        add_map(out["responseCodes"], summary.get("responseCodes"))
+        add_map(out["byIndication"], summary.get("byIndication"))
+        add_map(out["byStrategy"], summary.get("byStrategy"))
+        add_map(out["byAxis"], summary.get("byAxis"))
+        if summary.get("parity") == "discrepant":
+            parity_bad = True
+        tail = summary.get("tail")
+        if isinstance(tail, list):
+            out["tail"].extend(row for row in tail if isinstance(row, dict))
+    out["eventCount"] = int(out["eventCount"])
+    out["duplicateCount"] = int(out["duplicateCount"])
+    out["internalOpen"] = int(out["internalOpen"])
+    out["exchangeOpen"] = int(out["exchangeOpen"]) if exchange_known else -1
+    out["grossPnl"] = round(float(out["grossPnl"]), 8)
+    out["fees"] = round(float(out["fees"]), 8)
+    out["tail"] = sorted(out["tail"], key=lambda row: float(row.get("ts") or 0), reverse=True)[:32]
+    if parity_bad:
+        out["parity"] = "discrepant"
+    elif not exchange_known:
+        out["parity"] = "pending"
+    else:
+        out["parity"] = "match" if out["internalOpen"] == out["exchangeOpen"] else "discrepant"
+    return out
+
+
 def _pick_detail(lane_defs: list) -> tuple:
     loaded = [(lane, load_stats(lane["id"])) for lane in lane_defs]
     for lane, st in loaded:
@@ -637,11 +715,16 @@ def merge_overall() -> dict:
     wins = losses = errors = 0
     running_any = False
     stats_by_id = {}
+    activity_summaries = []
     for lane in LANES:
         st = load_stats(lane["id"])
         stats_by_id[lane["id"]] = st
         if not st:
             continue
+        if isinstance(st.get("activity"), dict):
+            activity_summaries.append(st["activity"])
+        elif isinstance((st.get("coverage") or {}).get("activity"), dict):
+            activity_summaries.append((st.get("coverage") or {})["activity"])
         running_any = running_any or bool(st.get("running") and not st.get("halted"))
         wins += int(st.get("wins") or 0)
         losses += int(st.get("losses") or 0)
@@ -669,6 +752,7 @@ def merge_overall() -> dict:
     pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
     detail_lane, detail_st = _pick_detail(LANES)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
+    activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
     out = {
@@ -706,6 +790,8 @@ def merge_overall() -> dict:
         "open": opens,
         "closed": closed[:80],
         "tests": tests[-24:],
+        "activity": activity,
+        "events": activity.get("tail") or [],
         "errors": errors,
         "halted": not running_any,
         "paused": any(bool(x.get("paused")) for x in lanes),
@@ -746,7 +832,7 @@ def merge_overall() -> dict:
     except Exception:
         pass
     for k in DETAIL_KEYS:
-        if k == "tests":
+        if k in ("tests", "activity", "events"):
             continue
         if k in ("pfCost", "profitFactor", "pf", "pfNeutral", "pfPlus1xCost", "pfScale"):
             continue

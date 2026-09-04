@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_pf
+from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -56,10 +57,9 @@ class Coordinator:
             "cont": Axis(True, 8),
             "pause": Axis(True, 8),
         }
-        self.min_pf = 1.0
-        # Stage PositionCost PF floors on the cost scale (1.00 = neutral):
-        # Base / Main / Real all 1.25 systemwide.
-        self.stage_min_pf = {"base": 1.0, "main": 1.0, "real": 1.0}
+        self.min_pf = 1.15
+        # Stage PF floors use the shared 0.80–2.50 / 0.02 contract.
+        self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -76,6 +76,22 @@ class Coordinator:
         self.rearrange = True
         self.rearrange_gap = 0.22
         self.last: Dict[str, Any] = {}
+        self.coordination: Dict[str, Dict[str, int]] = {
+            axis: {
+                "evaluated": 0,
+                "qualified": 0,
+                "selected": 0,
+                "entered": 0,
+                "exited": 0,
+                "blocked": 0,
+                "rejected": 0,
+                "paused": 0,
+                "long": 0,
+                "short": 0,
+            }
+            for axis in AXES
+        }
+        self._axis_seen: set[str] = set()
 
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
@@ -99,15 +115,15 @@ class Coordinator:
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
             st = stages_cts.get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.0)
+            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.15)
         except Exception:
-            self.min_pf = float(ov.get("minPf") or 1.25)
-        # Per-stage floors: overlay wins, then strategies.main.<stage>, then 1.25.
+            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or 1.15)
+        # Per-stage floors: overlay wins, then strategies.main.<stage>, then the shared defaults.
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
         except Exception:
             stages_cts = {}
-        for _stage, _dflt in (("base", 1.0), ("main", 1.0), ("real", 1.0)):
+        for _stage, _dflt in (("base", 1.05), ("main", 1.10), ("real", 1.15)):
             _v = ov.get(f"{_stage}MinPf")
             if _v is None:
                 try:
@@ -117,7 +133,7 @@ class Coordinator:
             if _v is None and _stage == "real":
                 _v = self.min_pf
             try:
-                self.stage_min_pf[_stage] = max(1.0, float(_v)) if _v is not None else _dflt
+                self.stage_min_pf[_stage] = normalize_pf(_v, _dflt) if _v is not None else _dflt
             except Exception:
                 self.stage_min_pf[_stage] = _dflt
         # Strictest stage (Real) is the canonical min PF consumers read.
@@ -203,9 +219,9 @@ class Coordinator:
             "classicPf15": cost["classicPf"],
             "costPct": cost["costPct"],
             "minPf": self.min_pf,
-            "baseMinPf": float(self.stage_min_pf.get("base", 1.25)),
-            "mainMinPf": float(self.stage_min_pf.get("main", 1.25)),
-            "realMinPf": float(self.stage_min_pf.get("real", 1.25)),
+            "baseMinPf": float(self.stage_min_pf.get("base", 1.05)),
+            "mainMinPf": float(self.stage_min_pf.get("main", 1.10)),
+            "realMinPf": float(self.stage_min_pf.get("real", 1.15)),
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
@@ -220,9 +236,9 @@ class Coordinator:
         intern_ok = intern_n >= max(3, int(self.prev_min_count or 5)) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
-        base_floor = float(self.stage_min_pf.get("base", 1.25))
-        main_floor = float(self.stage_min_pf.get("main", 1.25))
-        real_floor = float(self.stage_min_pf.get("real", 1.25))
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.10))
+        real_floor = float(self.stage_min_pf.get("real", 1.15))
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
             if last_cost["ratio"] + 1e-9 < base_floor:
@@ -256,6 +272,126 @@ class Coordinator:
         self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
         return allow, reasons, metrics
 
+    def record_coordination(self, axis: str, outcome: str, direction: str = "", event_key: str = "") -> bool:
+        """Count one coordination outcome once per stable child/event key."""
+        axis_name = str(axis or "").strip().lower()
+        if axis_name not in self.coordination:
+            return False
+        key = event_key or stable_key(axis_name, outcome, direction)
+        if key in self._axis_seen:
+            return False
+        self._axis_seen.add(key)
+        if len(self._axis_seen) > 4096:
+            self._axis_seen = set(list(self._axis_seen)[-2048:])
+        bucket = self.coordination[axis_name]
+        name = str(outcome or "").strip().lower()
+        if name in bucket:
+            bucket[name] += 1
+        if str(direction or "").upper() in ("LONG", "SHORT"):
+            bucket[str(direction).upper().lower()] += 1
+        return True
+
+    def axis_variants(
+        self,
+        parent_set_id: str,
+        closed_rows: Sequence[Any],
+        open_rows: Optional[Sequence[Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build deterministic count-pos children without counting a parent twice.
+
+        Prev/Last/Cont/Pause are evaluated from closed rows only. Open rows are
+        accepted separately so callers cannot accidentally leak an active
+        position into the Prev tape. Every child keeps the Base parent ID and a
+        stable dedupe key; 100 relative positions equals one parent volume.
+        """
+        closed = [r for r in closed_rows if r is not None]
+        _ = list(open_rows or ())  # explicit boundary: never mixed into closed
+        out: List[Dict[str, Any]] = []
+        for axis, spec in AXIS_SPECS.items():
+            cfg = self.axes[axis]
+            if not cfg.enabled:
+                continue
+            start = int(spec["min"])
+            stop = min(int(cfg.max_window), int(spec["max"]))
+            step = int(spec["step"])
+            for count in range(start, stop + 1, step):
+                if axis == "prev":
+                    # Previous means the closed window immediately before the
+                    # current closed window. Open positions never enter either
+                    # window, even when a caller supplies open_rows.
+                    tape = closed[-(count * 2) : -count] if len(closed) >= count * 2 else []
+                else:
+                    tape = closed[-count:]
+                pf = last_n_cost_pf(tape, count, self.position_cost_pct)
+                losses = [float((r.get("pnl") if isinstance(r, dict) else getattr(r, "pnl", 0)) or 0) for r in tape]
+                paused = axis == "pause" and consec_loss(losses) >= count
+                qualifies = (
+                    len(tape) >= min(3, count)
+                    and not paused
+                    and float(pf.get("ratio") or 0.0) + 1e-9 >= float(self.stage_min_pf.get("base", 1.05))
+                )
+                child_key = stable_key(parent_set_id, axis, count, len(tape), round(float(pf.get("ratio") or 0.0), 6))
+                self.record_coordination(axis, "evaluated", event_key=child_key + ":evaluated")
+                if paused:
+                    self.record_coordination(axis, "paused", event_key=child_key + ":paused")
+                elif qualifies:
+                    self.record_coordination(axis, "qualified", event_key=child_key + ":qualified")
+                else:
+                    self.record_coordination(axis, "blocked", event_key=child_key + ":blocked")
+                out.append({
+                    "axisKey": f"{axis}:{count}",
+                    "axis": axis,
+                    "parentSetId": str(parent_set_id),
+                    "relativeCount": count,
+                    "volumeRatio": round(count * VOLUME_RATIO_UNIT, 6),
+                    "volumeRatioUnit": VOLUME_RATIO_UNIT,
+                    "closedOnly": True,
+                    "openExcluded": True,
+                    "closedN": len(tape),
+                    "pf": round(float(pf.get("ratio") or 1.0), 6),
+                    "paused": paused,
+                    "qualified": qualifies,
+                    "qualificationReason": "qualified" if qualifies else (
+                        "paused" if paused else f"closed={len(tape)} pf={float(pf.get('ratio') or 0.0):.2f}"
+                    ),
+                    "dedupeKey": child_key,
+                })
+        return out
+
+    @staticmethod
+    def aggregate_axis_variants(variants: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate relative children once per parent while retaining details."""
+        rows = [v for v in variants if isinstance(v, dict)]
+        parents = sorted({str(v.get("parentSetId") or "") for v in rows if v.get("parentSetId")})
+        by_parent: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            parent = str(row.get("parentSetId") or "")
+            if parent:
+                by_parent.setdefault(parent, []).append(row)
+        parent_rows = []
+        for parent in sorted(by_parent):
+            children = by_parent[parent]
+            qualified = [row for row in children if row.get("qualified")]
+            parent_rows.append({
+                "parentSetId": parent,
+                "childCount": len(children),
+                "qualifiedChildren": len(qualified),
+                "childVolumeRatio": round(sum(float(row.get("volumeRatio") or 0) for row in qualified), 6),
+                "countedVolumeRatio": VOLUME_RATIO_UNIT if qualified else 0.0,
+            })
+        return {
+            "parentCount": len(parents),
+            "parentSetIds": parents,
+            "childCount": len(rows),
+            "volumeRatio": round(sum(float(row.get("countedVolumeRatio") or 0) for row in parent_rows), 6),
+            "childVolumeRatio": round(sum(float(row.get("childVolumeRatio") or 0) for row in parent_rows), 6),
+            "volumeRatioUnit": VOLUME_RATIO_UNIT,
+            "qualifiedChildren": sum(1 for v in rows if v.get("qualified")),
+            "axes": {a: sum(1 for v in rows if v.get("axis") == a) for a in AXIS_SPECS},
+            "parents": parent_rows,
+            "rows": rows,
+        }
+
     def size_mult(self, open_n: int) -> float:
         """Count-pos volume: each extra open trims new-entry size by posCountsVolumeRatio."""
         ratio = max(0.0, min(0.3, float(self.pos_count_vol_ratio or 0)))
@@ -271,7 +407,7 @@ class Coordinator:
             pf = float(last_pf or 0)
         except Exception:
             pf = 0.0
-        if pf + 1e-9 >= float(self.min_pf or 1.25):
+        if pf + 1e-9 >= float(self.min_pf or 1.15):
             return stack
         return max(1, stack // 2)
 
@@ -300,7 +436,7 @@ class Coordinator:
                 gp = sum(x for x in tail if x > 0)
                 gl = abs(sum(x for x in tail if x < 0))
                 pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
-                floor = float(self.stage_min_pf.get("base", 1.25))
+                floor = float(self.stage_min_pf.get("base", 1.05))
                 metrics["countPf"] = round(pf, 4)
                 if pf + 1e-9 < floor:
                     allow = False
@@ -390,5 +526,10 @@ class Coordinator:
             "mainEval": self.main_eval,
             "realEval": self.real_eval,
             "stages": (self.last or {}).get("stages") or {},
+            "coordination": {
+                "axes": {axis: dict(self.coordination.get(axis) or {}) for axis in AXES},
+                "eventCount": len(self._axis_seen),
+                "volumeRatioUnit": VOLUME_RATIO_UNIT,
+            },
             "gate": self.last,
         }

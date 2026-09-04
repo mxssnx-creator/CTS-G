@@ -8,6 +8,7 @@ is unreachable (sandbox / tests).
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import subprocess
@@ -17,7 +18,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import SL_TP_RATIOS, SL_TP_MIN, SL_TP_MAX, SL_TP_STEP, last_n_cost_pf, row_net_pnl, filter_side
@@ -53,6 +54,12 @@ HOURS_MAX = 120
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
+KLINE_PAGE_MAX = 1440
+REPLAY_SET_CHUNK = 96
+_PUBLIC_REQUEST_INTERVAL_S = 1.05
+_PUBLIC_REQUEST_LOCK = threading.Lock()
+_PUBLIC_REQUEST_LAST = 0.0
 
 # Coordinated low-DD books. Block ON, DCA OFF, SL 0.3 or 0.6, tight DD.
 _SHARED = {
@@ -514,20 +521,99 @@ def parse_klines(data: Any) -> List[List[float]]:
     return [x for x in bars if x[0] > 0 and x[3] > 0 and x[1] > 0 and x[2] > 0]
 
 
-def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 8.0) -> List[List[float]]:
-    limit = max(60, min(LOOKBACK_MAX, int(limit)))
-    qs = urllib.parse.urlencode({"symbol": symbol, "interval": "1m", "limit": str(limit)})
-    for base in (KLINE_URL, KLINE_URL_V3):
+def _public_json(url: str, timeout: float = 12.0) -> Any:
+    """Globally pace public BingX calls; the documented quote limit is 1/s/IP."""
+    global _PUBLIC_REQUEST_LAST
+    with _PUBLIC_REQUEST_LOCK:
+        wait_s = _PUBLIC_REQUEST_INTERVAL_S - (time.monotonic() - _PUBLIC_REQUEST_LAST)
+        if wait_s > 0:
+            time.sleep(wait_s)
+        req = urllib.request.Request(url, headers={"User-Agent": "cts-g-hist-calc/1.0"})
         try:
-            req = urllib.request.Request(f"{base}?{qs}", headers={"User-Agent": "cts-g-hist-calc/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = json.loads(resp.read().decode() or "{}")
-            bars = parse_klines(body.get("data") if isinstance(body, dict) else body)
-            if len(bars) >= 60:
-                return bars[-limit:]
-        except Exception:
+                return json.loads(resp.read().decode() or "{}")
+        finally:
+            _PUBLIC_REQUEST_LAST = time.monotonic()
+
+
+def _timed_klines(data: Any) -> List[Tuple[int, List[float]]]:
+    rows: List[Tuple[int, List[float]]] = []
+    if not isinstance(data, list):
+        return rows
+    for i, raw in enumerate(data):
+        parsed = parse_klines([raw])
+        if not parsed:
             continue
-    return []
+        ts = 0
+        try:
+            if isinstance(raw, dict):
+                ts = int(raw.get("time") or raw.get("timestamp") or raw.get("t") or 0)
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 6:
+                ts = int(raw[0])
+        except Exception:
+            ts = 0
+        rows.append((ts or i + 1, parsed[0]))
+    return rows
+
+
+def fetch_klines(symbol: str, limit: int = 1200, timeout: float = 12.0) -> List[List[float]]:
+    """Fetch the full requested 1m window using BingX's 1,440-candle pages."""
+    limit = max(60, min(LOOKBACK_MAX, int(limit)))
+    end_ms = int(time.time() // 60 * 60 * 1000)
+    start_ms = end_ms - limit * 60_000
+    pages: Dict[int, List[float]] = {}
+    cursor = start_ms
+    while cursor < end_ms and len(pages) < limit:
+        page_end = min(end_ms, cursor + KLINE_PAGE_MAX * 60_000)
+        page_limit = min(KLINE_PAGE_MAX, max(1, (page_end - cursor) // 60_000))
+        params = {
+            "symbol": symbol,
+            "interval": "1m",
+            "startTime": str(cursor),
+            "endTime": str(page_end),
+            "limit": str(page_limit),
+        }
+        got: List[Tuple[int, List[float]]] = []
+        for base in (KLINE_URL_V3, KLINE_URL):
+            try:
+                body = _public_json(f"{base}?{urllib.parse.urlencode(params)}", timeout=timeout)
+                got = _timed_klines(body.get("data") if isinstance(body, dict) else body)
+                if got:
+                    break
+            except Exception:
+                continue
+        if not got:
+            break
+        for ts, bar in got:
+            pages[ts] = bar
+        cursor = page_end
+    return [bar for _ts, bar in sorted(pages.items())][-limit:]
+
+
+def fetch_exchange_universe() -> List[str]:
+    """Return every currently open USDT perpetual exposed by BingX."""
+    try:
+        body = _public_json(CONTRACTS_URL, timeout=20.0)
+        rows = body.get("data") if isinstance(body, dict) else []
+    except Exception:
+        rows = []
+    now_ms = int(time.time() * 1000)
+    names: List[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol.endswith("-USDT"):
+            continue
+        status = str(row.get("status") or "").lower()
+        open_state = str(row.get("apiStateOpen") or "").lower()
+        launch_ms = int(row.get("launchTime") or 0)
+        if status in ("0", "offline", "close", "closed", "delisted"):
+            continue
+        if open_state == "false" or (launch_ms and launch_ms > now_ms):
+            continue
+        names.append(symbol)
+    return list(dict.fromkeys(names))
 
 
 def load_universe() -> List[str]:
@@ -586,17 +672,14 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
                 names.append(t)
     if wild or not names:
         uni = load_universe()
-        names = uni or list(DEFAULT_SYMBOLS)
+        names = uni or fetch_exchange_universe() or list(DEFAULT_SYMBOLS)
     seen = set()
     out: List[str] = []
-    cap = 24 if wild else 12
     for s in names:
         if s in seen:
             continue
         seen.add(s)
         out.append(s)
-        if len(out) >= cap:
-            break
     return out or list(DEFAULT_SYMBOLS)
 
 
@@ -1069,6 +1152,51 @@ def pipeline_symbols(
     return "live"
 
 
+_HIST_WORKER_OVERLAY: Optional[Dict[str, Any]] = None
+
+
+def _init_replay_worker(overlay: Dict[str, Any]) -> None:
+    global _HIST_WORKER_OVERLAY
+    _HIST_WORKER_OVERLAY = overlay
+
+
+def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
+    str, int, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, int]
+]:
+    """Replay one symbol in a separate process so CPU-heavy configs run in parallel."""
+    sym, bars, now = payload
+    book = SetBook()
+    book.load(dict(_HIST_WORKER_OVERLAY or {}))
+    book.ingest_bars(sym, bars)
+    prepared = book.prepare_replay_signals(sym, now)
+    set_ids = [st.id for st in book.by_idx]
+    chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
+    strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
+    nbar = len(bars)
+    for chunk_i, chunk_ids in enumerate(chunks):
+        local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
+        local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
+        book.replay_symbol_partial(
+            sym,
+            local_hist,
+            now=now,
+            ind_hist=local_ind,
+            drop_bars=chunk_i == len(chunks) - 1,
+            strat_hist=strat_hist if chunk_i == 0 else None,
+            set_ids=chunk_ids,
+            prepared=prepared,
+        )
+        book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+    return (
+        sym,
+        nbar,
+        {st.id: list(st.hist) for st in book.by_idx if st.hist},
+        {k: list(v) for k, v in book.ind_hist.items()},
+        strat_hist,
+        {st.id: int(st.n or 0) for st in book.by_idx},
+    )
+
+
 def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:
     requested = max(0, int(requested))
     completed = max(0, min(requested, int(completed)))
@@ -1138,6 +1266,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 pass
 
     prog("fetch", 2.0, f"async {len(symbols)} × {lookback} 1m")
+    replay_pool: Optional[ProcessPoolExecutor] = None
     try:
         ov = overlay_from_options(opt, extra)
         book = SetBook()
@@ -1158,10 +1287,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["async"] = True
         from set_engine import HIST_CAP as _HC
         hist_cap = max(24, min(48, int(_HC or 48)))
-        symbol_tapes: Dict[str, List[Dict[str, Any]]] = {}
         requested_sets = len(book.by_idx) * len(symbols)
 
         def _trim_maps() -> None:
+
             for k, v in list(hist.items()):
                 if len(v) > hist_cap:
                     hist[k] = v[-hist_cap:]
@@ -1171,9 +1300,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             for k, v in list(strat_hist.items()):
                 if len(v) > 400:
                     strat_hist[k] = v[-240:]
-            for k, v in list(symbol_tapes.items()):
-                if len(v) > hist_cap:
-                    symbol_tapes[k] = v[-hist_cap:]
 
         def update_coverage(done: int, bars_done: int, fills: int, source: str) -> None:
             job["coverage"] = {
@@ -1225,29 +1351,72 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 except Exception:
                     pass
 
-        def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
-            # Keep only one symbol's replay evidence in memory. Commit that
-            # slice atomically before advancing coverage; a restart therefore
-            # replays the same symbol instead of skipping a progression unit.
-            book.ingest_bars(sym, bars)
-            local_hist: Dict[str, List[Dict[str, Any]]] = {}
-            local_ind: Dict[str, List[Dict[str, Any]]] = {}
-            nbar = book.replay_symbol_partial(
-                sym, local_hist, now=now, ind_hist=local_ind, drop_bars=True, strat_hist=strat_hist
+        replay_pending: List[Tuple[Any, str, str]] = []
+        replay_done = 0
+
+        def commit_replay(result: Tuple[Any, ...], src: str, total: int) -> None:
+            nonlocal replay_done
+            sym, nbar, local_hist, local_ind, local_strat, local_counts = result
+            book._commit_hist(
+                local_hist,
+                local_ind,
+                merge=True,
+                replayed_symbols=[sym],
+                hist_counts=local_counts,
             )
-            book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
-            symbol_tapes.setdefault(sym, []).extend(
-                row for rows in local_hist.values() for row in rows if isinstance(row, dict)
-            )
-            job["_barsDone"] = int(job.get("_barsDone") or 0) + nbar
+            for key, rows in local_strat.items():
+                strat_hist.setdefault(key, []).extend(rows)
+            job["_barsDone"] = int(job.get("_barsDone") or 0) + int(nbar)
+            replay_done += 1
             job["checkpoint"]["symbol"] = sym
             job["source"] = src
             _trim_maps()
-            heavy = done == total or done % 8 == 0
-            if persist or heavy or done % 4 == 0:
-                snapshot(done, total, "replay", heavy=heavy)
+            heavy = replay_done == total or replay_done % 8 == 0
+            if persist or heavy or replay_done % 4 == 0:
+                snapshot(replay_done, total, "replay", heavy=heavy)
 
+        def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
+            # Fetching is I/O-bound, while replay is CPU-bound. Use separate
+            # processes for replay so requested workers actually use all cores.
+            if replay_pool is not None:
+                replay_pending.append((replay_pool.submit(_replay_symbol_worker, (sym, bars, now)), sym, src))
+                if len(replay_pending) < workers:
+                    return
+                future, _queued_sym, queued_src = replay_pending.pop(0)
+                commit_replay(future.result(), queued_src, total)
+                return
+
+            book.ingest_bars(sym, bars)
+            prepared = book.prepare_replay_signals(sym, now)
+            set_ids = [st.id for st in book.by_idx]
+            chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
+            nbar = 0
+            for chunk_i, chunk_ids in enumerate(chunks):
+                local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
+                local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
+                chunk_nbar = book.replay_symbol_partial(
+                    sym, local_hist, now=now, ind_hist=local_ind,
+                    drop_bars=chunk_i == len(chunks) - 1,
+                    strat_hist=strat_hist if chunk_i == 0 else None,
+                    set_ids=chunk_ids, prepared=prepared,
+                )
+                nbar = max(nbar, chunk_nbar)
+                book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+            commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}), src, total)
+
+        if workers > 1:
+            replay_pool = ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_replay_worker,
+                initargs=(ov,),
+            )
         source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
+        while replay_pending:
+            future, _queued_sym, queued_src = replay_pending.pop(0)
+            commit_replay(future.result(), queued_src, len(symbols))
+        if replay_pool is not None:
+            replay_pool.shutdown(wait=True, cancel_futures=True)
+            replay_pool = None
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")
@@ -1332,6 +1501,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 pass
         return job
     finally:
+        if replay_pool is not None:
+            replay_pool.shutdown(wait=False, cancel_futures=True)
         _set_running(False)
         if persist:
             _clear_pid()
@@ -1578,6 +1749,40 @@ def self_test() -> List[Tuple[str, bool, str]]:
     return out
 
 
+def cli_options(args: Sequence[str]) -> Dict[str, Any]:
+    """Translate direct CLI flags into the same request schema used by the UI."""
+    body: Dict[str, Any] = {}
+    value_flags = {"--hours": "hours", "--workers": "workers", "--min-step": "minStep", "--step-max": "stepMax"}
+    for flag, key in value_flags.items():
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 < len(args):
+                raw = args[i + 1]
+                try:
+                    body[key] = float(raw) if key == "hours" else int(raw)
+                except ValueError:
+                    pass
+    bool_flags = {
+        "--all-symbols": "allSymbols",
+        "--all-configs": "allConfigs",
+        "--all-steps": "allSteps",
+        "--trailing": "trailing",
+        "--block": "stratBlock",
+        "--general": "stratGeneral",
+        "--indications": "stratIndications",
+    }
+    for flag, key in bool_flags.items():
+        if flag in args:
+            body[key] = True
+    if "--indication-types" in args:
+        i = args.index("--indication-types")
+        if i + 1 < len(args):
+            kinds = {x.strip().lower() for x in args[i + 1].split(",") if x.strip()}
+            for kind in IND_KINDS:
+                body[f"indType{kind.title()}"] = kind in kinds
+    return body
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--self-test" in args or "--test" in args:
@@ -1592,7 +1797,7 @@ if __name__ == "__main__":
     if "--status" in args:
         print(json.dumps(read_job()))
         raise SystemExit(0)
-    body: Dict[str, Any] = {}
+    body: Dict[str, Any] = cli_options(args)
     if "--req" in args:
         i = args.index("--req")
         path = args[i + 1] if i + 1 < len(args) else req_path()

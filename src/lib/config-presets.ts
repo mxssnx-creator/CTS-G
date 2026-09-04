@@ -27,6 +27,7 @@ const SHARED: Partial<PulseOverlay> = {
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaMaxSteps: 4,
   controlOrders: true,
+  controlOrdersPerConfig: true,
   histEnabled: true,
   setUseHistoricGate: true,
   setStrictGate: true,

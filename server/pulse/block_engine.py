@@ -119,6 +119,7 @@ class BlockLane:
     satisfied: Dict[int, bool] = field(default_factory=dict)
     held_factor: Dict[int, float] = field(default_factory=dict)
     active: bool = True
+    group_key: str = ""
 
 
 class BlockBook:
@@ -149,8 +150,10 @@ class BlockBook:
         self.overall_tape: List[float] = []
         self.load()
 
-    def key(self, symbol: str, side: str) -> str:
-        return f"{symbol}:{side}"
+    def key(self, symbol: str, side: str, group_key: str = "") -> str:
+        """Return a stable lane key, optionally scoped to one logical range group."""
+        base = f"{symbol}:{side}"
+        return f"{base}:group:{group_key}" if group_key else base
 
     def load(self) -> None:
         if not os.path.exists(self.path):
@@ -193,6 +196,7 @@ class BlockBook:
                 satisfied={int(a): bool(b) for a, b in (v.get("satisfied") or {}).items()},
                 held_factor={int(a): float(b) for a, b in (v.get("held_factor") or {}).items()},
                 active=bool(v.get("active", True)),
+                group_key=str(v.get("group_key") or v.get("groupKey") or ""),
             )
             self.lanes[k] = lane
         for n, tape in (raw.get("countTape") or {}).items():
@@ -233,6 +237,7 @@ class BlockBook:
                 "satisfied": {str(a): b for a, b in lane.satisfied.items()},
                 "held_factor": {str(a): b for a, b in (lane.held_factor or {}).items()},
                 "active": lane.active,
+                "group_key": lane.group_key,
             }
         blob["countTape"] = {str(n): list(v)[-self.window :] for n, v in (self.count_tape or {}).items()}
         blob["overallTape"] = list(self.overall_tape or [])[-self.window :]
@@ -241,8 +246,8 @@ class BlockBook:
             json.dump(blob, f)
         os.replace(tmp, self.path)
 
-    def register_parent(self, symbol: str, side: str, qty: float, entry: float) -> BlockLane:
-        k = self.key(symbol, side)
+    def register_parent(self, symbol: str, side: str, qty: float, entry: float, group_key: str = "") -> BlockLane:
+        k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if lane and lane.base_qty > 0:
             lane.active = True
@@ -257,9 +262,40 @@ class BlockBook:
             lane.active = True
             self.save()
             return lane
-        lane = BlockLane(symbol=symbol, side=side, base_qty=qty, base_entry=entry, active=True)
+        lane = BlockLane(symbol=symbol, side=side, base_qty=qty, base_entry=entry, active=True, group_key=str(group_key or ""))
         self.lanes[k] = lane
         self.save()
+        return lane
+
+    def merge_parent(
+        self,
+        symbol: str,
+        side: str,
+        added_qty: float,
+        entry: float,
+        group_key: str = "",
+    ) -> BlockLane:
+        """Increase only a range group's parent after another entry fill.
+
+        ``base_qty`` is the anchor for Block sizing. It must grow when two
+        entries merge into one logical range group, but confirmed Block adds
+        remain untouched because they are already recorded separately.
+        """
+        add = max(0.0, float(added_qty or 0.0))
+        key = self.key(symbol, side, group_key)
+        lane = self.lanes.get(key)
+        if lane is None:
+            return self.register_parent(symbol, side, add, entry, group_key=group_key)
+        if add <= 0:
+            return lane
+        old_qty = max(0.0, float(lane.base_qty or 0.0))
+        total = old_qty + add
+        if total > 0:
+            if entry > 0:
+                lane.base_entry = ((lane.base_entry * old_qty) + float(entry) * add) / total
+            lane.base_qty = total
+            lane.active = True
+            self.save()
         return lane
 
     def last_n_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
@@ -560,8 +596,8 @@ class BlockBook:
         lane.pause_remaining[n] = max(int(lane.pause_remaining.get(n, 0)), max(1, self.pause_ratio))
         self.save()
 
-    def on_parent_close(self, symbol: str, side: str, pnl: float, pnl_pct: Optional[float] = None) -> None:
-        k = self.key(symbol, side)
+    def on_parent_close(self, symbol: str, side: str, pnl: float, pnl_pct: Optional[float] = None, group_key: str = "") -> None:
+        k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if not lane:
             return
@@ -603,6 +639,7 @@ class BlockBook:
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
+                "groupKey": lane.group_key,
                 "baseQty": lane.base_qty,
                 "confirmedAdd": round(lane.confirmed_add, 8),
                 "aggregate": round(lane.base_qty + lane.confirmed_add, 8),

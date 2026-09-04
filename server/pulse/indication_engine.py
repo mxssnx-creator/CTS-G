@@ -12,6 +12,8 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from contracts import INDICATION_KINDS
+
 try:
     import httpx
 except Exception:
@@ -1034,16 +1036,48 @@ class IndicationBook:
         self.evals: Dict[str, List[SignalEval]] = {}
         self.cycle = 0
         self.extra_cursor = 0
+        self.counters: Dict[str, Dict[str, Any]] = {
+            kind: {
+                "kind": kind,
+                "evaluated": 0,
+                "qualified": 0,
+                "entered": 0,
+                "exited": 0,
+                "blocked": 0,
+                "rejected": 0,
+                "hits": 0,
+                "noSignal": 0,
+                "symbols": 0,
+                "long": 0,
+                "short": 0,
+                "confTotal": 0.0,
+                "strengthTotal": 0.0,
+                "slTotal": 0.0,
+            }
+            for kind in INDICATION_KINDS
+        }
+        self.lane_results: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def keep(self, symbols: Sequence[str]) -> int:
         want = set(symbols)
         n = 0
-        for store in (self.last, self.evals):
+        for store in (self.last, self.evals, self.lane_results):
             for k in list(store):
                 if k not in want:
                     store.pop(k, None)
                     n += 1
         return n
+
+    def record_outcome(self, kind: str, outcome: str, amount: int = 1) -> None:
+        """Record entry/exit/block/reject outcomes without changing lane identity."""
+        key = str(kind or "").strip().lower()
+        if key not in self.counters:
+            return
+        name = str(outcome or "").strip()
+        bucket = self.counters[key]
+        if name in bucket and isinstance(bucket.get(name), int):
+            bucket[name] += max(0, int(amount or 0))
+
 
     def load(self, overlay: Dict[str, Any]) -> None:
         s = self.settings
@@ -1305,7 +1339,46 @@ class IndicationBook:
             indications = [i for i in indications if i.kind != "trend"]
         if not self.settings.get("typeBreak", True):
             indications = [i for i in indications if i.kind != "break"]
+        lane_result: Dict[str, Dict[str, Any]] = {}
+        for kind in INDICATION_KINDS:
+            bucket = self.counters[kind]
+            enabled = bool(self.settings.get(f"type{kind.title()}", True))
+            # Signals is the only plural setting key.
+            if kind == "signals":
+                enabled = bool(self.settings.get("typeSignals", True))
+            rows_kind = [item for item in indications if item.kind == kind]
+            bucket["evaluated"] += 1 if enabled else 0
+            bucket["symbols"] += 1 if enabled else 0
+            if rows_kind:
+                bucket["qualified"] += len(rows_kind)
+                bucket["hits"] += len(rows_kind)
+                bucket["long"] += sum(1 for item in rows_kind if item.direction == "long")
+                bucket["short"] += sum(1 for item in rows_kind if item.direction == "short")
+                bucket["confTotal"] += sum(float(item.confidence or 0.0) for item in rows_kind)
+                bucket["strengthTotal"] += sum(float(item.strength or 0.0) for item in rows_kind)
+                bucket["slTotal"] += sum(float(item.stop_loss_pct or 0.0) for item in rows_kind)
+                best = max(rows_kind, key=lambda item: (item.confidence, item.strength))
+                lane_result[kind] = {
+                    "status": "qualified",
+                    "direction": best.direction,
+                    "confidence": round(float(best.confidence or 0.0), 4),
+                    "strength": round(float(best.strength or 0.0), 4),
+                    "sampleCount": len(rows_kind),
+                }
+            elif enabled:
+                bucket["noSignal"] += 1
+                lane_result[kind] = {
+                    "status": "no-signal",
+                    "direction": "",
+                    "confidence": 0.0,
+                    "strength": 0.0,
+                    "sampleCount": 0,
+                }
+            else:
+                lane_result[kind] = {"status": "disabled", "direction": "", "confidence": 0.0, "strength": 0.0, "sampleCount": 0}
+        self.lane_results[symbol] = lane_result
         self.last[symbol] = indications
+        self.cycle += 1
         return indications
 
     def primary(self, symbol: str) -> Optional[Indication]:
@@ -1359,6 +1432,32 @@ class IndicationBook:
                 out[i.kind] = i
         return out
 
+    def pick_entries(
+        self,
+        symbol: str,
+        min_conf: float = 0.52,
+        allow: Optional[Any] = None,
+    ) -> List[Tuple["Indication", float, int]]:
+        """Return every eligible kind lane without a consensus requirement."""
+        by = self.kinds_for(symbol)
+        out: List[Tuple["Indication", float, int]] = []
+        for kind, indication in by.items():
+            if callable(allow):
+                try:
+                    if not bool(allow(kind, indication.direction)):
+                        continue
+                except TypeError:
+                    if not bool(allow(kind)):
+                        continue
+                except Exception:
+                    pass
+            confidence = float(indication.confidence or 0.0)
+            if confidence < min_conf:
+                continue
+            out.append((indication, confidence, 1))
+        out.sort(key=lambda item: (item[1], item[0].strength, item[0].kind), reverse=True)
+        return out
+
     def pick_entry(
         self,
         symbol: str,
@@ -1407,7 +1506,6 @@ class IndicationBook:
 
     def kind_stats(self) -> Dict[str, Any]:
         """Live scan evidence for every independent indication type."""
-        order = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
         flags = {
             "state": "typeState",
             "signals": "typeSignals",
@@ -1419,44 +1517,36 @@ class IndicationBook:
             "break": "typeBreak",
         }
         out: Dict[str, Any] = {}
-        for k in order:
-            out[k] = {
-                "kind": k,
-                "enabled": bool(self.settings.get(flags[k], True)),
-                "hits": 0,
-                "symbols": 0,
-                "long": 0,
-                "short": 0,
-                "avgConf": 0.0,
-                "avgStrength": 0.0,
-                "avgSl": 0.0,
+        for kind in INDICATION_KINDS:
+            source = self.counters.get(kind) or {}
+            evaluated = int(source.get("evaluated") or 0)
+            qualified = int(source.get("qualified") or 0)
+            out[kind] = {
+                "kind": kind,
+                "enabled": bool(self.settings.get(flags[kind], True)),
+                "hits": int(source.get("hits") or 0),
+                "evaluated": evaluated,
+                "qualified": qualified,
+                "entered": int(source.get("entered") or 0),
+                "exited": int(source.get("exited") or 0),
+                "blocked": int(source.get("blocked") or 0),
+                "rejected": int(source.get("rejected") or 0),
+                "noSignal": int(source.get("noSignal") or 0),
+                "symbols": int(source.get("symbols") or 0),
+                "long": int(source.get("long") or 0),
+                "short": int(source.get("short") or 0),
+                "avgConf": round(float(source.get("confTotal") or 0.0) / max(1, qualified), 3),
+                "avgStrength": round(float(source.get("strengthTotal") or 0.0) / max(1, qualified), 3),
+                "avgSl": round(float(source.get("slTotal") or 0.0) / max(1, qualified), 3),
+                "sampleCount": qualified,
+                "insufficientSample": qualified < 8,
+                "status": "no-signal" if (bool(self.settings.get(flags[kind], True)) and not qualified) else ("building" if qualified < 8 else "ready"),
                 "processed": True,
             }
-        seen: Dict[str, set] = {k: set() for k in order}
-        confs: Dict[str, List[float]] = {k: [] for k in order}
-        strs: Dict[str, List[float]] = {k: [] for k in order}
-        sls: Dict[str, List[float]] = {k: [] for k in order}
-        for s, rows in self.last.items():
-            for i in rows:
-                k = str(getattr(i, "kind", "") or "")
-                if k not in out:
-                    continue
-                out[k]["hits"] += 1
-                seen[k].add(s)
-                if i.direction == "long":
-                    out[k]["long"] += 1
-                elif i.direction == "short":
-                    out[k]["short"] += 1
-                confs[k].append(float(i.confidence or 0))
-                strs[k].append(float(i.strength or 0))
-                sls[k].append(float(i.stop_loss_pct or 0))
-        for k in order:
-            out[k]["symbols"] = len(seen[k])
-            if confs[k]:
-                n = len(confs[k])
-                out[k]["avgConf"] = round(sum(confs[k]) / n, 3)
-                out[k]["avgStrength"] = round(sum(strs[k]) / n, 3)
-                out[k]["avgSl"] = round(sum(sls[k]) / n, 3)
+        # Keep current per-symbol lane status visible even when the lane is quiet.
+        for kind in INDICATION_KINDS:
+            current = [row.get(kind) for row in self.lane_results.values() if isinstance(row, dict) and isinstance(row.get(kind), dict)]
+            out[kind]["currentNoSignal"] = sum(1 for row in current if row.get("status") == "no-signal")
         return out
 
     def snapshot(self) -> Dict[str, Any]:
@@ -1468,7 +1558,11 @@ class IndicationBook:
                 primaries.append(rec)
         primaries.sort(key=lambda r: r["confidence"], reverse=True)
         kinds = self.kind_stats()
-        types = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
+        # `types` is the configuration contract consumed by the UI and QA;
+        # hit counts belong in the separate `typeHits` field. A quiet kind
+        # must not look disabled merely because it has no current hit.
+        types = {k: bool(v.get("enabled")) for k, v in kinds.items()}
+        type_hits = {k: int(v.get("hits") or 0) for k, v in kinds.items()}
         keys = sorted(self.last.keys())
         eval_items = list(self.evals.items())
         last_items = list(self.last.items())
@@ -1498,7 +1592,7 @@ class IndicationBook:
                 "trend": bool(self.settings.get("typeTrend", True)),
                 "break": bool(self.settings.get("typeBreak", True)),
             },
-            "typeHits": types,
+            "typeHits": type_hits,
             "kindStats": kinds,
             "minSources": self.settings.get("minimumSourceSignals"),
             "minAgreement": self.settings.get("minimumAgreement"),

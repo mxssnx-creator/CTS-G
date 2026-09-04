@@ -7,6 +7,10 @@ import {
   fetchCtsBundle,
   loadLocalOverlay,
   num,
+  normalizePf,
+  PF_MAX,
+  PF_MIN,
+  PF_STEP,
   overlayFromCts,
   saveOverlay,
   slTpGrid,
@@ -970,13 +974,35 @@ function SettingsPage() {
                   onChange={(v) => patch("positionCostPct", v)}
                 />
                 <Slider
-                  label="Min PF ratio"
-                  value={overlay.minPf}
-                  min={1}
-                  max={2.3}
-                  step={0.02}
-                  hint={pfHint(overlay.minPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("minPf", v)}
+                  label="Base min PF"
+                  value={overlay.baseMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.baseMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))}
+                />
+                <Slider
+                  label="Main min PF"
+                  value={overlay.mainMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.mainMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))}
+                />
+                <Slider
+                  label="Real min PF"
+                  value={overlay.realMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
+                  onChange={(v) => {
+                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
+                    patch("realMinPf", next);
+                    patch("minPf", next);
+                  }}
                 />
                 <Slider
                   label="PF window"
@@ -1183,10 +1209,10 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1}
-                  max={2.3}
+                  min={0.8}
+                  max={2.5}
                   step={0.02}
-                  hint="Last-N cost PF. Sets above 1.15 with enough fills and DDt under the cap go live."
+                  hint="Base-stage cost PF. Shared range 0.80–2.50; qualified Sets flow to Main and Real."
                   onChange={(v) => patch("setMinPf", v)}
                 />
                 <Slider
@@ -1322,9 +1348,9 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.08" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · 1.10 = +1×PositionCost · default 1.10" onChange={(v) => patch("realMinPf", v)} />
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.10" onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.15" onChange={(v) => patch("realMinPf", v)} />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
@@ -1697,7 +1723,20 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Min PF" value={overlay.minPf} min={1} max={2.3} step={0.02} onChange={(v) => patch("minPf", v)} />
+                <Num label="Base min PF" value={overlay.baseMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))} />
+                <Num label="Main min PF" value={overlay.mainMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))} />
+                <Num
+                  label="Real min PF"
+                  value={overlay.realMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  onChange={(v) => {
+                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
+                    patch("realMinPf", next);
+                    patch("minPf", next);
+                  }}
+                />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={Math.max(3, overlay.minStep)} min={3} max={12} step={1} hint="System minimum is 3" onChange={(v) => patch("minStep", Math.max(3, Math.min(12, Math.round(v))))} />
@@ -1780,25 +1819,33 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Per-order SL+TP plus symbol+direction security range · hedge, no reduceOnly">
-              <Toggle
-                label="Place SL/TP on exchange"
-                on={overlay.controlOrders}
-                onChange={(v) => patch("controlOrders", v)}
-              />
+            <Card title="Control orders" hint="Hedge-safe TP/SL protection · quantity-matched by symbol, direction and range">
+              <div className="flex flex-col gap-2">
+                <Toggle
+                  label="Place SL/TP on exchange"
+                  on={overlay.controlOrders}
+                  onChange={(v) => patch("controlOrders", v)}
+                />
+                <Toggle
+                  label="Separate controls by symbol + direction + range"
+                  on={overlay.controlOrdersPerConfig}
+                  onChange={(v) => patch("controlOrdersPerConfig", v)}
+                />
+              </div>
               <Grid>
                 <Num label="Stop %" value={overlay.slPct} min={0.1} max={5} step={0.02} onChange={(v) => patch("slPct", v)} />
                 <Num label="Take profit %" value={overlay.tpPct} min={0.1} max={8} step={0.05} onChange={(v) => patch("tpPct", v)} />
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />
+                <KV k="Applied control mode" v={overlay.controlOrdersPerConfig ? "PER-CONFIG RANGE" : "AGGREGATE"} />
                 <KV k="Working type" v="MARK_PRICE" />
               </Grid>
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
-                After every parent fill and every Block add, protection is rebuilt for the exact
-                aggregate quantity. Trail replaces the live STOP_MARKET. Security SL/TP always exist
-                on the symbol+direction book using the widest order range.
+                {overlay.controlOrdersPerConfig
+                  ? "Each symbol + direction + normalized SL/TP range receives its own quantity-matched TP/SL pair. Identical ranges merge by quantity and weighted entry, while Set lineage stays attached."
+                  : "Controls use the legacy aggregate symbol + direction pair and widest range. Turn on per-config mode to isolate independent ranges without closePosition fallback."}
               </p>
             </Card>
           )}
@@ -2417,27 +2464,64 @@ function connHint(conn: string, stats: LiveStats | null) {
 function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const c = stats?.coverage?.controls;
   const open = stats?.open ?? [];
-  const missing = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid));
+  const groups = c?.groups ?? open.map((p) => ({
+    key: p.controlGroupKey ?? `${p.symbol}:${p.side}`,
+    symbol: p.symbol,
+    side: p.side,
+    range: p.controlRangeKey ?? "aggregate",
+    qty: p.qty,
+    memberCount: p.memberCount ?? 1,
+    protected: Boolean(p.controls),
+    status: p.controlStatus,
+    slOid: p.slOid,
+    tpOid: p.tpOid,
+    secSlOid: p.secSlOid,
+    secTpOid: p.secTpOid,
+  }));
+  const missing = groups.filter((group) => !group.protected);
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
+  const mode = c?.mode ?? (stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
-        <span className={(c?.missing ?? missing.length) ? "text-danger" : "text-primary"}>
-          live controls · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
+        <span className={missing.length ? "text-danger" : "text-primary"}>
+          live controls · {mode} · {ok}/{c?.open ?? open.length} SL+TP · {sec} security
         </span>
         <span className="text-muted">missing {c?.missing ?? missing.length}</span>
       </div>
+      <p className="mt-1 text-muted">
+        {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
+      </p>
+      {groups.length ? (
+        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+          {groups.slice(0, 12).map((group) => {
+            const slOid = group.slOid || group.secSlOid || "";
+            const tpOid = group.tpOid || group.secTpOid || "";
+            const protectedGroup = Boolean(group.protected ?? (slOid && tpOid));
+            return (
+              <div key={group.key} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-border px-2 py-1">
+                <span className="min-w-0 truncate text-muted">
+                  {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"} · q {group.qty ?? "—"}
+                </span>
+                <span className={protectedGroup ? "shrink-0 text-primary" : "shrink-0 text-danger"} title={`${slOid || "missing SL"} / ${tpOid || "missing TP"}`}>
+                  {protectedGroup ? `${String(slOid).slice(-8)}/${String(tpOid).slice(-8)}` : group.status ?? "missing"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       {missing.length ? (
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
-          {missing.slice(0, 12).map((p) => (
-            <span key={`${p.symbol}-${p.side}`}>
-              {p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"} {p.controls ? "" : "SL/TP"} {p.secSlOid && p.secTpOid ? "" : "SEC"}
+          {missing.slice(0, 12).map((group) => (
+            <span key={group.key}>
+              {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"}
             </span>
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">Every open has SL + TP and a symbol+direction security pair</p>
+        <p className="mt-2 text-muted">Every logical group has quantity-matched SL + TP protection</p>
       )}
     </div>
   );
@@ -2456,6 +2540,9 @@ function LiveApplied({
 }) {
   const p = (stats?.pulse ?? {}) as PulseOverlay & Record<string, unknown>;
   const v = stats?.variants;
+  const controls = stats?.coverage?.controls;
+  const controlMode = controls?.mode ?? (overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
+  const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
   const trail = v?.trailKey ?? `${Number(p.trailArmPct ?? overlay.trailArmPct).toFixed(1)}:${Number(p.trailGivePct ?? overlay.trailGivePct).toFixed(1)}`;
   const tf = [
@@ -2477,6 +2564,7 @@ function LiveApplied({
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
+        <span>controls {controlMode} · {controlGroups} groups</span>
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F

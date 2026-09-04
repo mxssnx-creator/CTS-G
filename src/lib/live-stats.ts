@@ -18,6 +18,17 @@ export type LiveOpen = {
   controls?: boolean;
   overall?: boolean;
   security?: boolean;
+  controlMode?: "per-config" | "aggregate" | string;
+  controlGroupKey?: string;
+  controlGroupToken?: string;
+  controlRangeKey?: string;
+  controlRangeBp?: { sl?: number; tp?: number };
+  controlStatus?: "protected" | "missing" | string;
+  memberCount?: number;
+  lineageSetIds?: string[];
+  lineageParentSetIds?: string[];
+  lineageAxisKeys?: string[];
+  lineagePacks?: string[];
   connection?: string;
   connType?: string;
   unit?: string;
@@ -26,6 +37,10 @@ export type LiveOpen = {
   slPct?: number;
   tpPct?: number;
   setId?: string;
+  parentSetId?: string;
+  axisKey?: string;
+  relativeCount?: number;
+  volumeRatio?: number;
   pack?: string;
   clientId?: string;
   ours?: boolean;
@@ -44,6 +59,10 @@ export type LiveClosed = {
   reason: string;
   hold_s: number;
   set_id?: string;
+  parent_set_id?: string;
+  axis_key?: string;
+  relative_count?: number;
+  volume_ratio?: number;
   pack?: string;
   sl_ratio?: number;
   trail_key?: string;
@@ -76,6 +95,13 @@ export type KindStat = {
   ok?: boolean;
   enabled?: boolean;
   processed?: boolean;
+  evaluated?: number;
+  qualified?: number;
+  entered?: number;
+  exited?: number;
+  blocked?: number;
+  rejected?: number;
+  noSignal?: number;
   hits?: number;
   symbols?: number;
   long?: number;
@@ -100,8 +126,85 @@ export type StrategyStat = {
   validated?: boolean;
   enabled?: boolean;
   processed?: boolean;
+  evaluated?: number;
+  qualified?: number;
+  entered?: number;
+  exited?: number;
+  blocked?: number;
+  rejected?: number;
   costSubtracted?: boolean;
   bySide?: Record<string, SideStat>;
+};
+
+export type ActivityEvent = {
+  event_id?: string;
+  event_type?: string;
+  ts?: number;
+  connection?: string;
+  status?: string;
+  symbol?: string;
+  side?: string;
+  set_id?: string;
+  parent_set_id?: string;
+  axis_key?: string;
+  indication_kind?: string;
+  strategy?: string;
+  control_group_key?: string;
+  control_range_key?: string;
+  control_mode?: string;
+  member_count?: number;
+  order_id?: string;
+  client_id?: string;
+  code?: string;
+  qty?: number;
+  price?: number;
+  pnl?: number;
+  fee?: number;
+  detail?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type ActivityCounts = {
+  evaluated?: number;
+  qualified?: number;
+  selected?: number;
+  entered?: number;
+  exited?: number;
+  blocked?: number;
+  rejected?: number;
+  paused?: number;
+  long?: number;
+  short?: number;
+};
+
+export type ActivitySummary = {
+  eventCount?: number;
+  grossPnl?: number;
+  fees?: number;
+  duplicateCount?: number;
+  byType?: Record<string, number>;
+  byStatus?: Record<string, number>;
+  responseCodes?: Record<string, number>;
+  requestCount?: number;
+  responseCount?: number;
+  fillCount?: number;
+  openEventCount?: number;
+  closeEventCount?: number;
+  protectionEventCount?: number;
+  cancellationCount?: number;
+  errorCount?: number;
+  internalOpen?: number;
+  exchangeOpen?: number;
+  internalClosed?: number;
+  parity?: "match" | "pending" | "discrepant" | string;
+  pendingCount?: number;
+  recoveredCount?: number;
+  discrepantCount?: number;
+  byIndication?: Record<string, ActivityCounts>;
+  byStrategy?: Record<string, ActivityCounts>;
+  byAxis?: Record<string, ActivityCounts>;
+  tail?: ActivityEvent[];
+  source?: string;
 };
 
 export type LiveStats = {
@@ -202,6 +305,10 @@ export type LiveStats = {
   errors: number;
   lastError: string;
   cycle: number;
+  lastEvent?: string;
+  eventN?: number;
+  activity?: ActivitySummary;
+  events?: ActivityEvent[];
   progressPct?: number;
   progressPhase?: string;
   progressDetail?: string;
@@ -284,10 +391,23 @@ export type LiveStats = {
     indicationTypes?: Record<string, boolean>;
     indicationHits?: Record<string, number>;
     indicationGate?: Record<string, KindStat>;
+    stageFlow?: {
+      stages?: Record<string, { evaluated?: number; qualified?: number; blocked?: number; rejected?: number; selected?: number; entered?: number; exited?: number; parents?: number; sampleCount?: number; confidence?: number; insufficientSample?: number; volumeRatio?: number }>;
+      stageOrder?: string[];
+      parentRule?: string;
+      requiredSamples?: number;
+      costSubtracted?: boolean;
+    };
+    evaluations?: { requiredSamples?: number; positionCostPct?: number; pairedNormalAdjusted?: boolean; costSubtracted?: boolean };
     evals?: { n?: number; symbols?: number; typeHits?: Record<string, number> };
     coord?: {
       allow?: boolean;
       stages?: Record<string, { pf?: number; n?: number; open?: boolean }>;
+      variants?: Record<string, unknown>;
+      coordination?: Record<string, ActivityCounts>;
+      volumeRatioUnit?: number;
+      closedOnlyPrev?: boolean;
+      oneOpenOrderPerSet?: boolean;
       mainEval?: number;
       realEval?: number;
       axes?: Record<string, { enabled?: boolean; maxWindow?: number }>;
@@ -330,8 +450,37 @@ export type LiveStats = {
       steps?: number[];
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
-    controls?: { open?: number; ok?: number; missing?: number; security?: number };
+    controls?: {
+      open?: number;
+      ok?: number;
+      missing?: number;
+      security?: number;
+      mode?: string;
+      groupCount?: number;
+      protectedGroups?: number;
+      mergedMembers?: number;
+      groups?: Array<{
+        key?: string;
+        symbol?: string;
+        side?: string;
+        range?: string;
+        rangeBp?: { sl?: number; tp?: number };
+        qty?: number;
+        exchangeQty?: number | null;
+        pendingQty?: number;
+        memberCount?: number;
+        protected?: boolean;
+        status?: string;
+        slOid?: string;
+        tpOid?: string;
+        secSlOid?: string;
+        secTpOid?: string;
+        lineageSetIds?: string[];
+      }>;
+    };
     recon?: { ok?: boolean; pending?: boolean; detail?: string };
+    activity?: ActivitySummary;
+    events?: ActivityEvent[];
     px?: number;
     symbols?: number;
     scan?: {
@@ -598,7 +747,19 @@ export type LiveStats = {
     };
     rows?: Array<{
       id: string;
-      pack: string;
+      pack?: string;
+      parentSetId?: string;
+      stage?: string;
+      stageQualified?: string;
+      stageLedger?: Record<string, unknown>;
+      basePf?: number;
+      mainPf?: number;
+      realPf?: number;
+      axisKey?: string;
+      relativeCount?: number;
+      volumeRatio?: number;
+      indicationKind?: string;
+      strategyAdjustments?: Record<string, unknown>;
       tf: string;
       slRatio: number;
       trailKey: string;
@@ -620,6 +781,13 @@ export type LiveStats = {
       ddEpisodes: number;
       wr?: number;
       expectancy?: number;
+      grossPf?: number;
+      netPf?: number;
+      grossEv?: number;
+      netEv?: number;
+      evaluation?: Record<string, unknown>;
+      pairedEvaluation?: { normal?: Record<string, unknown>; adjusted?: Record<string, unknown>; deltas?: Record<string, unknown> };
+      adjustmentDeltas?: Record<string, unknown>;
       avgHoldS?: number;
       classicPf?: number;
       intern?: {

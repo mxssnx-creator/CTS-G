@@ -9,6 +9,7 @@ import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { IndicationKindsPanel, StrategyStatsPanel } from "@/components/kind-strategy-stats";
+import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
@@ -86,6 +87,7 @@ function ResultsPage() {
       </section>
 
       <CoveragePanel live={stats} />
+      <ActivityPanel stats={stats} />
       <IndicationKindsPanel stats={stats} />
       <StrategyStatsPanel stats={stats} />
       <InternResults stats={stats} />

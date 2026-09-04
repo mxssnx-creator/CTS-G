@@ -63,6 +63,7 @@ class DcaStep:
     mult: float
     filled: bool = False
     qty: float = 0.0
+    requested_qty: float = 0.0
     px: float = 0.0
     t: float = 0.0
     cid: str = ""
@@ -76,6 +77,7 @@ class DcaLane:
     parent_qty: float
     avg_entry: float
     steps: List[DcaStep] = field(default_factory=list)
+    group_key: str = ""
     last_add: float = 0.0
     filled_n: int = 0
 
@@ -102,8 +104,10 @@ class DcaBook:
         self.emits = 0
         self.skips = 0
 
-    def key(self, symbol: str, side: str) -> str:
-        return f"{symbol}:{side}"
+    def key(self, symbol: str, side: str, group_key: str = "") -> str:
+        """Return an isolated DCA lane for one symbol/side/range group."""
+        base = f"{symbol}:{side}"
+        return f"{base}:group:{group_key}" if group_key else base
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
@@ -174,8 +178,8 @@ class DcaBook:
             return self.max_steps
         return max(len(self.distances), len(self.mults), 4)
 
-    def attach(self, symbol: str, side: str, qty: float, entry: float) -> DcaLane:
-        k = self.key(symbol, side)
+    def attach(self, symbol: str, side: str, qty: float, entry: float, group_key: str = "") -> DcaLane:
+        k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if lane is None:
             n = self._seed_n()
@@ -183,7 +187,15 @@ class DcaBook:
                 DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
                 for i in range(n)
             ]
-            lane = DcaLane(symbol=symbol, side=side, parent_qty=qty, avg_entry=entry, steps=steps, last_add=time.time())
+            lane = DcaLane(
+                symbol=symbol,
+                side=side,
+                parent_qty=qty,
+                avg_entry=entry,
+                steps=steps,
+                group_key=str(group_key or ""),
+                last_add=time.time(),
+            )
             self.lanes[k] = lane
         else:
             if lane.parent_qty <= 0 and qty > 0:
@@ -192,8 +204,32 @@ class DcaBook:
                 lane.last_add = time.time()
         return lane
 
-    def drop(self, symbol: str, side: str) -> None:
-        self.lanes.pop(self.key(symbol, side), None)
+    def merge_parent(
+        self,
+        symbol: str,
+        side: str,
+        added_qty: float,
+        entry: float,
+        group_key: str = "",
+    ) -> DcaLane:
+        """Increase a group's parent after a same-range entry merge."""
+        add = max(0.0, float(added_qty or 0.0))
+        key = self.key(symbol, side, group_key)
+        lane = self.lanes.get(key)
+        if lane is None:
+            return self.attach(symbol, side, add, entry, group_key=group_key)
+        if add <= 0:
+            return lane
+        old_qty = max(0.0, float(lane.parent_qty or 0.0))
+        total = old_qty + add
+        if total > 0:
+            if entry > 0:
+                lane.avg_entry = ((lane.avg_entry * old_qty) + float(entry) * add) / total
+            lane.parent_qty = total
+        return lane
+
+    def drop(self, symbol: str, side: str, group_key: str = "") -> None:
+        self.lanes.pop(self.key(symbol, side, group_key), None)
 
     def score(self) -> Dict[str, Any]:
         pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
@@ -216,7 +252,16 @@ class DcaBook:
         pc["deactReason"] = self.deact_reason
         return pc
 
-    def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def due(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        entry: float,
+        px: float,
+        now: Optional[float] = None,
+        group_key: str = "",
+    ) -> Optional[Dict[str, Any]]:
         if not self.enabled:
             return None
         self.score()
@@ -224,7 +269,7 @@ class DcaBook:
             self.skips += 1
             return None
         now = now or time.time()
-        lane = self.attach(symbol, side, qty, entry)
+        lane = self.attach(symbol, side, qty, entry, group_key=group_key)
         if self.cooldown_s > 0 and now - lane.last_add < self.cooldown_s:
             return None
         adv = adverse_pct(side, lane.avg_entry or entry, px)
@@ -243,31 +288,54 @@ class DcaBook:
                 return None
         if adv + 1e-12 < nxt.distance_pct:
             return None
-        add_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
+        target_qty = max(0.0, (lane.parent_qty or qty) * nxt.mult)
+        add_qty = max(0.0, target_qty - float(getattr(nxt, "qty", 0.0) or 0.0))
+        nxt.requested_qty = max(float(getattr(nxt, "requested_qty", 0.0) or 0.0), target_qty)
         self.last_pick = f"{symbol}#{nxt.n}"
         return {
             "n": nxt.n,
             "distancePct": nxt.distance_pct,
             "mult": nxt.mult,
             "qty": add_qty,
+            "requestedQty": target_qty,
             "adversePct": adv,
             "avgEntry": lane.avg_entry or entry,
             "lane": lane,
             "step": nxt,
         }
 
-    def record_fill(self, lane: DcaLane, step: DcaStep, qty: float, px: float, cid: str) -> None:
-        step.filled = True
-        step.qty = qty
-        step.px = px
+    def record_fill(
+        self,
+        lane: DcaLane,
+        step: DcaStep,
+        qty: float,
+        px: float,
+        cid: str,
+        requested_qty: float = 0.0,
+    ) -> None:
+        fill_qty = max(0.0, float(qty or 0.0))
+        if fill_qty <= 0:
+            return
+        was_filled = bool(step.filled)
+        existing_total = max(0.0, float(lane.parent_qty or 0.0)) + sum(
+            max(0.0, float(s.qty or 0.0)) for s in lane.steps
+        )
+        step.qty = max(0.0, float(step.qty or 0.0)) + fill_qty
+        if requested_qty > 0:
+            step.requested_qty = max(float(getattr(step, "requested_qty", 0.0) or 0.0), float(requested_qty))
+        step.filled = bool(
+            step.requested_qty <= 0
+            or step.qty + max(1e-12, step.requested_qty * 0.005) >= step.requested_qty
+        )
+        step.px = float(px or step.px or 0.0)
         step.t = time.time()
         step.cid = cid
-        prev_q = lane.parent_qty + sum(s.qty for s in lane.steps if s.filled and s is not step)
-        tot = prev_q + qty
-        if tot > 0:
-            lane.avg_entry = ((lane.avg_entry * prev_q) + px * qty) / tot
+        total = existing_total + fill_qty
+        if total > 0 and step.px > 0:
+            lane.avg_entry = ((lane.avg_entry * existing_total) + step.px * fill_qty) / total
         lane.last_add = time.time()
-        lane.filled_n += 1
+        if step.filled and not was_filled:
+            lane.filled_n += 1
         self.emits += 1
 
     def on_close(self, rec: Dict[str, Any]) -> None:
@@ -275,7 +343,8 @@ class DcaBook:
         cid = str(rec.get("client_id") or rec.get("clientId") or "")
         sym = str(rec.get("symbol") or "")
         side = str(rec.get("side") or "")
-        lane = self.lanes.get(self.key(sym, side)) if sym else None
+        group_key = str(rec.get("control_group_key") or rec.get("controlGroupKey") or "")
+        lane = self.lanes.get(self.key(sym, side, group_key)) if sym else None
         used = bool(lane and int(getattr(lane, "filled_n", 0) or 0) > 0)
         kind_d = len(cid) > 4 and cid[4:5].lower() == "d"
         if not used and "dca" not in why.lower() and not kind_d:
@@ -283,7 +352,7 @@ class DcaBook:
         self.closes.append(rec)
         if len(self.closes) > 80:
             self.closes = self.closes[-80:]
-        self.drop(sym, side)
+        self.drop(sym, side, group_key=group_key)
         self.score()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -293,6 +362,7 @@ class DcaBook:
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
+                "groupKey": lane.group_key,
                 "parentQty": lane.parent_qty,
                 "avgEntry": lane.avg_entry,
                 "filledN": lane.filled_n,
@@ -303,6 +373,8 @@ class DcaBook:
                         "mult": s.mult,
                         "filled": s.filled,
                         "qty": s.qty,
+                        "requestedQty": s.requested_qty,
+                        "remainingQty": max(0.0, s.requested_qty - s.qty) if s.requested_qty > 0 else 0.0,
                         "paused": s.paused,
                     }
                     for s in lane.steps

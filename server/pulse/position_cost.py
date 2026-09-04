@@ -8,15 +8,31 @@ required net % = cost% × ((ratio − 1) / 0.10)
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 POSITION_COST_PCT_DEFAULT = 0.15
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
-RATIO_MIN = 1.02
-RATIO_MAX = 2.30
-RATIO_STEP = 0.02
+# User-facing PF controls share one contract across UI, overlay, and workers.
+PF_MIN = 0.80
+PF_MAX = 2.50
+PF_STEP = 0.02
+RATIO_MIN = PF_MIN
+RATIO_MAX = PF_MAX
+RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 15
+
+
+def normalize_pf(value: Any, fallback: float) -> float:
+    """Clamp a configured PF floor without changing the requested 0.02 step."""
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(fallback)
+    if parsed != parsed or abs(parsed) == float("inf"):
+        parsed = float(fallback)
+    return round(max(PF_MIN, min(PF_MAX, parsed)), 2)
 SL_TP_MIN = 0.2
 SL_TP_MAX = 2.6
 SL_TP_STEP = 0.2
@@ -176,6 +192,59 @@ def last_n_cost_pf(
         "netPct": round(net_move_pct(ratio, cost_pct), 4),
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
         "netAvg": round(net_avg, 6),
+        "costSubtracted": True,
+    }
+
+
+def normalize_position_cost_pct(value: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Normalize PositionCost to the percent convention used by every tape."""
+    c = finite(value, fallback)
+    if c < 0:
+        c = 0.0
+    if c > 2.0:
+        c /= 100.0
+    return round(c if c <= 1.0 else fallback, 8)
+
+
+def _classic_pf(values: Sequence[float], fallback: float = 0.0) -> float:
+    gp = sum(value for value in values if value > 0)
+    gl = abs(sum(value for value in values if value < 0))
+    if gl > 0:
+        return gp / gl
+    return 99.0 if gp > 0 else fallback
+
+
+def cost_aware_metrics(
+    rows: Sequence[Any],
+    cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    required_samples: int = 8,
+) -> Dict[str, Any]:
+    """Return gross/net PF and EV from one shared closed sample.
+
+    ``pnl_pct`` is the gross price move and PositionCost is deducted exactly
+    once. Confidence is deliberately a sample-coverage signal, not a claim of
+    statistical certainty; callers can show the explicit insufficient status.
+    """
+    cost = normalize_position_cost_pct(cost_pct)
+    gross: List[float] = [row_pnl_pct(row) for row in rows]
+    net = [value - cost_as_frac(cost) for value in gross]
+    sample = len(gross)
+    required = max(1, int(required_samples or 1))
+    confidence = min(1.0, sample / required) if sample else 0.0
+    uncertainty = 1.0 / math.sqrt(sample) if sample else 1.0
+    return {
+        "sampleCount": sample,
+        "requiredSamples": required,
+        "grossPf": round(_classic_pf(gross), 6),
+        "netPf": round(_classic_pf(net), 6),
+        "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
+        "netEv": round(sum(net) / sample, 8) if sample else 0.0,
+        "ev": round(sum(net) / sample, 8) if sample else 0.0,
+        "confidence": round(confidence, 4),
+        "uncertainty": round(uncertainty, 4),
+        "insufficientSample": sample < required,
+        "status": "insufficient-sample" if sample < required else "qualified-sample",
+        "costPct": cost,
         "costSubtracted": True,
     }
 

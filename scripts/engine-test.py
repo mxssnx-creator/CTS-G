@@ -43,6 +43,11 @@ from pulse_trader import (
     SL_TYPES,
     TP_TYPES,
     order_fill_qty,
+    normalize_control_pct,
+    control_range_key,
+    parse_control_range,
+    make_control_group_key,
+    control_group_token,
 )
 
 out: List[Tuple[str, bool, str]] = []
@@ -108,6 +113,7 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
+        rec(f"{name}-per-config-controls", ov.get("controlOrdersPerConfig", True) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 3 and int(ov.get("trailingMinStep") or 0) == 3)
@@ -259,16 +265,16 @@ def coord_test() -> None:
 
 
 def stage_min_pf_test() -> None:
-    """Stage PositionCost PF floors: Base/Main/Real 1.25 systemwide."""
+    """Stage PF floors follow Base 1.05, Main 1.10, Real 1.15."""
     from coord_engine import Coordinator
 
     # 1) defaults after a bare load
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.0, "main": 1.0, "real": 1.0},
+        c.stage_min_pf == {"base": 1.05, "main": 1.1, "real": 1.15},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.0) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.15) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -307,14 +313,14 @@ def stage_min_pf_test() -> None:
     # 5) main/real stages report floors in the stages snapshot
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
-        stages.get("base", {}).get("minPf") == 1.0
-        and stages.get("main", {}).get("minPf") == 1.0
-        and stages.get("real", {}).get("minPf") == 1.0,
+        stages.get("base", {}).get("minPf") == 1.05
+        and stages.get("main", {}).get("minPf") == 1.1
+        and stages.get("real", {}).get("minPf") == 1.15,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.0, "main": 1.0, "real": 1.0},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.1, "real": 1.15},
         str(snap.get("stageMinPf")))
 
 
@@ -1001,6 +1007,9 @@ def block_calc_test() -> None:
         p.cooldown = {}
         p.errors = 0
         p.last_error = ""
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
+        p.seen_fill_cids = set()
         p.skip_log = {}
         p.did_io = False
         p.entries_blocked = lambda: False
@@ -1016,6 +1025,14 @@ def block_calc_test() -> None:
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
         p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
         p.px = {"TST-USDT": 100.30}
+        p.last_px = {}
+        p.sl_min = 0.001
+        p.sl_max = 0.02
+        p.tp_min = 0.002
+        p.tp_max = 0.05
+        p.position_cost_pct = 0.15
+        p.tp_cost_ratio = 1.5
+        p.exits = SimpleNamespace(enabled=False, opt_sl_min=0.001, opt_sl_max=0.009)
         p.lev_map = {"TST-USDT": 100}
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
@@ -1341,8 +1358,11 @@ def set_orders_test() -> None:
         p.ensure_max_leverage = lambda s, force=False: 100
         p.leverage_for = lambda c: 100
         p.control_orders = True
+        p.control_orders_per_config = True
         p.ctrl_skip = {}
         p.save_open_book = lambda: None
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
         p.seen_fill_cids = set()
         p.signals = []
         p.block = SimpleNamespace(register_parent=lambda *a, **k: None, on_parent_close=lambda *a, **k: None)
@@ -1355,6 +1375,9 @@ def set_orders_test() -> None:
         p._stats_force = False
         p.live_pos_keys = None
         return p
+
+    def pos_for(pulse, symbol: str, side: str = "LONG"):
+        return next(iter(pulse.positions_for(symbol, side)), None)
 
     # === 1) three Sets -> three independent entries + control pairs ===
     fx = FakeEx()
@@ -1378,10 +1401,12 @@ def set_orders_test() -> None:
             and abs(float(parsed[i].get("sl", 0)) - sts[i].sl_ratio) < 1e-9 for i in range(3)),
         str([(x.get("set_id"), x.get("step")) for x in parsed])[:140])
     rec("setord-positions-track-own-set",
-        all(p.open[syms[i]].set_id == sts[i].id and p.open[syms[i]].set_idx == sts[i].idx
-            and p.open[syms[i]].pack == sts[i].pack and p.open[syms[i]].client_id == entry_cids[i]
+        all(pos_for(p, syms[i]) is not None and pos_for(p, syms[i]).set_id == sts[i].id
+            and pos_for(p, syms[i]).set_idx == sts[i].idx
+            and pos_for(p, syms[i]).pack == sts[i].pack
+            and pos_for(p, syms[i]).client_id == entry_cids[i]
             for i in range(3)),
-        str([(p.open[s].set_id, p.open[s].set_idx) for s in syms])[:140])
+        str([(pos_for(p, s).set_id, pos_for(p, s).set_idx) for s in syms])[:140])
 
     # === 2) each position: own independent SL+TP control pair on the exchange ===
     rec("setord-3-control-pairs", len(fx.batches) == 3 and all(len(b) == 2 for b in fx.batches),
@@ -1391,7 +1416,7 @@ def set_orders_test() -> None:
         bodies = [b for b in fx.batches[i] if b.get("symbol") == sym]
         types = {b.get("type") for b in bodies}
         pair_ok = pair_ok and len(bodies) == 2 and types == {"STOP_MARKET", "TAKE_PROFIT_MARKET"} \
-            and all(b.get("closePosition") == "true" for b in bodies)
+            and all("quantity" in b and "closePosition" not in b and "reduceOnly" not in b for b in bodies)
     rec("setord-pairs-wellformed", pair_ok, f"{[(b[0].get('symbol'), len(b)) for b in fx.batches]}")
     ctrl_cids = [str(b.get("clientOrderID") or "") for batch in fx.batches for b in batch]
     rec("setord-control-cids-unique",
@@ -1410,11 +1435,11 @@ def set_orders_test() -> None:
         all(abs(sl_px[s] - want_sl[s]) < 1e-6 and abs(tp_px[s] - want_tp[s]) < 1e-6 for s in syms)
         and len({sl_px[s] for s in syms}) == 3,
         f"sl={sl_px} tp={tp_px}")
-    oid_sets = [{p.open[s].sl_oid, p.open[s].tp_oid} for s in syms]
+    oid_sets = [{pos_for(p, s).sl_oid, pos_for(p, s).tp_oid} for s in syms]
     all_oids = set().union(*oid_sets)
     rec("setord-control-oids-independent",
-        all(pt.real_oid(p.open[s].sl_oid) and pt.real_oid(p.open[s].tp_oid) and p.open[s].controls_ok
-            and p.open[s].ctrl_verified for s in syms)
+        all(pt.real_oid(pos_for(p, s).sl_oid) and pt.real_oid(pos_for(p, s).tp_oid)
+            and pos_for(p, s).controls_ok and pos_for(p, s).ctrl_verified for s in syms)
         and len(all_oids) == 6 and all_oids == set(fx.orders.keys()),
         f"oids={len(all_oids)} live={len(fx.orders)}")
 
@@ -1424,7 +1449,7 @@ def set_orders_test() -> None:
         all(len(pre_oids[s]) == 2 for s in syms) and len(set().union(*pre_oids.values())) == 6,
         str({s: sorted(o) for s, o in pre_oids.items()})[:120])
     fx.fill["AAA-USDT"] = 100.6  # +0.60% gross -> +3.0R net of 1x cost
-    p.close_pos(p.open["AAA-USDT"], 100.6, "tp")
+    p.close_pos(pos_for(p, "AAA-USDT"), 100.6, "tp")
     del_oids = {str(d[1].get("orderId")) for d in fx.deletes}
     rec("setord-cancel-isolation",
         pre_oids["AAA-USDT"] and pre_oids["AAA-USDT"] <= del_oids
@@ -1438,7 +1463,7 @@ def set_orders_test() -> None:
         and len(stB.live) == 0 and len(stC.live) == 0 and stB.last15_n == 12 and stC.last15_n == 12,
         f"A n={stA.last15_n} r={stA.last15_ratio} B live={len(stB.live)} C live={len(stC.live)}")
     fx.fill["BBB-USDT"] = 199.0  # -0.50% gross -> -4.33R net
-    p.close_pos(p.open["BBB-USDT"], 199.0, "sl")
+    p.close_pos(pos_for(p, "BBB-USDT"), 199.0, "sl")
     rec("setord-loss-attributes-setB",
         len(stB.live) == 1 and stB.last15_n == 1 and abs(stB.last15_ratio - 0.5667) < 1e-3
         and stA.last15_n == 1 and abs(stA.last15_ratio - 1.3) < 1e-6
@@ -1462,9 +1487,10 @@ def set_orders_test() -> None:
     rec("setord-real-live-sim-coordination", sim_n == 0 and sim_n2 == 1, f"sim={sim_n}/{sim_n2}")
 
     # === 4) negative controls ===
+    p.control_orders_per_config = False
     before = len(fx.posts)
-    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # occupied symbol -> refused
-    rec("setord-occupied-symbol-refused", len(fx.posts) == before and p.open["CCC-USDT"].set_id == stC.id,
+    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # legacy aggregate occupied symbol -> refused
+    rec("setord-occupied-symbol-refused", len(fx.posts) == before and pos_for(p, "CCC-USDT").set_id == stC.id,
         f"posts={len(fx.posts) - before}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)
@@ -1474,6 +1500,187 @@ def set_orders_test() -> None:
     rec("setord-no-ctrl-scratches",
         "DDD-USDT" not in p2.open and len(fx2_entries) == 2 and not fx2.orders,
         f"open={list(p2.open)} market_posts={len(fx2_entries)} live_ctrl={len(fx2.orders)}")
+
+
+def grouped_control_test() -> None:
+    """Range-group controls stay isolated, quantity matched, and restartable."""
+    import tempfile
+    from types import SimpleNamespace
+    import pulse_trader as pt
+    from dca_engine import DcaBook
+
+    tmp = tempfile.mkdtemp(prefix="group-control-test-")
+
+    class GroupApi:
+        def __init__(self):
+            self.posts = []
+            self.orders = {}
+            self.path_cd: Dict[str, float] = {}
+
+        def batch_place(self, bodies):
+            rows = []
+            for body in bodies:
+                oid = f"ctrl-{len(self.orders) + 1}"
+                saved = dict(body)
+                saved["orderId"] = oid
+                saved["origQty"] = body.get("quantity", "")
+                self.orders[oid] = saved
+                self.posts.append(("batch", saved))
+                rows.append({
+                    "code": 0,
+                    "orderId": oid,
+                    "type": body.get("type"),
+                    "clientOrderID": body.get("clientOrderID"),
+                })
+            return {"code": 0, "data": {"orders": rows}}
+
+        def post(self, path, body):
+            self.posts.append((path, dict(body)))
+            if body.get("type") == "MARKET":
+                return {"code": 0, "data": {"order": {
+                    "orderId": f"close-{len(self.posts)}",
+                    "avgPrice": "100",
+                    "quantity": str(body.get("quantity") or ""),
+                }}}
+            return {"code": 0, "data": {"order": {
+                "orderId": f"single-{len(self.posts)}",
+                "avgPrice": "100",
+                "quantity": str(body.get("quantity") or ""),
+            }}}
+
+        def delete(self, _path, params):
+            self.orders.pop(str(params.get("orderId") or ""), None)
+            return {"code": 0, "data": {}}
+
+        def get(self, path, _params=None):
+            if "openOrders" in path:
+                return {"code": 0, "data": list(self.orders.values())}
+            return {"code": 0, "data": []}
+
+    fx = GroupApi()
+    p = object.__new__(pt.Pulse)
+    p.api = fx
+    p.contracts = {"AAA-USDT": Contract("AAA-USDT", 0.01, 0.01, 2, 2, 1.0, 150)}
+    p.px = {"AAA-USDT": 100.0}
+    p.last_px = {}
+    p.open = {}
+    p.control_orders = True
+    p.control_orders_per_config = True
+    p.ctrl_skip = {}
+    p._oo_cache = {}
+    p.did_io = False
+    p.errors = 0
+    p.last_error = ""
+    p.record_event = lambda *args, **kwargs: True
+    p.save_open_book = lambda: None
+    p.sl_min, p.sl_max = 0.002, 0.012
+    p.tp_min, p.tp_max = 0.0035, 0.024
+    p.position_cost_pct = 0.15
+    p.tp_cost_ratio = 5.0
+    p.exits = SimpleNamespace(enabled=False, ignore_tp=False)
+    p.block = BlockBook(os.path.join(tmp, "block.json"), {
+        "variantBlockEnabled": True,
+        "blockMaxStack": 3,
+        "blockVolumeRatio": 1.0,
+        "blockProfitFactorRatio": 1.1,
+    })
+    p.dca = DcaBook()
+
+    def make_pos(side: str, sl_pct: float, tp_pct: float, qty: float, entry: float, cid: str):
+        pos = Position(
+            symbol="AAA-USDT",
+            side=side,
+            qty=qty,
+            entry=entry,
+            opened_at=time.time() - 60,
+            sl=entry * (1 - sl_pct) if side == "LONG" else entry * (1 + sl_pct),
+            tp=entry * (1 + tp_pct) if side == "LONG" else entry * (1 - tp_pct),
+            peak=entry,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            client_id=cid,
+            set_id=cid,
+            pack="general",
+        )
+        p.prepare_position_group(pos)
+        return pos
+
+    # Normalization is deliberately tolerant of fractional and percent input.
+    rec("group-normalize-fraction", normalize_control_pct(0.0048) == 48)
+    rec("group-normalize-percent", normalize_control_pct(0.48) == 48)
+    rec("group-range-stable", control_range_key(0.0048001, 0.0075001) == "sl0048-tp0075")
+    rec("group-range-parse", parse_control_range("SL0048-TP0075") == (48, 75))
+    rec("group-range-reject", parse_control_range("aggregate") == (0, 0))
+
+    long_a = make_pos("LONG", 0.0048, 0.0075, 1.0, 100.0, "set-a")
+    long_b = make_pos("LONG", 0.0064, 0.0100, 2.0, 102.0, "set-b")
+    short_a = make_pos("SHORT", 0.0048, 0.0075, 1.0, 100.0, "set-c")
+    rec("group-symbol-side-range-separate",
+        len({long_a.control_group_key, long_b.control_group_key, short_a.control_group_key}) == 3)
+    rec("group-token-range", control_group_token(long_a.control_group_key, long_a.control_range_key) == "r048075")
+
+    p.open[p.position_key(long_a)] = long_a
+    p.open[p.position_key(long_b)] = long_b
+    p.place_ctrl_pair(long_a)
+    p.place_ctrl_pair(long_b)
+    a_ids = {long_a.sl_oid, long_a.tp_oid}
+    b_ids = {long_b.sl_oid, long_b.tp_oid}
+    control_bodies = [body for _kind, body in fx.posts if body.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET")]
+    rec("group-two-pairs-four-controls",
+        len(a_ids) == 2 and len(b_ids) == 2 and len(fx.orders) == 4,
+        f"orders={len(fx.orders)}")
+    rec("group-controls-quantity-no-close",
+        all("quantity" in body and "closePosition" not in body and "reduceOnly" not in body for body in control_bodies),
+        str(control_bodies)[:200])
+    rec("group-cancel-isolated",
+        (p.cancel_controls("AAA-USDT", pos=long_a) is None)
+        and not (a_ids & set(fx.orders)) and b_ids <= set(fx.orders),
+        f"remaining={sorted(fx.orders)}")
+
+    # The same normalized range merges by weighted quantity and weighted entry.
+    p.clear_position_controls(long_a)
+    long_a.ctrl_qty = 0.0
+    p.ensure_strategy_lanes(long_a)
+    incoming_same = make_pos("LONG", 0.0048001, 0.0075001, 2.0, 110.0, "set-a2")
+    p.merge_position(long_a, incoming_same)
+    p.merge_parent_lanes(long_a, incoming_same.qty, incoming_same.entry)
+    rec("group-same-range-merge",
+        long_a.qty == 3.0 and abs(long_a.entry - (100.0 + 220.0) / 3.0) < 1e-9
+        and long_a.member_count == 2 and long_a.control_group_key == incoming_same.control_group_key,
+        f"qty={long_a.qty} entry={long_a.entry}")
+    lane = p.block.lanes.get(p.block_lane_key(long_a))
+    dca_lane = p.dca.lanes.get(p.dca_lane_key(long_a))
+    rec("group-parent-lanes-merge",
+        lane is not None and abs(lane.base_qty - 3.0) < 1e-9
+        and dca_lane is not None and abs(dca_lane.parent_qty - 3.0) < 1e-9,
+        f"block={getattr(lane, 'base_qty', None)} dca={getattr(dca_lane, 'parent_qty', None)}")
+
+    # A restart can recover the normalized range from the compact control CID.
+    cid = p.cid("u", pos=long_a)
+    track = p.parse_track(cid) or {}
+    rec("group-cid-restart-range",
+        track.get("group_token") == "r048075"
+        and track.get("control_range_key") == "sl0048-tp0075"
+        and track.get("control_sl_bp") == 48
+        and track.get("control_tp_bp") == 75,
+        str(track))
+
+    p.clear_position_controls(long_a)
+    p.place_ctrl_pair(long_a)
+    ok_close, _ = p.market_close(long_a)
+    market = next((body for kind, body in reversed(fx.posts) if body.get("type") == "MARKET"), {})
+    rec("group-close-quantity-matched",
+        ok_close and market.get("quantity") == long_a.qty
+        and "closePosition" not in market and "reduceOnly" not in market
+        and b_ids <= set(fx.orders),
+        str(market))
+
+    p.control_orders_per_config = False
+    aggregate = make_pos("LONG", 0.0048, 0.0075, 1.0, 100.0, "legacy")
+    p.prepare_position_group(aggregate, legacy=True)
+    rec("group-legacy-disables-key", not p.per_config_controls(aggregate) and aggregate.control_range_key == "aggregate")
+    legacy_payload = ctrl_payload("AAA-USDT", "LONG", "sl", "99", "1", "legacy", close_pos=True, with_qty=True)
+    rec("group-legacy-close-position", legacy_payload.get("closePosition") == "true" and "quantity" not in legacy_payload)
 
 
 def strict_gate_test() -> None:
@@ -1652,8 +1859,11 @@ def strict_gate_test() -> None:
                                      current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
         p.exits = SimpleNamespace(enabled=True, ignore_tp=False)
         p.control_orders = False
+        p.control_orders_per_config = False
         p.security_prices = lambda pos: (pos.sl, pos.tp)
         p.save_open_book = lambda: None
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
         p.seen_fill_cids = set()
         p.owned_syms = set()
         p.fees_est = 0.0
@@ -1678,7 +1888,7 @@ def strict_gate_test() -> None:
         warm2 = mk_book(winner=True)
         p6 = mk_place_trader(warm2)
         p6.place("AAA-USDT", 1, "gen:ema+", 0.9)
-        pos6 = p6.open.get("AAA-USDT")
+        pos6 = next(iter(p6.positions_for("AAA-USDT")), None)
         rec("strict-place-trades-validated",
             len(p6.api.posts) == 1 and pos6 is not None and pos6.set_id == warm2.by_idx[0].id,
             f"posts={len(p6.api.posts)} set={getattr(pos6, 'set_id', None)}")
@@ -1840,6 +2050,7 @@ def main() -> int:
     sim_stats_test()
     block_calc_test()
     set_orders_test()
+    grouped_control_test()
     strict_gate_test()
     dd_time_test()
     process_guard_test()
