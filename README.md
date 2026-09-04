@@ -58,7 +58,20 @@ If direct SSH is unavailable, establish the documented Chisel tunnel first;
 see [Remote access](INFO.md#remote-access-canonical-solution). Do not put its
 credentials or SSH private keys in this repository.
 
-Installs Node 22, Python 3, Redis, the scoped pulse engine at `/opt/cts-g-pulse`, and the desk at `/opt/cts-g` for the default `cts-g` name. Git origin is `https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`). Unit names are scoped to the install name so another checkout cannot overwrite CTS-G.
+Installs Node 22, Python 3, Redis, pulse engine at `/opt/cts-g-pulse`, desk at
+`/opt/cts-g`, and durable state at `/var/lib/cts/instances/cts-g`. Git origin is
+`https://github.com/mxssnx-creator/CTS-G.git` (`xssnet <mxssnx@gmail.com>`).
+Each `--name` gets independent code/state/log paths and systemd units. Use a
+unique desk port, Pulse port and Redis DB for parallel versions, for example:
+
+```bash
+sudo ./deploy/install-linux.sh --name cts-g-next --port 3202 --pulse-port 3203 --redis-db 2
+```
+
+The installer publishes a shared five-minute retention service. Regular host
+and CTS diagnostic files retain at most the newest 1,000 lines/8 MiB; journald
+retains at most 256 MiB/seven days. Databases, credentials, trading histories,
+statistics, reports and backups are excluded from this physical-log scan.
 
 | Unit | Role |
 |---|---|
@@ -75,8 +88,8 @@ sudo /opt/cts-g/deploy/update-linux.sh --force  # match origin/main exactly
 Credentials stay in the protected `/etc/cts-g/credentials.env` and the matching Redis connection hash, never in git. X01 remains stopped unless live operation has been explicitly approved:
 
 ```bash
-redis-cli HSET connection:bingx-x01 api_key '…' api_secret '…'
-redis-cli HSET connection:bingx-x02 api_key '…' api_secret '…'
+redis-cli -n 1 HSET connection:bingx-x01 api_key '…' api_secret '…'
+redis-cli -n 1 HSET connection:bingx-x02 api_key '…' api_secret '…'
 sudo systemctl stop cts-g-pulse@bingx-x01
 ```
 

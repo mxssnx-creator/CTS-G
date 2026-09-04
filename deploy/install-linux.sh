@@ -16,6 +16,9 @@ DO_CLONE=0
 START_LIVE=0
 NO_START=0
 PORT_EXPLICIT=0
+PULSE_PORT_EXPLICIT=0
+REDIS_DB_EXPLICIT=0
+STATE_EXPLICIT=0
 NAME_EXPLICIT=0
 
 usage() {
@@ -27,12 +30,15 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --name NAME       Install name (default: cts-g) → /opt/NAME, /etc/NAME
   --port N          Desk listen port (default: 3102)
   --desk-port N     Same as --port
+  --pulse-port N    Pulse HTTP port (default: 3015; new custom installs: desk+1)
+  --redis-db N      Independent Redis logical DB 0..15 (default: 1)
+  --state-dir PATH  Durable state root (default: /var/lib/cts/instances/NAME)
   --host HOST       Public hostname/IP for result URLs (default: 152.53.114.112)
   --from-dir PATH   Copy this checkout into /opt/NAME (default: this repo)
   --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
-  --start-live      Start <name>-pulse@bingx-x01
+  --start-live      Start NAME-pulse@bingx-x01 (never implicit)
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
   -h, --help
@@ -46,6 +52,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --name|-n) apply_name "${2:-}"; NAME_EXPLICIT=1; shift 2 ;;
     --port|-p|--desk-port) DESK_PORT="${2:-}"; PORT_EXPLICIT=1; shift 2 ;;
+    --pulse-port) PULSE_PORT="${2:-}"; PULSE_PORT_EXPLICIT=1; shift 2 ;;
+    --redis-db) REDIS_DB="${2:-}"; REDIS_DB_EXPLICIT=1; shift 2 ;;
+    --state-dir) STATE_DIR="${2:-}"; STATE_EXPLICIT=1; shift 2 ;;
     --host) PUBLIC_HOST="${2:-}"; REMOTE_HOST="${2:-}"; shift 2 ;;
     --from-dir) FROM_DIR="${2:-}"; shift 2 ;;
     --clone) DO_CLONE=1; shift ;;
@@ -62,6 +71,13 @@ done
 require_linux
 require_root
 
+load_existing_env_config
+if [[ "$PORT_EXPLICIT" == "1" && "$PULSE_PORT_EXPLICIT" != "1" && ! -f "$ENV_FILE" && "$DESK_PORT" != "3102" ]]; then
+  PULSE_PORT=$((DESK_PORT + 1))
+fi
+validate_instance_config
+lock_and_check_instance
+
 log "install  name=$CTS_G_NAME  root=$CTS_G_ROOT  desk=:${DESK_PORT}  branch=$BRANCH"
 log "unattended — no prompts; skip software already present"
 
@@ -69,6 +85,9 @@ ensure_base_packages
 ensure_node
 ensure_dirs
 ensure_redis
+quiesce_instance
+create_verified_backup
+migrate_legacy_redis_state
 
 if [[ "$DO_CLONE" -eq 1 ]]; then
   if [[ -d "$CTS_G_ROOT/.git" ]]; then
@@ -76,8 +95,9 @@ if [[ "$DO_CLONE" -eq 1 ]]; then
     git -C "$CTS_G_ROOT" remote set-url origin "$REPO_URL" 2>/dev/null \
       || git -C "$CTS_G_ROOT" remote add origin "$REPO_URL"
     git -C "$CTS_G_ROOT" fetch --prune origin
-    git -C "$CTS_G_ROOT" checkout -f "$BRANCH" >/dev/null 2>&1 || git -C "$CTS_G_ROOT" checkout -B "$BRANCH"
-    git -C "$CTS_G_ROOT" reset --hard "origin/$BRANCH"
+    [[ -z "$(git -C "$CTS_G_ROOT" status --porcelain --untracked-files=no)" ]] || die "local code changes preserved; resolve them before updating"
+    git -C "$CTS_G_ROOT" checkout "$BRANCH"
+    git -C "$CTS_G_ROOT" merge --ff-only "origin/$BRANCH" || die "non-fast-forward install; backup preserved"
     ok "git updated $CTS_G_ROOT"
   elif [[ -f "$CTS_G_ROOT/server/pulse/pulse_trader.py" ]]; then
     skip "tree already at $CTS_G_ROOT (not a clone)"
@@ -103,8 +123,9 @@ configure_git "$CTS_G_ROOT"
 seed_env
 sync_pulse_tree
 npm_install_desk
+npm_build_desk
 install_units
-enforce_retention
+configure_host_log_retention
 enable_stack
 
 if [[ "$NO_START" -eq 1 ]]; then

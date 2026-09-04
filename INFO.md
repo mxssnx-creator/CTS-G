@@ -11,6 +11,10 @@ validate the deployment without relying on hidden conversation history.
 | GitHub repository | `mxssnx-creator/CTS-G` |
 | Persistent working checkout | `/workspace/CTS-G` |
 | Installed VPS checkout | `/opt/cts-g` |
+| Replaceable Pulse code | `/opt/cts-g-pulse` |
+| Persistent state | `/var/lib/cts/instances/cts-g` |
+| Persistent environment | `/etc/cts-g/cts-g.env` (`0600`) |
+| Bounded runtime logs | `/var/log/cts-g` |
 | Verified recovery checkpoints | `/workspace/backups/CTS-G/<UTC timestamp>-<label>` |
 | Protected Chisel/SSH information | private `ssh-chisel.txt` plus the valid SSH identity; never Git |
 
@@ -359,6 +363,21 @@ snapshot, so displayed counts cannot be inferred from a truncated top-N table.
 After merge, update `/workspace/CTS-G`, deploy with the repository scripts,
 verify all services, and create a new post-merge checkpoint.
 
+## Multi-instance and retention contract
+
+`--name` is the installation identity. It determines independent checkout,
+Pulse-code, state, log, environment and systemd-unit paths. Parallel installs
+must also have distinct `--port`, `--pulse-port` and `--redis-db` values. The
+default `cts-g` instance uses desk `3102`, Pulse `3015`, Redis DB `1`, and
+`/var/lib/cts/instances/cts-g`.
+
+The shared `cts-log-retention.timer` runs every five minutes. It bounds active
+diagnostic text files to 1,000 newest lines and 8 MiB per file, and bounds the
+system journal to 256 MiB/seven days. It does not descend through data,
+credentials, Redis persistence, trading history, reports or backups. Redis is
+dynamically capped against host memory and uses `noeviction`, so pressure can
+never silently evict credentials or authoritative state.
+
 ## Installed VPS baseline (verified 2026-09-02)
 
 | Component | Version / state |
@@ -373,7 +392,69 @@ verify all services, and create a new post-merge checkpoint.
 Version presence is not proof of mesh connectivity. Inspect status and policy
 before choosing Tailscale or NetBird as an access path.
 
-## Secret handling
+## Runtime hardening checkpoint — 2026-09-04
+
+Integrated against `4e158bd` without discarding the new historic/coordination
+work. The earlier worktree and its uncommitted report were preserved separately.
+
+- Fixed historic replay crashing on `copy.deepcopy(RLock)`. Snapshots own an
+  independent lock, keep live tapes on publication, reject outdated generations,
+  and share immutable OHLC arrays to avoid duplicating the full symbol history.
+- Preferred-step evaluation now requires enough evidence from each individually
+  identified Set; several undersampled Sets cannot qualify by pooling samples.
+- Log writers serialize threads/processes, retain the same inode, bound dedupe
+  maps, and enforce the newest 1,000 lines after each application write batch.
+  Host text logs are compacted every five minutes, not on every external write.
+- Pulse HTTP is loopback-only by default, has 32 worker slots, a 128-request
+  backlog, request size/time limits, and no arbitrary durable-file serving.
+  Native Node production hosting proxies the same operational endpoints as dev.
+- Missing Redis binaries/config values no longer crash the settings response.
+  Redis errors are not reported as successful connection saves. Concurrent
+  overlay saves use one mutex and unique atomic temporary files.
+- New installs default to `/var/lib/cts/instances/<name>`; existing explicit
+  data directories remain authoritative. `--state-dir` migrates recognized
+  files while preserving STOP/PAUSE/RUN intent. DB files live under state/db.
+  `/etc/<name>/credentials.env` is backed up and is never overwritten.
+  Connection saves additionally persist owner-only `credentials-<slot>.json`
+  under the instance data directory. HTTP and engine readers recover absent
+  Redis fields from that file, then scoped environment values; UI responses
+  expose presence flags, never secrets. A Redis write error remains an error.
+- Redis DB 0 remains reserved for CTS-K-N. Additional CTS-G installs require
+  an explicit unused DB. Do not give simultaneous VST engines the same account
+  unless their order ownership has been independently verified.
+- X01 is never started implicitly. X02 rejects a non-VST exchange endpoint.
+  Reinstall refuses to stop an active/initializing X01 without explicitly
+  coordinated `--start-live` maintenance; it stops before changing any unit.
+  Diagnostic cleanup does not authorize deleting account or database state.
+- Removed the pre-existing hardcoded shared preview OAuth secret. Optional
+  preview sign-in now requires server-side `GROK_PREVIEW_CLIENT_SECRET`.
+  Broker-side revocation/rotation is still required: Git history is not erased.
+
+Verification: 279/279 engine checks; eight retention/isolation/concurrency
+regressions; TypeScript, ESLint and native production build passed. The offline
+production check passed 105 assertions across two simultaneous instances,
+including SSR routes, settings and connection POSTs, stop-state propagation,
+80 concurrent-batch stats reads, response bounds and embedded-DB reopen.
+No exchange orders are submitted by this verification harness.
+The dependency lock includes Nitro's optional LRU peer so clean npm 10 and
+npm 11 installations agree; the CI npm 10 install was reproduced locally.
+
+Run after building: `node scripts/verify-production-runtime.mjs`. GitHub's
+Runtime verification workflow now repeats the local gates for PRs and main.
+These finite tests are not a production-readiness guarantee. Remote max-symbol
+VST soak and visual browser acceptance must be recorded separately: the cloud
+browser returned 502 for the remote UI in this session while direct server
+HTTP checks succeeded. Do not claim those visual tests passed.
+
+Remote rollout preflight at approximately 20:24 UTC found both old Pulse
+engines repeatedly hitting systemd's 90-second startup timeout. X01's stale
+snapshot reported nine exchange positions on LIVE_MAINNET; this is not a
+fresh exchange reconciliation. Consequently the shared-code reinstall was
+not run: coordinate the live account's maintenance/protection first. X02
+max-symbol soak, startup-timeout remediation and visual acceptance remain
+open; neither stale counters nor passing offline tests establish live health.
+
+## Secret-handling rules
 
 - Keep `ssh-chisel.txt` and SSH identities outside Git with owner-only access.
 - Treat Chisel auth as a secret even though the listener is public.

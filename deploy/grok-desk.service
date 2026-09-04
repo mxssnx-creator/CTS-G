@@ -16,7 +16,7 @@ RestartSec=3
 TimeoutStartSec=120
 TimeoutStopSec=20
 KillMode=mixed
-Environment=NODE_ENV=development
+Environment=NODE_ENV=production
 Environment=HOST=0.0.0.0
 Environment=PORT=3102
 Environment=PULSE_URL=http://127.0.0.1:3015
@@ -26,6 +26,8 @@ LimitNOFILE=8192
 StandardOutput=append:/var/log/cts-g/desk.log
 StandardError=append:/var/log/cts-g/desk.err.log
 SyslogIdentifier=grok-desk
+LogRateLimitIntervalSec=300s
+LogRateLimitBurst=300
 
 [Install]
 WantedBy=multi-user.target

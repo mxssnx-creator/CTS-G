@@ -100,10 +100,11 @@ def stress_api(out: List[Tuple[str, bool, str]]) -> None:
         def redis_hget(field: str) -> str:
             import shutil
             import subprocess
+            from storage_paths import redis_cli_args
             if not shutil.which("redis-cli"):
                 return ""
             conn = os.environ.get("PULSE_CONN", "bingx-x02")
-            r = subprocess.run(["redis-cli", "hget", f"connection:{conn}", field], capture_output=True, text=True)
+            r = subprocess.run(redis_cli_args("hget", f"connection:{conn}", field), capture_output=True, text=True)
             return (r.stdout or "").strip()
 
     key = redis_hget("api_key")

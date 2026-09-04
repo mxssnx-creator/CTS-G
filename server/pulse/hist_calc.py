@@ -43,7 +43,7 @@ from set_engine import (
     last_n_balanced,
     synth_trend,
 )
-from storage_paths import path_for
+from storage_paths import log_path, path_for, trim_text_log
 
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
@@ -653,8 +653,7 @@ def load_universe() -> List[str]:
         path_for("universe.json"),
         os.path.join(os.path.dirname(job_path()), "universe.json"),
         os.path.join(here, "universe.json"),
-        os.path.join(os.environ.get("PULSE_DIR", ""), "universe.json") if os.environ.get("PULSE_DIR") else "",
-        "/opt/grok-x01-pulse/universe.json",
+        os.path.join(os.environ.get("PULSE_DIR", "/opt/cts-g-pulse"), "universe.json"),
     ):
         if not path:
             continue
@@ -1661,7 +1660,8 @@ def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     here = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(here, "hist_calc.py")
-    logp = job_path().replace("hist-calc.json", "hist-calc.log")
+    logp = log_path("hist-calc.log")
+    trim_text_log(logp)
     try:
         logf = open(logp, "ab", buffering=0)
     except Exception:

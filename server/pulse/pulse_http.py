@@ -12,16 +12,25 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
-from storage_paths import DATA_DIR, append_bounded_line, atomic_write, path_for, storage_info
+from storage_paths import DATA_DIR, INSTANCE_NAME, append_log, atomic_write, log_path, path_for, redis_cli_args, storage_info
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
-CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
+SYSTEMD_PREFIX = os.environ.get("CTS_SYSTEMD_PREFIX", INSTANCE_NAME)
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", SYSTEMD_PREFIX):
+    raise ValueError("invalid CTS_SYSTEMD_PREFIX")
+try:
+    PULSE_PORT = int(os.environ.get("PULSE_PORT", "3015"))
+except (TypeError, ValueError):
+    PULSE_PORT = 3015
+if PULSE_PORT < 1 or PULSE_PORT > 65535:
+    PULSE_PORT = 3015
 
 
-def engine_unit(cid: str) -> str:
-    """Return the install-scoped engine unit; never control generic grok-* units."""
-    return f"{CTS_G_NAME}-pulse@{cid}"
+def pulse_unit(cid: str) -> str:
+    return f"{SYSTEMD_PREFIX}-pulse@{cid}"
+
+engine_unit = pulse_unit
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [
@@ -139,27 +148,36 @@ def resolve_conn(raw: str) -> str:
 
 def redis_hgetall(key: str) -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=6)
+        p = subprocess.run(redis_cli_args("HGETALL", key), capture_output=True, text=True, timeout=6)
+        lines = (p.stdout or "").splitlines() if p.returncode == 0 else []
     except Exception:
-        return {}
-    lines = (p.stdout or "").splitlines()
+        lines = []
     out = {}
     for i in range(0, len(lines) - 1, 2):
         out[lines[i]] = lines[i + 1]
+    cid = key.removeprefix("connection:")
+    if key.startswith("connection:") and cid in ID_TO_LANE:
+        saved = load_json(path_for(f"credentials-{cid}.json"))
+        suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
+        for field in ("api_key", "api_secret", "base_url", "is_testnet", "connection_method", "live_trade_enabled"):
+            if not str(out.get(field) or "").strip():
+                value = saved.get(field) or os.environ.get(f"CTS_{suffix}_{field.upper()}") or os.environ.get(f"BINGX_{suffix}_{field.upper()}")
+                if value:
+                    out[field] = str(value)
     return out
 
 
 def redis_hset(key: str, mapping: dict) -> bool:
-    args = ["redis-cli", "HSET", key]
+    args = redis_cli_args("HSET", key)
     for k, v in mapping.items():
         if v is None:
             continue
         args.extend([str(k), str(v)])
-    if len(args) <= 3:
+    if len(args) <= 5:
         return False
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=6)
-        return p.returncode == 0
+        return p.returncode == 0 and (p.stdout or "").strip().isdigit()
     except Exception:
         return False
 
@@ -284,6 +302,10 @@ def save_connection(cid: str, body: dict) -> tuple:
         }
     if not redis_hset(f"connection:{target}", mapping):
         return False, "redis write failed", connection_public(target)
+    try:
+        atomic_write(path_for(f"credentials-{target}.json"), mapping)
+    except OSError:
+        return False, "saved in Redis, but durable credential backup failed", connection_public(target)
     pub = connection_public(target)
     pub["detail"] = f"saved {target} as {write_type} default" if write_type == "mainnet" else f"saved {target}"
     return True, pub["detail"], pub
@@ -297,6 +319,11 @@ def overlay_path(conn: str) -> str:
 
 
 def write_overlay(conn: str, overlay: dict) -> dict:
+    with CONTROL_LOCK:
+        return _write_overlay_locked(conn, overlay)
+
+
+def _write_overlay_locked(conn: str, overlay: dict) -> dict:
     cid = resolve_conn(conn) if conn not in ("", "overall") else conn
     if cid in ("", "overall"):
         raise ValueError("pick a lane")
@@ -305,11 +332,7 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     if not isinstance(overlay, dict):
         overlay = {}
     cur.update(overlay)
-    tmp = dest + ".tmp"
-    os.makedirs(DIR, exist_ok=True)
-    with open(tmp, "w") as f:
-        json.dump(cur, f)
-    os.replace(tmp, dest)
+    atomic_write(dest, cur)
     return cur
 
 
@@ -428,7 +451,7 @@ def unit_state(cid: str, fresh: bool = False) -> str:
     hit = _STATE_CACHE.get(cid)
     if not fresh and hit and now - hit[0] < 3.0:
         return hit[1]
-    rc, out = _sysctl("is-active", engine_unit(cid), timeout=6)
+    rc, out = _sysctl("is-active", pulse_unit(cid), timeout=6)
     state = (out.splitlines() or [""])[0].strip() if out else ""
     if state not in ("active", "inactive", "failed", "activating", "deactivating"):
         state = "failed" if rc not in (0,) and state == "" else (state or "unknown")
@@ -459,13 +482,15 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
+        run = os.path.join(DIR, f"RUN-{cid}")
         reset_eq = os.path.join(DIR, f"reset-eq-{cid}")
-        unit = engine_unit(cid)
+        unit = pulse_unit(cid)
         if action == "pause":
             _unlink(stop)
             _touch(pause)
             notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
+            _touch(run)
             _unlink(pause)
             _unlink(stop)
             _unlink(STOP_ALL_PATH)
@@ -480,6 +505,7 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             st = unit_state(cid, fresh=True)
             notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
+            _unlink(run)
             _unlink(pause)
             _touch(stop)
             rc, out = _sysctl("stop", unit)
@@ -504,16 +530,10 @@ def load_cts(conn: str) -> dict:
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True)
-    lines = (p.stdout or "").splitlines()
-    out = {}
-    for i in range(0, len(lines) - 1, 2):
-        out[lines[i]] = parse_val(lines[i + 1])
+    raw = redis_hgetall(key)
+    out = {name: parse_val(value) for name, value in raw.items()}
     try:
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(out, f)
-        os.replace(tmp, path)
+        atomic_write(path, out)
     except Exception:
         pass
     return out
@@ -897,6 +917,36 @@ def connections_blob() -> dict:
     }
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 128
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(32)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        request.settimeout(20)
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=DIR, **k)
@@ -906,8 +956,7 @@ class Handler(SimpleHTTPRequestHandler):
         if "GET /stats.json" in msg or "GET /universe.json" in msg or "GET /connections.json" in msg or "GET /connection.json" in msg:
             return
         try:
-            path = os.path.join(DIR, "http.log")
-            append_bounded_line(path, "%s - %s\n" % (self.address_string(), msg))
+            append_log(log_path("http.log"), "%s - %s" % (self.address_string(), msg))
         except Exception:
             pass
 
@@ -1063,16 +1112,29 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._json(stamp_stats(st, conn))
             return
-        return super().do_GET()
+        if path == "/universe.json":
+            self._json(load_json(path_for("universe.json")))
+            return
+        # Never serve the durable data directory as an arbitrary static tree.
+        self._json({"ok": False, "detail": "unknown endpoint"}, 404)
 
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
         conn = resolve_conn(qs(self.path).get("conn", ""))
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json({"ok": False, "detail": "invalid content length"}, 400)
+            return
+        if n < 0 or n > 1048576:
+            self._json({"ok": False, "detail": "request too large"}, 413)
+            return
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
+            if not isinstance(body, dict):
+                raise ValueError("JSON object required")
         except Exception:
             self.send_error(400, "invalid json")
             return
@@ -1184,6 +1246,8 @@ def heal_loop() -> None:
                 # start are atomic against a manual stop/pause click, so the
                 # watchdog can never revive a lane the user just stopped.
                 with CONTROL_LOCK:
+                    if not os.path.exists(os.path.join(DIR, f"RUN-{cid}")):
+                        continue
                     if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
                         continue
                     state = unit_state(cid, fresh=True)
@@ -1192,22 +1256,24 @@ def heal_loop() -> None:
                     now = time.time()
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
-                    suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
-                    env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
-                    if not env_key:
-                        try:
-                            p = subprocess.run(["redis-cli", "HGET", f"connection:{cid}", "api_key"], capture_output=True, text=True, timeout=6)
-                            env_key = (p.stdout or "").strip()
-                        except Exception:
-                            env_key = ""
-                    if not env_key:
-                        continue  # no keys — engine would exit instantly
+                    try:
+                        p = subprocess.run(
+                            redis_cli_args("HGET", f"connection:{cid}", "api_key"),
+                            capture_output=True,
+                            text=True,
+                            timeout=6,
+                        )
+                        suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()
+                        env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
+                        if not env_key and (p.stdout or "").strip() in ("", "(nil)"):
+                            continue  # no keys — engine would exit instantly
+                    except Exception:
+                        continue
                     last[cid] = now
-                    unit = engine_unit(cid)
-                    _sysctl("reset-failed", unit, timeout=8)
-                    rc, out = _sysctl("start", unit)
+                    _sysctl("reset-failed", pulse_unit(cid), timeout=8)
+                    rc, out = _sysctl("start", pulse_unit(cid))
                 try:
-                    append_bounded_line(os.path.join(DIR, "http.log"), f"heal {cid} rc={rc} {out[:120]}\n")
+                    append_log(log_path("http.log"), f"heal {cid} rc={rc} {out[:120]}")
                 except Exception:
                     pass
         except Exception:
@@ -1218,4 +1284,4 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
-    ThreadingHTTPServer(("0.0.0.0", 3015), Handler).serve_forever()
+    BoundedHTTPServer((os.environ.get("PULSE_HOST", "127.0.0.1"), PULSE_PORT), Handler).serve_forever()
