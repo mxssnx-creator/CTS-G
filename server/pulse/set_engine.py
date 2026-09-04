@@ -765,21 +765,25 @@ class SetBook:
         self.live_test_candidates = 12
         self.live_test_min_samples = 8
 
-    def __getstate__(self) -> Dict[str, Any]:
-        """Return a copy-safe state for isolated historic replays.
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "SetBook":
+        """Clone replay data, preserve Set aliases, allocate an independent lock.
 
-        ``SetBook`` is snapshotted while the live lane continues processing
-        exchange events.  The selection lock protects the live book but is
-        not itself copyable; omitting it from the snapshot lets deepcopy
-        recreate an independent lock in ``__setstate__``.
+        The engine state lock is held by the replay caller. Disposable UI caches
+        are rebuilt instead of copied, keeping snapshot memory bounded.
         """
-        state = dict(self.__dict__)
-        state.pop("_pick_lock", None)
-        return state
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self._pick_lock = threading.RLock()
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        with self._pick_lock:
+            for key, value in self.__dict__.items():
+                if key == "_pick_lock":
+                    setattr(clone, key, threading.RLock())
+                elif key in ("_snap_cache", "_live_ov_cache"):
+                    setattr(clone, key, None)
+                elif key in ("_snap_ts", "_live_ov_ts"):
+                    setattr(clone, key, 0.0)
+                else:
+                    setattr(clone, key, copy.deepcopy(value, memo))
+        return clone
 
     def replay_clone(self, symbols: Optional[Sequence[str]] = None) -> "SetBook":
         """Create a lean catalog clone for an isolated history slice.

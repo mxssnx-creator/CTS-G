@@ -77,6 +77,19 @@ _APPEND_LOCK = threading.RLock()
 _APPEND_COUNTS: Dict[str, int] = {}
 
 
+def _bounded_line_bytes(value: Any) -> bytes:
+    """Encode one log line without ever handing the file writer an oversized value."""
+    raw = str(value).encode("utf-8", "replace")
+    has_newline = raw.endswith(b"\n")
+    payload_limit = MAX_RETAINED_LINE_BYTES if has_newline else max(1, MAX_RETAINED_LINE_BYTES - 1)
+    if len(raw) > payload_limit:
+        raw = raw[:payload_limit]
+        # Do not leave a partial UTF-8 sequence at the boundary.  The decode /
+        # encode round-trip is bounded by MAX_RETAINED_LINE_BYTES.
+        raw = raw.decode("utf-8", "ignore").encode("utf-8")
+    return raw if raw.endswith(b"\n") else raw + b"\n"
+
+
 def _writable(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -176,7 +189,7 @@ def _tail_lines_locked(
     if not target.is_file():
         return 0
     line_limit = min(1000, max(1, _safe_int(max_lines, MAX_RETAINED_LINES)))
-    byte_limit = max(1024, _safe_int(max_bytes, MAX_RETAINED_FILE_BYTES))
+    byte_limit = min(MAX_RETAINED_FILE_BYTES, max(1024, _safe_int(max_bytes, MAX_RETAINED_FILE_BYTES)))
     lines: Deque[bytes] = deque(maxlen=line_limit)
     try:
         with target.open("rb") as handle:
@@ -253,12 +266,12 @@ def append_bounded_lines(
 ) -> int:
     """Append lines and periodically compact the file to the shared tail cap."""
     line_limit = min(1000, max(1, _safe_int(max_lines, MAX_RETAINED_LINES)))
-    values: Deque[str] = deque(maxlen=line_limit)
+    byte_limit = min(MAX_RETAINED_FILE_BYTES, max(1024, _safe_int(max_bytes, MAX_RETAINED_FILE_BYTES)))
+    values: Deque[bytes] = deque(maxlen=line_limit)
     for line in lines:
         if line is None:
             continue
-        value = str(line)
-        values.append(value if value.endswith("\n") else value + "\n")
+        values.append(_bounded_line_bytes(line))
     if not values:
         return 0
     target = Path(path)
@@ -267,15 +280,15 @@ def append_bounded_lines(
     with _APPEND_LOCK:
         known = _APPEND_COUNTS.get(key)
         if known is None:
-            known = _tail_lines_locked(target, max_lines=line_limit, max_bytes=max_bytes)
+            known = _tail_lines_locked(target, max_lines=line_limit, max_bytes=byte_limit)
         try:
-            with target.open("a", encoding="utf-8") as handle:
+            with target.open("ab") as handle:
                 handle.writelines(values)
         except OSError:
             return 0
         pending = known + len(values)
         try:
-            too_large = target.stat().st_size > max_bytes
+            too_large = target.stat().st_size > byte_limit
         except OSError:
             too_large = False
         # ``known`` is the retained line count from the last write. Compact
@@ -285,7 +298,7 @@ def append_bounded_lines(
         # extra normalization, but never allow it to weaken the hard cap.
         normalize = pending >= max(1, int(compact_every)) and pending >= line_limit
         if pending > line_limit or too_large or normalize:
-            kept = _tail_lines_locked(target, max_lines=line_limit, max_bytes=max_bytes)
+            kept = _tail_lines_locked(target, max_lines=line_limit, max_bytes=byte_limit)
             _APPEND_COUNTS[key] = kept
             return kept
         _APPEND_COUNTS[key] = min(line_limit, pending)
@@ -313,10 +326,20 @@ def read_jsonl(
     limit = min(1000, max(1, _safe_int(max_rows, MAX_RETAINED_LINES)))
     out: Deque[Dict[str, Any]] = deque(maxlen=limit)
     try:
-        with Path(path).open(encoding="utf-8") as handle:
-            for line in handle:
+        with Path(path).open("rb") as handle:
+            while True:
+                raw = handle.readline(MAX_RETAINED_LINE_BYTES + 1)
+                if not raw:
+                    break
+                if len(raw) > MAX_RETAINED_LINE_BYTES and not raw.endswith(b"\n"):
+                    while True:
+                        remainder = handle.readline(MAX_RETAINED_LINE_BYTES + 1)
+                        if not remainder or remainder.endswith(b"\n"):
+                            break
+                if len(raw) > MAX_RETAINED_LINE_BYTES:
+                    continue
                 try:
-                    row = json.loads(line)
+                    row = json.loads(raw.decode("utf-8"))
                     ts = float(row.get("t") or 0) if isinstance(row, dict) else 0.0
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
@@ -349,14 +372,25 @@ def append_jsonl(path: str, rows: Iterable[Dict[str, Any]], *, cutoff: float) ->
         if key:
             current[key] = row
     ordered = sorted(current.values(), key=lambda row: float(row.get("t") or 0))[-MAX_RETAINED_LINES:]
+    encoded_rows: List[bytes] = []
+    for row in ordered:
+        try:
+            encoded = (json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        except (TypeError, ValueError, OverflowError):
+            continue
+        # Oversized JSONL rows are skipped rather than truncated into invalid
+        # JSON.  The file-level cap is applied after the atomic replacement.
+        if len(encoded) <= MAX_RETAINED_LINE_BYTES:
+            encoded_rows.append(encoded)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        for row in ordered:
-            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    with tmp.open("wb") as handle:
+        for encoded in encoded_rows:
+            handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, target)
-    return len(ordered)
+    # Keep both the 1,000-row and hard byte caps in force for JSONL callers.
+    return retain_last_lines(str(target))
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
@@ -375,6 +409,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
         lines = log_path.read_text(encoding="utf-8").splitlines()
         rows.append(("append-hard-cap", len(lines) <= 1000 and lines[-1:] == ["line-1304"], f"lines={len(lines)}"))
 
+        oversized = Path(root) / "oversized.log"
+        append_bounded_line(str(oversized), "x" * (MAX_RETAINED_LINE_BYTES * 8))
+        rows.append(("append-line-cap", oversized.stat().st_size <= MAX_RETAINED_LINE_BYTES, str(oversized.stat().st_size)))
+
         jsonl_path = Path(root) / "events.jsonl"
         jsonl_path.write_text(
             "".join(json.dumps({"t": i, "eventId": str(i)}) + "\n" for i in range(1205)),
@@ -382,6 +420,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         )
         parsed = read_jsonl(str(jsonl_path))
         rows.append(("jsonl-hard-cap", len(parsed) == 1000 and parsed[0].get("t") == 205, f"rows={len(parsed)}"))
+
+        append_jsonl(str(jsonl_path), [{"t": 2000, "eventId": "oversized", "payload": "x" * (MAX_RETAINED_LINE_BYTES * 8)}], cutoff=0)
+        rows.append(("jsonl-oversized-skip", all(row.get("eventId") != "oversized" for row in read_jsonl(str(jsonl_path))), "oversized row skipped"))
 
         huge_path = Path(root) / "huge.log"
         huge_path.write_text("old\n" + ("x" * (MAX_RETAINED_FILE_BYTES + 1024)) + "\nnew\n", encoding="utf-8")

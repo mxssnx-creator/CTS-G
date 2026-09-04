@@ -12,12 +12,34 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
-from storage_paths import DATA_DIR, append_bounded_line, atomic_write, path_for, storage_info
+from storage_paths import (
+    DATA_DIR,
+    MAX_RETAINED_FILE_BYTES,
+    append_bounded_line,
+    atomic_write,
+    path_for,
+    storage_info,
+)
 from runtime_scope import redis_key
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
 CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
+MAX_REQUEST_BYTES = 256 * 1024
+MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def _flag(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _live_start_allowed(cid: str) -> bool:
+    """Keep the mainnet lane fail-closed unless a separate operator gate exists."""
+    return cid != "bingx-x01" or _flag("CTS_ALLOW_LIVE_START")
+
+
+def _live_heal_allowed(cid: str) -> bool:
+    return cid != "bingx-x01" or _flag("CTS_ALLOW_LIVE_HEAL")
 
 
 def engine_unit(cid: str) -> str:
@@ -210,6 +232,8 @@ def connection_public(cid: str) -> dict:
             "defaultMainnet": True,
             "lanes": [live, vst],
         }
+    if cid not in ID_TO_LANE:
+        return {"ok": False, "conn": cid, "detail": "unknown connection"}
     raw = redis_hgetall(f"connection:{cid}")
     ctype = _conn_type_of(cid, raw)
     method = (raw.get("connection_method") or "library").strip() or "library"
@@ -235,6 +259,8 @@ def connection_public(cid: str) -> dict:
 
 def save_connection(cid: str, body: dict) -> tuple:
     body = body if isinstance(body, dict) else {}
+    if cid not in ("", "overall", *ID_TO_LANE):
+        return False, "unknown connection", connection_public(cid)
     as_default = body.get("as_default_mainnet")
     if as_default is None:
         as_default = body.get("asDefaultMainnet")
@@ -295,7 +321,10 @@ def save_connection(cid: str, body: dict) -> tuple:
 
 
 def overlay_path(conn: str) -> str:
-    p = os.path.join(DIR, f"overlay-{conn}.json")
+    cid = resolve_conn(conn)
+    if cid not in ID_TO_LANE:
+        return os.path.join(DIR, "__invalid-connection-overlay__.json")
+    p = os.path.join(DIR, f"overlay-{cid}.json")
     if os.path.exists(p):
         return p
     return os.path.join(DIR, "overlay.json")
@@ -303,8 +332,8 @@ def overlay_path(conn: str) -> str:
 
 def write_overlay(conn: str, overlay: dict) -> dict:
     cid = resolve_conn(conn) if conn not in ("", "overall") else conn
-    if cid in ("", "overall"):
-        raise ValueError("pick a lane")
+    if cid not in ID_TO_LANE:
+        raise ValueError("pick a known lane")
     dest = os.path.join(DIR, f"overlay-{cid}.json")
     cur = load_overlay(cid)
     if not isinstance(overlay, dict):
@@ -319,11 +348,17 @@ def write_overlay(conn: str, overlay: dict) -> dict:
 
 
 def cts_path(conn: str) -> str:
-    return os.path.join(DIR, f"cts-settings-{conn}.json")
+    cid = resolve_conn(conn)
+    if cid not in ID_TO_LANE:
+        return os.path.join(DIR, "__invalid-connection-settings__.json")
+    return os.path.join(DIR, f"cts-settings-{cid}.json")
 
 
 def stats_path(conn: str) -> str:
-    return os.path.join(DIR, f"stats-{conn}.json")
+    cid = resolve_conn(conn)
+    if cid not in ID_TO_LANE:
+        return os.path.join(DIR, "__invalid-connection-stats__.json")
+    return os.path.join(DIR, f"stats-{cid}.json")
 
 
 def slim_for_ui(st: dict) -> dict:
@@ -359,6 +394,10 @@ def slim_for_ui(st: dict) -> dict:
     closed = out.get("closed") or []
     if isinstance(closed, list) and len(closed) > 40:
         out["closed"] = closed[:40]
+    if isinstance(opens, list) and len(opens) > 256:
+        out["openCountReported"] = len(opens)
+        out["openTruncated"] = True
+        out["open"] = opens[:256]
     return out
 
 
@@ -471,6 +510,9 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             _touch(pause)
             notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
+            if not _live_start_allowed(cid):
+                notes.append(f"{cid} start blocked: explicit CTS_ALLOW_LIVE_START gate required")
+                continue
             _unlink(pause)
             _unlink(stop)
             _unlink(STOP_ALL_PATH)
@@ -490,26 +532,38 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             rc, out = _sysctl("stop", unit)
             st = unit_state(cid, fresh=True)
             notes.append(f"{cid} stop rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
-    return True, "; ".join(notes)
+    executed = any("start blocked" not in note for note in notes)
+    return executed, "; ".join(notes)
 
 
 def load_json(path: str) -> dict:
     try:
-        with open(path) as f:
-            data = json.load(f)
+        if not path or os.path.getsize(path) > MAX_RETAINED_FILE_BYTES:
+            return {}
+        with open(path, "rb") as f:
+            raw = f.read(MAX_RETAINED_FILE_BYTES + 1)
+        if len(raw) > MAX_RETAINED_FILE_BYTES:
+            return {}
+        data = json.loads(raw.decode("utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
 def load_cts(conn: str) -> dict:
+    conn = resolve_conn(conn)
+    if conn not in ID_TO_LANE:
+        return {}
     path = cts_path(conn)
     if os.path.exists(path):
         data = load_json(path)
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
+    except Exception:
+        return {}
     lines = (p.stdout or "").splitlines()
     out = {}
     for i in range(0, len(lines) - 1, 2):
@@ -924,6 +978,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _json(self, obj, code=200):
         blob = json.dumps(obj, separators=(",", ":")).encode()
+        if len(blob) > MAX_JSON_RESPONSE_BYTES:
+            obj = {"ok": False, "detail": "response exceeds bounded payload limit"}
+            code = 500
+            blob = json.dumps(obj, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(blob)))
@@ -1074,7 +1132,14 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         conn = resolve_conn(qs(self.path).get("conn", ""))
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self.send_error(400, "invalid content length")
+            return
+        if n < 0 or n > MAX_REQUEST_BYTES:
+            self._json({"ok": False, "detail": "request exceeds bounded payload limit"}, 413)
+            return
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
@@ -1185,6 +1250,8 @@ def heal_loop() -> None:
         try:
             for lane in LANES:
                 cid = lane["id"]
+                if not _live_heal_allowed(cid):
+                    continue
                 # Same mutex as apply_control: the STOP-file check and the
                 # start are atomic against a manual stop/pause click, so the
                 # watchdog can never revive a lane the user just stopped.

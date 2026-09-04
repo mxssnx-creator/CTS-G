@@ -36,6 +36,15 @@ class ForcedTests(unittest.TestCase):
     def test_forced_cli(self):
         self.assertTrue(cli_options(["--forced-only", "--hours", "24"])["forcedOnly"])
 
+    def test_recent_pf_and_drawdown_are_explicit_diagnostics(self):
+        result = self.replay([[100, 101, 99, 100, 1]] * 120)
+        self.assertEqual(result["recentPf"]["last8"]["classicPf"], 0)
+        self.assertTrue(result["recentPf"]["last8"]["available"])
+        self.assertFalse(result["recentPf"]["last75"]["available"])
+        self.assertEqual(result["ddEpisodes"], 1)
+        self.assertGreater(result["avgDdS"], 0)
+        self.assertEqual(result["avgDdS"], result["maxDdS"])
+
     def test_strict_pf_and_input_validation(self):
         self.assertTrue(forced.valid_candidate(self.row()))
         for field in ("pf", "trainPf", "holdoutPf"):
