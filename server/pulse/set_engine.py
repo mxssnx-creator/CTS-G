@@ -1591,7 +1591,12 @@ class SetBook:
                     symbol,
                     local,
                     now,
-                    on_step=None,
+                    # Keep the service watchdog alive during a single
+                    # symbol's vector/scalar replay.  A symbol can cover the
+                    # full catalog and take longer than the systemd watchdog
+                    # interval; forwarding the bounded inner progress hook
+                    # avoids mistaking a healthy long replay for a hung lane.
+                    on_step=on_step,
                     ind_hist=local_ind,
                     strat_hist=local_strategy,
                 )

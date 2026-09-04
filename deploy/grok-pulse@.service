@@ -10,7 +10,10 @@ StartLimitIntervalSec=120
 [Service]
 Type=notify
 NotifyAccess=all
-WatchdogSec=300
+# A full symbol slice can legitimately run for several minutes while the
+# bounded replay emits inner WATCHDOG heartbeats. Keep a generous systemd
+# safety ceiling so reclaim/CPU scheduling cannot kill a healthy long slice.
+WatchdogSec=900
 WatchdogSignal=SIGKILL
 EnvironmentFile=-/etc/cts-g/cts-g.env
 EnvironmentFile=-/etc/cts-g/credentials.env
