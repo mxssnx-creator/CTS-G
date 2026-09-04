@@ -308,10 +308,20 @@ class EventLedger:
                     codes[event.code] = codes.get(event.code, 0) + 1
             exchange_known = int(exchange_open) >= 0
             parity = "pending" if not exchange_known else ("match" if int(internal_open) == int(exchange_open) else "discrepant")
+            # Financial totals are sourced from the authoritative close
+            # events.  Exchange fill callbacks can repeat the same realized
+            # result for a close order; counting every request/fill event
+            # would inflate PnL and fees and corrupt PF/DDT exports.
+            realized_events = [
+                event for event in events
+                if event.event_type == "close"
+                or str((event.metadata or {}).get("realized") or "").lower() == "true"
+            ]
             return {
                 "eventCount": len(events),
-                "grossPnl": round(sum(event.pnl for event in events), 8),
-                "fees": round(sum(event.fee for event in events), 8),
+                "grossPnl": round(sum(event.pnl for event in realized_events), 8),
+                "fees": round(sum(event.fee for event in realized_events), 8),
+                "financialEventCount": len(realized_events),
                 "duplicateCount": int(self.duplicate_count),
                 "byType": by_type,
                 "byStatus": by_status,
@@ -349,13 +359,16 @@ def self_test() -> List[tuple[str, bool, str]]:
     ledger.record("position_open", "open-1", status="confirmed", symbol="SOL-USDT", side="LONG", strategy="general")
     ledger.record("reconciliation", "recon-1", status="discrepant", detail="book-only")
     restored = EventLedger(path, "bingx-x02", max_events=32)
+    restored.record("fill", "close-fill-1", status="filled", symbol="SOL-USDT", side="LONG", pnl=5.0, fee=0.2)
+    restored.record("close", "close-1", status="confirmed", symbol="SOL-USDT", side="LONG", pnl=5.0, fee=0.2)
     summary = restored.summary(internal_open=1, exchange_open=2, internal_closed=0)
     return [
         ("ledger-commit", first and not duplicate, f"first={first} duplicate={duplicate}"),
-        ("ledger-restart", len(restored.events) == 3, f"n={len(restored.events)}"),
+        ("ledger-restart", len(restored.events) == 5, f"n={len(restored.events)}"),
         ("ledger-bounded", len(restored.tail(32)) <= 32, f"n={len(restored.tail(32))}"),
         ("ledger-parity", summary.get("parity") == "discrepant", str(summary.get("parity"))),
-        ("ledger-tail", bool(summary.get("tail")) and summary["tail"][0]["event_type"] == "reconciliation", str(summary.get("tail")[:1])),
+        ("ledger-realized-dedup", summary.get("grossPnl") == 5.0 and summary.get("fees") == 0.2 and summary.get("financialEventCount") == 1, str(summary)),
+        ("ledger-tail", bool(summary.get("tail")) and summary["tail"][0]["event_type"] == "close", str(summary.get("tail")[:1])),
     ]
 
 

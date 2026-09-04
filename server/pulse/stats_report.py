@@ -15,7 +15,7 @@ from position_cost import (
     net_pnl_usdt,
     signed_result_r,
 )
-from set_engine import drawdown_time, IND_KINDS
+from set_engine import drawdown_time_by_symbol, IND_KINDS
 
 
 def _f(v: Any, fb: float = 0.0) -> float:
@@ -28,6 +28,7 @@ def _f(v: Any, fb: float = 0.0) -> float:
 
 def _row(c: Any) -> Dict[str, Any]:
     if isinstance(c, dict):
+        has_pct = c.get("pnl_pct") is not None
         return {
             "t": _f(c.get("t")),
             "symbol": str(c.get("symbol") or ""),
@@ -37,6 +38,7 @@ def _row(c: Any) -> Dict[str, Any]:
             "exit": _f(c.get("exit") or c.get("exit_px")),
             "pnl": _f(c.get("pnl")),
             "pnl_pct": _f(c.get("pnl_pct")),
+            "_pnl_pct_present": has_pct,
             "hold_s": _f(c.get("hold_s") or c.get("holdS")),
             "reason": str(c.get("reason") or ""),
             "set_id": str(c.get("set_id") or c.get("setId") or ""),
@@ -56,6 +58,7 @@ def _row(c: Any) -> Dict[str, Any]:
         "exit": _f(getattr(c, "exit", 0)),
         "pnl": _f(getattr(c, "pnl", 0)),
         "pnl_pct": _f(getattr(c, "pnl_pct", 0)),
+        "_pnl_pct_present": getattr(c, "pnl_pct", None) is not None,
         "hold_s": _f(getattr(c, "hold_s", 0)),
         "reason": str(getattr(c, "reason", "") or ""),
         "set_id": str(getattr(c, "set_id", "") or ""),
@@ -70,7 +73,12 @@ def _row(c: Any) -> Dict[str, Any]:
 
 def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     notion = max(0.0, row["qty"] * row["entry"])
-    gross_pct = row["pnl_pct"]
+    if not row.get("_pnl_pct_present", True) and notion > 1e-12:
+        # Persisted Closed.pnl is net of one PositionCost. Reconstruct the
+        # gross move before applying cost again.
+        gross_pct = row["pnl"] / notion + cost_as_frac(cost_pct)
+    else:
+        gross_pct = row["pnl_pct"]
     net_pct = net_pnl_pct(gross_pct, cost_pct)
     net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], cost_pct) if notion else row["pnl"]
     r = signed_result_r(gross_pct, cost_pct)
@@ -81,11 +89,13 @@ def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     row["resultR"] = round(r, 4)
     row["costPct"] = cost_pct
     row["costUsdt"] = round(notion * cost_as_frac(cost_pct), 8)
+    row.pop("_pnl_pct_present", None)
     return row
 
 
 def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float) -> Dict[str, Any]:
-    src = list(rows)[-n:] if n else list(rows)
+    ordered = sorted(list(rows), key=lambda r: _f(r.get("t")))
+    src = ordered[-n:] if n else ordered
     gp = gl = 0.0
     gp_net = gl_net = 0.0
     wins = losses = 0
@@ -138,7 +148,7 @@ def by_symbol(rows: Sequence[Dict[str, Any]], cost_pct: float) -> List[Dict[str,
         buckets.setdefault(r["symbol"] or "?", []).append(r)
     out = []
     for s, items in buckets.items():
-        d = drawdown_time([{"t": x["t"], "pnl": x.get("netPnl", x["pnl"])} for x in items])
+        d = drawdown_time_by_symbol([{"t": x["t"], "symbol": s, "pnl": x.get("netPnl", x["pnl"])} for x in items])
         w = pf_window(items, None, cost_pct)
         out.append({
             "symbol": s,
@@ -211,7 +221,7 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
 
 
 def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    d = drawdown_time([{"t": x.get("t"), "pnl": x.get("netPnl", x.get("pnl"))} for x in rows]) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+    d = drawdown_time_by_symbol([{"t": x.get("t"), "symbol": x.get("symbol") or "?", "pnl": x.get("netPnl", x.get("pnl"))} for x in rows]) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
     window["maxDdS"] = d.get("maxS")
     window["avgDdS"] = d.get("avgS")
     window["ddEpisodes"] = d.get("episodes")
@@ -420,8 +430,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
     pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
-    ddt = drawdown_time([{"t": r["t"], "pnl": r.get("netPnl", r["pnl"])} for r in closed])
-    ddt_gross = drawdown_time([{"t": r["t"], "pnl": r["pnl"]} for r in closed])
+    ddt = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r.get("netPnl", r["pnl"])} for r in closed])
+    ddt_gross = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r["pnl"]} for r in closed])
     occ = occupancy(st.get("open") or [])
     rows = []
     for r in sets.get("rows") or []:
@@ -763,6 +773,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("rep-cost-loss", e[1]["netPnl"] < 0 and e[1]["resultR"] < 0, str(e[1])))
     w = pf_window(e, None, 0.15)
     out.append(("rep-pf-after-cost", "pfAfterCost" in w and "costRatio" in w, str(w)))
+    window_rows = [
+        {"t": 1, "pnl": 1.0, "netPnl": 1.0},
+        {"t": 2, "pnl": -10.0, "netPnl": -10.0},
+        {"t": 3, "pnl": 3.0, "netPnl": 3.0},
+        {"t": 4, "pnl": 4.0, "netPnl": 4.0},
+    ]
+    newest_first = list(reversed(window_rows))
+    newest = pf_window(newest_first, 2, 0.15)
+    out.append(("rep-pf-latest-window", newest["gp"] == 7.0 and newest["gl"] == 0.0, str(newest)))
+    legacy = enrich(_row({"t": 7, "symbol": "AAA-USDT", "qty": 100, "entry": 1, "pnl": 1.0}), 0.15)
+    out.append(("rep-legacy-pnl-normalized", abs(legacy["netPnl"] - 1.0) < 1e-9 and abs(legacy["resultR"] - 6.6667) < 1e-3, str(legacy)))
     occ = occupancy([{"symbol": "A", "side": "LONG", "pack": "general", "setId": "s1"}, {"symbol": "B", "side": "SHORT", "pack": "indications", "setId": "s2"}])
     out.append(("rep-occ-unique", occ["duplicateSlots"] == 0 and occ["maxOnePerSymbolDirSet"], str(occ)))
     occ2 = occupancy([{"symbol": "A", "side": "LONG", "pack": "g", "setId": "s1"}, {"symbol": "A", "side": "LONG", "pack": "g", "setId": "s1"}])
@@ -795,6 +816,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("rep-strat-trail", int((stt.get("trailing") or {}).get("n") or 0) >= 1, str(stt.get("trailing"))))
     out.append(("rep-strat-exits", int((stt.get("exits") or {}).get("n") or 0) >= 1, str(stt.get("exits"))))
     out.append(("rep-strat-ind-kind", "indications:active" in stt, str(sorted(stt))))
+    cross = build({"closed": [
+        {"t": 100, "symbol": "A", "pnl": 1.0},
+        {"t": 160, "symbol": "A", "pnl": -2.0},
+        {"t": 50_000, "symbol": "B", "pnl": 1.0},
+        {"t": 50_060, "symbol": "B", "pnl": -0.2},
+        {"t": 50_120, "symbol": "B", "pnl": 1.5},
+    ], "sets": {"rows": []}, "open": []}, cost_pct=0.15, conn="x02")
+    out.append(("rep-ddt-symbol-isolation", cross["drawdownTime"]["afterCost"]["maxDdS"] == 60.0, str(cross["drawdownTime"])))
     return out
 
 

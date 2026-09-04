@@ -65,7 +65,7 @@ function DeskPage() {
   const overview = useMemo(
     () =>
       buildOverview(
-        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, pnl_pct: c.pnl_pct })),
+        (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
       ),
     [stats],
   );

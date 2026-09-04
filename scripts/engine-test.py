@@ -15,7 +15,7 @@ DIR = os.path.abspath(DIR)
 sys.path.insert(0, DIR)
 os.chdir(DIR)
 
-from set_engine import self_test as sets_self_test
+from set_engine import SetBook, self_test as sets_self_test, synth_trend
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
 from risk_variants import self_test as variants_self_test
@@ -193,12 +193,118 @@ def controls_test() -> None:
 
 
 def fill_accounting_test() -> None:
-    """Exchange fill fields must not overstate positions or debited margin."""
+    """Exchange fill fields and cumulative close accounting stay exact."""
     rec("fill-executed-priority", abs(order_fill_qty({"executedQty": "0.02", "quantity": "0.05"}, 0.05) - 0.02) < 1e-12)
     rec("fill-explicit-zero-stays-zero", order_fill_qty({"executedQty": "0", "quantity": "0.05"}, 0.05) == 0.0)
     rec("fill-capped-to-request", order_fill_qty({"executedQty": "0.08"}, 0.05) == 0.05)
     rec("fill-fallback-requested", order_fill_qty({"orderId": "x"}, 0.05) == 0.05)
     rec("fill-malformed-fallback", order_fill_qty({"executedQty": "nan"}, 0.05) == 0.05)
+    rec("fill-control-half-up", normalize_control_pct(0.00495) == 50,
+        str(normalize_control_pct(0.00495)))
+
+    # An exchange close is cumulative: direct response 2/5, then allOrders
+    # reports 4/5 and 5/5. Only the new delta may change local qty/PnL. The
+    # foreign row is deliberately present in the exchange tape but has no CTS
+    # client id and is never touched by the close reconciliation.
+    import time as _time
+    from types import SimpleNamespace
+    import pulse_trader as pt
+
+    class CloseApi:
+        def __init__(self):
+            self.rows: List[dict] = []
+            self.n = 0
+            self.path_cd: Dict[str, float] = {}
+
+        def post(self, _path: str, _body: dict) -> dict:
+            self.n += 1
+            return {"code": 0, "data": {"order": {
+                "orderId": "close-1",
+                "avgPrice": "101",
+                "origQty": "5",
+                "executedQty": "2",
+                "status": "PARTIALLY_FILLED",
+            }}}
+
+        def get(self, _path: str, _params=None) -> dict:
+            return {"code": 0, "data": {"orders": list(self.rows)}}
+
+    api = CloseApi()
+    p = object.__new__(pt.Pulse)
+    p.api = api
+    p.px = {"AAA-USDT": 101.0}
+    p.last_px = {}
+    p.open = {}
+    p.pending_orders = {}
+    p.control_orders = False
+    p.control_orders_per_config = False
+    p.position_cost_pct = 0.15
+    p._last_close_result = {}
+    p._save_pending_orders = lambda: None
+    p.save_open_book = lambda: None
+    p.record_event = lambda *args, **kwargs: None
+    p.cancel_controls = lambda *args, **kwargs: None
+    p.clear_position_controls = lambda *args, **kwargs: None
+    p.ensure_controls = lambda *args, **kwargs: None
+    p._close_strategy_lanes = lambda *args, **kwargs: None
+    p.ban_sym = lambda *args, **kwargs: None
+    p.control_event_fields = lambda *args, **kwargs: {}
+    p.seen_fill_cids = set()
+    p._stats_force = False
+    p.closed = []
+    p.wins = 0
+    p.losses = 0
+    p.consec_loss = 0
+    p.cooldown = {}
+    p.owned_syms = set()
+    p.errors = 0
+    p.last_error = ""
+    p.sets = SimpleNamespace(
+        get_idx=lambda _idx: None,
+        on_live_close=lambda *args, **kwargs: None,
+        adapt_from_live=lambda *args, **kwargs: None,
+    )
+    p.variants = SimpleNamespace()
+    p.exits = SimpleNamespace()
+    p.dca = SimpleNamespace()
+    p.block = SimpleNamespace()
+    pos = pt.Position(
+        symbol="AAA-USDT", side="LONG", qty=5.0, entry=100.0,
+        opened_at=_time.time() - 60, sl=99.0, tp=102.0, peak=100.0,
+        client_id="Gx02og060308000own1", ours=True,
+    )
+    p.open[p.position_key(pos)] = pos
+    p.close_pos(pos, 101.0, "test-partial")
+    close_cid = next(iter(p.pending_orders))
+    rec("close-partial-direct",
+        abs(pos.qty - 3.0) < 1e-12 and abs(pos.pending_close_qty - 3.0) < 1e-12
+        and len(p.closed) == 1 and abs(p.closed[0].qty - 2.0) < 1e-12,
+        f"qty={pos.qty} pending={pos.pending_close_qty} closed={len(p.closed)}")
+
+    def exchange_close(cumulative: float, status: str = "PARTIALLY_FILLED") -> dict:
+        return {
+            "clientOrderID": close_cid, "symbol": "AAA-USDT", "positionSide": "LONG",
+            "origQty": "5", "executedQty": str(cumulative), "avgPrice": "102",
+            "status": status, "orderId": "close-1",
+        }
+
+    api.rows = [exchange_close(4.0)]
+    p.sync_own_fills()
+    rec("close-partial-cumulative-delta",
+        abs(pos.qty - 1.0) < 1e-12 and abs(pos.pending_close_qty - 1.0) < 1e-12
+        and len(p.closed) == 2 and abs(sum(x.qty for x in p.closed) - 4.0) < 1e-12,
+        f"qty={pos.qty} pending={pos.pending_close_qty} closed={len(p.closed)}")
+    p.sync_own_fills()
+    rec("close-partial-repeat-idempotent",
+        abs(pos.qty - 1.0) < 1e-12 and len(p.closed) == 2,
+        f"qty={pos.qty} closed={len(p.closed)}")
+
+    api.rows = [exchange_close(5.0, "FILLED")]
+    p.sync_own_fills()
+    rec("close-partial-final-reconciles",
+        not p.open and close_cid not in p.pending_orders and abs(sum(x.qty for x in p.closed) - 5.0) < 1e-12
+        and p.wins == 3,
+        f"open={len(p.open)} pending={close_cid in p.pending_orders} closed_qty={sum(x.qty for x in p.closed)} wins={p.wins}")
 
 
 def unlimited_test() -> None:
@@ -848,6 +954,7 @@ def sim_stats_test() -> None:
     p2 = object.__new__(pt.Pulse)
     p2.api = FakeApi()
     p2.open = {"A-USDT": pos("A-USDT", "LONG", 1.5, 100.0)}
+    p2.open["A-USDT"].client_id = "Gx02og060308000own2"
     p2.px = {}
     p2.cooldown = {}
     p2.did_io = False
@@ -862,6 +969,33 @@ def sim_stats_test() -> None:
     rec("sim-adopt-keys", p2.live_pos_keys == {"A-USDT:LONG"} and n == 0
         and p2.exchange_open_count == 1,
         f"keys={p2.live_pos_keys} n={n} xch={p2.exchange_open_count}")
+
+    # 6) same endpoint contains a foreign position: it remains diagnostic
+    # only, is excluded from own/live stats, and cannot be adopted.
+    p3 = object.__new__(pt.Pulse)
+    p3.api = type("ForeignApi", (), {"get": lambda self, path: {"code": 0, "data": [
+        {"symbol": "FOREIGN-USDT", "positionSide": "LONG", "positionAmt": "2", "avgPrice": "50", "leverage": ""},
+    ]}})()
+    p3.open = {}
+    p3.px = {}
+    p3.cooldown = {}
+    p3.did_io = False
+    p3.recon_ok = True
+    p3.recon_detail = "pending"
+    p3.exchange_open_count = -1
+    p3.exchange_total_open_count = -1
+    p3.exchange_own_open_count = -1
+    p3._empty_rest_streak = 0
+    p3.ignored_foreign = 0
+    p3.live_pos_keys = None
+    p3.record_event = lambda *args, **kwargs: None
+    p3.save_open_book = lambda: None
+    p3.our_orders = lambda *args, **kwargs: []
+    p3.adopt_exchange_positions()
+    rec("sim-foreign-excluded",
+        not p3.open and p3.live_pos_keys == set() and p3.exchange_open_count == 0
+        and p3.exchange_total_open_count == 1 and p3.ignored_foreign == 1,
+        f"open={len(p3.open)} own={p3.exchange_open_count} total={p3.exchange_total_open_count} foreign={p3.ignored_foreign}")
 
 
 def block_calc_test() -> None:
@@ -2032,6 +2166,57 @@ def process_guard_test() -> None:
     rec("async-shared-rate-trip", "self._take(\"public\", path)" in fast and "self._trip(path, body)" in fast)
 
 
+def historic_snapshot_test() -> None:
+    """Historic CPU work cannot block or overwrite live Set evidence."""
+    import threading
+    import pulse_trader as pt
+    from load_engine import LoadGovernor
+
+    book = SetBook()
+    book.load({
+        "stratIndications": False,
+        "stratGeneral": True,
+        "stratTrailing": False,
+        "slToTpRatios": [0.6],
+        "setMinStep": 3,
+        "setStepMax": 3,
+        "histMinBars": 60,
+        "histLookbackBars": 120,
+    })
+    symbol = "SNAP-USDT"
+    book.ingest_bars(symbol, synth_trend(120))
+    set_id = book.by_idx[0].id
+    book.on_live_close({
+        "t": time.time(),
+        "symbol": symbol,
+        "side": "LONG",
+        "pnl": 0.02,
+        "pnl_pct": 0.01,
+        "hold_s": 60,
+        "reason": "tp",
+        "set_id": set_id,
+        "client_id": "snap-live-1",
+        "ours": True,
+    })
+    p = object.__new__(pt.Pulse)
+    p._state_lock = threading.RLock()
+    p._sets_generation = 1
+    p.sets = book
+    p.load = LoadGovernor()
+    p.open = {}
+    p._hist_deferred = ""
+    p.hist_busy = False
+    old_id = id(book)
+    ok = p._replay_sets_isolated([symbol], False, 1)
+    current = p.sets
+    rec("hist-snapshot-atomic", ok and id(current) != old_id and current.progress.ready,
+        f"ok={ok} swapped={id(current) != old_id} phase={current.progress.phase}")
+    rec("hist-snapshot-keeps-live", len(current.sets[set_id].live) == 1 and current.sets[set_id].live[0].get("client_id") == "snap-live-1",
+        f"live={len(current.sets[set_id].live)}")
+    rec("hist-snapshot-no-bars-loss", symbol in current.bars and len(current.bars[symbol]) == 120,
+        f"bars={len(current.bars.get(symbol) or [])}")
+
+
 def main() -> int:
     run_units()
     rank_test()
@@ -2053,6 +2238,7 @@ def main() -> int:
     grouped_control_test()
     strict_gate_test()
     dd_time_test()
+    historic_snapshot_test()
     process_guard_test()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
