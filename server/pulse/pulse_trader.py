@@ -3489,6 +3489,8 @@ class Pulse:
             "indTypeActive": bool(self.indications.settings.get("typeActive", True)),
             "indTypeCommon": bool(self.indications.settings.get("typeCommon", True)),
             "indTypeSignals": bool(self.indications.settings.get("typeSignals", True)),
+            "indTypeTrend": bool(self.indications.settings.get("typeTrend", True)),
+            "indTypeBreak": bool(self.indications.settings.get("typeBreak", True)),
             "histEnabled": self.sets.enabled,
             "histLookbackBars": self.sets.lookback,
             "histMinBars": self.sets.min_bars,

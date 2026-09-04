@@ -656,6 +656,9 @@ class SetBook:
         # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
         self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
+        # Main-stage strategy tapes are kept separately from the canonical
+        # Set tape so Block/DCA evidence cannot inflate Base/Real counts.
+        self.strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
         # Partial load-sliced replays retain bounded evidence from symbols
         # already covered in the current cycle. Per-symbol counts keep
         # histFills meaningful even though each Set tape is capped for RAM.
@@ -994,6 +997,10 @@ class SetBook:
             if len(tape) > lc:
                 self.ind_live[k] = tape[-lc:]
                 n += 1
+        for k, tape in list(self.strategy_hist.items()):
+            if len(tape) > hc:
+                self.strategy_hist[k] = tape[-hc:]
+                n += 1
         return n
 
     def trim_bars(self, keep: Sequence[str]) -> int:
@@ -1157,18 +1164,27 @@ class SetBook:
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
+            strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
             processed_symbols: set[str] = set()
             aborted = False
             w = max(1, min(int(workers or 1), 8, len(names) or 1))
             lock = threading.Lock()
 
-            def _merge(symbol: str, local: Dict[str, List[Dict[str, Any]]], local_ind: Dict[str, List[Dict[str, Any]]]) -> None:
+            def _merge(
+                symbol: str,
+                local: Dict[str, List[Dict[str, Any]]],
+                local_ind: Dict[str, List[Dict[str, Any]]],
+                local_strategy: Dict[str, List[Dict[str, Any]]],
+            ) -> None:
                 for sid, rows in local.items():
                     if rows:
                         hist.setdefault(sid, []).extend(rows)
                 for k, rows in local_ind.items():
                     if rows:
                         ind_hist.setdefault(k, []).extend(rows)
+                for k, rows in local_strategy.items():
+                    if rows:
+                        strategy_hist.setdefault(k, []).extend(rows)
                 nbar = len(self.bars.get(symbol) or [])
                 if drop_bars:
                     self.bars.pop(symbol, None)
@@ -1177,11 +1193,26 @@ class SetBook:
                     self._hist_seen.add(symbol)
                     processed_symbols.add(symbol)
 
-            def _one(symbol: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+            def _one(
+                symbol: str,
+            ) -> Tuple[
+                str,
+                Dict[str, List[Dict[str, Any]]],
+                Dict[str, List[Dict[str, Any]]],
+                Dict[str, List[Dict[str, Any]]],
+            ]:
                 local: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
                 local_ind: Dict[str, List[Dict[str, Any]]] = {}
-                self._replay_symbol(symbol, local, now, on_step=None, ind_hist=local_ind)
-                return symbol, local, local_ind
+                local_strategy: Dict[str, List[Dict[str, Any]]] = {}
+                self._replay_symbol(
+                    symbol,
+                    local,
+                    now,
+                    on_step=None,
+                    ind_hist=local_ind,
+                    strat_hist=local_strategy,
+                )
+                return symbol, local, local_ind, local_strategy
 
             done = 0
             if w <= 1 or len(names) <= 1:
@@ -1195,8 +1226,8 @@ class SetBook:
                     self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                     self.progress.elapsed_ms = (time.time() - t0) * 1000
                     self.progress.detail = f"replay {symbol} {i + 1}/{len(names)}"
-                    _sym, local, local_ind = _one(symbol)
-                    _merge(_sym, local, local_ind)
+                    _sym, local, local_ind, local_strategy = _one(symbol)
+                    _merge(_sym, local, local_ind, local_strategy)
                     done += 1
                     if on_symbol:
                         on_symbol(symbol, done, len(names))
@@ -1226,7 +1257,7 @@ class SetBook:
                         for fut in finished:
                             symbol, _attempt = pending.pop(fut)
                             try:
-                                result_symbol, local, local_ind = fut.result()
+                                result_symbol, local, local_ind, local_strategy = fut.result()
                             except Exception:
                                 attempt = retries.get(symbol, 0) + 1
                                 retries[symbol] = attempt
@@ -1235,7 +1266,7 @@ class SetBook:
                                     continue
                                 raise
                             with lock:
-                                _merge(result_symbol, local, local_ind)
+                                _merge(result_symbol, local, local_ind, local_strategy)
                                 done += 1
                                 self.progress.symbol = result_symbol
                                 self.progress.symbols_done = done
@@ -1254,6 +1285,17 @@ class SetBook:
                 merge=merge,
                 replayed_symbols=processed_symbols if merge else names,
             )
+            strategy_names = processed_symbols if merge else names
+            if not merge:
+                self.strategy_hist = {
+                    k: trim_hist(rows, HIST_CAP) for k, rows in strategy_hist.items()
+                }
+            else:
+                keys = set(self.strategy_hist) | set(strategy_hist)
+                self.strategy_hist = {
+                    k: merge_hist_rows(self.strategy_hist.get(k) or [], strategy_hist.get(k) or [], strategy_names)
+                    for k in keys
+                }
             coverage_done = len(self._hist_seen) if merge else (done if aborted else len(names))
             complete = (not merge and not aborted) or (merge and coverage_done >= symbols_total)
             if complete:
@@ -2738,6 +2780,18 @@ class SetBook:
         cover = self.coverage()
         validated_count = int(cover.get("validatedCount") or 0)
         live_ov = self.live_overview()
+        strategy_history = {}
+        for strategy, tape in (self.strategy_hist or {}).items():
+            metrics = self._score_metrics(tape)
+            strategy_history[str(strategy)] = {
+                "n": int(metrics.get("source_n") or 0),
+                "last15N": int(metrics.get("last15_n") or 0),
+                "last15Ratio": round(float(metrics.get("last15_ratio") or 0), 4),
+                "netAvg": round(float(metrics.get("net_avg") or 0), 6),
+                "maxDdS": round(float(metrics.get("max_dd_s") or 0), 1),
+                "costSubtracted": True,
+                "source": "hist-sim",
+            }
         # Never dump the full 1000+ set index into the hot stats JSON.
         index = []
         if full:
@@ -2781,6 +2835,7 @@ class SetBook:
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "coverage": cover,
             "liveOverview": live_ov,
+            "strategyHistory": strategy_history,
             "liveFills": int(live_ov.get("fills") or 0),
             "liveProcessed": int(live_ov.get("processed") or 0),
             "liveActive": int(live_ov.get("active") or 0),
