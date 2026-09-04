@@ -861,6 +861,42 @@ class Pulse:
                 return str(key)
         return str(getattr(pos, "symbol", ""))
 
+    def logical_group_key(self, pos: Position) -> str:
+        return self.position_key(pos) if self.per_config_controls(pos) else ""
+
+    def block_lane_key(self, pos: Position) -> str:
+        group_key = self.logical_group_key(pos)
+        try:
+            return self.block.key(pos.symbol, pos.side, group_key)
+        except TypeError:
+            return self.block.key(pos.symbol, pos.side)
+
+    def dca_lane_key(self, pos: Position) -> str:
+        group_key = self.logical_group_key(pos)
+        try:
+            return self.dca.key(pos.symbol, pos.side, group_key)
+        except TypeError:
+            return self.dca.key(pos.symbol, pos.side)
+
+    def ensure_strategy_lanes(self, pos: Position) -> None:
+        """Rebind Block/DCA state to this logical group after fills or restart."""
+        group_key = self.logical_group_key(pos)
+        try:
+            self.block.register_parent(pos.symbol, pos.side, pos.qty, pos.entry, group_key=group_key)
+        except TypeError:
+            self.block.register_parent(pos.symbol, pos.side, pos.qty, pos.entry)
+        except Exception:
+            pass
+        try:
+            self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry, group_key=group_key)
+        except TypeError:
+            try:
+                self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def positions_for(self, symbol: str, side: str = "") -> List[Position]:
         side_u = str(side or "").upper()
         return [
@@ -3378,11 +3414,7 @@ class Pulse:
                 self.close_pos(pos, avg, "no-ctrl")
                 return
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
-        self.block.register_parent(sym, side, pos.qty, pos.entry)
-        try:
-            self.dca.attach(sym, side, pos.qty, pos.entry)
-        except Exception:
-            pass
+        self.ensure_strategy_lanes(pos)
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
         self._stats_force = True
 
@@ -4239,7 +4271,7 @@ class Pulse:
             return
         if self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time():
             return
-        live_keys = {self.block.key(p.symbol, p.side) for p in self.open.values()}
+        live_keys = {self.block_lane_key(p) for p in self.open.values()}
         dirty = False
         for k, lane in list(self.block.lanes.items()):
             if k not in live_keys and (lane.active or lane.base_qty > 0):
@@ -4253,7 +4285,8 @@ class Pulse:
             self.block.save()
         live_n_by: Dict[str, int] = {}
         for p in self.open.values():
-            live_n_by[self.block.key(p.symbol, p.side)] = live_n_by.get(self.block.key(p.symbol, p.side), 0) + 1
+            lane_key = self.block_lane_key(p)
+            live_n_by[lane_key] = live_n_by.get(lane_key, 0) + 1
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
@@ -4263,7 +4296,7 @@ class Pulse:
                 self.ensure_controls(pos)
                 if self.missing_controls(pos):
                     continue
-            k = self.block.key(pos.symbol, pos.side)
+            k = self.block_lane_key(pos)
             lane = self.block.lanes.get(k)
             if not lane or lane.base_qty <= 0:
                 continue
@@ -4301,7 +4334,7 @@ class Pulse:
                 continue
             # One add-strategy per parent: DCA already filled → skip Block.
             try:
-                dca_lane = (getattr(self.dca, "lanes", {}) or {}).get(self.dca.key(pos.symbol, pos.side))
+                dca_lane = (getattr(self.dca, "lanes", {}) or {}).get(self.dca_lane_key(pos))
                 if dca_lane and int(getattr(dca_lane, "filled_n", 0) or 0) > 0:
                     continue
             except Exception:
@@ -5161,6 +5194,7 @@ class Pulse:
                         except Exception:
                             pass
                     self.prepare_position_group(candidate)
+                    self.ensure_strategy_lanes(candidate)
                 continue
             if px <= 0:
                 continue
@@ -5197,8 +5231,11 @@ class Pulse:
                 volume_ratio=float(track.get("volume_ratio") or 1.0),
                 ind_kind=str(track.get("ind_kind") or ""),
             )
-            self.prepare_position_group(rec_pos)
+            # Without persisted lineage, recovery is intentionally aggregate:
+            # never invent a per-config group from one ambiguous control order.
+            self.prepare_position_group(rec_pos, legacy=True)
             self.open[self.position_key(rec_pos) if self.per_config_controls(rec_pos) else sym] = rec_pos
+            self.ensure_strategy_lanes(rec_pos)
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
             if getattr(self, "control_orders", True):

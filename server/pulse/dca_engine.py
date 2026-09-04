@@ -76,6 +76,7 @@ class DcaLane:
     parent_qty: float
     avg_entry: float
     steps: List[DcaStep] = field(default_factory=list)
+    group_key: str = ""
     last_add: float = 0.0
     filled_n: int = 0
 

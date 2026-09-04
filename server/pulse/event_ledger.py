@@ -42,6 +42,10 @@ class LedgerEvent:
     status: str = ""
     symbol: str = ""
     side: str = ""
+    control_group_key: str = ""
+    control_range_key: str = ""
+    control_mode: str = ""
+    member_count: int = 1
     set_id: str = ""
     parent_set_id: str = ""
     axis_key: str = ""
@@ -135,6 +139,10 @@ class EventLedger:
             status=_text(row.get("status"), 32),
             symbol=_text(row.get("symbol"), 48),
             side=_text(row.get("side"), 16),
+            control_group_key=_text(row.get("control_group_key") or row.get("controlGroupKey"), 160),
+            control_range_key=_text(row.get("control_range_key") or row.get("controlRangeKey"), 64),
+            control_mode=_text(row.get("control_mode") or row.get("controlMode"), 32),
+            member_count=max(1, int(_number(row.get("member_count") or row.get("memberCount")) or 1)),
             set_id=_text(row.get("set_id") or row.get("setId"), 160),
             parent_set_id=_text(row.get("parent_set_id") or row.get("parentSetId"), 160),
             axis_key=_text(row.get("axis_key") or row.get("axisKey"), 48),
@@ -217,6 +225,10 @@ class EventLedger:
                 status=_text(status or fields.get("state"), 32),
                 symbol=symbol,
                 side=side,
+                control_group_key=_text(fields.get("control_group_key") or fields.get("controlGroupKey"), 160),
+                control_range_key=_text(fields.get("control_range_key") or fields.get("controlRangeKey"), 64),
+                control_mode=_text(fields.get("control_mode") or fields.get("controlMode"), 32),
+                member_count=max(1, int(_number(fields.get("member_count") or fields.get("memberCount")) or 1)),
                 set_id=set_id,
                 parent_set_id=_text(fields.get("parent_set_id") or fields.get("parentSetId"), 160),
                 axis_key=_text(fields.get("axis_key") or fields.get("axisKey"), 48),
