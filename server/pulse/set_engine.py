@@ -499,6 +499,19 @@ class SetState:
     tr_i: int = 0
     step_i: int = 0
     kind: str = "base"
+    parent_set_id: str = ""
+    stage: str = "Base"
+    stage_qualified: str = ""
+    base_pf: float = 0.0
+    main_pf: float = 0.0
+    real_pf: float = 0.0
+    position_cost_pct: float = POSITION_COST_PCT_DEFAULT
+    axis_key: str = ""
+    relative_count: int = 1
+    volume_ratio: float = 1.0
+    indication_kind: str = ""
+    strategy_adjustments: Dict[str, Any] = field(default_factory=dict)
+    stage_ledger: Dict[str, Any] = field(default_factory=dict)
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
     last15_ratio: float = 1.0
@@ -563,7 +576,9 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.15
+        self.min_pf = 1.05
+        self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
+        self.real_min_pf = 1.15
         self.max_dd_s = 27000.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -627,7 +642,18 @@ class SetBook:
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.0)
+        def _pf(key: str, fallback: float) -> float:
+            try:
+                return max(0.8, min(2.5, float(ov.get(key, fallback))))
+            except Exception:
+                return fallback
+        self.stage_min_pf = {
+            "base": _pf("baseMinPf", 1.05),
+            "main": _pf("mainMinPf", 1.10),
+            "real": _pf("realMinPf", float(ov.get("setMinPf") or 1.15)),
+        }
+        self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
+        self.real_min_pf = self.stage_min_pf["real"]
         self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
@@ -836,6 +862,16 @@ class SetBook:
                         _put(st)
         self.sets = next_sets
         self.by_idx = by_idx
+        for st in by_idx:
+            st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
+            st.stage = "Base"
+            st.stage_qualified = ""
+            st.position_cost_pct = self.cost_pct
+            st.axis_key = ""
+            st.relative_count = 1
+            st.volume_ratio = 1.0
+            st.indication_kind = "" if st.pack != "indications" else "signals"
+            st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
         signature = tuple(next_sets)
         if signature != self._hist_set_signature:
@@ -1749,7 +1785,7 @@ class SetBook:
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         validated = n15 >= need and ratio + 1e-9 >= 1.0
-        enable_pf = float(self.min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.15)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
@@ -1782,13 +1818,58 @@ class SetBook:
             "net_avg": float(last15.get("netAvg") or expectancy),
         }
 
+    def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive the monotonic Base -> Main -> Real qualification ledger.
+
+        Each stage is a stricter view of the same cost-net tape. A child stage
+        never creates another parent count; lineage stays anchored to the
+        canonical Base Set ID.
+        """
+        need = self.eval_need()
+        n = int(m.get("last15_n") or 0)
+        pf = float(m.get("last15_ratio") or 0.0)
+        dd_ok = bool(m.get("ddOk", True))
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.10))
+        real_floor = float(self.stage_min_pf.get("real", 1.15))
+        base = n >= need and pf + 1e-9 >= base_floor and dd_ok
+        main = base and pf + 1e-9 >= main_floor
+        real = main and pf + 1e-9 >= real_floor
+        qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
+        st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
+        st.stage = qualified or "Base"
+        st.stage_qualified = qualified
+        st.base_pf = round(pf, 6)
+        st.main_pf = round(pf, 6) if base else 0.0
+        st.real_pf = round(pf, 6) if main else 0.0
+        st.position_cost_pct = self.cost_pct
+        st.strategy_adjustments = {
+            "base": {"qualified": base, "minPf": base_floor},
+            "main": {"qualified": main, "minPf": main_floor},
+            "real": {"qualified": real, "minPf": real_floor},
+            "live": {"evaluation": False, "source": "real"},
+            "exchange": {"trackingOnly": True},
+        }
+        return {
+            "stage": st.stage,
+            "qualified": qualified,
+            "parentSetId": st.parent_set_id,
+            "base": base,
+            "main": main,
+            "real": real,
+            "basePf": st.base_pf,
+            "mainPf": st.main_pf,
+            "realPf": st.real_pf,
+            "positionCostPct": self.cost_pct,
+        }
+
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
         if not self.auto_deact:
             return True, ""
         live_rows = [r for r in live if isinstance(r, dict)]
         need = self.eval_need()
-        enable_pf = float(self.min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.15)
         if len(live_rows) < need:
             if not self.strict_gate:
                 return True, ""
@@ -1859,6 +1940,7 @@ class SetBook:
         st.avg_dd_s = m["avg_dd_s"]
         st.dd_episodes = m["dd_episodes"]
         st.source_n = m["source_n"]
+        st.stage_ledger = self._stage_qualification(st, m)
         need = self.eval_need()
         live_m = self._score_metrics(st.live)
         st.live_eval = {
@@ -2022,6 +2104,19 @@ class SetBook:
             "active": st.active,
             "last15Ratio": round(st.last15_ratio, 4),
             "maxDdS": st.max_dd_s,
+            "parentSetId": st.parent_set_id or st.id,
+            "stage": st.stage,
+            "stageQualified": st.stage_qualified,
+            "stageLedger": st.stage_ledger,
+            "basePf": st.base_pf,
+            "mainPf": st.main_pf,
+            "realPf": st.real_pf,
+            "positionCostPct": st.position_cost_pct,
+            "axisKey": st.axis_key,
+            "relativeCount": st.relative_count,
+            "volumeRatio": st.volume_ratio,
+            "indicationKind": st.indication_kind,
+            "strategyAdjustments": st.strategy_adjustments,
         }
 
     def coverage(self) -> Dict[str, Any]:
@@ -2071,6 +2166,10 @@ class SetBook:
             for st in self.sets.values()
             if int(st.last15_n or 0) >= need and float(st.last15_ratio or 0) + 1e-9 >= 1.0
         )
+        stage_counts = {"Base": 0, "Main": 0, "Real": 0, "unqualified": 0}
+        for st in self.by_idx:
+            stage_counts[st.stage if st.stage in stage_counts else "unqualified"] += 1
+        axis_counts = {a: sum(1 for st in self.by_idx if st.axis_key.startswith(a + ":")) for a in ("prev", "last", "cont", "pause")}
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -2098,6 +2197,10 @@ class SetBook:
             "independentSlTp": True,
             "independentConfigs": True,
             "costSubtracted": True,
+            "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
+            "stageCounts": stage_counts,
+            "axisCounts": axis_counts,
+            "axisVolumeRatio": 0.01,
             "directions": list(DIRECTIONS),
             "byTrail": by_tr,
             "bySl": by_sl,
@@ -2122,7 +2225,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.min_pf or 1.15),
+                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.real_min_pf or 1.15),
                 "active": st.active,
             }
         return blob
@@ -2164,7 +2267,7 @@ class SetBook:
 
         passing = [
             s for s in rows
-            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.min_pf
+            if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= self.real_min_pf
         ]
         if not passing and not self.strict_gate:
             passing = [
@@ -2386,6 +2489,19 @@ class SetBook:
                     "kind": st.kind,
                     "idx": st.idx,
                     "id": st.id,
+                    "parentSetId": st.parent_set_id or st.id,
+                    "stage": st.stage,
+                    "stageQualified": st.stage_qualified,
+                    "stageLedger": st.stage_ledger,
+                    "basePf": st.base_pf,
+                    "mainPf": st.main_pf,
+                    "realPf": st.real_pf,
+                    "positionCostPct": st.position_cost_pct,
+                    "axisKey": st.axis_key,
+                    "relativeCount": st.relative_count,
+                    "volumeRatio": st.volume_ratio,
+                    "indicationKind": st.indication_kind,
+                    "strategyAdjustments": st.strategy_adjustments,
                     "pack": st.pack,
                     "packI": st.pack_i,
                     "tf": st.tf,
@@ -2416,7 +2532,10 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
-                    "validated": bool(st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= 1.0),
+                    "validated": bool(st.stage_qualified),
+                    "baseQualified": bool((st.stage_ledger or {}).get("base")),
+                    "mainQualified": bool((st.stage_ledger or {}).get("main")),
+                    "realQualified": bool((st.stage_ledger or {}).get("real")),
                     "gp": st.gp,
                     "gl": st.gl,
                     "costSubtracted": True,
@@ -2506,7 +2625,7 @@ class SetBook:
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
-            "minPf": self.min_pf,
+            "minPf": self.real_min_pf,
             "enablePf": 1.15 if float(self.min_pf or 0) <= 0 else self.min_pf,
             "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,

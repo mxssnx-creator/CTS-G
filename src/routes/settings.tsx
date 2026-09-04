@@ -1183,10 +1183,10 @@ function SettingsPage() {
                 <Slider
                   label="Set min PF"
                   value={overlay.setMinPf}
-                  min={1}
-                  max={2.3}
+                  min={0.8}
+                  max={2.5}
                   step={0.02}
-                  hint="Last-N cost PF. Sets above 1.15 with enough fills and DDt under the cap go live."
+                  hint="Base-stage cost PF. Shared range 0.80–2.50; qualified Sets flow to Main and Real."
                   onChange={(v) => patch("setMinPf", v)}
                 />
                 <Slider
@@ -1322,9 +1322,9 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · default 1.08" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={1} max={2} step={0.01} hint="1.00 = neutral · 1.10 = +1×PositionCost · default 1.10" onChange={(v) => patch("realMinPf", v)} />
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.10" onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.15" onChange={(v) => patch("realMinPf", v)} />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />

@@ -56,10 +56,9 @@ class Coordinator:
             "cont": Axis(True, 8),
             "pause": Axis(True, 8),
         }
-        self.min_pf = 1.0
-        # Stage PositionCost PF floors on the cost scale (1.00 = neutral):
-        # Base / Main / Real all 1.25 systemwide.
-        self.stage_min_pf = {"base": 1.0, "main": 1.0, "real": 1.0}
+        self.min_pf = 1.15
+        # Stage PF floors use the shared 0.80–2.50 / 0.02 contract.
+        self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = 0.05
@@ -99,15 +98,15 @@ class Coordinator:
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
             st = stages_cts.get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.0)
+            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.15)
         except Exception:
-            self.min_pf = float(ov.get("minPf") or 1.25)
+            self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or 1.15)
         # Per-stage floors: overlay wins, then strategies.main.<stage>, then 1.25.
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
         except Exception:
             stages_cts = {}
-        for _stage, _dflt in (("base", 1.0), ("main", 1.0), ("real", 1.0)):
+        for _stage, _dflt in (("base", 1.05), ("main", 1.10), ("real", 1.15)):
             _v = ov.get(f"{_stage}MinPf")
             if _v is None:
                 try:
@@ -117,7 +116,7 @@ class Coordinator:
             if _v is None and _stage == "real":
                 _v = self.min_pf
             try:
-                self.stage_min_pf[_stage] = max(1.0, float(_v)) if _v is not None else _dflt
+                self.stage_min_pf[_stage] = max(0.8, min(2.5, float(_v))) if _v is not None else _dflt
             except Exception:
                 self.stage_min_pf[_stage] = _dflt
         # Strictest stage (Real) is the canonical min PF consumers read.
@@ -203,9 +202,9 @@ class Coordinator:
             "classicPf15": cost["classicPf"],
             "costPct": cost["costPct"],
             "minPf": self.min_pf,
-            "baseMinPf": float(self.stage_min_pf.get("base", 1.25)),
-            "mainMinPf": float(self.stage_min_pf.get("main", 1.25)),
-            "realMinPf": float(self.stage_min_pf.get("real", 1.25)),
+            "baseMinPf": float(self.stage_min_pf.get("base", 1.05)),
+            "mainMinPf": float(self.stage_min_pf.get("main", 1.10)),
+            "realMinPf": float(self.stage_min_pf.get("real", 1.15)),
             "pfNeutral": 1.0,
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
@@ -255,6 +254,65 @@ class Coordinator:
         }
         self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
         return allow, reasons, metrics
+
+    def axis_variants(
+        self,
+        parent_set_id: str,
+        closed_rows: Sequence[Any],
+        open_rows: Optional[Sequence[Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build deterministic count-pos children without counting a parent twice.
+
+        Prev/Last/Cont/Pause are evaluated from closed rows only. Open rows are
+        accepted separately so callers cannot accidentally leak an active
+        position into the Prev tape. Every child keeps the Base parent ID and a
+        stable dedupe key; 100 relative positions equals one parent volume.
+        """
+        closed = [r for r in closed_rows if r is not None]
+        _ = list(open_rows or ())  # explicit boundary: never mixed into closed
+        out: List[Dict[str, Any]] = []
+        for axis, spec in AXIS_SPECS.items():
+            cfg = self.axes[axis]
+            if not cfg.enabled:
+                continue
+            start = int(spec["min"])
+            stop = min(int(cfg.max_window), int(spec["max"]))
+            step = int(spec["step"])
+            for count in range(start, stop + 1, step):
+                tape = closed[-count:]
+                pf = last_n_cost_pf(tape, count, self.position_cost_pct)
+                losses = [float((r.get("pnl") if isinstance(r, dict) else getattr(r, "pnl", 0)) or 0) for r in tape]
+                paused = axis == "pause" and consec_loss(losses) >= count
+                out.append({
+                    "axisKey": f"{axis}:{count}",
+                    "axis": axis,
+                    "parentSetId": str(parent_set_id),
+                    "relativeCount": count,
+                    "volumeRatio": round(count * 0.01, 6),
+                    "closedOnly": True,
+                    "openExcluded": True,
+                    "closedN": len(tape),
+                    "pf": round(float(pf.get("ratio") or 1.0), 6),
+                    "paused": paused,
+                    "qualified": bool(len(tape) >= min(3, count) and not paused),
+                    "dedupeKey": f"{parent_set_id}|{axis}|{count}",
+                })
+        return out
+
+    @staticmethod
+    def aggregate_axis_variants(variants: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate relative children as one parent while retaining details."""
+        rows = [v for v in variants if isinstance(v, dict)]
+        parents = sorted({str(v.get("parentSetId") or "") for v in rows if v.get("parentSetId")})
+        return {
+            "parentCount": len(parents),
+            "parentSetIds": parents,
+            "childCount": len(rows),
+            "volumeRatio": round(sum(float(v.get("volumeRatio") or 0) for v in rows if v.get("qualified")), 6),
+            "qualifiedChildren": sum(1 for v in rows if v.get("qualified")),
+            "axes": {a: sum(1 for v in rows if v.get("axis") == a) for a in AXIS_SPECS},
+            "rows": rows,
+        }
 
     def size_mult(self, open_n: int) -> float:
         """Count-pos volume: each extra open trims new-entry size by posCountsVolumeRatio."""

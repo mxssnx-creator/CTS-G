@@ -1359,6 +1359,32 @@ class IndicationBook:
                 out[i.kind] = i
         return out
 
+    def pick_entries(
+        self,
+        symbol: str,
+        min_conf: float = 0.52,
+        allow: Optional[Any] = None,
+    ) -> List[Tuple["Indication", float, int]]:
+        """Return every eligible kind lane without a consensus requirement."""
+        by = self.kinds_for(symbol)
+        out: List[Tuple["Indication", float, int]] = []
+        for kind, indication in by.items():
+            if callable(allow):
+                try:
+                    if not bool(allow(kind, indication.direction)):
+                        continue
+                except TypeError:
+                    if not bool(allow(kind)):
+                        continue
+                except Exception:
+                    pass
+            confidence = float(indication.confidence or 0.0)
+            if confidence < min_conf:
+                continue
+            out.append((indication, confidence, 1))
+        out.sort(key=lambda item: (item[1], item[0].strength, item[0].kind), reverse=True)
+        return out
+
     def pick_entry(
         self,
         symbol: str,
@@ -1424,6 +1450,12 @@ class IndicationBook:
                 "kind": k,
                 "enabled": bool(self.settings.get(flags[k], True)),
                 "hits": 0,
+                "evaluated": 0,
+                "qualified": 0,
+                "entered": 0,
+                "exited": 0,
+                "blocked": 0,
+                "rejected": 0,
                 "symbols": 0,
                 "long": 0,
                 "short": 0,
@@ -1442,6 +1474,8 @@ class IndicationBook:
                 if k not in out:
                     continue
                 out[k]["hits"] += 1
+                out[k]["evaluated"] += 1
+                out[k]["qualified"] += 1
                 seen[k].add(s)
                 if i.direction == "long":
                     out[k]["long"] += 1

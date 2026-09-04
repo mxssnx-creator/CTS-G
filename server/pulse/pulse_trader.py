@@ -4294,24 +4294,32 @@ class Pulse:
             for s in SYMBOLS:
                 if s in self.open:
                     continue
-                picked = None
+                picked_lanes = []
                 try:
-                    picked = self.indications.pick_entry(s, min_conf=0.52, allow=_ind_allow)
+                    pick_lanes = getattr(self.indications, "pick_entries", None)
+                    if callable(pick_lanes):
+                        picked_lanes = pick_lanes(s, min_conf=0.52, allow=_ind_allow)
+                    else:
+                        one = self.indications.pick_entry(s, min_conf=0.52, allow=_ind_allow)
+                        picked_lanes = [one] if one else []
                 except Exception:
-                    picked = None
-                if not picked:
+                    picked_lanes = []
+                if not picked_lanes:
                     try:
                         one = self.indications.best(s) or self.indications.primary(s)
                         if one and one.confidence >= 0.52 and _ind_allow(one.kind, one.direction):
-                            picked = (one, float(one.confidence), 1)
+                            picked_lanes = [(one, float(one.confidence), 1)]
                     except Exception:
-                        picked = None
-                if not picked:
-                    continue
-                pick, conf, agree_n = picked
-                d = 1 if pick.direction == "long" else -1
-                why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
-                best[s] = (float(conf), s, d, why)
+                        picked_lanes = []
+                for picked in picked_lanes:
+                    if not picked:
+                        continue
+                    pick, conf, agree_n = picked
+                    d = 1 if pick.direction == "long" else -1
+                    why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
+                    current = best.get(s)
+                    if current is None or float(conf) > current[0]:
+                        best[s] = (float(conf), s, d, why)
         if self.strat_general:
             for s in SYMBOLS:
                 if s in self.open:
@@ -5106,6 +5114,18 @@ class Pulse:
         live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
         progress = getattr(self.sets, "progress", None)
         stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
+        axis_variants = []
+        try:
+            axis_variants = self.coord.axis_variants(
+                "engine",
+                self.strategy_closes(),
+                list(self.open.values()),
+            )
+        except Exception:
+            axis_variants = []
+        axis_aggregate = self.coord.aggregate_axis_variants(axis_variants) if axis_variants else {
+            "parentCount": 0, "childCount": 0, "volumeRatio": 0.0, "qualifiedChildren": 0, "axes": {}
+        }
         ours_open = [p for p in self.open.values() if getattr(p, "ours", True)]
         with_set = sum(1 for p in ours_open if getattr(p, "set_id", ""))
         with_cid = sum(1 for p in ours_open if getattr(p, "client_id", "") and self.cid_ours(p.client_id))
@@ -5161,6 +5181,10 @@ class Pulse:
                 "sizeMult": round(float(self.coord.size_mult(len(self.open))), 4),
                 "openN": len(self.open),
                 "axes": {k: {"enabled": v.enabled, "maxWindow": v.max_window} for k, v in self.coord.axes.items()},
+                "variants": axis_aggregate,
+                "volumeRatioUnit": 0.01,
+                "closedOnlyPrev": True,
+                "oneOpenOrderPerSet": True,
             },
             "block": {
                 "enabled": bool(self.block.enabled and self.strat_block),
