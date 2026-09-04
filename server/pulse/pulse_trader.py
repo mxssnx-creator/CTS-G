@@ -290,6 +290,11 @@ _TRANSIENT_API = (
     "insufficient liquidity",
     "cooling",
     "rate limit",
+    "rate-limit",
+    "too many request",
+    "requests within",
+    "request limit",
+    "109420",
     "frequency",
     "order not exist",
     "position not exist",
@@ -319,6 +324,8 @@ def short_api_msg(msg: str) -> str:
         return "order too large"
     if "cooling" in low:
         return "cooling"
+    if "109420" in low or "rate limit" in low or "rate-limit" in low or "too many request" in low or "requests within" in low or "request limit" in low:
+        return "rate limited"
     return m.strip(" ,.")[:120]
 
 
@@ -2074,9 +2081,19 @@ class Pulse:
         try:
             # Let the first control cycles and catalog publication establish a
             # useful baseline before competing for REST/rate-limit capacity.
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and int(getattr(self, "cycle", 0) or 0) < 4:
+            # In particular, never run the full QA matrix beside the initial
+            # 34k-set allocation: both paths are bounded individually but
+            # their transient overlap can force a small VPS into swap.
+            deadline = time.monotonic() + 900.0
+            while time.monotonic() < deadline and (
+                int(getattr(self, "cycle", 0) or 0) < 4
+                or not getattr(self, "_catalog_ready", threading.Event()).is_set()
+                or bool(getattr(self, "hist_busy", False))
+            ):
                 time.sleep(0.5)
+            if not getattr(self, "_catalog_ready", threading.Event()).is_set():
+                self.record_test("startup-qa", True, "deferred until catalog is ready")
+                return
             self.run_self_tests()
         except Exception as exc:
             self.errors += 1
@@ -3715,6 +3732,15 @@ class Pulse:
                     "status": "FLAT",
                 })
                 return True, px
+            if is_transient_api(msg):
+                # Throttling is a retry state, not a failed close. Keep the
+                # position open and let the event loop retry it without
+                # inflating the error counter or marking a partial close as
+                # complete.
+                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 20.0)
+                self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
+                log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=20.0, key=f"close-skip:{pos.symbol}")
+                return False, self.px.get(pos.symbol) or pos.entry
         self.errors += 1
         self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
         self._last_close_result["status"] = "REJECTED"
@@ -4314,6 +4340,10 @@ class Pulse:
                     self.cooldown["__book__"] = time.time() + 20.0
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
+                    # No exchange order was accepted. Release the local
+                    # pending id so a later event can retry without becoming
+                    # permanently stuck behind a transient rejection.
+                    self._clear_pending(cid)
                     return
                 self.errors += 1
                 self.last_error = f"order {sym} {short}"[:160]
@@ -6410,8 +6440,13 @@ class Pulse:
                         },
                     )
                     self.did_io = True
-                    msg = str(r.get("msg") or "")
+                msg = str(r.get("msg") or "")
                 if not self.ok(r):
+                    if is_transient_api(msg):
+                        log(f"BLOCK SKIP {pos.symbol} #{row['blockCount']} {short_api_msg(msg)}", every=20.0, key=f"block-skip:{pos.symbol}")
+                        self.block_last_emit = time.time()
+                        self._clear_pending(cid)
+                        continue
                     self.errors += 1
                     self.last_error = f"block {pos.symbol} n={row['blockCount']} {msg}"[:240]
                     log(f"BLOCK FAIL {pos.symbol} #{row['blockCount']} {msg}")

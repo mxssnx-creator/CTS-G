@@ -2988,15 +2988,24 @@ class SetBook:
                 s["bestPf"] = st.last15_ratio
                 s["bestIdx"] = st.idx
         sl_tp_cover = all(set(self.steps) <= sl_step.get(f"{sl:.1f}", set()) for sl in self.sl_ratios) if self.sl_ratios and self.steps else True
+        # Check trail coverage from indexed tuples. The previous nested
+        # ``any`` scan was O(trails * sl * steps * trail_sets), which made a
+        # 30x25x20 catalog block the stats/UI thread for seconds on every
+        # uncached snapshot.
+        trail_pairs = {
+            (round(float(st.sl_ratio), 10), str(st.trail_key))
+            for st in trail_sets
+        }
+        trail_triples = {
+            (round(float(st.sl_ratio), 10), str(st.trail_key), int(st.step))
+            for st in trail_sets
+        }
         trail_sl_cover = all(
-            all(any(abs(st.sl_ratio - sl) < 1e-9 and st.trail_key == t for st in trail_sets) for sl in self.sl_ratios)
-            for t in trails
+            (round(float(sl), 10), str(t)) in trail_pairs
+            for t in trails for sl in self.sl_ratios
         ) if trails and self.sl_ratios else True
         trail_sl_tp_cover = all(
-            any(
-                abs(st.sl_ratio - sl) < 1e-9 and st.trail_key == t and int(st.step) == int(step)
-                for st in trail_sets
-            )
+            (round(float(sl), 10), str(t), int(step)) in trail_triples
             for t in trails for sl in self.sl_ratios for step in self.steps
         ) if trails and self.sl_ratios and self.steps else True
         need = self.eval_need()
@@ -3419,8 +3428,12 @@ class SetBook:
         cached = self._snap_cache
         if cached is not None and now - self._snap_ts < (0.8 if full else 1.4):
             return cached
+        # The UI only consumes the best bounded preview rows.  Sorting the
+        # states is cheap compared with constructing a JSON row for every
+        # 34k-entry catalog; materialising the full list here briefly doubled
+        # RSS during startup and pushed small VPS workers into swap.
         rows = []
-        for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.last15_ratio, s.max_dd_s)):
+        for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.last15_ratio, s.max_dd_s))[:16]:
             rows.append(
                 {
                     "kind": st.kind,
@@ -3529,7 +3542,6 @@ class SetBook:
                     "locked": st.locked,
                 }
             )
-        rows = rows[:16]
         p = self.progress
         cover = self.coverage()
         validated_count = int(cover.get("validatedCount") or 0)

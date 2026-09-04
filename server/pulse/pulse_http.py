@@ -54,6 +54,8 @@ def _short_err(msg) -> str:
         return ""
     if "cooling" in low or "position not exist" in low:
         return ""
+    if "109420" in low or "rate limit" in low or "rate-limit" in low or "too many request" in low or "requests within" in low or "request limit" in low:
+        return ""
     if "quantity or stopprice" in low or "parameter quantity" in low:
         return ""
     if "order size must be less" in low or "available amount" in low:
