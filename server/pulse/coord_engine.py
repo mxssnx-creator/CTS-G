@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_pf
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -101,7 +101,7 @@ class Coordinator:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.15)
         except Exception:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or 1.15)
-        # Per-stage floors: overlay wins, then strategies.main.<stage>, then 1.25.
+        # Per-stage floors: overlay wins, then strategies.main.<stage>, then the shared defaults.
         try:
             stages_cts = (cts.get("strategies") or {}).get("main") or {}
         except Exception:
@@ -116,7 +116,7 @@ class Coordinator:
             if _v is None and _stage == "real":
                 _v = self.min_pf
             try:
-                self.stage_min_pf[_stage] = max(0.8, min(2.5, float(_v))) if _v is not None else _dflt
+                self.stage_min_pf[_stage] = normalize_pf(_v, _dflt) if _v is not None else _dflt
             except Exception:
                 self.stage_min_pf[_stage] = _dflt
         # Strictest stage (Real) is the canonical min PF consumers read.
@@ -219,9 +219,9 @@ class Coordinator:
         intern_ok = intern_n >= max(3, int(self.prev_min_count or 5)) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
-        base_floor = float(self.stage_min_pf.get("base", 1.25))
-        main_floor = float(self.stage_min_pf.get("main", 1.25))
-        real_floor = float(self.stage_min_pf.get("real", 1.25))
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.10))
+        real_floor = float(self.stage_min_pf.get("real", 1.15))
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
             if last_cost["ratio"] + 1e-9 < base_floor:
@@ -279,10 +279,21 @@ class Coordinator:
             stop = min(int(cfg.max_window), int(spec["max"]))
             step = int(spec["step"])
             for count in range(start, stop + 1, step):
-                tape = closed[-count:]
+                if axis == "prev":
+                    # Previous means the closed window immediately before the
+                    # current closed window. Open positions never enter either
+                    # window, even when a caller supplies open_rows.
+                    tape = closed[-(count * 2) : -count] if len(closed) >= count * 2 else []
+                else:
+                    tape = closed[-count:]
                 pf = last_n_cost_pf(tape, count, self.position_cost_pct)
                 losses = [float((r.get("pnl") if isinstance(r, dict) else getattr(r, "pnl", 0)) or 0) for r in tape]
                 paused = axis == "pause" and consec_loss(losses) >= count
+                qualifies = (
+                    len(tape) >= min(3, count)
+                    and not paused
+                    and float(pf.get("ratio") or 0.0) + 1e-9 >= float(self.stage_min_pf.get("base", 1.05))
+                )
                 out.append({
                     "axisKey": f"{axis}:{count}",
                     "axis": axis,
@@ -294,7 +305,10 @@ class Coordinator:
                     "closedN": len(tape),
                     "pf": round(float(pf.get("ratio") or 1.0), 6),
                     "paused": paused,
-                    "qualified": bool(len(tape) >= min(3, count) and not paused),
+                    "qualified": qualifies,
+                    "qualificationReason": "qualified" if qualifies else (
+                        "paused" if paused else f"closed={len(tape)} pf={float(pf.get('ratio') or 0.0):.2f}"
+                    ),
                     "dedupeKey": f"{parent_set_id}|{axis}|{count}",
                 })
         return out
@@ -329,7 +343,7 @@ class Coordinator:
             pf = float(last_pf or 0)
         except Exception:
             pf = 0.0
-        if pf + 1e-9 >= float(self.min_pf or 1.25):
+        if pf + 1e-9 >= float(self.min_pf or 1.15):
             return stack
         return max(1, stack // 2)
 
@@ -358,7 +372,7 @@ class Coordinator:
                 gp = sum(x for x in tail if x > 0)
                 gl = abs(sum(x for x in tail if x < 0))
                 pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
-                floor = float(self.stage_min_pf.get("base", 1.25))
+                floor = float(self.stage_min_pf.get("base", 1.05))
                 metrics["countPf"] = round(pf, 4)
                 if pf + 1e-9 < floor:
                     allow = False

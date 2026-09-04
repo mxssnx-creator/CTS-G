@@ -13,10 +13,25 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 POSITION_COST_PCT_DEFAULT = 0.15
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
-RATIO_MIN = 1.02
-RATIO_MAX = 2.30
-RATIO_STEP = 0.02
+# User-facing PF controls share one contract across UI, overlay, and workers.
+PF_MIN = 0.80
+PF_MAX = 2.50
+PF_STEP = 0.02
+RATIO_MIN = PF_MIN
+RATIO_MAX = PF_MAX
+RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 15
+
+
+def normalize_pf(value: Any, fallback: float) -> float:
+    """Clamp a configured PF floor without changing the requested 0.02 step."""
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(fallback)
+    if parsed != parsed or abs(parsed) == float("inf"):
+        parsed = float(fallback)
+    return round(max(PF_MIN, min(PF_MAX, parsed)), 2)
 SL_TP_MIN = 0.2
 SL_TP_MAX = 2.6
 SL_TP_STEP = 0.2

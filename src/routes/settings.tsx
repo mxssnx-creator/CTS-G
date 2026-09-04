@@ -7,6 +7,10 @@ import {
   fetchCtsBundle,
   loadLocalOverlay,
   num,
+  normalizePf,
+  PF_MAX,
+  PF_MIN,
+  PF_STEP,
   overlayFromCts,
   saveOverlay,
   slTpGrid,
@@ -970,13 +974,35 @@ function SettingsPage() {
                   onChange={(v) => patch("positionCostPct", v)}
                 />
                 <Slider
-                  label="Min PF ratio"
-                  value={overlay.minPf}
-                  min={1}
-                  max={2.3}
-                  step={0.02}
-                  hint={pfHint(overlay.minPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("minPf", v)}
+                  label="Base min PF"
+                  value={overlay.baseMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.baseMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))}
+                />
+                <Slider
+                  label="Main min PF"
+                  value={overlay.mainMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.mainMinPf, overlay.positionCostPct)}
+                  onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))}
+                />
+                <Slider
+                  label="Real min PF"
+                  value={overlay.realMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
+                  onChange={(v) => {
+                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
+                    patch("realMinPf", next);
+                    patch("minPf", next);
+                  }}
                 />
                 <Slider
                   label="PF window"
@@ -1697,7 +1723,20 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Min PF" value={overlay.minPf} min={1} max={2.3} step={0.02} onChange={(v) => patch("minPf", v)} />
+                <Num label="Base min PF" value={overlay.baseMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))} />
+                <Num label="Main min PF" value={overlay.mainMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))} />
+                <Num
+                  label="Real min PF"
+                  value={overlay.realMinPf}
+                  min={PF_MIN}
+                  max={PF_MAX}
+                  step={PF_STEP}
+                  onChange={(v) => {
+                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
+                    patch("realMinPf", next);
+                    patch("minPf", next);
+                  }}
+                />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={Math.max(3, overlay.minStep)} min={3} max={12} step={1} hint="System minimum is 3" onChange={(v) => patch("minStep", Math.max(3, Math.min(12, Math.round(v))))} />

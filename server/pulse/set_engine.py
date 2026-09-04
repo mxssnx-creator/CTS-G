@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -17,6 +17,7 @@ from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
     last_n_cost_pf,
+    normalize_pf,
     signed_result_r,
     snap_ratio,
     SL_TP_RATIOS,
@@ -482,6 +483,46 @@ class SimTrade:
     source: str = "hist"
 
 
+@dataclass(frozen=True)
+class StageRecord:
+    """Stable audit record for one Set at one processing boundary."""
+
+    set_id: str
+    parent_set_id: str
+    stage: str
+    gross_pf: float
+    net_pf: float
+    position_cost_pct: float
+    ddt_s: float
+    sample_count: int
+    volume_ratio: float
+    axis_key: str = ""
+    relative_count: int = 1
+    indication_kind: str = ""
+    strategy_adjustments: Tuple[Tuple[str, Any], ...] = ()
+    qualification_reason: str = ""
+    dedupe_key: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "setId": self.set_id,
+            "parentSetId": self.parent_set_id,
+            "stage": self.stage,
+            "grossPf": self.gross_pf,
+            "netPf": self.net_pf,
+            "positionCostPct": self.position_cost_pct,
+            "ddtS": self.ddt_s,
+            "sampleCount": self.sample_count,
+            "volumeRatio": self.volume_ratio,
+            "axisKey": self.axis_key,
+            "relativeCount": self.relative_count,
+            "indicationKind": self.indication_kind,
+            "strategyAdjustments": dict(self.strategy_adjustments),
+            "qualificationReason": self.qualification_reason,
+            "dedupeKey": self.dedupe_key or f"{self.set_id}|{self.stage}",
+        }
+
+
 @dataclass
 class SetState:
     id: str
@@ -643,10 +684,7 @@ class SetBook:
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         def _pf(key: str, fallback: float) -> float:
-            try:
-                return max(0.8, min(2.5, float(ov.get(key, fallback))))
-            except Exception:
-                return fallback
+            return normalize_pf(ov.get(key, fallback), fallback)
         self.stage_min_pf = {
             "base": _pf("baseMinPf", 1.05),
             "main": _pf("mainMinPf", 1.10),
@@ -991,7 +1029,7 @@ class SetBook:
                 "reason": str(rec.get("reason") or ""),
                 "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
             }
-            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "")
+            ind_kind = str(rec.get("ind_kind") or rec.get("indKind") or "").strip().lower()
         else:
             if getattr(rec, "ours", True) is False:
                 return
@@ -1006,15 +1044,9 @@ class SetBook:
                 "reason": str(getattr(rec, "reason", "")),
                 "client_id": str(getattr(rec, "client_id", "") or ""),
             }
-            ind_kind = str(getattr(rec, "ind_kind", "") or "")
-        # Per-kind live evidence feeds the indication gate even when the close
-        # cannot be attributed to a known set below.
-        if ind_kind:
-            tape = self.ind_live.setdefault(ind_kind, [])
-            cid0 = row.get("client_id") or ""
-            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
-                tape.append(dict(row))
-                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
+            ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
+        if ind_kind not in IND_KINDS:
+            ind_kind = ""
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
             sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
@@ -1029,6 +1061,16 @@ class SetBook:
             if not step:
                 step = self.min_step
             sid = make_set_id(pack, sl, "", step)
+        row["set_id"] = sid
+        row["pack"] = "indications" if ind_kind else ("indications" if "ind:" in row["reason"] else "general")
+        if ind_kind:
+            row["ind_kind"] = ind_kind
+            row["indKind"] = ind_kind
+            tape = self.ind_live.setdefault(ind_kind, [])
+            cid0 = row.get("client_id") or ""
+            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
+                tape.append(dict(row))
+                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
         extra = ""
         if isinstance(rec, dict):
             extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
@@ -1161,27 +1203,49 @@ class SetBook:
                     if on_step:
                         on_step()
             else:
+                # Keep at most one worker's worth of symbols in flight. The old
+                # submit-all approach retained every future and its captured
+                # payload until the slowest symbol finished.
                 with ThreadPoolExecutor(max_workers=w, thread_name_prefix="set-replay") as pool:
-                    futs = {pool.submit(_one, s): s for s in names}
-                    for fut in as_completed(futs):
+                    pending: Dict[Any, Tuple[str, int]] = {}
+                    next_i = 0
+                    retries: Dict[str, int] = {}
+                    while pending or next_i < len(names):
+                        while not aborted and len(pending) < w and next_i < len(names):
+                            symbol = names[next_i]
+                            next_i += 1
+                            pending[pool.submit(_one, symbol)] = (symbol, 0)
+                        if not pending:
+                            break
                         if abort and abort():
                             aborted = True
-                            for pending in futs:
-                                pending.cancel()
+                            for future in pending:
+                                future.cancel()
                             break
-                        symbol, local, local_ind = fut.result()
-                        with lock:
-                            _merge(symbol, local, local_ind)
-                            done += 1
-                            self.progress.symbol = symbol
-                            self.progress.symbols_done = done
-                            self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
-                            self.progress.elapsed_ms = (time.time() - t0) * 1000
-                            self.progress.detail = f"replay {symbol} {done}/{len(names)}"
-                        if on_symbol:
-                            on_symbol(symbol, done, len(names))
-                        if on_step:
-                            on_step()
+                        finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                        for fut in finished:
+                            symbol, _attempt = pending.pop(fut)
+                            try:
+                                result_symbol, local, local_ind = fut.result()
+                            except Exception:
+                                attempt = retries.get(symbol, 0) + 1
+                                retries[symbol] = attempt
+                                if attempt <= 1 and not (abort and abort()):
+                                    pending[pool.submit(_one, symbol)] = (symbol, attempt)
+                                    continue
+                                raise
+                            with lock:
+                                _merge(result_symbol, local, local_ind)
+                                done += 1
+                                self.progress.symbol = result_symbol
+                                self.progress.symbols_done = done
+                                self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
+                                self.progress.elapsed_ms = (time.time() - t0) * 1000
+                                self.progress.detail = f"replay {result_symbol} {done}/{len(names)}"
+                            if on_symbol:
+                                on_symbol(result_symbol, done, len(names))
+                            if on_step:
+                                on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
             self._commit_hist(
@@ -1837,12 +1901,23 @@ class SetBook:
         real = main and pf + 1e-9 >= real_floor
         qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
-        st.stage = qualified or "Base"
+        st.stage = qualified or "Unqualified"
         st.stage_qualified = qualified
         st.base_pf = round(pf, 6)
         st.main_pf = round(pf, 6) if base else 0.0
         st.real_pf = round(pf, 6) if main else 0.0
         st.position_cost_pct = self.cost_pct
+        reasons: List[str] = []
+        if n < need:
+            reasons.append(f"sample {n}/{need}")
+        if pf + 1e-9 < base_floor:
+            reasons.append(f"base PF {pf:.2f}<{base_floor:.2f}")
+        elif pf + 1e-9 < main_floor:
+            reasons.append(f"main PF {pf:.2f}<{main_floor:.2f}")
+        elif pf + 1e-9 < real_floor:
+            reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
+        if not dd_ok:
+            reasons.append("DDt cap")
         st.strategy_adjustments = {
             "base": {"qualified": base, "minPf": base_floor},
             "main": {"qualified": main, "minPf": main_floor},
@@ -1861,7 +1936,60 @@ class SetBook:
             "mainPf": st.main_pf,
             "realPf": st.real_pf,
             "positionCostPct": self.cost_pct,
+            "reason": "; ".join(reasons),
         }
+
+    def stage_record(self, st: SetState, stage: str, *, reason: str = "") -> StageRecord:
+        """Materialize one idempotent stage record without evaluating again."""
+        name = str(stage or "").strip().lower()
+        if name not in {"base", "main", "real", "live", "exchange"}:
+            raise ValueError(f"unknown stage: {stage}")
+        ledger = st.stage_ledger or {}
+        stage_pf = {
+            "base": st.base_pf,
+            "main": st.main_pf,
+            "real": st.real_pf,
+        }
+        qualified = bool(ledger.get(name, False)) if name in ("base", "main", "real") else name in ("live", "exchange")
+        return StageRecord(
+            set_id=st.id,
+            parent_set_id=st.parent_set_id or st.id,
+            stage=name.title(),
+            gross_pf=round(float(st.last15_classic or 0.0), 6),
+            net_pf=round(float(stage_pf.get(name, st.last15_ratio) or 0.0), 6),
+            position_cost_pct=float(st.position_cost_pct or self.cost_pct),
+            ddt_s=float(st.max_dd_s or 0.0),
+            sample_count=int(st.last15_n or 0),
+            volume_ratio=float(st.volume_ratio or 1.0),
+            axis_key=st.axis_key,
+            relative_count=int(st.relative_count or 1),
+            indication_kind=st.indication_kind,
+            strategy_adjustments=(("qualified", qualified),),
+            qualification_reason=reason or ("qualified" if qualified else str(ledger.get("reason") or "not qualified")),
+        )
+
+    def stage_records(self, stage: str, pack: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return stable records; parent IDs are retained for aggregate dedupe."""
+        want = str(pack or "")
+        return [self.stage_record(st, stage).as_dict() for st in self.by_idx if not want or st.pack == want]
+
+    def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:
+        """Return unique parent Set IDs qualified for a downstream stage."""
+        name = str(stage or "").strip().lower()
+        if name not in {"base", "main", "real"}:
+            raise ValueError(f"qualification stage must be Base, Main, or Real: {stage}")
+        out: List[str] = []
+        seen: set[str] = set()
+        for st in self.by_idx:
+            if pack and st.pack != pack:
+                continue
+            if not bool((st.stage_ledger or {}).get(name)):
+                continue
+            parent = st.parent_set_id or st.id
+            if parent not in seen:
+                seen.add(parent)
+                out.append(parent)
+        return out
 
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
@@ -2166,9 +2294,12 @@ class SetBook:
             for st in self.sets.values()
             if int(st.last15_n or 0) >= need and float(st.last15_ratio or 0) + 1e-9 >= 1.0
         )
-        stage_counts = {"Base": 0, "Main": 0, "Real": 0, "unqualified": 0}
+        stage_counts = {"Base": 0, "Main": 0, "Real": 0, "Unqualified": 0}
+        stage_parent_counts = {k: set() for k in stage_counts}
         for st in self.by_idx:
-            stage_counts[st.stage if st.stage in stage_counts else "unqualified"] += 1
+            stage = st.stage if st.stage in stage_counts else "Unqualified"
+            stage_counts[stage] += 1
+            stage_parent_counts[stage].add(st.parent_set_id or st.id)
         axis_counts = {a: sum(1 for st in self.by_idx if st.axis_key.startswith(a + ":")) for a in ("prev", "last", "cont", "pause")}
         return {
             "packs": list(self.packs),
@@ -2199,6 +2330,12 @@ class SetBook:
             "costSubtracted": True,
             "stageDefaults": {"base": self.stage_min_pf["base"], "main": self.stage_min_pf["main"], "real": self.stage_min_pf["real"]},
             "stageCounts": stage_counts,
+            "stageParentCounts": {k: len(v) for k, v in stage_parent_counts.items()},
+            "qualifiedParentIds": {
+                "base": self.qualified_stage_ids("base"),
+                "main": self.qualified_stage_ids("main"),
+                "real": self.qualified_stage_ids("real"),
+            },
             "axisCounts": axis_counts,
             "axisVolumeRatio": 0.01,
             "directions": list(DIRECTIONS),

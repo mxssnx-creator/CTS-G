@@ -84,6 +84,15 @@ export const SL_TP_MIN = 0.2;
 export const SL_TP_MAX = 2.6;
 export const SL_TP_STEP = 0.2;
 
+export const PF_MIN = 0.8;
+export const PF_MAX = 2.5;
+export const PF_STEP = 0.02;
+
+export function normalizePf(value: number, fallback: number): number {
+  const parsed = Number.isFinite(value) ? value : fallback;
+  return Math.round(Math.min(PF_MAX, Math.max(PF_MIN, parsed)) * 100) / 100;
+}
+
 export function slTpGrid(lo = SL_TP_MIN, hi = SL_TP_MAX, step = SL_TP_STEP): number[] {
   const a = Number.isFinite(lo) ? lo : SL_TP_MIN;
   const b = Number.isFinite(hi) ? hi : SL_TP_MAX;
@@ -663,10 +672,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-  minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15),
-  baseMinPf: num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.05),
-  mainMinPf: num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.1),
-  realMinPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15),
+  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15), 1.15),
+  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.05), 1.05),
+  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.1), 1.1),
+  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15), 1.15),
 
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
     pfWindow: num(cts.pfWindow, 15),
@@ -854,6 +863,10 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     if (!next.symbols.length) next.symbols = [...PULSE_SYMBOLS];
   }
   next.symbolSort = coerceSymbolSort(next.symbolSort);
+  next.baseMinPf = normalizePf(next.baseMinPf, DEFAULT_OVERLAY.baseMinPf);
+  next.mainMinPf = normalizePf(next.mainMinPf, DEFAULT_OVERLAY.mainMinPf);
+  next.realMinPf = normalizePf(next.realMinPf, DEFAULT_OVERLAY.realMinPf);
+  next.minPf = next.realMinPf;
   next.symbolsDynamic = next.symbolsDynamic !== false;
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));

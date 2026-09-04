@@ -82,7 +82,7 @@
   "maxOpen": 0,
   "maxPerGroup": 0,
   "maxStopLossRatio": 2.5,
-  "minPf": 1.25,
+  "minPf": 1.15,
   "minStep": 3,
   "modules": {
     "core.historic": true,
@@ -172,9 +172,10 @@
   "volWeight": 0.3,
   "volumeFactor": 1,
   "maxDdTimeS": 27000,
-  "baseMinPf": 1.25,
-  "mainMinPf": 1.25,
-  "realMinPf": 1.25,
+ "baseMinPf": 1.05,
+ "mainMinPf": 1.10,
+ "realMinPf": 1.15,
+
   "setStrictGate": true,
   "slToTpRatios": [0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.6],
   "slToTpMin": 0.2,
