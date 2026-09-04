@@ -2472,6 +2472,11 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
     qty: p.qty,
     memberCount: p.memberCount ?? 1,
     protected: Boolean(p.controls),
+    status: p.controlStatus,
+    slOid: p.slOid,
+    tpOid: p.tpOid,
+    secSlOid: p.secSlOid,
+    secTpOid: p.secTpOid,
   }));
   const missing = groups.filter((group) => !group.protected);
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
@@ -2488,6 +2493,25 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
       <p className="mt-1 text-muted">
         {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
       </p>
+      {groups.length ? (
+        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+          {groups.slice(0, 12).map((group) => {
+            const slOid = group.slOid || group.secSlOid || "";
+            const tpOid = group.tpOid || group.secTpOid || "";
+            const protectedGroup = Boolean(group.protected ?? (slOid && tpOid));
+            return (
+              <div key={group.key} className="flex min-w-0 items-center justify-between gap-2 rounded-md border border-border px-2 py-1">
+                <span className="min-w-0 truncate text-muted">
+                  {group.symbol?.replace("-USDT", "")} {group.side === "LONG" ? "L" : "S"} · {group.range ?? "aggregate"} · q {group.qty ?? "—"}
+                </span>
+                <span className={protectedGroup ? "shrink-0 text-primary" : "shrink-0 text-danger"} title={`${slOid || "missing SL"} / ${tpOid || "missing TP"}`}>
+                  {protectedGroup ? `${String(slOid).slice(-8)}/${String(tpOid).slice(-8)}` : group.status ?? "missing"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       {missing.length ? (
         <div className="mt-2 flex flex-wrap gap-2 text-danger">
           {missing.slice(0, 12).map((group) => (
