@@ -267,6 +267,37 @@ class BlockBook:
         self.save()
         return lane
 
+    def merge_parent(
+        self,
+        symbol: str,
+        side: str,
+        added_qty: float,
+        entry: float,
+        group_key: str = "",
+    ) -> BlockLane:
+        """Increase only a range group's parent after another entry fill.
+
+        ``base_qty`` is the anchor for Block sizing. It must grow when two
+        entries merge into one logical range group, but confirmed Block adds
+        remain untouched because they are already recorded separately.
+        """
+        add = max(0.0, float(added_qty or 0.0))
+        key = self.key(symbol, side, group_key)
+        lane = self.lanes.get(key)
+        if lane is None:
+            return self.register_parent(symbol, side, add, entry, group_key=group_key)
+        if add <= 0:
+            return lane
+        old_qty = max(0.0, float(lane.base_qty or 0.0))
+        total = old_qty + add
+        if total > 0:
+            if entry > 0:
+                lane.base_entry = ((lane.base_entry * old_qty) + float(entry) * add) / total
+            lane.base_qty = total
+            lane.active = True
+            self.save()
+        return lane
+
     def last_n_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
         """Independent last-`count` average for this block count only."""
         n = max(1, int(count))

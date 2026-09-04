@@ -114,6 +114,20 @@ def control_range_key(sl_pct: Any, tp_pct: Any) -> str:
     return f"sl{normalize_control_pct(sl_pct):04d}-tp{normalize_control_pct(tp_pct):04d}"
 
 
+def parse_control_range(value: Any) -> Tuple[int, int]:
+    """Read the canonical SL/TP basis-point pair from a range key."""
+    match = re.fullmatch(r"sl(\d+)-tp(\d+)", str(value or "").strip().lower())
+    if not match:
+        return 0, 0
+    try:
+        sl_bp, tp_bp = int(match.group(1)), int(match.group(2))
+    except (TypeError, ValueError):
+        return 0, 0
+    if sl_bp <= 0 or tp_bp <= 0:
+        return 0, 0
+    return sl_bp, tp_bp
+
+
 def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> str:
     """Stable logical control identity: symbol + side + normalized SL/TP range."""
     sym = str(symbol or "").strip().upper()
@@ -129,11 +143,9 @@ def control_group_token(group_key: Any, range_key: Any = "") -> str:
     malformed range metadata, so an upgrade never loses the ability to match a
     previously placed order by its client ID.
     """
-    match = re.fullmatch(r"sl(\d+)-tp(\d+)", str(range_key or "").strip().lower())
-    if match:
-        sl_bp, tp_bp = int(match.group(1)), int(match.group(2))
-        if 0 <= sl_bp <= 999 and 0 <= tp_bp <= 999:
-            return f"r{sl_bp:03d}{tp_bp:03d}"
+    sl_bp, tp_bp = parse_control_range(range_key)
+    if 0 < sl_bp <= 999 and 0 < tp_bp <= 999:
+        return f"r{sl_bp:03d}{tp_bp:03d}"
     raw = re.sub(r"[^a-z0-9]", "", str(group_key or "").lower())
     if not raw:
         return ""
@@ -904,16 +916,32 @@ class Pulse:
         """Attach a restart-safe control identity and bounded lineage metadata."""
         if legacy is not None:
             pos.legacy_aggregate = bool(legacy)
-        # Old snapshots may not have explicit percentages. Derive identity from
-        # the current baseline without rewriting their persisted trigger prices.
+        # Prefer persisted normalized range fields when available. This keeps a
+        # group stable across JSON round-trips even if a producer used a value
+        # such as 0.6400001 for the same 64-basis-point range.
+        range_sl_bp, range_tp_bp = parse_control_range(getattr(pos, "control_range_key", ""))
+        stored_sl_bp = int(getattr(pos, "control_sl_bp", 0) or 0)
+        stored_tp_bp = int(getattr(pos, "control_tp_bp", 0) or 0)
+        if stored_sl_bp > 0 and stored_tp_bp > 0:
+            range_sl_bp, range_tp_bp = stored_sl_bp, stored_tp_bp
         sl_value = _sf(getattr(pos, "sl_pct", 0), SL_PCT) or SL_PCT
         tp_value = _sf(getattr(pos, "tp_pct", 0), TP_PCT) or TP_PCT
         if self.per_config_controls(pos):
-            pos.control_sl_bp = normalize_control_pct(sl_value)
-            pos.control_tp_bp = normalize_control_pct(tp_value)
-            pos.control_range_key = control_range_key(sl_value, tp_value)
-            pos.control_group_key = pos.control_group_key or make_control_group_key(
-                pos.symbol, pos.side, sl_value, tp_value
+            sl_bp = range_sl_bp or normalize_control_pct(sl_value)
+            tp_bp = range_tp_bp or normalize_control_pct(tp_value)
+            if sl_bp <= 0:
+                sl_bp = normalize_control_pct(SL_PCT)
+            if tp_bp <= 0:
+                tp_bp = normalize_control_pct(TP_PCT)
+            # Store the canonical percentages on the logical group so fills,
+            # weighted merges, and replacement prices all use one exact range.
+            pos.sl_pct = sl_bp / 10000.0
+            pos.tp_pct = tp_bp / 10000.0
+            pos.control_sl_bp = sl_bp
+            pos.control_tp_bp = tp_bp
+            pos.control_range_key = control_range_key(pos.sl_pct, pos.tp_pct)
+            pos.control_group_key = make_control_group_key(
+                pos.symbol, pos.side, pos.sl_pct, pos.tp_pct
             )
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
@@ -981,6 +1009,22 @@ class Pulse:
                 self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry)
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def merge_parent_lanes(self, pos: Position, added_qty: float, entry: float) -> None:
+        """Keep Block/DCA parent anchors aligned with an entry merge."""
+        group_key = self.logical_group_key(pos)
+        try:
+            merge_parent = getattr(self.block, "merge_parent", None)
+            if callable(merge_parent):
+                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=group_key)
+        except Exception:
+            pass
+        try:
+            merge_parent = getattr(self.dca, "merge_parent", None)
+            if callable(merge_parent):
+                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=group_key)
         except Exception:
             pass
 
@@ -1773,6 +1817,8 @@ class Pulse:
                     "pack": st_obj.pack,
                     "sl": st_obj.sl_ratio,
                     "trail": st_obj.trail_key,
+                    "trail_arm": getattr(st_obj, "trail_arm", arm),
+                    "trail_give": getattr(st_obj, "trail_give", give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX)),
                     "step": st_obj.step,
                     "idx": st_obj.idx,
                     "set_id": st_obj.id,
@@ -1795,6 +1841,8 @@ class Pulse:
             "pack": pack,
             "sl": sl,
             "trail": tr,
+            "trail_arm": arm,
+            "trail_give": give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX),
             "step": step,
             "idx": idx,
             "set_id": fallback_set_id,
@@ -1804,7 +1852,13 @@ class Pulse:
             "volume_ratio": 1.0,
             "ind_kind": "signals" if pack == "indications" else "",
             "group_token": group_token,
+            "control_range_key": control_range_key,
+            "control_sl_bp": control_sl_bp,
+            "control_tp_bp": control_tp_bp,
+            "sl_pct": control_sl_bp / 10000.0 if control_sl_bp else 0.0,
+            "tp_pct": control_tp_bp / 10000.0 if control_tp_bp else 0.0,
         }
+
 
     def ok(self, r: Dict[str, Any]) -> bool:
         return (not r.get("error")) and r.get("code") in (0, None)
@@ -6415,6 +6469,11 @@ class Pulse:
             ("ind_kind", track.get("ind_kind")),
             ("sl_ratio", track.get("sl")),
             ("trail_key", track.get("trail")),
+            ("trail_arm", track.get("trail_arm")),
+            ("trail_give", track.get("trail_give")),
+            ("control_range_key", track.get("control_range_key")),
+            ("control_sl_bp", track.get("control_sl_bp")),
+            ("control_tp_bp", track.get("control_tp_bp")),
         ):
             if value not in (None, ""):
                 meta.setdefault(key, value)
@@ -6437,6 +6496,15 @@ class Pulse:
             except Exception:
                 pass
         group_key = str(old.get("group_key") or meta.get("control_group_key") or "")
+        if not group_key and symbol and side:
+            range_sl_bp, range_tp_bp = parse_control_range(meta.get("control_range_key"))
+            if range_sl_bp <= 0 or range_tp_bp <= 0:
+                range_sl_bp = int(_sf(meta.get("control_sl_bp"), 0) or 0)
+                range_tp_bp = int(_sf(meta.get("control_tp_bp"), 0) or 0)
+            if range_sl_bp > 0 and range_tp_bp > 0:
+                group_key = make_control_group_key(
+                    symbol, side, range_sl_bp / 10000.0, range_tp_bp / 10000.0
+                )
         if not group_key and symbol and side:
             token = str(track.get("group_token") or "")
             bound = self.position_for_group_token(symbol, side, token) if token else None

@@ -204,6 +204,30 @@ class DcaBook:
                 lane.last_add = time.time()
         return lane
 
+    def merge_parent(
+        self,
+        symbol: str,
+        side: str,
+        added_qty: float,
+        entry: float,
+        group_key: str = "",
+    ) -> DcaLane:
+        """Increase a group's parent after a same-range entry merge."""
+        add = max(0.0, float(added_qty or 0.0))
+        key = self.key(symbol, side, group_key)
+        lane = self.lanes.get(key)
+        if lane is None:
+            return self.attach(symbol, side, add, entry, group_key=group_key)
+        if add <= 0:
+            return lane
+        old_qty = max(0.0, float(lane.parent_qty or 0.0))
+        total = old_qty + add
+        if total > 0:
+            if entry > 0:
+                lane.avg_entry = ((lane.avg_entry * old_qty) + float(entry) * add) / total
+            lane.parent_qty = total
+        return lane
+
     def drop(self, symbol: str, side: str, group_key: str = "") -> None:
         self.lanes.pop(self.key(symbol, side, group_key), None)
 
