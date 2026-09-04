@@ -1660,8 +1660,11 @@ def strict_gate_test() -> None:
                                      current_trail=lambda: ("0.3:0.1", 0.3, 0.1))
         p.exits = SimpleNamespace(enabled=True, ignore_tp=False)
         p.control_orders = False
+        p.control_orders_per_config = False
         p.security_prices = lambda pos: (pos.sl, pos.tp)
         p.save_open_book = lambda: None
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
         p.seen_fill_cids = set()
         p.owned_syms = set()
         p.fees_est = 0.0
@@ -1686,7 +1689,7 @@ def strict_gate_test() -> None:
         warm2 = mk_book(winner=True)
         p6 = mk_place_trader(warm2)
         p6.place("AAA-USDT", 1, "gen:ema+", 0.9)
-        pos6 = p6.open.get("AAA-USDT")
+        pos6 = next(iter(p6.positions_for("AAA-USDT")), None)
         rec("strict-place-trades-validated",
             len(p6.api.posts) == 1 and pos6 is not None and pos6.set_id == warm2.by_idx[0].id,
             f"posts={len(p6.api.posts)} set={getattr(pos6, 'set_id', None)}")
