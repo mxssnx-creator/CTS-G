@@ -3737,14 +3737,13 @@ class Pulse:
                 self.did_io = True
                 msg = str(r.get("msg") or "")
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-            if m2 and not self.ok(r):
+            if m2 and not self.ok(r) and c is not None:
                 need = float(m2.group(1))
-                    c.min_qty = max(float(c.min_qty or 0), need)
-                    qty = self.round_qty_up(c, need)
-                    if qty > 0:
-                        # Retry the same client id after correcting quantity.
-                        r = self.api.post(
-
+                c.min_qty = max(float(c.min_qty or 0), need)
+                qty = self.round_qty_up(c, need)
+                if qty > 0:
+                    # Retry the same client id after correcting quantity.
+                    r = self.api.post(
                         "/openApi/swap/v2/trade/order",
                         _entry_body(qty, cid),
                     )
@@ -5073,7 +5072,7 @@ class Pulse:
                             "side": order_side,
                             "positionSide": pos.side,
                             "quantity": qty,
-                            "clientOrderID": self.cid("b", pos=pos),
+                            "clientOrderID": cid,
                         },
                     )
                     self.did_io = True
@@ -5090,11 +5089,22 @@ class Pulse:
             data = (r.get("data") or {}).get("order") or r.get("data") or {}
             avg = float(data.get("avgPrice") or data.get("price") or px) or px
             filled = order_fill_qty(data, qty)
+            oid = extract_oid(data)
+            self._remember_pending(
+                kind="block",
+                cid=cid,
+                symbol=pos.symbol,
+                side=pos.side,
+                requested_qty=qty,
+                filled_qty=filled,
+                order_id=oid,
+                avg_price=avg,
+                group_key=block_group_key,
+            )
             if filled <= 0:
                 self.block_last_emit = time.time()
                 log(f"BLOCK NO FILL {pos.symbol} #{row['blockCount']}", every=20.0, key=f"block-nofill:{pos.symbol}")
                 continue
-            oid = str(data.get("orderId") or "")
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
             pos.qty += filled
