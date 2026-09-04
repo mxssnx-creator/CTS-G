@@ -3537,6 +3537,7 @@ class Pulse:
         *,
         order_id: str = "",
         pending_qty: Optional[float] = None,
+        source: str = "",
     ) -> float:
         """Apply only an exchange-confirmed delta to one logical position."""
         add_qty = max(0.0, float(qty or 0.0))
@@ -3567,6 +3568,8 @@ class Pulse:
             pos.peak = min(float(pos.peak or pos.entry), pos.entry)
         pos.sl, pos.tp = self.security_prices(pos)
         self.prepare_position_group(pos)
+        if str(source or "").lower() == "entry":
+            self.merge_parent_lanes(pos, add_qty, fill_px)
         if getattr(self, "control_orders", True):
             self.clear_position_controls(pos)
             self.ctrl_skip.pop(self.position_key(pos), None)
@@ -3664,6 +3667,7 @@ class Pulse:
                 fill_px,
                 order_id=order_id,
                 pending_qty=pending_qty,
+                source="entry",
             )
             self.save_open_book()
             return existing
@@ -3677,6 +3681,7 @@ class Pulse:
         )
         if existing is not None:
             self.merge_position(existing, pos)
+            self.merge_parent_lanes(existing, float(pos.qty or 0), float(pos.entry or 0))
             pos = existing
         else:
             self.open[self.position_key(pos)] = pos
