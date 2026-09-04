@@ -49,7 +49,7 @@ from position_cost import (
 )
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND
+from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -9127,7 +9127,12 @@ class Pulse:
             generation = int(getattr(self, "_sets_generation", 0) or 0)
             if not source.enabled or source._running:
                 return False
-            replay_book = copy.deepcopy(source)
+            # A full deepcopy duplicates the complete catalog, including the
+            # large per-state object graph, before this slice has produced any
+            # history.  Keep the source book live and build only a lean,
+            # metadata-equivalent replay catalog with the selected bars.
+            replay_book = source.replay_clone(names)
+            replay_book.progress.ready = bool(already)
             source._running = True
             source.progress = copy.deepcopy(source.progress)
             source.progress.phase = "replay"
@@ -9163,6 +9168,7 @@ class Pulse:
                 abort=should_abort,
                 merge=True,
                 progress_total=progress_total,
+                score=False,
             )
         except Exception as exc:
             with self.state_guard():
@@ -9181,20 +9187,50 @@ class Pulse:
                 source.progress = copy.deepcopy(replay_book.progress)
                 source._running = False
                 return False
-            # Fill events can arrive while the isolated CPU replay runs.
-            # They are authoritative for live deactivation and must win
-            # over the old snapshot when the new historic result lands.
+            # Commit only the selected symbol slice into the live source book.
+            # Exchange/live evidence stays in place, so a fill or control event
+            # that arrived during replay cannot be overwritten by a stale
+            # snapshot.  All IDs are included so a refreshed empty slice also
+            # removes that symbol's previous historic rows; scoring is limited
+            # to states actually touched by old or new rows.
+            incoming = {
+                sid: list(state.hist)
+                for sid, state in replay_book.sets.items()
+            }
+            wanted = set(names)
+            affected = set()
             for sid, current in source.sets.items():
                 target = replay_book.sets.get(sid)
-                if target is not None:
-                    target.live = copy.deepcopy(current.live)
-            replay_book.ind_live = copy.deepcopy(source.ind_live)
-            replay_book.bars = copy.deepcopy(source.bars)
-            replay_book._snap_cache = None
-            replay_book._live_ov_cache = None
-            replay_book._score_all()
-            replay_book._running = False
-            self.sets = replay_book
+                if any(str(row.get("symbol") or "") in wanted for row in current.hist):
+                    affected.add(sid)
+                if target is not None and any(str(row.get("symbol") or "") in wanted for row in target.hist):
+                    affected.add(sid)
+            source._commit_hist(
+                incoming,
+                replay_book.ind_hist,
+                merge=True,
+                replayed_symbols=names,
+                score_ids=affected,
+            )
+            keys = set(source.strategy_hist) | set(replay_book.strategy_hist)
+            source.strategy_hist = {
+                key: merge_hist_rows(
+                    source.strategy_hist.get(key) or [],
+                    replay_book.strategy_hist.get(key) or [],
+                    names,
+                )
+                for key in keys
+            }
+            source._hist_seen = set(replay_book._hist_seen)
+            source._hist_total = int(replay_book._hist_total or 0)
+            source.last_run = float(replay_book.last_run or time.time())
+            source.progress = copy.deepcopy(replay_book.progress)
+            source.progress.sets_total = len(source.sets)
+            source.progress.sets_done = len(source.sets)
+            source._running = False
+            source._snap_cache = None
+            source._live_ov_cache = None
+            self._stats_force = True
             return True
 
     def _bootstrap_catalog(self) -> None:

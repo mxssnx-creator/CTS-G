@@ -7,6 +7,7 @@ processed Sets and are the only tape that deactivates them.
 """
 from __future__ import annotations
 
+import copy
 import time
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -780,6 +781,90 @@ class SetBook:
         self.__dict__.update(state)
         self._pick_lock = threading.RLock()
 
+    def replay_clone(self, symbols: Optional[Sequence[str]] = None) -> "SetBook":
+        """Create a lean catalog clone for an isolated history slice.
+
+        A full ``deepcopy(SetBook)`` duplicates the complete 34k-state object
+        graph before a replay has produced any evidence.  That is needlessly
+        expensive on the long-running lane and can turn a bounded replay into
+        cgroup swap pressure.  The replay only needs catalog parameters,
+        selected bars, and empty evidence containers; live evidence remains
+        authoritative in the source book and is merged on commit.
+        """
+        clone = SetBook()
+        skip = {
+            "sets", "by_idx", "bars", "progress", "last_run",
+            "ind_hist", "ind_live", "strategy_hist", "_hist_seen",
+            "_hist_total", "_hist_counts", "_hist_set_signature", "_running",
+            "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
+            "_pick_lock",
+        }
+        for name, value in self.__dict__.items():
+            if name in skip:
+                continue
+            if isinstance(value, (dict, list, set, tuple)):
+                setattr(clone, name, copy.deepcopy(value))
+            else:
+                setattr(clone, name, value)
+
+        empty_fields = {
+            "strategy_adjustments": {},
+            "stage_ledger": {},
+            "hist": [],
+            "live": [],
+            "exits": {},
+            "by_side": {},
+            "live_eval": {},
+            "evaluation": {},
+            "evaluation_windows": {},
+            "normal_evaluation": {},
+            "adjusted_evaluation": {},
+            "adjustment_deltas": {},
+        }
+        states: Dict[str, SetState] = {}
+        ordered: List[SetState] = []
+        for original in self.by_idx:
+            state = copy.copy(original)
+            for field_name, empty in empty_fields.items():
+                setattr(state, field_name, copy.deepcopy(empty))
+            state.last15_ratio = 1.0
+            state.last15_classic = state.last15_r = 0.0
+            state.last15_n = state.last25_n = 0
+            state.last25_avg_r = state.last25_avg_pnl = 0.0
+            state.max_dd_s = state.avg_dd_s = 0.0
+            state.dd_episodes = 0
+            state.n = state.wins = 0
+            state.gp = state.gl = state.wr = state.expectancy = 0.0
+            state.avg_hold_s = state.classic_all = 0.0
+            state.source_n = 0
+            state.active = False
+            state.deact_reason = ""
+            state.base_pf = state.main_pf = state.real_pf = 0.0
+            state.gross_pf = state.net_pf = state.gross_ev = state.net_ev = 0.0
+            states[state.id] = state
+            ordered.append(state)
+        clone.sets = states
+        clone.by_idx = ordered
+        wanted = [str(s) for s in symbols] if symbols is not None else list(self.bars)
+        clone.bars = {
+            symbol: [list(row) for row in (self.bars.get(symbol) or [])]
+            for symbol in wanted if self.bars.get(symbol)
+        }
+        clone.progress = copy.deepcopy(self.progress)
+        clone.ind_hist = {}
+        clone.ind_live = {}
+        clone.strategy_hist = {}
+        clone._hist_seen = set(self._hist_seen)
+        clone._hist_total = int(self._hist_total or 0)
+        clone._hist_counts = {}
+        clone._hist_set_signature = tuple(self._hist_set_signature)
+        clone._running = False
+        clone._snap_cache = None
+        clone._snap_ts = 0.0
+        clone._live_ov_cache = None
+        clone._live_ov_ts = 0.0
+        return clone
+
     def load(
         self,
         ov: Dict[str, Any],
@@ -1423,6 +1508,7 @@ class SetBook:
         on_symbol: Optional[Callable[[str, int, int], None]] = None,
         merge: bool = False,
         progress_total: Optional[int] = None,
+        score: bool = True,
     ) -> None:
         if not self.enabled or self._running:
             return
@@ -1581,6 +1667,7 @@ class SetBook:
                 ind_hist,
                 merge=merge,
                 replayed_symbols=processed_symbols if merge else names,
+                score=score,
             )
             strategy_names = processed_symbols if merge else names
             if not merge:
@@ -1634,8 +1721,10 @@ class SetBook:
         replayed_symbols: Optional[Sequence[str]] = None,
         hist_counts: Optional[Dict[str, int]] = None,
         score: bool = True,
+        score_ids: Optional[Sequence[str]] = None,
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
+        score_set = {str(s) for s in score_ids} if score_ids is not None else None
         if not merge:
             if ind_hist is not None:
                 self.ind_hist = {k: trim_hist(v, HIST_CAP) for k, v in ind_hist.items()}
@@ -1664,13 +1753,13 @@ class SetBook:
                     else:
                         counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
                 st.hist = merge_hist_rows(st.hist, full, names)
-                if score:
+                if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
                 st.n = sum(counts.values())
             else:
                 full.sort(key=lambda r: finite(r.get("t")))
                 st.hist = full
-                if score:
+                if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
                 n_full = len(full)
                 st.hist = trim_hist(full, HIST_CAP)

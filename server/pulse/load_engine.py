@@ -15,6 +15,7 @@ backpressure, RSS caps, malloc_trim):
 from __future__ import annotations
 
 import gc
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -32,6 +33,38 @@ def rss_mb() -> float:
         return pages * 4096 / 1048576.0
     except Exception:
         return 0.0
+
+
+def cgroup_memory_limit_mb() -> float:
+    """Return this process' effective memory cap when cgroups expose one."""
+    paths = []
+    try:
+        with open("/proc/self/cgroup") as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) == 3:
+                    rel = parts[2].lstrip("/")
+                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory.max"))
+                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory", "memory.limit_in_bytes"))
+    except Exception:
+        pass
+    paths.extend(("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+    seen = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            with open(path) as f:
+                raw = f.read().strip()
+            if not raw or raw.lower() in ("max", "infinity"):
+                continue
+            value = float(raw)
+            if value > 0:
+                return value / 1048576.0
+        except Exception:
+            continue
+    return 0.0
 
 
 def malloc_trim() -> bool:
@@ -152,6 +185,7 @@ class LoadGovernor:
         self.partial = True
         self.soft_mb = 0.0  # 0 = scale with universe
         self.hard_mb = 0.0
+        self.cgroup_mb = cgroup_memory_limit_mb()
         self.level = "normal"
         self.rss = 0.0
         self.rss_peak = 0.0
@@ -185,12 +219,21 @@ class LoadGovernor:
     def soft_limit(self, n_sym: int) -> float:
         if self.soft_mb > 0:
             return self.soft_mb
-        return 90.0 + max(0, n_sym) * 0.35
+        base = 90.0 + max(0, n_sym) * 0.35
+        if self.cgroup_mb > 0:
+            # Leave room for a bounded replay clone and the Python runtime,
+            # while allowing a large-symbol lane to use its explicit service
+            # budget instead of being classified critical forever.
+            return max(base, min(self.cgroup_mb * 0.58, self.cgroup_mb - 160.0))
+        return base
 
     def hard_limit(self, n_sym: int) -> float:
         if self.hard_mb > 0:
             return self.hard_mb
-        return 140.0 + max(0, n_sym) * 0.55
+        base = 140.0 + max(0, n_sym) * 0.55
+        if self.cgroup_mb > 0:
+            return max(base, min(self.cgroup_mb * 0.78, self.cgroup_mb - 160.0))
+        return base
 
     def observe(
         self,
@@ -429,6 +472,7 @@ class LoadGovernor:
             "peakMb": round(self.rss_peak, 1),
             "softMb": round(self.soft_limit(self.n_sym), 1),
             "hardMb": round(self.hard_limit(self.n_sym), 1),
+            "cgroupMb": round(self.cgroup_mb, 1),
             "scanChunk": int(b.scan_chunk),
             "histChunk": int(b.hist_chunk),
             "klineBatch": int(b.kline_batch),
