@@ -874,6 +874,12 @@ class Pulse:
         self._warm_stop = False
         self._stats_lock = threading.RLock()
         self._state_lock = threading.RLock()
+        # The hot cycle and the diagnostic self-test are independent from the
+        # shared-state lock.  Exchange I/O can take seconds (or be put into a
+        # kernel wait), so serialise those activities separately without
+        # starving HTTP/state readers or the history worker.
+        self._cycle_lock = threading.Lock()
+        self._qa_lock = threading.Lock()
         self.hist_busy = False
         self._hist_fetch_next = 0.0
         self._hist_fetch_failures = 0
@@ -2054,6 +2060,32 @@ class Pulse:
     def state_guard(self):
         """Return the shared state lock, with a test-friendly fallback."""
         return getattr(self, "_state_lock", None) or nullcontext()
+
+    def _background_startup_self_tests(self) -> None:
+        """Run the read-only startup probes after the live loop is moving.
+
+        The complete probe suite includes public REST calls and deliberately
+        bounded local calculation checks.  Keeping it off the startup call
+        stack prevents a rate-limit/network wait from presenting an otherwise
+        healthy service as a stuck process.  It never places an order.
+        """
+        if not self._qa_lock.acquire(blocking=False):
+            return
+        try:
+            # Let the first control cycles and catalog publication establish a
+            # useful baseline before competing for REST/rate-limit capacity.
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and int(getattr(self, "cycle", 0) or 0) < 4:
+                time.sleep(0.5)
+            self.run_self_tests()
+        except Exception as exc:
+            self.errors += 1
+            self.last_error = f"startup self-test {str(exc)[:260]}"
+            if hasattr(self.api, "err"):
+                self.api.err.write("self-test", msg=self.last_error[:220])
+        finally:
+            self._qa_lock.release()
+            self._stats_force = True
 
     def refresh_balance(self) -> None:
         request_key = stable_key(CONN_SHORT, "balance", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
@@ -5502,10 +5534,10 @@ class Pulse:
                 "useLivePositionCosts",
                 ov.get(
                     "useExchangePositionCost",
-                    ov.get("livePositionCostEnabled", False),
+                    ov.get("livePositionCostEnabled", True),
                 ),
             ),
-            False,
+            True,
         )
         return fallback, enabled
 
@@ -8116,6 +8148,7 @@ class Pulse:
         self.record_test("uni-rank-lev-vol1h", rk_ok, rk_d)
         self.record_test("uni-sort-default", coerce_symbol_sort(getattr(self, "symbol_sort", "vol1h")) == "vol1h" or coerce_symbol_sort(self.overlay.get("symbolSort")) in SYMBOL_SORTS, f"sort={self.symbol_sort}")
         held_closed = list(self.closed)
+        held_px = dict(self.px)
         try:
             ours_cid = f"{TAG}cigen0600000abcd"
             self.closed = [
@@ -8132,6 +8165,9 @@ class Pulse:
             )
         finally:
             self.closed = held_closed
+            # The probes use deterministic dummy prices for control-price
+            # assertions; never leave those values in the live market cache.
+            self.px = held_px
 
     def stats(self) -> Dict[str, Any]:
         # HTTP readers and the hot/warm workers can arrive concurrently. A
@@ -9426,8 +9462,6 @@ class Pulse:
         self.priority_controls()
         self._load_lev_file()
         sd_notify("WATCHDOG=1")
-        self.run_self_tests()
-        sd_notify("WATCHDOG=1")
         self.pool.submit(self.set_leverage)
         self.write_stats()
         warm = threading.Thread(target=self._warm_loop, name="warm-feed", daemon=True)
@@ -9439,6 +9473,11 @@ class Pulse:
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
         self.cycle_overrun = False
+        # Probes are observability only.  Run them after the service has
+        # entered its normal event loop so API stalls or a large local QA
+        # matrix cannot hold up controls, history, or the first live cycle.
+        qa = threading.Thread(target=self._background_startup_self_tests, name="startup-qa", daemon=True)
+        qa.start()
         while True:
             # Never overlap: previous cycle must finish before the next starts.
             if self.cycle_busy:
@@ -9447,7 +9486,10 @@ class Pulse:
             self.cycle_busy = True
             t0 = time.perf_counter()
             try:
-                with self.state_guard():
+                # Do not hold the shared state lock across refresh/control
+                # REST calls.  A slow exchange response must not starve the
+                # stats/UI readers, history progress, or control watcher.
+                with self._cycle_lock:
                     self._one_cycle()
             except Exception:
                 self.errors += 1
