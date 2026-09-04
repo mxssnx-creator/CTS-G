@@ -1,4 +1,5 @@
 import type { LiveStats } from "@/lib/live-stats";
+import { formatDuration } from "@/lib/analytics";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
 const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break"] as const;
@@ -169,7 +170,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
           v={`${sets.liveActive ?? liveSets?.active ?? 0}/${sets.liveProcessed ?? liveSets?.processed ?? 0} processed · PF ${Number(sets.livePf ?? liveSets?.last15Ratio ?? 0).toFixed(2)} · n ${sets.liveFills ?? liveSets?.fills ?? 0}`}
           ok={(sets.liveProcessed ?? liveSets?.processed ?? 0) >= 0}
         />
-        <KV k="Set families" v={`base ${sets.families?.base ?? "���"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
+        <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
         <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
         <KV
           k="Stages intern/main/real"
@@ -238,7 +239,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
                     <td className="py-1 text-right">{r.n ?? 0}</td>
                     <td className="py-1 text-right">{Number(r.last15Ratio ?? 0).toFixed(2)}</td>
                     <td className="py-1 text-right">{(Number(r.netAvg ?? 0) * 100).toFixed(3)}%</td>
-                    <td className="py-1 text-right">{Math.round(Number(r.maxDdS ?? 0))}s</td>
+                    <td className="py-1 text-right">{formatDuration(Number(r.maxDdS ?? 0) * 1000)}</td>
                     <td className="py-1">{on ? "on" : String(r.deactReason || "off")}</td>
                   </tr>
                 );
@@ -276,7 +277,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
                   <td className="py-1">{c.n}</td>
                   <td className="py-1 text-right">{Number(c.inc).toFixed(2)}×</td>
                   <td className="py-1 text-right">{Number(c.targetAdd).toFixed(2)}</td>
-                  <td className="py-1 text-right">{Number(c.targetBlock ?? 1 + c.targetAdd).toFixed(2)}</td>
+                  <td className="py-1 text-right">{Number(c.targetBlock ?? (1 + Number(c.targetAdd ?? 0))).toFixed(2)}</td>
                   <td className="py-1 text-right">{Number(c.minPF).toFixed(3)}</td>
                 </tr>
               ))}

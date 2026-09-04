@@ -36,9 +36,9 @@ export function StatsOverview({
   const heroes = (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
-          k="Last 15 PF"
+          k="Last 15 cost PF"
           v={cost.count ? cost.ratio.toFixed(2) : "—"}
-          s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
+          s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
         <Hero
@@ -66,14 +66,15 @@ export function StatsOverview({
       {heroes}
 
       <div className="grid gap-3 lg:grid-cols-2">
-        <Card title="Profit factor · 1.00=neutral · 1.10=+1×PositionCost">
+        <Card title="Profit factor · cost PF scale plus classic PF">
           <table className="w-full text-sm">
             <thead className="font-mono text-[11px] text-muted">
               <tr>
                 <th className="pb-2 text-left font-medium">Window</th>
                 <th className="pb-2 text-right font-medium">n</th>
                 <th className="pb-2 text-right font-medium">R</th>
-                <th className="pb-2 text-right font-medium">PF</th>
+                <th className="pb-2 text-right font-medium">Cost PF</th>
+                <th className="pb-2 text-right font-medium">Classic PF</th>
                 <th className="pb-2 text-right font-medium">Net%</th>
               </tr>
             </thead>
@@ -119,6 +120,7 @@ function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
       <td className={`py-2 text-right font-mono tabular-nums ${tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : ""}`}>
         {m.count ? m.ratio.toFixed(2) : "—"}
       </td>
+      <td className="py-2 text-right font-mono tabular-nums">{m.count ? (m.classicPf >= 99 ? "∞" : m.classicPf.toFixed(2)) : "—"}</td>
       <td className={`py-2 text-right font-mono tabular-nums ${m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
         {m.netPct >= 0 ? "+" : ""}
         {m.netPct.toFixed(3)}

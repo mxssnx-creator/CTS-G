@@ -128,14 +128,15 @@ ssh -i /secure/path/snet-ln-deb01.txt -p 2222 root@127.0.0.1 \
 
 The 2026-09-03 revalidation confirmed the pinned fingerprint, the proxied
 Chisel session, SSH authentication as `root`, and the SSH service behind the
-forward. The latest deployment reached hostname `v2202607384858486523` and
-installed commit `6296ebfa7b6aef7ddae92579961fe5e8e9e7d32c` in both
-`/opt/cts-g` and `/workspace/CTS-G`. Desk, pulse HTTP and Redis were healthy;
-the two pulse instances were then intentionally stopped after the remote
-resolver returned `Temporary failure in name resolution` for the exchange
-endpoint, so no retry loop or order activity is created. The read-only public
-overview recovered to `OPERATIONAL` and reported CTS-G `up` with HTTP 200.
-The verified post-deploy checkpoint is
+forward. The previous deployment reached hostname
+`v2202607384858486523`; its exact SHA and checkpoint are retained in the
+private continuity record. Always compare the new GitHub-approved SHA with
+the remote checkout before restarting services. Desk, pulse HTTP and Redis
+were healthy; the two pulse instances were then intentionally stopped after
+the remote resolver returned `Temporary failure in name resolution` for the
+exchange endpoint, so no retry loop or order activity was created. The
+read-only public overview recovered to `OPERATIONAL` and reported CTS-G `up`
+with HTTP 200. The earlier verified post-deploy checkpoint was
 `/workspace/backups/CTS-G/20260903T070101Z-post-deploy-signals-block`.
 
 ### Failure interpretation
@@ -232,6 +233,64 @@ required evaluation sample; `active #/#` is intentionally stricter and also
 requires the configured enable PF and drawdown-time limit. Historic row counts
 may exceed the catalog count because LONG, SHORT and BOTH are reported as
 separate views.
+
+## Processing and accounting contract
+
+The live and historic paths use the same Set identity, indication, strategy,
+volume and cost conventions. `volumeRatio` defaults to `1.0`; every configured
+ratio, relation, step, SL:TP range and independent trailing pair remains a
+separate Set. Order-level fills and logical-position quantities are calculated
+independently, then aggregated only inside the owning symbol/direction/control
+group. `executedQty` (including zero) is authoritative when the exchange sends
+it; a requested quantity is only a fallback when no execution field exists.
+
+Close order responses and exchange order history are cumulative. The local
+book applies only the new cumulative delta, records each confirmed execution
+leg once, keeps the remaining quantity and scoped controls after a partial
+fill, and removes the logical position only after the final fill. A repeated
+snapshot is idempotent. A rejected or no-fill control request remains visible
+as a pending/recovery state and immediately re-establishes only that
+position's protection pair. Fallback close forms reuse one client ID, so a
+retry cannot create an untraceable duplicate close order.
+
+Exchange reconciliation classifies ownership by the configured connection and
+CTS client-ID namespace before adopting anything. Foreign orders and
+positions remain diagnostic-only; they are excluded from CTS PnL, equity,
+balance, PF, DDT and open-position counts and are never cancelled or merged.
+The overview reports both `exchangeOwnOpenCount` and the diagnostic
+`exchangeTotalOpenCount` so a discrepancy cannot be hidden in a single count.
+Financial totals use authoritative `close` events; fill callbacks are
+operational evidence and cannot double-count realized PnL or fees.
+
+Historic replay performs network fetches outside the shared state lock. It
+runs against a deep-copied SetBook and commits only when the SetBook pointer
+and configuration generation still match. Live tapes, current bars and
+configuration changes therefore cannot be overwritten by a stale replay.
+Catalog-wide scoring and direction/strategy rollups happen once after all
+symbol/chunk workers finish, preventing quadratic progress stalls. Drawdown
+time is calculated per symbol and then aggregated; timestamps are normalized
+between seconds and milliseconds and stale tails do not create cross-symbol
+DDT episodes.
+
+The Stats/Overview controls expose separate groups for catalog coverage,
+indication kinds (including `signals` and `break`), directions, strategies,
+Block, DCA, trailing, exits and per-symbol results. Cost PF, classic PF, net
+PnL, wins/losses, fills, DDT and `valid #/#` / `active #/#` are sourced from
+the same full snapshot. The Settings table is not a top-N substitute for the
+catalog counters.
+
+The reproducible offline VST evidence is
+`reports/cts-g-72h-report.html`, generated with:
+
+```bash
+python3 scripts/generate-72h-report.py --symbols 12 --workers 4
+```
+
+The latest complete run covered 72 hours × 12 symbols, 13,520 catalog Sets
+per symbol, 40,560 expanded Set/direction views and 39,163 validated rows;
+all eight indication kinds, both directions, the full trailing product and
+Block/DCA lanes were included. This is synthetic/offline evidence only and
+does not claim live exchange profitability or submit orders.
 
 The Settings catalog exposes the same bounded ranges used by the engines:
 

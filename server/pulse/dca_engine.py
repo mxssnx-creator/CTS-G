@@ -233,7 +233,10 @@ class DcaBook:
 
     def score(self) -> Dict[str, Any]:
         pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
-        last25 = self.closes[-self.deact_n :]
+        # Restored/API tapes may be newest-first; deactivation must always use
+        # the chronological latest window, just like the PF gate.
+        ordered = sorted(self.closes, key=lambda row: float(row.get("t") or 0) if isinstance(row, dict) else float(getattr(row, "t", 0) or 0))
+        last25 = ordered[-self.deact_n :]
         avg_r = 0.0
         if last25:
             avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)

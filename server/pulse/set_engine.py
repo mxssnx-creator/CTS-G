@@ -36,6 +36,11 @@ from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
+try:
+    import numpy as _np
+except Exception:  # pragma: no cover - scalar replay remains the fallback
+    _np = None
+
 PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
@@ -165,11 +170,20 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, An
 
 def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
     """CTS drawdown-time: episodes from peak through recovery, in seconds."""
-    now = now or time.time()
-    ordered = sorted(rows, key=lambda r: finite(r.get("t")))
-    last_t = finite(ordered[-1].get("t")) if ordered else 0.0
-    if last_t > 0 and now - last_t > 3600:
-        now = last_t
+    ordered = sorted(
+        (r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0),
+        key=lambda r: finite(r.get("t")),
+    )
+    # A historic tape has no meaningful wall-clock tail. If the caller does
+    # not provide an observation time, close an open episode at its last
+    # sample. For an explicitly supplied time, do not let a stale symbol's
+    # missing data create a false multi-hour DDt episode.
+    if now is None:
+        now = finite(ordered[-1].get("t")) if ordered else time.time()
+    elif ordered:
+        last_t = finite(ordered[-1].get("t"))
+        if last_t > 0 and now - last_t > 3600:
+            now = last_t
     equity = 0.0
     peak = 0.0
     started: Optional[float] = None
@@ -1375,6 +1389,7 @@ class SetBook:
         merge: bool = False,
         replayed_symbols: Optional[Sequence[str]] = None,
         hist_counts: Optional[Dict[str, int]] = None,
+        score: bool = True,
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
         if not merge:
@@ -1405,15 +1420,24 @@ class SetBook:
                     else:
                         counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
                 st.hist = merge_hist_rows(st.hist, full, names)
-                self._score_one(st)
+                if score:
+                    self._score_one(st)
                 st.n = sum(counts.values())
             else:
                 full.sort(key=lambda r: finite(r.get("t")))
                 st.hist = full
-                self._score_one(st)
+                if score:
+                    self._score_one(st)
                 n_full = len(full)
                 st.hist = trim_hist(full, HIST_CAP)
                 st.n = n_full
+        if score:
+            self._cap_active()
+
+    def _score_all(self) -> None:
+        """Score the complete catalog once after a batched replay commit."""
+        for st in self.by_idx:
+            self._score_one(st)
         self._cap_active()
 
     def replay_symbol_partial(
@@ -1621,6 +1645,168 @@ class SetBook:
                 on_step()
         return signals, kind_sigs, warmup
 
+    def _replay_core_vectorized(
+        self,
+        symbol: str,
+        bars: Sequence[Sequence[float]],
+        pack_sets: Sequence[SetState],
+        pack_sig: Sequence[Tuple[int, float, str]],
+        now: float,
+        warmup: int,
+        time_bars: int,
+        scratch_bars: int,
+        honor_tp: bool,
+        hist: Dict[str, List[Dict[str, Any]]],
+    ) -> None:
+        """Replay core configs with columnar state, preserving scalar rules.
+
+        A full catalog contains thousands of independent Sets. Their core
+        state transitions are identical apart from numeric parameters, so
+        NumPy columns remove the Python dict loop over every config/bar while
+        keeping one output row per Set. Block/DCA and indication tapes remain
+        on their explicit paths below.
+        """
+        if _np is None or not pack_sets:
+            return
+        np = _np
+        n = len(bars)
+        m = len(pack_sets)
+        side_values = (1, -1)
+        tp_frac = np.asarray(
+            [max(0.0020, float(st.tp_pct)) for st in pack_sets],
+            dtype=float,
+        )
+        sl_frac = np.asarray(
+            [max(0.0015, float(st.tp_pct) * max(0.3, float(st.sl_ratio or 0.6))) for st in pack_sets],
+            dtype=float,
+        )
+        trailing = np.asarray([str(st.kind or "") == "trail" for st in pack_sets], dtype=bool)
+        arms = np.asarray([
+            (float(st.trail_arm) / 100.0 if float(st.trail_arm or 0) > 0.05 else float(st.trail_arm or 0))
+            for st in pack_sets
+        ], dtype=float)
+        gives = np.asarray([
+            (float(st.trail_give) / 100.0 if float(st.trail_give or 0) > 0.05 else float(st.trail_give or 0))
+            for st in pack_sets
+        ], dtype=float)
+        base_ts = now - (n - 1) * BAR_S
+        cooldown_n = max(0, int(self.cooldown_bars or 0))
+        scratch_min = float(self.scratch_min or 0.0)
+
+        for want_side in side_values:
+            active = np.zeros(m, dtype=bool)
+            cooldown = np.zeros(m, dtype=np.int32)
+            entry = np.zeros(m, dtype=float)
+            stop_loss = np.zeros(m, dtype=float)
+            take_profit = np.zeros(m, dtype=float)
+            peak = np.zeros(m, dtype=float)
+            trail_px = np.zeros(m, dtype=float)
+            entry_i = np.zeros(m, dtype=np.int32)
+
+            for i in range(warmup, n):
+                if cooldown_n:
+                    cooldown = np.where((~active) & (cooldown > 0), cooldown - 1, cooldown)
+                bar = bars[i]
+                high = float(bar[1])
+                low = float(bar[2])
+                close = float(bar[3])
+                if close <= 0:
+                    continue
+
+                live = active.copy()
+                if live.any():
+                    if want_side > 0:
+                        if trailing.any():
+                            peak[live] = np.maximum(peak[live], high)
+                            fav = (peak - entry) / np.maximum(entry, 1e-12)
+                            arm_now = live & trailing & (fav >= arms)
+                            if arm_now.any():
+                                next_trail = peak * (1.0 - gives)
+                                trail_px[arm_now] = np.maximum(trail_px[arm_now], next_trail[arm_now])
+                        if (~trailing & live).any():
+                            peak[live & ~trailing] = np.maximum(peak[live & ~trailing], high)
+                        effective_stop = np.where(live & (trail_px > 0), np.maximum(stop_loss, trail_px), stop_loss)
+                        sl_hit = live & (low <= effective_stop)
+                        tp_hit = live & (high >= take_profit) if honor_tp else np.zeros(m, dtype=bool)
+                        exited = sl_hit | tp_hit
+                        exit_px = np.where(sl_hit, effective_stop, take_profit)
+                        raw = (exit_px - entry) / np.maximum(entry, 1e-12)
+                    else:
+                        if trailing.any():
+                            peak[live] = np.minimum(peak[live], low)
+                            fav = (entry - peak) / np.maximum(entry, 1e-12)
+                            arm_now = live & trailing & (fav >= arms)
+                            if arm_now.any():
+                                next_trail = peak * (1.0 + gives)
+                                fresh = arm_now & (trail_px <= 0)
+                                trail_px[fresh] = next_trail[fresh]
+                                trail_px[arm_now & ~fresh] = np.minimum(trail_px[arm_now & ~fresh], next_trail[arm_now & ~fresh])
+                        if (~trailing & live).any():
+                            peak[live & ~trailing] = np.minimum(peak[live & ~trailing], low)
+                        effective_stop = np.where(live & (trail_px > 0), np.minimum(stop_loss, trail_px), stop_loss)
+                        sl_hit = live & (high >= effective_stop)
+                        tp_hit = live & (low <= take_profit) if honor_tp else np.zeros(m, dtype=bool)
+                        exited = sl_hit | tp_hit
+                        exit_px = np.where(sl_hit, effective_stop, take_profit)
+                        raw = (entry - exit_px) / np.maximum(entry, 1e-12)
+
+                    # Scalar _advance_pos applies time/scratch exits only
+                    # after the stop/TP decision on the same bar.
+                    held = i - entry_i
+                    close_move = (close - entry) / np.maximum(entry, 1e-12) * want_side
+                    time_exit = live & ~exited & (held >= time_bars)
+                    scratch_exit = live & ~exited & ~time_exit & (close_move >= scratch_min) & (held >= scratch_bars)
+                    if time_exit.any():
+                        exited |= time_exit
+                        exit_px[time_exit] = close
+                        raw[time_exit] = (close - entry[time_exit]) / np.maximum(entry[time_exit], 1e-12) * want_side
+                    if scratch_exit.any():
+                        exited |= scratch_exit
+                        exit_px[scratch_exit] = close
+                        raw[scratch_exit] = (close - entry[scratch_exit]) / np.maximum(entry[scratch_exit], 1e-12) * want_side
+
+                    exit_indices = np.flatnonzero(exited)
+                    ts = base_ts + i * BAR_S
+                    for j in exit_indices.tolist():
+                        why = "sl" if bool(sl_hit[j]) else ("tp" if bool(tp_hit[j]) else ("time" if bool(time_exit[j]) else "scratch+"))
+                        qty = 1.0
+                        move = float(raw[j])
+                        hist.setdefault(pack_sets[j].id, []).append({
+                            "t": ts,
+                            "symbol": symbol,
+                            "side": "LONG" if want_side > 0 else "SHORT",
+                            "direction": "LONG" if want_side > 0 else "SHORT",
+                            "pnl": net_pnl_pct(move, self.cost_pct) * qty,
+                            "pnl_pct": move,
+                            "hold_s": int(held[j]) * BAR_S,
+                            "reason": why,
+                            "set_id": pack_sets[j].id,
+                            "pack": pack_sets[j].pack,
+                            "costPct": self.cost_pct,
+                            "qty": qty,
+                            "adds": 0,
+                            "strategy": "core",
+                        })
+                    if exit_indices.size:
+                        active[exited] = False
+                        cooldown[exited] = cooldown_n
+
+                d, conf, _why = pack_sig[i]
+                if d == want_side and conf >= 0.58:
+                    seed = (~active) & (cooldown <= 0)
+                    if seed.any():
+                        entry[seed] = close
+                        peak[seed] = close
+                        entry_i[seed] = i
+                        trail_px[seed] = 0.0
+                        if want_side > 0:
+                            stop_loss[seed] = close * (1.0 - sl_frac[seed])
+                            take_profit[seed] = close * (1.0 + tp_frac[seed])
+                        else:
+                            stop_loss[seed] = close * (1.0 + sl_frac[seed])
+                            take_profit[seed] = close * (1.0 - tp_frac[seed])
+                        active[seed] = True
+
     def _replay_symbol(
         self,
         symbol: str,
@@ -1657,11 +1843,22 @@ class SetBook:
             if strat_hist is not None:
                 strat_hist.setdefault("block", [])
                 strat_hist.setdefault("dca", [])
+            vector_core = _np is not None
+            if vector_core:
+                self._replay_core_vectorized(
+                    symbol, bars, pack_sets, pack_sig, now, warmup,
+                    time_bars, scratch_bars, honor_tp, hist,
+                )
             for want_side in (1, -1):
                 opens: Dict[str, Dict[str, Any]] = {}
                 cools: Dict[str, int] = {}
                 blk_pos: Optional[Dict[str, Any]] = None
                 dca_pos: Optional[Dict[str, Any]] = None
+                # The vectorized core does not populate ``opens``. Keep one
+                # scalar-equivalent base lane so Block/DCA retain the exact
+                # entry/cooldown coordination of the reference replay.
+                representative: Optional[Dict[str, Any]] = None
+                representative_cool = 0
                 for i in range(warmup, n):
                     bar = bars[i]
                     ts = base_ts + i * BAR_S
@@ -1693,6 +1890,24 @@ class SetBook:
                             opens[sid] = pos
                     for sid in dead:
                         opens.pop(sid, None)
+                    if vector_core and strat_seed is not None:
+                        if representative is None and representative_cool > 0:
+                            representative_cool -= 1
+                        if representative is not None:
+                            rep_sl = max(
+                                0.0015,
+                                strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)),
+                            )
+                            rep_tp = max(0.0020, strat_seed.tp_pct)
+                            representative, rep_rec = self._advance_pos(
+                                representative, bar, i, strategy="core",
+                                sl_frac=rep_sl, tp_frac=rep_tp, use_trail=False,
+                                arm=0.0, give=0.0, time_bars=time_bars,
+                                scratch_bars=scratch_bars, honor_tp=honor_tp,
+                                ts=ts, symbol=symbol, st_id=strat_seed.id, pack=pack,
+                            )
+                            if rep_rec:
+                                representative_cool = self.cooldown_bars
                     if blk_pos is not None and strat_seed is not None:
                         sl_frac = max(0.0015, strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)))
                         tp_frac = max(0.0020, strat_seed.tp_pct)
@@ -1722,7 +1937,11 @@ class SetBook:
                     if close <= 0:
                         continue
                     for st in pack_sets:
+                        if vector_core and st is not strat_seed:
+                            continue
                         if st.id in opens or cools.get(st.id, 0) > 0:
+                            continue
+                        if vector_core and st is strat_seed and (representative is not None or representative_cool > 0):
                             continue
                         sl_frac = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
                         tp_frac = max(0.0020, st.tp_pct)
@@ -1733,6 +1952,17 @@ class SetBook:
                             sl = close * (1 + sl_frac)
                             tp = close * (1 - tp_frac)
                         seed = self._seed_pos(d, close, sl, tp, i, str(why or ""))
+                        if vector_core:
+                            # Core Sets were already replayed column-wise;
+                            # retain only the representative state needed by
+                            # the independent Block/DCA lanes.
+                            if st is strat_seed:
+                                representative = dict(seed)
+                                if do_block and blk_pos is None:
+                                    blk_pos = dict(seed)
+                                if do_dca and dca_pos is None:
+                                    dca_pos = dict(seed)
+                            continue
                         opens[st.id] = dict(seed)
                         if do_block and blk_pos is None and st is strat_seed:
                             blk_pos = dict(seed)
@@ -2830,9 +3060,6 @@ class SetBook:
             "source": "live-exchange",
             "rows": rows,
         }
-        self._live_ov_cache = out
-        self._live_ov_ts = time.monotonic()
-        return out
         self._live_ov_cache = out
         self._live_ov_ts = time.monotonic()
         return out

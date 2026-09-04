@@ -659,7 +659,13 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
     if isinstance(raw, str):
         raw = [raw]
     names: List[str] = []
-    wild = bool(opt.get("allSymbols")) or bool(body.get("allSymbols"))
+    # An explicit symbol list is authoritative.  The UI defaults
+    # ``allSymbols`` to true, but that must not turn a targeted VST/replay
+    # request into a remote universe lookup (and a proxy timeout).  Wildcard
+    # markers and an explicit allSymbols flag still intentionally use the
+    # configured universe.
+    requested = isinstance(raw, list) and bool(raw)
+    wild = bool(body.get("allSymbols")) or (not requested and bool(opt.get("allSymbols")))
     if isinstance(raw, list) and raw:
         for s in raw:
             t = str(s or "").strip().upper().replace("_", "-")
@@ -1172,6 +1178,8 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
     set_ids = [st.id for st in book.by_idx]
     chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
     strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
+    accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
+    accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
     nbar = len(bars)
     for chunk_i, chunk_ids in enumerate(chunks):
         local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
@@ -1186,7 +1194,19 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
             set_ids=chunk_ids,
             prepared=prepared,
         )
-        book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+        # Chunking bounds the replay working set. Accumulate the resulting
+        # rows and merge into the catalog once; repeatedly sorting every
+        # config's existing tape per chunk made a full matrix effectively
+        # quadratic and looked like a hung worker.
+        for sid, rows in local_hist.items():
+            if rows:
+                accumulated_hist.setdefault(sid, []).extend(rows)
+        if local_ind:
+            for kind, rows in local_ind.items():
+                if rows:
+                    accumulated_ind.setdefault(kind, []).extend(rows)
+    book._commit_hist(accumulated_hist, accumulated_ind, merge=True, replayed_symbols=[sym], score=False)
+    book._score_all()
     return (
         sym,
         nbar,
@@ -1336,8 +1356,12 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 job["rowCount"] = len(rows)
                 job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
                 job["kinds"] = book.ind_gate_snapshot()
-                job["byDirection"] = direction_rollup(book)
-                job["byStrategy"] = strategy_rollup(book, strat=strat_hist)
+                # Direction/strategy rollups walk the full per-Set tape and
+                # duplicate rows across groups. They are deliberately built
+                # once after the final catalog score below; doing them on each
+                # progress snapshot made a healthy replay appear stalled.
+                job.setdefault("byDirection", {})
+                job.setdefault("byStrategy", {})
             job["detail"] = (
                 f"{phase} {done}/{total} · {int(job.get('validatedCount') or 0)}/"
                 f"{int(job.get('rowCount') or len(book.by_idx))} validated · {fills} fills"
@@ -1363,6 +1387,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 merge=True,
                 replayed_symbols=[sym],
                 hist_counts=local_counts,
+                score=False,
             )
             for key, rows in local_strat.items():
                 strat_hist.setdefault(key, []).extend(rows)
@@ -1390,6 +1415,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             prepared = book.prepare_replay_signals(sym, now)
             set_ids = [st.id for st in book.by_idx]
             chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
+            accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
+            accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
             nbar = 0
             for chunk_i, chunk_ids in enumerate(chunks):
                 local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
@@ -1401,7 +1428,14 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                     set_ids=chunk_ids, prepared=prepared,
                 )
                 nbar = max(nbar, chunk_nbar)
-                book._commit_hist(local_hist, local_ind, merge=True, replayed_symbols=[sym])
+                for sid, rows in local_hist.items():
+                    if rows:
+                        accumulated_hist.setdefault(sid, []).extend(rows)
+                if local_ind:
+                    for kind, rows in local_ind.items():
+                        if rows:
+                            accumulated_ind.setdefault(kind, []).extend(rows)
+            book._commit_hist(accumulated_hist, accumulated_ind, merge=True, replayed_symbols=[sym], score=False)
             commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}), src, total)
 
         if workers > 1:
@@ -1417,6 +1451,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         if replay_pool is not None:
             replay_pool.shutdown(wait=True, cancel_futures=True)
             replay_pool = None
+        # All symbols/chunks are now present. One catalog-wide score pass
+        # avoids repeatedly recalculating every config while replay workers
+        # stream symbol-local evidence into the aggregate book.
+        book._score_all()
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")

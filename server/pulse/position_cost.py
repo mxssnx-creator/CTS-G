@@ -96,16 +96,32 @@ def net_pnl_usdt(pnl_pct: float, qty: float, entry: float, cost_pct: float = POS
     return notion * net_pnl_pct(pnl_pct, cost_pct)
 
 
-def row_pnl_pct(row: Any) -> float:
-    """Gross price-move fraction from a fill row."""
+def row_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Gross price-move fraction from a fill row.
+
+    New fills carry ``pnl_pct``. Older persisted tapes can contain only the
+    already cost-net USDT ``pnl`` plus quantity and entry. Reconstruct the
+    gross move in that case so a missing percentage cannot become a synthetic
+    cost-only loss in PF, expectancy, or DDT calculations.
+    """
+    raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
+    if raw is not None:
+        return finite(raw)
     if isinstance(row, dict):
-        return finite(row.get("pnl_pct"))
-    return finite(getattr(row, "pnl_pct", 0))
+        pnl = finite(row.get("pnl"))
+        qty = finite(row.get("qty"))
+        entry = finite(row.get("entry"))
+    else:
+        pnl = finite(getattr(row, "pnl", 0))
+        qty = finite(getattr(row, "qty", 0))
+        entry = finite(getattr(row, "entry", 0))
+    notional = max(0.0, qty * entry)
+    return pnl / notional + cost_as_frac(cost_pct) if notional > 1e-12 else 0.0
 
 
 def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """Net fraction after subtracting one PositionCost. Always from the gross move."""
-    return net_pnl_pct(row_pnl_pct(row), cost_pct)
+    return net_pnl_pct(row_pnl_pct(row, cost_pct), cost_pct)
 
 
 def row_side(row: Any) -> str:
@@ -164,12 +180,17 @@ def last_n_cost_pf(
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
 ) -> Dict[str, float]:
-    window = list(rows)[-max(1, int(n)) :]
+    # API surfaces provide both chronological and newest-first tapes. A
+    # timestamp-normalized tail makes every "last N" gate mean the same thing.
+    window = sorted(
+        list(rows),
+        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+    )[-max(1, int(n)) :]
     rs: List[float] = []
     nets: List[float] = []
     gp = gl = 0.0
     for row in window:
-        pnl_pct = row_pnl_pct(row)
+        pnl_pct = row_pnl_pct(row, cost_pct)
         net = row_net_pnl(row, cost_pct)
         rs.append(signed_result_r(pnl_pct, cost_pct))
         nets.append(net)
@@ -311,6 +332,9 @@ if __name__ == "__main__":
     assert abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-12
     assert abs(net_pnl_usdt(0.003, 1.0, 100.0, 0.15) - 0.15) < 1e-9
     assert abs(row_net_pnl({"pnl_pct": 0.003, "pnl": 9}, 0.15) - 0.0015) < 1e-12
+    legacy = {"t": 1, "pnl": 1.0, "qty": 100.0, "entry": 1.0}
+    assert abs(row_pnl_pct(legacy, 0.15) - 0.0115) < 1e-12
+    assert abs(row_net_pnl(legacy, 0.15) - 0.01) < 1e-12
     assert row_side({"side": "long"}) == "LONG" and row_side({"side": "SELL"}) == "SHORT"
     assert len(filter_side([{"side": "LONG"}, {"side": "SHORT"}], "LONG")) == 1
     n = last_n_cost_pf([{"pnl_pct": 0.003, "pnl": 0.0015}] * 10, 10, 0.15)

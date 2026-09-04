@@ -1,6 +1,6 @@
 /** CTS live-trading analytics: profit factor windows + drawdown-time average. */
 
-export type PfRow = { pnl: number; t: number; notional?: number; pnl_pct?: number };
+export type PfRow = { pnl: number; t: number; symbol?: string; notional?: number; pnl_pct?: number };
 
 export type ProfitFactorMetric = {
   trades: number;
@@ -98,10 +98,49 @@ export function calculateDrawdownTime(
   const cutoff = now - lookbackDays * 24 * 60 * 60 * 1000;
   const ordered = rows
     .filter((row) => {
-      const ts = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
+      const ts = timestampMs(row.t);
       return ts >= cutoff && ts <= now;
     })
-    .sort((a, b) => a.t - b.t);
+    .sort((a, b) => timestampMs(a.t) - timestampMs(b.t));
+
+  const symbols = new Set(ordered.map((row) => row.symbol || "?"));
+  if (symbols.size > 1) {
+    const parts = [...symbols].map((symbol) =>
+      calculateDrawdownTimeSingle(
+        ordered.filter((row) => (row.symbol || "?") === symbol),
+        now,
+        lookbackDays,
+      ),
+    );
+    const totalDurationMs = parts.reduce((sum, part) => sum + part.totalDurationMs, 0);
+    const episodes = parts.reduce((sum, part) => sum + part.episodes, 0);
+    return {
+      lookbackDays,
+      samples: ordered.length,
+      episodes,
+      maxDurationMs: Math.max(0, ...parts.map((part) => part.maxDurationMs)),
+      averageDurationMs: episodes ? Math.round(totalDurationMs / episodes) : 0,
+      currentDurationMs: Math.max(0, ...parts.map((part) => part.currentDurationMs)),
+      totalDurationMs,
+      maxDepth: round(Math.max(0, ...parts.map((part) => part.maxDepth))),
+      currentDepth: round(Math.max(0, ...parts.map((part) => part.currentDepth))),
+      inDrawdown: parts.some((part) => part.inDrawdown),
+    };
+  }
+  return calculateDrawdownTimeSingle(ordered, now, lookbackDays);
+}
+
+function timestampMs(value: number): number {
+  return value < 10_000_000_000 ? value * 1000 : value;
+}
+
+function calculateDrawdownTimeSingle(
+  ordered: PfRow[],
+  now: number,
+  lookbackDays: number,
+): DrawdownTimeMetric {
+  const lastTs = ordered.length ? timestampMs(ordered[ordered.length - 1].t) : 0;
+  const observationNow = lastTs > 0 && now - lastTs > 3_600_000 ? lastTs : now;
 
   let equity = 0;
   let peak = 0;
@@ -112,7 +151,7 @@ export function calculateDrawdownTime(
   let episodes = 0;
 
   for (const row of ordered) {
-    const closedAt = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
+    const closedAt = timestampMs(row.t);
     equity += finite(row.pnl);
     if (equity >= peak) {
       if (drawdownStartedAt !== null) {
@@ -132,7 +171,7 @@ export function calculateDrawdownTime(
   }
 
   const currentDurationMs =
-    drawdownStartedAt === null ? 0 : Math.max(0, now - drawdownStartedAt);
+    drawdownStartedAt === null ? 0 : Math.max(0, observationNow - drawdownStartedAt);
   if (drawdownStartedAt !== null) {
     maxDurationMs = Math.max(maxDurationMs, currentDurationMs);
     totalDurationMs += currentDurationMs;
@@ -177,7 +216,9 @@ export function lastNCostPf(
   costPct = POSITION_COST_PCT_DEFAULT,
   minPf = 1.1,
 ): CostPfMetric {
-  const window = rows.slice(0, Math.max(1, n));
+  const window = [...rows]
+    .sort((a, b) => timestampMs(b.t) - timestampMs(a.t))
+    .slice(0, Math.max(1, n));
   const rs: number[] = [];
   const nets: number[] = [];
   let gp = 0;
@@ -211,10 +252,10 @@ export function lastNCostPf(
 }
 
 export function buildOverview(rows: PfRow[], now = Date.now()) {
-  const newestFirst = [...rows].sort((a, b) => b.t - a.t);
+  const newestFirst = [...rows].sort((a, b) => timestampMs(b.t) - timestampMs(a.t));
   const withinHours = (hours: number) =>
     newestFirst.filter((row) => {
-      const ts = row.t < 10_000_000_000 ? row.t * 1000 : row.t;
+      const ts = timestampMs(row.t);
       return ts >= now - hours * 60 * 60 * 1000 && ts <= now;
     });
   return {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import copy
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import nullcontext
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
@@ -107,7 +109,11 @@ def normalize_control_pct(value: Any, default: float = 0.0) -> int:
         parsed = float(default or 0.0)
     if abs(parsed) > 0.05:
         parsed /= 100.0
-    return max(0, int(round(parsed * 10000.0)))
+    # Use deterministic half-up quantization for the identity only. Python's
+    # banker rounding makes values such as 0.495% depend on their binary
+    # representation and can silently move a control range down by one basis
+    # point. Runtime pricing keeps the original fraction below.
+    return max(0, int(math.floor(parsed * 10000.0 + 0.5)))
 
 
 def control_range_key(sl_pct: Any, tp_pct: Any) -> str:
@@ -696,6 +702,7 @@ class Position:
     exchange_qty: float = 0.0
     foreign_qty: float = 0.0
     pending_qty: float = 0.0
+    pending_close_qty: float = 0.0
     last_fill_at: float = 0.0
 
 
@@ -746,10 +753,12 @@ class Pulse:
         self.open: Dict[str, Position] = {}
         self.pending_orders: Dict[str, Dict[str, Any]] = {}
         self._last_order_result: Dict[str, Any] = {}
+        self._last_close_result: Dict[str, Any] = {}
         self.exchange_qty: Dict[str, float] = {}
         self.exchange_foreign_qty: Dict[str, float] = {}
         self.exchange_own_qty: Dict[str, float] = {}
         self.exchange_own_open_count = -1
+        self.exchange_total_open_count = -1
         self.control_orders_per_config = True
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
@@ -814,7 +823,8 @@ class Pulse:
         self.qa_fail = 0
         self.warm_ms = 0.0
         self._warm_stop = False
-        self._stats_lock = threading.Lock()
+        self._stats_lock = threading.RLock()
+        self._state_lock = threading.RLock()
         self.hist_busy = False
         self._hist_fetch_next = 0.0
         self._hist_fetch_failures = 0
@@ -862,6 +872,10 @@ class Pulse:
         self.dca = DcaBook()
         self.variants = VariantBook()
         self.sets = SetBook()
+        # Monotonic catalog generation.  Historic replay runs on an isolated
+        # SetBook snapshot and may only be committed if configuration has not
+        # been reloaded while the worker was busy.
+        self._sets_generation = 0
         self.exits = ExitBook()
         self.block_last_emit = 0.0
         self.overlay_mtime = 0.0
@@ -933,15 +947,22 @@ class Pulse:
                 sl_bp = normalize_control_pct(SL_PCT)
             if tp_bp <= 0:
                 tp_bp = normalize_control_pct(TP_PCT)
-            # Store the canonical percentages on the logical group so fills,
-            # weighted merges, and replacement prices all use one exact range.
-            pos.sl_pct = sl_bp / 10000.0
-            pos.tp_pct = tp_bp / 10000.0
+            # Keep the source fractions for actual SL/TP pricing. The basis
+            # points are the stable restart/group identity; overwriting the
+            # source here would turn e.g. 0.495% into 0.49/0.50% and break the
+            # configured ratio. Legacy rows with no fractions use the
+            # canonical identity as their safe fallback.
+            if sl_value <= 0:
+                sl_value = sl_bp / 10000.0
+            if tp_value <= 0:
+                tp_value = tp_bp / 10000.0
+            pos.sl_pct = sl_value
+            pos.tp_pct = tp_value
             pos.control_sl_bp = sl_bp
             pos.control_tp_bp = tp_bp
-            pos.control_range_key = control_range_key(pos.sl_pct, pos.tp_pct)
+            pos.control_range_key = f"sl{sl_bp:04d}-tp{tp_bp:04d}"
             pos.control_group_key = make_control_group_key(
-                pos.symbol, pos.side, pos.sl_pct, pos.tp_pct
+                pos.symbol, pos.side, sl_bp / 10000.0, tp_bp / 10000.0
             )
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
@@ -1097,6 +1118,24 @@ class Pulse:
         target.exchange_qty = max(0.0, float(getattr(target, "exchange_qty", 0) or 0)) + max(0.0, float(getattr(incoming, "exchange_qty", 0) or 0))
         target.foreign_qty = max(0.0, float(getattr(target, "foreign_qty", 0) or 0))
         target.pending_qty = max(0.0, float(getattr(target, "pending_qty", 0) or 0)) + max(0.0, float(getattr(incoming, "pending_qty", 0) or 0))
+        target.pending_close_qty = max(
+            float(getattr(target, "pending_close_qty", 0) or 0),
+            float(getattr(incoming, "pending_close_qty", 0) or 0),
+        )
+        # Same-range fills may originate from independent orders with slightly
+        # different sub-basis-point inputs. Keep their weighted effective
+        # fractions for pricing while the canonical range key remains stable.
+        if not bool(getattr(target, "legacy_aggregate", False)) and not bool(getattr(incoming, "legacy_aggregate", False)):
+            if float(getattr(incoming, "sl_pct", 0) or 0) > 0:
+                target.sl_pct = (
+                    float(getattr(target, "sl_pct", 0) or 0) * old_qty
+                    + float(incoming.sl_pct) * add_qty
+                ) / total
+            if float(getattr(incoming, "tp_pct", 0) or 0) > 0:
+                target.tp_pct = (
+                    float(getattr(target, "tp_pct", 0) or 0) * old_qty
+                    + float(incoming.tp_pct) * add_qty
+                ) / total
         target.last_fill_at = max(float(getattr(target, "last_fill_at", 0) or 0), float(getattr(incoming, "last_fill_at", 0) or 0), time.time())
         if not getattr(target, "control_group_key", "") and getattr(incoming, "control_group_key", ""):
             target.control_group_key = incoming.control_group_key
@@ -1712,6 +1751,26 @@ class Pulse:
                     pos.pending_qty = max(float(getattr(pos, "pending_qty", 0.0) or 0.0), requested - filled)
                 else:
                     self.seen_fill_cids.add(pos.client_id)
+            # Close intents use their own client id, while the open position
+            # keeps the parent entry id. Restore the remaining close quantity
+            # by the persisted group/side so a restart cannot issue a second
+            # full-size close for an already partially executed order.
+            for pending in (self.pending_orders or {}).values():
+                if str(pending.get("kind") or "").lower() not in ("close", "c"):
+                    continue
+                pside = str(pending.get("side") or "").upper()
+                if str(pending.get("symbol") or "").upper() != str(pos.symbol or "").upper() or pside != str(pos.side or "").upper():
+                    continue
+                pgroup = str(pending.get("group_key") or "")
+                parent = str((pending.get("metadata") or {}).get("parent_client_id") or "")
+                matches_group = pgroup and pgroup in (self.position_key(pos), getattr(pos, "control_group_key", ""), self.legacy_position_key(pos))
+                matches_parent = parent and parent in ([getattr(pos, "client_id", "")] + list(getattr(pos, "member_client_ids", []) or []))
+                if not (matches_group or matches_parent):
+                    continue
+                requested_c = max(0.0, _sf(pending.get("requested_qty") or pending.get("requestedQty")))
+                filled_c = max(0.0, _sf(pending.get("filled_qty") or pending.get("filledQty")))
+                if requested_c > filled_c + 1e-12:
+                    pos.pending_close_qty = max(float(getattr(pos, "pending_close_qty", 0.0) or 0.0), requested_c - filled_c)
 
     def cid(self, kind: str = "o", pos: Optional["Position"] = None, set_id: str = "", pack: str = "", set_idx: int = -1) -> str:
         kind = (kind or "o")[:1]
@@ -1887,6 +1946,10 @@ class Pulse:
         else:
             self.qa_fail += 1
             log(f"TEST FAIL {name} {detail}"[:240], every=20.0, key=f"fail:{name}")
+
+    def state_guard(self):
+        """Return the shared state lock, with a test-friendly fallback."""
+        return getattr(self, "_state_lock", None) or nullcontext()
 
     def refresh_balance(self) -> None:
         request_key = stable_key(CONN_SHORT, "balance", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
@@ -3431,12 +3494,25 @@ class Pulse:
     def market_close(self, pos: Position) -> Tuple[bool, float]:
         close_side = "SELL" if pos.side == "LONG" else "BUY"
         grouped = self.per_config_controls(pos)
-        forms = [{"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)}]
+        close_cid = self.cid("c", pos=pos)
+        requested_qty = max(0.0, float(getattr(pos, "qty", 0.0) or 0.0))
+        self._last_close_result = {
+            "cid": close_cid,
+            "requested_qty": requested_qty,
+            "filled_qty": 0.0,
+            "order_id": "",
+            "avg_price": 0.0,
+            "status": "",
+        }
+        # Every fallback form must keep the same client id. Otherwise an
+        # accepted first request followed by a retry becomes two independent
+        # close orders and the fill ledger cannot reconcile them safely.
+        forms = [{"quantity": requested_qty, "clientOrderID": close_cid}]
         if not grouped:
-            forms.append({"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)})
+            forms.append({"closePosition": "true", "clientOrderID": close_cid})
             pid = str(getattr(pos, "position_id", "") or "")
             if pid:
-                forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
+                forms.append({"positionId": pid, "clientOrderID": close_cid})
         r: Dict[str, Any] = {}
         for extra in forms:
             body = {
@@ -3448,19 +3524,38 @@ class Pulse:
             body.update(extra)
             if "quantity" in body and body.get("closePosition"):
                 body.pop("quantity", None)
-            r = self.api.post("/openApi/swap/v2/trade/order", body)
+            try:
+                r = self.api.post("/openApi/swap/v2/trade/order", body)
+            except Exception as exc:
+                r = {"error": str(exc), "msg": short_api_msg(str(exc))}
             self.did_io = True
             if self.ok(r):
                 data = (r.get("data") or {}).get("order") or r.get("data") or {}
                 px = float(data.get("avgPrice") or data.get("price") or 0) or (self.px.get(pos.symbol) or pos.entry)
+                oid = extract_oid(data)
+                status = str(data.get("status") or data.get("orderStatus") or data.get("state") or "").upper()
+                filled = order_fill_qty(data, requested_qty)
+                self._last_close_result.update({
+                    "order_id": oid,
+                    "avg_price": px,
+                    "filled_qty": min(requested_qty, max(0.0, filled)),
+                    "status": status or "ACCEPTED",
+                })
                 return True, px
             msg = str(r.get("msg") or "")
             if ctrl_err_kind(msg) == "qty_close":
                 continue
             if "position not exist" in msg.lower():
-                return True, self.px.get(pos.symbol) or pos.entry
+                px = self.px.get(pos.symbol) or pos.entry
+                self._last_close_result.update({
+                    "avg_price": px,
+                    "filled_qty": requested_qty,
+                    "status": "FLAT",
+                })
+                return True, px
         self.errors += 1
         self.last_error = f"close {pos.symbol} {r.get('msg')}"[:240]
+        self._last_close_result["status"] = "REJECTED"
         return False, self.px.get(pos.symbol) or pos.entry
 
     def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
@@ -4298,8 +4393,196 @@ class Pulse:
         except Exception:
             pass
 
+    def _record_close_fill(
+        self,
+        pos: Position,
+        qty: float,
+        exit_px: float,
+        reason: str,
+        *,
+        exchange: bool = True,
+        close_cid: str = "",
+        close_oid: str = "",
+        status: str = "",
+        cumulative_qty: float = 0.0,
+        skip_eval: Optional[bool] = None,
+    ) -> bool:
+        """Apply one exchange-confirmed close delta to exactly one position.
+
+        Close responses and allOrders rows are cumulative at the exchange,
+        while the local book stores the delta. This helper is the single
+        accounting path for direct responses and later fill polling, so a
+        repeated partial-fill callback cannot double-decrement qty or PnL.
+        Returns True when a fill was applied and leaves a smaller position in
+        ``open`` until the cumulative close is complete.
+        """
+        current_qty = max(0.0, float(getattr(pos, "qty", 0.0) or 0.0))
+        fill_qty = min(current_qty, max(0.0, float(qty or 0.0)))
+        if fill_qty <= 1e-12 or current_qty <= 1e-12:
+            return False
+        exit_px = max(0.0, float(exit_px or 0.0)) or float(self.px.get(pos.symbol) or pos.entry or 0.0)
+        if exit_px <= 0 or float(pos.entry or 0) <= 0:
+            return False
+        reason = str(reason or "exchange-close")
+        skip = bool(skip_eval) if skip_eval is not None else any(
+            key in reason.lower() for key in ("oversized", "ctrl-no-position", "no-ctrl")
+        )
+        if pos.side == "LONG":
+            pnl_pct = (exit_px - pos.entry) / pos.entry
+        else:
+            pnl_pct = (pos.entry - exit_px) / pos.entry
+        pnl = net_pnl_usdt(pnl_pct, fill_qty, pos.entry, self.position_cost_pct)
+        hold = max(0.0, time.time() - float(pos.opened_at or time.time()))
+        remaining = max(0.0, current_qty - fill_qty)
+        final_fill = remaining <= max(1e-12, current_qty * 1e-9)
+        sequence = float(cumulative_qty or 0.0) if cumulative_qty else fill_qty
+        close_key = stable_key(
+            CONN_SHORT,
+            "close",
+            self.position_key(pos),
+            pos.client_id,
+            close_cid,
+            round(sequence, 12),
+            round(fill_qty, 12),
+        )
+        rec = Closed(
+            time.time(), pos.symbol, pos.side, fill_qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
+            sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
+            set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
+            ind_kind=str(getattr(pos, "ind_kind", "") or ""),
+            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
+            axis_key=str(getattr(pos, "axis_key", "") or ""),
+            relative_count=int(getattr(pos, "relative_count", 1) or 1),
+            volume_ratio=float(getattr(pos, "volume_ratio", 1.0) or 1.0),
+            control_group_key=str(getattr(pos, "control_group_key", "") or ""),
+            control_range_key=str(getattr(pos, "control_range_key", "") or "aggregate"),
+            control_mode="per-config" if self.per_config_controls(pos) else "aggregate",
+            member_count=max(1, int(getattr(pos, "member_count", 1) or 1)),
+        )
+        self.record_event(
+            "close",
+            stable_key(close_key, "closed"),
+            status=status or ("confirmed" if exchange else "recovered"),
+            symbol=pos.symbol,
+            side=pos.side,
+            set_id=pos.set_id,
+            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
+            indication_kind=getattr(pos, "ind_kind", ""),
+            strategy=pos.pack,
+            **self.control_event_fields(pos),
+            client_id=pos.client_id,
+            order_id=close_oid,
+            qty=fill_qty,
+            price=exit_px,
+            pnl=pnl,
+            fee=abs(fill_qty * pos.entry) * cost_as_frac(self.position_cost_pct),
+            detail=reason,
+            metadata={
+                "realized": not skip,
+                "partial": not final_fill,
+                "cumulativeQty": cumulative_qty or fill_qty,
+                "closeClientId": close_cid,
+                "closeOrderId": close_oid,
+                "holdS": hold,
+                "pnlPct": pnl_pct,
+                "skipEvaluation": skip,
+            },
+        )
+        if not skip:
+            self.closed.append(rec)
+            # Each confirmed execution leg is a realized financial event and
+            # is therefore counted exactly once. A cumulative close may emit
+            # several legs; the delta/idempotency guard above prevents a
+            # repeated exchange snapshot from counting any leg twice.
+            if pnl >= 0:
+                self.wins += 1
+                self.consec_loss = 0
+            else:
+                self.losses += 1
+                self.consec_loss += 1
+                if self.consec_loss >= 8:
+                    self.cooldown["__book__"] = time.time() + 120
+                    self.consec_loss = 4
+            try:
+                self.variants.on_close(rec)
+            except Exception:
+                pass
+            try:
+                self.sets.on_live_close(rec)
+                self.sets.adapt_from_live(self.strategy_closes())
+            except Exception:
+                pass
+            try:
+                self.exits.on_close(rec)
+            except Exception:
+                pass
+
+        # Decrement only the confirmed exchange delta. Foreign remainder is
+        # never folded into this position and is intentionally left untouched.
+        pos.qty = remaining
+        pos.notional = remaining * float(pos.entry or 0.0)
+        pos.exchange_qty = max(0.0, float(getattr(pos, "exchange_qty", current_qty) or 0.0) - fill_qty)
+        pos.last_fill_at = time.time()
+
+        if not final_fill:
+            # A partially executed close must leave a fresh, quantity-matched
+            # protection pair for the remainder. This is deliberately scoped
+            # to this logical group and cannot cancel another group's orders.
+            if getattr(self, "control_orders", True):
+                try:
+                    self.cancel_controls(pos.symbol, pos=pos)
+                except Exception:
+                    pass
+                self.clear_position_controls(pos)
+                try:
+                    self.ensure_controls(pos)
+                except Exception:
+                    pass
+            self.save_open_book()
+            self._stats_force = True
+            return True
+
+        try:
+            self._close_strategy_lanes(pos, rec, pnl, pnl_pct)
+        except Exception:
+            pass
+        if getattr(pos, "ind_kind", "") in INDICATION_KINDS:
+            try:
+                self.indications.record_outcome(str(pos.ind_kind), "exited")
+            except Exception:
+                pass
+        if close_cid:
+            self.seen_fill_cids.add(close_cid)
+        if skip:
+            self.remove_position(pos)
+            self.ban_sym(pos.symbol, clear_open=False)
+            log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
+        else:
+            if self.consec_loss >= 4:
+                log("pause new entries 120s after cold streak", every=30.0, key="partial-cold-streak")
+            self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
+            self.remove_position(pos)
+            try:
+                with open(TRADES_PATH, "a") as f:
+                    f.write(json.dumps(asdict(rec)) + "\n")
+            except Exception:
+                pass
+            log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
+        self.save_open_book()
+        self._stats_force = True
+        return True
+
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        if exchange and float(getattr(pos, "pending_close_qty", 0.0) or 0.0) > 1e-12:
+            # An accepted close is already in flight. Repeating it from the
+            # max-hold/DDT/control paths would create an over-close race.
+            if getattr(self, "control_orders", True) and not getattr(pos, "controls_ok", False):
+                try:
+                    self.ensure_controls(pos)
+                except Exception:
+                    pass
+            return
         group_key = self.position_key(pos) if self.per_config_controls(pos) else "aggregate"
         close_key = stable_key(CONN_SHORT, "close", group_key, pos.client_id, pos.symbol, pos.side, reason)
         if exchange:
@@ -4318,13 +4601,23 @@ class Pulse:
                 price=px,
                 detail=f"close {reason}",
             )
-            self.cancel_controls(pos.symbol, pos=pos)
+            try:
+                self.cancel_controls(pos.symbol, pos=pos)
+            except Exception:
+                pass
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
             ok, exit_px = self.market_close(pos)
+            close_result = dict(getattr(self, "_last_close_result", {}) or {})
+            close_cid = str(close_result.get("cid") or self.cid("c", pos=pos))
+            requested_qty = max(0.0, float(close_result.get("requested_qty") or pos.qty or 0.0))
+            filled_qty = min(requested_qty, max(0.0, float(close_result.get("filled_qty") or 0.0)))
+            close_oid = real_oid(close_result.get("order_id"))
+            close_status = str(close_result.get("status") or "").upper()
+            response_status = "rejected" if not ok else ("confirmed" if filled_qty + 1e-12 >= requested_qty else ("partial" if filled_qty > 0 else "pending"))
             self.record_event(
                 "exchange_response",
                 stable_key(close_key, "response"),
-                status="confirmed" if ok else "rejected",
+                status=response_status,
                 symbol=pos.symbol,
                 side=pos.side,
                 set_id=pos.set_id,
@@ -4332,15 +4625,83 @@ class Pulse:
                 strategy=pos.pack,
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
-                qty=pos.qty,
+                order_id=close_oid,
+                qty=requested_qty,
                 price=exit_px,
-                detail=f"close {reason}" if ok else "close failed",
+                detail=f"close {reason} {close_status.lower()}" if ok else "close failed",
             )
             if not ok:
                 if skip_eval:
                     self.ban_sym(pos.symbol, clear_open=False)
                 self.record_event("error", stable_key(close_key, "error"), status="error", symbol=pos.symbol, side=pos.side, client_id=pos.client_id, detail="close failed")
+                if getattr(self, "control_orders", True):
+                    try:
+                        self.ensure_controls(pos)
+                    except Exception:
+                        pass
                 return
+            pending_meta = {
+                "reason": reason,
+                "parent_client_id": pos.client_id,
+                "set_id": pos.set_id,
+                "parent_set_id": getattr(pos, "parent_set_id", "") or pos.set_id,
+                "pack": pos.pack,
+                "ind_kind": getattr(pos, "ind_kind", ""),
+                "control_group_key": getattr(pos, "control_group_key", ""),
+                "control_range_key": getattr(pos, "control_range_key", "") or "aggregate",
+            }
+            self._remember_pending(
+                kind="close",
+                cid=close_cid,
+                symbol=pos.symbol,
+                side=pos.side,
+                requested_qty=requested_qty,
+                filled_qty=filled_qty,
+                order_id=close_oid,
+                avg_price=exit_px,
+                group_key=group_key,
+                metadata=pending_meta,
+            )
+            pos.pending_close_qty = max(0.0, requested_qty - filled_qty)
+            if filled_qty <= 1e-12:
+                if getattr(self, "control_orders", True):
+                    try:
+                        self.ensure_controls(pos)
+                    except Exception:
+                        pass
+                self.save_open_book()
+                self._stats_force = True
+                return
+            self._record_close_fill(
+                pos,
+                filled_qty,
+                exit_px,
+                reason,
+                exchange=True,
+                close_cid=close_cid,
+                close_oid=close_oid,
+                status="confirmed" if filled_qty + 1e-12 >= requested_qty else "partial",
+                cumulative_qty=filled_qty,
+                skip_eval=skip_eval,
+            )
+            if filled_qty + 1e-12 >= requested_qty:
+                self._clear_pending(close_cid)
+                self.seen_fill_cids.add(close_cid)
+            else:
+                pos.pending_close_qty = max(0.0, requested_qty - filled_qty)
+                self._remember_pending(
+                    kind="close",
+                    cid=close_cid,
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    requested_qty=requested_qty,
+                    filled_qty=filled_qty,
+                    order_id=close_oid,
+                    avg_price=exit_px,
+                    group_key=group_key,
+                    metadata=pending_meta,
+                )
+            return
         else:
             exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
             self.record_event(
@@ -4358,96 +4719,16 @@ class Pulse:
                 price=exit_px,
                 detail=f"local close {reason}",
             )
-            exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
-        if pos.side == "LONG":
-            pnl_pct = (exit_px - pos.entry) / pos.entry
-        else:
-            pnl_pct = (pos.entry - exit_px) / pos.entry
-        pnl = net_pnl_usdt(pnl_pct, pos.qty, pos.entry, self.position_cost_pct)
-        hold = time.time() - pos.opened_at
-        rec = Closed(
-            time.time(), pos.symbol, pos.side, pos.qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
-            sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
-            set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
-            ind_kind=str(getattr(pos, "ind_kind", "") or ""),
-            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
-            axis_key=str(getattr(pos, "axis_key", "") or ""),
-            relative_count=int(getattr(pos, "relative_count", 1) or 1),
-            volume_ratio=float(getattr(pos, "volume_ratio", 1.0) or 1.0),
-            control_group_key=str(getattr(pos, "control_group_key", "") or ""),
-            control_range_key=str(getattr(pos, "control_range_key", "") or "aggregate"),
-            control_mode="per-config" if self.per_config_controls(pos) else "aggregate",
-            member_count=max(1, int(getattr(pos, "member_count", 1) or 1)),
-        )
-        self.record_event(
-            "close",
-            stable_key(close_key, "closed"),
-            status="confirmed" if exchange else "recovered",
-            symbol=pos.symbol,
-            side=pos.side,
-            set_id=pos.set_id,
-            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
-            indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
-                    **self.control_event_fields(pos),
-            client_id=pos.client_id,
-            qty=pos.qty,
-            price=exit_px,
-            pnl=pnl,
-            fee=abs(pos.qty * pos.entry) * cost_as_frac(self.position_cost_pct),
-            detail=reason,
-            metadata={"pnlPct": pnl_pct, "holdS": hold, "skipEvaluation": skip_eval},
-        )
-        if getattr(pos, "ind_kind", "") in INDICATION_KINDS:
-            try:
-                self.indications.record_outcome(str(pos.ind_kind), "exited")
-            except Exception:
-                pass
-        if pos.client_id:
-            self.seen_fill_cids.add(pos.client_id)
-        if skip_eval:
-            self._close_strategy_lanes(pos, rec, pnl, pnl_pct)
-            self.remove_position(pos)
-            self.ban_sym(pos.symbol, clear_open=False)
-            log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
-            self.save_open_book()
-            self._stats_force = True
-            return
-        self.closed.append(rec)
-        try:
-            self.variants.on_close(rec)
-        except Exception:
-            pass
-        try:
-            self.sets.on_live_close(rec)
-            self.sets.adapt_from_live(self.strategy_closes())
-        except Exception:
-            pass
-        try:
-            self.exits.on_close(rec)
-        except Exception:
-            pass
-        self._close_strategy_lanes(pos, rec, pnl, pnl_pct)
-        if pnl >= 0:
-            self.wins += 1
-            self.consec_loss = 0
-        else:
-            self.losses += 1
-            self.consec_loss += 1
-            if self.consec_loss >= 8:
-                self.cooldown["__book__"] = time.time() + 120
-                self.consec_loss = 4
-                log("pause new entries 120s after cold streak")
-        self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
-        self.remove_position(pos)
-        self.save_open_book()
-        try:
-            with open(TRADES_PATH, "a") as f:
-                f.write(json.dumps(asdict(rec)) + "\n")
-        except Exception:
-            pass
-        log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
-        self._stats_force = True
+            self._record_close_fill(
+                pos,
+                pos.qty,
+                exit_px,
+                reason,
+                exchange=False,
+                status="recovered",
+                cumulative_qty=pos.qty,
+                skip_eval=skip_eval,
+            )
 
     def manage(self) -> None:
         now = time.time()
@@ -4889,6 +5170,11 @@ class Pulse:
                 dirty_lanes = True
         if dirty_lanes:
             self.block.save()
+        # A history worker may have captured the previous SetBook while this
+        # reload was in progress.  Increment only after the complete catalog
+        # and its dependent strategy settings are installed so that stale
+        # replay results are discarded instead of replacing new settings.
+        self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
 
     def seed_lev_from_contracts(self) -> None:
         for s, c in self.contracts.items():
@@ -6216,15 +6502,17 @@ class Pulse:
             stable_key(CONN_SHORT, "position_snapshot", tuple(sorted(live_keys))),
             status="confirmed",
             qty=live_n,
-            detail="exchange position snapshot",
-            metadata={"keys": sorted(live_keys)[:32], "count": live_n},
+            detail="exchange position snapshot total",
+            metadata={"keys": sorted(live_keys)[:32], "countTotal": live_n, "scope": "exchange-total-before-ownership-filter"},
         )
-        self.exchange_open_count = live_n
+        self.exchange_total_open_count = live_n
         # Real/Live/Simulated: live_pos_keys = what the exchange REALLY holds
         # right now (any valid read refreshes it, even while the flat-exchange
         # glitch guard below still arms). Book positions not in this set are
         # "Simulated" — system-internal calcs only.
-        self.live_pos_keys = live_keys
+        self.live_pos_keys = set(live_keys)
+        self.exchange_open_count = 0
+        self.exchange_own_open_count = 0
         self.recon_pending = False
         if live_n == 0 and self.open:
             # Glitch guard: one empty REST page must never wipe the book — but a
@@ -6262,7 +6550,6 @@ class Pulse:
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
             ours = candidates[0] if candidates else None
-            live.add(f"{sym}:{side}")
             live_lev = 0
             try:
                 live_lev = int(float(p.get("leverage") or 0))
@@ -6288,6 +6575,9 @@ class Pulse:
                 foreign.add(exchange_key)
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
+            # From this point onward `live` is own-system truth only. The raw
+            # exchange-wide set is retained separately for diagnostics.
+            live.add(f"{sym}:{side}")
             if live_lev and live_lev < int(self.lev_max.get(sym) or self.lev_map.get(sym) or 0):
                 self.ensure_max_leverage(sym, force=True)
             try:
@@ -6466,6 +6756,9 @@ class Pulse:
             self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
         ours_live = live - set(foreign)
+        self.exchange_open_count = len(ours_live)
+        self.exchange_own_open_count = len(ours_live)
+        self.live_pos_keys = set(ours_live)
         issues = []
         confirmed_book_only = []
         for pos in self.open.values():
@@ -6495,7 +6788,7 @@ class Pulse:
             status="pending" if self.recon_pending else ("confirmed" if self.recon_ok else "discrepant"),
             qty=len(self.open),
             detail=self.recon_detail,
-            metadata={"internalOpen": len(self.open), "exchangeOpen": live_n, "foreign": len(foreign)},
+            metadata={"internalOpen": len(self.open), "exchangeOpen": len(ours_live), "exchangeTotalOpen": live_n, "foreign": len(foreign), "scope": "own-connection"},
         )
         self.save_open_book()
 
@@ -6607,6 +6900,41 @@ class Pulse:
         row, cumulative, px, oid = self._pending_row_from_exchange(order, cid, track, kind)
         previous = max(0.0, _sf((self.pending_orders.get(cid) or {}).get("filled_qty")))
         delta = max(0.0, cumulative - previous)
+        pos: Optional[Position] = None
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if kind == "c":
+            pos = self.position_for_group(str(row.get("group_key") or ""))
+            if pos is None:
+                pos = self._position_for_client(str(meta.get("parent_client_id") or ""))
+            if pos is None:
+                candidates = self.positions_for(row["symbol"], row["side"])
+                # A close without lineage may only fall back when the
+                # symbol/side has one own group; never guess among siblings.
+                if len(candidates) == 1:
+                    pos = candidates[0]
+            no_fill_terminal = str(order.get("status") or order.get("orderStatus") or order.get("state") or "").upper() in {
+                "CANCELED", "CANCELLED", "REJECTED", "EXPIRED", "FAILED"
+            }
+            if no_fill_terminal and cumulative <= previous + 1e-12:
+                if pos is not None:
+                    pos.pending_close_qty = 0.0
+                    if getattr(self, "control_orders", True):
+                        try:
+                            self.ensure_controls(pos)
+                        except Exception:
+                            pass
+                self._clear_pending(cid)
+                self.record_event(
+                    "rejected",
+                    stable_key(CONN_SHORT, "close-rejected", cid, str(order.get("status") or order.get("orderStatus") or "")),
+                    status="rejected",
+                    symbol=row["symbol"],
+                    side=row["side"],
+                    client_id=cid,
+                    order_id=oid,
+                    detail="close order ended without an additional fill",
+                )
+                return False
         if delta > 0 and px > 0:
             if kind == "o":
                 pos = self._upsert_pending_entry(
@@ -6616,16 +6944,55 @@ class Pulse:
                     oid,
                     pending_qty=max(0.0, row["requested_qty"] - cumulative),
                 )
+            elif kind == "c":
+                if pos is None:
+                    # Keep the intent persisted until lineage/position data
+                    # becomes available; no foreign/ambiguous position may be
+                    # mutated to absorb a close fill.
+                    # Do not advance the local cumulative marker while the
+                    # matching own position is temporarily unavailable. The
+                    # observed exchange cumulative is diagnostic only; keeping
+                    # the prior marker lets a later reconciliation apply the
+                    # fill exactly once instead of losing it.
+                    self._remember_pending(
+                        kind="close",
+                        cid=cid,
+                        symbol=row["symbol"],
+                        side=row["side"],
+                        requested_qty=row["requested_qty"],
+                        filled_qty=previous,
+                        order_id=oid,
+                        avg_price=px,
+                        group_key=str(row.get("group_key") or ""),
+                        metadata={**meta, "observedCumulativeQty": cumulative},
+                    )
+                    return False
+                applied = self._record_close_fill(
+                    pos,
+                    delta,
+                    px,
+                    str(meta.get("reason") or "exchange-close"),
+                    exchange=True,
+                    close_cid=cid,
+                    close_oid=oid,
+                    status="confirmed" if row["requested_qty"] > 0 and cumulative + 1e-12 >= row["requested_qty"] else "partial",
+                    cumulative_qty=cumulative,
+                    skip_eval=bool(meta.get("skipEvaluation") or meta.get("skip_eval")),
+                )
+                if not applied:
+                    return False
+                if row["requested_qty"] > 0:
+                    pos.pending_close_qty = max(0.0, row["requested_qty"] - cumulative)
             else:
                 pos = self.position_for_group(str(row.get("group_key") or ""))
                 if pos is None:
                     pos = self._position_for_client(str(row.get("metadata", {}).get("parent_client_id") or ""))
                 if pos is None:
-                    pos = next(iter(self.positions_for(row["symbol"], row["side"])), None)
+                    candidates = self.positions_for(row["symbol"], row["side"])
+                    pos = candidates[0] if len(candidates) == 1 else None
                 if pos is None:
                     return False
                 self.ensure_strategy_lanes(pos)
-                meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                 if kind == "b":
                     lane = self.block.lanes.get(self.block_lane_key(pos))
                     if lane is not None:
@@ -6678,11 +7045,11 @@ class Pulse:
                 order_id=oid,
                 qty=delta,
                 price=px,
-                metadata={"kind": kind, "cumulativeQty": cumulative},
+                metadata={"kind": "close" if kind == "c" else kind, "cumulativeQty": cumulative, "realized": False},
             )
         if cumulative > previous or cid in self.pending_orders:
             self._remember_pending(
-                kind="entry" if kind == "o" else ("dca" if kind == "d" else "block"),
+                kind="entry" if kind == "o" else ("dca" if kind == "d" else ("block" if kind == "b" else "close")),
                 cid=cid,
                 symbol=row["symbol"],
                 side=row["side"],
@@ -6697,6 +7064,8 @@ class Pulse:
         if requested > 0 and cumulative + 1e-12 >= requested:
             self._clear_pending(cid)
             self.seen_fill_cids.add(cid)
+            if kind == "c" and pos is not None:
+                pos.pending_close_qty = 0.0
         return delta > 0
 
     def sync_own_fills(self) -> None:
@@ -6728,77 +7097,23 @@ class Pulse:
             track = self.parse_track(cid) or {}
             kind = str(track.get("kind") or "")
             status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
-            if kind in ("o", "d", "b"):
-                if cid in self.seen_fill_cids:
+            if kind in ("o", "d", "b", "c"):
+                # Close orders remain eligible for polling until their
+                # cumulative executed quantity reaches the requested size.
+                # Entry/add-on orders retain the existing one-shot dedupe.
+                if cid in self.seen_fill_cids and not (kind == "c" and cid in self.pending_orders):
                     continue
+                if kind == "c" and cid not in self.pending_orders:
+                    # A close callback without a persisted intent is safe only
+                    # when its lineage binds to one position; the sync helper
+                    # refuses ambiguous symbol/side matches.
+                    if not (track.get("control_group_key") or track.get("group_token")):
+                        continue
                 if self._sync_pending_fill(o, cid, track, kind):
                     if o.get("symbol"):
                         self.owned_syms.add(str(o.get("symbol")).upper())
                     n += 1
                 continue
-            if cid in self.seen_fill_cids:
-                continue
-            if status and status not in terminal:
-                continue
-            try:
-                qty = float(o.get("executedQty") or o.get("filledQty") or o.get("origQty") or o.get("quantity") or 0)
-                px = float(o.get("avgPrice") or o.get("fillPrice") or o.get("price") or 0)
-                pnl = float(o.get("profit") or o.get("realizedPnl") or o.get("pnl") or 0)
-            except Exception:
-                continue
-            if qty <= 0 or px <= 0:
-                continue
-            symbol = str(o.get("symbol") or "").upper()
-            close_side = str(o.get("positionSide") or "").upper()
-            if close_side not in ("LONG", "SHORT"):
-                close_side = "LONG" if str(o.get("side") or "").upper() == "SELL" else "SHORT"
-            pnl_pct = pnl / (qty * px) if qty * px else 0.0
-            rec = {
-                "t": time.time(),
-                "symbol": symbol,
-                "side": close_side,
-                "qty": qty,
-                "entry": px,
-                "exit": px,
-                "pnl": pnl,
-                "pnl_pct": pnl_pct,
-                "reason": f"exch:{kind}",
-                "hold_s": 0.0,
-                "set_id": track.get("set_id") or "",
-                "pack": track.get("pack") or "",
-                "client_id": cid,
-                "ours": True,
-                "conn": CONN_SHORT,
-                "sl_ratio": track.get("sl") or 0.6,
-                "trail_key": track.get("trail") or "",
-                "control_group_key": track.get("control_group_key") or "",
-                "control_range_key": track.get("control_range_key") or "",
-            }
-            oid = real_oid(o.get("orderId") or o.get("orderID") or o.get("orderid"))
-            self.record_event(
-                "fill",
-                stable_key(CONN_SHORT, "fill", cid),
-                status="filled",
-                symbol=rec["symbol"],
-                side=rec["side"],
-                set_id=rec["set_id"],
-                parent_set_id=track.get("parent_set_id") or rec["set_id"],
-                indication_kind=track.get("ind_kind") or track.get("indKind") or "",
-                strategy=track.get("strategy") or rec.get("pack") or "",
-                client_id=cid,
-                order_id=oid,
-                qty=qty,
-                price=px,
-                pnl=pnl,
-                fee=abs(qty * px) * cost_as_frac(self.position_cost_pct),
-                metadata={"kind": kind, "status": status, "groupKey": rec["control_group_key"]},
-            )
-            self.seen_fill_cids.add(cid)
-            try:
-                self.sets.on_live_close(rec)
-            except Exception:
-                pass
-            n += 1
         if n:
             log(f"SYNC fills {n} ours", every=30.0, key="sync-fills", quiet=True)
 
@@ -6975,6 +7290,13 @@ class Pulse:
             self.closed = held_closed
 
     def stats(self) -> Dict[str, Any]:
+        # HTTP readers and the hot/warm workers can arrive concurrently. A
+        # re-entrant guard keeps JSON snapshots internally consistent without
+        # blocking recursive stats writes.
+        with self.state_guard():
+            return self._stats_unlocked()
+
+    def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
@@ -7063,6 +7385,8 @@ class Pulse:
             "winRate": round(wr, 1),
             "openCount": len(self.open),
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
+            "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
+            "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
@@ -7131,6 +7455,7 @@ class Pulse:
                     "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
+                    "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),
                     "controlMode": "per-config" if self.per_config_controls(p) else "aggregate",
                     "controlGroupKey": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
                     "controlGroupToken": control_group_token(
@@ -7390,7 +7715,8 @@ class Pulse:
                         "rangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
                         "qty": float(p.qty or 0),
                         "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
-                        "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
+                    "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
+                    "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),
                         "memberCount": int(getattr(p, "member_count", 1) or 1),
                         "protected": bool(getattr(p, "controls_ok", False)),
                         "status": "protected" if bool(getattr(p, "controls_ok", False)) else "missing",
@@ -7443,7 +7769,11 @@ class Pulse:
 
     def _pf_windows(self, closed: List[Any]) -> Dict[str, Any]:
         def win(n: Optional[int] = None) -> Dict[str, Any]:
-            src = list(closed)[-n:] if n else list(closed)
+            ordered = sorted(
+                list(closed),
+                key=lambda c: float((c.get("t") if isinstance(c, dict) else getattr(c, "t", 0)) or 0),
+            )
+            src = ordered[-n:] if n else ordered
             cost = last_n_cost_pf(src, len(src) or 1, self.position_cost_pct)
             pnls = []
             for c in src:
@@ -7472,14 +7802,14 @@ class Pulse:
         return {"last5": win(5), "last15": win(15), "last25": win(25), "all": win()}
 
     def _ddt_blob(self, closed: List[Any]) -> Dict[str, Any]:
-        from set_engine import drawdown_time
+        from set_engine import drawdown_time_by_symbol
         recs = []
         for c in closed:
             if isinstance(c, dict):
-                recs.append({"t": c.get("t"), "pnl": c.get("pnl")})
+                recs.append({"t": c.get("t"), "symbol": c.get("symbol") or "?", "pnl": c.get("pnl")})
             else:
-                recs.append({"t": getattr(c, "t", 0), "pnl": getattr(c, "pnl", 0)})
-        d = drawdown_time(recs)
+                recs.append({"t": getattr(c, "t", 0), "symbol": getattr(c, "symbol", "?") or "?", "pnl": getattr(c, "pnl", 0)})
+        d = drawdown_time_by_symbol(recs)
         return {"maxDdS": d.get("maxS"), "avgDdS": d.get("avgS"), "episodes": d.get("episodes"), "maxDepth": d.get("maxDepth"), "currentS": d.get("currentS")}
 
     def _by_symbol_blob(self, closed: List[Any]) -> List[Dict[str, Any]]:
@@ -7492,12 +7822,12 @@ class Pulse:
                 s, pnl, t = getattr(c, "symbol", "?"), float(getattr(c, "pnl", 0) or 0), getattr(c, "t", 0)
             buckets.setdefault(s, []).append(pnl)
             ddt_rows.setdefault(s, []).append({"t": t, "pnl": pnl})
-        from set_engine import drawdown_time
+        from set_engine import drawdown_time_by_symbol
         out = []
         for s, pnls in buckets.items():
             gp = sum(x for x in pnls if x > 0)
             gl = abs(sum(x for x in pnls if x < 0))
-            d = drawdown_time(ddt_rows.get(s) or [])
+            d = drawdown_time_by_symbol(ddt_rows.get(s) or [])
             out.append({
                 "symbol": s,
                 "n": len(pnls),
@@ -7730,42 +8060,63 @@ class Pulse:
             str(tr_g),
         )
 
+    def _hist_progress_update(self, book: SetBook, generation: int, **values: Any) -> bool:
+        """Update replay/fetch progress only while its catalog is current."""
+        with self.state_guard():
+            if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                return False
+            progress = book.progress
+            for key, value in values.items():
+                if hasattr(progress, key):
+                    setattr(progress, key, value)
+            return True
+
     def _hist_fetch(self) -> bool:
-        if not self.sets.enabled:
-            return False
-        now = time.time()
-        if now < float(getattr(self, "_hist_fetch_next", 0.0) or 0.0):
-            self._hist_deferred = f"history fetch backoff {self._hist_fetch_next - now:.1f}s"
-            self.sets.progress.phase = "deferred"
-            self.sets.progress.pct = 100.0 if self.sets.progress.ready else 0.0
-            self.sets.progress.detail = self._hist_deferred
-            return False
-        self._hist_fetch_last = now
-        self._hist_deferred = ""
-        # A refresh can run while the previous historic gate is still valid.
-        # Reset only the displayed work counters here; keep ``ready`` intact
-        # until a replacement replay has completed so live entries do not
-        # flap on a harmless data refresh.
-        self.sets.progress.phase = "fetch"
-        self.sets.progress.pct = 0.0
-        self.sets.progress.symbol = ""
-        self.sets.progress.set_id = ""
-        self.sets.progress.bars_done = 0
-        self.sets.progress.bars_total = 0
-        self.sets.progress.sets_done = 0
-        self.sets.progress.sets_total = len(self.sets.sets)
-        self.sets.progress.symbols_done = 0
-        self.sets.progress.symbols_total = len(SYMBOLS)
-        self.sets.progress.elapsed_ms = 0.0
-        limit = str(self.sets.lookback)
-        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in SYMBOLS]
-        stored = 0
+        # Network I/O is deliberately outside the shared state lock.  Only a
+        # short, generation-checked commit touches the SetBook, so a balance,
+        # control, or UI reader never waits behind a public klines timeout.
+        with self.state_guard():
+            book = self.sets
+            generation = int(getattr(self, "_sets_generation", 0) or 0)
+            if not book.enabled:
+                return False
+            now = time.time()
+            next_fetch = float(getattr(self, "_hist_fetch_next", 0.0) or 0.0)
+            if now < next_fetch:
+                self._hist_deferred = f"history fetch backoff {next_fetch - now:.1f}s"
+                book.progress.phase = "deferred"
+                book.progress.pct = 100.0 if book.progress.ready else 0.0
+                book.progress.detail = self._hist_deferred
+                return False
+            self._hist_fetch_last = now
+            self._hist_deferred = ""
+            # Keep ``ready`` intact until replacement replay commits so a
+            # harmless data refresh does not flap the live gate.
+            book.progress.phase = "fetch"
+            book.progress.pct = 0.0
+            book.progress.symbol = ""
+            book.progress.set_id = ""
+            book.progress.bars_done = 0
+            book.progress.bars_total = 0
+            book.progress.sets_done = 0
+            book.progress.sets_total = len(book.sets)
+            book.progress.symbols_done = 0
+            symbols = list(SYMBOLS)
+            book.progress.symbols_total = len(symbols)
+            book.progress.elapsed_ms = 0.0
+            limit = str(book.lookback)
+        reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in symbols]
+        fetched: Dict[str, List[List[float]]] = {}
         chunk = 10
         for i in range(0, len(reqs), chunk):
             done = min(i, len(reqs))
-            self.sets.progress.detail = f"fetch {done}/{len(reqs)}"
-            self.sets.progress.symbols_done = done
-            self.sets.progress.pct = (done / max(1, len(reqs))) * 8.0
+            if not self._hist_progress_update(
+                book, generation,
+                detail=f"fetch {done}/{len(reqs)}",
+                symbols_done=done,
+                pct=(done / max(1, len(reqs))) * 8.0,
+            ):
+                return False
             batch = reqs[i : i + chunk]
             sd_notify("WATCHDOG=1")
             rows = []
@@ -7784,93 +8135,200 @@ class Pulse:
                 print(f"batch-err {i}: {e}")
                 rows = [(r[0], r[1], None) for r in batch]
             for _path, extra, body in rows:
-                s = extra.get("symbol")
+                symbol = str(extra.get("symbol") or "")
                 bars = self._parse_klines((body or {}).get("data"))
-                if s and bars:
-                    self.sets.ingest_bars(s, bars)
-                    stored += 1
+                if symbol and bars:
+                    fetched[symbol] = bars
             time.sleep(0.12)
-        self.sets.progress.symbols_done = len(SYMBOLS)
-        self.sets.progress.pct = 8.0
-        self._hist_fetch_stored = stored
-        if stored:
-            self._hist_fetch_failures = 0
-            self._hist_fetch_next = time.time() + 30.0
-            self.sets.progress.detail = f"fetched {stored}/{len(SYMBOLS)} · next fetch in 30s"
-        else:
-            self._hist_fetch_failures = min(6, int(self._hist_fetch_failures) + 1)
-            delay = min(300.0, 15.0 * (2 ** (self._hist_fetch_failures - 1)))
-            self._hist_fetch_next = time.time() + delay
-            self.sets.progress.detail = f"fetch empty {stored}/{len(SYMBOLS)} · retry in {delay:.0f}s"
+        stored = len(fetched)
+        with self.state_guard():
+            if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                return False
+            for symbol, bars in fetched.items():
+                book.ingest_bars(symbol, bars)
+            book.progress.symbols_done = len(symbols)
+            book.progress.pct = 8.0
+            self._hist_fetch_stored = stored
+            if stored:
+                self._hist_fetch_failures = 0
+                self._hist_fetch_next = time.time() + 30.0
+                book.progress.detail = f"fetched {stored}/{len(symbols)} · next fetch in 30s"
+            else:
+                self._hist_fetch_failures = min(6, int(self._hist_fetch_failures) + 1)
+                delay = min(300.0, 15.0 * (2 ** (self._hist_fetch_failures - 1)))
+                self._hist_fetch_next = time.time() + delay
+                book.progress.detail = f"fetch empty {stored}/{len(symbols)} · retry in {delay:.0f}s"
         return bool(stored)
+
+    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int) -> bool:
+        """Replay a catalog snapshot and atomically publish its result.
+
+        Historic scoring is CPU-heavy but read-only with respect to live
+        execution.  Running it on a deep snapshot keeps the main control loop
+        free to handle exchange fills.  On publish, current live tapes and
+        bars are copied back into the completed snapshot; a concurrent config
+        reload invalidates the snapshot instead of allowing stale settings to
+        replace the new catalog.
+        """
+        with self.state_guard():
+            source = self.sets
+            generation = int(getattr(self, "_sets_generation", 0) or 0)
+            if not source.enabled or source._running:
+                return False
+            replay_book = copy.deepcopy(source)
+            source._running = True
+            source.progress = copy.deepcopy(source.progress)
+            source.progress.phase = "replay"
+            source.progress.pct = 1.0
+            source.progress.symbol = ""
+            source.progress.set_id = ""
+            source.progress.bars_done = 0
+            source.progress.bars_total = sum(len(replay_book.bars.get(s) or []) for s in names)
+            source.progress.sets_done = 0
+            source.progress.sets_total = len(replay_book.sets)
+            source.progress.symbols_done = 0
+            source.progress.symbols_total = max(0, int(progress_total or len(names)))
+            source.progress.elapsed_ms = 0.0
+            source.progress.detail = f"{len(names)} symbols · {len(replay_book.sets)} sets"
+            source.progress.ready = bool(already)
+
+        def publish_progress() -> None:
+            sd_notify("WATCHDOG=1")
+            with self.state_guard():
+                if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                    source.progress = copy.deepcopy(replay_book.progress)
+                    source._running = True
+
+        def should_abort() -> bool:
+            if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                return True
+            return bool(already and self.load.last_budget.level == "critical")
+
+        try:
+            replay_book.replay_all(
+                on_step=publish_progress,
+                symbols=names,
+                abort=should_abort,
+                merge=True,
+                progress_total=progress_total,
+            )
+        except Exception as exc:
+            with self.state_guard():
+                if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                    source.progress.phase = "error"
+                    source.progress.error = str(exc)[:220]
+                    source._running = False
+            return False
+
+        with self.state_guard():
+            if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                if self.sets is source:
+                    source._running = False
+                return False
+            if replay_book.progress.phase == "error":
+                source.progress = copy.deepcopy(replay_book.progress)
+                source._running = False
+                return False
+            # Fill events can arrive while the isolated CPU replay runs.
+            # They are authoritative for live deactivation and must win
+            # over the old snapshot when the new historic result lands.
+            for sid, current in source.sets.items():
+                target = replay_book.sets.get(sid)
+                if target is not None:
+                    target.live = copy.deepcopy(current.live)
+            replay_book.ind_live = copy.deepcopy(source.ind_live)
+            replay_book.bars = copy.deepcopy(source.bars)
+            replay_book._snap_cache = None
+            replay_book._live_ov_cache = None
+            replay_book._score_all()
+            replay_book._running = False
+            self.sets = replay_book
+            return True
 
     def _hist_loop(self) -> None:
         while not self._hist_stop:
             try:
-                for s in SYMBOLS:
-                    bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
-                    if bars:
-                        self.sets.ingest_bars(s, bars)
-                if self.sets.due():
+                with self.state_guard():
+                    symbols = list(SYMBOLS)
+                    book = self.sets
+                    for symbol in symbols:
+                        bars = self.klines_tf.get("1m", {}).get(symbol) or self.klines.get(symbol) or []
+                        if bars:
+                            book.ingest_bars(symbol, bars)
+                    due = book.due()
+                if due:
                     # Evaluate the load budget before any REST history fetch.
                     # Under critical pressure, fetching and then skipping the
                     # replay only burns bandwidth/CPU and leaves a stale
                     # partial progress value in the UI.
                     b = self._budget()
                     if not b.hist_run:
-                        p = self.sets.progress
-                        p.phase = "deferred"
-                        p.pct = 100.0 if p.ready else 0.0
-                        p.detail = f"history deferred · load {b.level}"
+                        with self.state_guard():
+                            current = self.sets
+                            p = current.progress
+                            p.phase = "deferred"
+                            p.pct = 100.0 if p.ready else 0.0
+                            p.detail = f"history deferred · load {b.level}"
                     else:
-                        have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
-                        min_ready = max(4, len(SYMBOLS) // 2)
+                        with self.state_guard():
+                            current = self.sets
+                            symbols = list(SYMBOLS)
+                            have = sum(1 for symbol in symbols if len(current.bars.get(symbol) or []) >= current.min_bars)
+                            min_ready = max(4, len(symbols) // 2)
+                            refresh_due = time.time() - current.last_run >= current.refresh_s
                         fetch_needed = have < min_ready
-                        if fetch_needed or time.time() - self.sets.last_run >= self.sets.refresh_s:
+                        if fetch_needed or refresh_due:
                             self._hist_fetch()
-                            have = sum(1 for s in SYMBOLS if len(self.sets.bars.get(s) or []) >= self.sets.min_bars)
+                            with self.state_guard():
+                                current = self.sets
+                                symbols = list(SYMBOLS)
+                                have = sum(1 for symbol in symbols if len(current.bars.get(symbol) or []) >= current.min_bars)
+                                min_ready = max(4, len(symbols) // 2)
                         # Do not enter replay with an unfillable cache. The old
                         # path replayed an empty/short book every 2.4s, keeping
                         # hist_busy asserted and starving the warm feed.
                         if have < min_ready:
-                            p = self.sets.progress
-                            p.phase = "deferred"
-                            p.pct = 100.0 if p.ready else 0.0
-                            p.detail = self._hist_deferred or f"history waiting for bars {have}/{min_ready}"
-                        self.hist_busy = have >= min_ready
-                        nbar = [0]
-                        def _hist_step():
-                            nbar[0] += 1
-                            sd_notify("WATCHDOG=1")
-                            time.sleep(0)
+                            with self.state_guard():
+                                current = self.sets
+                                p = current.progress
+                                p.phase = "deferred"
+                                p.pct = 100.0 if p.ready else 0.0
+                                p.detail = self._hist_deferred or f"history waiting for bars {have}/{min_ready}"
+                        with self.state_guard():
+                            self.hist_busy = have >= min_ready
                         try:
                             b = self._budget()
-                            names = list(SYMBOLS)
+                            with self.state_guard():
+                                names = list(SYMBOLS)
+                                open_symbols = [p.symbol for p in self.open.values()]
+                                cursor = int(self.load.cursor_hist or 0)
                             if b.scan_chunk and len(names) > b.hist_chunk:
-                                names, self.load.cursor_hist = self.load.scan_window(
-                                    names, [p.symbol for p in self.open.values()], b.hist_chunk, int(self.load.cursor_hist or 0)
-                                )
+                                names, cursor = self.load.scan_window(names, open_symbols, b.hist_chunk, cursor)
+                                with self.state_guard():
+                                    self.load.cursor_hist = cursor
                             if b.hist_run and have >= min_ready:
-                                already = bool(getattr(self.sets, "progress", None) and self.sets.progress.ready)
-                                self.sets.replay_all(
-                                    on_step=_hist_step,
-                                    symbols=names,
-                                    abort=lambda: already and self.load.last_budget.level == "critical",
-                                    merge=True,
-                                    progress_total=len(SYMBOLS),
-                                )
-                            elif self.sets.progress.ready:
-                                self.sets.progress.phase = "deferred"
-                                self.sets.progress.pct = 100.0
-                                self.sets.progress.detail = f"history replay deferred · load {b.level}"
+                                with self.state_guard():
+                                    already = bool(getattr(self.sets, "progress", None) and self.sets.progress.ready)
+                                self._replay_sets_isolated(names, already, len(symbols))
+                            else:
+                                with self.state_guard():
+                                    current = self.sets
+                                    if current.progress.ready:
+                                        current.progress.phase = "deferred"
+                                        current.progress.pct = 100.0
+                                        current.progress.detail = f"history replay deferred · load {b.level}"
                         finally:
-                            self.hist_busy = False
+                            with self.state_guard():
+                                self.hist_busy = False
             except Exception:
-                self.hist_busy = False
-                self.sets.progress.phase = "error"
-                self.sets.progress.error = traceback.format_exc()[-220:]
+                error = traceback.format_exc()[-220:]
+                with self.state_guard():
+                    self.hist_busy = False
+                    current = self.sets
+                    current.progress.phase = "error"
+                    current.progress.error = error
                 if hasattr(self.api, "err"):
-                    self.api.err.write("hist", msg=self.sets.progress.error[:200])
+                    self.api.err.write("hist", msg=error[:200])
             remain = 2.4
             t0 = time.monotonic()
             while time.monotonic() - t0 < remain and not self._hist_stop:
@@ -7880,12 +8338,13 @@ class Pulse:
         while not self._warm_stop:
             t0 = time.time()
             try:
-                if time.time() - self.last_bal > BALANCE_EVERY:
-                    self.refresh_balance()
-                self.refresh_klines()
-                self.refresh_vol1h()
-                self.process_indications()
-                self.update_regime()
+                with self.state_guard():
+                    if time.time() - self.last_bal > BALANCE_EVERY:
+                        self.refresh_balance()
+                    self.refresh_klines()
+                    self.refresh_vol1h()
+                    self.process_indications()
+                    self.update_regime()
             except Exception:
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-300:]
@@ -8041,7 +8500,8 @@ class Pulse:
             self.cycle_busy = True
             t0 = time.perf_counter()
             try:
-                self._one_cycle()
+                with self.state_guard():
+                    self._one_cycle()
             except Exception:
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-400:]

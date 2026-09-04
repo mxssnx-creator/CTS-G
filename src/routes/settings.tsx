@@ -495,7 +495,7 @@ function SettingsPage() {
                         <p className="mt-1 text-xs text-muted">{p.hint}</p>
                         <p className="mt-2 text-xs text-fg/80">{p.why}</p>
                         <p className="mt-2 font-mono text-[11px] text-muted">
-                          SL {p.sl.toFixed(1)} · step {p.minStep}–{p.stepMax} · trail {p.trail} · PF {p.minPf.toFixed(2)} · DDt {p.maxDdS}s
+                          SL {p.sl.toFixed(1)} · step {p.minStep}–{p.stepMax} · trail {p.trail} · PF {p.minPf.toFixed(2)} · DDt {formatDuration(p.maxDdS * 1000)}
                         </p>
                         <p className="font-mono text-[11px] text-primary">Block ON · DCA OFF · cost subtracted</p>
                       </button>
@@ -758,7 +758,7 @@ function SettingsPage() {
                         {calcJob.winner.direction ? ` · ${calcJob.winner.direction}` : ""}
                         {" "}· PF {calcJob.winner.last15Ratio.toFixed(2)}
                         {typeof calcJob.winner.netAvg === "number" ? ` · net ${(calcJob.winner.netAvg * 100).toFixed(3)}%` : ""}
-                        {" "}· DDt {Math.round(calcJob.winner.maxDdS)}s · SL {calcJob.winner.slRatio.toFixed(1)}
+                        {" "}· DDt {formatDuration(calcJob.winner.maxDdS * 1000)} · SL {calcJob.winner.slRatio.toFixed(1)}
                       </p>
                     ) : null}
                     <div className="overflow-x-auto">
@@ -784,7 +784,7 @@ function SettingsPage() {
                               <td className="py-1.5 text-right">{r.kind === "trail" ? r.trailKey || "trail" : r.slRatio.toFixed(1)}</td>
                               <td className="py-1.5 text-right">{r.step || "—"}</td>
                               <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                              <td className="py-1.5 text-right">{Math.round(r.maxDdS)}s</td>
+                              <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                               <td className="py-1.5 text-right">{r.n}</td>
                             </tr>
                           ))}
@@ -799,7 +799,7 @@ function SettingsPage() {
                             <div key={k} className="flex justify-between gap-3 font-mono text-xs">
                               <span className={v.validated && v.profitable ? "text-primary" : "text-muted"}>{k}</span>
                               <span className="text-right">
-                                PF {(v.pf ?? 0).toFixed(2)} · DDt {Math.round(v.maxDdS ?? 0)}s
+                                PF {(v.pf ?? 0).toFixed(2)} · DDt {formatDuration((v.maxDdS ?? 0) * 1000)}
                                 {v.bySide ? ` · L ${(v.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(v.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
                               </span>
                             </div>
@@ -812,7 +812,7 @@ function SettingsPage() {
                           {Object.entries(calcJob.byDirection || {}).map(([k, v]) => (
                             <div key={k} className="flex justify-between font-mono text-xs">
                               <span className={v.validated ? "text-primary" : "text-muted"}>{k}</span>
-                              <span>PF {v.pf.toFixed(2)} · net {((v.netAvg ?? 0) * 100).toFixed(3)}% · DDt {Math.round(v.maxDdS)}s · n {v.n}</span>
+                              <span>PF {v.pf.toFixed(2)} · net {((v.netAvg ?? 0) * 100).toFixed(3)}% · DDt {formatDuration(v.maxDdS * 1000)} · n {v.n}</span>
                             </div>
                           ))}
                         </div>
@@ -838,7 +838,7 @@ function SettingsPage() {
                             <div key={s.symbol} className="flex justify-between gap-3 font-mono text-xs">
                               <span className={s.validated ? "text-primary" : "text-muted"}>{s.symbol.replace("-USDT", "")}</span>
                               <span className="text-right">
-                                PF {s.pf.toFixed(2)} · DDt {Math.round(s.maxDdS)}s
+                                PF {s.pf.toFixed(2)} · DDt {formatDuration(s.maxDdS * 1000)}
                                 {s.bySide ? ` · L ${(s.bySide.LONG?.pf ?? 0).toFixed(2)} S ${(s.bySide.SHORT?.pf ?? 0).toFixed(2)}` : ""}
                               </span>
                             </div>
