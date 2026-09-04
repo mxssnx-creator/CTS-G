@@ -2239,8 +2239,8 @@ def historic_snapshot_test() -> None:
     old_id = id(book)
     ok = p._replay_sets_isolated([symbol], False, 1)
     current = p.sets
-    rec("hist-snapshot-atomic", ok and id(current) != old_id and current.progress.ready,
-        f"ok={ok} swapped={id(current) != old_id} phase={current.progress.phase}")
+    rec("hist-snapshot-atomic", ok and id(current) == old_id and current.progress.ready and not current._running,
+        f"ok={ok} source_kept={id(current) == old_id} phase={current.progress.phase}")
     rec("hist-snapshot-keeps-live", len(current.sets[set_id].live) == 1 and current.sets[set_id].live[0].get("client_id") == "snap-live-1",
         f"live={len(current.sets[set_id].live)}")
     rec("hist-snapshot-no-bars-loss", symbol in current.bars and len(current.bars[symbol]) == 120,
