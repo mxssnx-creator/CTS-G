@@ -222,6 +222,12 @@ function DeskPage() {
                   <dd className={`text-right ${p.secSlOid && p.secTpOid ? "text-primary" : "text-danger"}`}>
                     {p.secSlOid && p.secTpOid ? "SEC" : "gap"}
                   </dd>
+                  <dt>Control mode</dt>
+                  <dd className="text-right text-fg">{p.controlMode || "aggregate"}</dd>
+                  <dt>Range</dt>
+                  <dd className="text-right text-fg">{p.controlRangeKey || "aggregate"}</dd>
+                  <dt>Members</dt>
+                  <dd className="text-right text-fg">{p.memberCount ?? 1}</dd>
                   <dt>SL:TP</dt>
                   <dd className="text-right text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
                   <dt>Trail</dt>
@@ -490,12 +496,16 @@ function ControlsStrip({ stats }: { stats: LiveStats | null }) {
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const n = c?.open ?? open.length;
+  const mode = c?.mode ?? (((stats?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig === false) ? "aggregate" : "per-config");
+  const groupCount = c?.groupCount ?? n;
+  const mergedMembers = c?.mergedMembers;
   const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 8);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="controls-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={miss ? "text-danger" : "text-primary"}>
-          controls · {ok}/{n} SL+TP · {sec} security
+          controls · {mode} · {ok}/{n} SL+TP · {sec} security · {groupCount} groups
+          {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
         </span>
         <span className="text-muted">missing {miss}</span>
       </div>

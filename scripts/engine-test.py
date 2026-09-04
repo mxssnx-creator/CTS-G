@@ -1001,6 +1001,9 @@ def block_calc_test() -> None:
         p.cooldown = {}
         p.errors = 0
         p.last_error = ""
+        p.pending_orders = {}
+        p._save_pending_orders = lambda: None
+        p.seen_fill_cids = set()
         p.skip_log = {}
         p.did_io = False
         p.entries_blocked = lambda: False
@@ -1016,6 +1019,14 @@ def block_calc_test() -> None:
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
         p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
         p.px = {"TST-USDT": 100.30}
+        p.last_px = {}
+        p.sl_min = 0.001
+        p.sl_max = 0.02
+        p.tp_min = 0.002
+        p.tp_max = 0.05
+        p.position_cost_pct = 0.15
+        p.tp_cost_ratio = 1.5
+        p.exits = SimpleNamespace(enabled=False, opt_sl_min=0.001, opt_sl_max=0.009)
         p.lev_map = {"TST-USDT": 100}
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
@@ -1470,8 +1481,9 @@ def set_orders_test() -> None:
     rec("setord-real-live-sim-coordination", sim_n == 0 and sim_n2 == 1, f"sim={sim_n}/{sim_n2}")
 
     # === 4) negative controls ===
+    p.control_orders_per_config = False
     before = len(fx.posts)
-    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # occupied symbol -> refused
+    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # legacy aggregate occupied symbol -> refused
     rec("setord-occupied-symbol-refused", len(fx.posts) == before and pos_for(p, "CCC-USDT").set_id == stC.id,
         f"posts={len(fx.posts) - before}")
     cur["i"] = 0

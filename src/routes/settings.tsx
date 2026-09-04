@@ -2516,6 +2516,9 @@ function LiveApplied({
 }) {
   const p = (stats?.pulse ?? {}) as PulseOverlay & Record<string, unknown>;
   const v = stats?.variants;
+  const controls = stats?.coverage?.controls;
+  const controlMode = controls?.mode ?? (overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
+  const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
   const trail = v?.trailKey ?? `${Number(p.trailArmPct ?? overlay.trailArmPct).toFixed(1)}:${Number(p.trailGivePct ?? overlay.trailGivePct).toFixed(1)}`;
   const tf = [
@@ -2537,6 +2540,7 @@ function LiveApplied({
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
+        <span>controls {controlMode} · {controlGroups} groups</span>
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F

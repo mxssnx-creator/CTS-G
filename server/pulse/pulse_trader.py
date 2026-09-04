@@ -1030,6 +1030,11 @@ class Pulse:
         target.foreign_qty = max(0.0, float(getattr(target, "foreign_qty", 0) or 0))
         target.pending_qty = max(0.0, float(getattr(target, "pending_qty", 0) or 0)) + max(0.0, float(getattr(incoming, "pending_qty", 0) or 0))
         target.last_fill_at = max(float(getattr(target, "last_fill_at", 0) or 0), float(getattr(incoming, "last_fill_at", 0) or 0), time.time())
+        if bool(getattr(target, "legacy_aggregate", False)) or bool(getattr(incoming, "legacy_aggregate", False)):
+            # Legacy mode keeps one symbol/side pair and must use the widest
+            # effective range represented by any merged member.
+            target.sl_pct = max(float(getattr(target, "sl_pct", 0) or 0), float(getattr(incoming, "sl_pct", 0) or 0))
+            target.tp_pct = max(float(getattr(target, "tp_pct", 0) or 0), float(getattr(incoming, "tp_pct", 0) or 0))
         target.sl, target.tp = self.security_prices(target)
         return target
 
@@ -2867,6 +2872,11 @@ class Pulse:
                         side = str(o.get("positionSide") or "").upper()
                         if side != pos.side:
                             continue
+                        # An "already exists" response is symbol-wide. In
+                        # per-config mode only rebind an order carrying this
+                        # group's token/known ID, never another range pair.
+                        if self.per_config_controls(pos) and not self._order_matches_position(o, pos):
+                            continue
                         live = real_oid(o.get("orderId") or o.get("orderID"))
                         if not live:
                             continue
@@ -3015,7 +3025,16 @@ class Pulse:
             b["clientOrderID"] = self.cid(ch, pos=pos)
             if not self.per_config_controls(pos):
                 b["closePosition"] = "true"
-        batch_key = stable_key(CONN_SHORT, "control-batch", pos.symbol, pos.side, pos.set_id, self.fmt_px(self.contracts.get(pos.symbol), want_sl), self.fmt_px(self.contracts.get(pos.symbol), want_tp))
+        batch_scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        batch_key = stable_key(
+            CONN_SHORT,
+            "control-batch",
+            batch_scope,
+            pos.side,
+            getattr(pos, "control_range_key", "aggregate") or "aggregate",
+            self.fmt_px(self.contracts.get(pos.symbol), want_sl),
+            self.fmt_px(self.contracts.get(pos.symbol), want_tp),
+        )
         self.record_event(
             "control_request",
             stable_key(batch_key, "request"),
@@ -3131,7 +3150,13 @@ class Pulse:
             except Exception:
                 q = 0.0
             if q <= 0:
-                return True
+                # A quantity-less control is safe only in legacy aggregate
+                # mode. A range group must never inherit closePosition=true.
+                return not self.per_config_controls(pos)
+            if self.per_config_controls(pos):
+                # Do not adopt an oversized range order: it could close a
+                # different group sharing this symbol and hedge side.
+                return pos.qty * 0.95 <= q <= pos.qty * 1.05
             return q + 1e-12 >= pos.qty * 0.95
 
         stale = [o for o in sls + tps if not qty_ok(o)]
@@ -3270,9 +3295,9 @@ class Pulse:
         forms = [{"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)}]
         if not grouped:
             forms.append({"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)})
-        pid = str(getattr(pos, "position_id", "") or "")
-        if pid:
-            forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
+            pid = str(getattr(pos, "position_id", "") or "")
+            if pid:
+                forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
         r: Dict[str, Any] = {}
         for extra in forms:
             body = {
@@ -4655,6 +4680,11 @@ class Pulse:
             self.block.enabled = True
         self.control_orders = _bool_setting(self.mods.get("exec.controls", self.control_orders), self.control_orders)
         self._set_control_mode(control_orders_per_config)
+        for position in list(self.open.values()):
+            try:
+                self.ensure_strategy_lanes(position)
+            except Exception:
+                pass
         self.coord.rearrange = bool(self.mods.get("strategy.rearrange", self.coord.rearrange))
         if not self.mods.get("strategy.indications", True):
             self.indications.settings["enabled"] = False
@@ -5881,6 +5911,9 @@ class Pulse:
             self._empty_rest_streak = 0
         live = set()
         foreign = set()
+        self.exchange_qty = {}
+        self.exchange_own_qty = {}
+        self.exchange_foreign_qty = {}
         for p in rows:
             try:
                 amt = float(p.get("positionAmt") or p.get("availableAmt") or 0)
@@ -5896,7 +5929,7 @@ class Pulse:
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
             ours = candidates[0] if candidates else None
-            live.add(sym)
+            live.add(f"{sym}:{side}")
             live_lev = 0
             try:
                 live_lev = int(float(p.get("leverage") or 0))
@@ -5915,7 +5948,11 @@ class Pulse:
                 )
             )
             if not tagged and not owned:
-                foreign.add(f"{sym}:{side}")
+                exchange_key = f"{sym}:{side}"
+                self.exchange_qty[exchange_key] = qty
+                self.exchange_own_qty[exchange_key] = 0.0
+                self.exchange_foreign_qty[exchange_key] = qty
+                foreign.add(exchange_key)
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
             if live_lev and live_lev < int(self.lev_max.get(sym) or self.lev_map.get(sym) or 0):
@@ -5927,21 +5964,31 @@ class Pulse:
             pid = str(p.get("positionId") or p.get("positionID") or "")
             if candidates:
                 total_book_qty = sum(max(0.0, float(getattr(candidate, "qty", 0) or 0)) for candidate in candidates)
-                for candidate in candidates:
+                own_qty = min(qty, total_book_qty) if total_book_qty > 0 else 0.0
+                foreign_qty = max(0.0, qty - own_qty)
+                self.exchange_qty[f"{sym}:{side}"] = qty
+                self.exchange_own_qty[f"{sym}:{side}"] = own_qty
+                self.exchange_foreign_qty[f"{sym}:{side}"] = foreign_qty
+                for index, candidate in enumerate(candidates):
+                    candidate_book_qty = max(0.0, float(getattr(candidate, "qty", 0) or 0))
+                    allocated_qty = (
+                        own_qty * candidate_book_qty / total_book_qty
+                        if total_book_qty > 0
+                        else own_qty / max(1, len(candidates))
+                    )
                     if liq > 0:
                         candidate.liq = liq
                     if pid:
                         candidate.position_id = pid
                     if px > 0:
-                        if len(candidates) == 1 or total_book_qty <= 0:
-                            candidate.qty = qty
-                        else:
-                            candidate.qty = qty * max(0.0, float(candidate.qty or 0)) / total_book_qty
+                        candidate.qty = allocated_qty
                         candidate.entry = px
                         candidate.notional = candidate.qty * px
-                        candidate.exchange_qty = candidate.qty
-                        candidate.foreign_qty = 0.0
                         candidate.ours = True
+                    candidate.exchange_qty = allocated_qty
+                    # Attribute a mixed-side foreign remainder once so group
+                    # health totals cannot double-count it across candidates.
+                    candidate.foreign_qty = foreign_qty if index == 0 else 0.0
                     if not getattr(candidate, "set_id", "") and tagged:
                         try:
                             trk = self.parse_track(self.order_cid(tagged[0])) or {}
@@ -5966,9 +6013,21 @@ class Pulse:
                     candidate.ctrl_verified = candidate.controls_ok
                     self.ensure_strategy_lanes(candidate)
                 continue
+            exchange_key = f"{sym}:{side}"
+            self.exchange_qty[exchange_key] = qty
+            self.exchange_own_qty[exchange_key] = qty
+            self.exchange_foreign_qty[exchange_key] = 0.0
             if px <= 0:
                 continue
-            track = self.parse_track(self.order_cid(tagged[0])) if tagged else {}
+            entry_tag = next((o for o in tagged if self._cid_kind(o) == "o"), None)
+            identity_tag = next(
+                (
+                    o for o in tagged
+                    if bool((self.parse_track(self.order_cid(o)) or {}).get("group_token"))
+                ),
+                entry_tag or (tagged[0] if tagged else None),
+            )
+            track = self.parse_track(self.order_cid(identity_tag)) if identity_tag else {}
             track = track or {}
             sl_ratio = float(track.get("sl") or self.variants.current_sl())
             trail_key, trail_arm, trail_give = self.variants.current_trail()
@@ -6016,12 +6075,12 @@ class Pulse:
                     self.ensure_controls(rec_pos)
         pending_absent: List[str] = []
         for stored_key, pos in list(self.open.items()):
-            if pos.symbol in live:
+            exchange_key = f"{pos.symbol}:{pos.side}"
+            if exchange_key in live:
                 if hasattr(self, "_absent_n"):
                     self._absent_n.pop(stored_key, None)
                 continue
             age = time.time() - float(pos.opened_at or 0)
-            exchange_key = f"{pos.symbol}:{pos.side}"
             live_keys_now = getattr(self, "live_pos_keys", None) or set()
             still_live = exchange_key in live_keys_now
             if still_live:
@@ -6048,12 +6107,12 @@ class Pulse:
             self.remove_position(pos)
             self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
-        ours_live = {k.split(":")[0] for k in live if k not in {x.split(":")[0] for x in foreign}}
-        book_syms = set(self.open)
+        ours_live = live - set(foreign)
         issues = []
         confirmed_book_only = []
         for pos in self.open.values():
-            if pos.symbol not in live:
+            exchange_key = f"{pos.symbol}:{pos.side}"
+            if exchange_key not in live:
                 group_key = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
                 if group_key in pending_absent:
                     continue
@@ -6062,7 +6121,7 @@ class Pulse:
         # Count mismatches only from confirmed absences. Pending entries are
         # inside the exchange confirmation window and must not fail QA.
         if confirmed_book_only:
-            issues.append(f"count confirmed={len(confirmed_book_only)} live_ours={len(live - {x.split(':')[0] for x in foreign})}")
+            issues.append(f"count confirmed={len(confirmed_book_only)} live_ours={len(ours_live)}")
         self.recon_pending = bool(pending_absent)
         self.recon_ok = not issues
         if issues:
@@ -6790,7 +6849,13 @@ class Pulse:
         scov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
         live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
         progress = getattr(self.sets, "progress", None)
-        stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
+        coord_last = getattr(self.coord, "last", {}) if hasattr(self, "coord") else {}
+        if not isinstance(coord_last, dict):
+            coord_last = {}
+        coord_axes = getattr(self.coord, "axes", {}) or {}
+        coord_coordination = getattr(self.coord, "coordination", {}) or {}
+        coord_size_mult = getattr(self.coord, "size_mult", None)
+        stages = (coord_last.get("stages") or {})
         stage_flow_fn = getattr(self.sets, "stage_flow", None)
         stage_flow = stage_flow_fn() if callable(stage_flow_fn) else {}
         axis_aggregate: Dict[str, Any] = {
@@ -6836,10 +6901,10 @@ class Pulse:
                 "trailing": bool(self.strat_trail),
                 "dca": bool(self.dca.enabled),
                 "exits": bool(self.exits.enabled),
-                "rearrange": bool(self.coord.rearrange),
-                "coord": bool(any(ax.enabled for ax in self.coord.axes.values())),
+                "rearrange": bool(getattr(self.coord, "rearrange", False)),
+                "coord": bool(any(bool(getattr(ax, "enabled", False)) for ax in coord_axes.values())),
                 "trailRecalc": bool(getattr(self.variants, "trail_auto", True) or self.strat_trail),
-                "sets": bool(self.sets.enabled),
+                "sets": bool(getattr(self.sets, "enabled", False)),
             },
             "modules": mods,
             "indicationTypes": {
@@ -6867,18 +6932,18 @@ class Pulse:
                 "typeHits": hits,
             },
             "coord": {
-                "allow": bool((self.coord.last or {}).get("allow", True)),
-                "addsAllow": bool((self.coord.last or {}).get("addsAllow", True)),
-                "addReasons": list((self.coord.last or {}).get("addReasons") or [])[:6],
+                "allow": bool(coord_last.get("allow", True)),
+                "addsAllow": bool(coord_last.get("addsAllow", True)),
+                "addReasons": list(coord_last.get("addReasons") or [])[:6],
                 "stages": stages,
                 "mainEval": int(getattr(self.coord, "main_eval", 5)),
                 "realEval": int(getattr(self.coord, "real_eval", 3)),
                 "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05) or 0.05),
-                "sizeMult": round(float(self.coord.size_mult(len(self.open))), 4),
+                "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),
                 "openN": len(self.open),
-                "axes": {k: {"enabled": v.enabled, "maxWindow": v.max_window} for k, v in self.coord.axes.items()},
+                "axes": {k: {"enabled": bool(getattr(v, "enabled", False)), "maxWindow": int(getattr(v, "max_window", 0) or 0)} for k, v in coord_axes.items()},
                 "variants": axis_aggregate,
-                "coordination": {axis: dict(self.coord.coordination.get(axis) or {}) for axis in ("prev", "last", "cont", "pause")},
+                "coordination": {axis: dict(coord_coordination.get(axis) or {}) for axis in ("prev", "last", "cont", "pause")},
                 "volumeRatioUnit": 0.01,
                 "closedOnlyPrev": True,
                 "oneOpenOrderPerSet": True,
