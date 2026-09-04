@@ -808,6 +808,16 @@ quiesce_legacy_stack() {
 }
 
 quiesce_instance() {
+  # A VST-only maintenance request must not interrupt a live engine, including
+  # one still initializing. Require the installer's explicit live-maintenance
+  # flag before stopping any unit or replacing shared Pulse code.
+  local live_state
+  live_state="$(systemctl show "$(pulse_unit "$LIVE_SLOT")" --property=ActiveState --value 2>/dev/null || true)"
+  case "$live_state" in
+    active|activating|reloading|deactivating)
+      [[ "${START_LIVE:-0}" == "1" ]] || die "live engine is $live_state; coordinate live maintenance and use --start-live before updating shared code"
+      ;;
+  esac
   local unit slot
   for slot in "$VST_SLOT" "$LIVE_SLOT"; do
     unit="$(pulse_unit "$slot")"

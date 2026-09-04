@@ -227,3 +227,20 @@ print("ok")
     assert.equal(result.stdout.trim(), "ok");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("VST-only reinstall cannot interrupt an active or initializing live engine", () => {
+  for (const state of ["active", "activating", "reloading", "deactivating"]) {
+    const script = `source deploy/linux-common.sh
+systemctl() {
+  if [[ "$1" = show ]]; then echo "${state}"; return 0; fi
+  echo unexpected-mutation >&2
+  return 1
+}
+START_LIVE=0
+quiesce_instance`;
+    const result = spawnSync("bash", ["-c", script], { cwd: ROOT, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /coordinate live maintenance/);
+    assert.doesNotMatch(result.stderr, /unexpected-mutation/);
+  }
+});

@@ -423,12 +423,14 @@ work. The earlier worktree and its uncommitted report were preserved separately.
   an explicit unused DB. Do not give simultaneous VST engines the same account
   unless their order ownership has been independently verified.
 - X01 is never started implicitly. X02 rejects a non-VST exchange endpoint.
+  Reinstall refuses to stop an active/initializing X01 without explicitly
+  coordinated `--start-live` maintenance; it stops before changing any unit.
   Diagnostic cleanup does not authorize deleting account or database state.
 - Removed the pre-existing hardcoded shared preview OAuth secret. Optional
   preview sign-in now requires server-side `GROK_PREVIEW_CLIENT_SECRET`.
   Broker-side revocation/rotation is still required: Git history is not erased.
 
-Verification: 279/279 engine checks; seven retention/isolation/concurrency
+Verification: 279/279 engine checks; eight retention/isolation/concurrency
 regressions; TypeScript, ESLint and native production build passed. The offline
 production check passed 105 assertions across two simultaneous instances,
 including SSR routes, settings and connection POSTs, stop-state propagation,
@@ -443,6 +445,14 @@ These finite tests are not a production-readiness guarantee. Remote max-symbol
 VST soak and visual browser acceptance must be recorded separately: the cloud
 browser returned 502 for the remote UI in this session while direct server
 HTTP checks succeeded. Do not claim those visual tests passed.
+
+Remote rollout preflight at approximately 20:24 UTC found both old Pulse
+engines repeatedly hitting systemd's 90-second startup timeout. X01's stale
+snapshot reported nine exchange positions on LIVE_MAINNET; this is not a
+fresh exchange reconciliation. Consequently the shared-code reinstall was
+not run: coordinate the live account's maintenance/protection first. X02
+max-symbol soak, startup-timeout remediation and visual acceptance remain
+open; neither stale counters nor passing offline tests establish live health.
 
 ## Secret-handling rules
 
