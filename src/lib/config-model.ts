@@ -361,10 +361,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   mainMinPf: 1.1,
   realMinPf: 1.15,
   positionCostPct: 0.15,
-  // Static/manual PositionCost remains the safe default. Live fee discovery
-  // is opt-in and falls back to positionCostPct when no complete exchange
-  // fee sample is available.
-  useLivePositionCosts: false,
+  // Prefer measured exchange fees. The manual PositionCost remains the
+  // deterministic fallback until a complete live sample is available.
+  useLivePositionCosts: true,
   // Evaluate the full catalog, then (optionally) prefer the smallest stable
   // ranges after PF/DD/sample gates. PF remains the primary objective.
   // Additional 50+ close coordination is independently switchable and does
@@ -717,7 +716,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
     useLivePositionCosts: bool(
       live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
-      false,
+      true,
     ),
     preferMinimalRange: bool(
       live?.preferMinimalRange ?? live?.preferMinimalPositive ?? cts.preferMinimalRange ?? cts.preferMinimalPositive,

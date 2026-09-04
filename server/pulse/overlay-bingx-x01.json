@@ -109,7 +109,7 @@
   "pfWindow": 15,
   "posCountsVolumeRatio": 0.05,
   "positionCostPct": 0.15,
-  "useLivePositionCosts": false,
+  "useLivePositionCosts": true,
   "preferMinimalRange": true,
   "additionalCoordination": true,
   "coordOptimizationN": 50,
