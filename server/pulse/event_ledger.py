@@ -53,6 +53,7 @@ class LedgerEvent:
     qty: float = 0.0
     price: float = 0.0
     pnl: float = 0.0
+    fee: float = 0.0
     detail: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -106,6 +107,8 @@ class EventLedger:
                 raw = json.load(state_file)
         except Exception:
             return
+        if isinstance(raw, dict):
+            self.duplicate_count = int(_number(raw.get("duplicateCount")) or 0)
         rows = raw.get("events") if isinstance(raw, dict) else raw
         if not isinstance(rows, list):
             return
@@ -143,6 +146,7 @@ class EventLedger:
             qty=_number(row.get("qty")),
             price=_number(row.get("price")),
             pnl=_number(row.get("pnl")),
+            fee=_number(row.get("fee") or row.get("fees")),
             detail=_text(row.get("detail"), 240),
             metadata=_metadata(row.get("metadata")),
         )
@@ -158,6 +162,7 @@ class EventLedger:
                 "version": 1,
                 "connection": self.connection,
                 "updatedAt": time.time(),
+                "duplicateCount": int(self.duplicate_count),
                 "events": [event.as_dict() for event in self.events],
             }
             tmp = self.path + ".tmp"
@@ -223,6 +228,7 @@ class EventLedger:
                 qty=_number(fields.get("qty")),
                 price=_number(fields.get("price")),
                 pnl=_number(fields.get("pnl")),
+                fee=_number(fields.get("fee") or fields.get("fees")),
                 detail=_text(fields.get("detail"), 240),
                 metadata=_metadata(fields.get("metadata")),
             )
@@ -247,6 +253,8 @@ class EventLedger:
         out = {key: {"evaluated": 0, "qualified": 0, "selected": 0, "entered": 0, "exited": 0, "blocked": 0, "rejected": 0, "paused": 0, "long": 0, "short": 0} for key in known}
         for event in self.events:
             key = str(getattr(event, attr, "") or "")
+            if attr == "axis_key" and ":" in key:
+                key = key.split(":", 1)[0]
             if not key:
                 continue
             bucket = out.setdefault(key, {name: 0 for name in next(iter(out.values())).keys()})
@@ -290,6 +298,8 @@ class EventLedger:
             parity = "pending" if not exchange_known else ("match" if int(internal_open) == int(exchange_open) else "discrepant")
             return {
                 "eventCount": len(events),
+                "grossPnl": round(sum(event.pnl for event in events), 8),
+                "fees": round(sum(event.fee for event in events), 8),
                 "duplicateCount": int(self.duplicate_count),
                 "byType": by_type,
                 "byStatus": by_status,

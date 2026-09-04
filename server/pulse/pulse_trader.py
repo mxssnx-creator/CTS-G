@@ -33,6 +33,8 @@ from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
 from storage_paths import DATA_DIR
+from event_ledger import EventLedger
+from contracts import INDICATION_KINDS, stable_key
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
@@ -50,6 +52,7 @@ OVERLAY_PATH = os.path.join(DIR, f"overlay-{CONN_SHORT}.json")
 OPEN_PATH = os.path.join(DIR, f"open-{CONN_SHORT}.json")
 CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
 ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
+EVENTS_PATH = os.path.join(DIR, f"events-{CONN_SHORT}.json")
 LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
 START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
 RESET_EQ_PATH = os.path.join(DIR, f"reset-eq-{CONN_SHORT}")
@@ -666,6 +669,7 @@ class Pulse:
         self.wake_ev = threading.Event()
         self.last_event = "boot"
         self.event_n = 0
+        self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
         self._oo_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self.mods: Dict[str, bool] = {}
         self.last_bal = 0.0
@@ -1222,9 +1226,19 @@ class Pulse:
             log(f"TEST FAIL {name} {detail}"[:240], every=20.0, key=f"fail:{name}")
 
     def refresh_balance(self) -> None:
+        request_key = stable_key(CONN_SHORT, "balance", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
+        self.record_event("exchange_request", request_key, status="pending", detail="balance", metadata={"path": "/openApi/swap/v3/user/balance"})
         r = self.api.get("/openApi/swap/v3/user/balance")
         if not self.ok(r):
             r = self.api.get("/openApi/swap/v2/user/balance")
+        self.record_event(
+            "exchange_response",
+            stable_key(request_key, "response"),
+            status="confirmed" if self.ok(r) else "error",
+            code=r.get("code"),
+            detail="balance",
+            metadata={"path": "/openApi/swap/v2/user/balance" if not self.ok(r) else "/openApi/swap/v3/user/balance"},
+        )
         data = r.get("data")
         row = None
         if isinstance(data, dict):
@@ -1234,6 +1248,7 @@ class Pulse:
         if not isinstance(row, dict):
             self.errors += 1
             self.last_error = f"balance {r.get('msg')}"
+            self.record_event("error", stable_key(request_key, "invalid"), status="error", code=r.get("code"), detail=self.last_error)
             return
         self.equity = float(row.get("equity") or row.get("balance") or 0)
         self.available = float(row.get("availableMargin") or row.get("available") or row.get("availableBalance") or 0)
@@ -1326,6 +1341,33 @@ class Pulse:
             self.wake_ev.set()
         except Exception:
             pass
+
+    def record_event(self, event_type: str, event_id: str = "", status: str = "", **fields: Any) -> bool:
+        """Commit one bounded activity event without allowing telemetry to stop the engine."""
+        try:
+            ledger = getattr(self, "event_ledger", None)
+            if ledger is None:
+                ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
+                self.event_ledger = ledger
+            fields.setdefault("connection", CONN_SHORT)
+            committed = bool(ledger.record(event_type, event_id, status=status, **fields))
+            if committed:
+                self.bump(f"event:{event_type}")
+            return committed
+        except Exception as exc:
+            # Event persistence is observability, never a trading dependency.
+            self.last_error = f"event ledger {str(exc)[:120]}"
+            return False
+
+    def event_summary(self) -> Dict[str, Any]:
+        ledger = getattr(self, "event_ledger", None)
+        if ledger is None:
+            return {"eventCount": 0, "parity": "pending", "source": "committed-event-ledger"}
+        return ledger.summary(
+            internal_open=len(getattr(self, "open", {}) or {}),
+            exchange_open=int(getattr(self, "exchange_open_count", -1) or -1),
+            internal_closed=len(getattr(self, "closed", ()) or ()),
+        )
 
     def ingest_ws_px(self) -> int:
         n = 0
@@ -1916,12 +1958,35 @@ class Pulse:
         if not cid and not self._oid_in_book(order_id):
             log(f"SKIP cancel unknown {symbol} oid={order_id}", every=20.0, key=f"skipu:{symbol}")
             return False
+        cancel_key = stable_key(CONN_SHORT, "cancel", symbol, order_id)
+        self.record_event(
+            "exchange_request",
+            stable_key(cancel_key, "request"),
+            status="pending",
+            symbol=symbol,
+            order_id=order_id,
+            client_id=cid,
+            detail="cancel order",
+            metadata={"path": "/openApi/swap/v2/trade/order"},
+        )
         r = self.api.delete("/openApi/swap/v2/trade/order", {"symbol": symbol, "orderId": order_id})
+        self.record_event(
+            "exchange_response",
+            stable_key(cancel_key, "response"),
+            status="confirmed" if self.ok(r) else "error",
+            code=r.get("code"),
+            symbol=symbol,
+            order_id=order_id,
+            client_id=cid,
+            detail="cancel order" if self.ok(r) else str(r.get("msg") or "cancel failed"),
+        )
         if self.ok(r):
+            self.record_event("cancellation", stable_key(cancel_key, "completed"), status="confirmed", symbol=symbol, order_id=order_id, client_id=cid, detail="order cancelled")
             self._oo_cache.pop(symbol, None)
             self._oo_cache.pop("*", None)
             return True
         self.last_error = f"cancel {symbol} {r.get('msg')}"[:200]
+        self.record_event("error", stable_key(cancel_key, "error"), status="error", code=r.get("code"), symbol=symbol, order_id=order_id, client_id=cid, detail=self.last_error)
         return False
 
     def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
@@ -2137,8 +2202,39 @@ class Pulse:
                 )
                 if "quantity" in body and body.get("closePosition"):
                     body.pop("quantity", None)
+                control_key = stable_key(CONN_SHORT, "control", cid, kind, px_s)
+                self.record_event(
+                    "control_request",
+                    stable_key(control_key, "request"),
+                    status="pending",
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    set_id=pos.set_id,
+                    indication_kind=getattr(pos, "ind_kind", ""),
+                    strategy=pos.pack,
+                    client_id=cid,
+                    qty=pos.qty,
+                    price=px_try,
+                    detail=f"{kind} protection",
+                    metadata={"path": "/openApi/swap/v2/trade/order", "closePosition": form["close_pos"]},
+                )
                 r = self.api.post("/openApi/swap/v2/trade/order", body)
                 self.did_io = True
+                self.record_event(
+                    "control_response",
+                    stable_key(control_key, "response"),
+                    status="confirmed" if self.ok(r) else ("pending" if r.get("cooled") else "rejected"),
+                    code=r.get("code"),
+                    symbol=pos.symbol,
+                    side=pos.side,
+                    set_id=pos.set_id,
+                    indication_kind=getattr(pos, "ind_kind", ""),
+                    strategy=pos.pack,
+                    client_id=cid,
+                    order_id=extract_oid(r),
+                    price=px_try,
+                    detail=f"{kind} protection",
+                )
                 if r.get("cooled"):
                     return ""
                 msg = str(r.get("msg") or "")
@@ -2146,6 +2242,20 @@ class Pulse:
                 if self.ok(r):
                     oid = extract_oid(r)
                     if oid:
+                        self.record_event(
+                            "protection",
+                            stable_key(control_key, "protection"),
+                            status="confirmed",
+                            symbol=pos.symbol,
+                            side=pos.side,
+                            set_id=pos.set_id,
+                            indication_kind=getattr(pos, "ind_kind", ""),
+                            strategy=pos.pack,
+                            client_id=cid,
+                            order_id=oid,
+                            price=px_try,
+                            detail=kind,
+                        )
                         pos.close_position = bool(form["close_pos"])
                         price = px_try
                         break
@@ -2303,8 +2413,35 @@ class Pulse:
             b["clientOrderID"] = self.cid(ch, pos=pos)
             if "closePosition" in b:
                 b["closePosition"] = "true"
+        batch_key = stable_key(CONN_SHORT, "control-batch", pos.symbol, pos.side, pos.set_id, self.fmt_px(self.contracts.get(pos.symbol), want_sl), self.fmt_px(self.contracts.get(pos.symbol), want_tp))
+        self.record_event(
+            "control_request",
+            stable_key(batch_key, "request"),
+            status="pending",
+            symbol=pos.symbol,
+            side=pos.side,
+            set_id=pos.set_id,
+            indication_kind=getattr(pos, "ind_kind", ""),
+            strategy=pos.pack,
+            qty=pos.qty,
+            detail="batch SL/TP protection",
+            metadata={"count": 2},
+        )
         r = self.api.batch_place([sl_b, tp_b])
         self.did_io = True
+        self.record_event(
+            "control_response",
+            stable_key(batch_key, "response"),
+            status="confirmed" if self.ok(r) else ("pending" if r.get("cooled") else "rejected"),
+            code=r.get("code"),
+            symbol=pos.symbol,
+            side=pos.side,
+            set_id=pos.set_id,
+            indication_kind=getattr(pos, "ind_kind", ""),
+            strategy=pos.pack,
+            qty=pos.qty,
+            detail="batch SL/TP protection",
+        )
         data = r.get("data") or {}
         rows = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(rows, list):
@@ -2713,6 +2850,28 @@ class Pulse:
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
+        ind_kind_hint = ""
+        if str(reason).startswith("ind:"):
+            parts = str(reason).split(":")
+            ind_kind_hint = parts[1] if len(parts) > 1 else ""
+        parent_set_id = str(getattr(chosen, "parent_set_id", "") or set_id)
+        entry_key = stable_key(CONN_SHORT, "entry", cid)
+        self.record_event(
+            "entry_intent",
+            stable_key(entry_key, "intent"),
+            status="selected",
+            symbol=sym,
+            side=side,
+            set_id=set_id,
+            parent_set_id=parent_set_id,
+            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            indication_kind=ind_kind_hint,
+            strategy=pack,
+            client_id=cid,
+            qty=qty,
+            price=px,
+            metadata={"reason": reason, "confidence": conf, "setIdx": set_idx},
+        )
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
@@ -2736,6 +2895,22 @@ class Pulse:
             body.update(attach)
             return body
 
+        self.record_event(
+            "exchange_request",
+            stable_key(entry_key, "request"),
+            status="pending",
+            symbol=sym,
+            side=side,
+            set_id=set_id,
+            parent_set_id=parent_set_id,
+            indication_kind=ind_kind_hint,
+            strategy=pack,
+            client_id=cid,
+            qty=qty,
+            price=px,
+            detail="entry market order",
+            metadata={"path": "/openApi/swap/v2/trade/order", "orderSide": order_side},
+        )
         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
         self.did_io = True
         if not self.ok(r) and attach:
@@ -2790,8 +2965,27 @@ class Pulse:
                     return
                 self.errors += 1
                 self.last_error = f"order {sym} {short}"[:160]
+                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
                 log(f"ORDER FAIL {sym} {side} {short}")
                 return
+        self.record_event(
+            "exchange_response",
+            stable_key(entry_key, "response"),
+            status="confirmed" if self.ok(r) else "rejected",
+            code=r.get("code"),
+            symbol=sym,
+            side=side,
+            set_id=set_id,
+            parent_set_id=parent_set_id,
+            indication_kind=ind_kind_hint,
+            strategy=pack,
+            client_id=cid,
+            order_id=extract_oid(r),
+            qty=qty,
+            price=px,
+            detail="entry market order",
+        )
         data = (r.get("data") or {}).get("order") or r.get("data") or {}
         self.last_error = ""
         avg = float(data.get("avgPrice") or data.get("price") or px) or px
@@ -2859,6 +3053,24 @@ class Pulse:
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
         self.open[sym] = pos
+        self.record_event(
+            "position_open",
+            stable_key(CONN_SHORT, "position_open", cid),
+            status="confirmed",
+            symbol=sym,
+            side=side,
+            set_id=set_id,
+            parent_set_id=str(getattr(chosen, "parent_set_id", "") or set_id),
+            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            indication_kind=ind_kind,
+            strategy=pack,
+            order_id=real_oid(data.get("orderId") or data.get("orderID")),
+            client_id=cid,
+            qty=filled,
+            price=avg,
+            detail="position opened",
+            metadata={"confidence": conf, "reason": reason},
+        )
         self.owned_syms.add(sym)
         self.save_open_book()
         if cid:
@@ -2944,15 +3156,60 @@ class Pulse:
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        close_key = stable_key(CONN_SHORT, "close", pos.client_id, pos.symbol, pos.side, reason)
         if exchange:
+            self.record_event(
+                "exchange_request",
+                stable_key(close_key, "request"),
+                status="pending",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy=pos.pack,
+                client_id=pos.client_id,
+                qty=pos.qty,
+                price=px,
+                detail=f"close {reason}",
+            )
             self.cancel_controls(pos.symbol)
             self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
             ok, exit_px = self.market_close(pos)
+            self.record_event(
+                "exchange_response",
+                stable_key(close_key, "response"),
+                status="confirmed" if ok else "rejected",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy=pos.pack,
+                client_id=pos.client_id,
+                qty=pos.qty,
+                price=exit_px,
+                detail=f"close {reason}" if ok else "close failed",
+            )
             if not ok:
                 if skip_eval:
                     self.ban_sym(pos.symbol)
+                self.record_event("error", stable_key(close_key, "error"), status="error", symbol=pos.symbol, side=pos.side, client_id=pos.client_id, detail="close failed")
                 return
         else:
+            exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
+            self.record_event(
+                "reconciliation",
+                stable_key(close_key, "local"),
+                status="recovered",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy=pos.pack,
+                client_id=pos.client_id,
+                qty=pos.qty,
+                price=exit_px,
+                detail=f"local close {reason}",
+            )
             exit_px = px if px > 0 else (self.px.get(pos.symbol) or pos.entry)
         if pos.side == "LONG":
             pnl_pct = (exit_px - pos.entry) / pos.entry
@@ -2966,6 +3223,29 @@ class Pulse:
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
             ind_kind=str(getattr(pos, "ind_kind", "") or ""),
         )
+        self.record_event(
+            "close",
+            stable_key(close_key, "closed"),
+            status="confirmed" if exchange else "recovered",
+            symbol=pos.symbol,
+            side=pos.side,
+            set_id=pos.set_id,
+            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
+            indication_kind=getattr(pos, "ind_kind", ""),
+            strategy=pos.pack,
+            client_id=pos.client_id,
+            qty=pos.qty,
+            price=exit_px,
+            pnl=pnl,
+            fee=abs(pos.qty * pos.entry) * cost_as_frac(self.position_cost_pct),
+            detail=reason,
+            metadata={"pnlPct": pnl_pct, "holdS": hold, "skipEvaluation": skip_eval},
+        )
+        if getattr(pos, "ind_kind", "") in INDICATION_KINDS:
+            try:
+                self.indications.record_outcome(str(pos.ind_kind), "exited")
+            except Exception:
+                pass
         if pos.client_id:
             self.seen_fill_cids.add(pos.client_id)
         if skip_eval:
@@ -4443,16 +4723,21 @@ class Pulse:
 
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
+        request_key = stable_key(CONN_SHORT, "positions", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
+        self.record_event("exchange_request", request_key, status="pending", detail="positions", metadata={"path": "/openApi/swap/v2/user/positions"})
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/user/positions")
         if not self.ok(r):
+            self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail=str(r.get("msg") or "positions failed"))
             self.recon_ok = False
             self.recon_pending = False
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
         rows = r.get("data") or []
         if not isinstance(rows, list):
+            self.record_event("error", stable_key(request_key, "payload"), status="error", code=r.get("code"), detail="positions payload malformed")
             return
+        self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed", code=r.get("code"), qty=len(rows), detail="positions", metadata={"rows": len(rows)})
         live_n = 0
         live_keys: set = set()
         for p in rows:
@@ -4466,6 +4751,14 @@ class Pulse:
                 if sym_k:
                     side_k = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
                     live_keys.add(f"{sym_k}:{side_k}")
+        self.record_event(
+            "position_snapshot",
+            stable_key(CONN_SHORT, "position_snapshot", tuple(sorted(live_keys))),
+            status="confirmed",
+            qty=live_n,
+            detail="exchange position snapshot",
+            metadata={"keys": sorted(live_keys)[:32], "count": live_n},
+        )
         self.exchange_open_count = live_n
         # Real/Live/Simulated: live_pos_keys = what the exchange REALLY holds
         # right now (any valid read refreshes it, even while the flat-exchange
@@ -4647,10 +4940,20 @@ class Pulse:
         else:
             self.recon_detail = f"ok ours={len(self.open)} foreign={len(foreign)} live={len(live)}"
         self.recon_detail = self.recon_detail[:160]
+        self.record_event(
+            "reconciliation",
+            stable_key(CONN_SHORT, "reconciliation", tuple(sorted(live_keys)), tuple(sorted(self.open)), self.recon_detail),
+            status="pending" if self.recon_pending else ("confirmed" if self.recon_ok else "discrepant"),
+            qty=len(self.open),
+            detail=self.recon_detail,
+            metadata={"internalOpen": len(self.open), "exchangeOpen": live_n, "foreign": len(foreign)},
+        )
         self.save_open_book()
 
     def sync_own_fills(self) -> None:
         """Pull FILLED orders with our tracking id. Ignore everything else. Feed Set live tape."""
+        request_key = stable_key(CONN_SHORT, "fills", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
+        self.record_event("exchange_request", request_key, status="pending", detail="fill polling", metadata={"path": "/openApi/swap/v2/trade/allOrders"})
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
         data = r.get("data") or {}
@@ -4662,7 +4965,9 @@ class Pulse:
             if isinstance(data, dict) and isinstance(data.get("list"), list):
                 orders = data["list"]
         if not isinstance(orders, list):
+            self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill payload malformed")
             return
+        self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed" if self.ok(r) else "error", code=r.get("code"), qty=len(orders), detail="fill polling", metadata={"rows": len(orders)})
         n = 0
         for o in orders:
             cid = self.order_cid(o)
@@ -4707,6 +5012,24 @@ class Pulse:
                 "sl_ratio": track.get("sl") or 0.6,
                 "trail_key": track.get("trail") or "",
             }
+            self.record_event(
+                "fill",
+                stable_key(CONN_SHORT, "fill", cid),
+                status="filled",
+                symbol=rec["symbol"],
+                side=rec["side"],
+                set_id=rec["set_id"],
+                parent_set_id=track.get("parent_set_id") or rec["set_id"],
+                indication_kind=track.get("ind_kind") or track.get("indKind") or "",
+                strategy=track.get("strategy") or rec.get("pack") or "",
+                client_id=cid,
+                order_id=real_oid(o.get("orderId") or o.get("orderID") or o.get("orderid")),
+                qty=qty,
+                price=px,
+                pnl=pnl,
+                fee=abs(qty * px) * cost_as_frac(self.position_cost_pct),
+                metadata={"kind": kind, "status": status},
+            )
             self.seen_fill_cids.add(cid)
             try:
                 self.sets.on_live_close(rec)
