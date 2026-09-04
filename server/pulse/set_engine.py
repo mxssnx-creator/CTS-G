@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 52419)
+Total output lines: 4318
+
 #!/usr/bin/env python3
 """Independent config Sets: 1m historic replay, last-15 PF, max DD time, live deact.
 
@@ -105,7 +108,9 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     # Duplicate/near-duplicate exchange timestamps must not create an
     # infinite score or make a tiny test burst look like a stable rate.
     span_h = max(1.0 / 60.0, (last - first) / 3600.0)
-    return len(ordered) / span_h
+    keys = {str(row.get("client_id") or row.get("fillId") or i) if isinstance(row, dict)
+            else str(getattr(row, "client_id", "") or i) for i, row in enumerate(ordered)}
+    return len(keys) / span_h
 
 
 def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
@@ -762,7 +767,13 @@ class SetBook:
         self.live_test_candidates = 12
         self.live_test_min_samples = 8
 
-    def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
+    def load(
+        self,
+        ov: Dict[str, Any],
+        cts: Optional[Dict[str, Any]] = None,
+        *,
+        rebuild: bool = True,
+    ) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback = max(120, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
@@ -922,7 +933,13 @@ class SetBook:
             self.scratch_min = float(ov.get("setScratchMin") or 0.0016)
         except Exception:
             self.scratch_min = 0.0016
-        self._rebuild_sets()
+        # A live engine may have tens of thousands of independent Sets.  The
+        # initial catalog is allowed to build off the service start path so a
+        # slow CPU or exchange response cannot make systemd report a startup
+        # timeout.  Normal reloads keep the synchronous behaviour unless the
+        # caller explicitly opts into the deferred bootstrap.
+        if rebuild:
+            self._rebuild_sets()
 
     def eval_need(self) -> int:
         """Fills needed to enable a Set. Capped at 8 so last-15 can validate."""
@@ -1129,15 +1146,20 @@ class SetBook:
         avg = sum(row_net_pnl(rec, self.cost_pct) for rec in rows) / len(rows) if rows else 0.0
         opt_pf = last_n_cost_pf(rows, len(rows), self.cost_pct)
         opt_dd = drawdown_time_by_symbol(rows)
-        by_step: Dict[int, List[Dict[str, Any]]] = {}
+        by_config: Dict[tuple, List[Dict[str, Any]]] = {}
         for rec in rows:
             step = self._record_step(rec)
-            if step >= floor:
-                by_step.setdefault(step, []).append(rec if isinstance(rec, dict) else asdict(rec))
+            row = rec if isinstance(rec, dict) else asdict(rec)
+            if step >= floor and row.get("exchange_confirmed") and not row.get("partial"):
+                key = (step, str(row.get("set_id") or ""), str(row.get("symbol") or ""),
+                       str(row.get("side") or ""), str(row.get("strategy") or "core"),
+                       str(row.get("axis_key") or ""), float(row.get("volume_ratio") or 1))
+                by_config.setdefault(key, []).append(row)
         candidates: List[Dict[str, Any]] = []
         promoted_steps: List[int] = []
-        for step in sorted(by_step):
-            tape = by_step[step]
+        for key in sorted(by_config):
+            step = key[0]
+            tape = by_config[key]
             if len(tape) < self.eval_need():
                 continue
             ok, reason, windows = self._live_windows_ok(tape, minimum_pf=1.0)
@@ -1148,6 +1170,7 @@ class SetBook:
                 promoted_steps.append(step)
             candidates.append({
                 "step": step,
+                "setId": key[1], "symbol": key[2], "side": key[3], "strategy": key[4],
                 "n": len(tape),
                 "last15Pf": round(primary_pf, 4),
                 "windowPf": {name: round(float(metric.get("pf") or 0.0), 4) for name, metric in windows.items()},
@@ -1276,6 +1299,11 @@ class SetBook:
                 "pack": str(getattr(rec, "pack", "") or ""),
             }
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
+        original = rec if isinstance(rec, dict) else vars(rec)
+        for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source",
+                    "exchange_confirmed", "partial", "strategy", "member_count"):
+            if key in original:
+                row[key] = original[key]
         if ind_kind not in IND_KINDS:
             ind_kind = ""
         if not sid:
@@ -2264,195 +2292,7 @@ class SetBook:
                     for i in range(warmup, n):
                         bar = bars[i]
                         ts = base_ts + i * BAR_S
-                        if open_pos is not None:
-                            side = int(open_pos["side"])
-                            entry = float(open_pos["entry"])
-                            held = i - int(open_pos["i"])
-                            why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
-                            if why is None and held >= time_bars:
-                                why, px = "time", float(bar[3])
-                            if why is None and held >= scratch_bars:
-                                move = (float(bar[3]) - entry) / entry * side
-                                if move >= self.scratch_min:
-                                    why, px = "scratch+", float(bar[3])
-                            if why:
-                                raw = (px - entry) / entry * side
-                                buf.append({
-                                    "t": ts,
-                                    "symbol": symbol,
-                                    "side": "LONG" if side > 0 else "SHORT",
-                                    "direction": "LONG" if side > 0 else "SHORT",
-                                    "pnl": net_pnl_pct(raw, self.cost_pct),
-                                    "pnl_pct": raw,
-                                    "hold_s": held * BAR_S,
-                                    "reason": f"ind:{kind}:{why}",
-                                    "ind_kind": kind,
-                                    "pack": "indications",
-                                    "costPct": self.cost_pct,
-                                    "slRatio": 0.6,
-                                    "tpPct": tp_frac * 100.0,
-                                })
-                                open_pos = None
-                                cool = self.cooldown_bars
-                            continue
-                        if cool > 0:
-                            cool -= 1
-                            continue
-                        d, conf = sigs[i]
-                        if d == 0 or conf < 0.52:
-                            continue
-                        if d != want_side:
-                            continue
-                        close = float(bar[3])
-                        if d > 0:
-                            sl_px = close * (1 - sl_frac)
-                            tp_px = close * (1 + tp_frac)
-                        else:
-                            sl_px = close * (1 + sl_frac)
-                            tp_px = close * (1 - tp_frac)
-                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
-
-    def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
-        ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
-        nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
-        wins = sum(1 for x in nets if x > 0)
-        gp = round(sum(x for x in nets if x > 0), 6)
-        gl = round(abs(sum(x for x in nets if x < 0)), 6)
-        decided = sum(1 for x in nets if x != 0)
-        wr = round(100.0 * wins / decided, 1) if decided else 0.0
-        expectancy = round(sum(nets) / len(nets), 6) if nets else 0.0
-        holds = [finite(r.get("hold_s")) for r in ordered]
-        avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
-        classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-        pf_tape = last_n_balanced(ordered, self.pf_n)
-        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
-        evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
-        # Use one bounded, symbol-balanced tape for every named last-N view.
-        # This keeps the 50+/75-position coordinations reproducible without
-        # retaining the complete history in each Set.
-        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
-        windows = evaluation_windows(window_tape, self.cost_pct, required_samples=self.eval_need())
-        last25 = ordered[-self.deact_n :]
-        if last25:
-            rs = [signed_result_r(finite(r.get("pnl_pct")), row_position_cost_pct(r, self.cost_pct)) for r in last25]
-            last25_avg_r = sum(rs) / len(rs)
-            last25_avg_pnl = sum(row_net_pnl(r, self.cost_pct) for r in last25) / len(last25)
-        else:
-            last25_avg_r = 0.0
-            last25_avg_pnl = 0.0
-        dd = drawdown_time_by_symbol(ordered)
-        need = self.eval_need()
-        n15 = int(last15["count"])
-        ratio = float(last15["ratio"])
-        validated = n15 >= need and ratio + 1e-9 >= 1.0
-        enable_pf = float(self.real_min_pf or 1.15)
-        proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
-        dd_s = float(dd["maxS"])
-        dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
-        return {
-            "n": int(hist_n if hist_n is not None else len(ordered)),
-            "wins": wins,
-            "gp": gp,
-            "gl": gl,
-            "wr": wr,
-            "expectancy": expectancy,
-            "avg_hold_s": avg_hold,
-            "classic_all": classic,
-            "last15_ratio": ratio,
-            "last15_classic": float(last15["classicPf"]),
-            "last15_n": n15,
-            "last15_r": float(last15["avgR"]),
-            "last25_n": len(last25),
-            "last25_avg_r": last25_avg_r,
-            "last25_avg_pnl": last25_avg_pnl,
-            "max_dd_s": float(dd["maxS"]),
-            "avg_dd_s": float(dd["avgS"]),
-            "dd_episodes": int(dd["episodes"]),
-            "source_n": len(ordered),
-            "validated": validated,
-            "active": bool(n15 >= need and ratio + 1e-9 >= enable_pf and dd_ok),
-            "enablePf": enable_pf,
-            "ddOk": dd_ok,
-            "cost_subtracted": True,
-            "cost_pct": self.cost_pct,
-            "net_avg": float(last15.get("netAvg") or expectancy),
-            "gross_pf": float(evaluation.get("grossPf") or 0.0),
-            "net_pf": float(evaluation.get("netPf") or 0.0),
-            "gross_ev": float(evaluation.get("grossEv") or 0.0),
-            "net_ev": float(evaluation.get("netEv") or 0.0),
-            "evaluation": evaluation,
-            "evaluation_windows": windows,
-            "proven_neg": proven_neg,
-        }
-
-    def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
-        """Derive the monotonic Base -> Main -> Real qualification ledger.
-
-        Main consumes only Base-qualified evidence and Real consumes only
-        Main-qualified evidence. The ledger stores the decision at each
-        boundary, so retries and restarts can replay the same parent without
-        creating another count.
-        """
-        need = self.eval_need()
-        n = int(m.get("last15_n") or 0)
-        pf = float(m.get("last15_ratio") or 0.0)
-        dd_ok = bool(m.get("ddOk", True))
-        base_floor = float(self.stage_min_pf.get("base", 1.05))
-        main_floor = float(self.stage_min_pf.get("main", 1.10))
-        real_floor = float(self.stage_min_pf.get("real", 1.15))
-        base = n >= need and pf + 1e-9 >= base_floor and dd_ok
-        main = base and pf + 1e-9 >= main_floor
-        real = main and pf + 1e-9 >= real_floor
-        qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
-        st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
-        st.stage = qualified or "Unqualified"
-        st.stage_qualified = qualified
-        st.base_pf = round(pf, 6)
-        st.main_pf = round(pf, 6) if base else 0.0
-        st.real_pf = round(pf, 6) if main else 0.0
-        st.position_cost_pct = self.cost_pct
-        st.evaluation = dict(m.get("evaluation") or {})
-        st.evaluation_windows = dict(m.get("evaluation_windows") or {})
-        st.normal_evaluation = {
-            "pf": float(m.get("gross_pf") or 0.0),
-            "ev": float(m.get("gross_ev") or 0.0),
-            "sampleCount": n,
-            "source": "gross-price-move",
-        }
-        st.adjusted_evaluation = {
-            "pf": float(m.get("net_pf") or 0.0),
-            "ev": float(m.get("net_ev") or 0.0),
-            "ratio": pf,
-            "sampleCount": n,
-            "source": "cost-net",
-        }
-        st.adjustment_deltas = {
-            "pf": round(float(m.get("net_pf") or 0.0) - float(m.get("gross_pf") or 0.0), 6),
-            "ev": round(float(m.get("net_ev") or 0.0) - float(m.get("gross_ev") or 0.0), 8),
-            "costPct": self.cost_pct,
-        }
-        reasons: List[str] = []
-        if n < need:
-            reasons.append(f"sample {n}/{need}")
-        if pf + 1e-9 < base_floor:
-            reasons.append(f"base PF {pf:.2f}<{base_floor:.2f}")
-        elif pf + 1e-9 < main_floor:
-            reasons.append(f"main PF {pf:.2f}<{main_floor:.2f}")
-        elif pf + 1e-9 < real_floor:
-            reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
-        if not dd_ok:
-            reasons.append("DDt cap")
-        reason = "; ".join(reasons)
-        st.strategy_adjustments = {
-            "base": {"qualified": base, "evaluated": True, "minPf": base_floor},
-            "main": {"qualified": main, "evaluated": base, "minPf": main_floor},
-            "real": {"qualified": real, "evaluated": main, "minPf": real_floor},
-            "live": {"evaluation": False, "source": "real"},
-            "exchange": {"trackingOnly": True},
-        }
-        records = {
-            "Base": {"evaluated": True, "qualified": base, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
-            "Main": {"evaluated": base, "qualified": main, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+   …2419 tokens truncated…Count": n, "pf": pf, "reason": reason or "qualified"},
             "Real": {"evaluated": main, "qualified": real, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
         }
         return {
@@ -3104,14 +2944,16 @@ class SetBook:
         # Once a Set has enough own exchange evidence, do not let a merely
         # historic sibling win by default.  This keeps the measured live pool
         # separate from cold candidates and makes throughput meaningful.
-        chosen = live_evidenced or passing
+        chosen = live_evidenced or live_pass
+        if not chosen:
+            return None
         if self.live_test_mode and kind == "base":
             # Exploration is deliberately bounded to the best historic
             # candidates and only rotates candidates that are still cold. A
             # candidate with negative live windows is already deactivated by
             # _score_one/_side_active_flags and cannot be reintroduced here.
             exploratory = sorted(
-                passing,
+                live_pass,
                 key=lambda s: (
                     -float(view(s).get("last15_ratio") or 0),
                     -float(view(s).get("last25_avg_r") or 0),
@@ -3137,9 +2979,8 @@ class SetBook:
                     self._pick_cursor = (self._pick_cursor + 1) % max(1, len(pool))
                 chosen = [selected]
         if self.prefer_minimal_range and kind == "base" and self.additional_coordination:
-            # A loss-driven 50+ optimization window may raise the effective
-            # minimum step. This is a range floor only; PF remains the
-            # primary objective for the final selection.
+            # Independently positive live configs may establish a preferred
+            # floor. This never invents a threshold from aggregate losses.
             floor_rows = [s for s in chosen if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
             if floor_rows:
                 chosen = floor_rows
@@ -3193,6 +3034,10 @@ class SetBook:
             want = str(side or "").strip().upper()
             vb = self._side_view(base, want if want in DIRECTIONS else None)
             vt = self._side_view(trail, want if want in DIRECTIONS else None)
+            base_live = filter_side(base.live, want if want in DIRECTIONS else None)
+            trail_live = filter_side(trail.live, want if want in DIRECTIONS else None)
+            if min(len(base_live), len(trail_live)) >= self.eval_need():
+                return max((base, trail), key=lambda s: trades_per_hour(filter_side(s.live, want)))
             if float(vt.get("last15_ratio") or 0) > float(vb.get("last15_ratio") or 0):
                 return trail
             return base
@@ -3676,7 +3521,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book._rebuild_sets()
     mixed = [{"pnl": -0.02, "pnl_pct": -0.003}] * 20 + [{"pnl": 0.02, "pnl_pct": 0.004}] * 5
     book.adapt_from_live(mixed)
-    out.append(("set-adapt-min", book.min_step == 5, f"min={book.min_step} n={len(book.sets)}"))
+    out.append(("set-adapt-unattributed-no-promotion", book.min_step == 3, f"min={book.min_step} n={len(book.sets)}"))
     out.append(("set-adapt-keeps-grid", sorted({s.step for s in book.sets.values() if s.kind == "base"}) == list(range(3, 7)), f"steps={sorted({s.step for s in book.sets.values() if s.kind == 'base'})}"))
     sid = next(iter(book.sets))
     st = book.sets[sid]

@@ -373,6 +373,41 @@ verify all services, and create a new post-merge checkpoint.
 Version presence is not proof of mesh connectivity. Inspect status and policy
 before choosing Tailscale or NetBird as an access path.
 
+## Remote startup and post-merge verification (2026-09-04)
+
+The corrected overlay-grid PR was merged as `4e158bd6d4c9ef0ec8a169dfb81d1f88f837cf44`.
+The remote workspace is `/workspace/CTS-G`, the installed application tree is
+`/opt/cts-g`, the pulse runtime tree is `/opt/cts-g-pulse`, and state remains
+under `/var/lib/cts-g`. A pre-deploy bundle and checksummed data-overlay backup
+were written under `/workspace/backups/CTS-G/20260904T195850Z-pre-4e158bd6-final`.
+
+The mandatory access path remains:
+
+```bash
+export CTS_CHISEL_PROXY="${HTTPS_PROXY:?}"
+/workspace/.network-clients/connect-remote-chisel.sh -- 'command'
+```
+
+The helper starts the authenticated Chisel client through that same managed
+HTTP/HTTPS proxy and exposes only `127.0.0.1:2222` locally to the remote
+`127.0.0.1:22` SSH service. SSH uses the pinned known-host fingerprint and the
+owner-only key; never remove verification or put credentials in Git.
+
+The two persistent runtime overlays were synchronized from the verified
+`main` checkout and both now use the complete `0.1–3.0` ratio grid at `0.1`
+steps (30 ratios), direct SL/TP ceilings of `3%`, full step range `3–22`, and
+the independent trailing grid. X02/VST is the only engine left running for
+safe remote validation. X01/mainnet is explicitly stopped and disabled; this
+does not alter foreign exchange positions or services.
+
+The initial full catalog is built on a generation-checked worker after the
+engine announces `READY`. This is required because the full matrix can contain
+tens of thousands of Sets and synchronous construction exceeded the VPS
+90-second systemd start window. History replay waits for the atomic catalog
+publication, and a concurrent configuration change invalidates a stale build.
+`StartLimitBurst` and `StartLimitIntervalSec` are rendered in the systemd
+`[Unit]` section, so the installed template produces no start-limit warning.
+
 ## Secret handling
 
 - Keep `ssh-chisel.txt` and SSH identities outside Git with owner-only access.
