@@ -705,6 +705,7 @@ export type LiveStats = {
     };
     rows?: Array<{
       id: string;
+      pack?: string;
       parentSetId?: string;
       stage?: string;
       stageQualified?: string;
