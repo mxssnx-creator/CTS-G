@@ -121,11 +121,32 @@ def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> 
     return stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct))
 
 
-def control_group_token(group_key: Any) -> str:
+def control_group_token(group_key: Any, range_key: Any = "") -> str:
+    """Return a compact token that can be rebound after an exchange restart.
+
+    New control IDs carry the normalized range in a short, parseable token. The
+    hash-derived token remains the fallback for older persisted IDs and for
+    malformed range metadata, so an upgrade never loses the ability to match a
+    previously placed order by its client ID.
+    """
+    match = re.fullmatch(r"sl(\d+)-tp(\d+)", str(range_key or "").strip().lower())
+    if match:
+        sl_bp, tp_bp = int(match.group(1)), int(match.group(2))
+        if 0 <= sl_bp <= 999 and 0 <= tp_bp <= 999:
+            return f"r{sl_bp:03d}{tp_bp:03d}"
     raw = re.sub(r"[^a-z0-9]", "", str(group_key or "").lower())
     if not raw:
         return ""
     return (raw[-8:] if len(raw) >= 8 else raw).ljust(8, "0")
+
+
+def control_group_tokens(group_key: Any, range_key: Any = "") -> set:
+    """Return both the current range token and the legacy hash token."""
+    tokens = {
+        control_group_token(group_key, range_key),
+        control_group_token(group_key),
+    }
+    return {token for token in tokens if token}
 
 
 def coerce_symbol_sort(raw: Any) -> str:
@@ -983,7 +1004,10 @@ class Pulse:
         return next(
             (
                 p for p in self.positions_for(symbol, side)
-                if control_group_token(getattr(p, "control_group_key", "")) == token
+                if token in control_group_tokens(
+                    getattr(p, "control_group_key", ""),
+                    getattr(p, "control_range_key", ""),
+                )
             ),
             None,
         )
@@ -1608,7 +1632,7 @@ class Pulse:
             # Symbol-keyed records predate range groups. Keep them as a
             # legacy aggregate so enabling the new default cannot reinterpret
             # an already-open position and place an unsafe second control pair.
-            is_legacy = not bool(rec.get("control_group_key"))
+            is_legacy = bool(rec.get("legacy_aggregate")) or not bool(rec.get("control_group_key"))
             self.prepare_position_group(pos, legacy=is_legacy)
             # Re-key legacy symbol records by hedge side so LONG and SHORT
             # aggregates cannot overwrite one another on restart.
@@ -1668,7 +1692,10 @@ class Pulse:
         ix = f"{max(0, idx):03d}"
         group_token = ""
         if pos is not None and self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
-            group_token = control_group_token(pos.control_group_key)
+            group_token = control_group_token(
+                pos.control_group_key,
+                getattr(pos, "control_range_key", ""),
+            )
         nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
         # Keep the historical parser offsets intact: bytes after set index are
         # now a range-group token plus a short nonce for per-config controls.
@@ -1716,7 +1743,21 @@ class Pulse:
                 idx = int(rest[8:11])
             except Exception:
                 idx = -1
-        group_token = rest[11:19] if len(rest) >= 19 and re.fullmatch(r"[a-z0-9]{8}", rest[11:19], re.I) else ""
+        group_token = ""
+        control_range_key = ""
+        control_sl_bp = 0
+        control_tp_bp = 0
+        tail = rest[11:]
+        # Current per-config IDs use r + three decimal digits per side
+        # (basis points). Older IDs used an eight-character hash token.
+        range_match = re.match(r"(r\d{6})", tail, re.I)
+        if range_match:
+            group_token = range_match.group(1)
+            control_sl_bp = int(group_token[1:4])
+            control_tp_bp = int(group_token[4:7])
+            control_range_key = f"sl{control_sl_bp:04d}-tp{control_tp_bp:04d}"
+        elif len(tail) >= 8 and re.fullmatch(r"[a-z0-9]{8}", tail[:8], re.I):
+            group_token = tail[:8]
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
         st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
@@ -1741,6 +1782,11 @@ class Pulse:
                     "volume_ratio": st_obj.volume_ratio,
                     "ind_kind": st_obj.indication_kind,
                     "group_token": group_token,
+                    "control_range_key": control_range_key,
+                    "control_sl_bp": control_sl_bp,
+                    "control_tp_bp": control_tp_bp,
+                    "sl_pct": control_sl_bp / 10000.0 if control_sl_bp else 0.0,
+                    "tp_pct": control_tp_bp / 10000.0 if control_tp_bp else 0.0,
                 }
         from set_engine import make_set_id
         fallback_set_id = make_set_id(pack, sl, tr, step)
@@ -2574,7 +2620,13 @@ class Pulse:
             return True
         parsed = self.parse_track(self.order_cid(o)) or {}
         token = str(parsed.get("group_token") or "")
-        return bool(token and token == control_group_token(getattr(pos, "control_group_key", "")))
+        return bool(
+            token
+            and token in control_group_tokens(
+                getattr(pos, "control_group_key", ""),
+                getattr(pos, "control_range_key", ""),
+            )
+        )
 
     def cancel_controls(
         self, symbol: str, keep: Optional[set] = None, pos: Optional[Position] = None
@@ -5848,6 +5900,161 @@ class Pulse:
         for pos in list(self.open.values()):
             self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, why)
 
+    def _recoverable_control_specs(
+        self,
+        symbol: str,
+        side: str,
+        tagged: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Collect parseable per-config control pairs from exchange open orders.
+
+        The exchange position endpoint is aggregate by symbol and hedge side,
+        so a restart with no local open-book row can only reconstruct a range
+        group when the control client ID carries the normalized range. Legacy
+        close-position orders intentionally return no spec and use the safer
+        aggregate fallback in ``adopt_exchange_positions``.
+        """
+        specs: Dict[str, Dict[str, Any]] = {}
+        for order in tagged:
+            parsed = self.parse_track(self.order_cid(order)) or {}
+            token = str(parsed.get("group_token") or "")
+            range_key = str(parsed.get("control_range_key") or "")
+            sl_bp = int(_sf(parsed.get("control_sl_bp"), 0) or 0)
+            tp_bp = int(_sf(parsed.get("control_tp_bp"), 0) or 0)
+            if not token or not range_key or sl_bp <= 0 or tp_bp <= 0:
+                continue
+            sl_pct = sl_bp / 10000.0
+            tp_pct = tp_bp / 10000.0
+            group_key = make_control_group_key(symbol, side, sl_pct, tp_pct)
+            if token not in control_group_tokens(group_key, range_key):
+                # A malformed or old hash token cannot be safely translated
+                # back to a range without persisted lineage.
+                continue
+            spec = specs.setdefault(
+                group_key,
+                {
+                    "group_key": group_key,
+                    "range_key": range_key,
+                    "sl_bp": sl_bp,
+                    "tp_bp": tp_bp,
+                    "sl_pct": sl_pct,
+                    "tp_pct": tp_pct,
+                    "track": parsed,
+                    "orders": [],
+                },
+            )
+            spec["orders"].append(order)
+            if not spec.get("track", {}).get("set_id") and parsed.get("set_id"):
+                spec["track"] = parsed
+        return list(specs.values())
+
+    def _recover_grouped_positions(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        px: float,
+        liq: float,
+        position_id: str,
+        tagged: List[Dict[str, Any]],
+    ) -> List[Position]:
+        """Rebuild quantity-matched range groups from tagged control orders."""
+        specs = self._recoverable_control_specs(symbol, side, tagged)
+        if not specs or qty <= 0 or px <= 0:
+            return []
+        weights: List[float] = []
+        for spec in specs:
+            measured = sum(
+                max(
+                    0.0,
+                    _sf(
+                        order.get("origQty")
+                        or order.get("quantity")
+                        or order.get("orderQty")
+                    ),
+                )
+                for order in spec["orders"]
+            )
+            weights.append(measured if measured > 0 else 1.0)
+        total_weight = sum(weights) or float(len(specs))
+        remaining = float(qty)
+        recovered: List[Position] = []
+        trail_key, trail_arm, trail_give = self.variants.current_trail()
+        entry_tag = next((order for order in tagged if self._cid_kind(order) == "o"), None)
+        entry_oid = real_oid(
+            entry_tag.get("orderId") or entry_tag.get("orderID")
+        ) if entry_tag else ""
+        for index, (spec, weight) in enumerate(zip(specs, weights)):
+            allocated = remaining if index == len(specs) - 1 else qty * weight / total_weight
+            allocated = max(0.0, min(remaining, allocated))
+            remaining = max(0.0, remaining - allocated)
+            if allocated <= 0:
+                continue
+            track = spec.get("track") or {}
+            if track.get("trail"):
+                trail_key = str(track.get("trail"))
+            controls = spec.get("orders") or []
+            sl_row = next((order for order in controls if self._order_is_sl(order)), None)
+            tp_row = next((order for order in controls if self._order_is_tp(order)), None)
+            sl = px * (1.0 - spec["sl_pct"]) if side == "LONG" else px * (1.0 + spec["sl_pct"])
+            tp = px * (1.0 + spec["tp_pct"]) if side == "LONG" else px * (1.0 - spec["tp_pct"])
+            if sl_row:
+                sl = _sf(sl_row.get("stopPrice"), sl) or sl
+            if tp_row:
+                tp = _sf(tp_row.get("stopPrice"), tp) or tp
+            group_cid = self.order_cid(sl_row or tp_row) if (sl_row or tp_row) else ""
+            pos = Position(
+                symbol=symbol,
+                side=side,
+                qty=allocated,
+                entry=px,
+                opened_at=time.time(),
+                sl=sl,
+                tp=tp,
+                peak=px,
+                order_id=entry_oid,
+                notional=allocated * px,
+                reason=f"recover grouped {spec['range_key']}",
+                conf=0.35,
+                sl_ratio=_sf(track.get("sl"), self.variants.current_sl()),
+                trail_key=trail_key,
+                trail_arm=trail_arm / 100.0,
+                trail_give=trail_give / 100.0,
+                sl_pct=spec["sl_pct"],
+                tp_pct=spec["tp_pct"],
+                set_id=str(track.get("set_id") or ""),
+                set_idx=int(track.get("idx") if track.get("idx") is not None else -1),
+                pack=str(track.get("pack") or "general"),
+                client_id=group_cid,
+                ours=True,
+                overall=True,
+                close_position=False,
+                sec_sl=sl,
+                sec_tp=tp,
+                ind_kind=str(track.get("ind_kind") or ""),
+                liq=liq,
+                position_id=position_id,
+                parent_set_id=str(track.get("parent_set_id") or track.get("set_id") or ""),
+                axis_key=str(track.get("axis_key") or ""),
+                relative_count=int(track.get("relative_count") or 1),
+                volume_ratio=float(track.get("volume_ratio") or 1.0),
+                control_group_key=spec["group_key"],
+                control_range_key=spec["range_key"],
+                control_sl_bp=spec["sl_bp"],
+                control_tp_bp=spec["tp_bp"],
+                exchange_qty=allocated,
+            )
+            if sl_row:
+                pos.sl_oid = pos.sec_sl_oid = real_oid(sl_row.get("orderId") or sl_row.get("orderID"))
+            if tp_row:
+                pos.tp_oid = pos.sec_tp_oid = real_oid(tp_row.get("orderId") or tp_row.get("orderID"))
+            self.prepare_position_group(pos, legacy=False)
+            pos.controls_ok = bool(pos.sl_oid and pos.tp_oid)
+            pos.ctrl_verified = pos.controls_ok
+            pos.ctrl_qty = allocated
+            recovered.append(pos)
+        return recovered
+
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
         request_key = stable_key(CONN_SHORT, "positions", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
@@ -6019,6 +6226,30 @@ class Pulse:
             self.exchange_foreign_qty[exchange_key] = 0.0
             if px <= 0:
                 continue
+            grouped_positions = self._recover_grouped_positions(
+                sym,
+                side,
+                qty,
+                px,
+                liq,
+                pid,
+                tagged,
+            )
+            if grouped_positions:
+                self.owned_syms.add(sym)
+                for rec_pos in grouped_positions:
+                    self.open[self.position_key(rec_pos)] = rec_pos
+                    self.ensure_strategy_lanes(rec_pos)
+                    if getattr(self, "control_orders", True) and self.missing_controls(rec_pos):
+                        self.place_ctrl_pair(rec_pos)
+                        if self.missing_controls(rec_pos):
+                            self.ensure_controls(rec_pos)
+                log(
+                    f"RECOVER groups {sym} {side} n={len(grouped_positions)} qty={qty}",
+                    every=20.0,
+                    key=f"rec-groups:{sym}:{side}",
+                )
+                continue
             entry_tag = next((o for o in tagged if self._cid_kind(o) == "o"), None)
             identity_tag = next(
                 (
@@ -6061,8 +6292,9 @@ class Pulse:
                 volume_ratio=float(track.get("volume_ratio") or 1.0),
                 ind_kind=str(track.get("ind_kind") or ""),
             )
-            # Without persisted lineage, recovery is intentionally aggregate:
-            # never invent a per-config group from one ambiguous control order.
+            # Without persisted lineage/range metadata, recovery remains an
+            # aggregate group; never invent a quantity-matched pair from an
+            # ambiguous legacy control order.
             self.prepare_position_group(rec_pos, legacy=True)
             self.open[self.position_key(rec_pos)] = rec_pos
             self.ensure_strategy_lanes(rec_pos)
@@ -6760,7 +6992,10 @@ class Pulse:
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "controlMode": "per-config" if self.per_config_controls(p) else "aggregate",
                     "controlGroupKey": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
-                    "controlGroupToken": control_group_token(getattr(p, "control_group_key", "")),
+                    "controlGroupToken": control_group_token(
+                        getattr(p, "control_group_key", ""),
+                        getattr(p, "control_range_key", ""),
+                    ),
                     "controlRangeKey": getattr(p, "control_range_key", "") or "aggregate",
                     "controlRangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
                     "memberCount": int(getattr(p, "member_count", 1) or 1),
