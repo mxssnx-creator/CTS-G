@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number
 from coord_engine import Coordinator
@@ -76,6 +76,40 @@ def _sf(v: Any, default: float = 0.0) -> float:
         return float(v)
     except Exception:
         return default
+
+
+def normalize_control_pct(value: Any, default: float = 0.0) -> int:
+    """Normalize an SL/TP percentage to integer basis points.
+
+    Runtime positions store fractions (0.0048), while overlays and exchange
+    payloads may use percent values (0.48). Accept both representations so
+    grouping remains stable across restarts and config sources.
+    """
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = float(default or 0.0)
+    if not math.isfinite(parsed):
+        parsed = float(default or 0.0)
+    if abs(parsed) > 0.05:
+        parsed /= 100.0
+    return max(0, int(round(parsed * 10000.0)))
+
+
+def control_range_key(sl_pct: Any, tp_pct: Any) -> str:
+    return f"sl{normalize_control_pct(sl_pct):04d}-tp{normalize_control_pct(tp_pct):04d}"
+
+
+def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> str:
+    """Stable logical control identity: symbol + side + normalized SL/TP range."""
+    sym = str(symbol or "").strip().upper()
+    side_u = str(side or "").strip().upper()
+    return stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct))
+
+
+def control_group_token(group_key: Any) -> str:
+    raw = re.sub(r"[^a-z0-9]", "", str(group_key or "").lower())
+    return (raw[-8:] if len(raw) >= 8 else raw).ljust(8, "0")
 
 
 def coerce_symbol_sort(raw: Any) -> str:
@@ -584,6 +618,17 @@ class Position:
     axis_key: str = ""
     relative_count: int = 1
     volume_ratio: float = 1.0
+    control_group_key: str = ""
+    control_range_key: str = ""
+    control_sl_bp: int = 0
+    control_tp_bp: int = 0
+    legacy_aggregate: bool = False
+    member_count: int = 1
+    lineage_set_ids: List[str] = field(default_factory=list)
+    lineage_parent_set_ids: List[str] = field(default_factory=list)
+    lineage_axis_keys: List[str] = field(default_factory=list)
+    lineage_packs: List[str] = field(default_factory=list)
+    member_client_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -626,6 +671,7 @@ class Pulse:
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.open: Dict[str, Position] = {}
+        self.control_orders_per_config = True
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
@@ -768,6 +814,104 @@ class Pulse:
             if sym in s:
                 return g
         return "u%d" % (abs(hash(sym)) % 8)
+
+    def per_config_controls(self, pos: Optional[Position] = None) -> bool:
+        """Whether a position participates in quantity-matched range controls."""
+        if not bool(getattr(self, "control_orders_per_config", True)):
+            return False
+        return pos is None or not bool(getattr(pos, "legacy_aggregate", False))
+
+    def prepare_position_group(self, pos: Position, legacy: Optional[bool] = None) -> Position:
+        """Attach a restart-safe control identity and bounded lineage metadata."""
+        if legacy is not None:
+            pos.legacy_aggregate = bool(legacy)
+        if self.per_config_controls(pos):
+            pos.control_sl_bp = normalize_control_pct(pos.sl_pct)
+            pos.control_tp_bp = normalize_control_pct(pos.tp_pct)
+            pos.control_range_key = control_range_key(pos.sl_pct, pos.tp_pct)
+            pos.control_group_key = pos.control_group_key or make_control_group_key(
+                pos.symbol, pos.side, pos.sl_pct, pos.tp_pct
+            )
+        else:
+            pos.control_group_key = pos.control_group_key or ""
+            pos.control_range_key = pos.control_range_key or "aggregate"
+        for attr, value in (
+            ("lineage_set_ids", getattr(pos, "set_id", "")),
+            ("lineage_parent_set_ids", getattr(pos, "parent_set_id", "")),
+            ("lineage_axis_keys", getattr(pos, "axis_key", "")),
+            ("lineage_packs", getattr(pos, "pack", "")),
+            ("member_client_ids", getattr(pos, "client_id", "")),
+        ):
+            rows = getattr(pos, attr, None)
+            if not isinstance(rows, list):
+                rows = []
+            if value and value not in rows:
+                rows.append(str(value))
+            setattr(pos, attr, list(dict.fromkeys(str(x) for x in rows if x))[-24:])
+        pos.member_count = max(1, int(getattr(pos, "member_count", 1) or 1))
+        return pos
+
+    def position_key(self, pos: Position) -> str:
+        if self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
+            return str(pos.control_group_key)
+        for key, candidate in self.open.items():
+            if candidate is pos:
+                return str(key)
+        return str(getattr(pos, "symbol", ""))
+
+    def positions_for(self, symbol: str, side: str = "") -> List[Position]:
+        side_u = str(side or "").upper()
+        return [
+            pos for pos in self.open.values()
+            if pos.symbol == symbol and (not side_u or str(pos.side).upper() == side_u)
+        ]
+
+    def position_for_group(self, group_key: str) -> Optional[Position]:
+        pos = self.open.get(str(group_key))
+        if pos is not None:
+            return pos
+        return next((p for p in self.open.values() if getattr(p, "control_group_key", "") == group_key), None)
+
+    def remove_position(self, pos: Position) -> Optional[Position]:
+        key = self.position_key(pos)
+        removed = self.open.pop(key, None)
+        if removed is None:
+            for candidate_key, candidate in list(self.open.items()):
+                if candidate is pos:
+                    removed = self.open.pop(candidate_key, None)
+                    break
+        return removed
+
+    def remove_symbol_positions(self, symbol: str) -> None:
+        for pos in self.positions_for(symbol):
+            self.remove_position(pos)
+
+    def aggregate_qty(self, symbol: str, side: str = "") -> float:
+        return sum(max(0.0, float(getattr(pos, "qty", 0) or 0)) for pos in self.positions_for(symbol, side))
+
+    def merge_position(self, target: Position, incoming: Position) -> Position:
+        """Merge a same-range fill into the existing logical control group."""
+        old_qty = max(0.0, float(target.qty or 0))
+        add_qty = max(0.0, float(incoming.qty or 0))
+        total = old_qty + add_qty
+        if total <= 0:
+            return target
+        target.entry = ((target.entry * old_qty) + (incoming.entry * add_qty)) / total
+        target.qty = total
+        target.notional = total * target.entry
+        target.opened_at = min(float(target.opened_at or time.time()), float(incoming.opened_at or time.time()))
+        if target.side == "LONG":
+            target.peak = max(float(target.peak or target.entry), float(incoming.peak or incoming.entry))
+        else:
+            target.peak = min(float(target.peak or target.entry), float(incoming.peak or incoming.entry))
+        target.conf = max(float(target.conf or 0), float(incoming.conf or 0))
+        target.reason = incoming.reason or target.reason
+        target.member_count = min(256, max(1, int(getattr(target, "member_count", 1) or 1)) + max(1, int(getattr(incoming, "member_count", 1) or 1)))
+        for attr in ("lineage_set_ids", "lineage_parent_set_ids", "lineage_axis_keys", "lineage_packs", "member_client_ids"):
+            values = list(getattr(target, attr, []) or []) + list(getattr(incoming, attr, []) or [])
+            setattr(target, attr, list(dict.fromkeys(str(x) for x in values if x))[-24:])
+        target.sl, target.tp = self.security_prices(target)
+        return target
 
     def round_qty(self, c: Contract, qty: float) -> float:
         n = math.floor(qty / c.step + 1e-12) * c.step
@@ -1055,10 +1199,19 @@ class Pulse:
             return 0.0
         return q
 
-    def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
+    def ban_sym(self, sym: str, sec: float = 1800.0, clear_open: bool = True) -> None:
         self.ignore_syms[sym] = time.time() + sec
         self.owned_syms.discard(sym)
-        self.open.pop(sym, None)
+        if clear_open:
+            self.remove_symbol_positions(sym)
+
+    def clear_position_controls(self, pos: Position) -> None:
+        """Forget only this group's local control IDs after a confirmed cancel/close."""
+        pos.sl_oid = pos.tp_oid = ""
+        pos.sec_sl_oid = pos.sec_tp_oid = ""
+        pos.controls_ok = False
+        pos.ctrl_verified = False
+        pos.ctrl_qty = 0.0
 
     def flatten_untracked(self, symbol: str, side: str, qty: float, px: float) -> bool:
         # Never flatten independent / other-system positions.
@@ -1085,7 +1238,7 @@ class Pulse:
 
     def save_open_book(self) -> None:
         try:
-            blob = {s: asdict(p) for s, p in self.open.items()}
+            blob = {self.position_key(p): asdict(p) for p in self.open.values()}
             tmp = OPEN_PATH + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(blob, f)
@@ -1101,7 +1254,7 @@ class Pulse:
         except Exception:
             return
         fields = {f.name for f in Position.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        for sym, rec in (data or {}).items():
+        for stored_key, rec in (data or {}).items():
             if not isinstance(rec, dict):
                 continue
             try:
@@ -1113,8 +1266,25 @@ class Pulse:
                 continue
             if pos.client_id and not self.cid_ours(pos.client_id):
                 continue
-            self.open[sym] = pos
-            self.owned_syms.add(sym)
+            # Symbol-keyed records predate range groups. Keep them as a
+            # legacy aggregate so enabling the new default cannot reinterpret
+            # an already-open position and place an unsafe second control pair.
+            is_legacy = not bool(rec.get("control_group_key"))
+            self.prepare_position_group(pos, legacy=is_legacy)
+            key = str(stored_key or pos.symbol) if is_legacy else self.position_key(pos)
+            if key in self.open:
+                existing = self.open[key]
+                old_qty = max(0.0, float(existing.qty or 0))
+                add_qty = max(0.0, float(pos.qty or 0))
+                total = old_qty + add_qty
+                if total > 0:
+                    existing.entry = ((existing.entry * old_qty) + (pos.entry * add_qty)) / total
+                    existing.qty = total
+                    existing.notional = total * existing.entry
+                    existing.member_count = min(256, existing.member_count + pos.member_count)
+                continue
+            self.open[key] = pos
+            self.owned_syms.add(pos.symbol)
             if pos.client_id:
                 self.seen_fill_cids.add(pos.client_id)
 
@@ -1149,8 +1319,14 @@ class Pulse:
             except Exception:
                 idx = -1
         ix = f"{max(0, idx):03d}"
+        group_token = ""
+        if pos is not None and self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
+            group_token = control_group_token(pos.control_group_key)
         nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-        return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{nonce}"[:32]
+        # Keep the historical parser offsets intact: bytes after set index are
+        # now a range-group token plus a short nonce for per-config controls.
+        suffix = (group_token + nonce[:2]) if group_token else nonce
+        return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{suffix}"[:32]
 
     def cid_ours(self, cid: str) -> bool:
         """Only this process + this connection watermark (Gx01 / Gx02). Never CTS or other bots."""
@@ -1193,6 +1369,7 @@ class Pulse:
                 idx = int(rest[8:11])
             except Exception:
                 idx = -1
+        group_token = rest[11:19] if len(rest) >= 19 and re.fullmatch(r"[a-z0-9]{8}", rest[11:19], re.I) else ""
         from risk_variants import trail_key as tk, give_from_arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX
         tr = tk(arm, give_from_arm(arm, TRAIL_GIVE_FACTOR, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX))
         st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
@@ -1216,6 +1393,7 @@ class Pulse:
                     "relative_count": st_obj.relative_count,
                     "volume_ratio": st_obj.volume_ratio,
                     "ind_kind": st_obj.indication_kind,
+                    "group_token": group_token,
                 }
         from set_engine import make_set_id
         fallback_set_id = make_set_id(pack, sl, tr, step)
@@ -1232,6 +1410,7 @@ class Pulse:
             "relative_count": 1,
             "volume_ratio": 1.0,
             "ind_kind": "signals" if pack == "indications" else "",
+            "group_token": group_token,
         }
 
     def ok(self, r: Dict[str, Any]) -> bool:
@@ -2021,12 +2200,35 @@ class Pulse:
         self.record_event("error", stable_key(cancel_key, "error"), status="error", code=r.get("code"), symbol=symbol, order_id=order_id, client_id=cid, detail=self.last_error)
         return False
 
-    def cancel_controls(self, symbol: str, keep: Optional[set] = None) -> None:
+    def _order_matches_position(self, o: Dict[str, Any], pos: Position) -> bool:
+        if str(o.get("symbol") or "") != pos.symbol:
+            return False
+        side = str(o.get("positionSide") or "").upper()
+        if side and side != str(pos.side).upper():
+            return False
+        oid = real_oid(o.get("orderId") or o.get("orderID"))
+        known = {
+            real_oid(pos.sl_oid), real_oid(pos.tp_oid),
+            real_oid(getattr(pos, "sec_sl_oid", "")), real_oid(getattr(pos, "sec_tp_oid", "")),
+        }
+        if oid and oid in known:
+            return True
+        if not self.per_config_controls(pos):
+            return True
+        parsed = self.parse_track(self.order_cid(o)) or {}
+        token = str(parsed.get("group_token") or "")
+        return bool(token and token == control_group_token(getattr(pos, "control_group_key", "")))
+
+    def cancel_controls(
+        self, symbol: str, keep: Optional[set] = None, pos: Optional[Position] = None
+    ) -> None:
         keep = keep or set()
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
                 continue
-            oid = str(o.get("orderId") or "")
+            if pos is not None and not self._order_matches_position(o, pos):
+                continue
+            oid = real_oid(o.get("orderId") or o.get("orderID"))
             typ = str(o.get("type") or "")
             if typ in SL_TYPES | TP_TYPES or o.get("stopPrice"):
                 if oid and oid not in keep:
@@ -2195,7 +2397,8 @@ class Pulse:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
-        if have_this and time.time() < self.ctrl_skip.get(pos.symbol, 0):
+        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        if have_this and time.time() < self.ctrl_skip.get(scope, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
             self.refresh_px_one(pos.symbol)
@@ -2205,14 +2408,25 @@ class Pulse:
         px_s = self.fmt_px(c, price)
         if float(px_s or 0) <= 0:
             log(f"CTRL SKIP {kind} {pos.symbol} stopPrice=0", every=20.0, key=f"cskip:{pos.symbol}:px0")
-            self.ctrl_skip[pos.symbol] = time.time() + 60
+            self.ctrl_skip[scope] = time.time() + 60
             return have_this
-        forms = [
-            {"close_pos": False, "with_qty": True, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
-            {"close_pos": True, "with_qty": False, "otype": "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"},
-            {"close_pos": False, "with_qty": True, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
-            {"close_pos": True, "with_qty": False, "otype": "STOP" if is_sl else "TAKE_PROFIT"},
-        ]
+        market_type = "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"
+        limit_type = "STOP" if is_sl else "TAKE_PROFIT"
+        # A range group is quantity-matched. It must never fall back to
+        # closePosition=true because that would close another range group on
+        # the same symbol and side.
+        if self.per_config_controls(pos):
+            forms = [
+                {"close_pos": False, "with_qty": True, "otype": market_type},
+                {"close_pos": False, "with_qty": True, "otype": limit_type},
+            ]
+        else:
+            forms = [
+                {"close_pos": False, "with_qty": True, "otype": market_type},
+                {"close_pos": True, "with_qty": False, "otype": market_type},
+                {"close_pos": False, "with_qty": True, "otype": limit_type},
+                {"close_pos": True, "with_qty": False, "otype": limit_type},
+            ]
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
@@ -2309,15 +2523,15 @@ class Pulse:
                 if kind_err == "qty_close":
                     continue
                 if kind_err == "cap":
-                    self.ctrl_skip[pos.symbol] = time.time() + 90
+                    self.ctrl_skip[scope] = time.time() + 90
                     self.ctrl_skip["__order_cap__"] = time.time() + 60
                     log(f"CTRL cap {pos.symbol} cooldown 60s", every=20.0, key="ordercap")
                     return ""
                 if "110206" in msg or ("over 20" in msg.lower() and "error code" in msg.lower()):
-                    self.ctrl_skip[pos.symbol] = time.time() + 30
+                    self.ctrl_skip[scope] = time.time() + 30
                     return have_this
                 if kind_err in ("px", "liq"):
-                    self.ctrl_skip[pos.symbol] = time.time() + 45
+                    self.ctrl_skip[scope] = time.time() + 45
                     break
             if oid:
                 break
@@ -2325,7 +2539,7 @@ class Pulse:
             short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
             if is_transient_api(msg) or kind_err in ("flat", "px", "liq", "exists", "qty_close", "qty"):
-                self.ctrl_skip[pos.symbol] = time.time() + (90 if kind_err in ("px", "liq", "qty") else 20)
+                self.ctrl_skip[scope] = time.time() + (90 if kind_err in ("px", "liq", "qty") else 20)
                 log(f"CTRL SKIP {kind} {pos.symbol} {short}", every=12.0, key=f"cskip:{pos.symbol}:{short}")
             else:
                 self.errors += 1
@@ -2333,14 +2547,14 @@ class Pulse:
                 log(f"CTRL FAIL {kind} {pos.symbol} {pos.side} {short} px={price} mark={self.px.get(pos.symbol)}")
             low2 = msg.lower()
             if kind_err == "flat" or "position not exist" in low2:
-                self.ctrl_skip[pos.symbol] = time.time() + 20
+                self.ctrl_skip[scope] = time.time() + 20
                 age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
                 if age > 90.0 and self._exchange_flat(pos):
                     self.drop_ghost(pos, "ctrl-no-position")
             elif kind_err in ("px", "liq"):
-                self.ctrl_skip[pos.symbol] = time.time() + 45
+                self.ctrl_skip[scope] = time.time() + 45
             elif kind_err == "qty":
-                self.ctrl_skip[pos.symbol] = time.time() + 60
+                self.ctrl_skip[scope] = time.time() + 60
             return ""
         pos.overall = True
         pos.ctrl_qty = pos.qty
@@ -2385,11 +2599,12 @@ class Pulse:
         now = time.time()
         for pos in list(self.open.values()):
             px = self.px.get(pos.symbol) or pos.entry
+            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
             need = self.missing_controls(pos)
-            illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{pos.symbol}", 0) and self.controls_illegal(pos)
+            illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{scope}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
                 continue
-            if now < self.ctrl_skip.get(pos.symbol, 0) and not need:
+            if now < self.ctrl_skip.get(scope, 0) and not need:
                 miss += 1
                 continue
             self.ensure_controls(pos)
@@ -2398,12 +2613,12 @@ class Pulse:
                 age = time.time() - float(pos.opened_at or 0)
                 bare = not (pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
                 if bare and age > 300.0 and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
-                    log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s")
+                    log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s group={scope[:16]}")
                     self.close_pos(pos, px or pos.entry, "no-ctrl")
                 else:
                     self.bump("ctrl")
             else:
-                self.ctrl_skip[f"legal:{pos.symbol}"] = now + 8.0
+                self.ctrl_skip[f"legal:{scope}"] = now + 8.0
         return miss
 
     def _cid_kind(self, o: Dict[str, Any]) -> str:
@@ -2435,15 +2650,15 @@ class Pulse:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return
-        if time.time() < self.ctrl_skip.get(pos.symbol, 0) and pos.sl_oid and pos.tp_oid:
+        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
-            b["closePosition"] = "true"
             b["clientOrderID"] = self.cid(ch, pos=pos)
-            if "closePosition" in b:
+            if not self.per_config_controls(pos):
                 b["closePosition"] = "true"
         batch_key = stable_key(CONN_SHORT, "control-batch", pos.symbol, pos.side, pos.set_id, self.fmt_px(self.contracts.get(pos.symbol), want_sl), self.fmt_px(self.contracts.get(pos.symbol), want_tp))
         self.record_event(
@@ -2505,7 +2720,7 @@ class Pulse:
                 pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         pos.overall = pos.controls_ok
-        pos.close_position = True
+        pos.close_position = not self.per_config_controls(pos)
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
 
@@ -2513,8 +2728,9 @@ class Pulse:
         now = time.time()
         if now < self.ctrl_skip.get("__order_cap__", 0):
             return
+        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
-        if have_both and now < self.ctrl_skip.get(pos.symbol, 0) and getattr(pos, "ctrl_verified", False):
+        if have_both and now < self.ctrl_skip.get(scope, 0) and getattr(pos, "ctrl_verified", False):
             return
         if self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() and have_both:
             return
@@ -2526,7 +2742,10 @@ class Pulse:
                 return
         banned = self.api.path_cd.get("/openApi/swap/v2/trade/openOrders", 0) > time.time()
         all_rows = [] if banned else self.list_orders(pos.symbol)
-        orders = [o for o in all_rows if self.order_is_ours(o)]
+        orders = [
+            o for o in all_rows
+            if self.order_is_ours(o) and self._order_matches_position(o, pos)
+        ]
         if banned:
             if not real_oid(pos.sl_oid):
                 oid = self.place_ctrl(pos, "sec-sl", want_sl)
@@ -2540,9 +2759,9 @@ class Pulse:
                     pos.tp = want_tp
             pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             pos.overall = True
-            pos.close_position = True
+            pos.close_position = not self.per_config_controls(pos)
             pos.ctrl_qty = pos.qty
-            self.ctrl_skip[f"sync:{pos.symbol}"] = time.time() + 12.0
+            self.ctrl_skip[f"sync:{scope}"] = time.time() + 12.0
             return
         # Empty REST is not "no orders" — never drop live oids.
         side = pos.side
@@ -2599,7 +2818,7 @@ class Pulse:
         if sec_sls or pos.sl_oid:
             pos.close_position = True
         now = time.time()
-        last_sync = float(self.ctrl_skip.get(f"sync:{pos.symbol}", 0) or 0)
+        last_sync = float(self.ctrl_skip.get(f"sync:{scope}", 0) or 0)
         can_replace = now >= last_sync
 
         def _place_side(is_sl: bool, have_oid: str, have_px: float, want: float, live_have: bool, live_rows: List[Dict[str, Any]]) -> str:
@@ -2626,7 +2845,7 @@ class Pulse:
                 self.cancel_order(pos.symbol, have_oid, cid)
             oid = self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want)
             if oid:
-                self.ctrl_skip[f"sync:{pos.symbol}"] = now + 30.0
+                self.ctrl_skip[f"sync:{scope}"] = now + 30.0
             return oid or have_oid
 
         pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
@@ -2639,11 +2858,12 @@ class Pulse:
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
         pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
-        pos.close_position = True
+        pos.close_position = not self.per_config_controls(pos)
 
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
         c = self.contracts.get(pos.symbol)
+        grouped = self.per_config_controls(pos)
         return ctrl_payload(
             pos.symbol,
             pos.side,
@@ -2651,13 +2871,14 @@ class Pulse:
             self.fmt_px(c, price),
             self.fmt_qty(c, pos.qty),
             self.cid("u" if kind == "sl" else "v", pos=pos),
-            close_pos=True,
-            with_qty=False,
+            close_pos=not grouped,
+            with_qty=grouped,
         )
 
     def replace_sl(self, pos: Position, new_sl: float) -> None:
         now = time.time()
-        if now < self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
+        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        if now < self.ctrl_skip.get(f"sync:{scope}", 0):
             return
         c = self.contracts.get(pos.symbol)
         if c:
@@ -2685,14 +2906,14 @@ class Pulse:
             pos.tp_oid = pos.sec_tp_oid = real_oid(self.place_ctrl(pos, "sec-tp", want_tp))
             pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
-        self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
+        self.ctrl_skip[f"sync:{scope}"] = now + 12.0
 
     def market_close(self, pos: Position) -> Tuple[bool, float]:
         close_side = "SELL" if pos.side == "LONG" else "BUY"
-        forms = [
-            {"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)},
-            {"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)},
-        ]
+        grouped = self.per_config_controls(pos)
+        forms = [{"quantity": pos.qty, "clientOrderID": self.cid("c", pos=pos)}]
+        if not grouped:
+            forms.append({"closePosition": "true", "clientOrderID": self.cid("c", pos=pos)})
         pid = str(getattr(pos, "position_id", "") or "")
         if pid:
             forms.append({"positionId": pid, "clientOrderID": self.cid("c", pos=pos)})
@@ -2723,16 +2944,17 @@ class Pulse:
         return False, self.px.get(pos.symbol) or pos.entry
 
     def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
-        """Max 1 position per symbol, and per (symbol, direction, pack, Set)."""
-        pos = self.open.get(sym)
-        if pos:
-            return True
+        """Return whether a candidate conflicts with the configured book mode."""
         side_u = (side or "").upper()
-        for p in self.open.values():
-            if p.symbol != sym:
-                continue
-            if side_u and p.side == side_u:
-                return True
+        positions = self.positions_for(sym, side_u)
+        if self.per_config_controls():
+            # A legacy symbol aggregate cannot safely coexist with a new
+            # quantity-matched range group. New groups otherwise merge on the
+            # normalized range after the exchange fill is confirmed.
+            return any(bool(getattr(p, "legacy_aggregate", False)) for p in positions)
+        if self.positions_for(sym):
+            return True
+        for p in self.positions_for(sym):
             if pack and p.pack == pack:
                 return True
             if set_id and p.set_id == set_id and (not side_u or p.side == side_u):
@@ -2818,7 +3040,9 @@ class Pulse:
             return
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
-        if (MAX_OPEN > 0 and len(self.open) >= MAX_OPEN) or sym in self.open:
+        if MAX_OPEN > 0 and len(self.open) >= MAX_OPEN:
+            return
+        if not self.per_config_controls() and self.positions_for(sym):
             return
         if time.time() < self.cooldown.get(sym, 0):
             return
@@ -3088,8 +3312,21 @@ class Pulse:
             pos.sl_oid = pos.sec_sl_oid = attached_sl
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
-        self.open[sym] = pos
-        self.record_event(
+        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
+        merged = False
+        if self.per_config_controls(pos):
+            existing = self.position_for_group(pos.control_group_key)
+            if existing is not None:
+                if getattr(self, "control_orders", True):
+                    self.cancel_controls(sym, pos=existing)
+                    self.clear_position_controls(existing)
+                self.merge_position(existing, pos)
+                pos = existing
+                merged = True
+            else:
+                self.open[self.position_key(pos)] = pos
+        else:
+            self.open[sym] = pos
             "position_open",
             stable_key(CONN_SHORT, "position_open", cid),
             status="confirmed",
@@ -3127,9 +3364,9 @@ class Pulse:
                 self.close_pos(pos, avg, "no-ctrl")
                 return
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
-        self.block.register_parent(sym, side, filled, avg)
+        self.block.register_parent(sym, side, pos.qty, pos.entry)
         try:
-            self.dca.attach(sym, side, filled, avg)
+            self.dca.attach(sym, side, pos.qty, pos.entry)
         except Exception:
             pass
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")

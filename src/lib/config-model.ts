@@ -164,6 +164,7 @@ export type PulseOverlay = {
   cooldownS: number;
   staggerS: number;
   controlOrders: boolean;
+  controlOrdersPerConfig: boolean;
   blockEnabled: boolean;
   blockMaxStack: number;
   blockVolumeRatio: number;
@@ -315,6 +316,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   cooldownS: 9,
   staggerS: 0.6,
   controlOrders: true,
+  controlOrdersPerConfig: true,
   blockEnabled: true,
   blockMaxStack: 3,
   blockVolumeRatio: 1,
@@ -465,6 +467,8 @@ export type CtsSettings = {
   coordinationSettings?: Record<string, unknown>;
   strategyBaseTrailingVariants?: string[];
   control_orders?: boolean | number | string;
+  controlOrdersPerConfig?: boolean | number | string;
+  control_orders_per_config?: boolean | number | string;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
   blockMaxStack?: number;
@@ -645,6 +649,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailArmPct: arm,
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
+    controlOrdersPerConfig: bool(
+      cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
+      true,
+    ),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 3),
     blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
@@ -863,11 +871,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     if (!next.symbols.length) next.symbols = [...PULSE_SYMBOLS];
   }
   next.symbolSort = coerceSymbolSort(next.symbolSort);
-  next.baseMinPf = normalizePf(next.baseMinPf, DEFAULT_OVERLAY.baseMinPf);
-  next.mainMinPf = normalizePf(next.mainMinPf, DEFAULT_OVERLAY.mainMinPf);
-  next.realMinPf = normalizePf(next.realMinPf, DEFAULT_OVERLAY.realMinPf);
-  next.minPf = next.realMinPf;
+  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.symbolsDynamic = next.symbolsDynamic !== false;
+
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;

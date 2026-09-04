@@ -15,6 +15,7 @@
   "blockProfitFactorRatio": 1.25,
   "blockVolumeRatio": 1,
   "controlOrders": true,
+  "controlOrdersPerConfig": true,
   "cooldownS": 9,
   "dcaAutoDeact": true,
   "dcaBreakevenProfitPct": 0.2,
