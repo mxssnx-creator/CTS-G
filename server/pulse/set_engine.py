@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 52419)
-Total output lines: 4318
-
 #!/usr/bin/env python3
 """Independent config Sets: 1m historic replay, last-15 PF, max DD time, live deact.
 
@@ -2292,7 +2289,195 @@ class SetBook:
                     for i in range(warmup, n):
                         bar = bars[i]
                         ts = base_ts + i * BAR_S
-   …2419 tokens truncated…Count": n, "pf": pf, "reason": reason or "qualified"},
+                        if open_pos is not None:
+                            side = int(open_pos["side"])
+                            entry = float(open_pos["entry"])
+                            held = i - int(open_pos["i"])
+                            why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
+                            if why is None and held >= time_bars:
+                                why, px = "time", float(bar[3])
+                            if why is None and held >= scratch_bars:
+                                move = (float(bar[3]) - entry) / entry * side
+                                if move >= self.scratch_min:
+                                    why, px = "scratch+", float(bar[3])
+                            if why:
+                                raw = (px - entry) / entry * side
+                                buf.append({
+                                    "t": ts,
+                                    "symbol": symbol,
+                                    "side": "LONG" if side > 0 else "SHORT",
+                                    "direction": "LONG" if side > 0 else "SHORT",
+                                    "pnl": net_pnl_pct(raw, self.cost_pct),
+                                    "pnl_pct": raw,
+                                    "hold_s": held * BAR_S,
+                                    "reason": f"ind:{kind}:{why}",
+                                    "ind_kind": kind,
+                                    "pack": "indications",
+                                    "costPct": self.cost_pct,
+                                    "slRatio": 0.6,
+                                    "tpPct": tp_frac * 100.0,
+                                })
+                                open_pos = None
+                                cool = self.cooldown_bars
+                            continue
+                        if cool > 0:
+                            cool -= 1
+                            continue
+                        d, conf = sigs[i]
+                        if d == 0 or conf < 0.52:
+                            continue
+                        if d != want_side:
+                            continue
+                        close = float(bar[3])
+                        if d > 0:
+                            sl_px = close * (1 - sl_frac)
+                            tp_px = close * (1 + tp_frac)
+                        else:
+                            sl_px = close * (1 + sl_frac)
+                            tp_px = close * (1 - tp_frac)
+                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
+
+    def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
+        ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
+        wins = sum(1 for x in nets if x > 0)
+        gp = round(sum(x for x in nets if x > 0), 6)
+        gl = round(abs(sum(x for x in nets if x < 0)), 6)
+        decided = sum(1 for x in nets if x != 0)
+        wr = round(100.0 * wins / decided, 1) if decided else 0.0
+        expectancy = round(sum(nets) / len(nets), 6) if nets else 0.0
+        holds = [finite(r.get("hold_s")) for r in ordered]
+        avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
+        classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
+        pf_tape = last_n_balanced(ordered, self.pf_n)
+        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
+        evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
+        # Use one bounded, symbol-balanced tape for every named last-N view.
+        # This keeps the 50+/75-position coordinations reproducible without
+        # retaining the complete history in each Set.
+        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
+        windows = evaluation_windows(window_tape, self.cost_pct, required_samples=self.eval_need())
+        last25 = ordered[-self.deact_n :]
+        if last25:
+            rs = [signed_result_r(finite(r.get("pnl_pct")), row_position_cost_pct(r, self.cost_pct)) for r in last25]
+            last25_avg_r = sum(rs) / len(rs)
+            last25_avg_pnl = sum(row_net_pnl(r, self.cost_pct) for r in last25) / len(last25)
+        else:
+            last25_avg_r = 0.0
+            last25_avg_pnl = 0.0
+        dd = drawdown_time_by_symbol(ordered)
+        need = self.eval_need()
+        n15 = int(last15["count"])
+        ratio = float(last15["ratio"])
+        validated = n15 >= need and ratio + 1e-9 >= 1.0
+        enable_pf = float(self.real_min_pf or 1.15)
+        proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
+        dd_s = float(dd["maxS"])
+        dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
+        return {
+            "n": int(hist_n if hist_n is not None else len(ordered)),
+            "wins": wins,
+            "gp": gp,
+            "gl": gl,
+            "wr": wr,
+            "expectancy": expectancy,
+            "avg_hold_s": avg_hold,
+            "classic_all": classic,
+            "last15_ratio": ratio,
+            "last15_classic": float(last15["classicPf"]),
+            "last15_n": n15,
+            "last15_r": float(last15["avgR"]),
+            "last25_n": len(last25),
+            "last25_avg_r": last25_avg_r,
+            "last25_avg_pnl": last25_avg_pnl,
+            "max_dd_s": float(dd["maxS"]),
+            "avg_dd_s": float(dd["avgS"]),
+            "dd_episodes": int(dd["episodes"]),
+            "source_n": len(ordered),
+            "validated": validated,
+            "active": bool(n15 >= need and ratio + 1e-9 >= enable_pf and dd_ok),
+            "enablePf": enable_pf,
+            "ddOk": dd_ok,
+            "cost_subtracted": True,
+            "cost_pct": self.cost_pct,
+            "net_avg": float(last15.get("netAvg") or expectancy),
+            "gross_pf": float(evaluation.get("grossPf") or 0.0),
+            "net_pf": float(evaluation.get("netPf") or 0.0),
+            "gross_ev": float(evaluation.get("grossEv") or 0.0),
+            "net_ev": float(evaluation.get("netEv") or 0.0),
+            "evaluation": evaluation,
+            "evaluation_windows": windows,
+            "proven_neg": proven_neg,
+        }
+
+    def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive the monotonic Base -> Main -> Real qualification ledger.
+
+        Main consumes only Base-qualified evidence and Real consumes only
+        Main-qualified evidence. The ledger stores the decision at each
+        boundary, so retries and restarts can replay the same parent without
+        creating another count.
+        """
+        need = self.eval_need()
+        n = int(m.get("last15_n") or 0)
+        pf = float(m.get("last15_ratio") or 0.0)
+        dd_ok = bool(m.get("ddOk", True))
+        base_floor = float(self.stage_min_pf.get("base", 1.05))
+        main_floor = float(self.stage_min_pf.get("main", 1.10))
+        real_floor = float(self.stage_min_pf.get("real", 1.15))
+        base = n >= need and pf + 1e-9 >= base_floor and dd_ok
+        main = base and pf + 1e-9 >= main_floor
+        real = main and pf + 1e-9 >= real_floor
+        qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
+        st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
+        st.stage = qualified or "Unqualified"
+        st.stage_qualified = qualified
+        st.base_pf = round(pf, 6)
+        st.main_pf = round(pf, 6) if base else 0.0
+        st.real_pf = round(pf, 6) if main else 0.0
+        st.position_cost_pct = self.cost_pct
+        st.evaluation = dict(m.get("evaluation") or {})
+        st.evaluation_windows = dict(m.get("evaluation_windows") or {})
+        st.normal_evaluation = {
+            "pf": float(m.get("gross_pf") or 0.0),
+            "ev": float(m.get("gross_ev") or 0.0),
+            "sampleCount": n,
+            "source": "gross-price-move",
+        }
+        st.adjusted_evaluation = {
+            "pf": float(m.get("net_pf") or 0.0),
+            "ev": float(m.get("net_ev") or 0.0),
+            "ratio": pf,
+            "sampleCount": n,
+            "source": "cost-net",
+        }
+        st.adjustment_deltas = {
+            "pf": round(float(m.get("net_pf") or 0.0) - float(m.get("gross_pf") or 0.0), 6),
+            "ev": round(float(m.get("net_ev") or 0.0) - float(m.get("gross_ev") or 0.0), 8),
+            "costPct": self.cost_pct,
+        }
+        reasons: List[str] = []
+        if n < need:
+            reasons.append(f"sample {n}/{need}")
+        if pf + 1e-9 < base_floor:
+            reasons.append(f"base PF {pf:.2f}<{base_floor:.2f}")
+        elif pf + 1e-9 < main_floor:
+            reasons.append(f"main PF {pf:.2f}<{main_floor:.2f}")
+        elif pf + 1e-9 < real_floor:
+            reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
+        if not dd_ok:
+            reasons.append("DDt cap")
+        reason = "; ".join(reasons)
+        st.strategy_adjustments = {
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor},
+            "live": {"evaluation": False, "source": "real"},
+            "exchange": {"trackingOnly": True},
+        }
+        records = {
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
             "Real": {"evaluated": main, "qualified": real, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
         }
         return {
