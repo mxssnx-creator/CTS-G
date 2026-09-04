@@ -599,6 +599,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "tests": st.get("tests") or [],
         "engine": st.get("engine"),
         "api": st.get("api"),
+        "activity": st.get("activity") or (st.get("coverage") or {}).get("activity") or {},
+        "events": st.get("events") or (st.get("coverage") or {}).get("events") or [],
         "coverage": {
             "px": st.get("klinesReady"),
             "klinesTf": st.get("klinesTf"),
@@ -725,6 +727,12 @@ def render_md(blob: Dict[str, Any]) -> str:
     lines += ["", "## Exits", ""]
     for ln in blob.get("exits") or []:
         lines.append(f"- {ln.get('key')} n={ln.get('n')} wins={ln.get('wins')} PF15={ln.get('last15Ratio')} active={ln.get('active')}")
+    activity = blob.get("activity") or {}
+    lines += ["", "## Activity ledger", ""]
+    lines.append(f"events={activity.get('eventCount', 0)} duplicates={activity.get('duplicateCount', 0)} fills={activity.get('fillCount', 0)} requests={activity.get('requestCount', 0)} responses={activity.get('responseCount', 0)} fees={activity.get('fees', 0)} parity={activity.get('parity', 'pending')}")
+    for event in (activity.get("tail") or [])[:12]:
+        if isinstance(event, dict):
+            lines.append(f"- {event.get('event_type')} {event.get('status')} {event.get('symbol') or ''} {event.get('detail') or ''}")
     lines += ["", "## Coverage / QA", ""]
     cov = blob.get("coverage") or {}
     lines.append(f"wsOk={cov.get('wsOk')} px={cov.get('px')} QA {cov.get('qaPass')}P/{cov.get('qaFail')}F controlsMissing={cov.get('controlsMissing')}")

@@ -580,6 +580,10 @@ class Position:
     position_id: str = ""
     ctrl_verified: bool = False
     under_since: float = 0.0
+    parent_set_id: str = ""
+    axis_key: str = ""
+    relative_count: int = 1
+    volume_ratio: float = 1.0
 
 
 @dataclass
@@ -605,6 +609,10 @@ class Closed:
     ours: bool = True
     conn: str = ""
     ind_kind: str = ""
+    parent_set_id: str = ""
+    axis_key: str = ""
+    relative_count: int = 1
+    volume_ratio: float = 1.0
 
 
 class Pulse:
@@ -1203,9 +1211,28 @@ class Pulse:
                     "step": st_obj.step,
                     "idx": st_obj.idx,
                     "set_id": st_obj.id,
+                    "parent_set_id": st_obj.parent_set_id or st_obj.id,
+                    "axis_key": st_obj.axis_key,
+                    "relative_count": st_obj.relative_count,
+                    "volume_ratio": st_obj.volume_ratio,
+                    "ind_kind": st_obj.indication_kind,
                 }
         from set_engine import make_set_id
-        return {"kind": kind, "pack": pack, "sl": sl, "trail": tr, "step": step, "idx": idx, "set_id": make_set_id(pack, sl, tr, step)}
+        fallback_set_id = make_set_id(pack, sl, tr, step)
+        return {
+            "kind": kind,
+            "pack": pack,
+            "sl": sl,
+            "trail": tr,
+            "step": step,
+            "idx": idx,
+            "set_id": fallback_set_id,
+            "parent_set_id": fallback_set_id,
+            "axis_key": "",
+            "relative_count": 1,
+            "volume_ratio": 1.0,
+            "ind_kind": "signals" if pack == "indications" else "",
+        }
 
     def ok(self, r: Dict[str, Any]) -> bool:
         return (not r.get("error")) and r.get("code") in (0, None)
@@ -1363,9 +1390,14 @@ class Pulse:
         ledger = getattr(self, "event_ledger", None)
         if ledger is None:
             return {"eventCount": 0, "parity": "pending", "source": "committed-event-ledger"}
+        exchange_open = getattr(self, "exchange_open_count", -1)
+        try:
+            exchange_open = int(exchange_open)
+        except Exception:
+            exchange_open = -1
         return ledger.summary(
             internal_open=len(getattr(self, "open", {}) or {}),
-            exchange_open=int(getattr(self, "exchange_open_count", -1) or -1),
+            exchange_open=exchange_open,
             internal_closed=len(getattr(self, "closed", ()) or ()),
         )
 
@@ -3046,6 +3078,10 @@ class Pulse:
             sl_pct=sl_pct, tp_pct=tp_pct,
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
             overall=True, close_position=True, ind_kind=ind_kind,
+            parent_set_id=parent_set_id,
+            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            relative_count=int(getattr(chosen, "relative_count", 1) or 1),
+            volume_ratio=float(getattr(chosen, "volume_ratio", 1.0) or 1.0),
         )
         pos.sl, pos.tp = self.security_prices(pos)
         if attached_sl:
@@ -3222,6 +3258,10 @@ class Pulse:
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
             ind_kind=str(getattr(pos, "ind_kind", "") or ""),
+            parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
+            axis_key=str(getattr(pos, "axis_key", "") or ""),
+            relative_count=int(getattr(pos, "relative_count", 1) or 1),
+            volume_ratio=float(getattr(pos, "volume_ratio", 1.0) or 1.0),
         )
         self.record_event(
             "close",
@@ -4871,6 +4911,11 @@ class Pulse:
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
                 liq=liq, position_id=pid,
+                parent_set_id=str(track.get("parent_set_id") or set_id),
+                axis_key=str(track.get("axis_key") or ""),
+                relative_count=int(track.get("relative_count") or 1),
+                volume_ratio=float(track.get("volume_ratio") or 1.0),
+                ind_kind=str(track.get("ind_kind") or ""),
             )
             rec_pos = self.open[sym]
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
@@ -5233,6 +5278,7 @@ class Pulse:
             d["indKind"] = d.get("ind_kind") or ""
             closed_out.append(d)
         cov = self._coverage_blob()
+        activity = self.event_summary()
         ind_snap = self.indications.snapshot()
         sets_snap = self.sets.snapshot(full=False)
         try:
@@ -5322,6 +5368,8 @@ class Pulse:
             "cycle": self.cycle,
             "lastEvent": getattr(self, "last_event", ""),
             "eventN": getattr(self, "event_n", 0),
+            "activity": activity,
+            "events": activity.get("tail") or [],
             "maxHoldS": MAX_HOLD_S,
             "tests": self.tests[-24:],
             "block": self.block.snapshot(),
@@ -5370,6 +5418,10 @@ class Pulse:
                     "slPct": round(p.sl_pct * 100, 3),
                     "tpPct": round(p.tp_pct * 100, 3),
                     "setId": p.set_id,
+                    "parentSetId": getattr(p, "parent_set_id", "") or p.set_id,
+                    "axisKey": getattr(p, "axis_key", ""),
+                    "relativeCount": int(getattr(p, "relative_count", 1) or 1),
+                    "volumeRatio": float(getattr(p, "volume_ratio", 1.0) or 1.0),
                     "setIdx": getattr(p, "set_idx", -1),
                     "trailSetId": getattr(p, "trail_set_id", ""),
                     "trailIdx": getattr(p, "trail_idx", -1),
@@ -5439,18 +5491,26 @@ class Pulse:
         live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
         progress = getattr(self.sets, "progress", None)
         stages = ((self.coord.last or {}).get("stages") if hasattr(self.coord, "last") else {}) or {}
-        axis_variants = []
-        try:
-            axis_variants = self.coord.axis_variants(
-                "engine",
-                self.strategy_closes(),
-                list(self.open.values()),
-            )
-        except Exception:
-            axis_variants = []
-        axis_aggregate = self.coord.aggregate_axis_variants(axis_variants) if axis_variants else {
-            "parentCount": 0, "childCount": 0, "volumeRatio": 0.0, "qualifiedChildren": 0, "axes": {}
+        axis_aggregate: Dict[str, Any] = {
+            "parentCount": 0,
+            "childCount": 0,
+            "volumeRatio": 0.0,
+            "qualifiedChildren": 0,
+            "axes": {},
+            "parentRule": "only Base-qualified parent Sets produce axis children",
         }
+        try:
+            if callable(getattr(self.sets, "axis_variants", None)):
+                axis_aggregate = self.sets.axis_variants(self.coord)
+        except Exception:
+            axis_aggregate = {
+                "parentCount": 0,
+                "childCount": 0,
+                "volumeRatio": 0.0,
+                "qualifiedChildren": 0,
+                "axes": {},
+                "parentRule": "only Base-qualified parent Sets produce axis children",
+            }
         ours_open = [p for p in self.open.values() if getattr(p, "ours", True)]
         with_set = sum(1 for p in ours_open if getattr(p, "set_id", ""))
         with_cid = sum(1 for p in ours_open if getattr(p, "client_id", "") and self.cid_ours(p.client_id))
@@ -5464,6 +5524,7 @@ class Pulse:
             mods = resolve_modules(getattr(self, "overlay", {}) if isinstance(getattr(self, "overlay", None), dict) else {})
         except Exception:
             mods = {}
+        activity = self.event_summary()
         return {
             "strategies": {
                 "indications": bool(self.strat_ind and self.indications.settings.get("enabled", True)),
@@ -5490,6 +5551,13 @@ class Pulse:
             },
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
+            "stageFlow": scov.get("stageFlow") or self.sets.stage_flow(),
+            "evaluations": {
+                "requiredSamples": int(getattr(self.sets, "eval_need", lambda: 8)()),
+                "positionCostPct": float(getattr(self.sets, "cost_pct", self.position_cost_pct) or self.position_cost_pct),
+                "pairedNormalAdjusted": True,
+                "costSubtracted": True,
+            },
             "evals": {
                 "n": eval_n,
                 "symbols": len(getattr(self.indications, "evals", {}) or {}),
@@ -5507,6 +5575,7 @@ class Pulse:
                 "openN": len(self.open),
                 "axes": {k: {"enabled": v.enabled, "maxWindow": v.max_window} for k, v in self.coord.axes.items()},
                 "variants": axis_aggregate,
+                "coordination": {axis: dict(self.coord.coordination.get(axis) or {}) for axis in ("prev", "last", "cont", "pause")},
                 "volumeRatioUnit": 0.01,
                 "closedOnlyPrev": True,
                 "oneOpenOrderPerSet": True,
@@ -5566,6 +5635,8 @@ class Pulse:
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
             },
             "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
+            "activity": activity,
+            "events": activity.get("tail") or [],
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
             "symbols": len(SYMBOLS),
             "scan": {

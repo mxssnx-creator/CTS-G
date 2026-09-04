@@ -24,6 +24,7 @@ import {
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
 import { KindStrategyStrip } from "@/components/kind-strategy-stats";
+import { ActivityPanel } from "@/components/activity-overview";
 import type { ConnType } from "@/lib/connections";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
@@ -143,6 +144,9 @@ function DeskPage() {
           <WorkStrip stats={stats} />
           <IndicationStrip stats={stats} />
           <KindStrategyStrip stats={stats} />
+          <div className="mt-3">
+            <ActivityPanel stats={stats} compact />
+          </div>
         </div>
         <div className="rounded-radius border border-border bg-surface p-5">
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
