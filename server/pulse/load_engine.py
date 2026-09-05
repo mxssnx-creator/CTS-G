@@ -312,7 +312,10 @@ class LoadGovernor:
         if level == "critical":
             b.scan_chunk = max(4, min(8, n_open + 4))
             b.kline_batch = 2
-            b.hist_chunk = 2
+            # A replay clone retains one bounded tape per Set. Keep the
+            # historic window to one symbol under critical pressure so the
+            # safety cap is not reached before the next commit.
+            b.hist_chunk = 1
             b.extra_n = 0
             b.lookback = 80
             b.universe_rows = 40
@@ -329,7 +332,7 @@ class LoadGovernor:
         elif level == "overload":
             b.scan_chunk = max(6, min(12, 8 + n_open))
             b.kline_batch = 3
-            b.hist_chunk = 3
+            b.hist_chunk = 2
             b.extra_n = 2
             b.lookback = 120
             b.universe_rows = 60
@@ -348,7 +351,10 @@ class LoadGovernor:
         elif level == "busy":
             b.scan_chunk = max(8, min(16, 10 + min(n_open, 8)))
             b.kline_batch = 3
-            b.hist_chunk = 4 if n > 200 else 6
+            # The full catalog is complete even when replay is sliced. A
+            # smaller history slice bounds clone+tape memory and avoids
+            # cgroup reclaim stalls on the 2 GiB lane.
+            b.hist_chunk = 2 if n > 200 else 6
             b.extra_n = 2 if n > 80 else 4
             b.lookback = 120 if n > 200 else 180
             b.universe_rows = 60 if n > 200 else 80
