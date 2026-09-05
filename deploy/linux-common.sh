@@ -89,6 +89,13 @@ apply_name() {
 
 env_value() { sed -n "s/^${1}=//p" "$ENV_FILE" 2>/dev/null | tail -1; }
 
+can_bind_port() {
+  # Match the HTTP servers' restart semantics. A stopped listener may leave
+  # accepted connections in TIME_WAIT; that is not another installation.
+  # SO_REUSEADDR does not allow binding over an active listening socket.
+  python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",int(sys.argv[1]))); s.close()' "$1" 2>/dev/null
+}
+
 validate_instance() {
   [[ "$CTS_G_NAME" =~ ^[a-z][a-z0-9-]{1,39}$ ]] || die "invalid install name"
   local saved_desk saved_pulse port unit
@@ -104,7 +111,7 @@ validate_instance() {
   PULSE_PORT=$((10#$PULSE_PORT))
   (( DESK_PORT >= 1024 && DESK_PORT <= 65535 && PULSE_PORT >= 1024 && PULSE_PORT <= 65535 && DESK_PORT != PULSE_PORT )) || die "ports must be distinct and between 1024 and 65535"
   for port in "$DESK_PORT" "$PULSE_PORT"; do
-    if ! python3 -c 'import socket,sys; s=socket.socket(); s.bind(("0.0.0.0",int(sys.argv[1]))); s.close()' "$port" 2>/dev/null; then
+    if ! can_bind_port "$port"; then
       unit="$(desk_unit)"
       [[ "$port" == "$PULSE_PORT" ]] && unit="$(pulse_http_unit)"
       if [[ "$port" != "$saved_desk" && "$port" != "$saved_pulse" ]] || ! systemctl is-active --quiet "$unit"; then
