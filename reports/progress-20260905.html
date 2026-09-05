@@ -22,7 +22,8 @@
 <h2>Durchgeführte Tests</h2>
 <p>Die Zeilen sind getrennte Testläufe; überlappende Tests werden nicht zu einer Gesamtsumme addiert.</p>
 <table><tr><th>Prüfung</th><th>Ergebnis</th><th>Reproduktion</th></tr>
-<tr><td>Breite Offline-Engine-Suite, Block-Integration</td><td>282/282 bestanden</td><td><code>python3 scripts/engine-test.py</code></td></tr>
+<tr><td>Breite Offline-Engine-Suite, Block-Integration und VST-Scheduling</td><td>283/283 bestanden (Folgetest nach PR 34)</td><td><code>python3 scripts/engine-test.py</code></td></tr>
+<tr><td>VST-Cooldown / Scheduler / read-only Probe</td><td>11/11 bestanden; 18 Datumsformat-/Zeitfensterfälle innerhalb eines Tests</td><td><code>python3 scripts/test_vst_scheduling.py</code></td></tr>
 <tr><td>Gezielte Kontroll-, Order-, Gruppen- und DD-Tests nach Wiederanlauf-Fix</td><td>143/143 bestanden</td><td>Testfunktionen in engine-test.py</td></tr>
 <tr><td>Block-Vertrag / Wiederanlauf</td><td>11/11; darin 768 Formel-Kombinationen</td><td><code>python3 scripts/test_block_contract.py</code></td></tr>
 <tr><td>Installation / Namespace / Import / Mainnet-Schutz</td><td>8/8 bestanden</td><td><code>python3 scripts/release-contract-test.py</code></td></tr>
@@ -30,8 +31,8 @@
 <tr><td>TypeScript in isolierter Serverkopie</td><td>Bestanden</td><td><code>npm run typecheck</code></td></tr>
 <tr><td>Frontend-JavaScript</td><td>191 bestanden; 4 übersprungen: optionale .grok-Skill-Dateien fehlen</td><td><code>npm test</code></td></tr>
 <tr><td>Frontend-TypeScript-Tests</td><td>34/34 bestanden</td><td><code>npm test</code>, Node 22+</td></tr>
-<tr><td>Server-Dashboard (separate CTS-K-N-Arbeitskopie)</td><td>16/16 bestanden, inklusive HTTP-Aktionsablauf</td><td><code>node --test ops/server-access-dashboard/server/*.test.mjs</code></td></tr></table>
-<h2>Remote X02: beobachtet, noch nicht akzeptiert</h2>
+<tr><td>Server-Dashboard (separate CTS-K-N-Arbeitskopie)</td><td>17/17 bestanden, inklusive HTTP-Aktionsablauf</td><td><code>node --test ops/server-access-dashboard/server/*.test.mjs</code></td></tr></table>
+<h2>Remote X02: Ausgangsmessung vor PR 34</h2>
 <table><tr><th>Messung</th><th>Beobachtung</th><th>Einordnung</th></tr>
 <tr><td>Dienste</td><td>Desk, Pulse-HTTP, X02 aktiv; X01 maskiert</td><td>Ein aktiver Dienst allein bestätigt keine gesunde Verarbeitung.</td></tr>
 <tr><td>Snapshot-Alter</td><td>3744,8 Sekunden; stale=true</td><td>Keine aktuelle Exchange-Wahrheit.</td></tr>
@@ -39,6 +40,16 @@
 <tr><td>Abschlusszeilen</td><td>40, davon 0 Exchange-bestätigt</td><td>Kein belastbarer PF8/PF25/PF75; keine erfolgreiche Live-Konfiguration ableiten.</td></tr>
 <tr><td>Prozess-Speicher</td><td>2445787136 Bytes, nahe MemoryHigh</td><td>Last-/Speicherprüfung bleibt erforderlich.</td></tr>
 <tr><td>Logs</td><td>Kontrollorders für nicht vorhandene Positionen; Rate-Limits/Cooling</td><td>Wiederanlauf-Fix implementiert und offline getestet; Remote-Abnahme steht aus.</td></tr></table>
+<h2>Fortsetzung nach Installation von PR 34</h2>
+<p><a href="https://github.com/mxssnx-creator/CTS-G/pull/34">PR 34</a> wurde gemergt. Stand <code>cc106052a7c8</code> wurde im ursprünglichen Verzeichnis neu installiert und am 05.09.2026 um 08:59 UTC gestartet. Geschützte Code-, Zustands- und Konfigurationssicherungen wurden geprüft; Credentials blieben byte-identisch, X01 blieb maskiert.</p>
+<ul><li>Die Start-Abstimmung entfernte den veralteten internen Bestand. Erste neue Messung: intern 0 / Exchange 0; anschließend protokollierte VST-Öffnungen, jedoch weiterhin keine Exchange-bestätigten Abschlusszeilen im gelesenen Snapshot.</li>
+<li>Ein Entry-Durchlauf dauerte 449429,1 ms. Deshalb ergänzt dieser Folgestand eine fortsetzbare Kandidaten-Zeitscheibe mit Cursor: keine übersprungenen Kandidaten aufgrund der Zeitscheibe, kein tägliches Trade-Limit. Laufende Einzelrequests können weiter länger dauern.</li>
+<li>BingX meldete temporäre Endpunktsperren nach vielen Anfragen für nicht existente Positionen. Das Parsing von „unblocked after …“ berücksichtigte das Leerzeichen nicht. Dieser Folgestand respektiert beide beobachteten Datumsformate und die vollständige Sperrfrist, auch über 15 Minuten. Token-Wartezeiten prüfen neu eingegangene Sperren erneut.</li>
+<li>Die zweite leere Positionsabfrage erfolgt jetzt bereits im Boot-Ablauf vor dessen Kontrollreparaturen; nicht erst im ersten regulären Zyklus. Berechnungen und private Positionsabfragen werden durch die Entry-Sperre nicht global deaktiviert.</li>
+<li>Live-Dashboard im Browser sichtbar; einzig vorhandener Button im produktiven Stand: „Pause refresh“. Privilegierte Aktionsbuttons sind dort noch nicht ausgerollt. Der externe Desk-Aufruf auf 3102 endet wegen HTTP/TLS-Zuordnung in 502; der interne HTTP-Test liefert 200.</li>
+<li>Host-RAM nahezu ausgeschöpft (zuletzt rund 169 MiB verfügbar). Gemeinsamer Redis und CTS-K-N wurden nicht verändert. X02 meldete im beobachteten Intervall 0 Neustarts. Dies ist keine dauerhafte Stabilitätsfreigabe.</li>
+<li>CTS-G-Log-Tail auf 1000 Zeilen verifiziert. Ältere Inhalte sind in der geschützten Vorinstallationssicherung wiederherstellbar.</li></ul>
+<p class="note">Dieser Bericht dokumentiert die Messungen vor der Remote-Abnahme des Cooldown-Folgestands. Aktive Dienste und akzeptierte Öffnungen ersetzen keinen vollständigen Exchange-Abgleich, keine bestätigten Abschlüsse und keine qualifizierte Konfiguration.</p>
 <h2>Offene Abnahme</h2>
 <ul><li>Neue 20h-Kalkulation sowie 14-/20-Tage-DCA-Auswertung für XRP/BCH/SOL sind in diesem Prüfstand nicht ausgeführt. Der bestehende interaktive Replay-Vertrag endet bei 72h; längere Zeiträume dürfen nicht stillschweigend als vollständig dargestellt werden.</li>
 <li>Keine durchschnittlichen Gewinner als neue Live-Defaults gespeichert: hierfür fehlen qualifizierte aktuelle VST-Ergebnisse.</li>
