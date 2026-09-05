@@ -34,8 +34,8 @@ CPUWeight=200
 # and watchdog resets while still bounding each connection lane. Swap is
 # disabled for this lane so reclaim cannot turn a bounded replay into a silent
 # multi-minute D-state stall.
-MemoryHigh=1792M
-MemoryMax=2048M
+MemoryHigh=2304M
+MemoryMax=3072M
 MemorySwapMax=0
 TasksMax=128
 LimitNOFILE=4096
