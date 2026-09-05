@@ -9,12 +9,14 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 BLOCK_COUNT_MIN = 1
-BLOCK_COUNT_PREVIEW = 12
-BLOCK_EVAL_N = 12
-BLOCK_STACK_DEFAULT = 3
+BLOCK_COUNT_PREVIEW = 6
+BLOCK_EVAL_N = 6
+BLOCK_STACK_DEFAULT = 6
 BLOCK_STACK_MAX = 6
-BLOCK_VOL_RATIO_MIN = 0.25
-BLOCK_VOL_RATIO_MAX = 3.0
+BLOCK_VOL_RATIO_MIN = 0.05
+BLOCK_VOL_RATIO_MAX = 2.0
+BLOCK_VOL_RATIO_DEFAULT = 0.25
+BLOCK_MAX_VOLUME_MULTIPLIER = 2.0
 # Base-1 PF coordination (position_cost): 1.00=neutral, 0.10=1×PositionCost.
 # Floor moved 0.2 -> 0.5 in the same +0.3 relation as the 0.8 -> 1.1 default.
 BLOCK_PF_RATIO_MIN = 0.5
@@ -53,22 +55,32 @@ def clamp_stack(n: Any) -> int:
 
 
 def calculate_block_volume_increment_ratio(block_count: int, volume_ratio: float) -> float:
+    block_count = finite_number(block_count)
+    volume_ratio = finite_number(volume_ratio)
     if block_count <= 0 or volume_ratio <= 0:
         return 0.0
     return int(block_count) * volume_ratio
 
 
 def calculate_block_volume_multiplier(block_count: int, volume_ratio: float) -> float:
-    if block_count <= 0 or volume_ratio <= 0:
-        return 0.0
-    return 1 + int(block_count) * volume_ratio
+    """Base-1 arithmetic: an inactive increment leaves the original quantity."""
+    return 1.0 + calculate_block_volume_increment_ratio(block_count, volume_ratio)
 
 
-def calculate_block_max_additional_ratio(max_stack: int, volume_ratio: float) -> float:
-    """Sequential remainder: max additional = stack × volume_ratio, not 1+2+…+N."""
-    n = max(0, int(max_stack or 0))
-    vr = max(0.0, float(volume_ratio or 0))
-    return n * vr
+def calculate_block_max_additional_ratio(
+    max_stack: int, volume_ratio: float, max_multiplier: float = BLOCK_MAX_VOLUME_MULTIPLIER
+) -> float:
+    """Bound the additive target, never sum targets or compound earlier fills."""
+    cap = clamp(finite_number(max_multiplier, BLOCK_MAX_VOLUME_MULTIPLIER), 1.0, BLOCK_MAX_VOLUME_MULTIPLIER)
+    return min(cap - 1.0, calculate_block_volume_increment_ratio(max_stack, volume_ratio))
+
+
+def normalize_block_counts(value: Any) -> List[int]:
+    if not isinstance(value, (list, tuple)):
+        return list(range(1, BLOCK_EVAL_N + 1))
+    return sorted({int(n) for n in value if not isinstance(n, bool)
+                   and isinstance(n, (int, float)) and finite_number(n) == n
+                   and int(n) == n and 1 <= n <= BLOCK_EVAL_N})
 
 
 def calculate_block_minimum_profit_factor(
@@ -134,10 +146,12 @@ class BlockBook:
             stack_n = int(raw_stack if raw_stack is not None else 0)
         except Exception:
             stack_n = 0
-        # Live adds: 1..6 (default 3). Evals always walk 1..12 independently.
+        # Six independent decisions share one bounded physical parent position.
         self.max_stack = clamp_stack(raw_stack)
         self.eval_n = BLOCK_EVAL_N
-        self.volume_ratio = clamp(finite_number(cfg.get("blockVolumeRatio", 1) or 1, 1.0), 0.25, 3.0)
+        self.volume_ratio = clamp(finite_number(cfg.get("blockVolumeRatio"), BLOCK_VOL_RATIO_DEFAULT), BLOCK_VOL_RATIO_MIN, BLOCK_VOL_RATIO_MAX)
+        self.max_volume_multiplier = clamp(finite_number(cfg.get("blockMaxVolumeMultiplier"), BLOCK_MAX_VOLUME_MULTIPLIER), 1.0, BLOCK_MAX_VOLUME_MULTIPLIER)
+        self.counts = normalize_block_counts(cfg.get("blockCounts"))
         self.pf_ratio = clamp(finite_number(cfg.get("blockProfitFactorRatio", 1.1) or 1.1, 1.1), BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
         self.pause_ratio = max(0, int(finite_number(cfg.get("blockPauseCountRatio", 1) or 1, 1.0)))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
@@ -215,6 +229,8 @@ class BlockBook:
                 "variantBlockEnabled": self.enabled,
                 "blockMaxStack": self.max_stack,
                 "blockVolumeRatio": self.volume_ratio,
+                "blockMaxVolumeMultiplier": self.max_volume_multiplier,
+                "blockCounts": self.counts,
                 "blockProfitFactorRatio": self.pf_ratio,
                 "blockPauseCountRatio": self.pause_ratio,
                 "blockActiveRealEnabled": self.active_real,
@@ -301,20 +317,16 @@ class BlockBook:
     def last_n_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
         """Independent last-`count` average for this block count only."""
         n = max(1, int(count))
-        samples: List[float] = []
-        if lane is not None:
-            samples.extend(list(lane.pf_ring.get(n) or []))
-        samples.extend(list((self.count_tape or {}).get(n) or []))
+        # Global tape already includes lane samples. Combining them both double
+        # counted outcomes and allowed another symbol's results to reset a lane.
+        samples = list(lane.pf_ring.get(n) or []) if lane is not None else list(self.count_tape.get(n) or [])
         samples = samples[-n:]
         if not samples:
             return 0.0, 0
         return (sum(samples) / len(samples)), len(samples)
 
     def overall_avg(self, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
-        samples: List[float] = []
-        if lane is not None:
-            samples.extend(list(lane.parent_pf_ring or []))
-        samples.extend(list(self.overall_tape or []))
+        samples = list(lane.parent_pf_ring or []) if lane is not None else list(self.overall_tape or [])
         samples = samples[-self.window :]
         if not samples:
             return 0.0, 0
@@ -323,10 +335,9 @@ class BlockBook:
     def vol_factor(self, count: int, lane: Optional[BlockLane] = None) -> float:
         """Increment factor vs original base. Independent per count.
 
-        Healthy / cold → 1.0 (sequential remainder unit = 1 × vr × base).
-        Last-`count` average not positive → keep the last increased factor
-        (the coming number of pos = this count) until overall position
-        average is positive again. Never compounded off the last add.
+        This is per-count recovery state, not another sizing multiplier. The
+        count is already included in the absolute target. Only this count's
+        positive result releases its held state, never overall or other lanes.
         """
         n = max(1, int(count))
         increased = float(n)
@@ -337,10 +348,7 @@ class BlockBook:
             except Exception:
                 held = 1.0
         avg, n_avg = self.last_n_avg(n, lane)
-        overall, n_ov = self.overall_avg(lane)
-        last_n_neg = n_avg >= n and avg < 0
-        overall_pos = n_ov >= max(1, min(self.min_samples, n)) and overall >= 0.0
-        if last_n_neg and not overall_pos:
+        if held > 1.0 or (n_avg >= n and avg <= 0):
             return max(held, increased)
         return 1.0
 
@@ -352,18 +360,17 @@ class BlockBook:
         return self.last_n_avg(count, lane)
 
     def step_qty(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> float:
-        """This count's add vs original base: base × vr × factor. Not compounded."""
+        """Marginal portion between absolute targets; held state adds no portion."""
         n = max(1, int(count))
         factor = self.vol_factor(n, lane)
         if lane is not None:
             lane.held_factor[n] = float(factor)
-        return max(0.0, float(base_qty) * float(self.volume_ratio) * factor)
+        return max(0.0, self.cumulative_target(base_qty, n) - self.cumulative_target(base_qty, n - 1))
 
     def cumulative_target(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> float:
-        total = 0.0
-        for n in range(1, max(1, int(count)) + 1):
-            total += self.step_qty(base_qty, n, lane)
-        return total
+        return max(0.0, finite_number(base_qty)) * calculate_block_max_additional_ratio(
+            count, self.volume_ratio, self.max_volume_multiplier
+        )
 
     def formula(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> Dict[str, float]:
         n = max(1, int(count))
@@ -436,21 +443,23 @@ class BlockBook:
     def unlimited(self) -> bool:
         return False
 
-    def _count_range(self, lane: Optional[BlockLane] = None) -> range:
-        """Live emit range: 1..maxStack (1–6, default 3)."""
-        return range(1, int(self.max_stack) + 1)
+    def _count_range(self, lane: Optional[BlockLane] = None) -> List[int]:
+        """Enabled counts; each count has its own PF and pause state."""
+        return [n for n in self.counts if n <= self.max_stack]
 
     def _eval_range(self) -> range:
-        """Independent evals: every count 1..12, regardless of live stack."""
+        """Always show six independent evaluations, including disabled counts."""
         return range(1, int(self.eval_n or BLOCK_EVAL_N) + 1)
 
     def next_unsatisfied(self, lane: BlockLane, stack_cap: Optional[int] = None) -> Optional[int]:
-        """Next sequential count (1..maxStack). Never skip a failed/paused rung."""
+        """Smallest uncovered target (eligibility is checked independently)."""
         if not lane or lane.base_qty <= 0:
             return None
         cap = int(stack_cap) if stack_cap is not None else int(self.max_stack)
         cap = max(1, min(int(self.max_stack), cap))
         for n in range(1, cap + 1):
+            if n not in self.counts:
+                continue
             f = self.formula(lane.base_qty, n, lane)
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
             if not sat:
@@ -476,7 +485,7 @@ class BlockBook:
         self.save()
 
     def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0, stack_cap: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Evaluate every 1..12 independently. Emit qty only for the next live stack rung."""
+        """Evaluate all six independently; order selection remains serialized."""
         rows = []
         if not self.enabled or not lane.active or lane.base_qty <= 0:
             return rows
@@ -490,9 +499,9 @@ class BlockBook:
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
             pf = self.pf_decision(lane, n, intern_pf=intern_pf)
             avg, n_avg = self.count_avg(n, lane)
-            live_ok = n <= live_stack
+            live_ok = n <= live_stack and n in self.counts
             requested = 0.0
-            if live_ok and nxt == n and not sat and not paused and pf["passesProfitFactor"]:
+            if live_ok and not sat and not paused and pf["passesProfitFactor"]:
                 requested = max(0.0, f["targetAddQty"] - lane.confirmed_add)
             rows.append({
                 "setKey": f"{lane.symbol}:{lane.side.lower()}#block:{n}",
@@ -537,13 +546,14 @@ class BlockBook:
         return rows
 
     def pick_emit(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Emit only the next sequential unsatisfied count.
+        """Choose one eligible target; a paused/failed count cannot gate others.
 
-        Physical book is one non-compounding remainder. Never skip a failed
-        rung, never let active-live jump to a larger count.
+        Active-live is a view of the same target, never an extra order portion.
         """
         regular = [r for r in rows if r.get("kind") == "regular"]
-        unsat = [r for r in regular if not r.get("targetSatisfied")]
+        unsat = [r for r in regular if not r.get("targetSatisfied")
+                 and r.get("liveStack") and not r.get("paused")
+                 and r.get("passesProfitFactor") and finite_number(r.get("requestedAddQty")) > 0]
         if not unsat:
             return None
         nxt = min(unsat, key=lambda r: int(r.get("blockCount") or 99))
@@ -619,10 +629,12 @@ class BlockBook:
             lane.pf_ring[n] = lane.pf_ring[n][-self.window :]
             self.count_tape.setdefault(n, []).append(sample)
             self.count_tape[n] = self.count_tape[n][-self.window :]
-            lane.pause_remaining[n] = self.pause_ratio
-            lane.pause_until[n] = time.time() + 45 * max(1, self.pause_ratio)
-            # Refresh held factor from this count's last-N vs overall.
-            lane.held_factor[n] = self.vol_factor(n, lane)
+            if sample > 0:
+                lane.pause_remaining[n] = self.pause_ratio
+                lane.pause_until[n] = time.time() + 45 * self.pause_ratio
+                lane.held_factor[n] = 1.0
+            else:
+                lane.held_factor[n] = max(float(n), lane.held_factor.get(n, 1.0))
         lane.active = False
         lane.confirmed_add = 0.0
         lane.legs = []
@@ -683,7 +695,7 @@ class BlockBook:
                 "targetAdd": round(f["targetAddQty"], 8),
                 "targetBlock": round(f["targetBlockQty"], 8),
                 "minPF": round(f["blockMinPF"], 4),
-                "liveStack": n <= int(self.max_stack),
+                "liveStack": n <= int(self.max_stack) and n in self.counts,
                 "independent": True,
             })
         return {
@@ -693,6 +705,8 @@ class BlockBook:
             "countN": len(catalog),
             "allCounts": catalog,
             "volumeRatio": self.volume_ratio,
+            "maxVolumeMultiplier": self.max_volume_multiplier,
+            "enabledCounts": self.counts,
             "profitFactorRatio": self.pf_ratio,
             "pauseCountRatio": self.pause_ratio,
             "activeLive": self.active_live,
@@ -714,8 +728,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-inc-n3", calculate_block_volume_increment_ratio(3, 1.0) == 3.0)
     rec("blk-inc-vr15", abs(calculate_block_volume_increment_ratio(2, 1.5) - 3.0) < 1e-9)
     rec("blk-mult-n3", calculate_block_volume_multiplier(3, 1.0) == 4.0)
-    rec("blk-max-add-sequential", calculate_block_max_additional_ratio(3, 1.0) == 3.0, "not 1+2+3=6")
-    rec("blk-max-add-vr", abs(calculate_block_max_additional_ratio(3, 1.5) - 4.5) < 1e-9)
+    rec("blk-max-add-sequential", calculate_block_max_additional_ratio(3, 1.0) == 1.0, "not 1+2+3=6")
+    rec("blk-max-add-vr", abs(calculate_block_max_additional_ratio(3, 1.5) - 1.0) < 1e-9)
     rec("blk-pf-n1", abs(calculate_block_minimum_profit_factor(1.1, 1.1, 1.0) - 1.11) < 1e-9,
         str(calculate_block_minimum_profit_factor(1.1, 1.1, 1.0)))
     rec("blk-pf-n3", abs(calculate_block_minimum_profit_factor(1.1, 1.1, 3.0) - 1.33) < 1e-9,
@@ -726,11 +740,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-parse-none", parse_block_count("general:1m:sl0.6") is None)
 
     b = BlockBook(os.path.join(tmp, "main.json"), {
-        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0,
+        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 0.25,
         "blockProfitFactorRatio": 1.1, "defaultMinPF": 1.1,
         "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True,
     })
-    rec("blk-zero-remap", BlockBook(os.path.join(tmp, "z.json"), {"blockMaxStack": 0}).max_stack == 3)
+    rec("blk-zero-remap", BlockBook(os.path.join(tmp, "z.json"), {"blockMaxStack": 0}).max_stack == 6)
     rec("blk-not-unlimited", not b.unlimited())
 
     long = b.register_parent("SOL-USDT", "LONG", 10.0, 100.0)
@@ -740,33 +754,33 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
     pick = b.pick_emit(b.evaluate_counts(long, live_n=3, intern_pf=1.5))
     rec("blk-no-jump-liven3", pick is not None and pick["blockCount"] == 1
-        and abs(pick["requestedAddQty"] - 10.0) < 1e-9,
+        and abs(pick["requestedAddQty"] - 2.5) < 1e-9,
         f"n={pick and pick.get('blockCount')} qty={pick and pick.get('requestedAddQty')}")
     rec("blk-next-unsat-1", b.next_unsatisfied(long) == 1)
 
     rows = b.evaluate_counts(long, live_n=3, intern_pf=1.5)
     act = [r for r in rows if r["kind"] == "active-live"]
     rec("blk-active-clipped", len(act) == 1 and act[0]["blockCount"] == 1
-        and abs(act[0]["requestedAddQty"] - 10.0) < 1e-9,
+        and abs(act[0]["requestedAddQty"] - 2.5) < 1e-9,
         f"act={act[0] if act else None}")
 
     # remainder: fill n=1 then next is n=2 requesting 1× parent
-    b.record_fill(long, pick, 10.0, "c1", "o1")
-    rec("blk-n1-satisfied", bool(long.satisfied.get(1)) and abs(long.confirmed_add - 10.0) < 1e-9)
+    b.record_fill(long, pick, 2.5, "c1", "o1")
+    rec("blk-n1-satisfied", bool(long.satisfied.get(1)) and abs(long.confirmed_add - 2.5) < 1e-9)
     pick2 = b.pick_emit(b.evaluate_counts(long, live_n=1, intern_pf=1.5))
     rec("blk-n2-remainder-1x", pick2 is not None and pick2["blockCount"] == 2
-        and abs(pick2["requestedAddQty"] - 10.0) < 1e-9,
+        and abs(pick2["requestedAddQty"] - 2.5) < 1e-9,
         f"n={pick2 and pick2.get('blockCount')} qty={pick2 and pick2.get('requestedAddQty')}")
-    b.record_fill(long, pick2, 10.0, "c2", "o2")
+    b.record_fill(long, pick2, 2.5, "c2", "o2")
     rec("blk-n1-stays-sat-after-n2", bool(long.satisfied.get(1)) and bool(long.satisfied.get(2)))
     pick3 = b.pick_emit(b.evaluate_counts(long, live_n=1, intern_pf=1.5))
     rec("blk-n3-remainder-1x", pick3 is not None and pick3["blockCount"] == 3
-        and abs(pick3["requestedAddQty"] - 10.0) < 1e-9,
+        and abs(pick3["requestedAddQty"] - 2.5) < 1e-9,
         f"n={pick3 and pick3.get('blockCount')} qty={pick3 and pick3.get('requestedAddQty')}")
-    rec("blk-agg-before-n3", abs(long.base_qty + long.confirmed_add - 30.0) < 1e-9, str(long.base_qty + long.confirmed_add))
-    b.record_fill(long, pick3, 10.0, "c3", "o3")
+    rec("blk-agg-before-n3", abs(long.base_qty + long.confirmed_add - 15.0) < 1e-9, str(long.base_qty + long.confirmed_add))
+    b.record_fill(long, pick3, 2.5, "c3", "o3")
     rec("blk-stack-full", b.next_unsatisfied(long) is None and b.pick_emit(b.evaluate_counts(long, live_n=1, intern_pf=1.5)) is None)
-    rec("blk-agg-4x", abs(long.base_qty + long.confirmed_add - 40.0) < 1e-9, str(long.base_qty + long.confirmed_add))
+    rec("blk-agg-4x", abs(long.base_qty + long.confirmed_add - 17.5) < 1e-9, str(long.base_qty + long.confirmed_add))
     rec("blk-remainder-qty", abs(b.remainder_qty(long, 3) - 0.0) < 1e-9)
     dust = BlockLane(symbol="DUST-USDT", side="LONG", base_qty=10.0, base_entry=1.0, confirmed_add=9.99)
     b.mark_nearly_filled(dust, 1)
@@ -775,24 +789,24 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # SHORT lane is untouched by LONG fills
     rec("blk-short-untouched", short.confirmed_add == 0.0 and b.next_unsatisfied(short) == 1)
     sp = b.pick_emit(b.evaluate_counts(short, live_n=1, intern_pf=1.5))
-    rec("blk-short-n1-own-base", sp is not None and abs(sp["requestedAddQty"] - 8.0) < 1e-9,
+    rec("blk-short-n1-own-base", sp is not None and abs(sp["requestedAddQty"] - 2.0) < 1e-9,
         f"qty={sp and sp.get('requestedAddQty')}")
 
     # intern too low for n=2 must NOT skip to n=3
-    lane2 = BlockLane(symbol="AAA-USDT", side="LONG", base_qty=10.0, base_entry=100.0, confirmed_add=10.0, satisfied={1: True})
+    lane2 = BlockLane(symbol="AAA-USDT", side="LONG", base_qty=10.0, base_entry=100.0, confirmed_add=2.5, satisfied={1: True})
     # n=2 gate = 1.22, intern 1.15 fails; n=3 gate 1.33 also fails
-    rec("blk-no-skip-failed-rung", b.pick_emit(b.evaluate_counts(lane2, live_n=1, intern_pf=1.15)) is None)
+    rec("blk-no-skip-failed-rung", b.pick_emit(b.evaluate_counts(lane2, live_n=1, intern_pf=1.015)) is None)
 
     # pause blocks the next count only
     lane3 = BlockLane(symbol="BBB-USDT", side="SHORT", base_qty=5.0, base_entry=50.0)
     b.pause_count(lane3, 1, 600)
-    rec("blk-pause-blocks", b.pick_emit(b.evaluate_counts(lane3, live_n=1, intern_pf=1.5)) is None)
+    rec("blk-pause-blocks", b.pick_emit(b.evaluate_counts(lane3, live_n=1, intern_pf=1.5))["blockCount"] == 2)
 
     rec("blk-disabled", BlockBook(os.path.join(tmp, "off.json"), {"variantBlockEnabled": False}).evaluate_counts(long, 1, 1.5) == [])
     rec("blk-no-base", b.evaluate_counts(BlockLane("X", "LONG", 0.0, 1.0), 1, 1.5) == [])
 
     # cost-net PF: losing ring (net frac) blocks, winning ring passes
-    lane4 = BlockLane(symbol="PF-USDT", side="LONG", base_qty=1.0, base_entry=100.0, confirmed_add=1.0, satisfied={1: True})
+    lane4 = BlockLane(symbol="PF-USDT", side="LONG", base_qty=1.0, base_entry=100.0, confirmed_add=0.25, satisfied={1: True})
     lane4.pf_ring[2] = [-0.0045] * 8  # 8 losing samples, warm
     lane4.parent_pf_ring = [-0.0045] * 8
     d_loss = b.pf_decision(lane4, 2, intern_pf=1.5)
@@ -811,7 +825,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     held_lane.parent_pf_ring = [-0.01] * 8
     held_lane.held_factor[2] = 2.0
     held_decision = b.pf_decision(held_lane, 2, intern_pf=1.5)
-    rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - 1.33) < 1e-9,
+    rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - 1.055) < 1e-9,
         str(held_decision))
 
     # parent close isolates sides + stores cost-net fraction
@@ -823,24 +837,25 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
     rec("blk-freeze-parent", b.register_parent("SOL-USDT", "SHORT", 99.0, 1.0).base_qty == 8.0)
 
-    rec("blk-eval-12", len([r for r in b.evaluate_counts(short, 1, 1.5) if r["kind"] == "regular"]) == 12)
+    rec("blk-eval-6", len([r for r in b.evaluate_counts(short, 1, 1.5) if r["kind"] == "regular"]) == 6)
     rec("blk-live-stack-3", all((r["requestedAddQty"] == 0 or r["blockCount"] <= 3) for r in b.evaluate_counts(short, 1, 1.5) if r["kind"] == "regular"))
-    rec("blk-clamp-6", clamp_stack(9) == 6 and clamp_stack(0) == 3 and clamp_stack(1) == 1)
+    rec("blk-clamp-6", clamp_stack(9) == 6 and clamp_stack(0) == 6 and clamp_stack(1) == 1)
     rec("blk-clamp-book", BlockBook(os.path.join(tmp, "c6.json"), {"blockMaxStack": 12}).max_stack == 6)
     snap = b.snapshot()
-    rec("blk-snap-12", int(snap.get("countN") or 0) == 12 and int(snap.get("evalN") or 0) == 12, str(snap.get("countN")))
+    rec("blk-snap-6", int(snap.get("countN") or 0) == 6 and int(snap.get("evalN") or 0) == 6, str(snap.get("countN")))
     rec("blk-snap-live-flag", sum(1 for c in snap.get("allCounts") or [] if c.get("liveStack")) == 3)
 
     scale_lane = BlockLane(symbol="SC-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     scale_lane.pf_ring[1] = [-0.01] * 1
     b.count_tape[1] = [-0.01] * 1
     rec("blk-hold-n1-keep", abs(b.vol_factor(1, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(1, scale_lane)))
-    rec("blk-no-shrink", abs(b.step_qty(10.0, 1, scale_lane) - 10.0) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
+    rec("blk-no-shrink", abs(b.step_qty(10.0, 1, scale_lane) - 2.5) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
     scale_lane.pf_ring[3] = [-0.01] * 3
     b.count_tape[3] = [-0.01] * 3
     rec("blk-hold-n3-increased", abs(b.vol_factor(3, scale_lane) - 3.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
-    rec("blk-hold-n3-vs-base", abs(b.step_qty(10.0, 3, scale_lane) - 30.0) < 1e-9, str(b.step_qty(10.0, 3, scale_lane)))
+    rec("blk-hold-n3-vs-base", abs(b.step_qty(10.0, 3, scale_lane) - 2.5) < 1e-9, str(b.step_qty(10.0, 3, scale_lane)))
     rec("blk-n2-indep-scale", abs(b.vol_factor(2, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(2, scale_lane)))
+    scale_lane.held_factor[3] = 1.0  # a positive settlement clears only this count
     scale_lane.pf_ring[3] = [0.004] * 3
     b.count_tape[3] = [0.004] * 3
     scale_lane.parent_pf_ring = [-0.01] * 8
@@ -851,14 +866,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-hold-until-overall", abs(b.vol_factor(3, scale_lane) - 3.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
     scale_lane.parent_pf_ring = [0.004] * 8
     b.overall_tape = [0.004] * 8
-    rec("blk-release-overall-pos", abs(b.vol_factor(3, scale_lane) - 1.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
-    rec("blk-step-restore-base", abs(b.step_qty(10.0, 1, scale_lane) - 10.0) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
+    rec("blk-other-results-cannot-release", abs(b.vol_factor(3, scale_lane) - 3.0) < 1e-9, str(b.vol_factor(3, scale_lane)))
+    rec("blk-step-restore-base", abs(b.step_qty(10.0, 1, scale_lane) - 2.5) < 1e-9, str(b.step_qty(10.0, 1, scale_lane)))
     # Cont/count-pos stack cap: live emit only 1..cap, evals still 1..12
     cap_lane = BlockLane("CAP-USDT", "LONG", 10.0, 100.0)
     cap_rows = b.evaluate_counts(cap_lane, live_n=1, intern_pf=2.0, stack_cap=1)
     live_req = [r for r in cap_rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0]
     rec("blk-stack-cap-1", all(int(r["blockCount"]) == 1 for r in live_req) and len(live_req) >= 1, str([(r["blockCount"], r.get("requestedAddQty")) for r in live_req]))
-    rec("blk-stack-cap-evals-12", sum(1 for r in cap_rows if r.get("kind") == "regular") == 12, str(sum(1 for r in cap_rows if r.get("kind") == "regular")))
+    rec("blk-stack-cap-evals-6", sum(1 for r in cap_rows if r.get("kind") == "regular") == 6, str(sum(1 for r in cap_rows if r.get("kind") == "regular")))
     return out
 
 
@@ -870,4 +885,3 @@ if __name__ == "__main__":
         bad += int(not ok)
     print("block_engine", "ok" if not bad else f"fail={bad}")
     raise SystemExit(1 if bad else 0)
-

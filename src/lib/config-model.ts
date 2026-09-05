@@ -170,6 +170,8 @@ export type PulseOverlay = {
   blockEnabled: boolean;
   blockMaxStack: number;
   blockVolumeRatio: number;
+  blockMaxVolumeMultiplier: number;
+  blockCounts: number[];
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
   blockActiveLive: boolean;
@@ -330,8 +332,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   controlOrders: true,
   controlOrdersPerConfig: true,
   blockEnabled: true,
-  blockMaxStack: 3,
-  blockVolumeRatio: 1,
+  blockMaxStack: 6,
+  blockVolumeRatio: 0.25,
+  blockMaxVolumeMultiplier: 2,
+  blockCounts: [1, 2, 3, 4, 5, 6],
   blockProfitFactorRatio: 1.25,
   blockPauseCountRatio: 1,
   blockActiveLive: true,
@@ -501,6 +505,8 @@ export type CtsSettings = {
   variant_block?: boolean;
   blockMaxStack?: number;
   blockVolumeRatio?: number;
+  blockMaxVolumeMultiplier?: number;
+  blockCounts?: number[];
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
   blockActiveLiveEnabled?: boolean;
@@ -682,8 +688,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       true,
     ),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
-    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 3),
-    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 1),
+    blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
+    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 0.25),
+    blockMaxVolumeMultiplier: num(cts.blockMaxVolumeMultiplier ?? coord.blockMaxVolumeMultiplier, 2),
+    blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
@@ -853,11 +861,13 @@ function nestedAxis(coord: Record<string, unknown>, axis: string, field: string)
   return axes?.[axis]?.[field];
 }
 
-export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1, stack = 0) {
+export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number, baseQty = 1, stack = 0, maxMultiplier = 2) {
   const rows = [];
-  const nMax = stack > 0 ? Math.min(stack, 24) : 12;
+  const nMax = stack > 0 ? Math.min(stack, 6) : 6;
+  const cap = Math.max(1, Math.min(2, num(maxMultiplier, 2)));
+  const volumeRatio = Math.max(0.05, Math.min(2, num(ratio, 0.25)));
   for (let n = 1; n <= nMax; n += 1) {
-    const inc = n * ratio;
+    const inc = Math.min(cap - 1, n * volumeRatio);
     rows.push({
       n,
       inc,
@@ -910,6 +920,12 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
     symbols: capSymbols(overlay.symbols || []),
+    blockMaxStack: Math.max(1, Math.min(6, Math.trunc(num(overlay.blockMaxStack, 6)) || 6)),
+    blockVolumeRatio: Math.max(0.05, Math.min(2, num(overlay.blockVolumeRatio, 0.25))),
+    blockMaxVolumeMultiplier: Math.max(1, Math.min(2, num(overlay.blockMaxVolumeMultiplier, 2))),
+    blockCounts: Array.isArray(overlay.blockCounts)
+      ? [...new Set(overlay.blockCounts.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6))].sort((a, b) => a - b)
+      : [1, 2, 3, 4, 5, 6],
   };
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];

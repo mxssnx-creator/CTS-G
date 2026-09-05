@@ -26,7 +26,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -919,8 +919,8 @@ class Pulse:
         self._load_open_book()
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
-            "blockMaxStack": 3,
-            "blockVolumeRatio": 1.0,
+            "blockMaxStack": 6,
+            "blockVolumeRatio": 0.25,
             "blockProfitFactorRatio": 1.1,
             "blockPauseCountRatio": 1,
             "blockActiveRealEnabled": True,
@@ -1504,11 +1504,11 @@ class Pulse:
                 dca_extra = 4.0
         stack = int(getattr(self.block, "max_stack", 0) or 0) if block_on else 0
         if block_on and stack <= 0:
-            stack = 3
-        vr = max(0.25, float(getattr(self.block, "volume_ratio", 1.0) or 1.0))
+            stack = 6
+        vr = max(0.05, float(getattr(self.block, "volume_ratio", 0.25) or 0.25))
         block_extra = 0.0
         if stack > 0:
-            block_extra = calculate_block_max_additional_ratio(stack, vr)
+            block_extra = calculate_block_max_additional_ratio(stack, vr, getattr(self.block, "max_volume_multiplier", 2.0))
         extra = min(12.0, max(dca_extra, block_extra))
         hard = base * (1.0 + extra)
         room = self.avail_notional()
@@ -3318,6 +3318,8 @@ class Pulse:
                 miss += 1
                 continue
             self.ensure_controls(pos)
+            if not any(candidate is pos for candidate in self.open.values()):
+                continue
             if self.missing_controls(pos):
                 miss += 1
                 age = time.time() - float(pos.opened_at or 0)
@@ -3458,6 +3460,12 @@ class Pulse:
 
     def ensure_controls(self, pos: Position) -> None:
         now = time.time()
+        tracked_at_start = any(candidate is pos for candidate in self.open.values())
+
+        def retired() -> bool:
+            # New entries attach protection before joining the local book.
+            # Only a previously tracked position disappearing means retirement.
+            return tracked_at_start and not any(candidate is pos for candidate in self.open.values())
         if now < self.ctrl_skip.get("__order_cap__", 0):
             return
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
@@ -3470,6 +3478,8 @@ class Pulse:
         pos.sec_sl, pos.sec_tp = sec_sl, sec_tp
         if not real_oid(pos.sl_oid) and not real_oid(pos.tp_oid):
             self.place_ctrl_pair(pos)
+            if retired():
+                return
             if real_oid(pos.sl_oid) and real_oid(pos.tp_oid):
                 return
         banned = self.api.path_cd.get("/openApi/swap/v2/trade/openOrders", 0) > time.time()
@@ -3481,6 +3491,8 @@ class Pulse:
         if banned:
             if not real_oid(pos.sl_oid):
                 oid = self.place_ctrl(pos, "sec-sl", want_sl)
+                if retired():
+                    return
                 if oid:
                     pos.sl_oid = pos.sec_sl_oid = oid
                     pos.sl = want_sl
@@ -3586,6 +3598,8 @@ class Pulse:
             return oid or have_oid
 
         pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
+        if retired():
+            return
         if pos.sl_oid:
             pos.sl = want_sl if not pos.sl or not self.sl_legal(pos, pos.sl) else pos.sl
         pos.tp_oid = pos.sec_tp_oid = _place_side(False, pos.tp_oid or pos.sec_tp_oid, pos.tp, want_tp, bool(tps), tps)
@@ -5039,6 +5053,8 @@ class Pulse:
                 if time.time() >= self.ctrl_skip.get(scope, 0):
                     if self.missing_controls(pos):
                         self.ensure_controls(pos)
+                        if not any(candidate is pos for candidate in self.open.values()):
+                            continue
             if pos.side == "LONG":
                 pnl_pct = (px - pos.entry) / pos.entry
                 pos.peak = max(pos.peak, px)
@@ -5819,7 +5835,7 @@ class Pulse:
             b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
         except Exception:
             b_stack = 0
-        b_ratio = finite_number(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1, 1.0)
+        b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
         real_pf = 1.1
@@ -5836,15 +5852,10 @@ class Pulse:
             self.load.configure(ov)
         except Exception:
             pass
-        try:
-            b_ratio = float(b_ratio)
-        except Exception:
-            b_ratio = 1.0
-        # Guard: leftover overlay stored max_stack as volume_ratio (n=1 then
-        # adds 3× parent). Count×ratio vs original parent needs ratio ~1.
-        if b_ratio >= 2.0 and int(round(b_ratio)) == int(self.block.max_stack):
-            b_ratio = 1.0
-        self.block.volume_ratio = max(0.25, min(3.0, b_ratio))
+        self.block.volume_ratio = max(0.05, min(2.0, b_ratio))
+        self.block.max_volume_multiplier = max(1.0, min(2.0, finite_number(
+            ov.get("blockMaxVolumeMultiplier", cts.get("blockMaxVolumeMultiplier")), 2.0)))
+        self.block.counts = normalize_block_counts(ov.get("blockCounts", cts.get("blockCounts")))
         self.block.pf_ratio = max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, b_pfr))
         self.block.pause_ratio = max(0, b_pause)
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
@@ -5994,6 +6005,8 @@ class Pulse:
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
+            "blockMaxVolumeMultiplier": self.block.max_volume_multiplier,
+            "blockCounts": self.block.counts,
             "blockProfitFactorRatio": self.block.pf_ratio,
             "blockPauseCountRatio": self.block.pause_ratio,
             "blockActiveLive": self.block.active_live,
@@ -6356,8 +6369,8 @@ class Pulse:
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, inc), room, leftover * px)
             qty = self.cap_order_qty(c, px, raw, add_cap)
-            qty = min(qty, leftover * 1.02)
-            if qty > leftover * 1.15 or qty < float(c.min_qty or 0) or qty <= 0:
+            qty = min(qty, self.round_qty(c, leftover))
+            if qty > leftover + 1e-12 or qty < float(c.min_qty or 0) or qty <= 0:
                 self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                 continue
             if qty * px < float(c.min_usdt or 0) * 0.98:
@@ -6428,6 +6441,14 @@ class Pulse:
                     need = float(m2.group(1))
                     c.min_qty = max(float(c.min_qty or 0), need)
                     qty = self.round_qty_up(c, need)
+                    # A venue minimum must never enlarge an approved target,
+                    # book cap or available-margin allocation on retry.
+                    if (qty > leftover + 1e-12 or qty * px > add_cap + 1e-9
+                            or (pos.qty + qty) * px > self.max_book_notional() + 1e-9
+                            or qty * px / max(1, self.leverage_for(c)) > self.available * 0.38):
+                        self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                        self._clear_pending(cid)
+                        continue
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
                         {
@@ -8461,7 +8482,7 @@ class Pulse:
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
-        show_n = min(max(show_n, 12), 32)
+        show_n = min(max(show_n, 1), BLOCK_COUNT_PREVIEW)
         for n in range(1, show_n + 1):
             f = self.block.formula(1.0, n)
             catalog.append({
@@ -8472,7 +8493,7 @@ class Pulse:
                 "targetAdd": round(f["targetAddQty"], 8),
                 "targetBlock": round(f["targetBlockQty"], 8),
                 "minPF": round(f["blockMinPF"], 4),
-                "liveStack": n <= int(self.block.max_stack or 3),
+                "liveStack": n <= int(self.block.max_stack or 6) and n in self.block.counts,
                 "independent": True,
             })
         hits: Dict[str, int] = {}
@@ -9473,12 +9494,14 @@ class Pulse:
         self._budget()
         self.refresh_tickers()
         self.seed_px_bars()
+        # Reconcile immediately after the boot snapshot, before touching old
+        # local controls. Waiting for cycle 25 can take hours when a stale book
+        # contains many positions and each repair encounters venue cooldowns.
+        if self.cycle == 1 or self.cycle % 25 == 0:
+            self.adopt_exchange_positions()
         unprotected = self.priority_controls()
         if self.cycle % 8 == 0:
             self.maybe_reload_config()
-        if self.cycle % 25 == 0:
-            self.adopt_exchange_positions()
-            unprotected = self.priority_controls()
         if self.cycle % 150 == 0:
             self.sync_own_fills()
         if self.cycle % 220 == 0:

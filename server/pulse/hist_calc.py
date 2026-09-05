@@ -78,8 +78,8 @@ _PUBLIC_REQUEST_LAST = 0.0
 _SHARED = {
     "blockEnabled": True,
     "stratBlock": True,
-    "blockMaxStack": 3,
-    "blockVolumeRatio": 1.0,
+    "blockMaxStack": 6,
+    "blockVolumeRatio": 0.25,
     "blockProfitFactorRatio": 1.25,
     "dcaEnabled": False,
     "stratDca": False,
@@ -246,8 +246,8 @@ PRESETS: List[Dict[str, Any]] = [
             "stratTrailing": True,
             "trailArmPct": 0.6,
             "trailGivePct": 0.2,
-            "blockMaxStack": 3,
-            "blockVolumeRatio": 1.0,
+            "blockMaxStack": 6,
+            "blockVolumeRatio": 0.25,
             "setMinPf": 1.08,
             "minPf": 1.10,
             "setMaxDdTimeS": 1800,
@@ -751,8 +751,8 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "stratDca": bool(opt.get("stratDca", False)),
         "histSimulateBlock": True,
         "histSimulateDca": True,
-        "blockVolumeRatio": 1.0,
-        "blockMaxStack": 3,
+        "blockVolumeRatio": 0.25,
+        "blockMaxStack": 6,
         "indTypeState": bool(opt.get("indTypeState", True)),
         "indTypeSignals": bool(opt.get("indTypeSignals", True)),
         "indTypeDirection": bool(opt.get("indTypeDirection", True)),
@@ -1054,8 +1054,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
-        "blockVolumeRatio": 1.0,
-        "blockMaxStack": 3,
+        "blockVolumeRatio": 0.25,
+        "blockMaxStack": 6,
         "dcaStepDistancesPct": [1.2, 1.6, 2.0, 2.4],
         "dcaStepVolumeMultipliers": [1.5, 2.0, 2.3, 2.5],
         "dcaMaxSteps": 4,
@@ -1105,8 +1105,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     patch["dcaEnabled"] = bool(dca_ok)
     patch["stratDca"] = bool(dca_ok)
     if block_ok:
-        patch["blockVolumeRatio"] = 1.0
-        patch["blockMaxStack"] = 3
+        patch["blockVolumeRatio"] = 0.25
+        patch["blockMaxStack"] = 6
     return patch
 
 

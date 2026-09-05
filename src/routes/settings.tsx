@@ -339,8 +339,8 @@ function SettingsPage() {
   };
   const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, 1.1);
   const table = useMemo(
-    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1),
-    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf],
+    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1, 0, overlay.blockMaxVolumeMultiplier),
+    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, overlay.blockMaxVolumeMultiplier],
   );
 
   const onSave = async (target = conn) => {
@@ -1197,12 +1197,12 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
-                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="historic counts 1–12 · live stack 1–6 · 0 uses default 3" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
+                <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–12).
+                Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–6).
                 Trailing only moves SL after min-step, only in the protective direction, and retries a failed exchange update while retaining the old stop. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
@@ -1457,7 +1457,7 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Each count 1–12 is independent · last-N of that count holds the increased factor vs original base until overall pos average is back positive">
+            <Card title="Block strategy" hint="Counts 1–6 are independent · each count retains recovery state until its own positive result · no compounding">
               <Grid>
                 <EnableSlider
                   label="Block enabled"
@@ -1481,17 +1481,26 @@ function SettingsPage() {
                   min={0}
                   max={6}
                   step={1}
-                  hint="0 = default 3 · live is capped at 6 · historic evaluates counts 1–12"
+                  hint="0 = default 6 · six independent evaluations · shared total volume cap"
                   onChange={(v) => patch("blockMaxStack", v)}
                 />
                 <Num
                   label="Volume ratio"
                   value={overlay.blockVolumeRatio}
-                  min={0.25}
-                  max={3}
+                  min={0.05}
+                  max={2}
                   step={0.05}
                   onChange={(v) => patch("blockVolumeRatio", v)}
                 />
+                <Num label="Maximum total volume" value={overlay.blockMaxVolumeMultiplier}
+                  min={1} max={2} step={0.05} hint="Base 1 = original parent · maximum 2×"
+                  onChange={(v) => patch("blockMaxVolumeMultiplier", v)} />
+                {[1, 2, 3, 4, 5, 6].map((count) => (
+                  <Toggle key={count} label={`Count ${count}`} on={overlay.blockCounts.includes(count)}
+                    onChange={(enabled) => patch("blockCounts", enabled
+                      ? [...new Set([...overlay.blockCounts, count])].sort((a, b) => a - b)
+                      : overlay.blockCounts.filter((n) => n !== count))} />
+                ))}
                 <Num
                   label="PF ratio"
                   value={overlay.blockProfitFactorRatio}
@@ -1511,7 +1520,7 @@ function SettingsPage() {
                 <KV k="Default min PF" v={String(defaultMinPf)} />
               </Grid>
               <p className="font-mono text-xs text-muted">
-                targetAdd = parentBase × (count × ratio) · requested = targetAdd − confirmedAdd ·
+                targetAdd = parentBase × min(count × ratio, totalCap − 1) · requested = max(0, targetAdd − confirmedAdd) ·
                 minPF = 1 + (({defaultMinPf} − 1) × {overlay.blockProfitFactorRatio} × increment)
               </p>
               <div className="overflow-x-auto">
