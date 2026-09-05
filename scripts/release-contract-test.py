@@ -3,6 +3,8 @@
 import copy
 import importlib
 import os
+import errno
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,6 +23,38 @@ import pulse_http
 
 
 class ReleaseTests(unittest.TestCase):
+    def port_probe(self, port):
+        return subprocess.run(["bash", "-c", 'source "$1"; can_bind_port "$2"',
+                               "probe", str(ROOT / "deploy/linux-common.sh"), str(port)],
+                              capture_output=True, text=True, timeout=5).returncode
+
+    def test_port_probe_rejects_an_actual_listener(self):
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            self.assertNotEqual(self.port_probe(listener.getsockname()[1]), 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux installer TIME_WAIT regression")
+    def test_port_probe_accepts_time_wait_after_http_style_close(self):
+        with socket.socket() as listener, socket.socket() as client:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+            listener.listen(1)
+            client.settimeout(2)
+            client.connect(("127.0.0.1", port))
+            accepted, _ = listener.accept()
+            with accepted:
+                accepted.shutdown(socket.SHUT_WR)
+                self.assertEqual(client.recv(1), b"")
+        # Reproduce the old false positive before verifying the real helper.
+        with socket.socket() as plain:
+            with self.assertRaises(OSError) as error:
+                plain.bind(("0.0.0.0", port))
+            self.assertEqual(error.exception.errno, errno.EADDRINUSE)
+        self.assertEqual(self.port_probe(port), 0)
+
     def test_runtime_entrypoints_import_in_clean_process(self):
         for module in ("pulse_trader", "pulse_http", "hist_calc"):
             with self.subTest(module=module):

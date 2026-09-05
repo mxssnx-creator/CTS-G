@@ -26,7 +26,7 @@
 <tr><td>VST-Cooldown / Scheduler / read-only Probe</td><td>11/11 bestanden; 18 Datumsformat-/Zeitfensterfälle innerhalb eines Tests</td><td><code>python3 scripts/test_vst_scheduling.py</code></td></tr>
 <tr><td>Gezielte Kontroll-, Order-, Gruppen- und DD-Tests nach Wiederanlauf-Fix</td><td>143/143 bestanden</td><td>Testfunktionen in engine-test.py</td></tr>
 <tr><td>Block-Vertrag / Wiederanlauf</td><td>11/11; darin 768 Formel-Kombinationen</td><td><code>python3 scripts/test_block_contract.py</code></td></tr>
-<tr><td>Installation / Namespace / Import / Mainnet-Schutz</td><td>8/8 bestanden</td><td><code>python3 scripts/release-contract-test.py</code></td></tr>
+<tr><td>Installation / Namespace / Import / Mainnet-Schutz</td><td>10/10 bestanden, inklusive echter Listener- und TIME_WAIT-Sockets</td><td><code>python3 scripts/release-contract-test.py</code></td></tr>
 <tr><td>Forced-Grid / Holdout / Kosten / Evidence</td><td>16/16 bestanden</td><td><code>python3 scripts/forced-config-test.py</code></td></tr>
 <tr><td>TypeScript in isolierter Serverkopie</td><td>Bestanden</td><td><code>npm run typecheck</code></td></tr>
 <tr><td>Frontend-JavaScript</td><td>191 bestanden; 4 übersprungen: optionale .grok-Skill-Dateien fehlen</td><td><code>npm test</code></td></tr>
@@ -50,6 +50,14 @@
 <li>Host-RAM nahezu ausgeschöpft (zuletzt rund 169 MiB verfügbar). Gemeinsamer Redis und CTS-K-N wurden nicht verändert. X02 meldete im beobachteten Intervall 0 Neustarts. Dies ist keine dauerhafte Stabilitätsfreigabe.</li>
 <li>CTS-G-Log-Tail auf 1000 Zeilen verifiziert. Ältere Inhalte sind in der geschützten Vorinstallationssicherung wiederherstellbar.</li></ul>
 <p class="note">Dieser Bericht dokumentiert die Messungen vor der Remote-Abnahme des Cooldown-Folgestands. Aktive Dienste und akzeptierte Öffnungen ersetzen keinen vollständigen Exchange-Abgleich, keine bestätigten Abschlüsse und keine qualifizierte Konfiguration.</p>
+<h2>Nachtrag: PR 35 installiert, VST direkt gelesen</h2>
+<p><a href="https://github.com/mxssnx-creator/CTS-G/pull/35">PR 35</a> wurde mit grünem gemeldetem GitHub-Status gemergt und als <code>5e1ebee48959</code> neu installiert. Alle drei CTS-G-Dienste wurden gestartet. Die Installation benötigte wegen des unten beschriebenen Port-Probe-Fehlers einen zweiten Versuch.</p>
+<table><tr><th>Prüfung</th><th>Aktuelle Beobachtung</th><th>Aussagegrenze</th></tr>
+<tr><td>Direkter authentifizierter VST-GET</td><td>25 offene Exchange-Positionen; Zeitpunkt 1788600475,489 Unix-Sekunden</td><td>Accountweiter Bestand, kein Nachweis der CTS-G-Zuordnung oder Profitabilität.</td></tr>
+<tr><td>X02-Snapshot</td><td>Alter 5,3 s; Zyklus 4; Scan 4995,2 ms; intern 35 / Exchange 25</td><td>Einzelmessung, keine Dauerstabilität; Gruppen und Exchange-Seiten müssen getrennt zugeordnet werden.</td></tr>
+<tr><td>Aktive Block-Einstellungen</td><td>Stack 6, Eval 6, Ratio 0,25, Gesamtmaximum 2, Zähler [1,2,3,4,5,6]</td><td>Rechenvertrag aktiviert, keine aus Gewinnmessungen abgeleitete Freigabe.</td></tr>
+<tr><td>X02-Prozess</td><td>0 Neustarts; cgroup-Speicher 1330827264 Bytes</td><td>Gemessener Wiederanlauf, kein langfristiger Speichernachweis.</td></tr></table>
+<p>Reproduzierter Installer-Fehler: Ein gestoppter HTTP-Listener hinterlässt TIME_WAIT-Verbindungen. Die bisherige Probe meldete deshalb einen belegten Port, obwohl kein Listener mehr vorhanden war. Die neue Probe nutzt dieselbe Adresswiederverwendung wie ein HTTP-Wiederanlauf. Regressionen zeigen: echte Listener werden weiter abgewiesen; TIME_WAIT wird korrekt akzeptiert. Shell-Syntaxprüfung und alle zehn Release-Verträge bestehen. Dieser Installer-Folgestand benötigt noch seine eigene Merge-/Remote-Abnahme.</p>
 <h2>Offene Abnahme</h2>
 <ul><li>Neue 20h-Kalkulation sowie 14-/20-Tage-DCA-Auswertung für XRP/BCH/SOL sind in diesem Prüfstand nicht ausgeführt. Der bestehende interaktive Replay-Vertrag endet bei 72h; längere Zeiträume dürfen nicht stillschweigend als vollständig dargestellt werden.</li>
 <li>Keine durchschnittlichen Gewinner als neue Live-Defaults gespeichert: hierfür fehlen qualifizierte aktuelle VST-Ergebnisse.</li>
