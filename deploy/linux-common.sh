@@ -223,6 +223,19 @@ ensure_node() {
   ok "node $(node -v) npm $(npm -v)"
 }
 
+redis_ready() {
+  # A running unit may still be loading its database. Bound every attempt and
+  # require PONG: redis-cli can exit zero for an error such as NOAUTH/LOADING.
+  local attempt reply
+  for attempt in 1 2 3 4 5; do
+    reply="$(timeout 2s redis-cli --raw ping 2>/dev/null || true)"
+    [[ "$reply" == PONG ]] && return 0
+    [[ "$reply" == *NOAUTH* || "$reply" == *WRONGPASS* ]] && return 1
+    [[ "$attempt" == 5 ]] || sleep 0.25
+  done
+  return 1
+}
+
 ensure_redis() {
   local unit=""
   if systemctl list-unit-files redis-server.service >/dev/null 2>&1; then
@@ -243,7 +256,7 @@ ensure_redis() {
   # Redis may be shared with other projects. Never change global eviction,
   # persistence or memory settings as a side effect of installing this app.
   if have redis-cli; then
-    redis-cli ping >/dev/null 2>&1 && ok "redis ping" || fail "redis ping"
+    redis_ready && ok "redis ping" || fail "redis ping"
   fi
 }
 

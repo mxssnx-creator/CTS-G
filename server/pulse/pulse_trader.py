@@ -2580,7 +2580,7 @@ class Pulse:
         src = self.klines_tf.get("1m") or {}
         for tf, n in (("5m", 5), ("15m", 15)):
             dest = self.klines_tf.setdefault(tf, {})
-            for s, bars in src.items():
+            for s, bars in list(src.items()):
                 if s in dest and len(dest[s] or []) >= 8:
                     continue
                 if len(bars) < n:
