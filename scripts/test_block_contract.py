@@ -153,13 +153,14 @@ class BlockContractTests(unittest.TestCase):
         p._budget = lambda: None
         p.refresh_tickers = lambda: None
         p.seed_px_bars = lambda: None
+        p.sync_own_fills = lambda: events.append("fills")
         p.adopt_exchange_positions = lambda: events.append("reconcile")
         p.priority_controls = lambda: events.append("controls") or 0
         p.manage = lambda: None
         p.maybe_entries = lambda: events.append("entry-evaluation")
         with patch.multiple(trader, STOP_PATH=self.tmp.name + "/STOP", PAUSE_PATH=self.tmp.name + "/PAUSE", STOP_ALL=self.tmp.name + "/ALL"):
             p._one_cycle()
-        self.assertEqual(events, ["reconcile", "controls", "entry-evaluation"])
+        self.assertEqual(events, ["fills", "reconcile", "controls", "entry-evaluation"])
 
 
 if __name__ == "__main__":

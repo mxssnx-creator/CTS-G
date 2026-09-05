@@ -6783,7 +6783,7 @@ class Pulse:
         if not bool(self.indications.settings.get("enabled", True)):
             return
         b = self._budget()
-        open_syms = [p.symbol for p in self.open.values() if p.symbol]
+        open_syms = [p.symbol for p in list(self.open.values()) if p.symbol]
         ranked = [r.get("symbol") for r in (self.universe or []) if r.get("symbol")]
         window, nxt = self.load.scan_window(list(SYMBOLS), open_syms, b.scan_chunk, int(getattr(self.load, "cursor_ind", 0) or 0), ranked)
         self.load.cursor_ind = nxt
@@ -7761,12 +7761,13 @@ class Pulse:
             _sf(order.get("origQty") or order.get("quantity") or order.get("orderQty")),
         )
         oid = real_oid(order.get("orderId") or order.get("orderID") or order.get("orderid"))
-        px = max(
-            0.0,
-            _sf(order.get("avgPrice") or order.get("fillPrice") or order.get("executedPrice") or order.get("price")),
-            _sf(old.get("avg_price") or old.get("avgPrice")),
-            _sf(self.px.get(symbol)),
-        )
+        # An execution price must not be raised to the current mark. Prefer
+        # the first valid venue execution value, preserving cumulative average.
+        px = next((value for value in (
+            _sf(order.get("avgPrice")), _sf(order.get("fillPrice")),
+            _sf(order.get("executedPrice")), _sf(order.get("price")),
+            _sf(old.get("avg_price") or old.get("avgPrice")), _sf(self.px.get(symbol)),
+        ) if math.isfinite(value) and value > 0), 0.0)
         meta = dict(old.get("metadata") or {})
         for key, value in (
             ("set_id", track.get("set_id")),
@@ -7859,10 +7860,17 @@ class Pulse:
         pos: Optional[Position] = None
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         if kind == "c":
-            pos = self.position_for_group(str(row.get("group_key") or ""))
-            if pos is None:
+            if meta.get("confirmed_control_fill"):
+                # Exact persisted parent lineage only. A new position in the
+                # same range must never absorb a previous parent's control fill.
                 pos = self._position_for_client(str(meta.get("parent_client_id") or ""))
-            if pos is None:
+                if pos is not None and (pos.symbol != row["symbol"] or pos.side != row["side"]):
+                    pos = None
+            else:
+                pos = self.position_for_group(str(row.get("group_key") or ""))
+                if pos is None:
+                    pos = self._position_for_client(str(meta.get("parent_client_id") or ""))
+            if pos is None and not meta.get("confirmed_control_fill"):
                 candidates = self.positions_for(row["symbol"], row["side"])
                 # A close without lineage may only fall back when the
                 # symbol/side has one own group; never guess among siblings.
@@ -7925,10 +7933,16 @@ class Pulse:
                         metadata={**meta, "observedCumulativeQty": cumulative},
                     )
                     return False
+                fill_px = px
+                if meta.get("confirmed_control_fill") and previous > 0:
+                    previous_px = _sf((self.pending_orders.get(cid) or {}).get("avg_price"))
+                    fill_px = (cumulative * px - previous * previous_px) / delta
+                    if not math.isfinite(fill_px) or fill_px <= 0:
+                        return False
                 applied = self._record_close_fill(
                     pos,
                     delta,
-                    px,
+                    fill_px,
                     str(meta.get("reason") or "exchange-close"),
                     exchange=True,
                     close_cid=cid,
@@ -8030,18 +8044,65 @@ class Pulse:
                 pos.pending_close_qty = 0.0
         return delta > 0
 
+    def _sync_control_fill(self, order: Dict[str, Any], cid: str, track: Dict[str, Any]) -> bool:
+        """Accept executed TP/SL only with an exact own order and parent binding."""
+        if cid in self.seen_fill_cids and cid not in self.pending_orders:
+            return False
+        oid = real_oid(order.get("orderId") or order.get("orderID") or order.get("orderid"))
+        symbol = str(order.get("symbol") or "").upper()
+        side = str(order.get("positionSide") or "").upper()
+        if not oid or side not in ("LONG", "SHORT") or not self.cid_ours(cid):
+            return False
+        # Requested size / trigger price are never execution evidence.
+        executed = next((_sf(order[key]) for key in ("executedQty", "filledQty", "cumQty", "filled")
+                         if order.get(key) not in (None, "")), 0.0)
+        px = next((v for v in (_sf(order.get(k)) for k in ("avgPrice", "fillPrice", "executedPrice"))
+                   if math.isfinite(v) and v > 0), 0.0)
+        if not math.isfinite(executed) or executed <= 0 or px <= 0:
+            return False
+        old = self.pending_orders.get(cid) or {}
+        meta = dict(old.get("metadata") or {})
+        if meta.get("confirmed_control_fill"):
+            if real_oid(old.get("order_id")) != oid:
+                return False
+            pos = self._position_for_client(str(meta.get("parent_client_id") or ""))
+            if pos is None or pos.symbol != symbol or pos.side != side or not pos.ours:
+                return False
+        else:
+            matches = [p for p in list(self.open.values()) if p.ours and p.symbol == symbol and p.side == side
+                       and oid in {real_oid(getattr(p, field, "")) for field in ("sl_oid", "tp_oid", "sec_sl_oid", "sec_tp_oid")}]
+            if len(matches) != 1 or not matches[0].client_id:
+                return False
+            pos = matches[0]
+            meta.update(confirmed_control_fill=True, parent_client_id=pos.client_id,
+                        reason="exchange-control-" + str(track.get("kind") or ""))
+        requested = _sf(old.get("requested_qty")) or max(pos.qty, executed)
+        self._remember_pending(kind="close", cid=cid, symbol=symbol, side=side,
+                               requested_qty=requested, filled_qty=_sf(old.get("filled_qty")),
+                               order_id=oid, avg_price=_sf(old.get("avg_price")),
+                               fee_total=_sf(old.get("fee_total")),
+                               group_key=str(getattr(pos, "control_group_key", "") or ""), metadata=meta)
+        return self._sync_pending_fill(dict(order, avgPrice=px, executedQty=executed), cid, track, "c")
+
     def sync_own_fills(self) -> None:
         """Pull exchange fills for this connection and apply only new deltas."""
+        self._next_fill_poll = time.monotonic() + 30.0
         request_key = stable_key(CONN_SHORT, "fills", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
         self.record_event("exchange_request", request_key, status="pending", detail="fill polling", metadata={"path": "/openApi/swap/v2/trade/allOrders"})
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
-        data = r.get("data") or {}
+        if not self.ok(r):
+            self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill request failed")
+            return
+        data = r.get("data")
         orders = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(orders, list) or not orders:
             r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
-            data = r.get("data") or {}
-            orders = data.get("fill_orders") or data.get("fills") or data.get("orders") or data
+            if not self.ok(r):
+                self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill fallback failed")
+                return
+            data = r.get("data")
+            orders = (data.get("fill_orders") or data.get("fills") or data.get("orders") or data) if isinstance(data, dict) else data
             if isinstance(data, dict) and isinstance(data.get("list"), list):
                 orders = data["list"]
         if not isinstance(orders, list):
@@ -8050,7 +8111,6 @@ class Pulse:
         self._update_live_position_costs(orders)
         self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed" if self.ok(r) else "error", code=r.get("code"), qty=len(orders), detail="fill polling", metadata={"rows": len(orders)})
         n = 0
-        terminal = {"FILLED", "FINISHED", "SUCCESS", "FILLED_FULLY", "COMPLETED"}
         for o in orders:
             if not isinstance(o, dict):
                 continue
@@ -8059,7 +8119,9 @@ class Pulse:
                 continue
             track = self.parse_track(cid) or {}
             kind = str(track.get("kind") or "")
-            status = str(o.get("status") or o.get("orderStatus") or o.get("state") or "").upper()
+            if kind in ("s", "t", "u", "v"):
+                n += int(self._sync_control_fill(o, cid, track))
+                continue
             if kind in ("o", "d", "b", "c"):
                 # Close orders remain eligible for polling until their
                 # cumulative executed quantity reaches the requested size.
@@ -8112,6 +8174,17 @@ class Pulse:
             LEVERAGE = max(int(v) for v in self.lev_map.values() if v)
 
     def run_self_tests(self) -> None:
+        # The warm QA worker must never replace economic state in the hot
+        # trader, even temporarily. Copy only the small mutable probe inputs;
+        # books/API are read-only here and must not be deep-copied at runtime.
+        probe = copy.copy(self)
+        probe.px = dict(self.px)
+        probe.open = {key: copy.copy(pos) for key, pos in list(self.open.items())}
+        probe.closed = [copy.copy(row) for row in list(self.closed)]
+        probe.record_test = self.record_test
+        probe._run_self_tests_isolated()
+
+    def _run_self_tests_isolated(self) -> None:
         r = self.api.get("/openApi/swap/v3/user/balance")
         if not self.ok(r):
             r = self.api.get("/openApi/swap/v2/user/balance")
@@ -8531,7 +8604,7 @@ class Pulse:
                 "independent": True,
             })
         hits: Dict[str, int] = {}
-        for rows in self.indications.last.values():
+        for rows in list(self.indications.last.values()):
             for i in rows:
                 hits[i.kind] = hits.get(i.kind, 0) + 1
         scov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
@@ -8571,7 +8644,7 @@ class Pulse:
         with_cid = sum(1 for p in ours_open if getattr(p, "client_id", "") and self.cid_ours(p.client_id))
         eval_n = 0
         try:
-            eval_n = sum(len(v) for v in (self.indications.evals or {}).values())
+            eval_n = sum(len(v) for v in list((self.indications.evals or {}).values()))
         except Exception:
             eval_n = 0
         mods = {}
@@ -9438,17 +9511,22 @@ class Pulse:
             while time.monotonic() - t0 < remain and not self._hist_stop:
                 time.sleep(0.2)
 
+    def _warm_pass(self) -> None:
+        # Network waits must not own the lock used by stats and coordination.
+        # Market/indication methods publish per-symbol replacement rows; readers
+        # snapshot collection membership before iterating concurrent updates.
+        if time.time() - self.last_bal > BALANCE_EVERY:
+            self.refresh_balance()
+        self.refresh_klines()
+        self.refresh_vol1h()
+        self.process_indications()
+        self.update_regime()
+
     def _warm_loop(self) -> None:
         while not self._warm_stop:
             t0 = time.time()
             try:
-                with self.state_guard():
-                    if time.time() - self.last_bal > BALANCE_EVERY:
-                        self.refresh_balance()
-                    self.refresh_klines()
-                    self.refresh_vol1h()
-                    self.process_indications()
-                    self.update_regime()
+                self._warm_pass()
             except Exception:
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-300:]
@@ -9528,6 +9606,8 @@ class Pulse:
         self._budget()
         self.refresh_tickers()
         self.seed_px_bars()
+        if time.monotonic() >= float(getattr(self, "_next_fill_poll", 0.0)):
+            self.sync_own_fills()
         # Reconcile immediately after the boot snapshot, before touching old
         # local controls. Waiting for cycle 25 can take hours when a stale book
         # contains many positions and each repair encounters venue cooldowns.
@@ -9536,8 +9616,6 @@ class Pulse:
         unprotected = self.priority_controls()
         if self.cycle % 8 == 0:
             self.maybe_reload_config()
-        if self.cycle % 150 == 0:
-            self.sync_own_fills()
         if self.cycle % 220 == 0:
             self.pool.submit(self.set_leverage)
         self.manage()
