@@ -775,6 +775,13 @@ class SetBook:
         """
         state = dict(self.__dict__)
         state.pop("_pick_lock", None)
+        # A copied book must never serve a snapshot produced by the live
+        # book.  Besides stale rows, the cache can retain the full preview
+        # matrix and defeat the bounded replay-memory contract.
+        state["_snap_cache"] = None
+        state["_snap_ts"] = 0.0
+        state["_live_ov_cache"] = None
+        state["_live_ov_ts"] = 0.0
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
