@@ -252,7 +252,7 @@ function DeskPage() {
       </section>
 
       <section className="grid gap-3 lg:grid-cols-2">
-        <Panel title="Block 1–12" icon={<Layers className="size-4" />}>
+        <Panel title="Block 1–6" icon={<Layers className="size-4" />}>
           {stats ? <BlockHeat stats={stats} /> : <p className="text-sm text-muted">Waiting</p>}
         </Panel>
         <Panel title="Risk tape" icon={<ShieldAlert className="size-4" />}>

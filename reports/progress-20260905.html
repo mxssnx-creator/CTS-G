@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CTS-G · Prüfstand 05.09.2026</title>
+<style>body{font:16px/1.55 system-ui,sans-serif;max-width:1000px;margin:auto;padding:32px;background:#101722;color:#e8eef7}h1,h2{line-height:1.2}h2{margin-top:32px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{padding:10px;text-align:left;border-bottom:1px solid #354253}code{color:#9cddff}.note{padding:16px;border-left:4px solid #f0c366;background:#212c3d}a{color:#9cddff}.muted{color:#b3c0cf}</style>
+<h1>CTS-G · Tests und Fortschritt</h1>
+<p class="muted">Prüfdatum: 05.09.2026 · Ausgangsstand main: <code>0dc6d2a49d59</code></p>
+<p class="note">Keine Freigabe positiver Live-Ergebnisse: Der gelesene X02-Snapshot war veraltet. Die darin enthaltenen Abschlüsse sind nicht Exchange-bestätigt. X01/Mainnet bleibt maskiert; diese Prüfung hat keine Mainnet-Orders ausgelöst.</p>
+<h2>Implementierte Korrekturen</h2>
+<ul><li>Sechs unabhängige Block-Zähler; eigene PF- und Pausenzustände, separat auswählbar.</li>
+<li>Ein additives Ziel je Zähler, ausgehend vom ursprünglichen Parent. Insgesamt höchstens 2×; bereits bestätigte Mengen werden abgezogen. Recovery-Faktoren erzeugen keine zweite Portion.</li>
+<li>Nur ein positiver Abschluss des betreffenden Zählers beendet dessen gehaltenen Recovery-Zustand und pausiert diesen Zähler. Andere Symbole und Zähler setzen ihn nicht zurück.</li>
+<li>Leere Zählerauswahl deaktiviert Orders, nicht die sechs Auswertungszeilen. Teilfüllungen fordern nur den Rest an.</li>
+<li>Exchange-Mindestmengen und Rundung dürfen die genehmigte Restmenge nicht erhöhen.</li>
+<li>Historische Mengenplanung, Live-Planung und Einstellungs-Vorschau verwenden dieselbe additive Formel und Obergrenze.</li>
+<li>Wiederanlauf gleicht den Positionsbestand im ersten Zyklus vor Kontrollorder-Reparaturen ab. Für dabei entfernte Positionen werden keine weiteren Reparaturen versucht.</li></ul>
+<h2>Exaktes Rechenbeispiel, keine Performance-Messung</h2>
+<p>Originalmenge 3; Block-Ratio 0,25; Gesamt-Cap 2. Ziel = Original × [1 + min(Zähler × Ratio, Cap − 1)]. Die Zeilen sind alternative absolute Ziele desselben Parents, keine sechs zu summierenden Positionen.</p>
+<table><tr><th>Zähler</th><th>Additives Ziel</th><th>Gesamtziel</th></tr>
+<tr><td>1</td><td>0,75</td><td>3,75</td></tr><tr><td>2</td><td>1,50</td><td>4,50</td></tr>
+<tr><td>3</td><td>2,25</td><td>5,25</td></tr><tr><td>4</td><td>3,00</td><td>6,00</td></tr>
+<tr><td>5</td><td>3,00</td><td>6,00</td></tr><tr><td>6</td><td>3,00</td><td>6,00</td></tr></table>
+<h2>Durchgeführte Tests</h2>
+<p>Die Zeilen sind getrennte Testläufe; überlappende Tests werden nicht zu einer Gesamtsumme addiert.</p>
+<table><tr><th>Prüfung</th><th>Ergebnis</th><th>Reproduktion</th></tr>
+<tr><td>Breite Offline-Engine-Suite, Block-Integration</td><td>282/282 bestanden</td><td><code>python3 scripts/engine-test.py</code></td></tr>
+<tr><td>Gezielte Kontroll-, Order-, Gruppen- und DD-Tests nach Wiederanlauf-Fix</td><td>143/143 bestanden</td><td>Testfunktionen in engine-test.py</td></tr>
+<tr><td>Block-Vertrag / Wiederanlauf</td><td>11/11; darin 768 Formel-Kombinationen</td><td><code>python3 scripts/test_block_contract.py</code></td></tr>
+<tr><td>Installation / Namespace / Import / Mainnet-Schutz</td><td>8/8 bestanden</td><td><code>python3 scripts/release-contract-test.py</code></td></tr>
+<tr><td>Forced-Grid / Holdout / Kosten / Evidence</td><td>16/16 bestanden</td><td><code>python3 scripts/forced-config-test.py</code></td></tr>
+<tr><td>TypeScript in isolierter Serverkopie</td><td>Bestanden</td><td><code>npm run typecheck</code></td></tr>
+<tr><td>Frontend-JavaScript</td><td>191 bestanden; 4 übersprungen: optionale .grok-Skill-Dateien fehlen</td><td><code>npm test</code></td></tr>
+<tr><td>Frontend-TypeScript-Tests</td><td>34/34 bestanden</td><td><code>npm test</code>, Node 22+</td></tr>
+<tr><td>Server-Dashboard (separate CTS-K-N-Arbeitskopie)</td><td>16/16 bestanden, inklusive HTTP-Aktionsablauf</td><td><code>node --test ops/server-access-dashboard/server/*.test.mjs</code></td></tr></table>
+<h2>Remote X02: beobachtet, noch nicht akzeptiert</h2>
+<table><tr><th>Messung</th><th>Beobachtung</th><th>Einordnung</th></tr>
+<tr><td>Dienste</td><td>Desk, Pulse-HTTP, X02 aktiv; X01 maskiert</td><td>Ein aktiver Dienst allein bestätigt keine gesunde Verarbeitung.</td></tr>
+<tr><td>Snapshot-Alter</td><td>3744,8 Sekunden; stale=true</td><td>Keine aktuelle Exchange-Wahrheit.</td></tr>
+<tr><td>Interne / Exchange-Positionen</td><td>93 / 0 im alten Snapshot</td><td>Abgleich erforderlich, nicht als gültiger Live-Bestand übernehmen.</td></tr>
+<tr><td>Abschlusszeilen</td><td>40, davon 0 Exchange-bestätigt</td><td>Kein belastbarer PF8/PF25/PF75; keine erfolgreiche Live-Konfiguration ableiten.</td></tr>
+<tr><td>Prozess-Speicher</td><td>2445787136 Bytes, nahe MemoryHigh</td><td>Last-/Speicherprüfung bleibt erforderlich.</td></tr>
+<tr><td>Logs</td><td>Kontrollorders für nicht vorhandene Positionen; Rate-Limits/Cooling</td><td>Wiederanlauf-Fix implementiert und offline getestet; Remote-Abnahme steht aus.</td></tr></table>
+<h2>Offene Abnahme</h2>
+<ul><li>Neue 20h-Kalkulation sowie 14-/20-Tage-DCA-Auswertung für XRP/BCH/SOL sind in diesem Prüfstand nicht ausgeführt. Der bestehende interaktive Replay-Vertrag endet bei 72h; längere Zeiträume dürfen nicht stillschweigend als vollständig dargestellt werden.</li>
+<li>Keine durchschnittlichen Gewinner als neue Live-Defaults gespeichert: hierfür fehlen qualifizierte aktuelle VST-Ergebnisse.</li>
+<li>Dashboard: privilegierter Installer-/Service-Adapter, sichere Einstellungen-Vorbelegung und produktiver Passwortdialog benötigen weitere End-to-End-Abnahme. Unverfügbare Werte, Snapshot-Alter und unbestätigte Abschlüsse werden bereits korrekt getestet.</li>
+<li>30%-Session-Equity-Liquidation ist in diesem Release nicht integriert oder aktiviert. Eine Einstellung ohne wirksamen Runtime-Guard darf nicht als Schutzfunktion verkauft werden.</li>
+<li>GitHub-Checks, Merge, gesicherte Remote-Installation und anschließender VST-/UI-Stabilitätslauf sind eigenständige Freigabeschritte. Dieses Dokument ersetzt deren Nachweis nicht.</li></ul>
+<p class="muted">Die React-Prüfrichtlinie wurde für konsistente Einstellungswerte, unabhängige Zählerschalter und die begrenzte Volumenvorschau angewendet. Gewinne, verlustfreie Runs oder moderate Risiken sind damit nicht garantiert.</p>
+</html>

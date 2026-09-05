@@ -37,6 +37,7 @@ from position_cost import (
     filter_side,
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
+from block_engine import calculate_block_max_additional_ratio, clamp_stack, finite_number, normalize_block_counts
 from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -755,7 +756,10 @@ class SetBook:
         self._pick_cursor = 0
         self.hist_block = True
         self.hist_dca = True
-        self.block_vr = 1.0
+        self.block_vr = 0.25
+        self.block_stack = 6
+        self.block_max_multiplier = 2.0
+        self.block_counts = list(range(1, 7))
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         # VST-only exploration is opt-in through the X02 overlay.  It rotates
@@ -947,10 +951,10 @@ class SetBook:
         self.hist_honor_tp = bool(ov.get("setHonorTp", True))
         self.hist_block = bool(ov.get("histSimulateBlock", ov.get("stratBlock", True)))
         self.hist_dca = bool(ov.get("histSimulateDca", True))
-        try:
-            self.block_vr = max(0.5, min(2.0, float(ov.get("blockVolumeRatio") or 1.0)))
-        except Exception:
-            self.block_vr = 1.0
+        self.block_vr = max(0.05, min(2.0, finite_number(ov.get("blockVolumeRatio"), 0.25)))
+        self.block_stack = clamp_stack(ov.get("blockMaxStack"))
+        self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
+        self.block_counts = normalize_block_counts(ov.get("blockCounts"))
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         opt = float(ov.get("exitOptSlPct") or 0.30)
@@ -1850,9 +1854,10 @@ class SetBook:
 
     def _maybe_block_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
         n = int(pos.get("adds") or 0)
-        stack = 3
-        if n >= stack:
+        counts = [c for c in self.block_counts if n < c <= self.block_stack]
+        if not counts:
             return
+        count = counts[0]
         close = float(bar[3])
         entry = float(pos["entry"])
         side = int(pos["side"])
@@ -1862,11 +1867,15 @@ class SetBook:
         if u < 0.002:
             return
         # Always size off original parent, never the last add.
-        add = float(pos["parent"]) * float(self.block_vr or 1.0)
+        target = float(pos["parent"]) * (1 + calculate_block_max_additional_ratio(
+            count, self.block_vr, self.block_max_multiplier))
         qty = float(pos["qty"])
+        add = max(0.0, target - qty)
+        if add <= 0:
+            return
         pos["entry"] = (entry * qty + close * add) / (qty + add)
         pos["qty"] = qty + add
-        pos["adds"] = n + 1
+        pos["adds"] = count
         self._rearm_stops(pos, sl_frac, tp_frac)
 
     def _maybe_dca_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:

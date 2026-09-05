@@ -313,7 +313,7 @@ def fill_accounting_test() -> None:
 
 def unlimited_test() -> None:
     b = BlockBook("/tmp/block-unlim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 0})
-    rec("block-unlim-stack", b.max_stack == 3 and not b.unlimited(), str(b.max_stack))
+    rec("block-unlim-stack", b.max_stack == 6 and not b.unlimited(), str(b.max_stack))
     lane = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.2)
     rec("block-unlim-eval-bounded", 1 <= len(rows) <= 24, f"n={len(rows)}")
@@ -322,7 +322,7 @@ def unlimited_test() -> None:
     finite = BlockBook("/tmp/block-lim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 3})
     rec("block-finite-stack", finite.max_stack == 3, str(finite.max_stack))
     frows = finite.evaluate_counts(BlockLane(symbol="XRP-USDT", side="SHORT", base_qty=1.0, base_entry=1.0), live_n=1, intern_pf=1.2)
-    rec("block-finite-eval", 12 <= len(frows) <= 13, f"n={len(frows)}")
+    rec("block-finite-eval", 6 <= len(frows) <= 7, f"n={len(frows)}")
     from dca_engine import DcaBook
     d = DcaBook()
     d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
@@ -332,7 +332,7 @@ def unlimited_test() -> None:
     f1 = sized.formula(10.0, 1)
     rec("block-n1-is-1x-parent", abs(f1["volumeIncrement"] - 1.0) < 1e-9 and abs(f1["targetAddQty"] - 10.0) < 1e-9, str(f1))
     f3 = sized.formula(10.0, 3)
-    rec("block-n3-is-3x-parent", abs(f3["volumeIncrement"] - 3.0) < 1e-9 and abs(f3["targetAddQty"] - 30.0) < 1e-9, str(f3))
+    rec("block-n3-total-capped-2x", abs(f3["volumeIncrement"] - 1.0) < 1e-9 and abs(f3["targetAddQty"] - 10.0) < 1e-9, str(f3))
     lane1 = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     pick1 = sized.pick_emit(sized.evaluate_counts(lane1, live_n=1, intern_pf=1.5))
     rec(
@@ -1097,11 +1097,11 @@ def block_calc_test() -> None:
     want = 3  # 0 remaps to the default Block stack of 3
     cov = mk_cov(0)._coverage_blob()
     rec("block-coverage-unlimited-all-counts",
-        cov["block"]["countN"] == 12 and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, 13)),
+        cov["block"]["countN"] == 6 and [r["n"] for r in cov["block"]["allCounts"]] == list(range(1, 7)),
         f"n={cov['block']['countN']}")
     cov5 = mk_cov(5)._coverage_blob()
     rec("block-coverage-limited-all-counts",
-        cov5["block"]["countN"] == 12 and [r["n"] for r in cov5["block"]["allCounts"]] == list(range(1, 13)),
+        cov5["block"]["countN"] == 6 and [r["n"] for r in cov5["block"]["allCounts"]] == list(range(1, 7)),
         f"n={cov5['block']['countN']}")
     rec("block-coverage-enabled-flag",
         cov["block"]["enabled"] is True and cov["strategies"]["block"] is True)
@@ -1109,14 +1109,14 @@ def block_calc_test() -> None:
     # 3) evaluate_counts walks every count + active-live overlay; satisfied
     # counts never request; pick_emit takes the smallest unsatisfied count
     b = BlockBook(os.path.join(tmp, "block-eval.json"), {
-        "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
+        "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 0.25,
         "blockProfitFactorRatio": 1.1, "defaultMinPF": 1.2,
         "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
     lane = BlockLane(symbol="TST-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     regular = [r for r in rows if r["kind"] == "regular"]
     rec("block-eval-all-counts",
-        [r["blockCount"] for r in regular] == list(range(1, 13)) and all(r["evaluated"] == 1 for r in rows),
+        [r["blockCount"] for r in regular] == list(range(1, 7)) and all(r["evaluated"] == 1 for r in rows),
         f"regular={[r['blockCount'] for r in regular]} total={len(rows)}")
     rec("block-eval-active-live", any(r["kind"] == "active-live" for r in rows))
     # finite stack stays 1..max for live emit — evals still walk 1..12
@@ -1124,10 +1124,10 @@ def block_calc_test() -> None:
     lane.confirmed_add = 6.0
     rows_roll = b.evaluate_counts(lane, live_n=1, intern_pf=1.4)
     rec("block-eval-window-rolls",
-        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == list(range(1, 13)),
+        [r["blockCount"] for r in rows_roll if r["kind"] == "regular"] == list(range(1, 7)),
         f"{[r['blockCount'] for r in rows_roll if r['kind'] == 'regular']}")
     lane.satisfied = {1: True}
-    lane.confirmed_add = 1.0
+    lane.confirmed_add = 0.25
     rows2 = b.evaluate_counts(lane, live_n=1, intern_pf=1.5)
     r1 = [r for r in rows2 if r["kind"] == "regular" and r["blockCount"] == 1][0]
     rec("block-eval-satisfied-no-request", r1["targetSatisfied"] and r1["requestedAddQty"] == 0.0)
@@ -1137,8 +1137,8 @@ def block_calc_test() -> None:
     # new base-1 coordination: count-2 gate = 1 + 0.2*1.1*2 = 1.44 — intern 1.4
     # (passed under the old 0.8 ratio at 1.32) must now be refused
     rec("block-pick-gated-by-new-ratio",
-        b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.4)) is None,
-        "intern 1.4 < count2 gate 1.44")
+        b.pick_emit(b.evaluate_counts(lane, live_n=1, intern_pf=1.05)) is None,
+        "intern 1.05 < capped count2 gate 1.11")
 
     # 4) maybe_block_adds end-to-end with a fake exchange
     class FakeApi:
@@ -1162,7 +1162,7 @@ def block_calc_test() -> None:
         p.api = FakeApi()
         p.halted = False
         p.block = BlockBook(os.path.join(tmp, f"block-trade-{default_min_pf}-{set_ratio}-{set_n}-{confirmed}.json"), {
-            "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 1.0,
+            "variantBlockEnabled": True, "blockMaxStack": 0, "blockVolumeRatio": 0.25,
             "blockProfitFactorRatio": 1.1, "defaultMinPF": default_min_pf,
             "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
         p.strat_block = True
@@ -1187,7 +1187,7 @@ def block_calc_test() -> None:
         p.sets = SimpleNamespace(sets={}, pick_any=lambda pack, side=None: st)
         p.score = lambda sym: (1, "t", 0.9)
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
-        p.contracts = {"TST-USDT": Contract("TST-USDT", 0.001, 0.001, 3, 2, 1.0, 100)}
+        p.contracts = {"TST-USDT": Contract("TST-USDT", 0.0001, 0.0001, 4, 2, 1.0, 100)}
         p.px = {"TST-USDT": 100.30}
         p.last_px = {}
         p.sl_min = 0.001
@@ -1206,7 +1206,7 @@ def block_calc_test() -> None:
         p.min_order_qty = lambda c, px: float(c.min_qty)
         p.leverage_for = lambda c: 100
         p.open = {"TST-USDT": pt.Position(
-            symbol="TST-USDT", side="LONG", qty=0.05, entry=100.0,
+            symbol="TST-USDT", side="LONG", qty=0.05 + confirmed, entry=100.0,
             opened_at=time.time() - 600, sl=99.0, tp=101.0, peak=100.0,
             set_id="", pack="general")}
         ln = p.block.register_parent("TST-USDT", "LONG", 0.05, 100.0)
@@ -1217,14 +1217,15 @@ def block_calc_test() -> None:
     # 4a) cold set + defaultMinPF 1.1: floor must follow the book default
     # (count2 effective = 1 + 0.1*1.1*2 = 1.22 > 1.1 -> NO emit; a hardcoded
     # 1.2 floor would wrongly emit here)
-    pA = mk_trader(1.1, 1.0, 3, satisfied={1: True}, confirmed=0.05)
+    pA = mk_trader(1.1, 1.0, 3, satisfied={1: True}, confirmed=0.0125)
+    pA.block.pf_ratio = 4.0  # Configure a count2 gate above the cold inherited floor.
     pA.maybe_block_adds()
     rec("block-floor-follows-default", pA.api.posts == [],
         f"posts={pA.api.posts}")
 
     # 4b) warm set (PF 1.5, n=12) lifts intern_pf above the count-2 gate -> emit,
     # volume coordinated against lane.base_qty and the book cap
-    pB = mk_trader(1.1, 1.5, 12, satisfied={1: True}, confirmed=0.05)
+    pB = mk_trader(1.1, 1.5, 12, satisfied={1: True}, confirmed=0.0125)
     pB.maybe_block_adds()
     posB = pB.open["TST-USDT"]
     laneB = pB.block.lanes["TST-USDT:LONG"]
@@ -1233,8 +1234,8 @@ def block_calc_test() -> None:
         f"posts={pB.api.posts}")
     rec("block-fill-coordination",
         len(pB.api.posts) == 1
-        and abs(posB.qty - (0.05 + posted_q)) < 1e-9
-        and abs(laneB.confirmed_add - (0.05 + posted_q)) < 1e-9
+        and abs(posB.qty - (0.0625 + posted_q)) < 1e-9
+        and abs(laneB.confirmed_add - (0.0125 + posted_q)) < 1e-9
         and abs(posB.entry - 100.0) < 1e-9
         and pB.block_last_emit > 0,
         f"q={posB.qty} add={laneB.confirmed_add} entry={posB.entry}")
@@ -1263,7 +1264,7 @@ def block_calc_test() -> None:
         pE.api.posts == [] and not laneE.active and laneE.base_qty == 0.0,
         f"active={laneE.active} base={laneE.base_qty}")
 
-    rec("block-max-add-not-sum", calculate_block_max_additional_ratio(3, 1.0) == 3.0
+    rec("block-max-add-not-sum", calculate_block_max_additional_ratio(3, 1.0) == 1.0
         and calculate_block_volume_increment_ratio(1, 1.0)
         + calculate_block_volume_increment_ratio(2, 1.0)
         + calculate_block_volume_increment_ratio(3, 1.0) == 6.0,
@@ -1280,7 +1281,7 @@ def block_calc_test() -> None:
     rec("block-short-emits-sell",
         len(pS.api.posts) == 1 and pS.api.posts[0][1].get("side") == "SELL"
         and pS.api.posts[0][1].get("positionSide") == "SHORT"
-        and abs(float(pS.api.posts[0][1]["quantity"]) - 0.05) < 1e-9,
+        and abs(float(pS.api.posts[0][1]["quantity"]) - 0.0125) < 1e-9,
         f"posts={pS.api.posts}")
     rec("block-short-lane", lnS.side == "SHORT" and lnS.confirmed_add > 0)
 
@@ -1290,24 +1291,24 @@ def block_calc_test() -> None:
     rowsJ = pJ.block.evaluate_counts(laneJ, live_n=3, intern_pf=1.5)
     pickJ = pJ.block.pick_emit(rowsJ)
     rec("block-no-liven-jump",
-        pickJ is not None and pickJ["blockCount"] == 1 and abs(pickJ["requestedAddQty"] - 0.05) < 1e-9
+        pickJ is not None and pickJ["blockCount"] == 1 and abs(pickJ["requestedAddQty"] - 0.0125) < 1e-9
         and all(r["blockCount"] == 1 for r in rowsJ if r["kind"] == "active-live"),
         f"pick={pickJ and (pickJ['blockCount'], pickJ['requestedAddQty'])} act={[r['blockCount'] for r in rowsJ if r['kind']=='active-live']}")
 
     # sequential remainder through n=1,2,3 → aggregate 4× parent, never more
     pR = mk_trader(1.1, 1.5, 12)
-    for step in (1, 2, 3):
+    for step in (1, 2, 3, 4):
         pR.block_last_emit = 0.0
         pR.maybe_block_adds()
     laneR = pR.block.lanes["TST-USDT:LONG"]
-    rec("block-seq-3-adds",
-        len(pR.api.posts) == 3 and abs(laneR.confirmed_add - 0.15) < 1e-9
-        and abs((laneR.base_qty + laneR.confirmed_add) - 0.20) < 1e-9
+    rec("block-seq-four-portions-2x-cap",
+        len(pR.api.posts) == 4 and abs(laneR.confirmed_add - 0.05) < 1e-9
+        and abs((laneR.base_qty + laneR.confirmed_add) - 0.10) < 1e-9
         and pR.block.next_unsatisfied(laneR) is None,
         f"posts={len(pR.api.posts)} add={laneR.confirmed_add} tot={laneR.base_qty+laneR.confirmed_add}")
     pR.block_last_emit = 0.0
     pR.maybe_block_adds()
-    rec("block-seq-full-stops", len(pR.api.posts) == 3, f"posts={len(pR.api.posts)}")
+    rec("block-seq-full-stops", len(pR.api.posts) == 4, f"posts={len(pR.api.posts)}")
 
     # volume correctness: no add at entry, no add while flat, remainder not bumped
     pAge = mk_trader(1.2, 1.5, 12)
@@ -1326,6 +1327,22 @@ def block_calc_test() -> None:
     rec("block-remainder-no-bump",
         pDust.api.posts == [] and bool(lnD.satisfied.get(1)),
         f"posts={pDust.api.posts} sat={lnD.satisfied}")
+    pRetry = mk_trader(1.2, 1.5, 12)
+    def reject_minimum(path, body):
+        pRetry.api.posts.append((path, dict(body)))
+        return {"code": 101400, "msg": "minimum order amount is 0.5"}
+    pRetry.api.post = reject_minimum
+    pRetry.maybe_block_adds()
+    rec("block-minimum-retry-never-exceeds-approved-portion",
+        len(pRetry.api.posts) == 1 and not pRetry.pending_orders
+        and pRetry.block.lanes["TST-USDT:LONG"].confirmed_add == 0,
+        f"requests={len(pRetry.api.posts)}")
+    pRound = mk_trader(1.2, 1.5, 12)
+    pRound.cap_order_qty = lambda c, px, qty, cap=None: qty * 1.05
+    pRound.maybe_block_adds()
+    rec("block-rounding-cannot-exceed-remainder",
+        len(pRound.api.posts) == 1 and float(pRound.api.posts[0][1]["quantity"]) <= 0.0125,
+        str(pRound.api.posts))
     pMx = mk_trader(1.2, 1.5, 12)
     pMx.dca = SimpleNamespace(enabled=True, lanes={"TST-USDT:LONG": SimpleNamespace(filled_n=1)}, key=lambda s, d: f"{s}:{d}")
     pMx.maybe_block_adds()
@@ -1361,10 +1378,10 @@ def block_calc_test() -> None:
     pCap.volume_factor = 1.0
     pCap.available = 100000.0
     extra = calculate_block_max_additional_ratio(pCap.block.max_stack, pCap.block.volume_ratio)
-    rec("block-book-extra-3", abs(extra - 3.0) < 1e-9, str(extra))
+    rec("block-book-extra-capped-1", abs(extra - 1.0) < 1e-9, str(extra))
     base_n = pt.Pulse.notional_cap(pCap)
     book_n = pt.Pulse.max_book_notional(pCap)
-    rec("block-book-cap-4x", abs(book_n / base_n - 4.0) < 0.08, f"book={book_n} base={base_n} ratio={book_n / base_n:.3f}")
+    rec("block-book-cap-2x", abs(book_n / base_n - 2.0) < 0.08, f"book={book_n} base={base_n} ratio={book_n / base_n:.3f}")
 
     # parent close stores cost-net fraction, opposite side stays live
     pC2 = mk_trader(1.2, 1.5, 12)
@@ -2249,6 +2266,10 @@ def historic_snapshot_test() -> None:
 
 def main() -> int:
     run_units()
+    import unittest
+    from test_block_contract import BlockContractTests
+    block_contract = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(BlockContractTests))
+    rec("unit-block-contract", block_contract.wasSuccessful(), f"n={block_contract.testsRun}")
     rank_test()
     overlay_test()
     cost_test()
