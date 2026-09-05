@@ -1545,13 +1545,13 @@ class IndicationBook:
             }
         # Keep current per-symbol lane status visible even when the lane is quiet.
         for kind in INDICATION_KINDS:
-            current = [row.get(kind) for row in self.lane_results.values() if isinstance(row, dict) and isinstance(row.get(kind), dict)]
+            current = [row.get(kind) for row in list(self.lane_results.values()) if isinstance(row, dict) and isinstance(row.get(kind), dict)]
             out[kind]["currentNoSignal"] = sum(1 for row in current if row.get("status") == "no-signal")
         return out
 
     def snapshot(self) -> Dict[str, Any]:
         primaries = []
-        for s, rows in self.last.items():
+        for s, rows in list(self.last.items()):
             p = self.primary(s)
             if p:
                 rec = asdict(p)
@@ -1605,7 +1605,7 @@ class IndicationBook:
             "tfMinAgree": int(self.settings.get("tfMinAgree") or 2),
             "symbols": len(self.last),
             "processed": keys if len(keys) <= 48 else keys[:32],
-            "evalN": sum(len(v) for v in self.evals.values()),
+            "evalN": sum(len(v) for v in list(self.evals.values())),
             "lanes": {s: [e.source_id for e in v] for s, v in eval_items},
             "primary": primaries[:24],
             "samples": samples[:16],
@@ -1859,4 +1859,3 @@ if __name__ == "__main__":
         bad += int(not ok)
     print("indication_engine", "ok" if not bad else f"fail={bad}")
     raise SystemExit(1 if bad else 0)
-
