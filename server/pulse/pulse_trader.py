@@ -3286,13 +3286,17 @@ class Pulse:
         return not (has_sl and has_tp)
 
     def entries_blocked(self) -> bool:
-        """Hard freeze only for order-cap cooldown and the first boot seconds.
+        """Entry-only admission for venue cooldown and the first boot seconds.
         A leftover/ghost missing SL/TP must never stop the rest of the book —
         after a manual exchange close the desk keeps placing, adding, and
         attaching controls on every other symbol."""
         if time.time() < self.ctrl_skip.get("__order_cap__", 0):
             return True
         if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
+            return True
+        api = getattr(self, "api", None)
+        retry_after = getattr(api, "order_retry_after", None)
+        if callable(retry_after) and retry_after() > 0:
             return True
         return False
 
@@ -7015,6 +7019,10 @@ class Pulse:
     def maybe_entries(self) -> None:
         if self.halted:
             return
+        if self.entries_blocked():
+            # Controls/management still run in _one_cycle. Do not repeatedly
+            # prepare entries for a transport that cannot accept them yet.
+            return
         rows = self.strategy_closes()
         consec = 0
         for c in reversed(rows):
@@ -7181,7 +7189,7 @@ class Pulse:
             ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
-        for conf, s, d, why in ranked:
+        for conf, s, d, why in self.entry_candidate_window(ranked):
             if self.entries_blocked():
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
@@ -7218,6 +7226,24 @@ class Pulse:
             self.skip_log["entry0"] = time.time()
         self.maybe_block_adds()
         self.maybe_dca_adds()
+
+    def entry_candidate_window(self, ranked):
+        """Fair cooperative slice, not a cap on symbols or completed trades.
+
+        Keep the cursor after the last examined candidate, including rejected
+        candidates. One slow order may exceed the slice, but hundreds of
+        rejected orders cannot monopolize the main loop before stats/SL work.
+        """
+        if not ranked:
+            return
+        start = int(getattr(self, "_entry_cursor", 0) or 0) % len(ranked)
+        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S))
+        for offset in range(len(ranked)):
+            if offset and time.monotonic() >= deadline:
+                break
+            index = (start + offset) % len(ranked)
+            self._entry_cursor = (index + 1) % len(ranked)
+            yield ranked[index]
 
     def flatten_all(self, why: str) -> None:
         for pos in list(self.open.values()):
@@ -7382,6 +7408,14 @@ class Pulse:
             pos.ctrl_qty = allocated
             recovered.append(pos)
         return recovered
+
+    def reconcile_startup_positions(self) -> None:
+        """Confirm a boot-time empty snapshot before repairing persisted IDs."""
+        self.adopt_exchange_positions()
+        if (getattr(self, "recon_pending", False)
+                and int(getattr(self, "_empty_rest_streak", 0) or 0) == 1
+                and str(getattr(self, "recon_detail", "")).startswith("pending empty exchange read")):
+            self.adopt_exchange_positions()
 
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
@@ -9547,7 +9581,7 @@ class Pulse:
         except Exception:
             pass
         sd_notify("WATCHDOG=1")
-        self.adopt_exchange_positions()
+        self.reconcile_startup_positions()
         sd_notify("WATCHDOG=1")
         try:
             self.list_orders()

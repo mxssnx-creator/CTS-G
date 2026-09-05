@@ -2270,6 +2270,9 @@ def main() -> int:
     from test_block_contract import BlockContractTests
     block_contract = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(BlockContractTests))
     rec("unit-block-contract", block_contract.wasSuccessful(), f"n={block_contract.testsRun}")
+    from test_vst_scheduling import VstSchedulingTests
+    scheduling = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(VstSchedulingTests))
+    rec("unit-vst-scheduling", scheduling.wasSuccessful(), f"n={scheduling.testsRun}")
     rank_test()
     overlay_test()
     cost_test()

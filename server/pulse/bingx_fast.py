@@ -342,7 +342,16 @@ class FastBingX:
             return False
         w = self.buckets[lane].take()
         self.stats["wait"] += w
-        return True
+        # Another worker may receive a venue ban while this worker waits for
+        # its token. Recheck without submitting a request inside that ban.
+        gate = self.path_cd.get(path, 0.0)
+        if lane == "order":
+            gate = max(self.cooldown_until, gate)
+        return time.time() >= gate
+
+    def order_retry_after(self) -> float:
+        """Read-only admission hint; does not spend a token or shorten a ban."""
+        return max(0.0, max(self.cooldown_until, self.path_cd.get("/openApi/swap/v2/trade/order", 0.0)) - time.time())
 
     def _trip(self, path: str, body: Dict[str, Any]) -> None:
         code = body.get("code")
@@ -350,16 +359,16 @@ class FastBingX:
         if code not in RATE_CODES and "rate limit" not in msg.lower() and "100410" not in msg and "frequency limit" not in msg.lower():
             return
         self.stats["rl"] += 1
-        wait = 1.2
-        m = re.search(r"(?:unblocked after|retry after time:\s*)(\d{10,})", msg)
+        now = time.time()
+        wait = 8.0
+        m = re.search(r"(?:unblocked\s+after|retry\s+after\s+time)\s*:?\s*(\d{10,})", msg, re.I)
         if m:
             raw = int(m.group(1))
             until = raw / 1000.0 if raw > 10_000_000_000 else float(raw)
-            wait = max(0.8, min(900.0, until - time.time() + 0.4))
-            self.path_cd[path] = time.time() + wait
-        else:
-            self.path_cd[path] = time.time() + 8.0
-        self.cooldown_until = max(self.cooldown_until, time.time() + min(wait, 12.0))
+            # Honor the complete server deadline, including waits >15 min.
+            wait = max(0.8, until - now + 0.4)
+        self.path_cd[path] = max(self.path_cd.get(path, 0.0), now + wait)
+        self.cooldown_until = max(self.cooldown_until, now + min(wait, 12.0))
         self.err.write("rate-limit", path=path, code=code, msg=msg[:180], wait=round(wait, 2))
 
     def _req(self, method: str, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
