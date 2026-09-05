@@ -81,5 +81,24 @@ class ControlFills(unittest.TestCase):
             release.set();worker.join(timeout=2)
         self.assertFalse(worker.is_alive());self.assertEqual(len(completed),4)
 
+    def test_rollup_survives_new_symbol_during_iteration(self):
+        entered=threading.Event();release=threading.Event();errors=[]
+        class WaitingBars(list):
+            def __len__(self):
+                entered.set();release.wait(timeout=2)
+                return super().__len__()
+        self.p.klines_tf={'1m':{'first':WaitingBars([[1,2,.5,1,1]]*75)}}
+        def run():
+            try:self.p.rollup_tf()
+            except Exception as e:errors.append(e)
+        worker=threading.Thread(target=run);worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=1))
+            self.p.klines_tf['1m']['new']=[[1,2,.5,1,1]]*75
+        finally:
+            release.set();worker.join(timeout=2)
+        self.assertEqual(errors,[]);self.assertFalse(worker.is_alive())
+        self.assertIn('first',self.p.klines_tf['5m'])
+
 
 if __name__=='__main__':unittest.main()

@@ -23,6 +23,19 @@ import pulse_http
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_redis_readiness_retries_loading_and_requires_pong(self):
+        for mode, expected, calls in (("loading",0,3),("auth",1,1),("error",1,5)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                counter = Path(tmp)/'count'
+                code = '''source "$1"
+timeout() { local n=0; [[ ! -f "$2" ]] || true; [[ ! -f "$COUNT_FILE" ]] || read -r n < "$COUNT_FILE"; n=$((n+1)); echo "$n" > "$COUNT_FILE"; case "$MODE" in loading) [[ "$n" -ge 3 ]] && echo PONG || echo LOADING;; auth) echo NOAUTH;; *) echo ERROR;; esac; }
+sleep() { :; }
+redis_ready
+'''
+                env=dict(os.environ,COUNT_FILE=str(counter),MODE=mode)
+                r=subprocess.run(['bash','-c',code,'probe',str(ROOT/'deploy/linux-common.sh')],env=env,capture_output=True,timeout=5)
+                self.assertEqual(r.returncode,expected);self.assertEqual(int(counter.read_text()),calls)
+
     def port_probe(self, port):
         return subprocess.run(["bash", "-c", 'source "$1"; can_bind_port "$2"',
                                "probe", str(ROOT / "deploy/linux-common.sh"), str(port)],
