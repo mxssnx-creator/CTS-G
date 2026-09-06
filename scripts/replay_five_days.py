@@ -35,7 +35,8 @@ def pf(gain, loss):
     return round(gain/loss, 6) if loss > 1e-15 else ('∞' if gain > 0 else None)
 
 
-def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
+def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15,
+           entry_filter=None, add_filter=None, on_close=None, on_equity=None):
     """Parallel independent configs. Only completed bar information is used.
 
     Stops/targets are tested before close-price additions. Same-bar ambiguity
@@ -44,6 +45,9 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
     PnL is normalized to original parent notional, not leveraged account equity.
     """
     count = len(cfg)
+    entry_scale = np.array([c.get('entryVolumeRatio', 1.) for c in cfg])
+    if not np.all(np.isfinite(entry_scale) & (entry_scale > 0)):
+        raise ValueError('Entry volume ratios must be finite and positive')
     zeros = lambda: np.zeros(count, dtype=float)
     entry, original, qty, added, entered, fees = [zeros() for _ in range(6)]
     gp, gl, net, costs, wins, losses, closes, hold, peak, dd = [zeros() for _ in range(10)]
@@ -61,8 +65,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
     ratios = np.array([c['volumeRatio'] for c in cfg])
     is_dca = np.array([c['strategy'] == 'dca' for c in cfg])
     is_block = np.array([c['strategy'] == 'block' for c in cfg])
-    block_qty = np.array([1+calculate_block_max_additional_ratio(c['levels'], c['volumeRatio'], 2.)
-                          if c['strategy']=='block' else 1 for c in cfg])
+    block_qty = entry_scale * np.array([1+calculate_block_max_additional_ratio(c['levels'], c['volumeRatio'], 2.)
+                                       if c['strategy']=='block' else 1 for c in cfg])
     trail_arm = np.array([c.get('trailArmPct', 0)/100 for c in cfg])
     trail_give = np.array([c.get('trailGivePct', 0)/100 for c in cfg])
     trailing = trail_arm > 0
@@ -94,6 +98,13 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
                           np.where(hit_tp, target, price))[ids]
             cost = (fees[ids] + qty[ids]*px*fee)/original[ids]
             pnl = side*qty[ids]*(px-entry[ids])/original[ids] - cost
+            if on_close is not None:
+                for offset, k in enumerate(ids):
+                    on_close(dict(config=int(k),bar=i,entryBar=int(entered[k]),
+                        entry=float(entry[k]),exit=float(px[offset]),qty=float(qty[k]),
+                        parentPrice=float(original[k]),netFraction=float(pnl[offset]),
+                        costFraction=float(cost[offset]),boundary=bool(boundary),
+                        reason='sl' if hit_sl[k] else ('tp' if hit_tp[k] else ('time' if timed[k] else 'boundary'))))
             gains, loss = np.maximum(pnl, 0), np.maximum(-pnl, 0)
             gp[ids] += gains; gl[ids] += loss; net[ids] += pnl; costs[ids] += cost
             recent[ids, closes[ids].astype(int)%75] = pnl
@@ -114,9 +125,11 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
         dca = active & is_dca & (added < levels) & (adverse >= increments*(added+1))
         block = active & is_block & (added == 0) & (-adverse >= increments)
         adding = dca | block
+        if add_filter is not None:
+            adding &= np.asarray(add_filter(i),dtype=bool)
         ids = np.flatnonzero(adding)
         if ids.size and not boundary:
-            extra = np.where(dca, ratios, np.maximum(0, block_qty-qty))[ids]
+            extra = np.where(dca, ratios*entry_scale, np.maximum(0, block_qty-qty))[ids]
             entry[ids] = (entry[ids]*qty[ids]+price*extra)/(qty[ids]+extra)
             qty[ids] += extra; fees[ids] += price*extra*fee
             added[ids] += 1; adds_total[ids] += 1
@@ -129,14 +142,18 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
         direction, confidence = signals[i]
         if not boundary and direction == side and confidence >= .58:
             opening = (qty == 0) & ~exiting
-            entry[opening] = price; original[opening] = price; qty[opening] = 1
-            fees[opening] = price*fee; added[opening] = 0; entered[opening] = i
+            if entry_filter is not None:
+                opening &= np.asarray(entry_filter(i),dtype=bool)
+            entry[opening] = price; original[opening] = price; qty[opening] = entry_scale[opening]
+            fees[opening] = price*fee*entry_scale[opening]; added[opening] = 0; entered[opening] = i
             trail_stop[opening] = 0; trail_peak[opening] = price
         max_qty = np.maximum(max_qty, qty)
         # Close-mark liquidation equity includes accrued + estimated exit costs.
         active = qty > 0
         equity = net.copy()
         equity[active] += (side*qty[active]*(price-entry[active])-fees[active]-qty[active]*price*fee)/original[active]
+        if on_equity is not None:
+            on_equity(i, equity)
         peak = np.maximum(peak, equity)
         dd = np.maximum(dd, peak-equity)
         underwater = equity < peak-1e-12
