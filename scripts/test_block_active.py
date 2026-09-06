@@ -27,7 +27,7 @@ class BlockActiveTests(unittest.TestCase):
         p.sets = NS(enabled=True, progress=NS(ready=True), eval_need=lambda: 8,
                     real_min_pf=1.15, max_dd_s=27000, _side_view=lambda *_: self.view,
                     pick_any=lambda *a, **k: self.st)
-        p.coord = NS(gate=lambda *a, **k: (True, [], {}))
+        p.coord = NS(min_pf=1.05, gate=lambda *a, **k: (True, [], {}))
         p.strategy_closes = lambda: []
         p.live_recent_pf = lambda *a, **k: None
         p._coord_add_state = lambda **k: (True, 6, 1.8, [])
@@ -80,7 +80,13 @@ class BlockActiveTests(unittest.TestCase):
         self.assertIsNone(self.plan())
 
     def test_negative_live_book_blocks(self):
-        self.p.live_recent_pf = lambda *a, **k: 1.1
+        self.p.live_recent_pf = lambda *a, **k: 1.04
+        self.assertIsNone(self.plan())
+
+    def test_configured_live_pf_floor_is_inclusive(self):
+        self.p.live_recent_pf = lambda *a, **k: 1.05
+        self.assertIsNotNone(self.plan())
+        self.p.coord.min_pf = 1.20
         self.assertIsNone(self.plan())
 
     def test_loss_blocks_only_its_own_count(self):

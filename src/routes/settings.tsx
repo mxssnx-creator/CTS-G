@@ -1025,14 +1025,14 @@ function SettingsPage() {
             >
               <Grid>
                 <Slider
-                  label="Position cost"
-                  value={overlay.positionCostPct}
+                  label="Position cost fallback"
+                  value={overlay.positionCostFallbackPct}
                   min={0.02}
                   max={1}
                   step={0.01}
                   unit="%"
-                  hint="Default 0.15%. Deducted once from the gross move before R."
-                  onChange={(v) => patch("positionCostPct", v)}
+                  hint="Default 0.10% round trip. Used until complete exchange fee samples are available."
+                  onChange={(v) => { patch("positionCostFallbackPct", v); if (!overlay.useLivePositionCosts) patch("positionCostPct", v); }}
                 />
                 <Slider
                   label="Base min PF"
@@ -1102,6 +1102,10 @@ function SettingsPage() {
                 />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
+                <KV k="Effective position cost" v={`${(stats?.positionCost?.effectivePct ?? overlay.positionCostPct).toFixed(4)}%`} />
+                <KV k="Configured fallback" v={`${overlay.positionCostFallbackPct.toFixed(2)}%`} />
+                <KV k="Cost source / samples" v={`${stats?.positionCost?.source ?? "No measurement received"} · ${stats?.positionCost?.samples ?? 0} samples${stats?.positionCost?.fallback ? " · fallback active" : ""}`} />
+                <KV k="Cost measured at" v={stats?.positionCost?.updatedAt ? new Date(stats.positionCost.updatedAt * 1000).toLocaleString() : "No exchange measurement"} />
                 <KV k="1.00 Neutral" v={`net 0 · gross ${overlay.positionCostPct.toFixed(2)}%`} />
                 <KV k="1.10 = +1× cost" v={`net +${overlay.positionCostPct.toFixed(2)}% · gross ${(overlay.positionCostPct * 2).toFixed(2)}%`} />
                 <KV
@@ -1313,11 +1317,11 @@ function SettingsPage() {
                   label="Max DD time"
                   value={Math.round(overlay.setMaxDdTimeS / 60)}
                   min={10}
-                  max={650}
+                  max={960}
                   step={10}
                   unit="min"
-                  hint="10–650 min · default 450 · a Set must stay under this DDt cap"
-                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)}
+                  hint="10–960 min · default 960 (16h) · a Set must stay under this DDt cap"
+                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)}
                 />
                 <Slider
                   label="Min samples"
@@ -2000,7 +2004,7 @@ function SettingsPage() {
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={650} step={10} hint="10–650 min · default 450 · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)} />
+                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={300} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>

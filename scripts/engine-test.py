@@ -382,9 +382,9 @@ def stage_min_pf_test() -> None:
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.05, "main": 1.1, "real": 1.15},
+        c.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.15) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.05) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -424,13 +424,13 @@ def stage_min_pf_test() -> None:
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
         stages.get("base", {}).get("minPf") == 1.05
-        and stages.get("main", {}).get("minPf") == 1.1
-        and stages.get("real", {}).get("minPf") == 1.15,
+        and stages.get("main", {}).get("minPf") == 1.05
+        and stages.get("real", {}).get("minPf") == 1.05,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.1, "real": 1.15},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(snap.get("stageMinPf")))
 
 
@@ -2185,7 +2185,7 @@ def dd_time_test() -> None:
     # 7) config model + desk expose the field
     cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
     st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
-    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 27000," in cm)
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 57600," in cm)
     rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 

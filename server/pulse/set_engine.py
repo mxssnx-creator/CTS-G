@@ -686,9 +686,9 @@ class SetBook:
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = 1.05
-        self.stage_min_pf = {"base": 1.05, "main": 1.10, "real": 1.15}
-        self.real_min_pf = 1.15
-        self.max_dd_s = 27000.0
+        self.stage_min_pf = {"base": 1.05, "main": 1.05, "real": 1.05}
+        self.real_min_pf = 1.05
+        self.max_dd_s = 57600.0
         self.auto_deact = True
         self.use_historic_gate = True
         self.min_samples = 8
@@ -895,12 +895,12 @@ class SetBook:
             return normalize_pf(ov.get(key, fallback), fallback)
         self.stage_min_pf = {
             "base": _pf("baseMinPf", 1.05),
-            "main": _pf("mainMinPf", 1.10),
-            "real": _pf("realMinPf", float(ov.get("setMinPf") or 1.15)),
+            "main": _pf("mainMinPf", 1.05),
+            "real": _pf("realMinPf", float(ov.get("setMinPf") or 1.05)),
         }
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
-        self.max_dd_s = max(600.0, min(650.0 * 60.0, float(ov.get("setMaxDdTimeS") or 27000)))
+        self.max_dd_s = max(600.0, min(960.0 * 60.0, float(ov.get("setMaxDdTimeS") or 57600)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.live_negative_deact = bool(ov.get("setLiveNegativeDeact", ov.get("liveNegativeSetDeactivation", False)))
         self.prefer_minimal_range = bool(
@@ -928,7 +928,7 @@ class SetBook:
             self.live_test_min_samples = self.eval_need()
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
-        # PROFITABLE (cost-adjusted PF > 1.15) + DDt under the cap may
+        # PROFITABLE (cost-adjusted PF > 1.05) + DDt under the cap may
         # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
@@ -2532,10 +2532,10 @@ class SetBook:
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         validated = n15 >= need and ratio + 1e-9 >= 1.0
-        enable_pf = float(self.real_min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.05)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
-        dd_ok = dd_s <= float(self.max_dd_s or 27000) + 1e-9
+        dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
         return {
             "n": int(hist_n if hist_n is not None else len(ordered)),
             "wins": wins,
@@ -2585,8 +2585,8 @@ class SetBook:
         pf = float(m.get("last15_ratio") or 0.0)
         dd_ok = bool(m.get("ddOk", True))
         base_floor = float(self.stage_min_pf.get("base", 1.05))
-        main_floor = float(self.stage_min_pf.get("main", 1.10))
-        real_floor = float(self.stage_min_pf.get("real", 1.15))
+        main_floor = float(self.stage_min_pf.get("main", 1.05))
+        real_floor = float(self.stage_min_pf.get("real", 1.05))
         base = n >= need and pf + 1e-9 >= base_floor and dd_ok
         main = base and pf + 1e-9 >= main_floor
         real = main and pf + 1e-9 >= real_floor
@@ -2799,7 +2799,7 @@ class SetBook:
             return True, ""
         live_rows = sorted((r for r in live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
-        enable_pf = float(self.real_min_pf or 1.15)
+        enable_pf = float(self.real_min_pf or 1.05)
         if len(live_rows) < need:
             if not self.strict_gate:
                 return True, ""
@@ -2812,7 +2812,7 @@ class SetBook:
             if ratio + 1e-9 < enable_pf:
                 return False, f"hist PF {ratio:.2f}<{enable_pf:.2f}"
             dd_s = float(m.get("max_dd_s") or 0)
-            if dd_s > float(self.max_dd_s or 27000) + 1e-9:
+            if dd_s > float(self.max_dd_s or 57600) + 1e-9:
                 return False, f"hist DDt {dd_s:.0f}s"
             return True, ""
         window_ok, window_reason, _windows = self._live_windows_ok(live_rows, minimum_pf=1.0)
@@ -2839,7 +2839,7 @@ class SetBook:
         if self.live_negative_deact and n15 >= need and ratio + 1e-9 < enable_pf:
             return False, f"live last{n15} PF {ratio:.2f}<{enable_pf:.2f}"
         dd_s = float(m.get("max_dd_s") or 0)
-        if n15 >= need and dd_s > float(self.max_dd_s or 27000) + 1e-9:
+        if n15 >= need and dd_s > float(self.max_dd_s or 57600) + 1e-9:
             return False, f"live DDt {dd_s:.0f}s"
         return True, ""
 
@@ -2935,7 +2935,7 @@ class SetBook:
             "costSource": live_opt_pf.get("costSource") or self.cost_source,
         }
         need = self.eval_need()
-        enable_pf = float(self.min_pf or 1.15)
+        enable_pf = float(self.min_pf or 1.05)
         by: Dict[str, Dict[str, Any]] = {}
         for side in DIRECTIONS:
             sub_hist = filter_side(st.hist, side)
@@ -3241,7 +3241,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.real_min_pf or 1.15),
+                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.real_min_pf or 1.05),
                 "active": st.active,
             }
         return blob
@@ -3744,7 +3744,7 @@ class SetBook:
             "pfWindow": self.pf_n,
             "deactN": self.deact_n,
             "minPf": self.real_min_pf,
-            "enablePf": 1.15 if float(self.min_pf or 0) <= 0 else self.min_pf,
+            "enablePf": 1.05 if float(self.min_pf or 0) <= 0 else self.min_pf,
             "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,
             "autoDeact": self.auto_deact,
@@ -4165,6 +4165,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     w.load(
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
+            "positionCostPct": 0.15,  # This hand-calculated fixture uses 0.15%.
             "setMinSamples": 5, "setAutoDeact": False, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6],
             "trailArmMin": 0.3, "trailArmMax": 0.3,
@@ -4192,6 +4193,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g2.load(
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
+            "positionCostPct": 0.15,  # Preserve the fixture's explicit cost basis.
             "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
             "setLiveNegativeDeact": True,
             "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6, 0.9],

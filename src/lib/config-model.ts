@@ -203,6 +203,7 @@ export type PulseOverlay = {
   mainMinPf: number;
   realMinPf: number;
   positionCostPct: number;
+  positionCostFallbackPct: number;
   useLivePositionCosts: boolean;
   /** Prefer the smallest stable ranges after PF/DD/sample gates. */
   preferMinimalRange: boolean;
@@ -325,7 +326,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
-  maxDdTimeS: 27000,
+  maxDdTimeS: 57600,
   scratchS: 600,
   scratchMinPct: 0.16,
   scanS: 0.2,
@@ -352,7 +353,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: 1.25,
+  dcaMinPf: 1.05,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
@@ -366,9 +367,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   minPf: 1.05,
   baseMinPf: 1.05,
-  mainMinPf: 1.1,
-  realMinPf: 1.15,
-  positionCostPct: 0.15,
+  mainMinPf: 1.05,
+  realMinPf: 1.05,
+  positionCostPct: 0.10,
+  positionCostFallbackPct: 0.10,
   // Prefer measured exchange fees. The manual PositionCost remains the
   // deterministic fallback until a complete live sample is available.
   useLivePositionCosts: true,
@@ -448,7 +450,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setPfWindow: 15,
   setDeactN: 25,
   setMinPf: 1.05,
-  setMaxDdTimeS: 27000,
+  setMaxDdTimeS: 57600,
   setAutoDeact: true,
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
@@ -476,7 +478,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 15,
   exitDeactN: 25,
-  exitMinPf: 1.25,
+  exitMinPf: 1.05,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -712,7 +714,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
-    dcaMinPf: num(cts.dcaMinPf, 1.25),
+    dcaMinPf: num(cts.dcaMinPf, 1.05),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 1),
@@ -724,12 +726,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15), 1.15),
+  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.05), 1.05),
   baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.05), 1.05),
-  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.1), 1.1),
-  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.15), 1.15),
+  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.05), 1.05),
+  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.05), 1.05),
 
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.10),
+    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.10),
     useLivePositionCosts: bool(
       live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
       true,
@@ -799,7 +802,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.05),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 27000),
+    setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
@@ -825,7 +828,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, 1.25),
+    exitMinPf: num(cts.exitMinPf, 1.05),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
@@ -847,8 +850,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.trailGiveMax = 0.5;
   out.setMinStep = Math.max(1, Math.min(22, Math.round(num(out.setMinStep, 1))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
-  out.maxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.maxDdTimeS, 27000) / 600) * 600));
-  out.setMaxDdTimeS = Math.max(600, Math.min(39000, Math.round(num(out.setMaxDdTimeS, 27000) / 600) * 600));
+  out.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.maxDdTimeS, 57600) / 600) * 600));
+  out.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.setMaxDdTimeS, 57600) / 600) * 600));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),

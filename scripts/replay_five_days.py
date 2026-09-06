@@ -35,8 +35,9 @@ def pf(gain, loss):
     return round(gain/loss, 6) if loss > 1e-15 else ('∞' if gain > 0 else None)
 
 
-def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15,
-           entry_filter=None, add_filter=None, on_close=None, on_equity=None):
+def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
+           entry_filter=None, add_filter=None, on_close=None, on_equity=None,
+           min_pf=1.05, max_dd_s=57600):
     """Parallel independent configs. Only completed bar information is used.
 
     Stops/targets are tested before close-price additions. Same-bar ambiguity
@@ -76,9 +77,18 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15,
     scratch_bars = np.array([c.get('scratchBars', 1e12) for c in cfg])
     scratch_min = np.array([c.get('scratchMinPct', 0)/100 for c in cfg])
     honor_tp = np.array([c.get('honorTp', True) for c in cfg])
-    fee = cost_pct/200
+    # Scalar fallback or a causal per-bar round-trip rate. Each execution pays
+    # that bar's half-rate; a later cost observation never reprices old fills.
+    cost_rates = np.asarray(cost_pct, dtype=float)
+    if cost_rates.ndim > 1 or (cost_rates.ndim == 1 and len(cost_rates) != len(bars)):
+        raise ValueError('Cost schedule must match bars')
+    if not np.all(np.isfinite(cost_rates) & (cost_rates >= 0)):
+        raise ValueError('Costs must be finite and nonnegative')
+    if not np.isfinite(min_pf) or min_pf < 1 or not np.isfinite(max_dd_s) or max_dd_s < 0:
+        raise ValueError('Invalid qualification policy')
     split = warmup + int((len(bars)-warmup)*.7)
     for i in range(warmup, len(bars)):
+        fee = float(cost_rates if cost_rates.ndim == 0 else cost_rates[i])/200
         op, hi, lo, price = bars[i][:4]
         active = qty > 0
         stop = entry * (1-side*sl)
@@ -173,7 +183,7 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15,
             recent_metrics.append(dict(n=available, requested=window,
                                       pf=pf(sum(max(0,x) for x in tape), sum(max(0,-x) for x in tape))))
         train_pf = pf(train_gp[k], train_gl[k]); test_pf = pf(test_gp[k], test_gl[k])
-        passes = lambda p: p == '∞' or isinstance(p, (float, int)) and p > 1.02
+        passes = lambda p: p == '∞' or isinstance(p, (float, int)) and p >= min_pf
         rows.append(dict(config=k, n=n, wins=int(wins[k]), losses=int(losses[k]),
             pf=pf(gp[k], gl[k]), netPct=round(net[k]*100, 6), costPct=round(costs[k]*100, 6),
             grossProfitPct=round(gp[k]*100,6), grossLossPct=round(gl[k]*100,6),
@@ -186,7 +196,7 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15,
             trainN=int(train_n[k]), trainPf=train_pf, trainDdPct=round(train_dd[k]*100,6),
             holdoutN=int(test_n[k]), holdoutPf=test_pf,
             holdoutNetPct=round((test_gp[k]-test_gl[k])*100,6), recentPf=recent_metrics,
-            positive=bool(net[k]>0), qualified=bool(train_n[k]>=8 and test_n[k]>=8 and passes(train_pf) and passes(test_pf)),
+            positive=bool(net[k]>0), qualified=bool(train_n[k]>=8 and test_n[k]>=8 and passes(train_pf) and passes(test_pf) and dd_max[k]<=max_dd_s),
             dailyNetPct=np.round(daily_net[k]*100,6).tolist(), dailyN=daily_n[k].astype(int).tolist()))
     return rows
 

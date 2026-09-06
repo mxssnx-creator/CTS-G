@@ -13,7 +13,7 @@ def section(evidence, out, table, fmt, esc, svg):
     fig,ax=plt.subplots(figsize=(10,3.6))
     ax.plot([p['candidate']['rank'] for p in parents],
             [p['baseline']['trainPf'] for p in parents],color='#b91c1c',label='Trainings-PF der Referenz')
-    ax.axhline(1.02,color='#0f766e',linestyle='--',label='Ergebnisprüfung: PF > 1,02')
+    ax.axhline(1.05,color='#0f766e',linestyle='--',label='Ergebnisprüfung: PF ≥ 1,05')
     ax.set_xlabel('Trainingsrang der 50 Kandidaten');ax.set_ylabel('Klassischer Netto-PF')
     ax.grid(alpha=.3);ax.legend();plot=svg(fig,pathlib.Path(out).parent/'charts'/'block-active-training.svg')
     parts=['<section id="block-active"><h2>Block → Active · angepasste Exchange-Ausführung</h2>',

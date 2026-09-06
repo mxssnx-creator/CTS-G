@@ -60,7 +60,7 @@ def select_top25(source, count=25):
     return dict(candidates=chosen,examinedParentRows=examined,sampleSufficientParentRows=eligible,
         selected=count,rule='Train PF descending; Train DD ascending; Train N descending; deterministic effective-config identity',
         period='First 14 days of the 20-day sample select; final six days validate retrospectively',
-        qualification=f'Research queue accepts {count}; outcome gate is independent: N>=8 and classic net PF>1.02 in both segments',
+        qualification=f'Research queue accepts {count}; outcome gate is independent: N>=8 and classic net PF>=1.05 in both segments; DD time<=16h',
         leakageNote='Earlier reports already exposed these dates. This is a retrospective chronological check, not an unseen forward test.')
 
 def variants(parent,admission='strict'):
@@ -121,7 +121,7 @@ def causal_gates(bars,tape,equity,settings):
             stack=coord.add_stack_cap(6,cm.get('lastPf',1.))
             recent=last_n_cost_pf(history,8,book.cost_pct)
             # Live continuation PF floor and Block's base-1 incremental floor.
-            last_block=np.array([bool(allow and n<=stack and (recent['count']<8 or recent['ratio']>=1.25)
+            last_block=np.array([bool(allow and n<=stack and (recent['count']<8 or recent['ratio']>=coord.min_pf)
                 and metric['ratio']>=calculate_block_minimum_profit_factor(coord.min_pf,
                     settings.get('overlay',{}).get('blockProfitFactorRatio',1.25),calculate_block_volume_increment_ratio(n,r)))
                 for n in range(1,7) for r in (.25,.5,1.)])

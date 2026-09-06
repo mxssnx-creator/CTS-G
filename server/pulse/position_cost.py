@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-POSITION_COST_PCT_DEFAULT = 0.15
+POSITION_COST_PCT_DEFAULT = 0.10
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 # User-facing PF controls share one contract across UI, overlay, and workers.

@@ -214,6 +214,16 @@ export type ActivitySummary = {
 };
 
 export type LiveStats = {
+  positionCost?: {
+    manualPct?: number;
+    effectivePct?: number;
+    useLive?: boolean;
+    source?: string;
+    samples?: number;
+    complete?: boolean;
+    updatedAt?: number;
+    fallback?: boolean;
+  };
   forcedConfigs?: import("./hist-calc").ForcedConfigSummary;
   running: boolean;
   mode: string;

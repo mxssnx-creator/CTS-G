@@ -11,6 +11,29 @@ import pulse_trader
 
 
 class HistoricTests(unittest.TestCase):
+    def test_dynamic_costs_charge_each_execution_at_its_observed_rate(self):
+        bars = [[100.,100.,100.,100.,1.] for _ in range(10)]
+        cfg = [dict(strategy='base', levels=0, incrementPct=0, volumeRatio=0, tpPct=5, slPct=5)]
+        rates = [.1] + [.2]*9
+        row = replay(bars, [(1,1)]+[(0,0)]*9, 1, cfg, warmup=0, cost_pct=rates)[0]
+        self.assertAlmostEqual(row['costPct'], .15)  # .05 entry + .10 exit
+        self.assertAlmostEqual(row['netPct'], -.15)
+        for costs in ([.1]*9, [float('nan')]*10, [-.1]*10):
+            with self.assertRaises(ValueError):
+                replay(bars, [(0,0)]*10, 1, cfg, warmup=0, cost_pct=costs)
+
+    def test_dd_duration_is_an_acceptance_gate(self):
+        # Alternating wins/losses yield PF 2; each chronological segment has
+        # enough closes. Only a stricter DD-time cap changes qualification.
+        bars=[];signals=[]
+        for i in range(240):
+            bars.append([100.,100.,100.,100.,1.]);signals.append((1,1) if i%3==0 else (0,0))
+            if i%3==1:bars[-1]=[100.,101. if (i//3)%2==0 else 100.,99.5 if (i//3)%2 else 100.,100.,1.]
+        cfg=[dict(strategy='base',levels=0,incrementPct=0,volumeRatio=0,tpPct=1,slPct=.5)]
+        accepted=replay(bars,signals,1,cfg,warmup=0,cost_pct=0,max_dd_s=57600)[0]
+        rejected=replay(bars,signals,1,cfg,warmup=0,cost_pct=0,max_dd_s=0)[0]
+        self.assertTrue(accepted['qualified']);self.assertFalse(rejected['qualified'])
+
     def run_lane(self, changes=None, cfg=None, cost=0, side=1):
         bars = [[100.,100.,100.,100.,1.] for _ in range(10)]
         for i, b in (changes or {}).items(): bars[i] = b

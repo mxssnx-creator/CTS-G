@@ -80,7 +80,9 @@ def job(args):
         start=blob['end']-n*60000,end=blob['end'],rows=len(results),expectedRows=2*len(cfg),
         positive=sum(r['positive'] for r in results),qualified=sum(r['qualified'] for r in results),
         noTrades=sum(r['n']==0 for r in results),best=best,elapsedS=round(time.monotonic()-started,2),
-        candleSha256=blob['candleSha256'],sha256=hashlib.sha256(raw).hexdigest(),signature=signature)
+        candleSha256=blob['candleSha256'],sha256=hashlib.sha256(raw).hexdigest(),signature=signature,
+        policy=dict(minClassicPf=1.05,maxDdS=57600,positionCostPct=.1,
+                    costSource='fallback; no historical exchange fee samples',useLivePositionCosts=True))
     summary_path.write_text(json.dumps(summary,separators=(',',':'),allow_nan=False))
     print(json.dumps({k:summary[k] for k in ('key','rows','positive','qualified','elapsedS')}),flush=True)
     return summary
@@ -141,6 +143,7 @@ for(const id of ['strategy','status','sort'])el(id).onchange=()=>{page=0;if(curr
 def main():
     p=argparse.ArgumentParser();p.add_argument('--data',required=True);p.add_argument('--output',required=True)
     p.add_argument('--workers',type=int,default=2);p.add_argument('--report-only',action='store_true')
+    p.add_argument('--no-report',action='store_true',help='Render the readable report separately after all additional tests')
     p.add_argument('--windows',nargs='+',choices=WINDOWS,default=list(WINDOWS));a=p.parse_args()
     out=pathlib.Path(a.output);out.mkdir(parents=True,exist_ok=True)
     source_files=['scripts/replay_complete.py','scripts/replay_five_days.py','server/pulse/set_engine.py','server/pulse/indication_engine.py']
@@ -157,7 +160,7 @@ def main():
         with ProcessPoolExecutor(max_workers=max(1,min(a.workers,2))) as pool:
             futures=[pool.submit(job,t) for t in tasks]
             for future in as_completed(futures):summaries.append(future.result())
-    make_report(out,summaries,signature)
+    if not a.no_report:make_report(out,summaries,signature)
     print(json.dumps({'completedGroups':len(summaries),'rows':sum(s['rows'] for s in summaries),'html':str(out/'cts-g-complete-validation-20260906.html')}))
 
 if __name__=='__main__':main()

@@ -274,7 +274,7 @@ TRAIL_ARM = 0.0032
 TRAIL_GIVE = 0.0016
 TIME_STOP_S = 21600
 MAX_HOLD_S = 21600
-MAX_DD_TIME_S = 27000.0  # default 450 minutes; configurable 10..650 minutes
+MAX_DD_TIME_S = 57600.0  # default and upper bound 16 hours; configurable 10..960 minutes
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
@@ -4170,8 +4170,8 @@ class Pulse:
         if not allow:
             return reject("overall coordination: " + "; ".join(reasons))
         live_pf = self.live_recent_pf(side, n=8)
-        if live_pf is not None and (not math.isfinite(live_pf) or live_pf < 1.25):
-            return reject("overall live PF below 1.25")
+        if live_pf is not None and (not math.isfinite(live_pf) or live_pf + 1e-9 < self.coord.min_pf):
+            return reject(f"overall live PF below {self.coord.min_pf:.2f}")
         anchors = getattr(self, "_block_reference_anchors", None)
         if anchors is None:
             anchors = self._block_reference_anchors = {}
@@ -5860,9 +5860,9 @@ class Pulse:
         else:
             TIME_STOP_S = MAX_HOLD_S
         if ov.get("maxDdTimeS") is not None:
-            MAX_DD_TIME_S = min(650.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
+            MAX_DD_TIME_S = min(960.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
         else:
-            MAX_DD_TIME_S = 0.0
+            MAX_DD_TIME_S = 57600.0
         if ov.get("scratchS"):
             SCRATCH_S = float(ov["scratchS"])
         if ov.get("scratchMinPct") is not None:
@@ -5967,10 +5967,10 @@ class Pulse:
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
-        real_pf = 1.1
+        real_pf = 1.05
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.25)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.05)
         except Exception:
             pass
         self.block.enabled = bool(b_en) if b_en is not None else True
@@ -6467,7 +6467,7 @@ class Pulse:
             # Live book losing → don't pyramid more size.
             try:
                 live_pf = self.live_recent_pf(pos.side, n=8)
-                if live_pf is not None and live_pf + 1e-9 < 1.25:
+                if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
                     continue
             except Exception:
                 pass
@@ -6670,7 +6670,7 @@ class Pulse:
         if self.entries_blocked():
             return
         live_pf = self.live_recent_pf(n=8)
-        if live_pf is not None and live_pf + 1e-9 < 1.25:
+        if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
             return
         allow_add, _, _, add_reasons = self._coord_add_state()
         if not allow_add:
