@@ -38,3 +38,4 @@ preview.log
 server/pulse/hist-calc.json
 server/pulse/hist-calc-req.json
 server/pulse/hist-calc.log
+server/pulse/hist-calc.pid
