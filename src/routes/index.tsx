@@ -542,7 +542,7 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
     ["dca", Boolean(p.dcaEnabled) && stats?.dca?.enabled !== false],
     ["trailing", p.stratTrailing !== false],
   ];
-  const tp = (p.positionCostPct ?? 0.15) * (p.tpCostRatio ?? 5);
+  const tp = (p.positionCostPct ?? 0.10) * (p.tpCostRatio ?? 5);
   const sl = tp * (p.slToTpRatio ?? 0.6);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">

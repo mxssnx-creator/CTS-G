@@ -464,10 +464,11 @@ function SettingsPage() {
               <CoveragePanel live={stats} />
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="General calculation" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Exchange execution without adjustments · disabled by default; calculation continues" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -1024,14 +1025,14 @@ function SettingsPage() {
             >
               <Grid>
                 <Slider
-                  label="Position cost"
-                  value={overlay.positionCostPct}
+                  label="Position cost fallback"
+                  value={overlay.positionCostFallbackPct}
                   min={0.02}
                   max={1}
                   step={0.01}
                   unit="%"
-                  hint="Default 0.15%. Deducted once from the gross move before R."
-                  onChange={(v) => patch("positionCostPct", v)}
+                  hint="Default 0.10% round trip. Used until complete exchange fee samples are available."
+                  onChange={(v) => { patch("positionCostFallbackPct", v); if (!overlay.useLivePositionCosts) patch("positionCostPct", v); }}
                 />
                 <Slider
                   label="Base min PF"
@@ -1101,6 +1102,10 @@ function SettingsPage() {
                 />
               </Grid>
               <div className="grid gap-3 sm:grid-cols-3">
+                <KV k="Effective position cost" v={`${(stats?.positionCost?.effectivePct ?? overlay.positionCostPct).toFixed(4)}%`} />
+                <KV k="Configured fallback" v={`${overlay.positionCostFallbackPct.toFixed(2)}%`} />
+                <KV k="Cost source / samples" v={`${stats?.positionCost?.source ?? "No measurement received"} · ${stats?.positionCost?.samples ?? 0} samples${stats?.positionCost?.fallback ? " · fallback active" : ""}`} />
+                <KV k="Cost measured at" v={stats?.positionCost?.updatedAt ? new Date(stats.positionCost.updatedAt * 1000).toLocaleString() : "No exchange measurement"} />
                 <KV k="1.00 Neutral" v={`net 0 · gross ${overlay.positionCostPct.toFixed(2)}%`} />
                 <KV k="1.10 = +1× cost" v={`net +${overlay.positionCostPct.toFixed(2)}% · gross ${(overlay.positionCostPct * 2).toFixed(2)}%`} />
                 <KV
@@ -1196,13 +1201,13 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="General calculation" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–6).
+                Indications and general run in parallel for entries. Block Active executes an adjusted quantity from a virtual reference. Normal exchange entries follow the separate Normal (General) setting.
                 Trailing only moves SL after min-step, only in the protective direction, and retries a failed exchange update while retaining the old stop. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
@@ -1312,11 +1317,11 @@ function SettingsPage() {
                   label="Max DD time"
                   value={Math.round(overlay.setMaxDdTimeS / 60)}
                   min={10}
-                  max={650}
+                  max={960}
                   step={10}
                   unit="min"
-                  hint="10–650 min · default 450 · a Set must stay under this DDt cap"
-                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)}
+                  hint="10–960 min · default 960 (16h) · a Set must stay under this DDt cap"
+                  onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)}
                 />
                 <Slider
                   label="Min samples"
@@ -1332,7 +1337,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="Default 50 qualified Sets · fewer when qualification fails · 0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -1457,13 +1462,18 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Counts 1–6 are independent · each count retains recovery state until its own positive result · no compounding">
+            <Card title="Block strategy" hint="Counts 1–6 · Active can open only the adjusted portion of a virtual reference · no compounding">
               <Grid>
                 <EnableSlider
                   label="Block enabled"
                   on={overlay.blockEnabled}
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
+                />
+                <Toggle
+                  label="Active"
+                  on={overlay.blockActive}
+                  onChange={(v) => patch("blockActive", v)}
                 />
                 <Toggle
                   label="Active Live overlay"
@@ -1475,6 +1485,8 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Unadjusted exchange entries · disabled by default" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <p className="text-sm text-muted">Active observes a qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; existing and pending same-side quantities reduce the order. Normal calculations remain available. Profitability is measured, never guaranteed.</p>
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}
@@ -1992,7 +2004,7 @@ function SettingsPage() {
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={650} step={10} hint="10–650 min · default 450 · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(650, Math.round(v / 10) * 10)) * 60)} />
+                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={300} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>

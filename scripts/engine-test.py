@@ -128,7 +128,7 @@ def overlay_test() -> None:
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
-    rec("x01-set-unlim", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
+    rec("x01-set-target50", int(x01.get("setMaxActive") or 0) == 50, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
     rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
@@ -382,9 +382,9 @@ def stage_min_pf_test() -> None:
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.05, "main": 1.1, "real": 1.15},
+        c.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.15) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.05) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -424,13 +424,13 @@ def stage_min_pf_test() -> None:
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
         stages.get("base", {}).get("minPf") == 1.05
-        and stages.get("main", {}).get("minPf") == 1.1
-        and stages.get("real", {}).get("minPf") == 1.15,
+        and stages.get("main", {}).get("minPf") == 1.05
+        and stages.get("real", {}).get("minPf") == 1.05,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.1, "real": 1.15},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(snap.get("stageMinPf")))
 
 
@@ -984,7 +984,7 @@ def sim_stats_test() -> None:
     p2 = object.__new__(pt.Pulse)
     p2.api = FakeApi()
     p2.open = {"A-USDT": pos("A-USDT", "LONG", 1.5, 100.0)}
-    p2.open["A-USDT"].client_id = "Gx02og060308000own2"
+    p2.open["A-USDT"].client_id = f"{pt.TAG}og060308000own2"
     p2.px = {}
     p2.cooldown = {}
     p2.did_io = False
@@ -1496,6 +1496,8 @@ def set_orders_test() -> None:
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = fx
         p.halted = False
         p.errors = 0
@@ -2014,6 +2016,8 @@ def strict_gate_test() -> None:
 
     def mk_place_trader(book):
         p = mk_trader(book)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = OrderApi()
         p.entries_blocked = lambda: False
         p.halted = False
@@ -2181,7 +2185,7 @@ def dd_time_test() -> None:
     # 7) config model + desk expose the field
     cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
     st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
-    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 27000," in cm)
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 57600," in cm)
     rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 
