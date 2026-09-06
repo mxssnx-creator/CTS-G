@@ -1498,7 +1498,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 except Exception:
                     pass
 
-        replay_pending: List[Tuple[Any, str, str]] = []
+        replay_pending: Dict[Any, Tuple[str, str]] = {}
         replay_done = 0
 
         def commit_replay(result: Tuple[Any, ...], src: str, total: int) -> None:
@@ -1526,15 +1526,23 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             if persist or heavy or replay_done % 4 == 0:
                 snapshot(replay_done, total, "replay", heavy=heavy)
 
+        def drain_replay(total: int) -> None:
+            """Commit whichever replay worker finishes first; never block on queue order."""
+            if not replay_pending:
+                return
+            finished, _ = wait(tuple(replay_pending), return_when=FIRST_COMPLETED)
+            for future in finished:
+                _queued_sym, queued_src = replay_pending.pop(future)
+                commit_replay(future.result(), queued_src, total)
+
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
             # Fetching is I/O-bound, while replay is CPU-bound. Use separate
             # processes for replay so requested workers actually use all cores.
             if replay_pool is not None:
-                replay_pending.append((replay_pool.submit(_replay_symbol_worker, (sym, bars, now)), sym, src))
-                if len(replay_pending) < workers:
-                    return
-                future, _queued_sym, queued_src = replay_pending.pop(0)
-                commit_replay(future.result(), queued_src, total)
+                future = replay_pool.submit(_replay_symbol_worker, (sym, bars, now))
+                replay_pending[future] = (sym, src)
+                if len(replay_pending) >= workers:
+                    drain_replay(total)
                 return
 
             book.ingest_bars(sym, bars)
@@ -1584,8 +1592,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             )
         source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
         while replay_pending:
-            future, _queued_sym, queued_src = replay_pending.pop(0)
-            commit_replay(future.result(), queued_src, len(symbols))
+            drain_replay(len(symbols))
         if replay_pool is not None:
             replay_pool.shutdown(wait=True, cancel_futures=True)
             replay_pool = None

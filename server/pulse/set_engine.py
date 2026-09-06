@@ -38,7 +38,7 @@ from position_cost import (
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from block_engine import calculate_block_max_additional_ratio, clamp_stack, finite_number, normalize_block_counts
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 try:
@@ -373,14 +373,10 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     return 0, max(long_c, short_c), "flat"
 
 
-def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
-    """Independent vote per indication kind. Signals / State / Direction / Move / Active / Common."""
-    candles = bars_to_candles(list(bars)[-60:], now=now, period_s=BAR_S)
-    closes = []
-    for b in list(bars)[-60:]:
-        row = ohlcv_row(b)
-        if row:
-            closes.append(row[3])
+def indication_kind_votes_frame(frame: IndicationFrame, settings: Dict[str, Any]) -> List[Tuple[int, float, str]]:
+    """Evaluate every configured indication lane from one parsed candle frame."""
+    candles = frame.candles
+    closes = frame.closes
     want = {
         "sig": bool(settings.get("typeSignals", True)),
         "ta": bool(settings.get("typeState", True)),
@@ -394,14 +390,14 @@ def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, A
     votes: List[Tuple[int, float, str]] = []
     if want["sig"]:
         try:
-            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
+            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85, frame=frame)
             if ev:
                 votes.append((1 if ev.direction == "long" else -1, float(ev.confidence), "sig"))
         except Exception:
             pass
     if want["ta"]:
         try:
-            ta = evaluate_ta_pack(candles, settings)
+            ta = evaluate_ta_pack(candles, settings, frame=frame)
             if ta:
                 votes.append((1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
         except Exception:
@@ -449,6 +445,15 @@ def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, A
         except Exception:
             pass
     return votes
+
+
+def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
+    """Build one bounded frame for callers that provide raw historic bars."""
+    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
+    return indication_kind_votes_frame(frame, settings)
+
+
+_DEFAULT_INDICATION_KIND_VOTES = indication_kind_votes
 
 
 def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float, str]:
@@ -1988,15 +1993,23 @@ class SetBook:
         warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
-        base_ts = (now or time.time()) - (n - 1) * BAR_S
+        frame_now = now or time.time()
+        indication_frame = (
+            build_indication_frame(bars, now=frame_now, period_s=BAR_S)
+            if "indications" in self.packs
+            else None
+        )
         for i in range(warmup, n):
             lo = max(0, i + 1 - 60)
             window = bars[lo : i + 1]
-            ts = base_ts + i * BAR_S
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
-            if "indications" in self.packs:
-                votes = indication_kind_votes(window, self.ind_settings, ts)
+            if "indications" in self.packs and indication_frame is not None:
+                if indication_kind_votes is _DEFAULT_INDICATION_KIND_VOTES:
+                    votes = indication_kind_votes_frame(indication_frame.window(lo, i + 1), self.ind_settings)
+                else:
+                    ts = frame_now - (n - 1 - i) * BAR_S
+                    votes = indication_kind_votes(window, self.ind_settings, ts)
                 signals["indications"][i] = votes_to_signal(votes)
                 for d, conf, tag in votes:
                     kind = IND_TAG_KIND.get(tag.strip())

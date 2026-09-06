@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from contracts import INDICATION_KINDS
@@ -32,6 +33,52 @@ class Candle:
     low: float
     close: float
     volume: float
+
+
+@dataclass
+class IndicationFrame:
+    """Parsed candle window with memoized features shared by indication lanes."""
+
+    candles: List[Candle]
+    closes: List[float]
+    _ema_cache: Dict[Tuple[int, int], float] = field(default_factory=dict, repr=False)
+    _rsi_cache: Dict[int, float] = field(default_factory=dict, repr=False)
+    _atr_cache: Dict[int, float] = field(default_factory=dict, repr=False)
+
+    def tail(self, limit: int) -> "IndicationFrame":
+        limit = max(0, int(limit))
+        if len(self.candles) <= limit:
+            return self
+        return IndicationFrame(self.candles[-limit:], self.closes[-limit:])
+
+    def window(self, start: int, end: int) -> "IndicationFrame":
+        start = max(0, int(start))
+        end = max(start, min(len(self.candles), int(end)))
+        return IndicationFrame(self.candles[start:end], self.closes[start:end])
+
+    def ema(self, period: int, span: Optional[int] = None) -> float:
+        period = max(1, int(period))
+        span_key = max(0, int(span or 0))
+        key = (period, span_key)
+        if key not in self._ema_cache:
+            values = self.closes[-span_key:] if span_key else self.closes
+            self._ema_cache[key] = ema(values, period)
+        return self._ema_cache[key]
+
+    def rsi(self, period: int = 14) -> float:
+        period = max(1, int(period))
+        if period not in self._rsi_cache:
+            self._rsi_cache[period] = rsi(self.closes, period)
+        return self._rsi_cache[period]
+
+    def atr(self, period: int = 14) -> float:
+        period = max(1, int(period))
+        if period not in self._atr_cache:
+            self._atr_cache[period] = atr(self.candles, period)
+        return self._atr_cache[period]
+
+    def recent_return(self, periods: int) -> float:
+        return recent_return(self.closes, periods)
 
 
 @dataclass
@@ -197,7 +244,11 @@ def ohlcv_row(bar: Sequence[float]) -> Optional[Tuple[float, float, float, float
     return o, h, l, c, v
 
 
-def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period_s: float = 60.0) -> List[Candle]:
+def build_indication_frame(
+    bars: Sequence[Sequence[float]],
+    now: Optional[float] = None,
+    period_s: float = 60.0,
+) -> IndicationFrame:
     now = now or time.time()
     step = period_s if period_s > 0 else 60.0
     parsed: List[Tuple[float, float, float, float, float]] = []
@@ -206,10 +257,20 @@ def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period
         if row:
             parsed.append(row)
     n = len(parsed)
-    out: List[Candle] = []
-    for i, (o, h, l, c, v) in enumerate(parsed):
-        out.append(Candle(now - (n - 1 - i) * step, o, h, l, c, v))
-    return out
+    candles = [
+        Candle(now - (n - 1 - i) * step, o, h, l, c, v)
+        for i, (o, h, l, c, v) in enumerate(parsed)
+    ]
+    return IndicationFrame(candles, [row[3] for row in parsed])
+
+
+def frame_from_candles(candles: Sequence[Candle]) -> IndicationFrame:
+    values = list(candles)
+    return IndicationFrame(values, [c.close for c in values])
+
+
+def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period_s: float = 60.0) -> List[Candle]:
+    return build_indication_frame(bars, now=now, period_s=period_s).candles
 
 
 def evaluate_signal_candles(
@@ -218,27 +279,29 @@ def evaluate_signal_candles(
     candles: List[Candle],
     settings: Dict[str, Any],
     weight: float = 1.0,
+    frame: Optional[IndicationFrame] = None,
 ) -> Optional[SignalEval]:
     limit = max(20, int(settings.get("candleLimit", 60)))
-    candles = candles[-limit:]
+    frame = (frame or frame_from_candles(candles)).tail(limit)
+    candles = frame.candles
     if len(candles) < 20:
         return None
-    closes = [c.close for c in candles]
+    closes = frame.closes
     latest = candles[-1]
     if latest.close <= 0:
         return None
-    average_true_range = atr(candles)
+    average_true_range = frame.atr()
     fallback = sum(abs(c.close - c.open) for c in candles[-10:]) / min(10, len(candles))
     atr_pct = (max(average_true_range, fallback) / latest.close) * 100.0
-    fast = ema(closes[-30:], 5)
-    slow = ema(closes[-45:], 13)
+    fast = frame.ema(5, 30)
+    slow = frame.ema(13, 45)
     trend_scale = max(average_true_range, latest.close * 0.0005)
     trend_score = clamp((fast - slow) / trend_scale, -1, 1)
-    momentum3 = recent_return(closes, 3)
-    momentum9 = recent_return(closes, 9)
+    momentum3 = frame.recent_return(3)
+    momentum9 = frame.recent_return(9)
     movement_scale = max(atr_pct / 100.0, 0.0005)
     momentum_score = clamp(momentum3 / movement_scale, -1, 1)
-    rsi_score = clamp((rsi(closes) - 50.0) / 30.0, -1, 1)
+    rsi_score = clamp((frame.rsi() - 50.0) / 30.0, -1, 1)
     window = candles[-14:]
     range_high = max(c.high for c in window)
     range_low = min(c.low for c in window)
@@ -301,17 +364,22 @@ def evaluate_signal_candles(
     )
 
 
-def evaluate_ta_pack(candles: List[Candle], settings: Dict[str, Any]) -> Optional[SignalEval]:
+def evaluate_ta_pack(
+    candles: List[Candle],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[SignalEval]:
+    frame = frame or frame_from_candles(candles)
+    candles = frame.candles
     if len(candles) < 26:
         return None
-    closes = [c.close for c in candles]
     latest = candles[-1]
-    r = rsi(closes, 14)
-    ema12 = ema(closes, 12)
-    ema26 = ema(closes, 26)
+    r = frame.rsi(14)
+    ema12 = frame.ema(12)
+    ema26 = frame.ema(26)
     macd = ema12 - ema26
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
+    ema20 = frame.ema(20)
+    ema50 = frame.ema(50)
     rsi_score = clamp((r - 50.0) / 30.0, -1, 1)
     macd_score = clamp(macd / max(latest.close * 0.0008, 1e-9), -1, 1)
     ema_score = clamp((ema20 - ema50) / max(latest.close * 0.001, 1e-9), -1, 1)
@@ -335,7 +403,7 @@ def evaluate_ta_pack(candles: List[Candle], settings: Dict[str, Any]) -> Optiona
         stop_loss_pct=sl,
         take_profit_pct=tp,
         reward_risk=tp / sl if sl else 1.8,
-        atr_pct=atr(candles) / latest.close * 100 if latest.close else 0,
+        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
         last_price=latest.close,
         candle_count=len(candles),
         weight=1.0,
@@ -922,6 +990,8 @@ class ExtraBook:
         self.cache: Dict[str, Tuple[float, List[Candle]]] = {}
         self.fail: Dict[str, int] = {}
         self.cool: Dict[str, float] = {}
+        self._lock = RLock()
+        self._inflight: set[str] = set()
         self.http = httpx.Client(timeout=2.2, headers={"User-Agent": "grok-x01-pulse/ind"}) if httpx else None
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ind-x")
@@ -930,69 +1000,96 @@ class ExtraBook:
     def prune(self, keep: Optional[set] = None, max_n: Optional[int] = None) -> int:
         now = time.time()
         drop: List[str] = []
-        for k, (ts, _) in list(self.cache.items()):
-            sym = k.split(":", 1)[-1] if ":" in k else k
-            if keep is not None and sym not in keep:
-                drop.append(k)
-            elif now - ts > 90:
-                drop.append(k)
-        for k in drop:
-            self.cache.pop(k, None)
-        cap = int(max_n if max_n is not None else self.cache_max)
-        extra = len(self.cache) - cap
-        if extra > 0:
-            oldest = sorted(self.cache.items(), key=lambda kv: kv[1][0])
-            for k, _ in oldest[:extra]:
+        with self._lock:
+            for k, (ts, _) in list(self.cache.items()):
+                sym = k.split(":", 1)[-1] if ":" in k else k
+                if keep is not None and sym not in keep:
+                    drop.append(k)
+                elif now - ts > 90:
+                    drop.append(k)
+            for k in drop:
                 self.cache.pop(k, None)
-                drop.append(k)
-        for src in list(self.fail):
-            if self.fail.get(src, 0) <= 0:
-                self.fail.pop(src, None)
-        for src, until in list(self.cool.items()):
-            if until < now:
-                self.cool.pop(src, None)
+            cap = int(max_n if max_n is not None else self.cache_max)
+            extra = len(self.cache) - cap
+            if extra > 0:
+                oldest = sorted(self.cache.items(), key=lambda kv: kv[1][0])
+                for k, _ in oldest[:extra]:
+                    self.cache.pop(k, None)
+                    drop.append(k)
+            for src in list(self.fail):
+                if self.fail.get(src, 0) <= 0:
+                    self.fail.pop(src, None)
+            for src, until in list(self.cool.items()):
+                if until < now:
+                    self.cool.pop(src, None)
         return len(drop)
 
     def prefetch(self, pairs: List[Tuple[str, str]]) -> None:
+        """Schedule optional sources without making the hot indication pass wait."""
         now = time.time()
-        want = []
-        for src, sym in pairs:
-            hit = self.cache.get(f"{src}:{sym}")
-            if hit and now - hit[0] < 30:
-                continue
-            want.append((src, sym))
-        if not want:
-            return
-        futs = [self.pool.submit(self.get, src, sym) for src, sym in want[:8]]
-        deadline = time.time() + 0.40
-        for f in futs:
-            remain = deadline - time.time()
-            if remain <= 0:
-                break
+        want: List[Tuple[str, str]] = []
+        with self._lock:
+            for src, sym in pairs:
+                key = f"{src}:{sym}"
+                hit = self.cache.get(key)
+                if hit and now - hit[0] < 30:
+                    continue
+                if key in self._inflight:
+                    continue
+                self._inflight.add(key)
+                want.append((src, sym))
+                if len(want) >= 8:
+                    break
+        for src, sym in want:
             try:
-                f.result(timeout=max(0.02, remain))
+                self.pool.submit(self._prefetch_one, src, sym)
             except Exception:
-                continue
-        if len(self.cache) > self.cache_max:
+                with self._lock:
+                    self._inflight.discard(f"{src}:{sym}")
+        with self._lock:
+            over = len(self.cache) > self.cache_max
+        if over:
             self.prune(max_n=self.cache_max)
+
+    def _prefetch_one(self, source: str, symbol: str) -> None:
+        key = f"{source}:{symbol}"
+        try:
+            self.get(source, symbol)
+        finally:
+            with self._lock:
+                self._inflight.discard(key)
+
+    def peek(self, source: str, symbol: str) -> List[Candle]:
+        """Return only cached optional data; never perform network I/O."""
+        key = f"{source}:{symbol}"
+        now = time.time()
+        with self._lock:
+            hit = self.cache.get(key)
+            return hit[1] if hit and now - hit[0] < 90 else []
 
     def get(self, source: str, symbol: str) -> List[Candle]:
         key = f"{source}:{symbol}"
-        hit = self.cache.get(key)
-        if hit and time.time() - hit[0] < 30:
-            return hit[1]
-        if self.cool.get(source, 0) > time.time():
-            return hit[1] if hit else []
+        now = time.time()
+        with self._lock:
+            hit = self.cache.get(key)
+            if hit and now - hit[0] < 30:
+                return hit[1]
+            cached = hit[1] if hit else []
+            cooling = self.cool.get(source, 0) > now
+        if cooling:
+            return cached
         try:
             bars = self._fetch(source, symbol)
-            self.cache[key] = (time.time(), bars)
-            self.fail[source] = 0
+            with self._lock:
+                self.cache[key] = (time.time(), bars)
+                self.fail[source] = 0
             return bars
         except Exception:
-            self.fail[source] = self.fail.get(source, 0) + 1
-            if self.fail[source] >= 3:
-                self.cool[source] = time.time() + 120
-            return hit[1] if hit else []
+            with self._lock:
+                self.fail[source] = self.fail.get(source, 0) + 1
+                if self.fail[source] >= 3:
+                    self.cool[source] = time.time() + 120
+            return cached
 
     def _fetch(self, source: str, symbol: str) -> List[Candle]:
         compact = symbol.replace("-", "")
@@ -1139,6 +1236,7 @@ class IndicationBook:
             tf_map["1m"] = bars
         evals: List[SignalEval] = []
         tf_evals: List[SignalEval] = []
+        frames_by_tf: Dict[str, IndicationFrame] = {}
         for tf in TIMEFRAMES:
             flag = f"tf{tf}"
             if not self.settings.get(flag, True):
@@ -1146,13 +1244,16 @@ class IndicationBook:
             rows = tf_map.get(tf) or []
             if len(rows) < 20:
                 continue
-            candles = bars_to_candles(rows, period_s=TF_SECONDS[tf])
+            frame = build_indication_frame(rows, period_s=TF_SECONDS[tf])
+            frames_by_tf[tf] = frame
+            candles = frame.candles
             ev = evaluate_signal_candles(
                 f"bingx-{tf}",
                 f"BingX {tf}",
                 candles,
                 self.settings,
                 weight=TF_WEIGHT[tf],
+                frame=frame,
             )
             if ev:
                 evals.append(ev)
@@ -1170,13 +1271,16 @@ class IndicationBook:
                     evals.append(loc)
         if self.settings.get("extraSources") and want_extra:
             for src, name in (("binance-usdm", "Binance USD-M"), ("bybit-linear", "Bybit Linear")):
-                extra = EXTRA.get(src, symbol)
+                extra = EXTRA.peek(src, symbol)
                 ev = evaluate_signal_candles(src, name, extra, self.settings)
                 if ev:
                     evals.append(ev)
-        candles_1m = bars_to_candles(tf_map.get("1m") or bars or [], period_s=60.0)
+        frame_1m = frames_by_tf.get("1m")
+        if frame_1m is None:
+            frame_1m = build_indication_frame(tf_map.get("1m") or bars or [], period_s=60.0)
+        candles_1m = frame_1m.candles
         if self.settings.get("typeState", True) and candles_1m:
-            ta = evaluate_ta_pack(candles_1m, self.settings)
+            ta = evaluate_ta_pack(candles_1m, self.settings, frame=frame_1m)
             if ta:
                 evals.append(ta)
         self.evals[symbol] = evals
@@ -1305,7 +1409,7 @@ class IndicationBook:
                     kind="state",
                 )
             )
-        closes = _closes(tf_map.get("1m") or bars or [])
+        closes = frame_1m.closes
         if self.settings.get("typeDirection", True) and closes:
             drow = evaluate_direction(symbol, closes, self.settings)
             if drow:
@@ -1325,8 +1429,7 @@ class IndicationBook:
             if brow:
                 indications.append(brow)
         if self.settings.get("typeCommon", True):
-            c1 = bars_to_candles(tf_map.get("1m") or bars or [], period_s=60.0)
-            crow = evaluate_common(symbol, c1, self.settings)
+            crow = evaluate_common(symbol, candles_1m, self.settings)
             if crow:
                 indications.append(crow)
         if not self.settings.get("typeSignals", True):
@@ -1814,6 +1917,20 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rows_tb = book.process("TB-USDT", up, bars_by_tf={"1m": up})
     t33 = (any(r.kind == "trend" for r in rows_tb) or any(r.kind == "break" for r in rows_tb) or (tr is not None),
            f"kinds={sorted({r.kind for r in rows_tb})}")
+    # The shared frame must be numerically identical to the uncached path.
+    frame = build_indication_frame(up, now=1234.0)
+    legacy_ev = evaluate_signal_candles("parity", "Parity", frame.candles, st)
+    cached_ev = evaluate_signal_candles("parity", "Parity", frame.candles, st, frame=frame)
+    t34 = (
+        legacy_ev is not None
+        and cached_ev is not None
+        and legacy_ev.direction == cached_ev.direction
+        and abs(legacy_ev.confidence - cached_ev.confidence) < 1e-12
+        and abs(legacy_ev.strength - cached_ev.strength) < 1e-12
+        and abs(legacy_ev.stop_loss_pct - cached_ev.stop_loss_pct) < 1e-12
+        and abs(legacy_ev.take_profit_pct - cached_ev.take_profit_pct) < 1e-12,
+        f"legacy={legacy_ev.direction if legacy_ev else None} cached={cached_ev.direction if cached_ev else None}",
+    )
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1848,6 +1965,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-trend", t31[0], t31[1]),
         ("ind-break", t32[0], t32[1]),
         ("ind-trend-break-process", t33[0], t33[1]),
+        ("ind-frame-parity", t34[0], t34[1]),
     ]
 
 

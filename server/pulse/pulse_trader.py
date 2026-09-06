@@ -894,6 +894,7 @@ class Pulse:
         self.skip_log: Dict[str, float] = {}
         self.last_rest_tick = 0.0
         self.wake_ev = threading.Event()
+        self._hist_wake = threading.Event()
         self.last_event = "boot"
         self.event_n = 0
         self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
@@ -2705,6 +2706,7 @@ class Pulse:
         # successful storage advances the aggregate refresh marker.
         if stored:
             self.last_kline = now
+            self._hist_wake.set()
 
     def ema(self, xs: List[float], n: int) -> float:
         if not xs:
@@ -6075,6 +6077,7 @@ class Pulse:
         self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
         if self.sets.sets:
             self._catalog_ready.set()
+            self._hist_wake.set()
         elif initial:
             self._catalog_ready.clear()
             self.sets.progress.phase = "catalog"
@@ -9407,7 +9410,6 @@ class Pulse:
                 bars = self._parse_klines((body or {}).get("data"))
                 if symbol and bars:
                     fetched[symbol] = bars
-            time.sleep(0.12)
         stored = len(fetched)
         with self.state_guard():
             if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
@@ -9477,11 +9479,25 @@ class Pulse:
                 return True
             return bool(already and self.load.last_budget.level == "critical")
 
+        budget = getattr(self.load, "last_budget", None)
+        level = str(getattr(budget, "level", "normal") or "normal")
+        if level in ("critical", "overload"):
+            replay_workers = 1
+        else:
+            try:
+                cpu = max(1, int(os.cpu_count() or 1))
+            except Exception:
+                cpu = 2
+            replay_workers = max(1, min(4, cpu, len(names) or 1))
+            if level == "busy":
+                replay_workers = min(replay_workers, 2)
+
         try:
             replay_book.replay_all(
                 on_step=publish_progress,
                 symbols=names,
                 abort=should_abort,
+                workers=replay_workers,
                 merge=True,
                 progress_total=progress_total,
                 score=False,
@@ -9597,6 +9613,7 @@ class Pulse:
                 self.sets = built
                 self._sets_generation += 1
                 self._catalog_ready.set()
+                self._hist_wake.set()
                 self._stats_force = True
         except Exception as exc:
             with self.state_guard():
@@ -9694,10 +9711,32 @@ class Pulse:
                     current.progress.error = error
                 if hasattr(self.api, "err"):
                     self.api.err.write("hist", msg=error[:200])
-            remain = 2.4
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < remain and not self._hist_stop:
-                time.sleep(0.2)
+            with self.state_guard():
+                current = self.sets
+                now = time.time()
+                refresh_in = max(
+                    0.0,
+                    float(getattr(current, "last_run", 0.0) or 0.0)
+                    + float(getattr(current, "refresh_s", 90.0) or 90.0)
+                    - now,
+                )
+                fetch_in = max(0.0, float(getattr(self, "_hist_fetch_next", 0.0) or 0.0) - now)
+                ready = bool(getattr(current.progress, "ready", False))
+                enabled = bool(getattr(current, "enabled", True))
+                budget = getattr(self.load, "last_budget", None)
+                hist_allowed = bool(getattr(budget, "hist_run", True))
+            if not enabled:
+                wait_s = 5.0
+            elif not hist_allowed:
+                wait_s = 2.0
+            elif refresh_in <= 0.0 and fetch_in > 0.0:
+                wait_s = min(fetch_in, 5.0)
+            elif not ready:
+                wait_s = 0.5
+            else:
+                wait_s = min(max(refresh_in, 0.05), 5.0)
+            self._hist_wake.wait(timeout=wait_s)
+            self._hist_wake.clear()
 
     def _warm_pass(self) -> None:
         # Network waits must not own the lock used by stats and coordination.
