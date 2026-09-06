@@ -87,6 +87,24 @@ def job(args):
 
 def make_report(out,summaries,signature):
     summary=sorted(summaries,key=lambda x:(WINDOWS[x['window']],x['symbol'],x['kind']))
+    # Many catalog settings have identical outcomes in a finite price path.
+    # Keep every config identity, but embed each identical metric vector once.
+    # This reduces the standalone HTML's DOM footprint without dropping rows.
+    for s in summary:
+        original=json.loads(gzip.decompress((out/(s['key']+'.json.gz')).read_bytes()))
+        ci=original['columns'].index('config'); metric_columns=[k for k in original['columns'] if k!='config']
+        metrics=[];references=[];seen={}
+        for row in original['rows']:
+            values=row[:ci]+row[ci+1:]
+            key=json.dumps(values,separators=(',',':'))
+            mid=seen.get(key)
+            if mid is None:
+                mid=len(metrics);seen[key]=mid;metrics.append(values)
+            references.append([row[ci],mid])
+        packed={'columns':original['columns'],'metricColumns':metric_columns,'metrics':metrics,'rows':references}
+        raw=gzip.compress(json.dumps(packed,separators=(',',':'),allow_nan=False).encode(),compresslevel=9,mtime=0)
+        (out/(s['key']+'.embedded.gz')).write_bytes(raw)
+        s['embeddedSha256']=hashlib.sha256(raw).hexdigest();s['uniqueMetricVectors']=len(metrics)
     grids_json=json.dumps(grids(),separators=(',',':'),allow_nan=False).replace('<','\\u003c')
     headers=['Window','Symbol','Typ / Pack','Zeilen','Positiv','PF/Samples beide Abschnitte','Ohne Trades','Sekunden']
     table='<tr>'+''.join('<th>'+h+'</th>' for h in headers)+'</tr>'
@@ -107,16 +125,16 @@ body{margin:0;background:#0b1421;color:#e5edf7;font:15px/1.5 system-ui}main{max-
         f.write('<section><h2>Remote, Settings, Aktivität und Funktionsabnahme</h2><pre>'+html.escape(json.dumps(audit,ensure_ascii=False,indent=2))+'</pre></section>')
         f.write('<section><h2>Vollständigkeitsbilanz</h2><table>'+table+'</table></section>')
         f.write('''<section><h2>Alle Einzelresultate</h2><p>Zur Begrenzung des Speicherbedarfs wird nur die gewählte Gruppe entpackt. CSV exportiert alle gefilterten Zeilen dieser Gruppe; kein Top-N-Limit.</p><select id="group"></select><button id="load">Gruppe öffnen</button><select id="strategy"><option value="">Alle Strategien</option><option>base</option><option>trail</option><option>block</option><option>dca</option></select><select id="status"><option value="">Alle Ergebnisse</option><option value="positive">Netto positiv</option><option value="qualified">PF/Samples beide Abschnitte</option><option value="negative">Netto ≤ 0</option></select><select id="sort"><option value="netPct">Netto absteigend</option><option value="maxDrawdownPct">Drawdown aufsteigend</option><option value="n">Trades absteigend</option></select><button id="prev">Zurück</button><button id="next">Weiter</button><button id="csv">CSV</button><p id="count">Gruppe wählen.</p><table><thead><tr><th>Details</th><th>Seite</th><th>Strategie</th><th>Schritt/Stufen</th><th>TP/SL %</th><th>Trailing</th><th>N</th><th>PF</th><th>Netto pp</th><th>Kosten pp</th><th>DD pp</th><th>DDT max h</th></tr></thead><tbody id="rows"></tbody></table></section><section><h2>Alle Parameter und Kennzahlen / Tagesergebnisse</h2><pre id="details"></pre></section>''')
-        f.write('<section><h2>Reproduktion und Datenherkunft</h2><p>Code-Signatur: '+signature+'</p><pre>'+html.escape(json.dumps(summary,ensure_ascii=False,indent=1))+'</pre></section>')
+        f.write('<section><h2>Reproduktion und Datenherkunft</h2><p>Report-Code-Signatur: '+signature+'. Die jeweilige Berechnungs-Signatur steht im Feld signature jeder Gruppe; reine Änderungen der Berichtsdarstellung berechnen die Ergebnisse nicht neu.</p><pre>'+html.escape(json.dumps(summary,ensure_ascii=False,indent=1))+'</pre></section>')
         f.write('<script type="application/json" id="grids">'+grids_json+'</script>')
         f.write('<script type="application/json" id="summaries">'+json.dumps(summary,separators=(',',':')).replace('<','\\u003c')+'</script>')
         for s in summary:
-            f.write('<script type="application/octet-stream" id="data-'+s['key']+'">'+base64.b64encode((out/(s['key']+'.json.gz')).read_bytes()).decode()+'</script>')
+            f.write('<script type="application/octet-stream" id="data-'+s['key']+'">'+base64.b64encode((out/(s['key']+'.embedded.gz')).read_bytes()).decode()+'</script>')
         f.write('''<script>
 const el=id=>document.getElementById(id), G=JSON.parse(el('grids').textContent), S=JSON.parse(el('summaries').textContent);let all=[],shown=[],page=0,current=null;
 for(const s of S){const o=document.createElement('option');o.value=s.key;o.textContent=`${s.window} · ${s.symbol} · ${s.kind} · ${s.rows} Zeilen`;el('group').append(o)}
 function view(){shown=all.filter(r=>(!el('strategy').value||G[current.family][r.config].strategy===el('strategy').value)&&(!el('status').value||(el('status').value==='negative'?r.netPct<=0:r[el('status').value])));const sort=el('sort').value;shown.sort((a,b)=>sort==='maxDrawdownPct'?a[sort]-b[sort]:b[sort]-a[sort]);page=Math.max(0,Math.min(page,Math.ceil(shown.length/50)-1));el('rows').replaceChildren();el('count').textContent=`${shown.length} / ${all.length} Zeilen · Seite ${page+1} / ${Math.max(1,Math.ceil(shown.length/50))}`;for(const r of shown.slice(page*50,page*50+50)){const c=G[current.family][r.config],tr=document.createElement('tr'),td=document.createElement('td'),b=document.createElement('button');b.textContent='Öffnen';b.onclick=()=>el('details').textContent=JSON.stringify({window:current.window,symbol:current.symbol,type:current.kind,parameters:c,metrics:r},null,2);td.append(b);tr.append(td);for(const v of [r.direction,c.strategy,c.step??c.levels,`${c.tpPct}/${c.slPct}`,c.trailArmPct?`${c.trailArmPct}:${c.trailGivePct}`:'—',r.n,r.pf??'—',r.netPct,r.costPct,r.maxDrawdownPct,(r.maxDdS/3600).toFixed(2)]){const d=document.createElement('td');d.textContent=v;tr.append(d)}el('rows').append(tr)}}
-el('load').onclick=async()=>{try{el('count').textContent='Entpacken …';current=S.find(s=>s.key===el('group').value);const raw=Uint8Array.from(atob(el('data-'+current.key).textContent.trim()),c=>c.charCodeAt(0));const text=await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).text();const d=JSON.parse(text);all=d.rows.map(a=>Object.fromEntries(d.columns.map((k,i)=>[k,a[i]])));page=0;view()}catch(e){el('count').textContent='Öffnen fehlgeschlagen: '+e.message}};
+el('load').onclick=async()=>{try{el('count').textContent='Entpacken …';current=S.find(s=>s.key===el('group').value);const raw=Uint8Array.from(atob(el('data-'+current.key).textContent.trim()),c=>c.charCodeAt(0));const text=await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).text();const d=JSON.parse(text);const metrics=d.metrics.map(a=>Object.fromEntries(d.metricColumns.map((k,i)=>[k,a[i]])));all=d.rows.map(([config,mid])=>({config,...metrics[mid]}));page=0;view()}catch(e){el('count').textContent='Öffnen fehlgeschlagen: '+e.message}};
 for(const id of ['strategy','status','sort'])el(id).onchange=()=>{page=0;if(current)view()};el('prev').onclick=()=>{page--;if(current)view()};el('next').onclick=()=>{page++;if(current)view()};el('csv').onclick=()=>{if(!current)return;const data=shown.map(r=>({window:current.window,symbol:current.symbol,type:current.kind,...G[current.family][r.config],...r}));if(!data.length)return;const cols=Object.keys(data[0]),quote=v=>'"'+String(typeof v==='object'?JSON.stringify(v):v??'').replaceAll('"','""')+'"';const csv=[cols.map(quote).join(','),...data.map(r=>cols.map(k=>quote(r[k])).join(','))].join('\\r\\n');const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=current.key+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 </script></main></html>''')
 

@@ -58,6 +58,34 @@ from event_ledger import EventLedger
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import redis_key, order_tag
 
+_CID_SEQUENCE_LOCK = threading.Lock()
+_CID_SEQUENCES: Dict[str, Tuple[int, int]] = {}
+
+
+def client_order_nonce(prefix: str, width: int) -> str:
+    """Never reuse a suffix for a prefix in this process; fail on exhaustion.
+
+    Randomize the starting point across process restarts. Exchange uniqueness
+    checks remain authoritative across restarts; this is not a durable ledger.
+    """
+    if width < 1:
+        raise ValueError("Client-order prefix leaves no nonce space")
+    limit = 36 ** width
+    with _CID_SEQUENCE_LOCK:
+        start, used = _CID_SEQUENCES.get(prefix, (None, 0))
+        if start is None:
+            start = random.SystemRandom().randrange(limit)
+        if used >= limit:
+            raise RuntimeError("Client-order nonce space exhausted")
+        value = (start + used) % limit
+        _CID_SEQUENCES[prefix] = (start, used + 1)
+    chars = string.digits + string.ascii_lowercase
+    result = ""
+    for _ in range(width):
+        value, digit = divmod(value, 36)
+        result = chars[digit] + result
+    return result
+
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = redis_key(f"connection:{CONN_SHORT}")
 BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
@@ -1926,11 +1954,12 @@ class Pulse:
                 pos.control_group_key,
                 getattr(pos, "control_range_key", ""),
             )
-        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-        # Keep the historical parser offsets intact: bytes after set index are
-        # now a range-group token plus a short nonce for per-config controls.
-        suffix = (group_token + nonce[:2]) if group_token else nonce
-        return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{suffix}"[:32]
+        prefix = f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{group_token}"
+        # Preserve parser offsets and the complete group token. Use all space
+        # for grouped orders; ungrouped five-character tails retain their legacy
+        # interpretation (an eight-character tail is a legacy group token).
+        width = 32 - len(prefix) if group_token else min(5, 32 - len(prefix))
+        return prefix + client_order_nonce(prefix, width)
 
     def cid_ours(self, cid: str) -> bool:
         """Only this process + this connection watermark (Gx01 / Gx02). Never CTS or other bots."""

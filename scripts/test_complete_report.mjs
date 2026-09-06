@@ -1,6 +1,7 @@
 // Data and UI-event contracts only; this does not claim a browser render.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import vm from 'node:vm';
 import { gunzipSync } from 'node:zlib';
 const html=fs.readFileSync(process.argv[2],'utf8');
@@ -12,6 +13,12 @@ assert.equal(summaries.length,120);assert.equal(new Set(summaries.map(s=>s.key))
 let count=0;
 for(const s of summaries){
  const d=JSON.parse(gunzipSync(Buffer.from(ids.get('data-'+s.key).textContent,'base64')));
+ if(d.metrics){const metrics=d.metrics.map(a=>Object.fromEntries(d.metricColumns.map((k,i)=>[k,a[i]])));d.rows=d.rows.map(([config,mid])=>{const r={config,...metrics[mid]};return d.columns.map(k=>r[k])})}
+ if(process.argv[3]){
+  const original=JSON.parse(gunzipSync(fs.readFileSync(path.join(process.argv[3],s.key+'.json.gz'))));
+  assert.deepEqual(d.columns,original.columns);
+  assert.deepEqual(d.rows,original.rows,'Lossless metric deduplication: '+s.key);
+ }
  assert.equal(d.rows.length,s.expectedRows);assert.equal(s.rows,2*grids[s.family].length);
  const index=Object.fromEntries(d.columns.map((k,i)=>[k,i]));
  const unique=new Set();
@@ -41,4 +48,4 @@ ids.get('status').value='qualified';ids.get('status').onchange();assert.equal(id
 ids.get('group').value=summaries.find(s=>s.family==='catalog').key;
 ids.get('strategy').value='trail';ids.get('status').value='';await ids.get('load').click();
 assert.match(ids.get('count').textContent,/66000 \/ 68640/);
-console.log(JSON.stringify({pass:true,groups:120,rows:count,checks:['unique Cartesian identities','all daily totals','compressed loading','pagination','filters','details','CSV','empty results','catalog TP-on/off trails'],visualBrowserVerified:false}));
+console.log(JSON.stringify({pass:true,groups:120,rows:count,losslessOriginalComparison:!!process.argv[3],checks:['unique Cartesian identities','all daily totals','compressed loading','pagination','filters','details','CSV','empty results','catalog TP-on/off trails'],visualBrowserVerified:false}));
