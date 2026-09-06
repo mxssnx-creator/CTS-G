@@ -63,17 +63,31 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
     is_block = np.array([c['strategy'] == 'block' for c in cfg])
     block_qty = np.array([1+calculate_block_max_additional_ratio(c['levels'], c['volumeRatio'], 2.)
                           if c['strategy']=='block' else 1 for c in cfg])
+    trail_arm = np.array([c.get('trailArmPct', 0)/100 for c in cfg])
+    trail_give = np.array([c.get('trailGivePct', 0)/100 for c in cfg])
+    trailing = trail_arm > 0
+    trail_stop = zeros()
+    trail_peak = zeros()
+    max_hold = np.array([c.get('maxHoldBars', 1e12) for c in cfg])
+    scratch_bars = np.array([c.get('scratchBars', 1e12) for c in cfg])
+    scratch_min = np.array([c.get('scratchMinPct', 0)/100 for c in cfg])
+    honor_tp = np.array([c.get('honorTp', True) for c in cfg])
     fee = cost_pct/200
     split = warmup + int((len(bars)-warmup)*.7)
     for i in range(warmup, len(bars)):
         op, hi, lo, price = bars[i][:4]
         active = qty > 0
         stop = entry * (1-side*sl)
+        # A close-confirmed trailing update becomes active on the next bar.
+        # Never assume that this bar's high happened before its low.
+        armed = active & trailing & (trail_stop > 0)
+        stop = np.where(armed, np.maximum(stop, trail_stop) if side == 1 else np.minimum(stop, trail_stop), stop)
         target = entry * (1+side*tp)
         hit_sl = active & ((lo <= stop) if side == 1 else (hi >= stop))
-        hit_tp = active & ((hi >= target) if side == 1 else (lo <= target))
+        hit_tp = active & honor_tp & ((hi >= target) if side == 1 else (lo <= target))
+        timed = active & ((i-entered >= max_hold) | ((i-entered >= scratch_bars) & (side*(price-entry)/np.where(active,entry,1) >= scratch_min)))
         boundary = i in (split-1, len(bars)-1)
-        exiting = active & (hit_sl | hit_tp | boundary)
+        exiting = active & (hit_sl | hit_tp | timed | boundary)
         ids = np.flatnonzero(exiting)
         if ids.size:
             px = np.where(hit_sl, np.minimum(op, stop) if side==1 else np.maximum(op, stop),
@@ -87,7 +101,7 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
             hold[ids] += (i-entered[ids])*60
             day = (i-warmup)//1440
             daily_net[ids, day] += pnl; daily_n[ids, day] += 1
-            forced[ids] += ~(hit_sl[ids] | hit_tp[ids])
+            forced[ids] += boundary & ~(hit_sl[ids] | hit_tp[ids] | timed[ids])
             if i < split:
                 train_gp[ids] += gains; train_gl[ids] += loss; train_n[ids] += 1
             else:
@@ -106,11 +120,18 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.15):
             entry[ids] = (entry[ids]*qty[ids]+price*extra)/(qty[ids]+extra)
             qty[ids] += extra; fees[ids] += price*extra*fee
             added[ids] += 1; adds_total[ids] += 1
+        active = qty > 0
+        trail_peak[active] = (np.maximum(trail_peak[active], price) if side==1 else np.minimum(trail_peak[active], price))
+        arm_now = active & trailing & (side*(trail_peak-entry)/np.where(active,entry,1) >= trail_arm)
+        next_stop = trail_peak*(1-side*trail_give)
+        trail_stop[arm_now] = (np.maximum(trail_stop[arm_now], next_stop[arm_now]) if side==1 else
+                              np.where(trail_stop[arm_now]>0, np.minimum(trail_stop[arm_now],next_stop[arm_now]),next_stop[arm_now]))
         direction, confidence = signals[i]
         if not boundary and direction == side and confidence >= .58:
             opening = (qty == 0) & ~exiting
             entry[opening] = price; original[opening] = price; qty[opening] = 1
             fees[opening] = price*fee; added[opening] = 0; entered[opening] = i
+            trail_stop[opening] = 0; trail_peak[opening] = price
         max_qty = np.maximum(max_qty, qty)
         # Close-mark liquidation equity includes accrued + estimated exit costs.
         active = qty > 0

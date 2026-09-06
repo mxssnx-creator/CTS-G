@@ -984,7 +984,7 @@ def sim_stats_test() -> None:
     p2 = object.__new__(pt.Pulse)
     p2.api = FakeApi()
     p2.open = {"A-USDT": pos("A-USDT", "LONG", 1.5, 100.0)}
-    p2.open["A-USDT"].client_id = "Gx02og060308000own2"
+    p2.open["A-USDT"].client_id = f"{pt.TAG}og060308000own2"
     p2.px = {}
     p2.cooldown = {}
     p2.did_io = False

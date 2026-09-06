@@ -5462,9 +5462,9 @@ class Pulse:
                     continue
                 if cid and not self.cid_ours(cid):
                     continue
-                if "oversized" in str(c.reason or "").lower():
+                if not c.exchange_confirmed and "oversized" in str(c.reason or "").lower():
                     continue
-                if abs(c.qty * c.entry) > 40:
+                if not c.exchange_confirmed and abs(c.qty * c.entry) > 40:
                     continue
                 if c.conn and c.conn != CONN_SHORT:
                     continue
@@ -6847,13 +6847,14 @@ class Pulse:
             if conn and conn != CONN_SHORT:
                 continue
             n = abs(float(c.qty) * float(c.entry or 0))
-            if n > cap:
+            confirmed = bool(getattr(c, "exchange_confirmed", False))
+            if not confirmed and n > cap:
                 continue
-            if "ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",):
+            if not confirmed and ("ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",)):
                 continue
-            if "oversized" in str(c.reason or "").lower():
+            if not confirmed and "oversized" in str(c.reason or "").lower():
                 continue
-            if n > self.max_book_notional() * 1.05:
+            if not confirmed and n > self.max_book_notional() * 1.05:
                 continue
             out.append(c)
         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
@@ -6891,16 +6892,27 @@ class Pulse:
         net = realized + upnl
         wins = sum(1 for c in closes if float(c.pnl) > 0)
         losses = sum(1 for c in closes if float(c.pnl) < 0)
-        peak = 0.0
-        eq = 0.0
+        # Drawdown is a decline relative to capital at the corresponding
+        # equity peak, not a decline divided by accumulated *profits*.
+        # A tiny first win previously produced thousands of percent DD, while
+        # an all-losing tape incorrectly returned zero.
+        capital = max(0.0, float(getattr(self, "start_eq", 0) or 0))
+        peak = capital
+        eq = capital
         max_dd = 0.0
+        dd_pct = 0.0
         for c in sorted(closes, key=lambda x: float(getattr(x, "t", 0) or 0)):
             eq += float(c.pnl)
             if eq > peak:
                 peak = eq
             if peak - eq > max_dd:
                 max_dd = peak - eq
-        dd_pct = (max_dd / peak * 100.0) if peak > 1e-12 else 0.0
+            if capital > 0 and peak > 1e-12:
+                dd_pct = max(dd_pct, (peak - eq) / peak * 100.0)
+        # Current own-book mark is available; past intratrade extrema are not.
+        max_dd = max(max_dd, peak - (eq + upnl))
+        if capital > 0 and peak > 1e-12:
+            dd_pct = max(dd_pct, (peak - (eq + upnl)) / peak * 100.0)
         traded = sum(abs(float(c.qty) * float(c.entry or 0)) for c in closes)
         for p in self.open.values():
             if getattr(p, "ours", True) is False:
@@ -6918,6 +6930,9 @@ class Pulse:
             "wins": wins,
             "losses": losses,
             "drawdownPct": round(max(0.0, dd_pct), 3),
+            "drawdownAmount": round(max(0.0, max_dd), 6),
+            "drawdownAvailable": capital > 0,
+            "drawdownBasis": "retained-system-tape-plus-current-mark / starting-capital",
             "tradedNotional": round(traded, 4),
             "pnlPct": round(pnl_pct, 3),
             "source": "system-orders",
@@ -7427,10 +7442,36 @@ class Pulse:
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail=str(r.get("msg") or "positions failed"))
             self.recon_ok = False
             self.recon_pending = False
+            self._empty_rest_streak = 0
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
-        rows = r.get("data") or []
-        if not isinstance(rows, list):
+        rows = r.get("data")
+        valid_rows = isinstance(rows, list)
+        if valid_rows:
+            for row in rows:
+                try:
+                    if not isinstance(row, dict):
+                        raise ValueError("position row must be an object")
+                    raw_amount = row.get("positionAmt")
+                    if raw_amount is None or raw_amount == "":
+                        raw_amount = row.get("availableAmt")
+                    amount = float(raw_amount)
+                    if not math.isfinite(amount):
+                        raise ValueError("nonfinite position quantity")
+                    if abs(amount) > 1e-12 and (not row.get("symbol") or
+                            str(row.get("positionSide") or "").upper() not in ("", "LONG", "SHORT")):
+                        raise ValueError("invalid position identity")
+                except (TypeError, ValueError, OverflowError):
+                    valid_rows = False
+                    break
+        if not valid_rows:
+            # Unknown/malformed truth is not a confirmed empty exchange. Do
+            # not advance absence counters or mutate ownership from a partial
+            # payload: that could discard our still-open protected position.
+            self.recon_ok = False
+            self.recon_pending = False
+            self.recon_detail = "positions payload malformed"
+            self._empty_rest_streak = 0
             self.record_event("error", stable_key(request_key, "payload"), status="error", code=r.get("code"), detail="positions payload malformed")
             return
         self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed", code=r.get("code"), qty=len(rows), detail="positions", metadata={"rows": len(rows)})
@@ -8367,10 +8408,12 @@ class Pulse:
         sim_n, sim_upnl = self.sim_stats()
         closed_n = 80 if getattr(getattr(self.load, "last_budget", None), "stats_full", True) else 40
         closed_out = []
-        for c in list(act["closes"])[-closed_n:][::-1]:
+        all_closed_rows = []
+        for c in list(act["closes"]):
             d = asdict(c)
             d["indKind"] = d.get("ind_kind") or ""
-            closed_out.append(d)
+            all_closed_rows.append(d)
+        closed_out = all_closed_rows[-closed_n:][::-1]
         cov = self._coverage_blob()
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
@@ -8383,7 +8426,7 @@ class Pulse:
             last_m = float(getattr(self, "_stats_merge_ts", 0) or 0)
             if fat or now_m - last_m >= 3.5 or not getattr(self, "_by_ind_cache", None):
                 by_ind = merge_kind_stats(
-                    closed_out,
+                    all_closed_rows,
                     self.position_cost_pct,
                     gate=sets_snap.get("indGate") or cov.get("indicationGate") or {},
                     hits=cov.get("indicationHits") or ind_snap.get("typeHits") or {},
@@ -8391,7 +8434,7 @@ class Pulse:
                     kind_live=ind_snap.get("kindStats") or {},
                 )
                 by_strat = merge_strategy_stats(
-                    closed_out,
+                    all_closed_rows,
                     self.position_cost_pct,
                     coverage=cov,
                     block=self.block.snapshot(),
@@ -8435,6 +8478,9 @@ class Pulse:
             "systemSource": "system-orders",
             "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
+            "drawdownAmount": act["drawdownAmount"],
+            "drawdownAvailable": act["drawdownAvailable"],
+            "drawdownBasis": act["drawdownBasis"],
             "wins": int(act["wins"]),
             "losses": int(act["losses"]),
             "winRate": round(wr, 1),

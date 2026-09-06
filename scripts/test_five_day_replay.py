@@ -22,6 +22,27 @@ class HistoricTests(unittest.TestCase):
         self.assertEqual(len(configs())*3*8*2,62208)
         self.assertEqual(len({tuple(x.items()) for x in configs()}),1296)
 
+    def test_trail_update_waits_until_next_bar_and_is_monotonic(self):
+        cfg=[dict(strategy='trail',levels=0,incrementPct=0,volumeRatio=0,
+                  tpPct=5,slPct=5,trailArmPct=.3,trailGivePct=.2,honorTp=False)]
+        r=self.run_lane({1:[100,104,99,101,1],2:[101,102,100,101,1]},cfg)[0]
+        self.assertAlmostEqual(r['netPct'],.798,places=6)
+        self.assertEqual(r['avgHoldS'],120)
+
+    def test_time_exit_is_not_a_boundary_close(self):
+        cfg=[dict(strategy='base',levels=0,incrementPct=0,volumeRatio=0,
+                  tpPct=5,slPct=5,maxHoldBars=2)]
+        r=self.run_lane(cfg=cfg)[0]
+        self.assertEqual(r['avgHoldS'],120);self.assertEqual(r['boundaryCloses'],0)
+
+    def test_full_catalog_cardinality_and_unique_parameters(self):
+        from replay_complete import grids
+        g=grids()
+        self.assertEqual(len(g['catalog']),30*22*26*2)
+        self.assertEqual(len(g['adjustments']),55*81)
+        for rows in g.values():
+            self.assertEqual(len({tuple(r.items()) for r in rows}),len(rows))
+
     def test_gaps_duplicates_and_nan_rejected(self):
         valid = [(0,[1,2,.5,1,2]),(60000,[1,2,.5,1,2])]
         validate(valid,0,120000)

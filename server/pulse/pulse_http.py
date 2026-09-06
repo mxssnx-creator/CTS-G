@@ -27,6 +27,7 @@ STOP_ALL_PATH = path_for("STOP")
 CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
+_OVERLAY_LOCKS = {cid: threading.RLock() for cid in ("bingx-x01", "bingx-x02")}
 
 
 def _flag(name: str) -> bool:
@@ -334,16 +335,18 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     cid = resolve_conn(conn) if conn not in ("", "overall") else conn
     if cid not in ID_TO_LANE:
         raise ValueError("pick a known lane")
-    dest = os.path.join(DIR, f"overlay-{cid}.json")
-    cur = load_overlay(cid)
     if not isinstance(overlay, dict):
-        overlay = {}
-    cur.update(overlay)
-    tmp = dest + ".tmp"
-    os.makedirs(DIR, exist_ok=True)
-    with open(tmp, "w") as f:
-        json.dump(cur, f)
-    os.replace(tmp, dest)
+        raise ValueError("overlay must be an object")
+    # Validate before any persistent mutation. JSON's default NaN/Infinity
+    # extension otherwise leaves settings that browsers cannot parse.
+    json.dumps(overlay, allow_nan=False)
+    dest = os.path.join(DIR, f"overlay-{cid}.json")
+    # Concurrent partial saves must serialize the complete read/merge/write,
+    # not just rename. A common .tmp also collided between HTTP threads.
+    with _OVERLAY_LOCKS[cid]:
+        cur = load_overlay(cid)
+        cur.update(overlay)
+        atomic_write(dest, cur)
     return cur
 
 
