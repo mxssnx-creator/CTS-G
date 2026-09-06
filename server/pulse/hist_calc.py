@@ -61,8 +61,9 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 20
-# The bounded three-day/72-hour validation window is the maximum supported
-# public window. Keep the exchange request bounded to avoid unbounded RAM/CPU.
+# The bounded fourteen-day/336-hour validation window is the maximum
+# supported public window. Keep the exchange request bounded to avoid
+# unbounded RAM/CPU.
 HOURS_MAX = LOOKBACK_MAX // 60  # never claim more history than the bounded replay holds
 BARS_PER_HOUR = 60
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
@@ -1776,11 +1777,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("preset-step-bounds", all(3 <= lo <= hi <= 22 for lo, hi in zip(step_grid, step_max)), str(list(zip(step_grid, step_max))))
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
-    rec("hours-clamp", hours_to_bars(99) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
-    range_series = {hours: hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120)}
+    rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
+    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
+    range_series = {hours: hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
-        range_series == {2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 4320},
+        range_series == {2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})

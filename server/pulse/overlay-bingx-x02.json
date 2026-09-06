@@ -129,7 +129,7 @@
   "setAutoDeact": true,
   "setDeactN": 25,
   "setLiveNegativeDeact": true,
-  "setMaxActive": 80,
+  "setMaxActive": 110,
   "setMaxDdTimeS": 57600,
   "setMinPf": 1.02,
   "setMinSamples": 8,

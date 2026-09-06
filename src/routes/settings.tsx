@@ -1228,7 +1228,7 @@ function SettingsPage() {
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
                   min={120}
-                  max={4320}
+                  max={20160}
                   step={60}
                   hint={`${overlay.histLookbackBars} × 1m = ${(overlay.histLookbackBars / 60).toFixed(1)}h`}
                   onChange={(v) => patch("histLookbackBars", v)}

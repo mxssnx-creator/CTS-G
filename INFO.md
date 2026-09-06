@@ -234,8 +234,9 @@ lanes, configuration persistence, calculation/statistics paths, Redis-backed
 state and the Linux deployment. Merge only intended files; the branch and PR
 must contain no bootstrap transport artifacts or credentials.
 
-Historic validation accepts 2–72 hours (1m bars); the three-day stress run is
-`hours=72` / `lookback=4320`. It processes every enabled pack, SL:TP ratio,
+Historic validation accepts 2–336 hours (1m bars, up to fourteen days); the
+three-day stress run is `hours=72` / `lookback=4320`, and a full fourteen-day
+run is `hours=336` / `lookback=20160`. It processes every enabled pack, SL:TP ratio,
 trailing arm/give pair, step, direction and indication kind, plus independent
 Block and DCA tapes. Signals additionally publish a separate `block:signals`
 historic ledger by symbol and direction; this is evaluation evidence for the
@@ -332,7 +333,7 @@ The Settings catalog exposes the same bounded ranges used by the engines:
 | SL:TP | `0.1–3.0`, step `0.1` (30 independent ratios) |
 | TP steps | `3–22`, every integer is a separate Set |
 | Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
-| Historic | `120–4320` 1m bars, `2–72h`; min bars and warmup remain bounded by the replay window |
+| Historic | `120–20160` 1m bars, `2–336h` (up to fourteen days); min bars and warmup remain bounded by the replay window |
 | Block | Historic evaluates counts `1–12`; live stack is bounded to `1–6`; `0` selects the default live stack `3` |
 | Block + Signals | `block:signals` is independently replayed and attributed by `ind_kind=signals`; live Block remains parent-only and cannot open standalone |
 | DCA | `0` uses the configured distance list; explicit max is `1–12`; distance is clamped to `0.05–8%`, first add is at least `1.2%`, later adds are at least `0.4%` apart, multiplier is `0.25–2.5×` |

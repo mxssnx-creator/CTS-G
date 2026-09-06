@@ -51,7 +51,7 @@ DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 480
-LOOKBACK_MAX = 4320  # three days of 1m bars for historic validation
+LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -934,9 +934,9 @@ class SetBook:
         # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 80)
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 110)
         except Exception:
-            raw_active = 80
+            raw_active = 110
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
