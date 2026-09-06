@@ -464,10 +464,11 @@ function SettingsPage() {
               <CoveragePanel live={stats} />
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="General calculation" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Exchange execution without adjustments · disabled by default; calculation continues" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -1196,13 +1197,13 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="General calculation" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
-                Indications and general run in parallel for entries. Block adds on a live parent for every count (live max stack 6; historic evaluation counts 1–6).
+                Indications and general run in parallel for entries. Block Active executes an adjusted quantity from a virtual reference. Normal exchange entries follow the separate Normal (General) setting.
                 Trailing only moves SL after min-step, only in the protective direction, and retries a failed exchange update while retaining the old stop. Last-{overlay.pfWindow} PositionCost PF must pass before any new risk.
               </p>
             </Card>
@@ -1332,7 +1333,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="0 = unlimited"
+                  hint="Default 50 qualified Sets · fewer when qualification fails · 0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -1457,13 +1458,18 @@ function SettingsPage() {
           )}
 
           {section === "block" && (
-            <Card title="Block strategy" hint="Counts 1–6 are independent · each count retains recovery state until its own positive result · no compounding">
+            <Card title="Block strategy" hint="Counts 1–6 · Active can open only the adjusted portion of a virtual reference · no compounding">
               <Grid>
                 <EnableSlider
                   label="Block enabled"
                   on={overlay.blockEnabled}
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
+                />
+                <Toggle
+                  label="Active"
+                  on={overlay.blockActive}
+                  onChange={(v) => patch("blockActive", v)}
                 />
                 <Toggle
                   label="Active Live overlay"
@@ -1475,6 +1481,8 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Unadjusted exchange entries · disabled by default" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <p className="text-sm text-muted">Active observes a qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; existing and pending same-side quantities reduce the order. Normal calculations remain available. Profitability is measured, never guaranteed.</p>
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}

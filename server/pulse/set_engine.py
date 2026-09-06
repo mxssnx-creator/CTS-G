@@ -694,7 +694,7 @@ class SetBook:
         self.min_samples = 8
         self.reactivate = True
         self.strict_gate = True
-        self.max_active = 0
+        self.max_active = 50
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.cost_source = "manual-fallback"
         # Optional live-selection policy: prefer the smallest stable
@@ -932,9 +932,9 @@ class SetBook:
         # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 50)
         except Exception:
-            raw_active = 0
+            raw_active = 50
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
@@ -2844,6 +2844,7 @@ class SetBook:
         return True, ""
 
     def _score_one(self, st: SetState) -> None:
+        self._selection_dirty = True
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
         tape = st.tape()
@@ -3060,10 +3061,21 @@ class SetBook:
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
 
-    def _cap_active(self) -> None:
-        # No set-count ceiling. Memory is trimmed by HIST_CAP / load_engine,
-        # not by deactivating independent configs.
-        return
+    def _cap_active(self, force: bool = True) -> None:
+        selection_key = (id(self.by_idx), len(self.by_idx), self.max_active)
+        if not force and not getattr(self, "_selection_dirty", True) and getattr(self, "_selection_key", None) == selection_key:
+            return
+        self._selection_key = selection_key
+        self._selection_dirty = False
+        # Keep scoring all configs, including previously unselected candidates.
+        eligible = [s for s in self.by_idx if not s.locked and
+                    (s.active or s.deact_reason == "selection limit")]
+        eligible.sort(key=lambda s: (-float(s.last15_ratio or 0),
+                      -float(s.expectancy or 0), float(s.max_dd_s or 0), s.id))
+        for index, st in enumerate(eligible):
+            st.active = self.max_active <= 0 or index < self.max_active
+            st.deact_reason = "" if st.active else "selection limit"
+        self._snap_ts = self._live_ov_ts = 0.0
 
     def get_idx(self, idx: int) -> Optional[SetState]:
         if 0 <= idx < len(self.by_idx):
@@ -3242,7 +3254,9 @@ class SetBook:
         elif want_side in ("S", "-1", "SELL"):
             want_side = "SHORT"
         use_side = want_side in DIRECTIONS
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
+        self._cap_active(force=False)
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind
+                and s.deact_reason != "selection limit"]
         if not rows:
             return None
         need = self.eval_need()

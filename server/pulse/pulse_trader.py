@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
+from block_active import adjusted_quantity, observe_continuation
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -1020,6 +1021,10 @@ class Pulse:
         self.strat_ind = True
         self.strat_block = True
         self.strat_trail = True
+        self.normal_execution_enabled = False
+        self.block_active = True
+        self._block_reference_anchors = {}
+        self._execution_decision = {}
         self.strat_general = True
         self.tf_on = {"1m": True, "5m": True, "15m": True}
         self._hist_stop = False
@@ -4050,6 +4055,7 @@ class Pulse:
             relative_count=int(meta.get("relative_count") or meta.get("relativeCount") or 1),
             volume_ratio=float(meta.get("volume_ratio") or meta.get("volumeRatio") or 1.0),
             ind_kind=str(meta.get("ind_kind") or meta.get("indKind") or ""),
+            strategy=str(meta.get("strategy") or "core"),
             exchange_qty=fill_qty,
             pending_qty=max(0.0, float(row.get("requested_qty") or 0.0) - fill_qty),
             last_fill_at=time.time(),
@@ -4131,7 +4137,79 @@ class Pulse:
         )
         return pos
 
+    def block_active_plan(self, sym, side, chosen, reference_qty, px):
+        """Plan one overall quantity delta, with no normal exchange parent."""
+        self._execution_decision = {"mode": "block-active", "allowed": False, "reason": "disabled"}
+        if not (getattr(self, "block_active", True) and self.block.enabled
+                and self.strat_block and self.block.active_live and self.block.active_real):
+            return None
+        def reject(reason):
+            self._execution_decision["reason"] = reason
+            return None
+        if not chosen or not self.sets.enabled or not self.sets.progress.ready:
+            return reject("qualified reference unavailable")
+        if not self.control_orders or not self.recon_ok or getattr(self, "recon_pending", False):
+            return reject("confirmed reconciliation and controls required")
+        view = self.sets._side_view(chosen, side)
+        n = int(view.get("last15_n") or 0)
+        pf = float(view.get("last15_ratio") or 0)
+        net = float(view.get("net_avg", getattr(chosen, "expectancy", 0)) or 0)
+        ddt = float(view.get("max_dd_s") or 0)
+        if (not chosen.active or n < max(8, self.sets.eval_need()) or
+                not math.isfinite(pf) or pf < self.sets.real_min_pf or
+                not math.isfinite(net) or net <= 0 or
+                not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
+            return reject("reference sample/PF/net/DD qualification failed")
+        rows = self.strategy_closes()
+        consec = 0
+        for row in reversed(rows):
+            if row.pnl >= 0:
+                break
+            consec += 1
+        allow, reasons, _ = self.coord.gate(rows, consec, intern={"pf": pf, "n": n})
+        if not allow:
+            return reject("overall coordination: " + "; ".join(reasons))
+        live_pf = self.live_recent_pf(side, n=8)
+        if live_pf is not None and (not math.isfinite(live_pf) or live_pf < 1.25):
+            return reject("overall live PF below 1.25")
+        anchors = getattr(self, "_block_reference_anchors", None)
+        if anchors is None:
+            anchors = self._block_reference_anchors = {}
+        key = (sym, side, chosen.id)
+        if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
+            return reject("reference needs 45 seconds and 0.2% continuation")
+        owned = sum(max(0.0, float(p.qty)) for p in self.positions_for(sym, side))
+        pending = sum(max(0.0, float(r.get("requested_qty") or 0) - float(r.get("filled_qty") or 0))
+                      for r in (getattr(self, "pending_orders", {}) or {}).values()
+                      if r.get("symbol") == sym and str(r.get("side") or "").upper() == side
+                      and str(r.get("kind") or "entry") in ("entry", "block", "dca"))
+        # Counts are independent alternatives, never summed into six orders.
+        for count in sorted(self.block.counts):
+            allowed, cap, _, _ = self._coord_add_state(count=count)
+            formula = self.block.formula(reference_qty, count)
+            if not allowed or count > cap or pf < formula["blockMinPF"]:
+                continue
+            own = [r for r in rows if r.parent_set_id == chosen.id
+                   and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
+            if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
+                continue
+            qty = adjusted_quantity(reference_qty, formula["volumeIncrement"], owned, pending)
+            if qty <= 0:
+                continue
+            decision = {"mode": "block-active", "allowed": True, "reason": "qualified adjusted delta",
+                        "parentSetId": chosen.id, "blockCount": count, "referenceQty": reference_qty,
+                        "volumeIncrement": formula["volumeIncrement"], "ownedQty": owned,
+                        "pendingQty": pending, "requestedQty": qty, "normalQtyExecuted": 0}
+            self._execution_decision = decision
+            return decision
+        return reject("counts blocked or overall target already satisfied")
+
     def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None) -> None:
+        normal_allowed = getattr(self, "normal_execution_enabled", False) is True
+        if forced_row is not None and not normal_allowed:
+            return
+        if not normal_allowed and not getattr(self, "block_active", True):
+            return
         if self.entries_blocked():
             return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
@@ -4224,6 +4302,16 @@ class Pulse:
         except TypeError:
             # Keep lightweight in-process fakes and older adapters compatible.
             qty = self.size_qty(c, px)
+        execution_plan = None
+        if forced_row is None and getattr(self, "block_active", True):
+            execution_plan = self.block_active_plan(sym, side, chosen, qty, px)
+        if execution_plan:
+            qty = self.round_qty(c, execution_plan["requestedQty"])
+            if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
+                self._execution_decision.update(allowed=False, reason="adjusted quantity below exchange minimum")
+                return
+        elif not normal_allowed:
+            return
         if qty <= 0:
             return
         notional = qty * px
@@ -4259,7 +4347,7 @@ class Pulse:
             client_id=cid,
             qty=qty,
             price=px,
-            metadata={"reason": reason, "confidence": conf, "setIdx": set_idx},
+            metadata={"reason": reason, "confidence": conf, "setIdx": set_idx, "execution": execution_plan or {"mode": "normal"}},
         )
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -4290,6 +4378,11 @@ class Pulse:
             "trail_arm": trail_arm / 100.0,
             "trail_give": trail_give / 100.0,
         }
+        if execution_plan:
+            pending_meta.update(axis_key=f"block-active:{execution_plan['blockCount']}",
+                                relative_count=execution_plan["blockCount"],
+                                volume_ratio=execution_plan["volumeIncrement"], strategy="block",
+                                execution=execution_plan)
         pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a)
         pending_meta["control_group_key"] = pending_group_key
         self._remember_pending(
@@ -4362,7 +4455,7 @@ class Pulse:
                 self.did_io = True
                 msg = str(r.get("msg") or "")
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-            if m2 and not self.ok(r) and c is not None:
+            if m2 and not execution_plan and not self.ok(r) and c is not None:
                 need = float(m2.group(1))
                 c.min_qty = max(float(c.min_qty or 0), need)
                 qty = self.round_qty_up(c, need)
@@ -4498,9 +4591,10 @@ class Pulse:
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
             overall=True, close_position=True, ind_kind=ind_kind,
             parent_set_id=parent_set_id,
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
-            relative_count=int(getattr(chosen, "relative_count", 1) or 1),
-            volume_ratio=float(getattr(chosen, "volume_ratio", 1.0) or 1.0),
+            axis_key=str(pending_meta["axis_key"]),
+            relative_count=int(pending_meta["relative_count"]),
+            volume_ratio=float(pending_meta["volume_ratio"]),
+            strategy="block" if execution_plan else "core",
             exchange_qty=filled,
             pending_qty=max(0.0, qty - filled),
             last_fill_at=time.time(),
@@ -5817,6 +5911,8 @@ class Pulse:
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
         self.strat_trail = bool(ov.get("stratTrailing", True))
+        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", False)) is True
+        self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.strat_general = bool(ov.get("stratGeneral", True))
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
@@ -6085,6 +6181,8 @@ class Pulse:
             "stratIndications": self.strat_ind,
             "stratBlock": self.strat_block,
             "stratTrailing": self.strat_trail,
+            "normalExecutionEnabled": self.normal_execution_enabled,
+            "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
             "stratDca": getattr(self, "strat_dca", True),
             "dcaEnabled": bool(self.dca.enabled),
@@ -6299,6 +6397,8 @@ class Pulse:
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
+            if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
@@ -6583,6 +6683,8 @@ class Pulse:
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
+            if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
@@ -7163,6 +7265,11 @@ class Pulse:
                 if not cur or conf > cur[0]:
                     best[s] = (conf, s, d, f"gen:{why}")
         ranked = sorted(best.values(), reverse=True)
+        anchors = getattr(self, "_block_reference_anchors", {})
+        for key in list(anchors):
+            current = best.get(key[0])
+            if current is None or ("LONG" if current[2] > 0 else "SHORT") != key[1]:
+                anchors.pop(key, None)
         intern = {}
         intern_any = False
         hist_ready = bool(self.sets.enabled and getattr(self.sets, "progress", None) and self.sets.progress.ready)
@@ -8755,6 +8862,12 @@ class Pulse:
             },
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
+            "executionPolicy": {
+                "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
+                "blockActive": bool(getattr(self, "block_active", True)),
+                "targetActiveSets": int(getattr(self.sets, "max_active", 50)),
+                "decision": dict(getattr(self, "_execution_decision", {}) or {}),
+            },
             "stageFlow": scov.get("stageFlow") or stage_flow,
             "evaluations": {
                 "requiredSamples": int(getattr(self.sets, "eval_need", lambda: 8)()),

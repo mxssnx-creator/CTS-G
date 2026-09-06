@@ -128,7 +128,7 @@ def overlay_test() -> None:
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
-    rec("x01-set-unlim", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
+    rec("x01-set-target50", int(x01.get("setMaxActive") or 0) == 50, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
     rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
@@ -1496,6 +1496,8 @@ def set_orders_test() -> None:
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = fx
         p.halted = False
         p.errors = 0
@@ -2014,6 +2016,8 @@ def strict_gate_test() -> None:
 
     def mk_place_trader(book):
         p = mk_trader(book)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = OrderApi()
         p.entries_blocked = lambda: False
         p.halted = False

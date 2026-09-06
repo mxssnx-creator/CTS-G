@@ -21,6 +21,14 @@ class SettingsPersistence(unittest.TestCase):
             for bad in ({'volumeFactor':float('nan')},{'nested':[float('inf')]},[]):
                 with self.assertRaises(ValueError):ph.write_overlay('vst',bad)
                 self.assertEqual(ph.load_overlay('bingx-x02'),{'volumeFactor':.1})
+    def test_execution_settings_roundtrip_without_disabling_calculation(self):
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            ph.write_overlay('vst',{'normalExecutionEnabled':False,'blockActive':True,'setMaxActive':50,'stratGeneral':True})
+            ph.write_overlay('vst',{'blockActive':False})
+            value=ph.load_overlay('bingx-x02')
+            self.assertEqual(value,{'normalExecutionEnabled':False,'blockActive':False,'setMaxActive':50,'stratGeneral':True})
+            ph.write_overlay('vst',{'normalExecutionEnabled':True})
+            self.assertTrue(ph.load_overlay('bingx-x02')['normalExecutionEnabled'])
     def test_invalid_lane_cannot_write_a_file(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             with self.assertRaises(ValueError):ph.write_overlay('../../foreign',{'x':1})

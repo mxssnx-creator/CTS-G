@@ -33,7 +33,7 @@ def selection_key(row):
     r=row['selectionMetrics']
     return (-pf_number(r['trainPf']),r['trainDdPct'],-r['trainN'],row['identity'])
 
-def select_top25(source):
+def select_top25(source, count=25):
     g=grids();short=[];examined=eligible=0
     for path in sorted(pathlib.Path(source).glob('20d_*.json.gz')):
         summary=json.loads(path.with_name(path.name.replace('.json.gz','.summary.json')).read_text())
@@ -53,14 +53,14 @@ def select_top25(source):
                 selectionMetrics={k:values[ix[k]] for k in ('trainPf','trainN','trainDdPct')},
                 originalMetrics=dict(zip(columns,values)))
             distinct[key]=row
-        short.extend(heapq.nsmallest(25,distinct.values(),key=selection_key))
-    chosen=sorted(short,key=selection_key)[:25]
-    if len(chosen)!=25:raise ValueError('Fewer than 25 distinct sample-sufficient parent configurations')
+        short.extend(heapq.nsmallest(count,distinct.values(),key=selection_key))
+    chosen=sorted(short,key=selection_key)[:count]
+    if len(chosen)!=count:raise ValueError(f'Fewer than {count} distinct sample-sufficient parent configurations')
     for rank,row in enumerate(chosen,1):row.update(rank=rank,acceptedFor='additional historical research tests',liveAccepted=False)
     return dict(candidates=chosen,examinedParentRows=examined,sampleSufficientParentRows=eligible,
-        selected=25,rule='Train PF descending; Train DD ascending; Train N descending; deterministic effective-config identity',
+        selected=count,rule='Train PF descending; Train DD ascending; Train N descending; deterministic effective-config identity',
         period='First 14 days of the 20-day sample select; final six days validate retrospectively',
-        qualification='Research queue accepts 25; outcome gate is independent: N>=8 and classic net PF>1.02 in both segments',
+        qualification=f'Research queue accepts {count}; outcome gate is independent: N>=8 and classic net PF>1.02 in both segments',
         leakageNote='Earlier reports already exposed these dates. This is a retrospective chronological check, not an unseen forward test.')
 
 def variants(parent,admission='strict'):

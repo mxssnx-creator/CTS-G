@@ -167,6 +167,8 @@ export type PulseOverlay = {
   staggerS: number;
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
+  normalExecutionEnabled: boolean;
+  blockActive: boolean;
   blockEnabled: boolean;
   blockMaxStack: number;
   blockVolumeRatio: number;
@@ -331,6 +333,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.6,
   controlOrders: true,
   controlOrdersPerConfig: true,
+  normalExecutionEnabled: false,
+  blockActive: true,
   blockEnabled: true,
   blockMaxStack: 6,
   blockVolumeRatio: 0.25,
@@ -453,7 +457,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setStrictGate: true,
   setMinSamples: 8,
   setReactivate: true,
-  setMaxActive: 0,
+  setMaxActive: 50,
   setMinStep: 1,
   setStepMax: 22,
   setStepAdapt: true,
@@ -509,6 +513,8 @@ export type CtsSettings = {
   blockCounts?: number[];
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
+  normalExecutionEnabled?: boolean;
+  blockActive?: boolean;
   blockActiveLiveEnabled?: boolean;
   blockActiveRealEnabled?: boolean;
   dcaEnabled?: boolean;
@@ -694,6 +700,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
+    normalExecutionEnabled: bool(cts.normalExecutionEnabled, false),
+    blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
     dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, false),
@@ -798,7 +806,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setStrictGate: bool(cts.setStrictGate, true),
     setMinSamples: num(cts.setMinSamples, 8),
     setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 0),
+    setMaxActive: num(cts.setMaxActive, 50),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
     setStepMax: num(cts.setStepMax, 22),
     setStepAdapt: bool(cts.setStepAdapt, true),
