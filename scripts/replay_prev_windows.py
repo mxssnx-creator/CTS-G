@@ -25,7 +25,7 @@ from replay_five_days import replay
 from coord_engine import Coordinator
 
 WINDOWS = tuple(range(5, 56, 5))
-POLICY = dict(min_pf=1.05, max_dd_s=57600, cost_pct=.10)
+POLICY = dict(min_pf=1.02, max_dd_s=57600, cost_pct=.10)
 
 
 def number(value):

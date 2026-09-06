@@ -5967,10 +5967,10 @@ class Pulse:
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
-        real_pf = 1.05
+        real_pf = 1.02
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.05)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.02)
         except Exception:
             pass
         self.block.enabled = bool(b_en) if b_en is not None else True

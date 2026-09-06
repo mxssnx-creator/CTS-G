@@ -70,7 +70,7 @@ def select_top25(source, count=25, window='20d', qualified_only=False):
     return dict(candidates=chosen,examinedParentRows=examined,sampleSufficientParentRows=eligible,
         selected=count,rule='Train PF descending; Train DD ascending; Train N descending; deterministic effective-config identity',
         period='First 14 days of the 20-day sample select; final six days validate retrospectively',
-        qualification=f'Research queue accepts {count}; outcome gate is independent: N>=8 and classic net PF>=1.05 in both segments; DD time<=16h',
+        qualification=f'Research queue accepts {count}; outcome gate is independent: N>=8 and classic net PF>=1.02 in both segments; DD time<=16h',
         leakageNote='Earlier reports already exposed these dates. This is a retrospective chronological check, not an unseen forward test.')
 
 def variants(parent,admission='strict'):

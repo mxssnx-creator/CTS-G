@@ -24,7 +24,7 @@ def run_one(args):
     base,tape,eq,closed=parent_observations(bars,signals,side,candidate['parameters'],start)
     _, block, events, policy, _ = causal_gates(bars,tape,eq,settings)
     # Real-stage qualification is separate from the lower Base Axis gate.
-    real_floor=float(settings.get('overlay',{}).get('realMinPf',1.05))
+    real_floor=float(settings.get('overlay',{}).get('realMinPf',1.02))
     real=np.zeros(len(bars),dtype=bool)
     for index,event in enumerate(events):
         end=events[index+1]['effectiveBar'] if index+1<len(events) else len(bars)

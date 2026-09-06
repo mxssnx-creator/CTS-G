@@ -81,7 +81,7 @@ def job(args):
         positive=sum(r['positive'] for r in results),qualified=sum(r['qualified'] for r in results),
         noTrades=sum(r['n']==0 for r in results),best=best,elapsedS=round(time.monotonic()-started,2),
         candleSha256=blob['candleSha256'],sha256=hashlib.sha256(raw).hexdigest(),signature=signature,
-        policy=dict(minClassicPf=1.05,maxDdS=57600,positionCostPct=.1,
+        policy=dict(minClassicPf=1.02,maxDdS=57600,positionCostPct=.1,
                     costSource='fallback; no historical exchange fee samples',useLivePositionCosts=True))
     summary_path.write_text(json.dumps(summary,separators=(',',':'),allow_nan=False))
     print(json.dumps({k:summary[k] for k in ('key','rows','positive','qualified','elapsedS')}),flush=True)

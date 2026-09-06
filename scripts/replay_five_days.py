@@ -37,7 +37,7 @@ def pf(gain, loss):
 
 def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
            entry_filter=None, add_filter=None, on_close=None, on_equity=None,
-           min_pf=1.05, max_dd_s=57600):
+           min_pf=1.02, max_dd_s=57600):
     """Parallel independent configs. Only completed bar information is used.
 
     Stops/targets are tested before close-price additions. Same-bar ambiguity
