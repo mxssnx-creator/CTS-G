@@ -43,7 +43,7 @@ from set_engine import (
     last_n_balanced,
     synth_trend,
 )
-from storage_paths import path_for
+from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
 DEFAULT_SYMBOLS = [
@@ -60,7 +60,7 @@ DEFAULT_SYMBOLS = [
     "1000PEPE-USDT",
     "KAS-USDT",
 ]
-HOURS_DEFAULT = 20
+HOURS_DEFAULT = 7
 # The bounded fourteen-day/336-hour validation window is the maximum
 # supported public window. Keep the exchange request bounded to avoid
 # unbounded RAM/CPU.
@@ -312,19 +312,27 @@ def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
     return max(120, min(LOOKBACK_MAX, int(round(h * BARS_PER_HOUR))))
 
 
-def job_path() -> str:
+def _connection_id(connection: Optional[str] = None) -> str:
+    raw = str(connection or os.environ.get("PULSE_CONN") or "bingx-x02").replace("connection:", "")
+    return "".join(ch for ch in raw if ch.isalnum() or ch in "._-") or "bingx-x02"
+
+
+def job_path(connection: Optional[str] = None) -> str:
     env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
-    if env:
+    if env and connection in (None, ""):
         return env
-    return path_for("hist-calc.json")
+    return path_for(f"hist-calc-{_connection_id(connection)}.json")
 
 
-def req_path() -> str:
-    return job_path().replace("hist-calc.json", "hist-calc-req.json")
+def req_path(connection: Optional[str] = None) -> str:
+    env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
+    if env and connection in (None, ""):
+        return env.replace("hist-calc.json", "hist-calc-req.json")
+    return path_for(f"hist-calc-req-{_connection_id(connection)}.json")
 
 
-def _pid_path() -> str:
-    return job_path().replace("hist-calc.json", "hist-calc.pid")
+def _pid_path(connection: Optional[str] = None) -> str:
+    return path_for(f"hist-calc-{_connection_id(connection)}.pid")
 
 
 def _write_pid(pid: Optional[int] = None) -> None:
@@ -375,16 +383,13 @@ def is_running() -> bool:
 
 
 def _atomic_write(path: str, blob: Dict[str, Any]) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(blob, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    storage_atomic_write(path, blob)
 
 
-def read_job() -> Dict[str, Any]:
-    p = job_path()
+def read_job(connection: Optional[str] = None) -> Dict[str, Any]:
+    p = job_path(connection)
     if not os.path.exists(p):
-        return idle_job()
+        return idle_job(connection)
     try:
         with open(p) as f:
             j = json.load(f)
@@ -392,15 +397,32 @@ def read_job() -> Dict[str, Any]:
             return j
     except Exception:
         pass
-    return idle_job()
+    return idle_job(connection)
 
 
-def idle_job() -> Dict[str, Any]:
+def idle_job(connection: Optional[str] = None) -> Dict[str, Any]:
     return {
         "ok": True,
         "phase": "idle",
         "pct": 0.0,
         "detail": "no calc yet",
+        "connection": _connection_id(connection),
+        "runId": "",
+        "generation": 0,
+        "mode": "idle",
+        "selectedSymbols": [],
+        "validSymbols": [],
+        "invalidSymbols": [],
+        "missingSymbols": [],
+        "requestedStart": 0,
+        "requestedEnd": 0,
+        "watermark": {},
+        "lastPublishedWatermark": {},
+        "lastCompleteRun": 0,
+        "nextRunAt": 0,
+        "stale": False,
+        "deferredReason": "",
+        "coordinationComplete": False,
         "hours": HOURS_DEFAULT,
         "lookback": hours_to_bars(HOURS_DEFAULT),
         "symbols": [],
@@ -419,7 +441,8 @@ def idle_job() -> Dict[str, Any]:
         "startedAt": 0,
         "finishedAt": 0,
         "source": "",
-        "independent": True,
+        "shared": True,
+        "independent": False,
         "independence": {
             "symbol": True,
             "direction": True,
@@ -1701,59 +1724,79 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             _clear_pid()
 
 
-def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if is_running():
-        cur = read_job()
-        cur["ok"] = True
-        cur["detail"] = cur.get("detail") or "calc already running"
-        return cur
-    body = body if isinstance(body, dict) else {}
+def write_job(job: Dict[str, Any], connection: Optional[str] = None) -> Dict[str, Any]:
+    """Persist the status consumed by both the HTTP lane and the engine lane."""
+    payload = dict(job or {})
+    payload.setdefault("connection", _connection_id(connection))
+    payload.setdefault("ok", True)
     try:
-        _atomic_write(req_path(), body)
+        _atomic_write(job_path(connection), payload)
     except Exception:
         pass
-    seed = idle_job()
+    return payload
+
+
+def read_request(connection: Optional[str] = None) -> Dict[str, Any]:
+    path = req_path(connection)
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+    """Queue one generation for the running Pulse lane.
+
+    The request file is intentionally the hand-off boundary.  The engine owns
+    fetching, replay, coordination, and publication; repeated UI clicks only
+    replace this newest request and never create a divergent subprocess.
+    """
+    cid = _connection_id(connection)
+    body = dict(body) if isinstance(body, dict) else {}
+    current = read_job(cid)
+    previous_request = read_request(cid)
+    generation = max(
+        int(current.get("generation") or 0),
+        int(previous_request.get("generation") or 0),
+    ) + 1
+    requested_at = time.time()
+    run_id = f"{cid}:{generation}:{int(requested_at * 1000)}"
+    request = {
+        **body,
+        "connection": cid,
+        "runId": run_id,
+        "generation": generation,
+        "mode": str(body.get("mode") or "manual"),
+        "requestedAt": requested_at,
+    }
+    try:
+        _atomic_write(req_path(cid), request)
+    except Exception:
+        pass
+    options = parse_options(body)
+    seed = idle_job(cid)
     seed.update({
         "phase": "queued",
         "pct": 0.5,
-        "detail": "starting independent historic calc",
-        "options": parse_options(body),
-        "hours": parse_options(body)["hours"],
-        "startedAt": time.time(),
+        "detail": "queued on shared historic lane",
+        "options": options,
+        "hours": options["hours"],
+        "lookback": hours_to_bars(options["hours"]),
+        "startedAt": requested_at,
+        "runId": run_id,
+        "generation": generation,
+        "mode": request["mode"],
+        "selectedSymbols": list(body.get("symbols") or body.get("selectedSymbols") or []),
+        "stale": bool(current.get("ready")),
+        "deferredReason": "awaiting running connection worker",
+        "shared": True,
+        "independent": False,
     })
-    try:
-        _atomic_write(job_path(), seed)
-    except Exception:
-        pass
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    script = os.path.join(here, "hist_calc.py")
-    logp = job_path().replace("hist-calc.json", "hist-calc.log")
-    try:
-        logf = open(logp, "ab", buffering=0)
-    except Exception:
-        logf = subprocess.DEVNULL
-    try:
-        proc = subprocess.Popen(
-            ["nice", "-n", "15", sys.executable, "-u", script, "--req", req_path()],
-            cwd=here,
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-        _write_pid(proc.pid)
-        seed["pid"] = proc.pid
-        seed["detached"] = True
-    except Exception as exc:
-        seed["phase"] = "error"
-        seed["error"] = str(exc)[:200]
-        seed["detail"] = seed["error"]
-        try:
-            _atomic_write(job_path(), seed)
-        except Exception:
-            pass
-    return seed
+    return write_job(seed, cid)
 
 
 def apply_preset(preset_id: str) -> Optional[Dict[str, Any]]:
@@ -1804,7 +1847,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
     )))
-    rec("opt-hours-20", parse_options({})["hours"] == 20)
+    rec("opt-hours-default-7", parse_options({})["hours"] == 7)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
     rec("klines-parse-list", len(parse_klines([[0, 1, 2, 0.5, 1.2, 3]])) == 1)
@@ -2027,12 +2070,11 @@ if __name__ == "__main__":
         except Exception:
             body = {}
     if "--bg" in args:
-        print(json.dumps(start_job(body)))
-        # keep process alive until the worker finishes
-        while is_running():
-            time.sleep(0.2)
-        print(json.dumps(read_job()))
-        raise SystemExit(0)
+        # Production HTTP requests are lane requests.  The direct CLI remains
+        # an offline/compatibility harness and owns its synchronous worker.
+        job = run_calc(body, persist=True)
+        print(json.dumps(job))
+        raise SystemExit(0 if job.get("phase") == "ready" else 1)
     job = run_calc(body, persist=True)
     print(json.dumps({k: job.get(k) for k in ("ok", "phase", "pct", "detail", "hours", "lookback", "rowCount", "validatedCount", "source", "error", "elapsedMs", "winner")}))
     raise SystemExit(0 if job.get("phase") == "ready" else 1)

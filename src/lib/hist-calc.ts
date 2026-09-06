@@ -158,6 +158,9 @@ export type HistCalcJob = {
     activeCount?: number;
     validatedCount?: number;
     histFills?: number;
+    symbols?: { requested?: number; valid?: number; completed?: number; failed?: number; gapped?: number; invalid?: number; coveragePct?: number };
+    bars?: { requested?: number; completed?: number; missing?: number; gapped?: number; coveragePct?: number };
+    gaps?: Array<{ symbol?: string; start?: number; end?: number; minutes?: number; error?: string }>;
     dims?: Record<string, number>;
     families?: { base?: number; trail?: number };
     slTpCover?: boolean;
@@ -184,6 +187,25 @@ export type HistCalcJob = {
   error?: string;
   elapsedMs?: number;
   source?: string;
+  connection?: string;
+  runId?: string;
+  generation?: number;
+  mode?: "idle" | "initial" | "hourly" | "manual" | "gap" | string;
+  selectedSymbols?: string[];
+  validSymbols?: string[];
+  invalidSymbols?: Array<{ symbol?: string; reason?: string }>;
+  missingSymbols?: string[];
+  gappedSymbols?: string[];
+  requestedStart?: number;
+  requestedEnd?: number;
+  watermark?: Record<string, number>;
+  lastPublishedWatermark?: Record<string, number>;
+  lastCompleteRun?: number;
+  nextRunAt?: number;
+  stale?: boolean;
+  deferredReason?: string;
+  coordinationComplete?: boolean;
+  shared?: boolean;
   independent?: boolean;
   ready?: boolean;
   async?: boolean;
@@ -203,7 +225,7 @@ export type HistCalcJob = {
 };
 
 export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
-  hours: 20,
+  hours: 7,
   minStep: 1,
   stepMax: 22,
   trailing: true,
@@ -226,9 +248,10 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   coordOptimizationN: 50,
 };
 
-export async function fetchHistCalc(): Promise<HistCalcJob> {
+export async function fetchHistCalc(connection?: string): Promise<HistCalcJob> {
   try {
-    const r = await fetch("/hist-calc.json", { cache: "no-store" });
+    const query = connection ? `?conn=${encodeURIComponent(connection)}` : "";
+    const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store" });
     if (!r.ok) return { phase: "idle", pct: 0, detail: `status ${r.status}` };
     return (await r.json()) as HistCalcJob;
   } catch (e) {
@@ -237,7 +260,13 @@ export async function fetchHistCalc(): Promise<HistCalcJob> {
 }
 
 export async function startHistCalc(
-  body: Partial<HistCalcOptions> & { symbols?: string[]; forcedOnly?: boolean },
+  body: Partial<HistCalcOptions> & {
+    symbols?: string[];
+    selectedSymbols?: string[];
+    forcedOnly?: boolean;
+    connection?: string;
+    overlay?: Record<string, unknown>;
+  },
 ): Promise<HistCalcJob> {
   try {
     const legacy = body as Partial<HistCalcOptions> & {
@@ -249,7 +278,8 @@ export async function startHistCalc(
       preferMinimalRange: body.preferMinimalRange ?? legacy.preferMinimalPositive,
       additionalCoordination: body.additionalCoordination ?? legacy.minimalPositiveCoordination,
     };
-    const r = await fetch("/hist-calc.json", {
+    const query = body.connection ? `?conn=${encodeURIComponent(body.connection)}` : "";
+    const r = await fetch(`/hist-calc.json${query}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...DEFAULT_CALC_OPTIONS, ...migrated, allConfigs: true }),

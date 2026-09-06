@@ -185,21 +185,21 @@ function SettingsPage() {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const pull = async () => {
-      const j = await fetchHistCalc();
+      const j = await fetchHistCalc(conn);
       if (!alive) return;
       setCalcJob(j);
-      const running = j.phase === "fetch" || j.phase === "replay" || j.phase === "score" || j.phase === "queued";
+      const running = ["initial", "backfill", "fetch", "replay", "score", "gap", "queued"].includes(j.phase);
       if (running) timer = setTimeout(() => void pull(), 1200);
       else setCalcBusy(false);
     };
-    if (calcBusy || (calcPhase && ["fetch", "replay", "score", "queued"].includes(calcPhase))) {
+    if (calcBusy || (calcPhase && ["initial", "backfill", "fetch", "replay", "score", "gap", "queued"].includes(calcPhase))) {
       void pull();
     }
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [calcBusy, calcPhase]);
+  }, [calcBusy, calcPhase, conn]);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
@@ -222,7 +222,7 @@ function SettingsPage() {
         trailing: true,
         stratBlock: true,
         stratDca: false,
-        hours: 20,
+        hours: Math.max(2, Math.round(Number(preset?.patch.histLookbackBars || 420) / 60)),
         allConfigs: true,
       }));
     }
@@ -319,6 +319,9 @@ function SettingsPage() {
       preferMinimalRange: activeOverlay.preferMinimalRange,
       additionalCoordination: activeOverlay.additionalCoordination,
       coordOptimizationN: activeOverlay.coordOptimizationN,
+      connection: conn,
+      overlay: activeOverlay,
+      selectedSymbols: activeOverlay.symbols,
     });
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
@@ -659,8 +662,8 @@ function SettingsPage() {
                 )}
               </Card>
               <Card
-                title="Historic calc · last 20 hours"
-                hint="Independent of engine start. Walks every selected pack × SL:TP × trail × step × symbol. PF + DDT scored per set, indication kind and symbol."
+                title="Historic replay · rolling 7 hours"
+                hint="Runs on the active connection lane. Durable 1m bars, every selected pack × SL:TP × trail × step × symbol, then a complete hourly refresh."
               >
                 <Grid>
                   <Slider
@@ -681,12 +684,12 @@ function SettingsPage() {
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
                   />
                   <Slider
-                    label="Hours"
+                    label="Rolling range (hours)"
                     value={calcOpt.hours}
-                    min={8}
-                    max={72}
+                    min={2}
+                    max={336}
                     step={1}
-                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars`}
+                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · complete refresh hourly`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
                   />
                   <EnableSlider
@@ -787,7 +790,7 @@ function SettingsPage() {
                   <span className="text-sm text-muted">
                     {calcJob?.phase && calcJob.phase !== "idle"
                       ? `${calcJob.phase} ${Math.round(calcJob.pct || 0)}% · ${calcJob.detail || ""}`
-                      : "Runs without starting the engine · last 20 hours"}
+                      : "Queues the shared lane · rolling 7 hours · complete refresh every hour"}
                   </span>
                 </div>
                 {calcJob && calcJob.phase !== "idle" ? (
@@ -801,7 +804,8 @@ function SettingsPage() {
                         k="Catalog valid sets"
                         v={`${calcJob.coverage?.validatedCount ?? 0}/${calcJob.coverage?.setCount ?? calcJob.coverage?.product ?? 0}`}
                       />
-                      <KV k="Source" v={String(calcJob.source || "—")} />
+                      <KV k="Source" v={String(calcJob.source || "shared lane")} />
+                      <KV k="Run" v={`${calcJob.mode || "shared"} · generation ${calcJob.generation ?? 0}`} />
                       <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
                       <KV
                         k="Set product"
@@ -810,6 +814,15 @@ function SettingsPage() {
                             ? `${calcJob.coverage.product} · base ${calcJob.coverage.families?.base ?? "—"} / trail ${calcJob.coverage.families?.trail ?? "—"}`
                             : "—"
                         }
+                      />
+                      <KV
+                        k="Symbol coverage"
+                        v={`${calcJob.coverage?.symbols?.completed ?? calcJob.validSymbols?.length ?? 0}/${calcJob.coverage?.symbols?.valid ?? calcJob.selectedSymbols?.length ?? 0} valid · ${calcJob.gappedSymbols?.length ?? 0} gapped`}
+                      />
+                      <KV k="Backfill gaps" v={String(calcJob.coverage?.bars?.missing ?? calcJob.missingSymbols?.length ?? 0)} />
+                      <KV
+                        k="Next complete refresh"
+                        v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : "pending"}
                       />
                     </div>
                     {calcJob.winner ? (
@@ -1250,12 +1263,13 @@ function SettingsPage() {
                   onChange={(v) => patch("histWarmup", v)}
                 />
                 <Slider
-                  label="Refresh"
+                  label="Complete refresh interval"
                   value={overlay.histRefreshS}
-                  min={30}
-                  max={600}
-                  step={10}
+                  min={60}
+                  max={86400}
+                  step={60}
                   unit="s"
+                  hint="3600s = one complete rolling replay per hour"
                   onChange={(v) => patch("histRefreshS", v)}
                 />
                 <Slider

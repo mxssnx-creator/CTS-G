@@ -1095,15 +1095,17 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import read_job, public_presets
-                blob = read_job()
+                from hist_calc import public_presets, read_job
+                blob = read_job(conn)
                 if not blob.get("presets"):
                     blob["presets"] = public_presets()
                 blob["ok"] = True
-                blob["independent"] = True
+                blob["connection"] = conn
+                blob["shared"] = True
+                blob["independent"] = False
                 self._json(blob)
             except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True}, 200)
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
             return
         if path in ("/config.json", "/config"):
             if conn == "overall":
@@ -1219,13 +1221,13 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import start_job, is_running
-                job = start_job(body if isinstance(body, dict) else {})
+                from hist_calc import start_job
+                job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
-                job["running"] = is_running()
+                job["running"] = job.get("phase") in ("queued", "fetch", "backfill", "replay", "score")
                 self._json(job)
             except Exception as exc:
-                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200]}, 200)
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
             return
         if path not in ("/config.json", "/config"):
             self.send_error(404)

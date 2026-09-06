@@ -50,7 +50,7 @@ PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 480
+LOOKBACK_DEFAULT = 420
 LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
@@ -679,6 +679,22 @@ class Progress:
     detail: str = ""
     ready: bool = False
     error: str = ""
+    run_id: str = ""
+    generation: int = 0
+    mode: str = ""
+    requested_start: int = 0
+    requested_end: int = 0
+    watermark: Dict[str, int] = field(default_factory=dict)
+    last_published_watermark: Dict[str, int] = field(default_factory=dict)
+    last_complete_run: float = 0.0
+    next_run_at: float = 0.0
+    valid_symbols: List[str] = field(default_factory=list)
+    invalid_symbols: List[Dict[str, str]] = field(default_factory=list)
+    missing_symbols: List[str] = field(default_factory=list)
+    gapped_symbols: List[str] = field(default_factory=list)
+    stale: bool = False
+    deferred_reason: str = ""
+    coordination_complete: bool = False
 
 
 class SetBook:
@@ -687,7 +703,7 @@ class SetBook:
         self.lookback = LOOKBACK_DEFAULT
         self.min_bars = 120
         self.warmup = WARMUP_DEFAULT
-        self.refresh_s = 90.0
+        self.refresh_s = 3600.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = 1.02
@@ -895,7 +911,7 @@ class SetBook:
         self.lookback = max(120, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
-        self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
+        self.refresh_s = max(60.0, min(86400.0, float(ov.get("histRefreshS") or 3600)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         def _pf(key: str, fallback: float) -> float:
@@ -3814,12 +3830,29 @@ class SetBook:
                 "symbolsDone": p.symbols_done,
                 "symbolsTotal": p.symbols_total,
                 "elapsedMs": round(p.elapsed_ms, 1),
-                "lastRunMs": round(p.last_run_ms, 1),
-                "cycle": p.cycle,
-                "detail": p.detail,
-                "ready": p.ready,
-                "error": p.error,
-            },
+                    "lastRunMs": round(p.last_run_ms, 1),
+                    "cycle": p.cycle,
+                    "detail": p.detail,
+                    "ready": p.ready,
+                    "error": p.error,
+                    "runId": p.run_id,
+                    "generation": p.generation,
+                    "mode": p.mode,
+                    "requestedStart": p.requested_start,
+                    "requestedEnd": p.requested_end,
+                    "watermark": dict(p.watermark),
+                    "lastPublishedWatermark": dict(p.last_published_watermark),
+                    "lastCompleteRun": p.last_complete_run,
+                    "nextRunAt": p.next_run_at,
+                    "validSymbols": list(p.valid_symbols),
+                    "invalidSymbols": list(p.invalid_symbols),
+                    "missingSymbols": list(p.missing_symbols),
+                    "gappedSymbols": list(p.gapped_symbols),
+                    "stale": p.stale,
+                    "deferredReason": p.deferred_reason,
+                    "coordinationComplete": p.coordination_complete,
+                },
+
             "rows": rows,
         }
         self._snap_cache = out
