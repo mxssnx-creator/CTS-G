@@ -205,6 +205,8 @@ export type HistCalcJob = {
   stale?: boolean;
   deferredReason?: string;
   coordinationComplete?: boolean;
+  requestOptions?: HistCalcOptions;
+  requestOverlay?: Record<string, unknown>;
   shared?: boolean;
   independent?: boolean;
   ready?: boolean;

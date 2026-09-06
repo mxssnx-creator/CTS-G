@@ -925,8 +925,18 @@ class Pulse:
         self._hist_fetch_last = 0.0
         self._hist_fetch_stored = 0
         self._hist_deferred = ""
+        self._hist_status_write_ts = 0.0
+        self._hist_resume_repair = False
         self.history_store = HistoryStore(CONN_SHORT, retention_bars=600)
         self._hist_status: Dict[str, Any] = read_hist_job(CONN_SHORT)
+        checkpoint = self.history_store.checkpoint()
+        if isinstance(checkpoint, dict):
+            # A checkpoint is the durable recovery boundary. Keep the last
+            # published watermark visible until the fresh lane proves a new
+            # complete replay; the entry gate still starts closed on restart.
+            for key in ("runId", "generation", "mode", "watermark", "lastPublishedWatermark", "lastCompleteRun"):
+                if not self._hist_status.get(key) and checkpoint.get(key):
+                    self._hist_status[key] = checkpoint[key]
         self._hist_request_seen = ""
         self._hist_active_request: Dict[str, Any] = {}
         self._hist_active_run_id = ""
@@ -937,6 +947,7 @@ class Pulse:
         self._hist_snapshot_symbols: List[str] = []
         self._hist_invalid_symbols: List[Dict[str, str]] = []
         self._hist_gap_symbols: List[str] = []
+        self._hist_incremental_symbols: set[str] = set()
         self._hist_last_published_watermark: Dict[str, int] = dict(self._hist_status.get("lastPublishedWatermark") or {})
         self._stats_ts = 0.0
         self._stats_force = False
@@ -2613,6 +2624,11 @@ class Pulse:
                         self.history_store.merge_bar(s, int(rec[0]), closed_bar, source="mark", quality="live-observed", closed=True)
                     except Exception:
                         pass
+                    with self.state_guard():
+                        pending = getattr(self, "_hist_incremental_symbols", None)
+                        if pending is not None:
+                            pending.add(s)
+                    self._hist_wake.set()
                 self.bar_min[s] = [float(minute), px, px, px, px]
             else:
                 rec[2] = max(rec[2], px)
@@ -3354,6 +3370,16 @@ class Pulse:
         retry_after = getattr(api, "order_retry_after", None)
         if callable(retry_after) and retry_after() > 0:
             return True
+        sets = getattr(self, "sets", None)
+        if (
+            sets is not None
+            and bool(getattr(sets, "enabled", False))
+            and bool(getattr(sets, "use_historic_gate", False))
+            and not bool(getattr(getattr(sets, "progress", None), "ready", False))
+        ):
+            # DCA and Block adds are new orders too; management and protective
+            # controls use separate paths and remain available during startup.
+            return True
         return False
 
     def controls_illegal(self, pos: Position) -> bool:
@@ -3847,6 +3873,12 @@ class Pulse:
         side = "LONG" if direction > 0 else "SHORT"
         if self.occupying(sym, side, pack):
             return "slot-taken"
+        if self.sets.enabled and self.sets.use_historic_gate and not getattr(
+                getattr(self.sets, "progress", None), "ready", False):
+            # A live tape can qualify a Set before the first complete historic
+            # snapshot.  The initial run is still the safety boundary: keep
+            # protective/reconciliation lanes alive, but do not open entries.
+            return "historic-gate"
         if pack == "indications":
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
                 return "ind-off"
@@ -4233,6 +4265,11 @@ class Pulse:
         if not normal_allowed and not getattr(self, "block_active", True):
             return
         if self.entries_blocked():
+            return
+        if self.sets.enabled and self.sets.use_historic_gate and not getattr(
+                getattr(self.sets, "progress", None), "ready", False):
+            # Keep forced/demo and direct callers behind the same initial
+            # historic publication boundary as normal signal entries.
             return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
             return
@@ -8964,6 +9001,23 @@ class Pulse:
                 "phase": getattr(progress, "phase", "idle"),
                 "ready": bool(getattr(progress, "ready", False)),
                 "detail": str(getattr(progress, "detail", ""))[:180],
+                "runId": str(getattr(progress, "run_id", "") or ""),
+                "generation": int(getattr(progress, "generation", 0) or 0),
+                "mode": str(getattr(progress, "mode", "") or ""),
+                "requestedStart": int(getattr(progress, "requested_start", 0) or 0),
+                "requestedEnd": int(getattr(progress, "requested_end", 0) or 0),
+                "watermark": dict(getattr(progress, "watermark", {}) or {}),
+                "lastPublishedWatermark": dict(getattr(progress, "last_published_watermark", {}) or {}),
+                "lastCompleteRun": float(getattr(progress, "last_complete_run", 0.0) or 0.0),
+                "nextRunAt": float(getattr(progress, "next_run_at", 0.0) or 0.0),
+                "validSymbols": list(getattr(progress, "valid_symbols", []) or []),
+                "invalidSymbols": list(getattr(progress, "invalid_symbols", []) or []),
+                "missingSymbols": list(getattr(progress, "missing_symbols", []) or []),
+                "gappedSymbols": list(getattr(progress, "gapped_symbols", []) or []),
+                "stale": bool(getattr(progress, "stale", False)),
+                "deferredReason": str(getattr(progress, "deferred_reason", "") or "")[:180],
+                "coordinationComplete": bool(getattr(progress, "coordination_complete", False)),
+                "coverage": dict(getattr(self, "_hist_status", {}).get("coverage") or {}),
                 "fetchStored": int(getattr(self, "_hist_fetch_stored", 0) or 0),
                 "fetchFailures": int(getattr(self, "_hist_fetch_failures", 0) or 0),
                 "fetchNext": float(getattr(self, "_hist_fetch_next", 0.0) or 0.0),
@@ -9380,15 +9434,24 @@ class Pulse:
         request = read_hist_request(CONN_SHORT)
         latest = str(request.get("runId") or "")
         self._hist_latest_request_id = latest
-        return bool(active_run_id and latest and latest != active_run_id)
+        # The request file is a durable status boundary and intentionally
+        # remains after publication. Only a generation newer than the last
+        # consumed request may invalidate an in-flight automatic run.
+        return bool(
+            active_run_id
+            and latest
+            and latest != active_run_id
+            and latest != self._hist_request_seen
+        )
 
-    def _hist_new_request(self) -> Dict[str, Any]:
+    def _hist_new_request(self, *, consume: bool = True) -> Dict[str, Any]:
         request = read_hist_request(CONN_SHORT)
         run_id = str(request.get("runId") or "")
         if not run_id or run_id == self._hist_request_seen:
             return {}
-        self._hist_request_seen = run_id
         self._hist_latest_request_id = run_id
+        if consume:
+            self._hist_request_seen = run_id
         return request
 
     def _hist_write_status(self, book: Optional[SetBook] = None, **values: Any) -> None:
@@ -9558,6 +9621,10 @@ class Pulse:
         for symbol in missing:
             failures.setdefault(symbol, "unresolved exchange gap")
         self._hist_fetch_stored = stored
+        if failures or missing:
+            self._hist_fetch_failures = min(6, int(self._hist_fetch_failures or 0) + 1)
+        else:
+            self._hist_fetch_failures = 0
         return coverage, failures
 
     def _hist_progress_update(self, book: SetBook, generation: int, **values: Any) -> bool:
@@ -9569,7 +9636,16 @@ class Pulse:
             for key, value in values.items():
                 if hasattr(progress, key):
                     setattr(progress, key, value)
-            return True
+        # Progress is durable status too, but status writes are throttled so a
+        # large replay cannot turn every inner vector callback into a disk sync.
+        now = time.monotonic()
+        if now - float(getattr(self, "_hist_status_write_ts", 0.0) or 0.0) >= 0.75:
+            self._hist_status_write_ts = now
+            try:
+                self._hist_write_status(book)
+            except Exception:
+                pass
+        return True
 
     def _hist_fetch(self) -> bool:
         # Network I/O is deliberately outside the shared state lock.  Only a
@@ -9695,13 +9771,26 @@ class Pulse:
             source.progress.elapsed_ms = 0.0
             source.progress.detail = f"{len(names)} symbols · {len(replay_book.sets)} sets"
             source.progress.ready = bool(already)
+        try:
+            self._hist_write_status(source)
+        except Exception:
+            pass
 
         def publish_progress() -> None:
             sd_notify("WATCHDOG=1")
+            should_write = False
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                     source.progress = copy.deepcopy(replay_book.progress)
                     source._running = True
+                    now_m = time.monotonic()
+                    should_write = now_m - float(getattr(self, "_hist_status_write_ts", 0.0) or 0.0) >= 0.75
+            if should_write:
+                self._hist_status_write_ts = time.monotonic()
+                try:
+                    self._hist_write_status(source)
+                except Exception:
+                    pass
 
         def should_abort() -> bool:
             if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
@@ -9871,6 +9960,82 @@ class Pulse:
         self._hist_stop.set()
         self._hist_wake.set()
 
+    def _hist_incremental_replay(self) -> bool:
+        """Replay only symbols whose closed live bar watermark advanced.
+
+        A complete hourly run remains the publication boundary for the full
+        catalog. Between those runs, a one-symbol slice keeps current Set and
+        indication evidence fresh without rescoring every selected symbol.
+        """
+        with self.state_guard():
+            book = self.sets
+            generation = int(getattr(self, "_sets_generation", 0) or 0)
+            if not book.enabled or not book.progress.ready or book._running:
+                return False
+            pending = sorted(str(symbol) for symbol in getattr(self, "_hist_incremental_symbols", set()))
+            if not pending:
+                return False
+            self._hist_incremental_symbols.difference_update(pending)
+            previous = copy.deepcopy(book.progress)
+            valid = set(previous.valid_symbols or SYMBOLS)
+            names = [symbol for symbol in pending if symbol in valid]
+            if not names:
+                return False
+            end = int(time.time() // 60) - 1
+            retry: List[str] = []
+            for symbol in names:
+                bars = self.history_store.window(symbol, bars=book.lookback, end=end, source=None)
+                if len(bars) < book.min_bars:
+                    retry.append(symbol)
+                    continue
+                book.ingest_bars(symbol, bars)
+            self._hist_incremental_symbols.update(retry)
+            names = [symbol for symbol in names if symbol not in retry]
+            if not names:
+                return False
+            book.progress.phase = "incremental"
+            book.progress.pct = 100.0
+            book.progress.detail = f"incremental closed-bar update · {len(names)} symbols"
+            book.progress.symbols_done = len(previous.valid_symbols) - len(retry)
+            book.progress.symbols_total = len(previous.valid_symbols)
+
+        self.hist_busy = True
+        try:
+            replayed = self._replay_sets_isolated(names, True, len(previous.valid_symbols))
+        finally:
+            self.hist_busy = False
+        if not replayed:
+            with self.state_guard():
+                self._hist_incremental_symbols.update(names)
+            return False
+        watermark = dict(previous.watermark)
+        for symbol in names:
+            watermark[symbol] = int(self.history_store.watermark(symbol, source=None) or watermark.get(symbol, 0))
+        with self.state_guard():
+            progress = self.sets.progress
+            progress.phase = "ready"
+            progress.pct = 100.0
+            progress.ready = True
+            progress.run_id = previous.run_id
+            progress.generation = previous.generation
+            progress.mode = previous.mode
+            progress.requested_start = previous.requested_start
+            progress.requested_end = previous.requested_end
+            progress.watermark = watermark
+            progress.last_published_watermark = dict(previous.last_published_watermark)
+            progress.last_complete_run = previous.last_complete_run
+            progress.next_run_at = previous.next_run_at
+            progress.valid_symbols = list(previous.valid_symbols)
+            progress.invalid_symbols = list(previous.invalid_symbols)
+            progress.missing_symbols = []
+            progress.gapped_symbols = []
+            progress.stale = False
+            progress.deferred_reason = ""
+            progress.coordination_complete = True
+            progress.detail = f"incremental closed-bar update · {len(names)} symbols · hourly publish pending"
+        self._hist_write_status(self.sets)
+        return True
+
     def _hist_loop_durable(self) -> None:
         """One lane-owned initial/hourly/gap state machine for historic replay."""
         while not self._hist_stop.is_set():
@@ -9878,17 +10043,33 @@ class Pulse:
             if not self._catalog_ready.is_set():
                 self._hist_wake.wait(timeout=5.0)
                 continue
-            request = self._hist_new_request()
             paused = os.path.exists(PAUSE_PATH) or os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
+            if not paused and bool(getattr(self, "_hist_resume_repair", False)):
+                # A pause/stop can leave an exchange gap even when its next
+                # hourly deadline has not arrived. Force the exact durable
+                # backfill path before allowing incremental replay again.
+                self._hist_resume_repair = False
+                self._hist_next_hourly_at = 0.0
+                with self.state_guard():
+                    if self.sets.progress.ready:
+                        self.sets.progress.phase = "gap"
+                        self.sets.progress.detail = "resume requires exchange gap repair"
+                        self.sets.progress.stale = True
+            # Peek until pause/load gates are clear so a manual request keeps
+            # its explicit range instead of being consumed while deferred.
+            request = self._hist_new_request(consume=False)
             try:
                 with self.state_guard():
                     book = self.sets
                     now = time.time()
                     ready = bool(book.progress.ready)
                     manual = bool(request)
-                    hourly_due = not ready or now >= float(self._hist_next_hourly_at or 0.0)
+                    # The same deadline drives the first run, hourly refreshes,
+                    # and bounded retry of an unresolved exchange gap.
+                    hourly_due = now >= float(self._hist_next_hourly_at or 0.0)
                     enabled = bool(book.enabled)
                 if paused:
+                    self._hist_resume_repair = True
                     with self.state_guard():
                         book.progress.phase = "paused"
                         book.progress.detail = "historic lane paused · watermark checkpointed"
@@ -9906,10 +10087,6 @@ class Pulse:
                     self._hist_write_status(book)
                     self._hist_wake.wait(timeout=5.0)
                     continue
-                if not manual and not hourly_due:
-                    wait_s = min(max(float(self._hist_next_hourly_at or now + 5.0) - now, 0.25), 10.0)
-                    self._hist_wake.wait(timeout=wait_s)
-                    continue
                 budget = self._budget()
                 if not bool(getattr(budget, "hist_run", True)):
                     with self.state_guard():
@@ -9921,26 +10098,73 @@ class Pulse:
                     self._hist_write_status(book)
                     self._hist_wake.wait(timeout=2.0)
                     continue
-
+                incremental_pending = False
+                with self.state_guard():
+                    incremental_pending = bool(getattr(self, "_hist_incremental_symbols", set()))
+                if ready and not manual and not hourly_due and incremental_pending:
+                    self._hist_incremental_replay()
+                    self._hist_wake.wait(timeout=0.25)
+                    continue
+                if not manual and not hourly_due:
+                    wait_s = min(max(float(self._hist_next_hourly_at or now + 5.0) - now, 0.25), 10.0)
+                    self._hist_wake.wait(timeout=wait_s)
+                    continue
                 mode = str(request.get("mode") or ("initial" if not ready else "hourly"))
                 run_id = str(request.get("runId") or f"{CONN_SHORT}:{int(now * 1000)}")
                 run_generation = int(request.get("generation") or (int(getattr(self, "_sets_generation", 0) or 0) + 1))
-                requested_symbols = request.get("selectedSymbols") or request.get("symbols") or list(SYMBOLS)
-                if isinstance(requested_symbols, list) and any(str(value).strip() in ("*", "ALL", "UNLIMITED") for value in requested_symbols):
+                raw_symbols = request.get("symbols")
+                selected_symbols = request.get("selectedSymbols")
+                requested_symbols = selected_symbols or raw_symbols or list(SYMBOLS)
+                wildcard_requested = bool(request.get("allSymbols")) or any(
+                    isinstance(values, list)
+                    and any(str(value).strip().upper() in ("*", "ALL", "UNLIMITED") for value in values)
+                    for values in (raw_symbols, selected_symbols)
+                )
+                if wildcard_requested:
+                    # A wildcard is an explicit request for the frozen dynamic
+                    # universe; do not let a stale selectedSymbols mirror win.
                     requested_symbols = list(SYMBOLS)
                 valid, invalid = self._hist_selected_snapshot(requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS))
                 self._hist_snapshot_symbols = list(valid)
                 self._hist_invalid_symbols = list(invalid)
                 lookback = int(book.lookback)
                 if manual:
+                    request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
+                    request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
                     try:
                         requested_hours = float(request.get("hours")) if request.get("hours") is not None else 0.0
+                        if requested_hours <= 0 and request_overlay.get("histLookbackBars") is not None:
+                            requested_hours = float(request_overlay.get("histLookbackBars")) / 60.0
                         if requested_hours > 0:
                             lookback = max(120, min(20160, int(round(requested_hours * 60))))
                     except (TypeError, ValueError):
                         pass
                     if lookback != book.lookback:
                         book.lookback = lookback
+                    try:
+                        refresh_raw = request.get("refreshS") or request_overlay.get("histRefreshS")
+                        if refresh_raw is not None:
+                            book.refresh_s = max(60.0, min(86400.0, float(refresh_raw)))
+                    except (TypeError, ValueError):
+                        pass
+                    # These controls are replay-lane settings. They are
+                    # applied to the shared SetBook snapshot without spawning
+                    # a second calculator or changing exchange safety lanes.
+                    if request_options:
+                        if "stratBlock" in request_options:
+                            book.hist_block = bool(request_options["stratBlock"])
+                        if "stratDca" in request_options:
+                            book.hist_dca = bool(request_options["stratDca"])
+                        if "trailing" in request_options:
+                            book.trail_enabled = bool(request_options["trailing"])
+                    for key, value in request_overlay.items():
+                        if key in ("histSimulateBlock", "histSimulateDca", "stratTrailing"):
+                            if key == "histSimulateBlock":
+                                book.hist_block = bool(value)
+                            elif key == "histSimulateDca":
+                                book.hist_dca = bool(value)
+                            else:
+                                book.trail_enabled = bool(value)
                 start, end = self._history_bounds(lookback)
                 catalog_generation = int(getattr(self, "_sets_generation", 0) or 0)
                 self._hist_active_request = dict(request)
@@ -10019,8 +10243,13 @@ class Pulse:
                     progress.deferred_reason = "unresolved exchange gap" if missing else ""
                 self._hist_write_status(book, coverage=coverage_blob)
                 if missing:
+                    retry_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
+                    self._hist_next_hourly_at = retry_at
+                    with self.state_guard():
+                        book.progress.next_run_at = retry_at
                     self._hist_checkpoint(book, "gap")
-                    self._hist_wake.wait(timeout=2.0)
+                    self._hist_write_status(book, nextRunAt=retry_at)
+                    self._hist_wake.wait(timeout=min(5.0, max(0.5, retry_at - time.time())))
                     continue
 
                 self.hist_busy = True
@@ -10036,7 +10265,11 @@ class Pulse:
                 watermark = {symbol: int(self.history_store.watermark(symbol, source="exchange") or 0) for symbol in valid}
                 complete_at = time.time()
                 self._hist_last_published_watermark = dict(watermark)
-                self._hist_next_hourly_at = complete_at + 3600.0
+                self._hist_fetch_failures = 0
+                self._hist_last_closed_minute = max(watermark.values(), default=0)
+                with self.state_guard():
+                    refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+                self._hist_next_hourly_at = complete_at + refresh_s
                 with self.state_guard():
                     progress = book.progress
                     progress.phase = "ready"
@@ -10050,10 +10283,13 @@ class Pulse:
                     progress.deferred_reason = ""
                     progress.coordination_complete = True
                     progress.detail = f"published complete {mode} replay · {len(valid)} symbols · next hourly refresh"
+                    if request:
+                        self._hist_request_seen = run_id
                 self._hist_write_status(book, coverage=coverage_blob, finishedAt=complete_at, lastCompleteRun=complete_at, nextRunAt=self._hist_next_hourly_at)
                 self._hist_checkpoint(book, "published")
             except Exception:
                 error = traceback.format_exc()[-220:]
+                self._hist_next_hourly_at = time.time() + 10.0
                 with self.state_guard():
                     current = self.sets
                     current.progress.phase = "error"
@@ -10061,7 +10297,8 @@ class Pulse:
                     current.progress.detail = "historic lane error"
                     current.progress.stale = bool(current.progress.ready)
                     current.progress.deferred_reason = error[:180]
-                self._hist_write_status(self.sets, error=error, deferredReason=error[:180])
+                    current.progress.next_run_at = self._hist_next_hourly_at
+                self._hist_write_status(self.sets, error=error, deferredReason=error[:180], nextRunAt=self._hist_next_hourly_at)
                 self._hist_checkpoint(self.sets, "error")
                 if hasattr(self.api, "err"):
                     self.api.err.write("hist", msg=error[:200])

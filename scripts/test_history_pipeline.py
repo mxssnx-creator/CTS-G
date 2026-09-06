@@ -6,11 +6,13 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PULSE = ROOT / "server" / "pulse"
 sys.path.insert(0, str(PULSE))
 
+import hist_calc  # noqa: E402
 from history_store import HistoryStore, parse_exchange_rows  # noqa: E402
 
 
@@ -79,6 +81,49 @@ class HistoryPipelineTests(unittest.TestCase):
             self.assertEqual(gaps[0]["start"], 4)
             self.assertEqual(gaps[0]["end"], 6)
             self.assertEqual(gaps[0]["source"], "exchange")
+
+    def test_manual_requests_are_generation_safe_and_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def scoped_path(name: str) -> str:
+                return str(pathlib.Path(directory) / name)
+
+            with patch.object(hist_calc, "path_for", side_effect=scoped_path):
+                first = hist_calc.start_job({"symbols": ["*"], "hours": 7}, connection="bingx-x01")
+                second = hist_calc.start_job({"symbols": ["SOL-USDT"], "hours": 4}, connection="bingx-x01")
+                request = hist_calc.read_request("bingx-x01")
+
+            self.assertEqual(first["generation"] + 1, second["generation"])
+            self.assertEqual(request["runId"], second["runId"])
+            self.assertEqual(request["generation"], second["generation"])
+            self.assertTrue(second["shared"])
+            self.assertFalse(second["independent"])
+            self.assertEqual(second["phase"], "queued")
+            self.assertEqual(request["options"]["hours"], 4)
+
+    def test_queued_request_keeps_last_published_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def scoped_path(name: str) -> str:
+                return str(pathlib.Path(directory) / name)
+
+            with patch.object(hist_calc, "path_for", side_effect=scoped_path):
+                published = hist_calc.idle_job("bingx-x01")
+                published.update({
+                    "phase": "ready",
+                    "ready": True,
+                    "runId": "published-run",
+                    "generation": 8,
+                    "rows": [{"id": "general:1m:sl0.6:st1"}],
+                    "coverage": {"symbols": {"completed": 2}},
+                    "lastPublishedWatermark": {"SOL-USDT": 10},
+                })
+                hist_calc.write_job(published, "bingx-x01")
+                queued = hist_calc.start_job({"symbols": ["SOL-USDT"], "hours": 7}, connection="bingx-x01")
+
+            self.assertEqual(queued["phase"], "queued")
+            self.assertTrue(queued["stale"])
+            self.assertEqual(queued["rows"], published["rows"])
+            self.assertEqual(queued["lastPublishedWatermark"], {"SOL-USDT": 10})
+            self.assertEqual(queued["coverage"], published["coverage"])
 
 
 if __name__ == "__main__":

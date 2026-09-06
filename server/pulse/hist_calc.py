@@ -1765,6 +1765,7 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
     ) + 1
     requested_at = time.time()
     run_id = f"{cid}:{generation}:{int(requested_at * 1000)}"
+    options = parse_options(body)
     request = {
         **body,
         "connection": cid,
@@ -1772,14 +1773,20 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
         "generation": generation,
         "mode": str(body.get("mode") or "manual"),
         "requestedAt": requested_at,
+        "options": options,
     }
     try:
         _atomic_write(req_path(cid), request)
     except Exception:
         pass
-    options = parse_options(body)
+    # Keep the last published rows, coverage, winner, and watermark visible
+    # while the newest request waits for the lane. The request is a coalescing
+    # hand-off, not a reason to erase the only good snapshot.
     seed = idle_job(cid)
+    seed.update(current if isinstance(current, dict) else {})
+    selected = body.get("selectedSymbols") or body.get("symbols") or []
     seed.update({
+        "ok": True,
         "phase": "queued",
         "pct": 0.5,
         "detail": "queued on shared historic lane",
@@ -1790,8 +1797,11 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
         "runId": run_id,
         "generation": generation,
         "mode": request["mode"],
-        "selectedSymbols": list(body.get("symbols") or body.get("selectedSymbols") or []),
-        "stale": bool(current.get("ready")),
+        "symbols": list(selected) if isinstance(selected, list) else [],
+        "selectedSymbols": list(selected) if isinstance(selected, list) else [],
+        "requestOptions": options,
+        "requestOverlay": dict(body.get("overlay")) if isinstance(body.get("overlay"), dict) else {},
+        "stale": bool(current.get("ready") or current.get("stale")),
         "deferredReason": "awaiting running connection worker",
         "shared": True,
         "independent": False,

@@ -180,26 +180,28 @@ function SettingsPage() {
 
   const stats = pickView(raw, conn);
   const calcPhase = calcJob?.phase;
+  // Historic workers are lane-owned; the aggregate view is display-only.
+  const histConn = conn === "overall" ? "live" : conn;
 
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const pull = async () => {
-      const j = await fetchHistCalc(conn);
+      const j = await fetchHistCalc(histConn);
       if (!alive) return;
       setCalcJob(j);
-      const running = ["initial", "backfill", "fetch", "replay", "score", "gap", "queued"].includes(j.phase);
+      const running = ["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"].includes(j.phase);
       if (running) timer = setTimeout(() => void pull(), 1200);
       else setCalcBusy(false);
     };
-    if (calcBusy || (calcPhase && ["initial", "backfill", "fetch", "replay", "score", "gap", "queued"].includes(calcPhase))) {
+    if (calcBusy || (calcPhase && ["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"].includes(calcPhase))) {
       void pull();
     }
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [calcBusy, calcPhase, conn]);
+  }, [calcBusy, calcPhase, histConn]);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
@@ -319,7 +321,7 @@ function SettingsPage() {
       preferMinimalRange: activeOverlay.preferMinimalRange,
       additionalCoordination: activeOverlay.additionalCoordination,
       coordOptimizationN: activeOverlay.coordOptimizationN,
-      connection: conn,
+      connection: histConn,
       overlay: activeOverlay,
       selectedSymbols: activeOverlay.symbols,
     });
@@ -669,7 +671,7 @@ function SettingsPage() {
                   <Slider
                     label="Minimal Step Range"
                     value={calcOpt.minStep}
-                    min={2}
+                    min={1}
                     max={22}
                     step={1}
                     hint={`Sets below step ${calcOpt.minStep} are not calculated`}
@@ -824,6 +826,15 @@ function SettingsPage() {
                         k="Next complete refresh"
                         v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : "pending"}
                       />
+                      <KV
+                        k="Published tape"
+                        v={`${calcJob.coordinationComplete ? "complete" : "partial"} · ${Object.keys(calcJob.lastPublishedWatermark || {}).length} symbols · ${calcJob.stale ? "stale while refreshing" : "current"}`}
+                      />
+                      <KV
+                        k="Last complete run"
+                        v={calcJob.lastCompleteRun ? new Date(calcJob.lastCompleteRun * 1000).toLocaleTimeString() : "not published"}
+                      />
+                      <KV k="Deferred reason" v={calcJob.deferredReason || "—"} />
                     </div>
                     {calcJob.winner ? (
                       <p className="text-sm">

@@ -1224,7 +1224,9 @@ class Handler(SimpleHTTPRequestHandler):
                 from hist_calc import start_job
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
-                job["running"] = job.get("phase") in ("queued", "fetch", "backfill", "replay", "score")
+                job["running"] = job.get("phase") in (
+                    "queued", "initial", "hourly", "fetch", "backfill", "gap", "replay", "score", "incremental"
+                )
                 self._json(job)
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)

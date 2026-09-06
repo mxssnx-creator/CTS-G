@@ -1488,7 +1488,11 @@ def set_orders_test() -> None:
         book.sets[sid] = st
         sts.append(st)
     book.by_idx = list(sts)
+    # This fixture exercises post-publication order attribution; the initial
+    # historic safety gate has its own regression above.
+    book.progress.ready = True
     cur = {"i": 0}
+
     book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
     book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
@@ -1925,11 +1929,28 @@ def strict_gate_test() -> None:
             settings={"enabled": True},
             match=lambda s, r: None, primary=lambda s: None, best=lambda s: None)
         p.occupying = lambda *a, **k: False
+        p.ctrl_skip = {}
+        p.boot_ts = time.time() - 60.0
+        p.api = SimpleNamespace(order_retry_after=lambda: 0.0)
         return p
 
-    # 1) strict + nothing validated: both packs closed, entry hard-blocked
+    # 1) The initial historic snapshot is a hard entry boundary, even if a
+    # live tape has already made a Set look selectable.
     cold = mk_book(winner=False)
+    cold.progress.ready = False
     for st in cold.by_idx:
+        st.hist = win_rows()
+        cold._score_one(st)
+    p0 = mk_trader(cold)
+    rec("historic-entry-blocked-before-ready",
+        p0.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") == "historic-gate",
+        f"{p0.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
+    rec("historic-adds-blocked-before-ready", p0.entries_blocked())
+
+    # 2) strict + nothing validated: both packs closed, entry hard-blocked
+    cold.progress.ready = True
+    for st in cold.by_idx:
+        st.hist = []
         cold._score_one(st)
     p1 = mk_trader(cold)
     rec("strict-entry-blocked-no-set",
@@ -1937,7 +1958,7 @@ def strict_gate_test() -> None:
         f"{p1.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
     rec("strict-packs-closed", not cold.pack_open("general") and not cold.pack_open("indications"))
 
-    # 2) strict + one validated + profitable set: entry allowed, winner bound
+    # 3) strict + one validated + profitable set: entry allowed, winner bound
     warm = mk_book(winner=True)
     p2 = mk_trader(warm)
     rec("strict-entry-allowed-validated",
