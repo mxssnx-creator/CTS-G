@@ -54,6 +54,10 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
     gp, gl, net, costs, wins, losses, closes, hold, peak, dd = [zeros() for _ in range(10)]
     dd_age, dd_max, dd_total, dd_episodes = [zeros() for _ in range(4)]
     max_qty, adds_total, forced = [zeros() for _ in range(3)]
+    # Keep explicit execution-weighted entry statistics.  These are useful
+    # for checking that higher Block/DCA ratios change the weighted average
+    # entry instead of merely duplicating a baseline result.
+    entry_execs, entry_qty_total, entry_notional_total = [zeros() for _ in range(3)]
     train_gp, train_gl, train_n, train_dd = [zeros() for _ in range(4)]
     test_gp, test_gl, test_n = [zeros() for _ in range(3)]
     daily_net = np.zeros((count, (len(bars)-warmup+1439)//1440))
@@ -66,8 +70,12 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
     ratios = np.array([c['volumeRatio'] for c in cfg])
     is_dca = np.array([c['strategy'] == 'dca' for c in cfg])
     is_block = np.array([c['strategy'] == 'block' for c in cfg])
-    block_qty = entry_scale * np.array([1+calculate_block_max_additional_ratio(c['levels'], c['volumeRatio'], 2.)
-                                       if c['strategy']=='block' else 1 for c in cfg])
+    block_caps = np.array([c.get('maxVolumeMultiplier', 2.) for c in cfg], dtype=float)
+    if not np.all(np.isfinite(block_caps) & (block_caps >= 1.0) & (block_caps <= 2.0)):
+        raise ValueError('Block maxVolumeMultiplier must be finite in [1, 2]')
+    block_qty = entry_scale * np.array([1+calculate_block_max_additional_ratio(
+        c['levels'], c['volumeRatio'], c.get('maxVolumeMultiplier', 2.))
+        if c['strategy']=='block' else 1 for c in cfg])
     trail_arm = np.array([c.get('trailArmPct', 0)/100 for c in cfg])
     trail_give = np.array([c.get('trailGivePct', 0)/100 for c in cfg])
     trailing = trail_arm > 0
@@ -91,10 +99,13 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
         fee = float(cost_rates if cost_rates.ndim == 0 else cost_rates[i])/200
         op, hi, lo, price = bars[i][:4]
         active = qty > 0
-        stop = entry * (1-side*sl)
+        base_stop = entry * (1-side*sl)
+        stop = base_stop.copy()
         # A close-confirmed trailing update becomes active on the next bar.
         # Never assume that this bar's high happened before its low.
         armed = active & trailing & (trail_stop > 0)
+        trail_hit = armed & (((side == 1) & (trail_stop > base_stop + 1e-12)) |
+                             ((side == -1) & (trail_stop < base_stop - 1e-12)))
         stop = np.where(armed, np.maximum(stop, trail_stop) if side == 1 else np.minimum(stop, trail_stop), stop)
         target = entry * (1+side*tp)
         hit_sl = active & ((lo <= stop) if side == 1 else (hi >= stop))
@@ -114,7 +125,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
                         entry=float(entry[k]),exit=float(px[offset]),qty=float(qty[k]),
                         parentPrice=float(original[k]),netFraction=float(pnl[offset]),
                         costFraction=float(cost[offset]),boundary=bool(boundary),
-                        reason='sl' if hit_sl[k] else ('tp' if hit_tp[k] else ('time' if timed[k] else 'boundary'))))
+                        reason='trail' if trail_hit[k] and hit_sl[k] else
+                               ('sl' if hit_sl[k] else ('tp' if hit_tp[k] else ('time' if timed[k] else 'boundary')))))
             gains, loss = np.maximum(pnl, 0), np.maximum(-pnl, 0)
             gp[ids] += gains; gl[ids] += loss; net[ids] += pnl; costs[ids] += cost
             recent[ids, closes[ids].astype(int)%75] = pnl
@@ -143,6 +155,9 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
             entry[ids] = (entry[ids]*qty[ids]+price*extra)/(qty[ids]+extra)
             qty[ids] += extra; fees[ids] += price*extra*fee
             added[ids] += 1; adds_total[ids] += 1
+            entry_execs[ids] += 1
+            entry_qty_total[ids] += extra
+            entry_notional_total[ids] += price*extra
         active = qty > 0
         trail_peak[active] = (np.maximum(trail_peak[active], price) if side==1 else np.minimum(trail_peak[active], price))
         arm_now = active & trailing & (side*(trail_peak-entry)/np.where(active,entry,1) >= trail_arm)
@@ -157,6 +172,9 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
             entry[opening] = price; original[opening] = price; qty[opening] = entry_scale[opening]
             fees[opening] = price*fee*entry_scale[opening]; added[opening] = 0; entered[opening] = i
             trail_stop[opening] = 0; trail_peak[opening] = price
+            entry_execs[opening] += 1
+            entry_qty_total[opening] += entry_scale[opening]
+            entry_notional_total[opening] += price*entry_scale[opening]
         max_qty = np.maximum(max_qty, qty)
         # Close-mark liquidation equity includes accrued + estimated exit costs.
         active = qty > 0
@@ -192,6 +210,10 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
             avgDdS=round(dd_total[k]/dd_episodes[k],2) if dd_episodes[k] else 0,
             ddEpisodes=int(dd_episodes[k]), tradesPerHour=round(n/hours,6),
             avgHoldS=round(hold[k]/n,2) if n else 0, maxVolume=float(max_qty[k]),
+            entryExecutions=int(entry_execs[k]),
+            entryQtyTotal=round(float(entry_qty_total[k]), 8),
+            avgEntryQty=round(float(entry_qty_total[k]/entry_execs[k]), 8) if entry_execs[k] else 0.0,
+            avgEntryPrice=round(float(entry_notional_total[k]/entry_qty_total[k]), 8) if entry_qty_total[k] else 0.0,
             additions=int(adds_total[k]), boundaryCloses=int(forced[k]),
             trainN=int(train_n[k]), trainPf=train_pf, trainDdPct=round(train_dd[k]*100,6),
             holdoutN=int(test_n[k]), holdoutPf=test_pf,

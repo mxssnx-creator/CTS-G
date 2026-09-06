@@ -198,6 +198,8 @@ export type PulseOverlay = {
   axisContMaxWindow: number;
   axisPauseEnabled: boolean;
   axisPauseMaxWindow: number;
+  prevPosWindow: number;
+  prevPosMinCount: number;
   minPf: number;
   baseMinPf: number;
   mainMinPf: number;
@@ -365,6 +367,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisContMaxWindow: 8,
   axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
+  prevPosWindow: 25,
+  prevPosMinCount: 5,
   minPf: 1.05,
   baseMinPf: 1.05,
   mainMinPf: 1.05,
@@ -459,7 +463,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setStrictGate: true,
   setMinSamples: 8,
   setReactivate: true,
-  setMaxActive: 50,
+  setMaxActive: 80,
   setMinStep: 1,
   setStepMax: 22,
   setStepAdapt: true,
@@ -726,6 +730,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
+    prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
+    prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),
   minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.05), 1.05),
   baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.05), 1.05),
   mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.05), 1.05),
@@ -809,7 +815,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setStrictGate: bool(cts.setStrictGate, true),
     setMinSamples: num(cts.setMinSamples, 8),
     setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 50),
+    setMaxActive: num(cts.setMaxActive, 80),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
     setStepMax: num(cts.setStepMax, 22),
     setStepAdapt: bool(cts.setStepAdapt, true),

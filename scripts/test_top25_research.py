@@ -14,12 +14,12 @@ class Top25Research(unittest.TestCase):
     def test_cartesian_additional_strategy_coverage(self):
         cfg=dict(strategy='base',levels=0,incrementPct=0,volumeRatio=0,tpPct=.5,slPct=.2)
         rows=variants(cfg)
-        self.assertEqual(len(rows),494)
+        self.assertEqual(len(rows),806)
         self.assertEqual(sum(r['mode']=='Baseline' for r in rows),1)
-        self.assertEqual(sum(r['mode']=='Block' for r in rows),18)
+        self.assertEqual(sum(r['mode']=='Block' for r in rows),30)
         self.assertEqual(sum(r['mode']=='Axis' for r in rows),25)
-        self.assertEqual(sum(r['mode']=='Axis + Block' for r in rows),450)
-        self.assertEqual(len({(r['axis'],r['axisCount'],r['levels'],r['volumeRatio']) for r in rows}),494)
+        self.assertEqual(sum(r['mode']=='Axis + Block' for r in rows),750)
+        self.assertEqual(len({(r['axis'],r['axisCount'],r['levels'],r['volumeRatio']) for r in rows}),806)
 
     def test_scaled_axis_block_is_additive_and_capped_relative_to_child(self):
         bars=[[100.,100.,100.,100.,1.] for _ in range(10)]

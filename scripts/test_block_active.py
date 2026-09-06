@@ -174,18 +174,18 @@ class BlockActiveTests(unittest.TestCase):
         p.api.post.assert_not_called()
         p.ensure_max_leverage.assert_not_called()
 
-    def test_fifty_selection_recovery_and_explicit_unlimited(self):
-        b=SetBook(); self.assertEqual(b.max_active,50)
+    def test_eighty_selection_recovery_and_explicit_unlimited(self):
+        b=SetBook(); self.assertEqual(b.max_active,80)
         b.by_idx=[SetState(id=str(i),pack='general',tf='1m',sl_ratio=.6,trail_key='',trail_arm=0,
-                          trail_give=0,last15_ratio=1+i/100,active=True) for i in range(70)]
+                          trail_give=0,last15_ratio=1+i/100,active=True) for i in range(100)]
         b._cap_active()
-        self.assertEqual(sum(s.active for s in b.by_idx),50)
+        self.assertEqual(sum(s.active for s in b.by_idx),80)
         self.assertFalse(b.by_idx[0].active)
         b.by_idx[0].last15_ratio=100
         b._cap_active();self.assertTrue(b.by_idx[0].active)
         b.by_idx[-1].active=False;b.by_idx[-1].deact_reason='live negative'
         b.max_active=0;b._cap_active()
-        self.assertEqual(sum(s.active for s in b.by_idx),69)
+        self.assertEqual(sum(s.active for s in b.by_idx),99)
         self.assertFalse(b.by_idx[-1].active)
 
 

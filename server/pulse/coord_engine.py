@@ -13,6 +13,8 @@ AXIS_SPECS = {
     "cont": {"min": 1, "max": 8, "step": 1, "default": 8},
     "pause": {"min": 1, "max": 8, "step": 1, "default": 8},
 }
+PREV_POSITION_MIN = 5
+PREV_POSITION_MAX = 55
 
 
 def clamp_window(axis: str, value: Any) -> int:
@@ -167,8 +169,16 @@ class Coordinator:
         if isinstance(raw_ob, str):
             raw_ob = [int(x) for x in raw_ob.replace("[", "").replace("]", "").split(",") if x.strip().isdigit()]
         self.outbreak = [int(x) for x in raw_ob][:4] or [3, 5, 10]
-        self.prev_min_count = int(ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)
-        self.prev_window = int(ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)
+        try:
+            self.prev_min_count = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(
+                ov.get("prevPosMinCount") or coord.get("prevPosMinCount") or 5)))
+        except Exception:
+            self.prev_min_count = PREV_POSITION_MIN
+        try:
+            self.prev_window = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(
+                ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)))
+        except Exception:
+            self.prev_window = 25
         self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)
         self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or 1)
@@ -214,7 +224,10 @@ class Coordinator:
             [row for row in closed_rows if row is not None],
             key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
         )
-        window_limit = max(50, int(self.optimization_n or 50))
+        # Prev is an independent prior-position window.  The old
+        # ``axes.prev.max_window * 2`` cap silently truncated configured
+        # 25–55-position windows to 24 positions.
+        window_limit = max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2)
         coord_rows = ordered[-window_limit:] if self.additional_coordination else ordered
         pnls = []
         for row in coord_rows:
@@ -223,10 +236,14 @@ class Coordinator:
             else:
                 pnls.append(float(getattr(row, "pnl", 0) or 0))
         last_w = self.axes["last"].max_window
-        prev_w = min(self.prev_window, self.axes["prev"].max_window * 2)
+        prev_w = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(self.prev_window or 25)))
         cost = last_n_cost_pf(coord_rows, self.pf_window, self.position_cost_pct)
         last_cost = last_n_cost_pf(coord_rows, last_w, self.position_cost_pct)
-        prev_cost = last_n_cost_pf(coord_rows, prev_w, self.position_cost_pct)
+        # "Prev" is the closed segment immediately before the current
+        # segment.  Taking ``last_n`` directly here made Prev identical to
+        # Last and ignored the earlier positions that the axis promises.
+        prev_tape = coord_rows[-(prev_w * 2) : -prev_w] if len(coord_rows) >= prev_w * 2 else []
+        prev_cost = last_n_cost_pf(prev_tape, prev_w, self.position_cost_pct)
         main_cost = last_n_cost_pf(coord_rows, max(3, self.main_eval), self.position_cost_pct)
         real_cost = last_n_cost_pf(coord_rows, max(3, self.real_eval), self.position_cost_pct)
         intern = intern or {}
@@ -256,6 +273,8 @@ class Coordinator:
             "optimizationN": float(len(coord_rows)),
             "optimizationWindow": float(window_limit if self.additional_coordination else len(ordered)),
             "optimizationEnabled": 1.0 if self.additional_coordination else 0.0,
+            "prevWindow": float(prev_w),
+            "prevCount": float(prev_cost["count"]),
         }
         if coord_rows:
             net = sum(float(row.get("pnl") or 0) if isinstance(row, dict) else float(getattr(row, "pnl", 0) or 0) for row in coord_rows)
@@ -359,7 +378,7 @@ class Coordinator:
             [r for r in closed_rows if r is not None],
             key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
         )
-        closed = ordered[-max(50, int(self.optimization_n or 50)) :] if self.additional_coordination else ordered
+        closed = ordered[-max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2) :] if self.additional_coordination else ordered
         _ = list(open_rows or ())  # explicit boundary: never mixed into closed
         out: List[Dict[str, Any]] = []
         for axis, spec in AXIS_SPECS.items():
