@@ -694,7 +694,9 @@ class SetBook:
         self.min_samples = 8
         self.reactivate = True
         self.strict_gate = True
-        self.max_active = 50
+        # Keep the default active catalogue near the requested 80-set live
+        # budget.  A zero value remains the explicit unlimited choice.
+        self.max_active = 80
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.cost_source = "manual-fallback"
         # Optional live-selection policy: prefer the smallest stable
@@ -932,9 +934,9 @@ class SetBook:
         # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 50)
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 80)
         except Exception:
-            raw_active = 50
+            raw_active = 80
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:

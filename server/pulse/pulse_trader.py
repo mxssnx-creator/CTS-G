@@ -8865,7 +8865,7 @@ class Pulse:
             "executionPolicy": {
                 "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
                 "blockActive": bool(getattr(self, "block_active", True)),
-                "targetActiveSets": int(getattr(self.sets, "max_active", 50)),
+            "targetActiveSets": int(getattr(self.sets, "max_active", 80)),
                 "decision": dict(getattr(self, "_execution_decision", {}) or {}),
             },
             "stageFlow": scov.get("stageFlow") or stage_flow,

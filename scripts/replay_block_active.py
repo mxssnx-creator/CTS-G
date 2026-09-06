@@ -9,7 +9,7 @@ import json
 import pathlib
 import time
 import numpy as np
-from replay_top25 import select_top25, parent_observations, causal_gates
+from replay_top25 import select_top25, parent_observations, causal_gates, BLOCK_RATIOS
 from replay_five_days import replay
 from block_active import observe_continuation
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -38,8 +38,12 @@ def run_one(args):
         continuation[i]=observe_continuation(anchors,'reference',float(bars[i][3]),side,i*60)
     configs=[]
     for count in range(1,7):
-        for ratio in (.25,.5,1.):
-            c=dict(candidate['parameters'],entryVolumeRatio=min(1,count*ratio),
+        for ratio in BLOCK_RATIOS:
+            # This is a real adjusted Block lane: the parent starts at one
+            # unit and the weighted average/quantity changes only when the
+            # causal Block gate permits the configured count/ratio.
+            c=dict(candidate['parameters'],strategy='block',levels=count,
+                   incrementPct=.2,volumeRatio=ratio,entryVolumeRatio=1.,
                    blockCount=count,blockRatio=ratio)
             configs.append(c)
     own_net=[[] for _ in configs]
@@ -50,9 +54,9 @@ def run_one(args):
     results=replay(bars,signals,side,configs,entry_filter=entry,on_close=close)
     for row,c in zip(results,configs):
         row.update(blockCount=c['blockCount'],blockRatio=c['blockRatio'],
-                   referenceVolume=1,adjustedVolume=c['entryVolumeRatio'],normalVolume=0,
+                   referenceVolume=1,adjustedVolume=row['maxVolume'],normalVolume=0,
                    deltaNetPct=round(row['netPct']-base['netPct'],6))
-        assert row['maxVolume'] <= c['entryVolumeRatio'] + 1e-9
+        assert row['maxVolume'] <= 1 + min(1, c['levels']*c['blockRatio']) + 1e-9
         assert row['n']==sum(row['dailyN'])
     return dict(candidate=candidate,baseline=base,results=results,
                 qualified=sum(r['qualified'] for r in results),
@@ -62,14 +66,17 @@ def run_one(args):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--source',required=True)
     p.add_argument('--settings',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--count',type=int,default=80,help='number of parent lanes to test')
+    p.add_argument('--window',choices=('20h','5d','14d','20d'),default='20h')
+    p.add_argument('--all-eligible',action='store_true',help='include sample-sufficient but unqualified parents')
     a=p.parse_args();started=time.monotonic()
-    selected=select_top25(a.source,50);settings=json.loads(pathlib.Path(a.settings).read_text())
+    selected=select_top25(a.source,a.count,a.window,qualified_only=not a.all_eligible);settings=json.loads(pathlib.Path(a.settings).read_text())
     results=[]
     with ProcessPoolExecutor(max_workers=2) as pool:
         futures=[pool.submit(run_one,(r,a.source,settings)) for r in selected['candidates']]
         for f in as_completed(futures):
             r=f.result();results.append(r);print('Completed',r['candidate']['rank'],flush=True)
-    out=dict(selection=selected,parents=50,variants=900,
+    out=dict(selection=selected,parents=a.count,variants=a.count*6*len(BLOCK_RATIOS),
              qualified=sum(r['qualified'] for r in results),
              elapsedS=round(time.monotonic()-started,2),
              results=sorted(results,key=lambda r:r['candidate']['rank']),

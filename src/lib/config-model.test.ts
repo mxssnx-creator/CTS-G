@@ -24,11 +24,11 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to adjusted execution and 50 Sets", () => {
+test("new and legacy settings default to adjusted execution and 80 Sets", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, false);
     assert.equal(value.blockActive, true);
-    assert.equal(value.setMaxActive, 50);
+  assert.equal(value.setMaxActive, 80);
     assert.equal(value.stratGeneral, true);
   }
 });
