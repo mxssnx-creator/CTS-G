@@ -1,0 +1,67 @@
+[
+  {
+    "label": "coord-off",
+    "additionalCoordination": false,
+    "coordOptimizationN": 50,
+    "elapsedSec": 289.7,
+    "rowCount": 102960,
+    "validatedCount": 0,
+    "avgValidatedPf": 0.0,
+    "maxValidatedPf": 0.0,
+    "phase": "ready",
+    "error": "",
+    "source": "live"
+  },
+  {
+    "label": "coord-on-n50",
+    "additionalCoordination": true,
+    "coordOptimizationN": 50,
+    "elapsedSec": 324.5,
+    "rowCount": 102960,
+    "validatedCount": 0,
+    "avgValidatedPf": 0.0,
+    "maxValidatedPf": 0.0,
+    "phase": "ready",
+    "error": "",
+    "source": "live"
+  },
+  {
+    "label": "coord-on-n100",
+    "additionalCoordination": true,
+    "coordOptimizationN": 100,
+    "elapsedSec": 317.0,
+    "rowCount": 102960,
+    "validatedCount": 0,
+    "avgValidatedPf": 0.0,
+    "maxValidatedPf": 0.0,
+    "phase": "ready",
+    "error": "",
+    "source": "live"
+  },
+  {
+    "label": "coord-on-n150",
+    "additionalCoordination": true,
+    "coordOptimizationN": 150,
+    "elapsedSec": 306.5,
+    "rowCount": 102960,
+    "validatedCount": 0,
+    "avgValidatedPf": 0.0,
+    "maxValidatedPf": 0.0,
+    "phase": "ready",
+    "error": "",
+    "source": "live"
+  },
+  {
+    "label": "coord-on-n200",
+    "additionalCoordination": true,
+    "coordOptimizationN": 200,
+    "elapsedSec": 309.8,
+    "rowCount": 102960,
+    "validatedCount": 0,
+    "avgValidatedPf": 0.0,
+    "maxValidatedPf": 0.0,
+    "phase": "ready",
+    "error": "",
+    "source": "live"
+  }
+]

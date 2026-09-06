@@ -20,7 +20,7 @@
   "controlOrders": true,
   "controlOrdersPerConfig": true,
   "cooldownS": 9,
-  "coordOptimizationN": 50,
+  "coordOptimizationN": 150,
   "dcaAutoDeact": true,
   "dcaBreakevenProfitPct": 0.2,
   "dcaCooldownSeconds": 45,

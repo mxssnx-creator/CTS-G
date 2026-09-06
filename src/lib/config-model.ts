@@ -387,7 +387,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   // only alter live selection/coordination after that evidence exists.
   preferMinimalRange: false,
   additionalCoordination: false,
-  coordOptimizationN: 50,
+  // 150 measured fastest among coordination-on window sizes in the 3h
+  // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
+  coordOptimizationN: 150,
   pfWindow: 15,
   slMinPct: 0.2,
   slMaxPct: 3.0,
