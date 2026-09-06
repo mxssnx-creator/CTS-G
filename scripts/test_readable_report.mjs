@@ -60,4 +60,27 @@ ids.get('strategy').value='base';ids.get('strategy').onchange();assert.match(ids
 ids.get('rows').onclick({target:{closest:()=>({dataset:{detail:'0'}})}});assert.match(ids.get('details').innerHTML,/Tagesergebnisse/);assert.ok(!ids.get('details').innerHTML.includes('{"'));
 ids.get('csv').click();const text=await download.text();assert.equal(text.split('\r\n').length,163);assert.deepEqual([...new Uint8Array(await download.arrayBuffer()).slice(0,3)],[239,187,191]);assert.ok(text.includes('dailyNetPct.0'));
 ids.get('status').value='qualified';ids.get('status').onchange();assert.equal(ids.get('rows').innerHTML,'');
-console.log(JSON.stringify({pass:true,matrixRows:total,additionalRows:additional,selected:25,fullRecalculationCompared:!!prior,visibleRawJson:false,staticCharts:4,interactiveCurves:4,checks:['all original values','full rerun equality','unique top25 identities','all additional daily totals','causal Axis evidence','scaled Block caps','strict gate preserved','matrix paging/filter/details/CSV','additional filters/details/CSV','runtime tables','diagram updates'],browserRenderVerified:false}));
+let activeRows=0;
+if (process.argv[5]) {
+ const data=JSON.parse(fs.readFileSync(process.argv[5],'utf8'));
+ assert.equal(data.parents,50); assert.equal(data.results.length,50);
+ assert.equal(new Set(data.results.map(r=>r.candidate.identity)).size,50);
+ assert.equal((visible.match(/class="active-parent"/g)||[]).length,50);
+ assert.equal((visible.match(/class="active-result"/g)||[]).length,900);
+ assert.equal((visible.match(/<th>PF-Fenster<\/th>/g)||[]).length,900);
+ for(const p of data.results){
+  for(const [key,value] of Object.entries(p.candidate.originalMetrics))
+   if(!['config','direction'].includes(key)) assert.deepEqual(p.baseline[key],value);
+  assert.equal(p.results.length,18);
+  assert.equal(new Set(p.results.map(r=>r.blockCount+':'+r.blockRatio)).size,18);
+  for(const r of p.results){
+   activeRows++;
+   assert.equal(r.normalVolume,0);
+   assert.ok(r.maxVolume<=r.adjustedVolume+1e-9);
+   assert.equal(r.n,r.dailyN.reduce((a,b)=>a+b,0));
+   assert.ok(Math.abs(r.netPct-r.dailyNetPct.reduce((a,b)=>a+b,0))<3e-5);
+  }
+ }
+ assert.equal(activeRows,900);
+}
+console.log(JSON.stringify({pass:true,activeRows,matrixRows:total,additionalRows:additional,selected:25,fullRecalculationCompared:!!prior,visibleRawJson:false,staticCharts:activeRows?5:4,interactiveCurves:4,checks:['all original values','full rerun equality','unique top25 identities','all additional daily totals','causal Axis evidence','scaled Block caps','strict gate preserved','matrix paging/filter/details/CSV','additional filters/details/CSV','runtime tables','diagram updates'],browserRenderVerified:false}));

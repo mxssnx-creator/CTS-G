@@ -38,6 +38,7 @@ def section(evidence, out, table, fmt, esc, svg):
         for row in parent['results']:
             parts.append('<details class="active-result"><summary>Count '+str(row['blockCount'])+' · Ratio '+str(row['blockRatio'])+' · sämtliche Kennzahlen und Tage</summary>')
             parts.append(table(['Kennzahl','Wert'],[[esc(k),fmt(v,6)] for k,v in row.items() if not isinstance(v,(list,dict))]))
+            parts.append(table(['PF-Fenster','Verfügbare Abschlüsse','Netto-PF'],[[fmt(v['requested'],0),fmt(v['n'],0),fmt(v['pf'],6)] for v in row['recentPf']]))
             parts.append(table(['Tag','Netto pp','Abschlüsse'],[[i+1,fmt(v,6),fmt(row['dailyN'][i],0)] for i,v in enumerate(row['dailyNetPct'])]))
             parts.append('</details>')
         parts.append('</details>')
