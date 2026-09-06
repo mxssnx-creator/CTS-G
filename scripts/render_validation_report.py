@@ -142,7 +142,7 @@ def build(source,additional,evidence,previous,out):
  from render_block_active_html import section as active_section
  supplement=active_section(evidence,out,table,fmt,esc,svg)
  if supplement:
-   htmlparts=[('<p>Aktuelle Ergebnisse und Einzeltests stehen im Abschnitt Block Active / 80.</p>' if 'Engine erneut</td>' in part else part) for part in htmlparts]
+   # Keep the remote verification table visible alongside the Block Active supplement.
    htmlparts.insert(3,supplement)
    htmlparts=[part.replace('<a href="#overview">Überblick</a>','<a href="#block-active">Block Active / 80</a><a href="#overview">Überblick</a>').replace('Top 25 · Block & Axis<br>Alle Ergebnisse im Überblick','Block Active · Ziel 80 Sets<br>Top 25, Block & Axis: alle Ergebnisse') for part in htmlparts]
  from render_policy_results import section as policy_section
