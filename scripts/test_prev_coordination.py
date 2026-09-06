@@ -31,13 +31,13 @@ class PrevCoordinationTests(unittest.TestCase):
                         "prevPosWindow": window,
                         "prevPosMinCount": minimum,
                         "positionCostPct": .10,
-                        "minPf": 1.05})
+                        "minPf": 1.02})
                 allowed, reasons, metrics = c.gate(tape, 0, {"pf": 1.5, "n": 20})
                 self.assertEqual(c.prev_window, window)
                 self.assertEqual(c.prev_min_count, minimum)
                 self.assertEqual(metrics["prevCount"], window)
                 self.assertEqual(metrics["prevWindow"], window)
-                self.assertGreaterEqual(metrics["prevPf"], 1.05)
+                self.assertGreaterEqual(metrics["prevPf"], 1.02)
 
     def test_prev_uses_the_segment_before_current(self):
         tape = rows()
@@ -50,11 +50,11 @@ class PrevCoordinationTests(unittest.TestCase):
         c = Coordinator()
         c.load({}, {"additionalCoordination": True, "coordOptimizationN": 50,
                 "prevPosWindow": 55, "prevPosMinCount": 5,
-                "positionCostPct": .10, "minPf": 1.05})
+                "positionCostPct": .10, "minPf": 1.02})
         _, _, metrics = c.gate(tape, 0, {"pf": 1.5, "n": 20})
         self.assertEqual(metrics["prevCount"], 55)
-        self.assertGreater(metrics["prevPf"], 1.05)
-        self.assertLess(metrics["lastPf"], 1.05)
+        self.assertGreater(metrics["prevPf"], 1.02)
+        self.assertLess(metrics["lastPf"], 1.02)
 
 
 if __name__ == "__main__":

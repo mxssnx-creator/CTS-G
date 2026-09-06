@@ -337,7 +337,7 @@ function SettingsPage() {
     main?: Record<string, { enabled?: boolean; min_profit_factor?: number; max_drawdown_time?: number; max_positions?: number }>;
     mainTradePfRatioSemantics?: string;
   };
-  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, 1.1);
+  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, DEFAULT_OVERLAY.realMinPf);
   const table = useMemo(
     () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1, 0, overlay.blockMaxVolumeMultiplier),
     [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, overlay.blockMaxVolumeMultiplier],
@@ -1446,9 +1446,9 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.10" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.15" onChange={(v) => patch("realMinPf", v)} />
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("realMinPf", v)} />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />

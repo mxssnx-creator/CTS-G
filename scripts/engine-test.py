@@ -375,16 +375,16 @@ def coord_test() -> None:
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow Base 1.05, Main 1.10, Real 1.15."""
+    """Stage PF floors follow the shared 1.02 default unless overridden."""
     from coord_engine import Coordinator
 
     # 1) defaults after a bare load
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
+        c.stage_min_pf == {"base": 1.02, "main": 1.02, "real": 1.02},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.05) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - 1.02) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -423,14 +423,14 @@ def stage_min_pf_test() -> None:
     # 5) main/real stages report floors in the stages snapshot
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
-        stages.get("base", {}).get("minPf") == 1.05
-        and stages.get("main", {}).get("minPf") == 1.05
-        and stages.get("real", {}).get("minPf") == 1.05,
+        stages.get("base", {}).get("minPf") == 1.02
+        and stages.get("main", {}).get("minPf") == 1.02
+        and stages.get("real", {}).get("minPf") == 1.02,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.05, "real": 1.05},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.02, "main": 1.02, "real": 1.02},
         str(snap.get("stageMinPf")))
 
 
