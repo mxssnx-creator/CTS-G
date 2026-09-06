@@ -42,8 +42,10 @@ class IndicationFrame:
     candles: List[Candle]
     closes: List[float]
     _ema_cache: Dict[Tuple[int, int], float] = field(default_factory=dict, repr=False)
+    _ema_series_cache: Dict[int, List[float]] = field(default_factory=dict, repr=False)
     _rsi_cache: Dict[int, float] = field(default_factory=dict, repr=False)
     _atr_cache: Dict[int, float] = field(default_factory=dict, repr=False)
+    _bollinger_cache: Dict[int, Optional[Tuple[float, float, float]]] = field(default_factory=dict, repr=False)
 
     def tail(self, limit: int) -> "IndicationFrame":
         limit = max(0, int(limit))
@@ -65,6 +67,12 @@ class IndicationFrame:
             self._ema_cache[key] = ema(values, period)
         return self._ema_cache[key]
 
+    def ema_series(self, period: int) -> List[float]:
+        period = max(1, int(period))
+        if period not in self._ema_series_cache:
+            self._ema_series_cache[period] = ema_series(self.closes, period)
+        return self._ema_series_cache[period]
+
     def rsi(self, period: int = 14) -> float:
         period = max(1, int(period))
         if period not in self._rsi_cache:
@@ -76,6 +84,12 @@ class IndicationFrame:
         if period not in self._atr_cache:
             self._atr_cache[period] = atr(self.candles, period)
         return self._atr_cache[period]
+
+    def bollinger(self, period: int = 20) -> Optional[Tuple[float, float, float]]:
+        period = max(1, int(period))
+        if period not in self._bollinger_cache:
+            self._bollinger_cache[period] = bollinger(self.closes, period)
+        return self._bollinger_cache[period]
 
     def recent_return(self, periods: int) -> float:
         return recent_return(self.closes, periods)
@@ -605,8 +619,15 @@ def _kind_indication(
     )
 
 
-def evaluate_direction(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_direction(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     rng = max(4, int(settings.get("dirRange") or 10))
     if len(closes) < rng * 2:
         return None
@@ -632,8 +653,15 @@ def evaluate_direction(symbol: str, closes: List[float], settings: Dict[str, Any
     )
 
 
-def evaluate_move(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_move(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """CTS Move: same-window displacement, independent direction agrees with the net move."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     rng = max(4, int(settings.get("moveRange") or 10))
     if len(closes) < rng:
         return None
@@ -655,12 +683,19 @@ def evaluate_move(symbol: str, closes: List[float], settings: Dict[str, Any]) ->
     )
 
 
-def evaluate_trend(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_trend(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """Independent trend: EMA 8 vs 21 with consecutive bar confirmation."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     if len(closes) < 30:
         return None
-    fast = ema_series(closes, 8)
-    slow = ema_series(closes, 21)
+    fast = frame.ema_series(8)
+    slow = frame.ema_series(21)
     if len(fast) < 6 or len(slow) < 6:
         return None
     last = closes[-1]
@@ -695,8 +730,15 @@ def evaluate_trend(symbol: str, closes: List[float], settings: Dict[str, Any]) -
     )
 
 
-def evaluate_break(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_break(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """Independent structure break: close beyond the prior N-bar high/low."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     rng = max(8, int(settings.get("breakRange") or settings.get("dirRange") or 16))
     if len(closes) < rng + 2:
         return None
@@ -774,8 +816,16 @@ def _range_pct(values: List[float]) -> float:
     return ((max(values) - min(values)) / values[0]) * 100.0
 
 
-def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_active_range(
+    symbol: str,
+    closes: List[float],
+    rng: int,
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """CTS Active/Outbreak for one range: current window vs previous equal window."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     rng = max(2, int(rng))
     need = rng * 2 + 1
     if len(closes) < need:
@@ -849,21 +899,35 @@ def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: 
     )
 
 
-def evaluate_active(symbol: str, closes: List[float], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_active(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     outbreaks = settings.get("activeOutbreak") or [3, 5, 10]
     best: Optional[Indication] = None
     for raw in outbreaks:
-        cand = evaluate_active_range(symbol, closes, int(raw), settings)
+        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
         if cand and (best is None or cand.confidence > best.confidence):
             best = cand
     return best
 
 
-def evaluate_active_all(symbol: str, closes: List[float], settings: Dict[str, Any]) -> List[Indication]:
+def evaluate_active_all(
+    symbol: str,
+    closes: List[float],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> List[Indication]:
     """Independent Active indication per outbreak range (3 / 5 / 10)."""
+    frame = frame or IndicationFrame([], list(closes))
+    closes = frame.closes
     out: List[Indication] = []
     for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
-        cand = evaluate_active_range(symbol, closes, int(raw), settings)
+        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
         if cand:
             out.append(cand)
     return out
@@ -879,24 +943,31 @@ def bollinger(closes: List[float], period: int = 20) -> Optional[Tuple[float, fl
     return mid + 2 * sd, mid, mid - 2 * sd
 
 
-def evaluate_common(symbol: str, candles: List[Candle], settings: Dict[str, Any]) -> Optional[Indication]:
+def evaluate_common(
+    symbol: str,
+    candles: List[Candle],
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
     """CTS Common / indication-stage: RSI + MACD + EMA + Bollinger, independent of State."""
+    frame = frame or frame_from_candles(candles)
+    candles = frame.candles
     if len(candles) < 26:
         return None
-    closes = [c.close for c in candles]
+    closes = frame.closes
     latest = candles[-1]
-    r = rsi(closes, 14)
-    macd_fast = ema_series(closes, 12)
-    macd_slow = ema_series(closes, 26)
+    r = frame.rsi(14)
+    macd_fast = frame.ema_series(12)
+    macd_slow = frame.ema_series(26)
     macd_line = [a - b for a, b in zip(macd_fast, macd_slow)]
     signal_line = ema_series(macd_line, 9)
     macd = macd_line[-1]
     macd_sig = signal_line[-1] if signal_line else 0.0
     hist = macd - macd_sig
-    ema20 = ema(closes, 20)
-    ema50 = ema(closes, 50)
-    ema200 = ema(closes, 200) if len(closes) >= 80 else ema50
-    bb = bollinger(closes, 20)
+    ema20 = frame.ema(20)
+    ema50 = frame.ema(50)
+    ema200 = frame.ema(200) if len(closes) >= 80 else ema50
+    bb = frame.bollinger(20)
     buy = sell = 0
     if r < 30:
         buy += 1
@@ -1411,25 +1482,25 @@ class IndicationBook:
             )
         closes = frame_1m.closes
         if self.settings.get("typeDirection", True) and closes:
-            drow = evaluate_direction(symbol, closes, self.settings)
+            drow = evaluate_direction(symbol, closes, self.settings, frame=frame_1m)
             if drow:
                 indications.append(drow)
         if self.settings.get("typeMove", True) and closes:
-            mrow = evaluate_move(symbol, closes, self.settings)
+            mrow = evaluate_move(symbol, closes, self.settings, frame=frame_1m)
             if mrow:
                 indications.append(mrow)
         if self.settings.get("typeActive", True) and closes:
-            indications.extend(evaluate_active_all(symbol, closes, self.settings))
+            indications.extend(evaluate_active_all(symbol, closes, self.settings, frame=frame_1m))
         if self.settings.get("typeTrend", True) and closes:
-            trow = evaluate_trend(symbol, closes, self.settings)
+            trow = evaluate_trend(symbol, closes, self.settings, frame=frame_1m)
             if trow:
                 indications.append(trow)
         if self.settings.get("typeBreak", True) and closes:
-            brow = evaluate_break(symbol, closes, self.settings)
+            brow = evaluate_break(symbol, closes, self.settings, frame=frame_1m)
             if brow:
                 indications.append(brow)
         if self.settings.get("typeCommon", True):
-            crow = evaluate_common(symbol, candles_1m, self.settings)
+            crow = evaluate_common(symbol, candles_1m, self.settings, frame=frame_1m)
             if crow:
                 indications.append(crow)
         if not self.settings.get("typeSignals", True):
@@ -1931,6 +2002,49 @@ def self_test() -> List[Tuple[str, bool, str]]:
         and abs(legacy_ev.take_profit_pct - cached_ev.take_profit_pct) < 1e-12,
         f"legacy={legacy_ev.direction if legacy_ev else None} cached={cached_ev.direction if cached_ev else None}",
     )
+    # A cold optional-source future must never make the indication cycle wait
+    # or fall back to synchronous network I/O.  The next cycle may consume a
+    # completed cache entry normally.
+    extra_key = "binance-usdm:ASYNC-USDT"
+    missing = object()
+    old_extra_cache = EXTRA.cache.get(extra_key, missing)
+    with EXTRA._lock:
+        old_inflight = set(EXTRA._inflight)
+        EXTRA._inflight.add(extra_key)
+    old_get = EXTRA.get
+    def forbidden_get(source: str, symbol: str) -> List[Candle]:
+        raise AssertionError(f"cold optional source fetched synchronously: {source}:{symbol}")
+    EXTRA.get = forbidden_get  # type: ignore[method-assign]
+    cold_elapsed = 0.0
+    cold_error = ""
+    try:
+        started = time.perf_counter()
+        book.process("ASYNC-USDT", up, want_extra=True, bars_by_tf={"1m": up})
+        cold_elapsed = time.perf_counter() - started
+    except Exception as exc:
+        cold_error = str(exc)
+    finally:
+        EXTRA.get = old_get  # type: ignore[method-assign]
+        with EXTRA._lock:
+            EXTRA._inflight = old_inflight
+            if old_extra_cache is missing:
+                EXTRA.cache.pop(extra_key, None)
+            else:
+                EXTRA.cache[extra_key] = old_extra_cache
+    t35 = (not cold_error and cold_elapsed < 0.2, f"elapsed={cold_elapsed:.4f}s error={cold_error}")
+    old_extra_cache = EXTRA.cache.get(extra_key, missing)
+    try:
+        with EXTRA._lock:
+            EXTRA.cache[extra_key] = (time.time(), bars_to_candles(up))
+        book.process("ASYNC-USDT", up, want_extra=True, bars_by_tf={"1m": up})
+        hot = any(e.source_id == "binance-usdm" for e in book.evals.get("ASYNC-USDT", []))
+    finally:
+        with EXTRA._lock:
+            if old_extra_cache is missing:
+                EXTRA.cache.pop(extra_key, None)
+            else:
+                EXTRA.cache[extra_key] = old_extra_cache
+    t36 = (hot, f"cached-extra={hot}")
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1966,6 +2080,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-break", t32[0], t32[1]),
         ("ind-trend-break-process", t33[0], t33[1]),
         ("ind-frame-parity", t34[0], t34[1]),
+        ("ind-extra-cold-nonblocking", t35[0], t35[1]),
+        ("ind-extra-cache-next-cycle", t36[0], t36[1]),
     ]
 
 

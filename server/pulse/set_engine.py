@@ -404,42 +404,42 @@ def indication_kind_votes_frame(frame: IndicationFrame, settings: Dict[str, Any]
             pass
     if want["dir"] and closes:
         try:
-            drow = evaluate_direction("hist", closes, settings)
+            drow = evaluate_direction("hist", closes, settings, frame=frame)
             if drow:
                 votes.append((1 if drow.direction == "long" else -1, float(drow.confidence), "dir"))
         except Exception:
             pass
     if want["move"] and closes:
         try:
-            mrow = evaluate_move("hist", closes, settings)
+            mrow = evaluate_move("hist", closes, settings, frame=frame)
             if mrow:
                 votes.append((1 if mrow.direction == "long" else -1, float(mrow.confidence), "move"))
         except Exception:
             pass
     if want["act"] and closes:
         try:
-            arow = evaluate_active("hist", closes, settings)
+            arow = evaluate_active("hist", closes, settings, frame=frame)
             if arow:
                 votes.append((1 if arow.direction == "long" else -1, float(arow.confidence), "act"))
         except Exception:
             pass
     if want["common"] and candles:
         try:
-            crow = evaluate_common("hist", candles, settings)
+            crow = evaluate_common("hist", candles, settings, frame=frame)
             if crow:
                 votes.append((1 if crow.direction == "long" else -1, float(crow.confidence), "common"))
         except Exception:
             pass
     if want.get("trend") and closes:
         try:
-            trow = evaluate_trend("hist", closes, settings)
+            trow = evaluate_trend("hist", closes, settings, frame=frame)
             if trow:
                 votes.append((1 if trow.direction == "long" else -1, float(trow.confidence), "trend"))
         except Exception:
             pass
     if want.get("brk") and closes:
         try:
-            brow = evaluate_break("hist", closes, settings)
+            brow = evaluate_break("hist", closes, settings, frame=frame)
             if brow:
                 votes.append((1 if brow.direction == "long" else -1, float(brow.confidence), "brk"))
         except Exception:

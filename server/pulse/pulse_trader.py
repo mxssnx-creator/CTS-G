@@ -1028,7 +1028,7 @@ class Pulse:
         self._execution_decision = {}
         self.strat_general = True
         self.tf_on = {"1m": True, "5m": True, "15m": True}
-        self._hist_stop = False
+        self._hist_stop = threading.Event()
         self.apply_live_config(initial=True)
 
     def group_of(self, sym: str) -> str:
@@ -9488,9 +9488,10 @@ class Pulse:
                 cpu = max(1, int(os.cpu_count() or 1))
             except Exception:
                 cpu = 2
-            replay_workers = max(1, min(4, cpu, len(names) or 1))
+            replay_workers = max(1, min(8, cpu, len(names) or 1))
             if level == "busy":
                 replay_workers = min(replay_workers, 2)
+
 
         try:
             replay_book.replay_all(
@@ -9625,9 +9626,20 @@ class Pulse:
             with self.state_guard():
                 self._catalog_bootstrap_running = False
 
+    def stop_history(self) -> None:
+        """Stop the history worker and wake it if it is in an idle wait."""
+        self._hist_stop.set()
+        self._hist_wake.set()
+
     def _hist_loop(self) -> None:
-        while not self._hist_stop:
-            if not self._catalog_ready.wait(timeout=0.2):
+        while not self._hist_stop.is_set():
+            # Clear before inspecting state. Any catalog/config/bar wake that
+            # arrives during replay remains set and is observed by the next
+            # deadline wait, so a fresh signal cannot be lost between clear and
+            # wait.
+            self._hist_wake.clear()
+            if not self._catalog_ready.is_set():
+                self._hist_wake.wait(timeout=5.0)
                 continue
             try:
                 with self.state_guard():
@@ -9736,7 +9748,6 @@ class Pulse:
             else:
                 wait_s = min(max(refresh_in, 0.05), 5.0)
             self._hist_wake.wait(timeout=wait_s)
-            self._hist_wake.clear()
 
     def _warm_pass(self) -> None:
         # Network waits must not own the lock used by stats and coordination.
