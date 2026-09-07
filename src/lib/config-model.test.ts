@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_OVERLAY, overlayFromCts, syncOverlayFlags } from "./config-model.ts";
+import {
+  DEFAULT_OVERLAY,
+  DEFAULT_SYMBOL_COUNT,
+  isUnlimitedSymbolBook,
+  overlayFromCts,
+  rankedSymbolCap,
+  syncOverlayFlags,
+} from "./config-model.ts";
 
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
@@ -31,7 +38,19 @@ test("new and legacy settings default to adjusted execution, 110 Sets and 25 sym
     assert.equal(value.setMaxActive, 110);
     assert.equal(value.stratGeneral, true);
     assert.equal(value.symbolCap, 25);
+    assert.equal(isUnlimitedSymbolBook(value), false);
+    assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
+});
+
+test("All/* with cap 25 is the ranked default book, not unlimited", () => {
+  const ranked = syncOverlayFlags(overlayFromCts({}, { symbolsAll: true, symbols: ["*"], symbolCap: 25 }));
+  assert.equal(ranked.symbolCap, 25);
+  assert.equal(ranked.symbolsAll, true);
+  assert.equal(isUnlimitedSymbolBook(ranked), false);
+  const unlimited = syncOverlayFlags(overlayFromCts({}, { symbolsAll: true, symbols: ["*"], symbolCap: 0 }));
+  assert.equal(unlimited.symbolCap, 0);
+  assert.equal(isUnlimitedSymbolBook(unlimited), true);
 });
 
 test("execution switches survive merge and save normalization independently", () => {

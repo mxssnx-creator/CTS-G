@@ -80,6 +80,23 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
+
+/** Cap 0 + All/* is unlimited. Cap 25 with universe ranking is the default book, not "all". */
+export function isUnlimitedSymbolBook(overlay: {
+  symbolCap?: number;
+  symbolsAll?: boolean;
+  symbols?: string[];
+}): boolean {
+  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
+  return cap === 0 && Boolean(
+    overlay.symbolsAll || overlay.symbols?.includes("*") || overlay.symbols?.includes("ALL"),
+  );
+}
+
+export function rankedSymbolCap(overlay: { symbolCap?: number }): number {
+  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
+  return cap > 0 ? cap : DEFAULT_SYMBOL_COUNT;
+}
 // Full independent risk catalog. PF remains the coordinator's primary
 // objective; this axis controls the evaluated SL:TP range only.
 export const SL_TP_MIN = 0.1;
@@ -970,7 +987,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolsDynamic = next.symbolsDynamic !== false;
 
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
-  if (next.symbolsAll && next.symbolCap === 0 && overlay.symbolCap == null) {
+  if (next.symbolCap === 0 && overlay.symbolCap == null) {
     next.symbolCap = DEFAULT_SYMBOL_COUNT;
   }
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
