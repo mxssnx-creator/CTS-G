@@ -14,7 +14,7 @@ import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 
-type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests";
+type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
 
 const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "overview", label: "Overview", hint: "equity, tape and headline metrics" },
@@ -25,6 +25,7 @@ const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "tests", label: "Tests", hint: "forced baseline configurations and VST evidence" },
   { id: "controls", label: "Controls", hint: "exchange actions and protection parity" },
   { id: "errors", label: "Errors", hint: "recorded failures and rejected actions" },
+  { id: "report", label: "HTML report", hint: "standalone stats report viewer" },
 ];
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
@@ -75,11 +76,26 @@ function ResultsPage() {
       </p>
       <StatsOverview data={overview} live={stats} />
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" data-testid="results-export-actions">
+        <a
+          href={`/results-export.html?conn=${encodeURIComponent(conn)}`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-bg"
+        >
+          Open HTML report
+        </a>
+        <a
+          href={`/results-export.html?conn=${encodeURIComponent(conn)}`}
+          download={`pulse-results-${conn}.html`}
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
+        >
+          Download HTML
+        </a>
         <a
           href={`/results-export.json?conn=${encodeURIComponent(conn)}`}
           download={`pulse-results-${conn}.json`}
-          className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-bg"
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
         >
           Download JSON
         </a>
@@ -88,7 +104,7 @@ function ResultsPage() {
           download={`pulse-results-${conn}.md`}
           className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
         >
-          Download report
+          Download Markdown
         </a>
       </div>
 
@@ -130,6 +146,7 @@ function ResultsPage() {
         </div>
       ) : null}
       {statsTab === "errors" ? <ErrorsPanel stats={stats} /> : null}
+      {statsTab === "report" ? <HtmlReportPanel conn={conn} /> : null}
 
       {statsTab === "overview" ? (
         <div id="results-panel-overview" className="grid gap-3" role="tabpanel">
@@ -180,6 +197,37 @@ function ResultsPage() {
         </div>
       ) : null}
     </DeskShell>
+  );
+}
+
+function HtmlReportPanel({ conn }: { conn: string }) {
+  const href = `/results-export.html?conn=${encodeURIComponent(conn)}`;
+  return (
+    <section id="results-panel-report" className="rounded-radius border border-border bg-surface p-4" data-testid="html-report-panel" role="tabpanel">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Canonical HTML stats report</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            Read-only report generated from the same position-cost, PF, DDT, set, indication, strategy, and coverage snapshot as the exports.
+          </p>
+        </div>
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-3 text-sm"
+        >
+          Open in new tab
+        </a>
+      </div>
+      <iframe
+        title={`HTML stats report for ${conn}`}
+        src={href}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        className="mt-4 h-[640px] w-full rounded-lg border border-border bg-bg sm:h-[760px]"
+      />
+    </section>
   );
 }
 

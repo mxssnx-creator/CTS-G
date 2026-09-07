@@ -27,6 +27,7 @@ STOP_ALL_PATH = path_for("STOP")
 CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g")) or "cts-g"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_HTML_RESPONSE_BYTES = 8 * 1024 * 1024
 _OVERLAY_LOCKS = {cid: threading.RLock() for cid in ("bingx-x01", "bingx-x02")}
 
 
@@ -589,6 +590,148 @@ def load_stats(conn: str) -> dict:
     return load_json(stats_path(conn))
 
 
+def _report_number(value, default=0.0) -> float:
+    try:
+        number = float(value)
+        return number if number == number else default
+    except (TypeError, ValueError):
+        return default
+
+
+def overall_report_state(live: dict, vst: dict) -> dict:
+    """Build a safe combined input for the canonical stats report renderer."""
+    states = (live, vst)
+    closed = [
+        row
+        for state in states
+        for row in (state.get("closed") or [])
+        if isinstance(row, dict)
+    ]
+    open_positions = [
+        row
+        for state in states
+        for row in (state.get("open") or [])
+        if isinstance(row, dict)
+    ]
+    set_rows = []
+    set_count = active_count = validated_count = hist_fills = 0
+    for state in states:
+        sets = state.get("sets") or {}
+        if not isinstance(sets, dict):
+            continue
+        set_rows.extend(row for row in (sets.get("rows") or []) if isinstance(row, dict))
+        set_count += int(_report_number(sets.get("setCount")))
+        active_count += int(_report_number(sets.get("activeCount")))
+        validated_count += int(_report_number(sets.get("validatedCount")))
+        hist_fills += int(_report_number(sets.get("histFills")))
+    symbols = sorted({
+        str(symbol)
+        for state in states
+        for symbol in (state.get("symbols") or [])
+        if symbol
+    })
+    wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
+    losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
+    position_cost = next(
+        (
+            _report_number((state.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
+            for state in states
+            if isinstance(state.get("pfCost"), dict) and state.get("pfCost", {}).get("costPct") is not None
+        ),
+        POSITION_COST_PCT_DEFAULT,
+    )
+    coverages = [state.get("coverage") or {} for state in states]
+    strategies = {
+        key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
+        for key in {key for coverage in coverages for key in (coverage.get("strategies") or {})}
+    }
+    indication_types = {
+        key: any(bool((coverage.get("indicationTypes") or {}).get(key)) for coverage in coverages)
+        for key in {key for coverage in coverages for key in (coverage.get("indicationTypes") or {})}
+    }
+    historic_states = [state.get("historic") or {} for state in states]
+    selected_symbols = sorted({
+        str(symbol)
+        for historic in historic_states
+        for symbol in (historic.get("selectedSymbols") or [])
+        if symbol
+    })
+    valid_symbols = sorted({
+        str(symbol)
+        for historic in historic_states
+        for symbol in (historic.get("validSymbols") or [])
+        if symbol
+    })
+    gapped_symbols = sorted({
+        str(symbol)
+        for historic in historic_states
+        for symbol in (historic.get("gappedSymbols") or [])
+        if symbol
+    })
+    last_watermark = {}
+    for index, historic in enumerate(historic_states):
+        for symbol, watermark in (historic.get("lastPublishedWatermark") or historic.get("watermark") or {}).items():
+            last_watermark[f"lane{index}:{symbol}"] = watermark
+    historic_bars = [(historic.get("coverage") or {}).get("bars") or {} for historic in historic_states]
+    historic_requested_bars = sum(int(_report_number(bars.get("requested"))) for bars in historic_bars if isinstance(bars, dict))
+    historic_completed_bars = sum(int(_report_number(bars.get("completed"))) for bars in historic_bars if isinstance(bars, dict))
+    historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
+    has_historic = any(bool(historic) for historic in historic_states)
+    return {
+        "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
+        "mode": "MULTI_DESK",
+        "connection": "overall",
+        "unit": "MIXED",
+        "equity": sum(_report_number(state.get("equity")) for state in states),
+        "startEquity": sum(_report_number(state.get("startEquity")) for state in states),
+        "available": sum(_report_number(state.get("available")) for state in states),
+        "usedMargin": sum(_report_number(state.get("usedMargin")) for state in states),
+        "sessionPnl": sum(_report_number(state.get("sessionPnl")) for state in states),
+        "realizedPnl": sum(_report_number(state.get("realizedPnl")) for state in states),
+        "unrealized": sum(_report_number(state.get("unrealized")) for state in states),
+        "wins": wins,
+        "losses": losses,
+        "openCount": len(open_positions),
+        "open": open_positions,
+        "closed": closed,
+        "symbols": symbols,
+        "pfCost": {"n": 15, "costPct": position_cost, "minPf": 1.1},
+        "historic": {
+            "phase": "aggregate" if has_historic else "offline",
+            "coordinationComplete": has_historic and all(bool(historic.get("coordinationComplete")) for historic in historic_states),
+            "selectedSymbols": selected_symbols,
+            "validSymbols": valid_symbols,
+            "gappedSymbols": gapped_symbols,
+            "lastPublishedWatermark": last_watermark,
+            "lastCompleteRun": max((_report_number(historic.get("lastCompleteRun")) for historic in historic_states), default=0),
+            "nextRunAt": min((value for value in (_report_number(historic.get("nextRunAt")) for historic in historic_states) if value > 0), default=0),
+            "coverage": {
+                "symbols": {"completed": len(valid_symbols), "valid": len(selected_symbols), "gapped": len(gapped_symbols)},
+                "bars": {"requested": historic_requested_bars, "completed": historic_completed_bars, "missing": historic_missing_bars},
+            },
+        },
+        "sets": {
+            "rows": set_rows,
+            "setCount": set_count,
+            "activeCount": active_count,
+            "validatedCount": validated_count,
+            "histFills": hist_fills,
+        },
+        "coverage": {
+            "symbols": len(symbols),
+            "px": sum(int(_report_number(coverage.get("px"))) for coverage in coverages),
+            "wsOk": all(coverage.get("wsOk") is not False for coverage in coverages),
+            "controlsMissing": sum(int(_report_number(coverage.get("controlsMissing"))) for coverage in coverages),
+            "qaPass": sum(int(_report_number(coverage.get("qaPass"))) for coverage in coverages),
+            "qaFail": sum(int(_report_number(coverage.get("qaFail"))) for coverage in coverages),
+            "strategies": strategies,
+            "indicationTypes": indication_types,
+            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "histFills": hist_fills},
+        },
+        "coord": {"gate": {"allow": all(bool((state.get("coord") or {}).get("gate", {}).get("allow")) for state in states)}},
+    }
+
+
 def _sets_lane(lane: dict, st: dict) -> dict:
     sets = st.get("sets") or {}
     prog = sets.get("progress") or {}
@@ -1010,81 +1153,100 @@ class Handler(SimpleHTTPRequestHandler):
         if path in ("/connection.json", "/connection"):
             self._json(connection_public(conn))
             return
-        if path in ("/results-export.json", "/results-export", "/results-export.md"):
-            ext = ".md" if path.endswith(".md") else ".json"
+        if path in ("/results-export.json", "/results-export", "/results-export.md", "/results-export.html"):
+            ext = ".html" if path.endswith(".html") else ".md" if path.endswith(".md") else ".json"
+            if conn != "overall" and conn not in ID_TO_LANE:
+                self._json({"ok": False, "detail": "unknown connection"}, 404)
+                return
+
+            raw: bytes
             if conn == "overall":
                 live = load_stats("bingx-x01")
                 vst = load_stats("bingx-x02")
-                blob = {
-                    "conn": "overall",
-                    "connType": "overall",
-                    "live": {
-                        "connection": "bingx-x01",
-                        "openCount": live.get("openCount") or 0,
-                        "exchangeOpenCount": live.get("exchangeOpenCount", -1),
-                        "simOpenCount": live.get("simOpenCount", -1),
-                        "equity": live.get("equity"),
-                        "pfCost": live.get("pfCost"),
-                        "open": live.get("open") or [],
-                        "closed": live.get("closed") or [],
-                    },
-                    "vst": {
-                        "connection": "bingx-x02",
-                        "openCount": vst.get("openCount") or 0,
-                        "exchangeOpenCount": vst.get("exchangeOpenCount", -1),
-                        "simOpenCount": vst.get("simOpenCount", -1),
-                        "equity": vst.get("equity"),
-                        "pfCost": vst.get("pfCost"),
-                        "open": vst.get("open") or [],
-                        "closed": vst.get("closed") or [],
-                    },
-                }
-                raw = json.dumps(blob, separators=(",", ":")).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Disposition", 'attachment; filename="pulse-results-overall.json"')
-                self.send_header("Content-Length", str(len(raw)))
-                self._cors()
-                self.end_headers()
-                self.wfile.write(raw)
-                return
-            cid = conn
-            p = os.path.join(DIR, f"results-export-{cid}{ext}")
-            if not os.path.exists(p):
+                if ext == ".html" or ext == ".md":
+                    from stats_report import build as build_report, render_html, render_md
+                    state = overall_report_state(live, vst)
+                    cost_pct = _report_number((state.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
+                    report = build_report(state, cost_pct=cost_pct, conn="overall")
+                    raw = (render_html(report) if ext == ".html" else render_md(report)).encode("utf-8")
+                else:
+                    blob = {
+                        "conn": "overall",
+                        "connType": "overall",
+                        "live": {
+                            "connection": "bingx-x01",
+                            "openCount": live.get("openCount") or 0,
+                            "exchangeOpenCount": live.get("exchangeOpenCount", -1),
+                            "simOpenCount": live.get("simOpenCount", -1),
+                            "equity": live.get("equity"),
+                            "pfCost": live.get("pfCost"),
+                            "open": live.get("open") or [],
+                            "closed": live.get("closed") or [],
+                        },
+                        "vst": {
+                            "connection": "bingx-x02",
+                            "openCount": vst.get("openCount") or 0,
+                            "exchangeOpenCount": vst.get("exchangeOpenCount", -1),
+                            "simOpenCount": vst.get("simOpenCount", -1),
+                            "equity": vst.get("equity"),
+                            "pfCost": vst.get("pfCost"),
+                            "open": vst.get("open") or [],
+                            "closed": vst.get("closed") or [],
+                        },
+                    }
+                    raw = json.dumps(blob, separators=(",", ":")).encode()
+            else:
+                cid = conn
+                p = os.path.join(DIR, f"results-export-{cid}{ext}")
                 st = load_stats(cid)
-                if not st:
+                if os.path.exists(p):
+                    with open(p, "rb") as export_file:
+                        raw = export_file.read()
+                elif not st:
                     self._json({"ok": False, "detail": "no export yet"}, 404)
                     return
-                raw = json.dumps({
-                    "conn": cid,
-                    "connType": "vst" if "x02" in cid else "live",
-                    "openCount": st.get("openCount") or 0,
-                    "exchangeOpenCount": st.get("exchangeOpenCount", -1),
-                    "simOpenCount": st.get("simOpenCount", -1),
-                    "equity": st.get("equity"),
-                    "pfCost": st.get("pfCost"),
-                    "open": st.get("open") or [],
-                    "closed": st.get("closed") or [],
-                    "sets": st.get("sets"),
-                    "block": st.get("block"),
-                    "coverage": st.get("coverage"),
-                }, separators=(",", ":")).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Disposition", f'attachment; filename="pulse-results-{cid}.json"')
-                self.send_header("Content-Length", str(len(raw)))
-                self._cors()
-                self.end_headers()
-                self.wfile.write(raw)
+                elif ext == ".html" or ext == ".md":
+                    from stats_report import build as build_report, render_html, render_md
+                    cost_pct = _report_number((st.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
+                    report = build_report(st, cost_pct=cost_pct, conn=cid)
+                    raw = (render_html(report) if ext == ".html" else render_md(report)).encode("utf-8")
+                else:
+                    raw = json.dumps({
+                        "conn": cid,
+                        "connType": "vst" if "x02" in cid else "live",
+                        "openCount": st.get("openCount") or 0,
+                        "exchangeOpenCount": st.get("exchangeOpenCount", -1),
+                        "simOpenCount": st.get("simOpenCount", -1),
+                        "equity": st.get("equity"),
+                        "pfCost": st.get("pfCost"),
+                        "open": st.get("open") or [],
+                        "closed": st.get("closed") or [],
+                        "sets": st.get("sets"),
+                        "block": st.get("block"),
+                        "coverage": st.get("coverage"),
+                    }, separators=(",", ":")).encode()
+
+            max_bytes = MAX_HTML_RESPONSE_BYTES if ext == ".html" else MAX_JSON_RESPONSE_BYTES
+            if len(raw) > max_bytes:
+                self._json({"ok": False, "detail": "export exceeds bounded payload limit"}, 500)
                 return
-            raw = open(p, "rb").read()
+            content_type = {
+                ".html": "text/html; charset=utf-8",
+                ".md": "text/markdown; charset=utf-8",
+                ".json": "application/json",
+            }[ext]
+            disposition = "inline" if ext == ".html" else "attachment"
+            filename = f"pulse-results-{conn}{ext}"
             self.send_response(200)
-            self.send_header("Content-Type", "text/markdown" if ext == ".md" else "application/json")
-            self.send_header("Content-Disposition", f'attachment; filename="pulse-results-{cid}{ext}"')
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f'{disposition}; filename="{filename}"')
             self.send_header("Content-Length", str(len(raw)))
             self._cors()
             self.end_headers()
-            self.wfile.write(raw)
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return
             return
         if path in ("/user-presets.json", "/user-presets"):
             try:

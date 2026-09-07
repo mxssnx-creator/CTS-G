@@ -702,6 +702,23 @@ function statsFallback(conn: string): Record<string, unknown> {
   };
 }
 
+function reportFallbackHtml(conn: string): string {
+  const stats = statsFallback(conn);
+  const escapeHtml = (value: unknown) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return String(value ?? "").replace(/[&<>"']/g, (character) => entities[character] || character);
+  };
+  const connection = escapeHtml(stats.connection || conn || "overall");
+  const detail = escapeHtml(stats.detail || "The pulse sidecar is not responding.");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CTS-G · stats waiting</title><style>:root{--bg:#07110e;--panel:#0f221c;--text:#d9f0e6;--muted:#7f9d90;--accent:#3dcf8e;color-scheme:dark;font:15px/1.5 system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:720px;margin:auto;padding:32px 20px}.label{color:var(--muted);font:11px ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase}section{margin-top:20px;border:1px solid color-mix(in srgb,var(--muted) 30%,var(--bg));background:var(--panel);border-radius:12px;padding:20px}h1{font-size:clamp(26px,6vw,44px);line-height:1.1;letter-spacing:-.04em;margin:10px 0}p{color:var(--muted)}strong{color:var(--accent);font:600 22px ui-monospace,monospace}</style></head><body><main><div class="label">CTS-G · canonical live stats export</div><h1>Stats report waiting</h1><section><p>The preview can display the report as soon as the pulse sidecar responds. No orders or state changes are performed by this page.</p><p>Connection: <strong>${connection}</strong></p><p>${detail}</p></section></main></body></html>`;
+}
+
 function pulseProxy(path: string): Record<string, ProxyOptions> {
   return {
     [path]: {
@@ -715,7 +732,23 @@ function pulseProxy(path: string): Record<string, ProxyOptions> {
         proxy.on("error", (_err, req, res) => {
           const r = res as import("node:http").ServerResponse;
           if (!r || r.headersSent) return;
-          if (String(req.url || "").startsWith("/stats.json")) {
+          const requestUrl = String(req.url || "");
+          if (requestUrl.startsWith("/results-export.html")) {
+            let conn = "overall";
+            try {
+              conn = new URL(requestUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
+            } catch {
+              /* keep overall */
+            }
+            const body = reportFallbackHtml(conn);
+            r.writeHead(503, {
+              "Content-Type": "text/html; charset=utf-8",
+              "Content-Length": Buffer.byteLength(body),
+            });
+            r.end(body);
+            return;
+          }
+          if (requestUrl.startsWith("/stats.json")) {
             try {
               const body = readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8");
               r.writeHead(200, { "Content-Type": "application/json" });
@@ -767,6 +800,7 @@ export default defineConfig(({ command, isPreview }) => ({
       ...pulseProxy("/stats"),
       ...pulseProxy("/results-export.json"),
       ...pulseProxy("/results-export.md"),
+      ...pulseProxy("/results-export.html"),
     },
   },
   preview: {

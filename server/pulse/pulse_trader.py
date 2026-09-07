@@ -9205,6 +9205,7 @@ class Pulse:
             os.path.join(DIR, f"results-export-{CONN_SHORT}.md"),
             cost_pct=self.position_cost_pct,
             conn=CONN_SHORT,
+            dest_html=os.path.join(DIR, f"results-export-{CONN_SHORT}.html"),
         )
 
     def qa_tick(self) -> None:

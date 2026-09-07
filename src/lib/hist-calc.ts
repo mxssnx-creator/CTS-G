@@ -247,7 +247,7 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   indTypeBreak: true,
   preferMinimalRange: false,
   additionalCoordination: false,
-  coordOptimizationN: 50,
+  coordOptimizationN: 150,
 };
 
 export async function fetchHistCalc(connection?: string): Promise<HistCalcJob> {
