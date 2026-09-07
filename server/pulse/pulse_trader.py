@@ -919,6 +919,7 @@ class Pulse:
         # starving HTTP/state readers or the history worker.
         self._cycle_lock = threading.Lock()
         self._qa_lock = threading.Lock()
+        self._stats_last: Dict[str, Any] = {}
         self.hist_busy = False
         self._hist_fetch_next = 0.0
         self._hist_fetch_failures = 0
@@ -2281,6 +2282,31 @@ class Pulse:
             self.wake_ev.set()
         except Exception:
             pass
+        # Control/config must also unstick the historic lane. Market ticks
+        # must not, or a busy websocket would busy-loop replay.
+        if kind in ("ctrl", "config", "catalog", "stop", "start", "pause", "resume"):
+            try:
+                self._hist_wake.set()
+            except Exception:
+                pass
+
+    def _wait_wake(self, timeout: float, ev: Optional[threading.Event] = None) -> bool:
+        """Wait for a bump without dropping one that arrived during the last cycle.
+
+        Wait first, then clear. A set event from Start/ctrl/fill during the
+        cycle returns immediately instead of sitting behind SCAN_S.
+        """
+        event = ev if ev is not None else getattr(self, "wake_ev", None)
+        wait_s = float(timeout or 0.0)
+        if event is None:
+            if wait_s > 0:
+                time.sleep(wait_s)
+            return False
+        if wait_s <= 0:
+            return bool(event.is_set())
+        hit = bool(event.wait(timeout=wait_s))
+        event.clear()
+        return hit
 
     def record_event(self, event_type: str, event_id: str = "", status: str = "", **fields: Any) -> bool:
         """Commit one bounded activity event without allowing telemetry to stop the engine."""
@@ -6142,6 +6168,8 @@ class Pulse:
             self.sets.progress.phase = "catalog"
             self.sets.progress.pct = 0.0
             self.sets.progress.detail = "catalog bootstrap deferred"
+        if not initial:
+            self.bump("config")
 
     def seed_lev_from_contracts(self) -> None:
         for s, c in self.contracts.items():
@@ -6431,7 +6459,8 @@ class Pulse:
             if time.time() - self.skip_log.get("add-gate", 0) > 45:
                 log("COORD add-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-add", quiet=True)
                 self.skip_log["add-gate"] = time.time()
-            return
+            # Overall pause/last must not freeze other Block counts; per-count
+            # add_gate still runs inside the lane loop.
         if time.time() - self.block_last_emit < max(12.0, STAGGER_S * 8):
             return
         if os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
@@ -8574,9 +8603,37 @@ class Pulse:
     def stats(self) -> Dict[str, Any]:
         # HTTP readers and the hot/warm workers can arrive concurrently. A
         # re-entrant guard keeps JSON snapshots internally consistent without
-        # blocking recursive stats writes.
-        with self.state_guard():
-            return self._stats_unlocked()
+        # blocking recursive stats writes. Never wait on a historic commit:
+        # scoring 10k+ sets under the same lock used to freeze the live cycle.
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            blob = self._stats_unlocked()
+            self._stats_last = blob
+            return blob
+        got = False
+        try:
+            got = bool(lock.acquire(timeout=0.08))
+        except TypeError:
+            lock.acquire()
+            got = True
+        if not got:
+            stale = dict(getattr(self, "_stats_last", None) or {})
+            stale.update({
+                "running": True,
+                "alive": True,
+                "cycle": int(getattr(self, "cycle", 0) or 0),
+                "scanMs": float(getattr(self, "last_scan_ms", 0) or 0),
+                "halted": bool(getattr(self, "halted", False)),
+                "haltReason": getattr(self, "halt_reason", None),
+                "statsDeferred": True,
+            })
+            return stale
+        try:
+            blob = self._stats_unlocked()
+            self._stats_last = blob
+            return blob
+        finally:
+            lock.release()
 
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
@@ -9819,6 +9876,8 @@ class Pulse:
                 replay_workers = min(replay_workers, 2)
 
 
+        published = False
+        affected_ids: List[str] = []
         try:
             replay_book.replay_all(
                 on_step=publish_progress,
@@ -9829,77 +9888,90 @@ class Pulse:
                 progress_total=progress_total,
                 score=False,
             )
+            if self._hist_request_changed():
+                with self.state_guard():
+                    if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                        source.progress.phase = "deferred"
+                        source.progress.detail = "replay superseded by newer generation"
+                        source.progress.deferred_reason = "newer manual/config generation"
+                return False
+
+            with self.state_guard():
+                if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                    return False
+                if replay_book.progress.phase == "error":
+                    source.progress = copy.deepcopy(replay_book.progress)
+                    return False
+                incoming = {
+                    sid: list(state.hist)
+                    for sid, state in replay_book.sets.items()
+                }
+                wanted = set(names)
+                affected = set()
+                for sid, current in source.sets.items():
+                    target = replay_book.sets.get(sid)
+                    if any(str(row.get("symbol") or "") in wanted for row in current.hist):
+                        affected.add(sid)
+                    if target is not None and any(str(row.get("symbol") or "") in wanted for row in target.hist):
+                        affected.add(sid)
+                source._commit_hist(
+                    incoming,
+                    replay_book.ind_hist,
+                    merge=True,
+                    replayed_symbols=names,
+                    score=False,
+                    score_ids=affected,
+                )
+                keys = set(source.strategy_hist) | set(replay_book.strategy_hist)
+                source.strategy_hist = {
+                    key: merge_hist_rows(
+                        source.strategy_hist.get(key) or [],
+                        replay_book.strategy_hist.get(key) or [],
+                        names,
+                    )
+                    for key in keys
+                }
+                source._hist_seen = set(replay_book._hist_seen)
+                source._hist_total = int(replay_book._hist_total or 0)
+                source.last_run = float(replay_book.last_run or time.time())
+                source.progress = copy.deepcopy(replay_book.progress)
+                source.progress.sets_total = len(source.sets)
+                source.progress.sets_done = len(source.sets)
+                source._snap_cache = None
+                source._live_ov_cache = None
+                self._stats_force = True
+                affected_ids = sorted(affected)
+                published = True
+            if published:
+                self._score_committed(source, generation, affected_ids)
+            return published
         except Exception as exc:
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                     source.progress.phase = "error"
                     source.progress.error = str(exc)[:220]
-                    source._running = False
             return False
-
-        if self._hist_request_changed():
+        finally:
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
-                    source.progress.phase = "deferred"
-                    source.progress.detail = "replay superseded by newer generation"
-                    source.progress.deferred_reason = "newer manual/config generation"
                     source._running = False
-            return False
 
+    def _score_committed(self, book: Any, generation: int, ids: List[str]) -> None:
+        """Score a published hist slice without holding the state lock for the catalog."""
+        for i, sid in enumerate(ids):
+            with self.state_guard():
+                if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                    return
+                st = book.sets.get(sid)
+                if st is not None:
+                    book._score_one(st)
+            if i % 48 == 0:
+                sd_notify("WATCHDOG=1")
         with self.state_guard():
-            if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
-                if self.sets is source:
-                    source._running = False
-                return False
-            if replay_book.progress.phase == "error":
-                source.progress = copy.deepcopy(replay_book.progress)
-                source._running = False
-                return False
-            # Commit only the selected symbol slice into the live source book.
-            # Exchange/live evidence stays in place, so a fill or control event
-            # that arrived during replay cannot be overwritten by a stale
-            # snapshot.  All IDs are included so a refreshed empty slice also
-            # removes that symbol's previous historic rows; scoring is limited
-            # to states actually touched by old or new rows.
-            incoming = {
-                sid: list(state.hist)
-                for sid, state in replay_book.sets.items()
-            }
-            wanted = set(names)
-            affected = set()
-            for sid, current in source.sets.items():
-                target = replay_book.sets.get(sid)
-                if any(str(row.get("symbol") or "") in wanted for row in current.hist):
-                    affected.add(sid)
-                if target is not None and any(str(row.get("symbol") or "") in wanted for row in target.hist):
-                    affected.add(sid)
-            source._commit_hist(
-                incoming,
-                replay_book.ind_hist,
-                merge=True,
-                replayed_symbols=names,
-                score_ids=affected,
-            )
-            keys = set(source.strategy_hist) | set(replay_book.strategy_hist)
-            source.strategy_hist = {
-                key: merge_hist_rows(
-                    source.strategy_hist.get(key) or [],
-                    replay_book.strategy_hist.get(key) or [],
-                    names,
-                )
-                for key in keys
-            }
-            source._hist_seen = set(replay_book._hist_seen)
-            source._hist_total = int(replay_book._hist_total or 0)
-            source.last_run = float(replay_book.last_run or time.time())
-            source.progress = copy.deepcopy(replay_book.progress)
-            source.progress.sets_total = len(source.sets)
-            source.progress.sets_done = len(source.sets)
-            source._running = False
-            source._snap_cache = None
-            source._live_ov_cache = None
-            self._stats_force = True
-            return True
+            if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                book._cap_active()
+                book._snap_cache = None
+                book._live_ov_cache = None
 
     def _bootstrap_catalog(self) -> None:
         """Build the initial full-range catalog without blocking service start.
@@ -10267,6 +10339,7 @@ class Pulse:
                     self.hist_busy = False
                 if not replayed or self._hist_request_changed():
                     self._hist_checkpoint(book, "superseded-or-deferred")
+                    self._hist_wake.wait(timeout=1.0)
                     continue
                 watermark = {symbol: int(self.history_store.watermark(symbol, source="exchange") or 0) for symbol in valid}
                 complete_at = time.time()
@@ -10489,8 +10562,6 @@ class Pulse:
             self.halt_reason = "stopped"
             self.priority_controls()
             self.write_stats(force=True)
-            self.wake_ev.clear()
-            self.wake_ev.wait(timeout=0.4)
             return
         if paused:
             self.halted = True
@@ -10502,8 +10573,6 @@ class Pulse:
             self.priority_controls()
             self.manage()
             self.write_stats(force=True)
-            self.wake_ev.clear()
-            self.wake_ev.wait(timeout=0.4)
             return
         if self.halt_reason in ("paused", "stopped"):
             pre = getattr(self, "_pre_pause_halt", None)
@@ -10547,11 +10616,9 @@ class Pulse:
             unprotected = self.priority_controls()
         # Indications run on the warm thread so the 530-symbol scan cannot stall the watchdog.
         if not self.halted:
-            if unprotected:
-                self.maybe_block_adds()
-                self.maybe_dca_adds()
-            else:
-                self.maybe_entries()
+            self.maybe_entries()
+            self.maybe_block_adds()
+            self.maybe_dca_adds()
         if self.cycle % QA_EVERY == 0:
             self.qa_tick()
         if self.cycle % 12 == 0:
@@ -10609,12 +10676,10 @@ class Pulse:
         qa = threading.Thread(target=self._background_startup_self_tests, name="startup-qa", daemon=True)
         qa.start()
         while True:
-            # Never overlap: previous cycle must finish before the next starts.
-            if self.cycle_busy:
-                time.sleep(0.001)
-                continue
-            self.cycle_busy = True
+            # One cycle at a time on this thread. cycle_busy is observability
+            # for stats; the lock is what actually serialises the work.
             t0 = time.perf_counter()
+            self.cycle_busy = True
             try:
                 # Do not hold the shared state lock across refresh/control
                 # REST calls.  A slow exchange response must not starve the
@@ -10627,22 +10692,22 @@ class Pulse:
                 log("LOOP " + self.last_error)
                 if hasattr(self.api, "err"):
                     self.api.err.write("loop", msg=self.last_error[:300])
-            dt = time.perf_counter() - t0
-            self.last_scan_ms = dt * 1000.0
-            self.last_scan_io = bool(self.did_io or self.hist_busy or dt > SCAN_S)
-            self.cycle_overrun = dt > SCAN_S and not (self.did_io or self.hist_busy)
-            try:
-                self.write_stats()
-            except Exception:
-                pass
-            sd_notify("WATCHDOG=1")
-            wall = time.perf_counter() - t0
-            remain = SCAN_S - wall
-            self.cycle_wait_ms = max(0.0, remain) * 1000.0
-            self.cycle_busy = False
+            finally:
+                dt = time.perf_counter() - t0
+                self.last_scan_ms = dt * 1000.0
+                self.last_scan_io = bool(self.did_io or self.hist_busy or dt > SCAN_S)
+                self.cycle_overrun = dt > SCAN_S and not (self.did_io or self.hist_busy)
+                try:
+                    self.write_stats()
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
+                wall = time.perf_counter() - t0
+                remain = SCAN_S - wall
+                self.cycle_wait_ms = max(0.0, remain) * 1000.0
+                self.cycle_busy = False
             if remain > 0:
-                self.wake_ev.clear()
-                self.wake_ev.wait(timeout=remain)
+                self._wait_wake(remain)
             else:
                 # Yield so hist/warm/ctrl threads run instead of busy-spinning.
                 time.sleep(0.02)

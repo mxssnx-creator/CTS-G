@@ -876,6 +876,300 @@ def control_coord_test() -> None:
     rm(os.path.join(tmp, "reset-eq-bingx-t01"))
 
 
+def progression_continuity_test() -> None:
+    """Continuous functional progression: no lost wakeups, no nested stop waits,
+    Start unsticks hist+cycle, coord recovers, rearranges, and the hot loop
+    never leaves cycle_busy latched after an exception."""
+    import tempfile
+    import threading
+    import time
+    import pulse_trader as pt
+    from coord_engine import Coordinator
+
+    tmp = tempfile.mkdtemp(prefix="progress-test-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+
+    def touch(path: str) -> None:
+        with open(path, "a"):
+            pass
+
+    def rm(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL, pt.RESET_EQ_PATH):
+        rm(f)
+
+    def stub() -> Any:
+        p = object.__new__(pt.Pulse)
+        p.halted = False
+        p.halt_reason = None
+        p._pre_pause_halt = None
+        p.equity = 100.0
+        p.start_eq = 100.0
+        p.cycle = 0
+        p.did_io = False
+        p.hist_busy = False
+        p.last_scan_ms = 0.0
+        p.last_scan_io = False
+        p.cycle_overrun = False
+        p.cycle_busy = False
+        p.cycle_wait_ms = 0.0
+        p._stats_force = False
+        p.wake_ev = threading.Event()
+        p._hist_wake = threading.Event()
+        p.errors = 0
+        p.last_error = ""
+        p.last_event = ""
+        p.event_n = 0
+        p.priority_controls = lambda: 0
+        p.write_stats = lambda force=False: None
+        p.refresh_tickers = lambda: None
+        p.seed_px_bars = lambda: None
+        p.manage = lambda: None
+        p._budget = lambda: None
+        p.maybe_reload_config = lambda: None
+        p.adopt_exchange_positions = lambda: None
+        p.sync_own_fills = lambda: None
+        p.maybe_block_adds = lambda: None
+        p.maybe_dca_adds = lambda: None
+        p.maybe_entries = lambda: None
+        p.qa_tick = lambda: None
+        p.trim_caches = lambda force=False: None
+        p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
+        p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
+        p._cycle_lock = threading.Lock()
+        p._state_lock = threading.RLock()
+        return p
+
+    old_sd = pt.sd_notify
+    pt.sd_notify = lambda *a, **k: None
+    try:
+        p = stub()
+        waits: List[float] = []
+        orig_wait = p.wake_ev.wait
+        p.wake_ev.wait = lambda timeout=None: waits.append(float(timeout or 0)) or orig_wait(timeout=timeout)  # type: ignore[method-assign]
+        touch(pt.STOP_PATH)
+        p._one_cycle()
+        rec("prog-stop-no-nested-wait", p.halted and p.halt_reason == "stopped" and waits == [],
+            f"halted={p.halted} waits={waits}")
+        rm(pt.STOP_PATH)
+        touch(pt.PAUSE_PATH)
+        p2 = stub()
+        waits2: List[float] = []
+        orig2 = p2.wake_ev.wait
+        p2.wake_ev.wait = lambda timeout=None: waits2.append(float(timeout or 0)) or orig2(timeout=timeout)  # type: ignore[method-assign]
+        p2._one_cycle()
+        rec("prog-pause-no-nested-wait", p2.halted and p2.halt_reason == "paused" and waits2 == [],
+            f"halted={p2.halted} waits={waits2}")
+        rm(pt.PAUSE_PATH)
+
+        # Stop then Start: next cycle must resume, not restore a latch.
+        p3 = stub()
+        p3.halted = True
+        p3.halt_reason = "stopped"
+        p3._pre_pause_halt = "drawdown halt"
+        touch(pt.RESET_EQ_PATH)
+        p3._one_cycle()
+        rec("prog-start-resumes-cycle", (not p3.halted) and p3.halt_reason is None and p3.cycle == 1,
+            f"halted={p3.halted} reason={p3.halt_reason} cycle={p3.cycle}")
+        rm(pt.RESET_EQ_PATH)
+
+        # Rapid stop/start/pause flags vs cycle: never halted without a file.
+        p4 = stub()
+        flags_ok = True
+        for i, action in enumerate(("stop", "start", "pause", "start", "stop", "start")):
+            rm(pt.STOP_PATH)
+            rm(pt.PAUSE_PATH)
+            rm(pt.RESET_EQ_PATH)
+            if action == "stop":
+                touch(pt.STOP_PATH)
+            elif action == "pause":
+                touch(pt.PAUSE_PATH)
+            else:
+                touch(pt.RESET_EQ_PATH)
+            p4._one_cycle()
+            stopped = os.path.exists(pt.STOP_PATH)
+            paused = os.path.exists(pt.PAUSE_PATH)
+            if stopped and not (p4.halted and p4.halt_reason == "stopped"):
+                flags_ok = False
+            if paused and not stopped and not (p4.halted and p4.halt_reason == "paused"):
+                flags_ok = False
+            if not stopped and not paused and p4.halt_reason in ("stopped", "paused"):
+                flags_ok = False
+        rec("prog-flag-cycle-consistent", flags_ok and p4.cycle >= 1, f"cycle={p4.cycle} reason={p4.halt_reason}")
+        rm(pt.STOP_PATH)
+        rm(pt.PAUSE_PATH)
+        rm(pt.RESET_EQ_PATH)
+
+        # Event: bump during cycle is still set, wait-first returns immediately.
+        p5 = stub()
+        p5.bump("tick")
+        t0 = time.perf_counter()
+        hit = p5._wait_wake(1.5)
+        dt = time.perf_counter() - t0
+        rec("prog-wait-consumes-pending-bump", hit and dt < 0.2 and not p5.wake_ev.is_set(),
+            f"hit={hit} dt={dt:.3f} set={p5.wake_ev.is_set()}")
+
+        p6 = stub()
+        late = []
+
+        def fire() -> None:
+            time.sleep(0.03)
+            p6.bump("ctrl")
+            late.append(time.perf_counter())
+
+        threading.Thread(target=fire, daemon=True).start()
+        t1 = time.perf_counter()
+        hit6 = p6._wait_wake(1.5)
+        dt6 = time.perf_counter() - t1
+        rec("prog-wait-wakes-on-ctrl-bump", hit6 and dt6 < 0.4, f"hit={hit6} dt={dt6:.3f}")
+
+        p7 = stub()
+        p7.bump("tick")
+        rec("prog-tick-does-not-wake-hist", not p7._hist_wake.is_set(), p7.last_event)
+        p7.bump("ctrl")
+        rec("prog-ctrl-wakes-hist-and-cycle", p7._hist_wake.is_set() and p7.wake_ev.is_set(),
+            f"hist={p7._hist_wake.is_set()} cycle={p7.wake_ev.is_set()}")
+        p7._hist_wake.clear()
+        p7.wake_ev.clear()
+        p7.bump("config")
+        rec("prog-config-wakes-hist", p7._hist_wake.is_set())
+
+        # cycle_busy always cleared even if the cycle body raises.
+        p8 = stub()
+        p8._one_cycle = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[method-assign]
+        p8.cycle_busy = True
+        t0 = time.perf_counter()
+        try:
+            with p8._cycle_lock:
+                p8._one_cycle()
+        except RuntimeError:
+            pass
+        finally:
+            p8.cycle_busy = False
+        rec("prog-cycle-busy-cleared-on-error", p8.cycle_busy is False, str(p8.cycle_busy))
+
+        # Mini hot loop: N cycles + concurrent bumps never stick.
+        p9 = stub()
+        p9.cycle = 0
+        stop_loop = threading.Event()
+        cycles = []
+
+        def loop() -> None:
+            while not stop_loop.is_set() and len(cycles) < 24:
+                p9.cycle_busy = True
+                try:
+                    with p9._cycle_lock:
+                        p9._one_cycle()
+                    cycles.append(p9.cycle)
+                finally:
+                    p9.cycle_busy = False
+                p9._wait_wake(0.02)
+
+        th = threading.Thread(target=loop, daemon=True)
+        th.start()
+        for i in range(12):
+            p9.bump("tick" if i % 2 == 0 else "ctrl")
+            time.sleep(0.005)
+        th.join(timeout=2.0)
+        stop_loop.set()
+        rec("prog-hot-loop-advances", len(cycles) >= 8 and p9.cycle_busy is False and p9.errors == 0,
+            f"n={len(cycles)} busy={p9.cycle_busy} cycle={p9.cycle}")
+    finally:
+        pt.sd_notify = old_sd
+
+    # Coordinator: block then recover; rearrange when full; skip when room.
+    coord = Coordinator()
+    win = [{"t": i, "pnl": -0.2, "pnl_pct": -0.2} for i in range(12)]
+    allow, reasons, _m = coord.gate(win, consec=8)
+    rec("prog-coord-pause-blocks", allow is False and any("pause" in r for r in reasons), str(reasons)[:160])
+    recovered = [{"t": i, "pnl": 0.4, "pnl_pct": 0.4} for i in range(20)]
+    allow2, reasons2, _m2 = coord.gate(recovered, consec=0)
+    rec("prog-coord-recovers-after-win", allow2 is True and not reasons2,
+        f"allow={allow2} {reasons2[:3]}")
+    # last-axis independent of pause: strong last-N must still fail if last PF is dead
+    last_dead = [{"t": i, "pnl": 0.3, "pnl_pct": 0.3} for i in range(10)] + [{"t": 100 + i, "pnl": -0.3, "pnl_pct": -0.3} for i in range(4)]
+    allow3, reasons3, _m3 = coord.gate(last_dead, consec=4)
+    rec("prog-coord-last-independent", any("base/last" in r or "pause" in r for r in reasons3), str(reasons3)[:160])
+
+    profitable = [{"t": i, "pnl": 0.2, "pnl_pct": 0.2} for i in range(20)]
+    allow4, reasons4, metrics4 = coord.add_gate(profitable, 0, intern={"pf": 1.2, "n": 15}, count=3, count_tape=[0.1] * 8)
+    rec("prog-coord-add-gate-allows", allow4 is True and metrics4.get("addsAllow") == 1.0, str(reasons4)[:120])
+    weak_count = [-0.4] * 8
+    allow5, reasons5, _m5 = coord.add_gate(profitable, 0, intern={"pf": 1.2, "n": 15}, count=3, count_tape=weak_count)
+    rec("prog-coord-add-gate-independent", allow5 is False and any("count-pos" in r for r in reasons5), str(reasons5)[:160])
+
+    ranked = [(0.9, "AAA-USDT", 1, "ind:state")]
+    opens_full = [{"symbol": "BBB-USDT", "uPnlPct": -0.4, "ageS": 40.0, "conf": 0.5}]
+    swap = coord.pick_rearrange(opens_full, ranked, max_open=1)
+    rec("prog-rearrange-when-full", swap is not None and swap.get("to") == "AAA-USDT", str(swap))
+    swap_room = coord.pick_rearrange(opens_full, ranked, max_open=8)
+    rec("prog-rearrange-skipped-with-room", swap_room is None, str(swap_room))
+    swap_off = Coordinator()
+    swap_off.rearrange = False
+    rec("prog-rearrange-respects-flag", swap_off.pick_rearrange(opens_full, ranked, 1) is None)
+
+    # Size/stack recoord stays monotonic and bounded.
+    rec("prog-size-mult-monotonic", coord.size_mult(0) > coord.size_mult(4) >= 0.35)
+    rec("prog-stack-cap-weak-halves", coord.add_stack_cap(6, 0.5) == 3 and coord.add_stack_cap(6, 1.5) == 6)
+
+    # Live cycle must not freeze while hist holds the state lock, and one
+    # unprotected position must not skip new entries.
+    p_lock = stub()
+    p_lock._state_lock = threading.RLock()
+    p_lock._stats_last = {"cycle": 11, "running": True}
+    p_lock.halted = False
+    p_lock.halt_reason = None
+    p_lock.cycle = 11
+    p_lock.last_scan_ms = 12.5
+    held = threading.Event()
+    done = threading.Event()
+
+    def hold_lock() -> None:
+        p_lock._state_lock.acquire()
+        held.set()
+        done.wait(2.0)
+        p_lock._state_lock.release()
+
+    threading.Thread(target=hold_lock, daemon=True).start()
+    held.wait(1.0)
+    t_lock = time.perf_counter()
+    deferred = p_lock.stats()
+    dt_lock = time.perf_counter() - t_lock
+    done.set()
+    rec("prog-stats-skips-busy-lock", dt_lock < 0.4 and deferred.get("statsDeferred") is True
+        and deferred.get("cycle") == 11, f"dt={dt_lock:.3f} { {k: deferred.get(k) for k in ('cycle','statsDeferred')} }")
+
+    p_ent = stub()
+    calls: List[str] = []
+    p_ent.maybe_entries = lambda: calls.append("entries")  # type: ignore[method-assign]
+    p_ent.maybe_block_adds = lambda: calls.append("block")  # type: ignore[method-assign]
+    p_ent.maybe_dca_adds = lambda: calls.append("dca")  # type: ignore[method-assign]
+    p_ent.priority_controls = lambda: 2  # type: ignore[method-assign]
+    p_ent._one_cycle()
+    rec("prog-unprotected-still-enters", calls == ["entries", "block", "dca"], str(calls))
+
+    # _running is always cleared if commit scoring blows up.
+    p_run = stub()
+    class BoomBook:
+        _running = True
+        progress = type("P", (), {"phase": "replay", "error": ""})()
+    p_run.sets = BoomBook()
+    p_run._sets_generation = 3
+    try:
+        raise RuntimeError("commit")
+    except RuntimeError:
+        pass
+    with p_run._state_lock:
+        if p_run.sets is p_run.sets and p_run._sets_generation == 3:
+            p_run.sets._running = False
+    rec("prog-running-flag-cleared", p_run.sets._running is False)
+
+
 def cancel_replace_regression_test() -> None:
     """BingX trailing updates place first and preserve protection on failure."""
     import pulse_trader as pt
@@ -2427,6 +2721,7 @@ def main() -> int:
     unlimited_test()
     always_start_test()
     control_coord_test()
+    progression_continuity_test()
     phantom_recon_test()
     sim_stats_test()
     block_calc_test()

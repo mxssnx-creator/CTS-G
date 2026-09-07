@@ -158,6 +158,8 @@ class BlockContractTests(unittest.TestCase):
         p.priority_controls = lambda: events.append("controls") or 0
         p.manage = lambda: None
         p.maybe_entries = lambda: events.append("entry-evaluation")
+        p.maybe_block_adds = lambda: None
+        p.maybe_dca_adds = lambda: None
         with patch.multiple(trader, STOP_PATH=self.tmp.name + "/STOP", PAUSE_PATH=self.tmp.name + "/PAUSE", STOP_ALL=self.tmp.name + "/ALL"):
             p._one_cycle()
         self.assertEqual(events, ["fills", "reconcile", "controls", "entry-evaluation"])
