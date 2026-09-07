@@ -1747,7 +1747,7 @@ class SetBook:
                         on_symbol(symbol, done, len(names))
                     if on_step:
                         on_step()
-            else:
+                    time.sleep(0)
                 # Keep at most one worker's worth of symbols in flight. The old
                 # submit-all approach retained every future and its captured
                 # payload until the slowest symbol finished.
@@ -1791,6 +1791,7 @@ class SetBook:
                                 on_symbol(result_symbol, done, len(names))
                             if on_step:
                                 on_step()
+                            time.sleep(0)
             self.progress.phase = "score"
             self.progress.pct = 90.0
             self._commit_hist(
@@ -2129,6 +2130,7 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
             if on_step and i % 50 == 0:
                 on_step()
+                time.sleep(0)
         return signals, kind_sigs, warmup
 
     def _replay_core_vectorized(
@@ -2470,6 +2472,7 @@ class SetBook:
                             dca_pos = dict(seed)
                     if on_step and i % 80 == 0:
                         on_step()
+                        time.sleep(0)
             if strat_hist is not None:
                 for k in ("block", "dca"):
                     tape = strat_hist.get(k) or []

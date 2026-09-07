@@ -10780,12 +10780,8 @@ class Pulse:
         stop = getattr(self, "_watchdog_stop", None)
         while True:
             sd_notify("WATCHDOG=1")
-            try:
-                store = getattr(self, "history_store", None)
-                if store is not None and hasattr(store, "flush"):
-                    store.flush()
-            except Exception:
-                pass
+            # Never persist from this thread: json-dumping a multi-symbol tape
+            # holds the GIL long enough that systemd never sees the ping.
             if stop is None:
                 time.sleep(5.0)
                 continue
