@@ -103,6 +103,12 @@ export const SL_TP_MIN = 0.1;
 export const SL_TP_MAX = 3.0;
 export const SL_TP_STEP = 0.1;
 
+/** Minimum PF for the coordinated/live qualification stages. */
+export const LIVE_MIN_PF = 1.25;
+export const CONTROL_SL_PCT = 2.5;
+export const CONTROL_TP_PCT = 5.0;
+export const RISK_PCT_MAX = 5.0;
+
 export const PF_MIN = 0.8;
 export const PF_MAX = 2.5;
 export const PF_STEP = 0.02;
@@ -184,6 +190,8 @@ export type PulseOverlay = {
   staggerS: number;
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
+  controlSlPct: number;
+  controlTpPct: number;
   normalExecutionEnabled: boolean;
   blockActive: boolean;
   blockEnabled: boolean;
@@ -353,11 +361,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.6,
   controlOrders: true,
   controlOrdersPerConfig: true,
+  controlSlPct: CONTROL_SL_PCT,
+  controlTpPct: CONTROL_TP_PCT,
   normalExecutionEnabled: false,
   blockActive: true,
   blockEnabled: true,
   blockMaxStack: 6,
-  blockVolumeRatio: 0.25,
+  blockVolumeRatio: 2.0,
   blockMaxVolumeMultiplier: 2,
   blockCounts: [1, 2, 3, 4, 5, 6],
   blockProfitFactorRatio: 1.25,
@@ -372,7 +382,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: 1.02,
+  dcaMinPf: LIVE_MIN_PF,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
@@ -386,10 +396,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   prevPosWindow: 25,
   prevPosMinCount: 5,
-  minPf: 1.02,
-  baseMinPf: 1.02,
-  mainMinPf: 1.02,
-  realMinPf: 1.02,
+  minPf: LIVE_MIN_PF,
+  baseMinPf: LIVE_MIN_PF,
+  mainMinPf: LIVE_MIN_PF,
+  realMinPf: LIVE_MIN_PF,
   positionCostPct: 0.10,
   positionCostFallbackPct: 0.10,
   // Prefer measured exchange fees. The manual PositionCost remains the
@@ -409,9 +419,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   coordOptimizationN: 150,
   pfWindow: 15,
   slMinPct: 0.2,
-  slMaxPct: 3.0,
+  slMaxPct: CONTROL_SL_PCT,
   tpMinPct: 0.3,
-  tpMaxPct: 3.0,
+  tpMaxPct: CONTROL_TP_PCT,
   tpCostRatio: 5,
   slToTpRatio: 0.6,
   slToTpAuto: true,
@@ -472,7 +482,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histRefreshS: 3600,
   setPfWindow: 15,
   setDeactN: 25,
-  setMinPf: 1.02,
+  setMinPf: LIVE_MIN_PF,
   setMaxDdTimeS: 57600,
   setAutoDeact: true,
   // Live negative-result deactivation is an explicit safety policy, not an
@@ -501,7 +511,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 15,
   exitDeactN: 25,
-  exitMinPf: 1.02,
+  exitMinPf: LIVE_MIN_PF,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -530,6 +540,8 @@ export type CtsSettings = {
   control_orders?: boolean | number | string;
   controlOrdersPerConfig?: boolean | number | string;
   control_orders_per_config?: boolean | number | string;
+  controlSlPct?: number;
+  controlTpPct?: number;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
   blockMaxStack?: number;
@@ -718,12 +730,14 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
       true,
     ),
+    controlSlPct: num(live?.controlSlPct ?? cts.controlSlPct, CONTROL_SL_PCT),
+    controlTpPct: num(live?.controlTpPct ?? cts.controlTpPct, CONTROL_TP_PCT),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
-    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 0.25),
+    blockVolumeRatio: num(cts.blockVolumeRatio ?? coord.blockVolumeRatio, 2.0),
     blockMaxVolumeMultiplier: num(cts.blockMaxVolumeMultiplier ?? coord.blockMaxVolumeMultiplier, 2),
     blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
-    blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
+    blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, LIVE_MIN_PF),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     normalExecutionEnabled: bool(cts.normalExecutionEnabled, false),
     blockActive: bool(cts.blockActive, true),
@@ -737,7 +751,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
-    dcaMinPf: num(cts.dcaMinPf, 1.02),
+    dcaMinPf: num(cts.dcaMinPf, LIVE_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 1),
@@ -751,10 +765,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
     prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),
-  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.02), 1.02),
-  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.02), 1.02),
-  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.02), 1.02),
-  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.02), 1.02),
+  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, LIVE_MIN_PF), LIVE_MIN_PF),
+  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, LIVE_MIN_PF), LIVE_MIN_PF),
+  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, LIVE_MIN_PF), LIVE_MIN_PF),
+  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, LIVE_MIN_PF), LIVE_MIN_PF),
 
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.10),
     positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.10),
@@ -773,9 +787,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.2),
-    slMaxPct: num(cts.slMaxPct, 3.0),
+    slMaxPct: num(cts.slMaxPct, CONTROL_SL_PCT),
     tpMinPct: num(cts.tpMinPct, 0.3),
-    tpMaxPct: num(cts.tpMaxPct, 3.0),
+    tpMaxPct: num(cts.tpMaxPct, CONTROL_TP_PCT),
     tpCostRatio: num(cts.tpCostRatio, 5),
     slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
     slToTpAuto: bool(cts.slToTpAuto, true),
@@ -826,7 +840,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histRefreshS: num(cts.histRefreshS, 3600),
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
-    setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.02),
+    setMinPf: num(cts.setMinPf ?? cts.baseMinPf, LIVE_MIN_PF),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
@@ -853,18 +867,22 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, 1.02),
+    exitMinPf: num(cts.exitMinPf, LIVE_MIN_PF),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
-  const pct = (value: number, fallback: number): number =>
-    Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 10) / 10;
+  const pct = (value: number, fallback: number, ceiling = RISK_PCT_MAX): number =>
+    Math.round(Math.max(0.1, Math.min(ceiling, num(value, fallback))) * 10) / 10;
   out.slMinPct = pct(out.slMinPct, 0.2);
-  out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
+  out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, CONTROL_SL_PCT));
   out.tpMinPct = pct(out.tpMinPct, 0.3);
-  out.tpMaxPct = Math.max(out.tpMinPct, pct(out.tpMaxPct, 3.0));
+  out.tpMaxPct = Math.max(out.tpMinPct, pct(out.tpMaxPct, CONTROL_TP_PCT));
+  out.controlSlPct = pct(out.controlSlPct, CONTROL_SL_PCT);
+  out.controlTpPct = pct(out.controlTpPct, CONTROL_TP_PCT);
+  out.slMaxPct = Math.max(out.slMaxPct, out.controlSlPct);
+  out.tpMaxPct = Math.max(out.tpMaxPct, out.controlTpPct);
   out.slToTpMin = SL_TP_MIN;
   out.slToTpMax = SL_TP_MAX;
   out.slToTpStep = SL_TP_STEP;
@@ -901,7 +919,7 @@ export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number,
   const rows = [];
   const nMax = stack > 0 ? Math.min(stack, 6) : 6;
   const cap = Math.max(1, Math.min(2, num(maxMultiplier, 2)));
-  const volumeRatio = Math.max(0.05, Math.min(2, num(ratio, 0.25)));
+  const volumeRatio = Math.max(0.05, Math.min(2, num(ratio, 2.0)));
   for (let n = 1; n <= nMax; n += 1) {
     const inc = Math.min(cap - 1, n * volumeRatio);
     rows.push({
@@ -957,7 +975,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     ...overlay,
     symbols: capSymbols(overlay.symbols || []),
     blockMaxStack: Math.max(1, Math.min(6, Math.trunc(num(overlay.blockMaxStack, 6)) || 6)),
-    blockVolumeRatio: Math.max(0.05, Math.min(2, num(overlay.blockVolumeRatio, 0.25))),
+    blockVolumeRatio: Math.max(0.05, Math.min(2, num(overlay.blockVolumeRatio, 2.0))),
     blockMaxVolumeMultiplier: Math.max(1, Math.min(2, num(overlay.blockMaxVolumeMultiplier, 2))),
     blockCounts: Array.isArray(overlay.blockCounts)
       ? [...new Set(overlay.blockCounts.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6))].sort((a, b) => a - b)

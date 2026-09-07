@@ -3,9 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   blockTable,
   bool,
+  CONTROL_SL_PCT,
+  CONTROL_TP_PCT,
   DEFAULT_OVERLAY,
   fetchCtsBundle,
   loadLocalOverlay,
+  LIVE_MIN_PF,
   num,
   normalizePf,
   PF_MAX,
@@ -1198,10 +1201,10 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMinPct", v)} />
-                <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
-                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
-                <Slider label="TP max" value={overlay.tpMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={0.1} max={5} step={0.1} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={5} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
+                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={5} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Slider label="TP max" value={overlay.tpMaxPct} min={0.1} max={5} step={0.1} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
                   value={overlay.tpCostRatio}
@@ -1498,9 +1501,9 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("realMinPf", v)} />
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint={`Shared PF range 0.80–2.50 · live default ${LIVE_MIN_PF.toFixed(2)}`} onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint={`Shared PF range 0.80–2.50 · live default ${LIVE_MIN_PF.toFixed(2)}`} onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint={`Shared PF range 0.80–2.50 · live default ${LIVE_MIN_PF.toFixed(2)}`} onChange={(v) => patch("realMinPf", v)} />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
@@ -1999,8 +2002,10 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Stop %" value={overlay.slPct} min={0.1} max={5} step={0.02} onChange={(v) => patch("slPct", v)} />
-                <Num label="Take profit %" value={overlay.tpPct} min={0.1} max={8} step={0.05} onChange={(v) => patch("tpPct", v)} />
+                <Num label="Control SL %" value={overlay.controlSlPct} min={0.1} max={5} step={0.1} hint={`Live default ${CONTROL_SL_PCT.toFixed(1)}%`} onChange={(v) => patch("controlSlPct", v)} />
+                <Num label="Control TP %" value={overlay.controlTpPct} min={0.1} max={5} step={0.1} hint={`Live default ${CONTROL_TP_PCT.toFixed(1)}%`} onChange={(v) => patch("controlTpPct", v)} />
+                <Num label="Base stop %" value={overlay.slPct} min={0.1} max={5} step={0.02} onChange={(v) => patch("slPct", v)} />
+                <Num label="Base take profit %" value={overlay.tpPct} min={0.1} max={8} step={0.05} onChange={(v) => patch("tpPct", v)} />
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />

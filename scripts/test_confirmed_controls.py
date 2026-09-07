@@ -64,6 +64,19 @@ class ControlFills(unittest.TestCase):
         costs=[];self.p._update_live_position_costs=lambda rows:costs.append(rows)
         self.p.sync_own_fills();self.assertEqual(costs,[[]])
 
+    def test_exact_control_pair_is_selected_without_legacy_widening(self):
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.control_sl_pct = 0.025
+        p.control_tp_pct = 0.05
+        p.px = {}
+        p.clamp_ctrl_price = lambda pos, kind, price: price
+        long_pos = SimpleNamespace(symbol="XRP-USDT", side="LONG", entry=100.0, sl=0.0, tp=0.0)
+        short_pos = SimpleNamespace(symbol="XRP-USDT", side="SHORT", entry=100.0, sl=0.0, tp=0.0)
+        self.assertEqual(p.control_prices(long_pos), (97.5, 105.0))
+        self.assertAlmostEqual(p.control_prices(short_pos)[0], 102.5)
+        self.assertEqual(p.control_prices(short_pos)[1], 95.0)
+        self.assertEqual(p.desired_sl_tp(long_pos), (97.5, 105.0, 97.5, 105.0))
+
     def test_warm_network_wait_does_not_lock_stats(self):
         entered=threading.Event();release=threading.Event();completed=[]
         self.p._state_lock=threading.RLock();self.p.last_bal=0

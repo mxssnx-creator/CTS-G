@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  CONTROL_SL_PCT,
+  CONTROL_TP_PCT,
   DEFAULT_OVERLAY,
   DEFAULT_SYMBOL_COUNT,
+  LIVE_MIN_PF,
   isUnlimitedSymbolBook,
   overlayFromCts,
   rankedSymbolCap,
@@ -12,7 +15,7 @@ import {
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.02, key);
+      assert.equal(value[key], LIVE_MIN_PF, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -35,6 +38,10 @@ test("new and legacy settings default to adjusted execution, 110 Sets and 50 sym
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, false);
     assert.equal(value.blockActive, true);
+    assert.equal(value.blockVolumeRatio, 2);
+    assert.equal(value.controlSlPct, CONTROL_SL_PCT);
+    assert.equal(value.controlTpPct, CONTROL_TP_PCT);
+    assert.equal(value.tpMaxPct, CONTROL_TP_PCT);
     assert.equal(value.setMaxActive, 110);
     assert.equal(value.stratGeneral, true);
     assert.equal(value.symbolCap, 50);

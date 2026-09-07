@@ -270,6 +270,9 @@ def rank_self_test() -> Tuple[bool, str]:
 TARGET_NOTIONAL = 2.15
 LEVERAGE = 150
 USE_MAX_LEVERAGE = True
+LIVE_MIN_PF = 1.25
+CONTROL_SL_PCT = 0.025
+CONTROL_TP_PCT = 0.05
 MAX_OPEN = 0  # 0 = unlimited
 MAX_PER_GROUP = 0  # 0 = unlimited
 SL_PCT = 0.0048
@@ -979,12 +982,12 @@ class Pulse:
         self.block = BlockBook(BLOCK_PATH, {
             "variantBlockEnabled": True,
             "blockMaxStack": 6,
-            "blockVolumeRatio": 0.25,
-            "blockProfitFactorRatio": 1.1,
+            "blockVolumeRatio": 2.0,
+            "blockProfitFactorRatio": LIVE_MIN_PF,
             "blockPauseCountRatio": 1,
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
-            "defaultMinPF": 1.2,
+            "defaultMinPF": LIVE_MIN_PF,
             "prevPosMinCount": 5,
             "prevPosWindow": 25,
         })
@@ -1043,9 +1046,11 @@ class Pulse:
         self._load_config_evidence()
         self.pf_window = 15
         self.sl_min = 0.0020
-        self.sl_max = 0.0120
+        self.sl_max = CONTROL_SL_PCT
         self.tp_min = 0.0035
-        self.tp_max = 0.0240
+        self.tp_max = CONTROL_TP_PCT
+        self.control_sl_pct = CONTROL_SL_PCT
+        self.control_tp_pct = CONTROL_TP_PCT
         self.tp_cost_ratio = 5.0
         self.sl_to_tp = 0.64
         self.strat_ind = True
@@ -3093,6 +3098,27 @@ class Pulse:
             tp = e * (1.0 - tp_w)
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
+    def has_exact_control_range(self) -> bool:
+        return (
+            float(getattr(self, "control_sl_pct", 0.0) or 0.0) > 0
+            and float(getattr(self, "control_tp_pct", 0.0) or 0.0) > 0
+        )
+
+    def control_prices(self, pos: Position) -> Tuple[float, float]:
+        """Return the configured exchange control pair, subject to venue legality."""
+        entry = float(pos.entry or 0.0) or float(self.px.get(pos.symbol) or 0.0)
+        if entry <= 0:
+            return pos.sl, pos.tp
+        sl_pct = float(getattr(self, "control_sl_pct", CONTROL_SL_PCT) or CONTROL_SL_PCT)
+        tp_pct = float(getattr(self, "control_tp_pct", CONTROL_TP_PCT) or CONTROL_TP_PCT)
+        if pos.side == "LONG":
+            sl = entry * (1.0 - sl_pct)
+            tp = entry * (1.0 + tp_pct)
+        else:
+            sl = entry * (1.0 + sl_pct)
+            tp = entry * (1.0 - tp_pct)
+        return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
+
     def px_band(self, symbol: str, entry: float = 0.0) -> Tuple[float, float, float, float]:
         mark = float(self.px.get(symbol) or 0)
         last = float((getattr(self, "last_px", None) or {}).get(symbol) or 0)
@@ -3120,6 +3146,9 @@ class Pulse:
         return price < lo * 0.9985
 
     def desired_sl_tp(self, pos: Position) -> Tuple[float, float, float, float]:
+        if self.has_exact_control_range():
+            control_sl, control_tp = self.control_prices(pos)
+            return control_sl, control_tp, control_sl, control_tp
         sl, tp = self.security_prices(pos)
         sec_sl, sec_tp = self.max_range_prices(pos)
         pick_sl = next((p for p in (sl, sec_sl) if self.sl_legal(pos, p)), 0.0)
@@ -3224,7 +3253,11 @@ class Pulse:
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
-        for extra in (0.0, 0.006, 0.012):
+        # With an explicit control pair, legality is handled by
+        # clamp_ctrl_price; never silently widen the requested 2.5% / 5% pair
+        # through the legacy retry offsets.
+        extras = (0.0,) if self.has_exact_control_range() else (0.0, 0.006, 0.012)
+        for extra in extras:
             px_try = price
             if extra:
                 m = max(self.px.get(pos.symbol) or 0, self.last_px.get(pos.symbol) or 0, pos.entry)
@@ -4298,7 +4331,7 @@ class Pulse:
             return
         if self.entries_blocked():
             return
-        if self.sets.enabled and self.sets.use_historic_gate and not getattr(
+        if self.sets.enabled and bool(getattr(self.sets, "use_historic_gate", False)) and not getattr(
                 getattr(self.sets, "progress", None), "ready", False):
             # Keep forced/demo and direct callers behind the same initial
             # historic publication boundary as normal signal entries.
@@ -4397,12 +4430,17 @@ class Pulse:
         if forced_row is None and getattr(self, "block_active", True):
             execution_plan = self.block_active_plan(sym, side, chosen, qty, px)
         if execution_plan:
+            if str(execution_plan.get("mode") or "") != "block-active":
+                return
             qty = self.round_qty(c, execution_plan["requestedQty"])
             if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
                 self._execution_decision.update(allowed=False, reason="adjusted quantity below exchange minimum")
                 return
         elif not normal_allowed:
+            # General and indication Sets remain available for historic scoring
+            # and coordination, but normal lanes are never live order sources.
             return
+        live_strategy = "block" if execution_plan else pack
         if qty <= 0:
             return
         notional = qty * px
@@ -4434,7 +4472,7 @@ class Pulse:
             parent_set_id=parent_set_id,
             axis_key=str(getattr(chosen, "axis_key", "") or ""),
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=live_strategy,
             client_id=cid,
             qty=qty,
             price=px,
@@ -4510,12 +4548,12 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=live_strategy,
             client_id=cid,
             qty=qty,
             price=px,
             detail="entry market order",
-            metadata={"path": "/openApi/swap/v2/trade/order", "orderSide": order_side},
+            metadata={"path": "/openApi/swap/v2/trade/order", "orderSide": order_side, "executionLane": live_strategy},
         )
         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
         self.did_io = True
@@ -4578,8 +4616,8 @@ class Pulse:
                     return
                 self.errors += 1
                 self.last_error = f"order {sym} {short}"[:160]
-                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
-                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=live_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=live_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
                 self._clear_pending(cid)
                 log(f"ORDER FAIL {sym} {side} {short}")
                 return
@@ -4593,7 +4631,7 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=live_strategy,
             client_id=cid,
             order_id=extract_oid(r),
             qty=qty,
@@ -4669,7 +4707,7 @@ class Pulse:
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
         if forced_row is None and self.exits.enabled and self.exits.ignore_tp:
             # Ignore-TP means the normal target is not an early close; the
-            # exchange safety target still respects the configured 3% ceiling.
+            # exchange safety target still respects the configured 5% ceiling.
             tp_pct = min(self.tp_max, max(tp_pct, sl_pct * 3.0))
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
@@ -4744,7 +4782,7 @@ class Pulse:
             parent_set_id=str(getattr(chosen, "parent_set_id", "") or set_id),
             axis_key=str(getattr(chosen, "axis_key", "") or ""),
             indication_kind=ind_kind,
-            strategy=pack,
+            strategy=live_strategy,
             **self.control_event_fields(pos),
             order_id=real_oid(data.get("orderId") or data.get("orderID")),
             client_id=cid,
@@ -5571,9 +5609,9 @@ class Pulse:
             source = dict(self.config_evidence.get("configs") or {})
         try:
             need = self.sets.eval_need()
-            real_floor = float(self.sets.real_min_pf or 1.15)
+            real_floor = float(self.sets.real_min_pf or LIVE_MIN_PF)
         except Exception:
-            need, real_floor = 8, 1.15
+            need, real_floor = 8, LIVE_MIN_PF
         rows_out: List[Dict[str, Any]] = []
         promoted = 0
         for key, item in source.items():
@@ -5979,17 +6017,23 @@ class Pulse:
         calc_ov["positionCostPct"] = effective_cost
         calc_ov["positionCostSource"] = effective_source
         self.pf_window = int(ov.get("pfWindow") or 15)
-        def _risk_pct(key: str, fallback: float) -> float:
+        def _risk_pct(key: str, fallback: float, ceiling: float = 5.0) -> float:
             try:
                 value = float(ov.get(key) if ov.get(key) is not None else fallback)
             except Exception:
                 value = fallback
-            return max(0.1, min(3.0, value)) / 100.0
+            return max(0.1, min(ceiling, value)) / 100.0
 
         self.sl_min = _risk_pct("slMinPct", 0.20)
-        self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
+        self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 2.5))
         self.tp_min = _risk_pct("tpMinPct", 0.30)
-        self.tp_max = max(self.tp_min, _risk_pct("tpMaxPct", 3.0))
+        self.tp_max = max(self.tp_min, _risk_pct("tpMaxPct", 5.0))
+        self.control_sl_pct = _risk_pct("controlSlPct", 2.5)
+        self.control_tp_pct = _risk_pct("controlTpPct", 5.0)
+        # Exact control targets must remain representable even if an older
+        # overlay still carries the former 3% ceiling.
+        self.sl_max = max(self.sl_max, self.control_sl_pct)
+        self.tp_max = max(self.tp_max, self.control_tp_pct)
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
         self.variants.load(calc_ov, cts)
         self.sl_to_tp = self.variants.current_sl()
@@ -6060,15 +6104,15 @@ class Pulse:
             b_stack = int(ov.get("blockMaxStack") if ov.get("blockMaxStack") is not None else (cts.get("blockMaxStack") or 0))
         except Exception:
             b_stack = 0
-        b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
-        b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
+        b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 2.0)
+        b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or LIVE_MIN_PF, LIVE_MIN_PF)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
-        real_pf = POSITIVE_PF
+        real_pf = LIVE_MIN_PF
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or LIVE_MIN_PF)
         except Exception:
-            real_pf = POSITIVE_PF
+            real_pf = LIVE_MIN_PF
         self.block.enabled = bool(b_en) if b_en is not None else True
         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
             self.block.enabled = True
@@ -6232,6 +6276,8 @@ class Pulse:
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
             "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
+            "controlSlPct": float(getattr(self, "control_sl_pct", CONTROL_SL_PCT) or CONTROL_SL_PCT) * 100,
+            "controlTpPct": float(getattr(self, "control_tp_pct", CONTROL_TP_PCT) or CONTROL_TP_PCT) * 100,
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
