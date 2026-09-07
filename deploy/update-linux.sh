@@ -82,6 +82,15 @@ else
   die "no git clone at $CTS_G_ROOT and no --from-dir given"
 fi
 
+# Reload helpers after the tree moves forward so start_stack/enable_stack
+# from this release actually run (Live default, halt-flag clear, etc.).
+saved_pulse_explicit="${PULSE_PORT_EXPLICIT:-0}"
+saved_start_live="${START_LIVE:-1}"
+# shellcheck source=linux-common.sh
+source "$HERE/linux-common.sh"
+PULSE_PORT_EXPLICIT="$saved_pulse_explicit"
+START_LIVE="$saved_start_live"
+
 find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 configure_git "$CTS_G_ROOT"
 migrate_redis_scope

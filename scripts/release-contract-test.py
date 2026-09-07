@@ -148,6 +148,7 @@ redis_ready
         self.assertIn("--no-live", remote)
         self.assertIn('local start_live="${1:-1}"', common)
         self.assertIn("clear_live_halt_flags", common)
+        self.assertIn("Reload helpers after the tree moves forward", update)
         self.assertIn("CTS_DISABLE_LIVE_START", http)
         self.assertNotIn("CTS_ALLOW_LIVE_START", http)
 
