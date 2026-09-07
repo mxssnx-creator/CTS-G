@@ -15,7 +15,7 @@ DIR = os.path.abspath(DIR)
 sys.path.insert(0, DIR)
 os.chdir(DIR)
 
-from set_engine import SetBook, self_test as sets_self_test, synth_trend
+from set_engine import SetBook, self_test as sets_self_test, synth_trend, drawdown_time, drawdown_time_by_symbol
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
 from risk_variants import self_test as variants_self_test
@@ -434,6 +434,73 @@ def stage_min_pf_test() -> None:
         str(snap.get("stageMinPf")))
 
 
+def stage_engine_calc_test() -> None:
+    """Independent stage PF/DDT stay populated; intern validated is PF>=1.0 not stage floors."""
+    from types import SimpleNamespace
+    from pulse_trader import Closed
+    from position_cost import evaluation_windows, POSITION_COST_PCT_DEFAULT
+
+    rec("ddt-pnl-pct-only", drawdown_time(
+        [{"t": 100, "pnl_pct": 0.01, "symbol": "A"}, {"t": 160, "pnl_pct": -0.02, "symbol": "A"}, {"t": 220, "pnl_pct": -0.01, "symbol": "A"}],
+        now=220,
+    )["maxS"] >= 60, "pct-only DDT")
+    rec("ddt-closed-objects", drawdown_time([
+        Closed(100, "A-USDT", "LONG", 1, 1, 1.1, 0.4, 0.003, "tp", 30),
+        Closed(160, "A-USDT", "LONG", 1, 1, 0.9, -0.2, -0.002, "sl", 20),
+        Closed(220, "A-USDT", "LONG", 1, 1, 0.85, -0.2, -0.002, "sl", 20),
+    ], now=220)["episodes"] >= 1, "Closed DDT")
+    rec("ddt-namespace-objects", drawdown_time([
+        SimpleNamespace(t=100, symbol="A", pnl=None, pnl_pct=0.01),
+        SimpleNamespace(t=160, symbol="A", pnl=None, pnl_pct=-0.02),
+        SimpleNamespace(t=220, symbol="A", pnl=None, pnl_pct=-0.01),
+    ], now=220)["maxS"] >= 60, "ns DDT")
+
+    book = SetBook()
+    book.load({
+        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
+        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
+        "mainEvalPosCount": 7, "realEvalPosCount": 4,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "trailArmMin": 0.3, "trailArmMax": 0.3,
+    })
+    rec("set-eval-overlay", book.main_eval == 7 and book.real_eval == 4, f"{book.main_eval}/{book.real_eval}")
+    st = next(x for x in book.by_idx if x.kind == "base")
+    st.hist = (
+        [{"t": 1000 + i * 60, "pnl": 0.001, "pnl_pct": 0.0012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(10)]
+        + [{"t": 2000 + i * 60, "pnl": 0.01, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(5)]
+    )
+    book._score_one(st)
+    rec("set-stage-pf-reported", st.base_pf > 1.0 and st.main_pf > 1.0 and st.real_pf > 1.0,
+        f"b={st.base_pf} m={st.main_pf} r={st.real_pf}")
+    rec("set-stage-windows-differ", abs(st.base_pf - st.main_pf) > 1e-4, f"b={st.base_pf} m={st.main_pf}")
+    rec("set-stage-ddt-nonzero", st.max_dd_s >= 0.0 and st.dd_episodes >= 0, f"ddt={st.max_dd_s} ep={st.dd_episodes}")
+    snap = book.snapshot()
+    row = next((r for r in (snap.get("rows") or []) if r.get("id") == st.id), {})
+    rec("set-intern-validated", bool(row.get("validated")) and float(row.get("last15Ratio") or 0) >= 1.0
+        and not bool(row.get("realQualified")),
+        f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
+    rec("set-eval-windows-present", bool((row.get("evaluationWindows") or {}).get("last15")),
+        str(list((row.get("evaluationWindows") or {}).keys())[:4]))
+    rec_m = book.stage_record(st, "main")
+    rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
+        f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")
+    rec("set-stage-record-ddt", rec_m.ddt_s == st.max_dd_s, f"{rec_m.ddt_s}")
+    mixed = drawdown_time_by_symbol([
+        {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
+        {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},
+        {"t": 50_000, "pnl_pct": 0.01, "symbol": "B-USDT"},
+        {"t": 50_060, "pnl_pct": -0.02, "symbol": "B-USDT"},
+        {"t": 50_120, "pnl_pct": 0.015, "symbol": "B-USDT"},
+    ], now=50_120)
+    rec("set-dd-split-pct-and-pnl", mixed["maxS"] < 5_000 and mixed.get("symbols") == 2.0, str(mixed))
+    wins = last_n_cost_pf([{"pnl_pct": 0.002, "pnl": 0}] * 15, 15, POSITION_COST_PCT_DEFAULT)
+    rec("pf-plus1x-from-zero-pnl", abs(float(wins["ratio"]) - 1.1) < 1e-6, str(wins.get("ratio")))
+    windows = evaluation_windows([{"t": i, "pnl_pct": 0.002, "pnl": 0} for i in range(15)], POSITION_COST_PCT_DEFAULT)
+    rec("eval-windows-last15", abs(float((windows.get("last15") or {}).get("pf") or 0) - 1.1) < 1e-6,
+        str((windows.get("last15") or {}).get("pf")))
+
+
 def always_start_test() -> None:
     """In-process proof: a start/stop cycle can never leave the desk stuck.
 
@@ -579,9 +646,23 @@ def always_start_test() -> None:
     ctl.fail_first_start = False
     rm(stop_f)
     touch(pause_f)
+    with open(os.path.join(tmp, "stats-bingx-t01.json"), "w") as f:
+        json.dump({"running": True, "halted": False, "haltReason": None}, f)
+    with open(os.path.join(tmp, "hist-calc-req-bingx-t01.json"), "w") as f:
+        json.dump({"phase": "queued"}, f)
     oks, msgs = ph.apply_control("bingx-t01", "stop")
     rec("astart-sidecar-stop-marks", oks and os.path.exists(stop_f) and not os.path.exists(pause_f)
         and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
+    rec("stop-force-kills-if-still-up", "forced" in msgs and any(c and c[0] == "kill" for c in ctl.calls)
+        and any(c and c[0] == "reset-failed" for c in ctl.calls), msgs[:160])
+    rec("stop-cancels-hist-request", not os.path.exists(os.path.join(tmp, "hist-calc-req-bingx-t01.json")))
+    stopped_stats = json.load(open(os.path.join(tmp, "stats-bingx-t01.json")))
+    rec("stop-marks-stats-stopped", stopped_stats.get("halted") is True and stopped_stats.get("running") is False
+        and stopped_stats.get("haltReason") == "stopped", str(stopped_stats)[:160])
+    ctl.calls = []
+    ok_again, msg_again = ph.apply_control("bingx-t01", "start")
+    rec("start-after-stop-clears", ok_again and not os.path.exists(stop_f) and os.path.exists(reset_f)
+        and any(c and c[0] == "restart" for c in ctl.calls), msg_again[:140])
 
     prev_disable_start = os.environ.pop("CTS_DISABLE_LIVE_START", None)
     prev_disable_heal = os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
@@ -2342,6 +2423,7 @@ def main() -> int:
     cancel_replace_regression_test()
     coord_test()
     stage_min_pf_test()
+    stage_engine_calc_test()
     unlimited_test()
     always_start_test()
     control_coord_test()

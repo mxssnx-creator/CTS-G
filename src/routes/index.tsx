@@ -66,6 +66,8 @@ function DeskPage() {
     () =>
       buildOverview(
         (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
       ),
     [stats],
   );
@@ -461,7 +463,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
   const allow = gate?.allow !== false;
   const pc = stats?.pfCost;
   const minPf = pc?.minPf ?? c?.minPf ?? 1.1;
-  const cost = pc?.costPct ?? 0.15;
+  const cost = pc?.costPct ?? 0.10;
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">

@@ -8587,6 +8587,16 @@ class Pulse:
         per_min = (act["wins"] + act["losses"]) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(act["closes"], self.pf_window, self.position_cost_pct)
+        try:
+            need = int(self.sets.eval_need()) if hasattr(self.sets, "eval_need") else 8
+        except Exception:
+            need = 8
+        pc["evaluationWindows"] = evaluation_windows(act["closes"], self.position_cost_pct, required_samples=need)
+        ddt = self._ddt_blob(act["closes"])
+        pc["maxDdS"] = ddt.get("maxDdS")
+        pc["avgDdS"] = ddt.get("avgDdS")
+        pc["ddEpisodes"] = ddt.get("episodes")
+        pc["currentS"] = ddt.get("currentS")
         pc["minPf"] = self.coord.min_pf
         pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
@@ -9158,38 +9168,33 @@ class Pulse:
 
     def _ddt_blob(self, closed: List[Any]) -> Dict[str, Any]:
         from set_engine import drawdown_time_by_symbol
-        recs = []
-        for c in closed:
-            if isinstance(c, dict):
-                recs.append({"t": c.get("t"), "symbol": c.get("symbol") or "?", "pnl": c.get("pnl")})
-            else:
-                recs.append({"t": getattr(c, "t", 0), "symbol": getattr(c, "symbol", "?") or "?", "pnl": getattr(c, "pnl", 0)})
-        d = drawdown_time_by_symbol(recs)
+        d = drawdown_time_by_symbol(closed)
         return {"maxDdS": d.get("maxS"), "avgDdS": d.get("avgS"), "episodes": d.get("episodes"), "maxDepth": d.get("maxDepth"), "currentS": d.get("currentS")}
 
     def _by_symbol_blob(self, closed: List[Any]) -> List[Dict[str, Any]]:
-        buckets: Dict[str, List[float]] = {}
-        ddt_rows: Dict[str, List[Dict[str, Any]]] = {}
+        buckets: Dict[str, List[Any]] = {}
         for c in closed:
             if isinstance(c, dict):
-                s, pnl, t = c.get("symbol") or "?", float(c.get("pnl") or 0), c.get("t")
+                s = str(c.get("symbol") or "?")
             else:
-                s, pnl, t = getattr(c, "symbol", "?"), float(getattr(c, "pnl", 0) or 0), getattr(c, "t", 0)
-            buckets.setdefault(s, []).append(pnl)
-            ddt_rows.setdefault(s, []).append({"t": t, "pnl": pnl})
-        from set_engine import drawdown_time_by_symbol
+                s = str(getattr(c, "symbol", "?") or "?")
+            buckets.setdefault(s, []).append(c)
+        from set_engine import drawdown_time_by_symbol, row_equity_pnl
         out = []
-        for s, pnls in buckets.items():
+        for s, rows in buckets.items():
+            pnls = [row_equity_pnl(c, self.position_cost_pct) for c in rows]
             gp = sum(x for x in pnls if x > 0)
             gl = abs(sum(x for x in pnls if x < 0))
-            d = drawdown_time_by_symbol(ddt_rows.get(s) or [])
+            d = drawdown_time_by_symbol(rows)
+            cost = last_n_cost_pf(rows, len(rows) or 1, self.position_cost_pct)
             out.append({
                 "symbol": s,
                 "n": len(pnls),
                 "wins": sum(1 for x in pnls if x > 0),
                 "losses": sum(1 for x in pnls if x < 0),
                 "net": round(sum(pnls), 6),
-                "pf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
+                "pf": round(float(cost.get("ratio") or 1.0), 4),
+                "classicPf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
                 "maxDdS": d.get("maxS"),
                 "avgDdS": d.get("avgS"),
             })

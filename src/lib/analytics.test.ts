@@ -24,12 +24,27 @@ test("drawdown time isolates interleaved symbols", () => {
 
 test("last-N cost PF selects the newest timestamps", () => {
   const metric = lastNCostPf([
-    { t: 4, pnl: 0, pnl_pct: 0.003 },
-    { t: 1, pnl: 0, pnl_pct: -0.003 },
-    { t: 3, pnl: 0, pnl_pct: 0.003 },
-    { t: 2, pnl: 0, pnl_pct: -0.003 },
+    { t: 4, pnl: 0, pnl_pct: 0.002 },
+    { t: 1, pnl: 0, pnl_pct: -0.002 },
+    { t: 3, pnl: 0, pnl_pct: 0.002 },
+    { t: 2, pnl: 0, pnl_pct: -0.002 },
   ], 2);
   assert.equal(metric.count, 2);
   assert.equal(metric.avgR, 1);
   assert.equal(metric.ratio, 1.1);
+});
+
+test("drawdown time uses cost-net pnl_pct when pnl is zero", () => {
+  const metric = calculateDrawdownTime(
+    [
+      { t: 1_700_000_100, symbol: "A", pnl: 0, pnl_pct: 0.01 },
+      { t: 1_700_000_160, symbol: "A", pnl: 0, pnl_pct: -0.02 },
+      { t: 1_700_000_220, symbol: "A", pnl: 0, pnl_pct: -0.01 },
+    ],
+    1_700_000_220_000,
+    3,
+  );
+  assert.equal(metric.samples, 3);
+  assert.ok(metric.episodes >= 1);
+  assert.ok(metric.maxDurationMs >= 60_000);
 });

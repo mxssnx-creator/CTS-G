@@ -206,23 +206,61 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
     return out[-n:]
 
 
-def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None, *, ordered: bool = False) -> Dict[str, float]:
-    """CTS drawdown-time: episodes from peak through recovery, in seconds."""
-    if ordered:
-        seq = [r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0]
+def row_ts(row: Any) -> float:
+    if isinstance(row, dict):
+        return finite(row.get("t"))
+    return finite(getattr(row, "t", 0))
+
+
+def row_symbol(row: Any) -> str:
+    if isinstance(row, dict):
+        return str(row.get("symbol") or "?")
+    return str(getattr(row, "symbol", None) or "?")
+
+
+def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """Signed equity increment for DDT. Prefer stored non-zero pnl, else cost-net of pnl_pct."""
+    pnl = None
+    pct = None
+    cost = cost_pct
+    if isinstance(row, dict):
+        if "pnl" in row and row.get("pnl") is not None:
+            pnl = finite(row.get("pnl"))
+        pct = row.get("pnl_pct")
+        cost = finite(row.get("position_cost_pct") or row.get("cost_pct") or row.get("costPct") or cost_pct)
     else:
-        seq = sorted(
-            (r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0),
-            key=lambda r: finite(r.get("t")),
+        raw_pnl = getattr(row, "pnl", None)
+        if raw_pnl is not None:
+            pnl = finite(raw_pnl)
+        pct = getattr(row, "pnl_pct", None)
+        cost = finite(
+            getattr(row, "position_cost_pct", None)
+            or getattr(row, "cost_pct", None)
+            or getattr(row, "costPct", None)
+            or cost_pct
         )
+    if pnl is not None and (pct is None or abs(pnl) > 1e-15):
+        return pnl
+    if pct is not None:
+        return net_pnl_pct(finite(pct), cost)
+    return 0.0 if pnl is None else pnl
+
+
+def drawdown_time(rows: Sequence[Any], now: Optional[float] = None, *, ordered: bool = False) -> Dict[str, float]:
+    """CTS drawdown-time: episodes from peak through recovery, in seconds."""
+    usable = [r for r in rows if r is not None and row_ts(r) > 0]
+    if ordered:
+        seq = usable
+    else:
+        seq = sorted(usable, key=row_ts)
     # A historic tape has no meaningful wall-clock tail. If the caller does
     # not provide an observation time, close an open episode at its last
     # sample. For an explicitly supplied time, do not let a stale symbol's
     # missing data create a false multi-hour DDt episode.
     if now is None:
-        now = finite(seq[-1].get("t")) if seq else time.time()
+        now = row_ts(seq[-1]) if seq else time.time()
     elif seq:
-        last_t = finite(seq[-1].get("t"))
+        last_t = row_ts(seq[-1])
         if last_t > 0 and now - last_t > 3600:
             now = last_t
     equity = 0.0
@@ -233,10 +271,10 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None, *
     episodes = 0
     max_depth = 0.0
     for row in seq:
-        t = finite(row.get("t"))
+        t = row_ts(row)
         if t <= 0:
             continue
-        equity += finite(row.get("pnl"))
+        equity += row_equity_pnl(row)
         if equity >= peak - 1e-12:
             if started is not None:
                 dur = max(0.0, t - started)
@@ -266,17 +304,17 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None, *
 
 
 def drawdown_time_by_symbol(
-    rows: Sequence[Dict[str, Any]],
+    rows: Sequence[Any],
     now: Optional[float] = None,
     *,
     ordered: bool = False,
 ) -> Dict[str, float]:
     """DDT per symbol, then max/mean. Mixed-market tapes must not span one 20h episode."""
-    by: Dict[str, List[Dict[str, Any]]] = {}
+    by: Dict[str, List[Any]] = {}
     for r in rows:
-        if not isinstance(r, dict):
+        if r is None:
             continue
-        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
+        by.setdefault(row_symbol(r), []).append(r)
     if len(by) <= 1:
         return drawdown_time(rows, now, ordered=ordered)
     parts = [drawdown_time(tape, now, ordered=ordered) for tape in by.values() if tape]
@@ -728,6 +766,8 @@ class SetBook:
         self.min_pf = 1.02
         self.stage_min_pf = {"base": 1.02, "main": 1.02, "real": 1.02}
         self.real_min_pf = 1.02
+        self.main_eval = 5
+        self.real_eval = 3
         self.max_dd_s = 57600.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -944,6 +984,14 @@ class SetBook:
         }
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
+        try:
+            self.main_eval = max(3, min(25, int(ov.get("mainEvalPosCount") or 5)))
+        except Exception:
+            self.main_eval = 5
+        try:
+            self.real_eval = max(3, min(15, int(ov.get("realEvalPosCount") or 3)))
+        except Exception:
+            self.real_eval = 3
         self.max_dd_s = max(600.0, min(960.0 * 60.0, float(ov.get("setMaxDdTimeS") or 57600)))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.live_negative_deact = bool(ov.get("setLiveNegativeDeact", ov.get("liveNegativeSetDeactivation", False)))
@@ -1105,6 +1153,23 @@ class SetBook:
         except Exception:
             pf = 15
         return max(5, min(8, ms, pf))
+
+    def _stage_window_ns(self) -> Tuple[int, int, int]:
+        base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
+        main_n = max(3, int(getattr(self, "main_eval", 5) or 5))
+        real_n = max(3, int(getattr(self, "real_eval", 3) or 3))
+        return base_n, main_n, real_n
+
+    def _window_cost_pf(
+        self,
+        ordered: Sequence[Dict[str, Any]],
+        n: int,
+        *,
+        simple: Optional[bool] = None,
+    ) -> Dict[str, float]:
+        take = max(1, int(n))
+        tape = ordered[-take:] if len(ordered) > take else ordered
+        return last_n_cost_pf(tape, take, self.cost_pct, ordered=True, simple=simple)
 
     def _step_grid(self) -> List[int]:
         # Always the configured TP-step range. Live adapt may prefer a higher
@@ -2792,6 +2857,9 @@ class SetBook:
         dd_s = float(dd["maxS"])
         enable_pf = float(self.real_min_pf or 1.02)
         max_dd = float(self.max_dd_s or 57600)
+        _base_n, main_n_req, real_n_req = self._stage_window_ns()
+        main_pf_m = self._fast_historic_pf_from_gross(gross, main_n_req, cost_pct, cost_frac)
+        real_pf_m = self._fast_historic_pf_from_gross(gross, real_n_req, cost_pct, cost_frac)
         return {
             "n": int(hist_n if hist_n is not None else n_rows),
             "wins": wins,
@@ -2821,6 +2889,12 @@ class SetBook:
             "net_avg": float(last15.get("netAvg") or (nets_sum / n_rows if n_rows else 0.0)),
             "gross_pf": float(evaluation.get("grossPf") or 0.0),
             "net_pf": float(evaluation.get("netPf") or 0.0),
+            "base_pf": ratio,
+            "base_n": n15,
+            "main_pf": float(main_pf_m["ratio"]),
+            "main_n": int(main_pf_m["count"]),
+            "real_pf": float(real_pf_m["ratio"]),
+            "real_n": int(real_pf_m["count"]),
             "gross_ev": float(evaluation.get("grossEv") or 0.0),
             "net_ev": float(evaluation.get("netEv") or 0.0),
             "evaluation": evaluation,
@@ -2880,6 +2954,9 @@ class SetBook:
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
+        _base_n, main_n_req, real_n_req = self._stage_window_ns()
+        main_pf_m = self._window_cost_pf(ordered, main_n_req)
+        real_pf_m = self._window_cost_pf(ordered, real_n_req)
         return {
             "n": int(hist_n if hist_n is not None else len(ordered)),
             "wins": wins,
@@ -2914,77 +2991,93 @@ class SetBook:
             "evaluation": evaluation,
             "evaluation_windows": windows,
             "proven_neg": proven_neg,
+            "base_pf": ratio,
+            "base_n": n15,
+            "main_pf": float(main_pf_m["ratio"]),
+            "main_n": int(main_pf_m["count"]),
+            "real_pf": float(real_pf_m["ratio"]),
+            "real_n": int(real_pf_m["count"]),
         }
 
     def _stage_qualification(self, st: SetState, m: Dict[str, Any]) -> Dict[str, Any]:
         """Derive the monotonic Base -> Main -> Real qualification ledger.
 
-        Main consumes only Base-qualified evidence and Real consumes only
-        Main-qualified evidence. The ledger stores the decision at each
-        boundary, so retries and restarts can replay the same parent without
-        creating another count.
+        PF and DDT are always stored from independent last-N windows
+        (Base=pf_n, Main=main_eval, Real=real_eval). Qualification is still
+        sequential: Main requires Base, Real requires Main. Unqualified
+        stages keep their measured cost-scale PF instead of being zeroed.
         """
         need = self.eval_need()
-        n = int(m.get("last15_n") or 0)
-        pf = float(m.get("last15_ratio") or 0.0)
+        _base_req, main_req, real_req = self._stage_window_ns()
+        base_n = int(m.get("base_n") if m.get("base_n") is not None else m.get("last15_n") or 0)
+        main_n = int(m.get("main_n") if m.get("main_n") is not None else base_n)
+        real_n = int(m.get("real_n") if m.get("real_n") is not None else base_n)
+        base_pf = finite(m.get("base_pf"), finite(m.get("last15_ratio")))
+        main_pf = finite(m.get("main_pf"), base_pf)
+        real_pf = finite(m.get("real_pf"), base_pf)
         dd_ok = bool(m.get("ddOk", True))
+        dd_s = finite(m.get("max_dd_s"), finite(st.max_dd_s))
         base_floor = float(self.stage_min_pf.get("base", 1.02))
         main_floor = float(self.stage_min_pf.get("main", 1.02))
         real_floor = float(self.stage_min_pf.get("real", 1.02))
-        base = n >= need and pf + 1e-9 >= base_floor and dd_ok
-        main = base and pf + 1e-9 >= main_floor
-        real = main and pf + 1e-9 >= real_floor
+        base = base_n >= need and base_pf + 1e-9 >= base_floor and dd_ok
+        main = base and main_n >= main_req and main_pf + 1e-9 >= main_floor
+        real = main and real_n >= real_req and real_pf + 1e-9 >= real_floor
         qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
         st.stage = qualified or "Unqualified"
         st.stage_qualified = qualified
-        st.base_pf = round(pf, 6)
-        st.main_pf = round(pf, 6) if base else 0.0
-        st.real_pf = round(pf, 6) if main else 0.0
+        st.base_pf = round(base_pf, 6)
+        st.main_pf = round(main_pf, 6)
+        st.real_pf = round(real_pf, 6)
         st.position_cost_pct = self.cost_pct
         st.evaluation = dict(m.get("evaluation") or {})
         st.evaluation_windows = dict(m.get("evaluation_windows") or {})
         st.normal_evaluation = {
-            "pf": float(m.get("gross_pf") or 0.0),
-            "ev": float(m.get("gross_ev") or 0.0),
-            "sampleCount": n,
+            "pf": finite(m.get("gross_pf")),
+            "ev": finite(m.get("gross_ev")),
+            "sampleCount": base_n,
             "source": "gross-price-move",
         }
         st.adjusted_evaluation = {
-            "pf": float(m.get("net_pf") or 0.0),
-            "ev": float(m.get("net_ev") or 0.0),
-            "ratio": pf,
-            "sampleCount": n,
+            "pf": finite(m.get("net_pf")),
+            "ev": finite(m.get("net_ev")),
+            "ratio": base_pf,
+            "sampleCount": base_n,
             "source": "cost-net",
         }
         st.adjustment_deltas = {
-            "pf": round(float(m.get("net_pf") or 0.0) - float(m.get("gross_pf") or 0.0), 6),
-            "ev": round(float(m.get("net_ev") or 0.0) - float(m.get("gross_ev") or 0.0), 8),
+            "pf": round(finite(m.get("net_pf")) - finite(m.get("gross_pf")), 6),
+            "ev": round(finite(m.get("net_ev")) - finite(m.get("gross_ev")), 8),
             "costPct": self.cost_pct,
         }
         reasons: List[str] = []
-        if n < need:
-            reasons.append(f"sample {n}/{need}")
-        if pf + 1e-9 < base_floor:
-            reasons.append(f"base PF {pf:.2f}<{base_floor:.2f}")
-        elif pf + 1e-9 < main_floor:
-            reasons.append(f"main PF {pf:.2f}<{main_floor:.2f}")
-        elif pf + 1e-9 < real_floor:
-            reasons.append(f"real PF {pf:.2f}<{real_floor:.2f}")
+        if base_n < need:
+            reasons.append(f"sample {base_n}/{need}")
+        if base_pf + 1e-9 < base_floor:
+            reasons.append(f"base PF {base_pf:.2f}<{base_floor:.2f}")
+        elif main_n < main_req:
+            reasons.append(f"main sample {main_n}/{main_req}")
+        elif main_pf + 1e-9 < main_floor:
+            reasons.append(f"main PF {main_pf:.2f}<{main_floor:.2f}")
+        elif real_n < real_req:
+            reasons.append(f"real sample {real_n}/{real_req}")
+        elif real_pf + 1e-9 < real_floor:
+            reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         if not dd_ok:
             reasons.append("DDt cap")
         reason = "; ".join(reasons)
         st.strategy_adjustments = {
-            "base": {"qualified": base, "evaluated": True, "minPf": base_floor},
-            "main": {"qualified": main, "evaluated": base, "minPf": main_floor},
-            "real": {"qualified": real, "evaluated": main, "minPf": real_floor},
+            "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
+            "main": {"qualified": main, "evaluated": True, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
+            "real": {"qualified": real, "evaluated": True, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
             "live": {"evaluation": False, "source": "real"},
             "exchange": {"trackingOnly": True},
         }
         records = {
-            "Base": {"evaluated": True, "qualified": base, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
-            "Main": {"evaluated": base, "qualified": main, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
-            "Real": {"evaluated": main, "qualified": real, "sampleCount": n, "pf": pf, "reason": reason or "qualified"},
+            "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": round(base_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Main": {"evaluated": True, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Real": {"evaluated": True, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
         }
         return {
             "stage": st.stage,
@@ -2996,10 +3089,14 @@ class SetBook:
             "basePf": st.base_pf,
             "mainPf": st.main_pf,
             "realPf": st.real_pf,
+            "baseN": base_n,
+            "mainN": main_n,
+            "realN": real_n,
+            "ddtS": dd_s,
             "positionCostPct": self.cost_pct,
             "reason": reason,
             "records": records,
-            "dedupeKey": stable_key(st.parent_set_id, st.id, "qualification", n, round(pf, 6)),
+            "dedupeKey": stable_key(st.parent_set_id, st.id, "qualification", base_n, round(base_pf, 6)),
         }
 
     def stage_record(self, st: SetState, stage: str, *, reason: str = "") -> StageRecord:
@@ -3016,20 +3113,28 @@ class SetBook:
         record = (ledger.get("records") or {}).get(name.title()) if isinstance(ledger.get("records"), dict) else {}
         qualified = bool(ledger.get(name, False)) if name in ("base", "main", "real") else name in ("live", "exchange")
         evaluation = st.evaluation or {}
+        cost_pf = finite(stage_pf.get(name), finite(st.last15_ratio))
+        ddt_s = finite(record.get("ddtS") if isinstance(record, dict) else None, finite(st.max_dd_s))
+        sample_n = int(
+            (record.get("sampleCount") if isinstance(record, dict) else None)
+            or evaluation.get("sampleCount")
+            or st.last15_n
+            or 0
+        )
         return StageRecord(
             set_id=st.id,
             parent_set_id=st.parent_set_id or st.id,
             stage=name.title(),
-            gross_pf=round(float(st.normal_evaluation.get("pf") or st.gross_pf or st.last15_classic or 0.0), 6),
-            net_pf=round(float(st.adjusted_evaluation.get("pf") or st.net_pf or stage_pf.get(name, st.last15_ratio) or 0.0), 6),
-            position_cost_pct=float(st.position_cost_pct or self.cost_pct),
-            ddt_s=float(st.max_dd_s or 0.0),
-            sample_count=int(record.get("sampleCount") or evaluation.get("sampleCount") or st.last15_n or 0),
-            volume_ratio=float(st.volume_ratio or 1.0),
-            ev=float(st.adjusted_evaluation.get("ev") or evaluation.get("netEv") or st.expectancy or 0.0),
-            gross_ev=float(st.normal_evaluation.get("ev") or evaluation.get("grossEv") or 0.0),
-            confidence=float(evaluation.get("confidence") or 0.0),
-            uncertainty=float(evaluation.get("uncertainty") or 1.0),
+            gross_pf=round(finite(st.normal_evaluation.get("pf"), finite(st.gross_pf, finite(st.last15_classic))), 6),
+            net_pf=round(cost_pf, 6),
+            position_cost_pct=finite(st.position_cost_pct, self.cost_pct),
+            ddt_s=ddt_s,
+            sample_count=sample_n,
+            volume_ratio=finite(st.volume_ratio, 1.0),
+            ev=finite(st.adjusted_evaluation.get("ev"), finite(evaluation.get("netEv"), finite(st.expectancy))),
+            gross_ev=finite(st.normal_evaluation.get("ev"), finite(evaluation.get("grossEv"))),
+            confidence=finite(evaluation.get("confidence")),
+            uncertainty=finite(evaluation.get("uncertainty"), 1.0),
             required_samples=int(evaluation.get("requiredSamples") or self.eval_need()),
             insufficient_sample=bool(evaluation.get("insufficientSample", True)),
             axis_key=st.axis_key,
@@ -3655,7 +3760,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= float(self.real_min_pf or 1.02),
+                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= 1.0,
                 "active": st.active,
             }
         return blob
@@ -4068,7 +4173,7 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
-                    "validated": bool(st.stage_qualified),
+                    "validated": int(st.last15_n or 0) >= self.eval_need() and float(st.last15_ratio or 0) + 1e-9 >= 1.0,
                     "baseQualified": bool((st.stage_ledger or {}).get("base")),
                     "mainQualified": bool((st.stage_ledger or {}).get("main")),
                     "realQualified": bool((st.stage_ledger or {}).get("real")),
@@ -4110,6 +4215,7 @@ class SetBook:
                         "avgHoldS": st.avg_hold_s,
                         "n": st.n,
                         "liveN": len(st.live),
+                        "validated": int(st.last15_n or 0) >= self.eval_need() and float(st.last15_ratio or 0) + 1e-9 >= 1.0,
                     },
                     "active": st.active,
                     "deactReason": st.deact_reason,
@@ -4156,6 +4262,8 @@ class SetBook:
             "ready": p.ready,
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
+            "mainEval": int(getattr(self, "main_eval", 5) or 5),
+            "realEval": int(getattr(self, "real_eval", 3) or 3),
             "deactN": self.deact_n,
             "minPf": self.real_min_pf,
                 "enablePf": 1.02 if float(self.min_pf or 0) <= 0 else self.min_pf,
@@ -4926,6 +5034,55 @@ def self_test() -> List[Tuple[str, bool, str]]:
     est.hist = [{"t": 100 + i, "pnl": 0.002, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 30, "reason": "tp"} for i in range(4)]
     e._score_one(est)
     out.append(("set-n4-unproven", (not est.active) and est.deact_reason == "unproven", f"{est.active} {est.deact_reason} n={est.last15_n}"))
+    pct_only = [
+        {"t": 100, "pnl_pct": 0.01, "symbol": "A"},
+        {"t": 160, "pnl_pct": -0.02, "symbol": "A"},
+        {"t": 220, "pnl_pct": -0.01, "symbol": "A"},
+    ]
+    dd_pct = drawdown_time(pct_only, now=220)
+    out.append(("set-dd-pnl-pct-only", dd_pct["episodes"] >= 1.0 and dd_pct["maxS"] >= 60, str(dd_pct)))
+    from types import SimpleNamespace as _NS
+    obj_dd = [
+        _NS(t=100, symbol="A", pnl=1.0, pnl_pct=0.003),
+        _NS(t=160, symbol="A", pnl=-0.4, pnl_pct=-0.002),
+        _NS(t=220, symbol="A", pnl=-0.4, pnl_pct=-0.002),
+    ]
+    dd_obj = drawdown_time(obj_dd, now=220)
+    out.append(("set-dd-objects", dd_obj["episodes"] >= 1.0 and dd_obj["maxS"] >= 60, str(dd_obj)))
+    zero_pnl = [
+        {"t": 100, "pnl": 0, "pnl_pct": 0.01, "symbol": "A"},
+        {"t": 160, "pnl": 0, "pnl_pct": -0.02, "symbol": "A"},
+        {"t": 220, "pnl": 0, "pnl_pct": -0.01, "symbol": "A"},
+    ]
+    dd_zero = drawdown_time(zero_pnl, now=220)
+    out.append(("set-dd-zero-pnl-uses-pct", dd_zero["episodes"] >= 1.0 and dd_zero["maxS"] >= 60, str(dd_zero)))
+    sbook = SetBook()
+    sbook.load({
+        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
+        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
+        "mainEvalPosCount": 5, "realEvalPosCount": 3,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "trailArmMin": 0.3, "trailArmMax": 0.3,
+    })
+    out.append(("set-stage-eval-from-overlay", sbook.main_eval == 5 and sbook.real_eval == 3, f"{sbook.main_eval}/{sbook.real_eval}"))
+    sst = next(x for x in sbook.by_idx if x.kind == "base")
+    sst.hist = (
+        [{"t": 1000 + i * 60, "pnl": 0.001, "pnl_pct": 0.0012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(10)]
+        + [{"t": 2000 + i * 60, "pnl": 0.01, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(5)]
+    )
+    sbook._score_one(sst)
+    out.append(("set-stage-pf-always", sst.base_pf > 1.0 and sst.main_pf > 1.0 and sst.real_pf > 1.0, f"b={sst.base_pf} m={sst.main_pf} r={sst.real_pf} q={sst.stage_qualified}"))
+    out.append(("set-stage-independent-windows", abs(sst.base_pf - sst.main_pf) > 1e-4, f"b={sst.base_pf} m={sst.main_pf} r={sst.real_pf}"))
+    ssnap = sbook.snapshot()
+    srow = next((r for r in (ssnap.get("rows") or []) if r.get("id") == sst.id), {})
+    intern_ok = bool(srow.get("validated")) and float(srow.get("last15Ratio") or 0) >= 1.0
+    out.append(("set-intern-validated-vs-stage", intern_ok and not bool(srow.get("realQualified")), f"val={srow.get('validated')} realQ={srow.get('realQualified')} pf={srow.get('last15Ratio')} stage={srow.get('stage')}"))
+    rec_m = sbook.stage_record(sst, "main")
+    rec_r = sbook.stage_record(sst, "real")
+    out.append(("set-stage-record-cost-pf", abs(rec_m.net_pf - sst.main_pf) < 1e-9 and rec_m.net_pf < 20 and rec_m.net_pf > 1.0, f"net={rec_m.net_pf} main={sst.main_pf} classic={sst.net_pf}"))
+    out.append(("set-stage-record-ddt", rec_m.ddt_s == sst.max_dd_s and rec_r.ddt_s == sst.max_dd_s, f"ddt={rec_m.ddt_s} max={sst.max_dd_s}"))
+    out.append(("set-stage-record-real-pf", abs(rec_r.net_pf - sst.real_pf) < 1e-9, f"net={rec_r.net_pf} real={sst.real_pf}"))
     return out
 
 

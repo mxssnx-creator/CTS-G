@@ -350,9 +350,9 @@ def _write_pid(pid: Optional[int] = None) -> None:
         pass
 
 
-def _clear_pid() -> None:
+def _clear_pid(connection: Optional[str] = None) -> None:
     try:
-        os.remove(_pid_path())
+        os.remove(_pid_path(connection))
     except Exception:
         pass
 
@@ -2211,6 +2211,45 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
         "independent": False,
     })
     return write_job(seed, cid)
+
+
+def stop_job(connection: Optional[str] = None) -> Dict[str, Any]:
+    """Drop a queued historic request and kill a leftover calc pid.
+
+    Exchange positions are not touched. A later Start must not resume a
+    half-dead worker from this connection.
+    """
+    cid = _connection_id(connection)
+    try:
+        os.remove(req_path(cid))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    pid = 0
+    try:
+        pid = int(open(_pid_path(cid)).read().strip())
+    except Exception:
+        pid = 0
+    me = os.getpid()
+    killed = 0
+    if pid > 1 and pid != me:
+        for sig in (15, 9):
+            try:
+                os.kill(pid, sig)
+                killed = pid
+            except OSError:
+                break
+            if sig == 15:
+                time.sleep(0.15)
+    _clear_pid(cid)
+    _set_running(False)
+    job = read_job(cid)
+    phase = str((job or {}).get("phase") or "")
+    if job and phase not in ("", "ready", "error", "stopped"):
+        job.update(phase="stopped", running=False, detail="stopped with connection")
+        write_job(job, cid)
+    return {"ok": True, "connection": cid, "killed": killed}
 
 
 def apply_preset(preset_id: str) -> Optional[Dict[str, Any]]:

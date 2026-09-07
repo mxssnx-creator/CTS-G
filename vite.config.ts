@@ -283,7 +283,12 @@ function overlayFile(conn: string): string {
 }
 
 function readLiveStats(): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8")) as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function connectionsFallback(): unknown {
@@ -751,6 +756,7 @@ function pulseProxy(path: string): Record<string, ProxyOptions> {
           if (requestUrl.startsWith("/stats.json")) {
             try {
               const body = readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8");
+              JSON.parse(body);
               r.writeHead(200, { "Content-Type": "application/json" });
               r.end(body);
               return;

@@ -20,7 +20,7 @@ from position_cost import (
     row_position_cost_pct,
     signed_result_r,
 )
-from set_engine import drawdown_time_by_symbol, IND_KINDS
+from set_engine import drawdown_time_by_symbol, IND_KINDS, row_equity_pnl
 
 
 def _f(v: Any, fb: float = 0.0) -> float:
@@ -29,6 +29,43 @@ def _f(v: Any, fb: float = 0.0) -> float:
     except Exception:
         return fb
     return n if n == n and abs(n) != float("inf") else fb
+
+
+def _ddt_tape(rows: Sequence[Dict[str, Any]], *, gross: bool = False) -> List[Dict[str, Any]]:
+    """Signed equity tape for DDT. Historic qty/entry=0 rows still keep pnl_pct."""
+    tape: List[Dict[str, Any]] = []
+    for x in rows:
+        if gross:
+            pnl = x.get("pnl")
+            try:
+                pnl_f = float(pnl) if pnl is not None else 0.0
+            except Exception:
+                pnl_f = 0.0
+            if abs(pnl_f) > 1e-15:
+                equity = pnl_f
+            else:
+                pct = x.get("pnl_pct")
+                try:
+                    equity = float(pct) if pct is not None else 0.0
+                except Exception:
+                    equity = 0.0
+        else:
+            net = x.get("netPnl")
+            try:
+                net_f = float(net) if net is not None else 0.0
+            except Exception:
+                net_f = 0.0
+            if abs(net_f) > 1e-15:
+                equity = net_f
+            elif x.get("netPnlPct") is not None:
+                try:
+                    equity = float(x.get("netPnlPct") or 0.0)
+                except Exception:
+                    equity = row_equity_pnl(x)
+            else:
+                equity = row_equity_pnl(x)
+        tape.append({"t": x.get("t"), "symbol": x.get("symbol") or "?", "pnl": equity})
+    return tape
 
 
 def _row(c: Any) -> Dict[str, Any]:
@@ -168,7 +205,7 @@ def by_symbol(rows: Sequence[Dict[str, Any]], cost_pct: float) -> List[Dict[str,
         buckets.setdefault(r["symbol"] or "?", []).append(r)
     out = []
     for s, items in buckets.items():
-        d = drawdown_time_by_symbol([{"t": x["t"], "symbol": s, "pnl": x.get("netPnl", x["pnl"])} for x in items])
+        d = drawdown_time_by_symbol(_ddt_tape(items))
         w = pf_window(items, None, cost_pct)
         out.append({
             "symbol": s,
@@ -241,7 +278,7 @@ def _strats_of(r: Dict[str, Any]) -> List[str]:
 
 
 def _with_ddt(window: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    d = drawdown_time_by_symbol([{"t": x.get("t"), "symbol": x.get("symbol") or "?", "pnl": x.get("netPnl", x.get("pnl"))} for x in rows]) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+    d = drawdown_time_by_symbol(_ddt_tape(rows)) if rows else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
     window["maxDdS"] = d.get("maxS")
     window["avgDdS"] = d.get("avgS")
     window["ddEpisodes"] = d.get("episodes")
@@ -451,8 +488,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     exits = st.get("exits") or {}
     pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
     windows = evaluation_windows(closed, cost_pct)
-    ddt = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r.get("netPnl", r["pnl"])} for r in closed])
-    ddt_gross = drawdown_time_by_symbol([{"t": r["t"], "symbol": r.get("symbol") or "?", "pnl": r["pnl"]} for r in closed])
+    ddt = drawdown_time_by_symbol(_ddt_tape(closed))
+    ddt_gross = drawdown_time_by_symbol(_ddt_tape(closed, gross=True))
     occ = occupancy(st.get("open") or [])
     rows = []
     for r in sets.get("rows") or []:
@@ -1219,6 +1256,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
         {"t": 50_120, "symbol": "B", "pnl": 1.5},
     ], "sets": {"rows": []}, "open": []}, cost_pct=0.15, conn="x02")
     out.append(("rep-ddt-symbol-isolation", cross["drawdownTime"]["afterCost"]["maxDdS"] == 60.0, str(cross["drawdownTime"])))
+    pct_only = [
+        {"t": 100, "symbol": "Z", "side": "LONG", "qty": 0, "entry": 0, "pnl": 0, "pnl_pct": 0.01, "hold_s": 60, "reason": "tp"},
+        {"t": 160, "symbol": "Z", "side": "LONG", "qty": 0, "entry": 0, "pnl": 0, "pnl_pct": -0.02, "hold_s": 40, "reason": "sl"},
+        {"t": 220, "symbol": "Z", "side": "LONG", "qty": 0, "entry": 0, "pnl": 0, "pnl_pct": -0.01, "hold_s": 30, "reason": "sl"},
+    ]
+    pct_blob = build({"closed": pct_only, "sets": {"rows": []}, "open": []}, cost_pct=0.15, conn="x02")
+    after_ddt = ((pct_blob.get("drawdownTime") or {}).get("afterCost") or {})
+    out.append(("rep-ddt-pnl-pct-only", float(after_ddt.get("maxDdS") or 0) >= 60, str(pct_blob.get("drawdownTime"))))
     return out
 
 

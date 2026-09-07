@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_pf
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
+from set_engine import row_equity_pnl
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -229,12 +230,7 @@ class Coordinator:
         # 25–55-position windows to 24 positions.
         window_limit = max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2)
         coord_rows = ordered[-window_limit:] if self.additional_coordination else ordered
-        pnls = []
-        for row in coord_rows:
-            if isinstance(row, dict):
-                pnls.append(float(row.get("pnl") or 0))
-            else:
-                pnls.append(float(getattr(row, "pnl", 0) or 0))
+        pnls = [row_equity_pnl(row, self.position_cost_pct) for row in coord_rows]
         last_w = self.axes["last"].max_window
         prev_w = max(PREV_POSITION_MIN, min(PREV_POSITION_MAX, int(self.prev_window or 25)))
         cost = last_n_cost_pf(coord_rows, self.pf_window, self.position_cost_pct)
@@ -277,7 +273,7 @@ class Coordinator:
             "prevCount": float(prev_cost["count"]),
         }
         if coord_rows:
-            net = sum(float(row.get("pnl") or 0) if isinstance(row, dict) else float(getattr(row, "pnl", 0) or 0) for row in coord_rows)
+            net = sum(pnls)
             self.optimization_stats = {
                 "n": len(coord_rows),
                 "positive": sum(1 for value in pnls if value > 0),

@@ -658,6 +658,10 @@ export type LiveStats = {
     neutral?: number;
     plus1x?: number;
     evaluationWindows?: Record<string, EvaluationWindow>;
+    maxDdS?: number;
+    avgDdS?: number;
+    ddEpisodes?: number;
+    currentS?: number;
   };
   profitFactor?: number;
   pf?: number;

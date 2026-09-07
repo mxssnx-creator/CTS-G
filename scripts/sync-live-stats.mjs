@@ -5,6 +5,15 @@ const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
 const DEST = new URL("../public/live-stats.json", import.meta.url);
 
+async function writeSnapshot(text) {
+  const fs = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const dest = fileURLToPath(DEST);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, text);
+  await fs.rename(tmp, dest);
+}
+
 async function readJson(url, timeoutMs = 8000) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -80,7 +89,7 @@ async function fromCts() {
     s.cycle = liveLane.cycle;
   }
   s.now = Date.now();
-  await fs.writeFile(DEST, JSON.stringify(s));
+  await writeSnapshot(JSON.stringify(s));
 }
 
 async function markOffline(reason) {
@@ -106,7 +115,7 @@ async function markOffline(reason) {
       l.progressPhase = "offline";
       l.progressReady = false;
     }
-    await fs.writeFile(DEST, JSON.stringify(s));
+    await writeSnapshot(JSON.stringify(s));
   } catch {
     /* keep last snapshot if we cannot rewrite it */
   }
@@ -117,8 +126,7 @@ async function once() {
   if (!r.ok) throw new Error("status " + r.status);
   const text = await r.text();
   JSON.parse(text);
-  const fs = await import("node:fs/promises");
-  await fs.writeFile(DEST, text);
+  await writeSnapshot(text);
 }
 
 async function loop() {

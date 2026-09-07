@@ -16,6 +16,10 @@ export function StatsOverview({
 }) {
   const dd = data.drawdown3d;
   const all = data.drawdownAll;
+  const engineAvgMs = Number(live?.pfCost?.avgDdS ?? 0) * 1000;
+  const engineMaxMs = Number(live?.pfCost?.maxDdS ?? 0) * 1000;
+  const engineCurrentMs = Number(live?.pfCost?.currentS ?? 0) * 1000;
+  const engineEpisodes = Number(live?.pfCost?.ddEpisodes ?? 0);
   const cost: CostPfMetric = {
     ...data.costPf,
     ...(live?.pfCost
@@ -43,19 +47,19 @@ export function StatsOverview({
         />
         <Hero
           k="Drawdown time avg"
-          v={formatDuration(dd.averageDurationMs || all.averageDurationMs)}
-          s={`${dd.episodes || all.episodes} episodes · 3d`}
+          v={formatDuration(dd.averageDurationMs || all.averageDurationMs || engineAvgMs)}
+          s={`${dd.episodes || all.episodes || engineEpisodes} episodes · 3d`}
           tone={dd.inDrawdown ? "bad" : "ok"}
         />
         <Hero
           k="Current DD time"
-          v={formatDuration(dd.currentDurationMs)}
+          v={formatDuration(dd.currentDurationMs || engineCurrentMs)}
           s={dd.inDrawdown ? `depth ${dd.currentDepth.toFixed(4)}` : "at peak"}
           tone={dd.inDrawdown ? "bad" : "good"}
         />
         <Hero
           k="Max DD episode"
-          v={formatDuration(dd.maxDurationMs || all.maxDurationMs)}
+          v={formatDuration(dd.maxDurationMs || all.maxDurationMs || engineMaxMs)}
           s={`depth ${Math.max(dd.maxDepth, all.maxDepth).toFixed(4)}`}
         />
       </div>

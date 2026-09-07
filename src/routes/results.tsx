@@ -58,6 +58,8 @@ function ResultsPage() {
     () =>
       buildOverview(
         (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
       ),
     [stats],
   );

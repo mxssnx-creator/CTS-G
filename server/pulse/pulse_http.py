@@ -464,6 +464,105 @@ def _sysctl(*args: str, timeout: float = 25.0) -> tuple:
         return 99, str(e)[:160]
 
 
+def _cancel_hist(cid: str) -> None:
+    for name in (f"hist-calc-req-{cid}.json", f"hist-calc-{cid}.pid"):
+        _unlink(os.path.join(DIR, name))
+    if cid not in ("bingx-x01", "bingx-x02"):
+        return
+    try:
+        from hist_calc import stop_job
+        stop_job(cid)
+    except Exception:
+        pass
+
+
+def _kill_conn_procs(cid: str) -> int:
+    """SIGKILL leftover pulse_trader/hist_calc workers for this connection only."""
+    me = os.getpid()
+    killed = 0
+    proc = "/proc"
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid <= 1 or pid == me:
+            continue
+        try:
+            env = open(os.path.join(proc, name, "environ"), "rb").read().split(b"\0")
+        except OSError:
+            continue
+        conn = ""
+        for item in env:
+            if item.startswith(b"PULSE_CONN="):
+                conn = item.split(b"=", 1)[-1].decode("utf-8", "ignore")
+                break
+        if conn != cid:
+            continue
+        try:
+            cmd = open(os.path.join(proc, name, "cmdline"), "rb").read()
+        except OSError:
+            continue
+        if b"pulse_http" in cmd:
+            continue
+        if b"pulse_trader" not in cmd and b"hist_calc" not in cmd:
+            continue
+        try:
+            os.kill(pid, 9)
+            killed += 1
+        except OSError:
+            pass
+    return killed
+
+
+def _mark_stats_stopped(cid: str) -> None:
+    path = stats_path(cid)
+    st = load_json(path)
+    st["running"] = False
+    st["halted"] = True
+    st["paused"] = False
+    st["alive"] = False
+    st["haltReason"] = "stopped"
+    try:
+        atomic_write(path, st)
+    except Exception:
+        pass
+
+
+def _force_stop_lane(cid: str, unit: str) -> str:
+    """STOP file first, then systemd stop, then SIGKILL leftovers so Start is clean.
+
+    Exchange positions stay. Heal cannot revive while STOP exists.
+    """
+    bits = []
+    _cancel_hist(cid)
+    rc, out = _sysctl("stop", unit, timeout=12)
+    if rc != 0 and out:
+        bits.append(f"stop {out[:80]}")
+    st = unit_state(cid, fresh=True)
+    if st in ("active", "activating", "deactivating", "failed", "unknown"):
+        _sysctl("kill", "-s", "SIGKILL", "--kill-who=all", unit, timeout=8)
+        leftover = _kill_conn_procs(cid)
+        if leftover:
+            time.sleep(0.25)
+        rc2, out2 = _sysctl("stop", unit, timeout=8)
+        st = unit_state(cid, fresh=True)
+        bits.append("forced")
+        if leftover:
+            bits.append(f"killed {leftover}")
+        if rc2 != 0 and out2:
+            bits.append(out2[:60])
+    _sysctl("reset-failed", unit, timeout=8)
+    _STATE_CACHE.pop(cid, None)
+    _mark_stats_stopped(cid)
+    st = unit_state(cid, fresh=True)
+    extra = (" " + " ".join(bits)) if bits else ""
+    return f"{cid} stop rc={rc} state={st}{extra}"
+
+
 _STATE_CACHE: dict = {}
 
 # Single global control mutex: every start/stop/pause/resume — from the desk
@@ -542,9 +641,7 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
         elif action == "stop":
             _unlink(pause)
             _touch(stop)
-            rc, out = _sysctl("stop", unit)
-            st = unit_state(cid, fresh=True)
-            notes.append(f"{cid} stop rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
+            notes.append(_force_stop_lane(cid, unit))
     executed = any("start blocked" not in note for note in notes)
     return executed, "; ".join(notes)
 

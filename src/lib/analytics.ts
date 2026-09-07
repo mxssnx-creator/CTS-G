@@ -43,7 +43,7 @@ export type CostPfMetric = {
   pass: boolean;
 };
 
-export const POSITION_COST_PCT_DEFAULT = 0.15;
+export const POSITION_COST_PCT_DEFAULT = 0.10;
 export const COST_RATIO_SCALE = 0.1;
 
 function finite(v: unknown): number {
@@ -134,6 +134,13 @@ function timestampMs(value: number): number {
   return value < 10_000_000_000 ? value * 1000 : value;
 }
 
+function rowEquityPnl(row: PfRow, costPct = POSITION_COST_PCT_DEFAULT): number {
+  const pnl = finite(row.pnl);
+  if (row.pnl != null && Math.abs(pnl) > 1e-15) return pnl;
+  if (row.pnl_pct != null) return netPnlPct(finite(row.pnl_pct), costPct);
+  return pnl;
+}
+
 function calculateDrawdownTimeSingle(
   ordered: PfRow[],
   now: number,
@@ -152,7 +159,7 @@ function calculateDrawdownTimeSingle(
 
   for (const row of ordered) {
     const closedAt = timestampMs(row.t);
-    equity += finite(row.pnl);
+    equity += rowEquityPnl(row);
     if (equity >= peak) {
       if (drawdownStartedAt !== null) {
         const duration = Math.max(0, closedAt - drawdownStartedAt);
@@ -251,28 +258,29 @@ export function lastNCostPf(
   };
 }
 
-export function buildOverview(rows: PfRow[], now = Date.now()) {
+export function buildOverview(rows: PfRow[], now = Date.now(), costPct = POSITION_COST_PCT_DEFAULT) {
   const newestFirst = [...rows].sort((a, b) => timestampMs(b.t) - timestampMs(a.t));
   const withinHours = (hours: number) =>
     newestFirst.filter((row) => {
       const ts = timestampMs(row.t);
       return ts >= now - hours * 60 * 60 * 1000 && ts <= now;
     });
+  const cost = Number.isFinite(costPct) && costPct > 0 ? costPct : POSITION_COST_PCT_DEFAULT;
   return {
     generatedAt: now,
-    last4: lastNCostPf(newestFirst, 4),
-    costPf: lastNCostPf(newestFirst, 15, POSITION_COST_PCT_DEFAULT, 1.1),
+    last4: lastNCostPf(newestFirst, 4, cost),
+    costPf: lastNCostPf(newestFirst, 15, cost, 1.1),
     positionWindows: {
-      "12": lastNCostPf(newestFirst, 12),
-      "15": lastNCostPf(newestFirst, 15),
-      "25": lastNCostPf(newestFirst, 25),
-      "75": lastNCostPf(newestFirst, 75),
-      "150": lastNCostPf(newestFirst, 150),
+      "12": lastNCostPf(newestFirst, 12, cost),
+      "15": lastNCostPf(newestFirst, 15, cost),
+      "25": lastNCostPf(newestFirst, 25, cost),
+      "75": lastNCostPf(newestFirst, 75, cost),
+      "150": lastNCostPf(newestFirst, 150, cost),
     } as const,
     timeWindows: {
-      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1),
-      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1),
-      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1),
+      "4h": lastNCostPf(withinHours(4), withinHours(4).length || 1, cost),
+      "12h": lastNCostPf(withinHours(12), withinHours(12).length || 1, cost),
+      "48h": lastNCostPf(withinHours(48), withinHours(48).length || 1, cost),
     } as const,
     drawdown3d: calculateDrawdownTime(newestFirst, now, 3),
     drawdownAll: calculateDrawdownTime(newestFirst, now, 3650),
