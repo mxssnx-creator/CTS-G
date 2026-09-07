@@ -36,12 +36,16 @@ def _flag(name: str) -> bool:
 
 
 def _live_start_allowed(cid: str) -> bool:
-    """Keep the mainnet lane fail-closed unless a separate operator gate exists."""
-    return cid != "bingx-x01" or _flag("CTS_ALLOW_LIVE_START")
+    """Live (x01) trading is on by default. Tests/operators can opt out."""
+    if cid != "bingx-x01":
+        return True
+    return not _flag("CTS_DISABLE_LIVE_START")
 
 
 def _live_heal_allowed(cid: str) -> bool:
-    return cid != "bingx-x01" or _flag("CTS_ALLOW_LIVE_HEAL")
+    if cid != "bingx-x01":
+        return True
+    return not _flag("CTS_DISABLE_LIVE_HEAL")
 
 
 def engine_unit(cid: str) -> str:
@@ -515,7 +519,7 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
         elif action in ("start", "resume"):
             if not _live_start_allowed(cid):
-                notes.append(f"{cid} start blocked: explicit CTS_ALLOW_LIVE_START gate required")
+                notes.append(f"{cid} start blocked: CTS_DISABLE_LIVE_START")
                 continue
             _unlink(pause)
             _unlink(stop)
@@ -523,10 +527,12 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             # Explicit Start = fresh session: engine re-baselines session equity
             # on the next balance tick, so a latched drawdown/equity halt clears.
             _touch(reset_eq)
+            _sysctl("enable", unit, timeout=8)
             rc, out = _sysctl("start", unit)
             if rc != 0:
                 # start-limit-hit after a crash loop blocks start — reset and retry once.
                 _sysctl("reset-failed", unit, timeout=8)
+                _sysctl("enable", unit, timeout=8)
                 rc, out = _sysctl("start", unit)
             st = unit_state(cid, fresh=True)
             notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
@@ -1445,6 +1451,7 @@ def heal_loop() -> None:
                         continue  # no keys — engine would exit instantly
                     last[cid] = now
                     unit = engine_unit(cid)
+                    _sysctl("enable", unit, timeout=8)
                     _sysctl("reset-failed", unit, timeout=8)
                     rc, out = _sysctl("start", unit)
                 try:

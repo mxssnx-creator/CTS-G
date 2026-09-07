@@ -445,14 +445,23 @@ def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    *,
+    ordered: bool = False,
+    simple: Optional[bool] = None,
 ) -> Dict[str, float]:
     # API surfaces provide both chronological and newest-first tapes. A
     # timestamp-normalized tail makes every "last N" gate mean the same thing.
-    window = sorted(
-        list(rows),
-        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-    )[-max(1, int(n)) :]
-    if _simple_historic_tape(window):
+    take = max(1, int(n))
+    if ordered:
+        seq = rows if isinstance(rows, list) else list(rows)
+        window = seq[-take:] if len(seq) > take else seq
+    else:
+        window = sorted(
+            list(rows),
+            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+        )[-take:]
+    use_simple = _simple_historic_tape(window) if simple is None else bool(simple)
+    if use_simple:
         cost = normalize_position_cost_pct(cost_pct)
         cost_frac = cost_as_frac(cost)
         gross_values = [finite(row.get("pnl_pct")) for row in window]
@@ -522,6 +531,9 @@ def evaluation_windows(
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     windows: Sequence[int] = EVALUATION_WINDOWS,
     required_samples: int = 8,
+    *,
+    ordered: bool = False,
+    simple: Optional[bool] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the shared last-position-N PF/EV view for one independent tape.
 
@@ -531,10 +543,13 @@ def evaluation_windows(
     tape; ``validated`` is a positive-PF/sample signal and is deliberately
     independent from any strategy-specific minimum PF floor.
     """
-    ordered = sorted(
-        [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-    )
+    if ordered:
+        seq = [row for row in rows if row is not None]
+    else:
+        seq = sorted(
+            [row for row in rows if row is not None],
+            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+        )
     out: Dict[str, Dict[str, Any]] = {}
     seen: set[int] = set()
     for raw_n in windows:
@@ -545,7 +560,7 @@ def evaluation_windows(
         if requested in seen:
             continue
         seen.add(requested)
-        metric = last_n_cost_pf(ordered, requested, cost_pct)
+        metric = last_n_cost_pf(seq, requested, cost_pct, ordered=True, simple=simple)
         count = int(metric.get("count") or 0)
         ratio = float(metric.get("ratio") or RATIO_BASE)
         required = max(1, min(requested, int(required_samples or 1)))

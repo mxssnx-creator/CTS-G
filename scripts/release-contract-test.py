@@ -134,14 +134,37 @@ redis_ready
         self.assertEqual(merged.close_started_qty, 3)
         self.assertAlmostEqual(merged.entry, 101)
 
-    def test_mainnet_start_and_path_inputs_fail_closed(self):
-        self.assertFalse(pulse_http._live_start_allowed("bingx-x01"))
-        self.assertFalse(pulse_http._live_heal_allowed("bingx-x01"))
+    def test_install_scripts_start_live_by_default(self):
+        install = (ROOT / "deploy/install-linux.sh").read_text()
+        update = (ROOT / "deploy/update-linux.sh").read_text()
+        remote = (ROOT / "deploy/remote-install.sh").read_text()
+        common = (ROOT / "deploy/linux-common.sh").read_text()
+        http = (ROOT / "server/pulse/pulse_http.py").read_text()
+        self.assertIn("START_LIVE=1", install)
+        self.assertIn("--no-live", install)
+        self.assertIn("START_LIVE=1", update)
+        self.assertIn("--no-live", update)
+        self.assertIn("START_LIVE=1", remote)
+        self.assertIn("--no-live", remote)
+        self.assertIn('local start_live="${1:-1}"', common)
+        self.assertIn("clear_live_halt_flags", common)
+        self.assertIn("CTS_DISABLE_LIVE_START", http)
+        self.assertNotIn("CTS_ALLOW_LIVE_START", http)
+
+    def test_mainnet_start_defaults_on_and_can_be_disabled(self):
+        os.environ.pop("CTS_DISABLE_LIVE_START", None)
+        os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+        self.assertTrue(pulse_http._live_start_allowed("bingx-x01"))
+        self.assertTrue(pulse_http._live_heal_allowed("bingx-x01"))
         self.assertTrue(pulse_http._live_start_allowed("bingx-x02"))
         self.assertTrue(pulse_http._live_heal_allowed("bingx-x02"))
+        with patch.dict(os.environ, {"CTS_DISABLE_LIVE_START": "1", "CTS_DISABLE_LIVE_HEAL": "1"}):
+            self.assertFalse(pulse_http._live_start_allowed("bingx-x01"))
+            self.assertFalse(pulse_http._live_heal_allowed("bingx-x01"))
+            self.assertTrue(pulse_http._live_start_allowed("bingx-x02"))
+            self.assertTrue(pulse_http._live_heal_allowed("bingx-x02"))
         with self.assertRaises(ValueError):
             pulse_http.write_overlay("../../outside", {"setMinStep": 1})
-
     def test_storage_and_historic_range_contracts(self):
         from hist_calc import HOURS_MAX, hours_to_bars, overlay_from_options, parse_options
         self.assertEqual(HOURS_MAX, 336)

@@ -530,13 +530,24 @@ redis_has_keys() {
 enable_stack() {
   [[ "${NO_START:-0}" != 1 ]] || { skip "enable (--no-start)"; return; }
   systemctl enable "$(pulse_http_unit)" "$(desk_unit)" "$(retention_timer_unit)" >/dev/null
-  # An unconfigured instance must not start trading at boot.
   if redis_has_keys "$VST_SLOT"; then systemctl enable "$(pulse_instance_unit "$VST_SLOT")" >/dev/null; fi
+  if [[ "${START_LIVE:-1}" != 0 ]] && redis_has_keys "$LIVE_SLOT"; then
+    systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
+  fi
   ok "configured units enabled"
 }
 
+clear_live_halt_flags() {
+  local slot="${1:-$LIVE_SLOT}"
+  local dir
+  for dir in "$CTS_DATA_DIR" "$PULSE_DIR" "${LEGACY_PULSE_DIR:-}"; do
+    [[ -n "$dir" && -d "$dir" ]] || continue
+    rm -f "$dir/STOP-$slot" "$dir/PAUSE-$slot"
+  done
+}
+
 start_stack() {
-  local start_live="${1:-0}"
+  local start_live="${1:-1}"
   systemctl restart "$(pulse_http_unit)"
   systemctl restart "$(desk_unit)"
   systemctl start "$(retention_timer_unit)"
@@ -546,14 +557,21 @@ start_stack() {
     skip "VST engine: no credentials in this instance"
   fi
   if [[ "$start_live" == 1 ]]; then
-    systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
-    systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")"
+    if redis_has_keys "$LIVE_SLOT"; then
+      clear_live_halt_flags "$LIVE_SLOT"
+      rm -f "$CTS_DATA_DIR/STOP" "$PULSE_DIR/STOP"
+      systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
+      systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")"
+      ok "live engine enabled and started"
+    else
+      skip "live engine: no credentials in this instance"
+    fi
   elif systemctl is-active --quiet "$(pulse_instance_unit "$LIVE_SLOT")"; then
     # Preserve its PAUSE flag and management of existing positions.
     systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")"
     ok "existing live manager restarted; entry-control flags preserved"
   else
-    skip "live engine: no new activation"
+    skip "live engine: --no-live"
   fi
 }
 

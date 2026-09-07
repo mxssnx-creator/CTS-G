@@ -154,6 +154,8 @@ def merge_hist_rows(
 ) -> List[Dict[str, Any]]:
     """Merge a refreshed symbol slice into the bounded historic tape."""
     replace = {str(s) for s in (replace_symbols or ())}
+    if not previous:
+        return trim_hist([row for row in incoming if isinstance(row, dict)], HIST_CAP)
     merged: Dict[Tuple[str, float, str, str, float, float], Dict[str, Any]] = {}
     for row in previous:
         if not isinstance(row, dict) or str(row.get("symbol") or "") in replace:
@@ -165,18 +167,21 @@ def merge_hist_rows(
     return trim_hist(list(merged.values()), HIST_CAP)
 
 
-def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = False) -> List[Dict[str, Any]]:
     """Last-N fills with every symbol still represented when possible."""
     n = max(1, int(n))
-    ordered = [r for r in rows if isinstance(r, dict)]
-    ordered.sort(key=lambda r: finite(r.get("t")))
-    if len(ordered) <= n:
-        return ordered
+    if ordered:
+        seq = rows if isinstance(rows, list) else list(rows)
+    else:
+        seq = [r for r in rows if isinstance(r, dict)]
+        seq.sort(key=lambda r: finite(r.get("t")))
+    if len(seq) <= n:
+        return seq
     by: Dict[str, List[Dict[str, Any]]] = {}
-    for r in ordered:
+    for r in seq:
         by.setdefault(str(r.get("symbol") or "?"), []).append(r)
     if len(by) <= 1:
-        return ordered[-n:]
+        return seq[-n:]
     names = list(by.keys())
     if len(names) >= n:
         recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
@@ -190,7 +195,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, An
     out.sort(key=lambda r: finite(r.get("t")))
     if len(out) < n:
         taken = {id(x) for x in out}
-        for r in reversed(ordered):
+        for r in reversed(seq):
             if id(r) in taken:
                 continue
             out.append(r)
@@ -201,20 +206,23 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int) -> List[Dict[str, An
     return out[-n:]
 
 
-def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
+def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None, *, ordered: bool = False) -> Dict[str, float]:
     """CTS drawdown-time: episodes from peak through recovery, in seconds."""
-    ordered = sorted(
-        (r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0),
-        key=lambda r: finite(r.get("t")),
-    )
+    if ordered:
+        seq = [r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0]
+    else:
+        seq = sorted(
+            (r for r in rows if isinstance(r, dict) and finite(r.get("t")) > 0),
+            key=lambda r: finite(r.get("t")),
+        )
     # A historic tape has no meaningful wall-clock tail. If the caller does
     # not provide an observation time, close an open episode at its last
     # sample. For an explicitly supplied time, do not let a stale symbol's
     # missing data create a false multi-hour DDt episode.
     if now is None:
-        now = finite(ordered[-1].get("t")) if ordered else time.time()
-    elif ordered:
-        last_t = finite(ordered[-1].get("t"))
+        now = finite(seq[-1].get("t")) if seq else time.time()
+    elif seq:
+        last_t = finite(seq[-1].get("t"))
         if last_t > 0 and now - last_t > 3600:
             now = last_t
     equity = 0.0
@@ -224,7 +232,7 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
     total_s = 0.0
     episodes = 0
     max_depth = 0.0
-    for row in ordered:
+    for row in seq:
         t = finite(row.get("t"))
         if t <= 0:
             continue
@@ -253,11 +261,16 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
         "currentS": round(current, 1),
         "maxDepth": round(max_depth, 6),
         "inDd": 1.0 if started is not None else 0.0,
-        "n": float(len(ordered)),
+        "n": float(len(seq)),
     }
 
 
-def drawdown_time_by_symbol(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
+def drawdown_time_by_symbol(
+    rows: Sequence[Dict[str, Any]],
+    now: Optional[float] = None,
+    *,
+    ordered: bool = False,
+) -> Dict[str, float]:
     """DDT per symbol, then max/mean. Mixed-market tapes must not span one 20h episode."""
     by: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
@@ -265,10 +278,10 @@ def drawdown_time_by_symbol(rows: Sequence[Dict[str, Any]], now: Optional[float]
             continue
         by.setdefault(str(r.get("symbol") or "?"), []).append(r)
     if len(by) <= 1:
-        return drawdown_time(rows, now)
-    parts = [drawdown_time(tape, now) for tape in by.values() if tape]
+        return drawdown_time(rows, now, ordered=ordered)
+    parts = [drawdown_time(tape, now, ordered=ordered) for tape in by.values() if tape]
     if not parts:
-        return drawdown_time(rows, now)
+        return drawdown_time(rows, now, ordered=ordered)
     episodes = sum(p["episodes"] for p in parts)
     total_s = sum(p["totalS"] for p in parts)
     return {
@@ -1261,7 +1274,7 @@ class SetBook:
         """
         ordered = sorted((r for r in rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
-        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need)
+        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
         checked = 0
         for name, metric in windows.items():
             n = int(metric.get("n") or 0)
@@ -1593,7 +1606,7 @@ class SetBook:
             strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
             processed_symbols: set[str] = set()
             aborted = False
-            w = max(1, min(int(workers or 1), 8, len(names) or 1))
+            w = max(1, min(int(workers or 1), 16, len(names) or 1))
             lock = threading.Lock()
 
             def _merge(
@@ -2557,16 +2570,55 @@ class SetBook:
 
     def _fast_historic_pf(self, rows: Sequence[Dict[str, Any]], requested: int) -> Dict[str, float]:
         """Score generated historic rows with the exact cost-aware formulas."""
-        window = list(rows)[-max(1, int(requested)) :]
+        take = max(1, int(requested))
+        window = rows[-take:] if isinstance(rows, list) else list(rows)[-take:]
         cost_pct = float(self.cost_pct)
         cost_frac = cost_as_frac(cost_pct)
-        gross = [finite(row.get("pnl_pct")) for row in window]
-        nets = [value - cost_frac for value in gross]
-        count = len(gross)
-        avg_r = sum(signed_result_r(value, cost_pct) for value in gross) / count if count else 0.0
-        ratio = ratio_from_r(avg_r) if count else 1.0
-        gp = sum(value for value in nets if value > 0)
-        gl = abs(sum(value for value in nets if value < 0))
+        return self._fast_historic_pf_from_gross(
+            [finite(row.get("pnl_pct")) for row in window],
+            requested,
+            cost_pct,
+            cost_frac,
+        )
+
+    def _fast_historic_pf_from_gross(
+        self,
+        gross: Sequence[float],
+        requested: int,
+        cost_pct: float,
+        cost_frac: float,
+    ) -> Dict[str, float]:
+        take = max(1, int(requested))
+        window = gross[-take:] if len(gross) > take else gross
+        count = len(window)
+        if not count:
+            return {
+                "n": float(requested),
+                "count": 0.0,
+                "avgR": 0.0,
+                "ratio": 1.0,
+                "classicPf": 0.0,
+                "costPct": round(cost_pct, 8),
+                "netPct": 0.0,
+                "grossPct": 0.0,
+                "netAvg": 0.0,
+                "costSubtracted": True,
+                "costSource": "manual-fallback",
+                "costSamples": 0.0,
+            }
+        inv_cost = 100.0 / cost_pct if cost_pct else 0.0
+        avg_r = sum(value * inv_cost - 1.0 for value in window) / count if cost_pct else 0.0
+        ratio = ratio_from_r(avg_r)
+        nets_sum = 0.0
+        gp = 0.0
+        gl = 0.0
+        for value in window:
+            net = value - cost_frac
+            nets_sum += net
+            if net > 0:
+                gp += net
+            elif net < 0:
+                gl -= net
         classic = gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)
         return {
             "n": float(requested),
@@ -2575,47 +2627,117 @@ class SetBook:
             "ratio": round(ratio, 4),
             "classicPf": round(classic, 4),
             "costPct": round(cost_pct, 8),
-            "netPct": round(net_move_pct(ratio, cost_pct), 4) if count else 0.0,
-            "grossPct": round(gross_move_pct(ratio, cost_pct), 4) if count else 0.0,
-            "netAvg": round(sum(nets) / count, 6) if count else 0.0,
+            "netPct": round(net_move_pct(ratio, cost_pct), 4),
+            "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+            "netAvg": round(nets_sum / count, 6),
             "costSubtracted": True,
             "costSource": "manual-fallback",
             "costSamples": 0.0,
         }
 
-    def _fast_historic_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
+    def _fast_historic_metrics(
+        self,
+        tape: Sequence[Dict[str, Any]],
+        hist_n: Optional[int] = None,
+        *,
+        ordered: bool = False,
+    ) -> Dict[str, Any]:
         """Equivalent historic score using the known simulation row contract."""
-        ordered = sorted(
-            (row for row in tape if isinstance(row, dict)),
-            key=lambda row: finite(row.get("t")),
-        )
+        if ordered:
+            rows = [row for row in tape if isinstance(row, dict)]
+        else:
+            rows = sorted(
+                (row for row in tape if isinstance(row, dict)),
+                key=lambda row: finite(row.get("t")),
+            )
+        return self._fast_historic_from_ordered(rows, hist_n=hist_n)
+
+    def _fast_historic_bundle(
+        self,
+        tape: Sequence[Dict[str, Any]],
+        hist_n: Optional[int] = None,
+        *,
+        ordered: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        """Overall + LONG/SHORT historic metrics from one sort."""
+        if ordered:
+            rows = [row for row in tape if isinstance(row, dict)]
+        else:
+            rows = sorted(
+                (row for row in tape if isinstance(row, dict)),
+                key=lambda row: finite(row.get("t")),
+            )
+        overall = self._fast_historic_from_ordered(rows, hist_n=hist_n)
+        sides: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
+        for row in rows:
+            d = str(row.get("side") or row.get("direction") or "")
+            if not d:
+                continue
+            key = d[0].upper()
+            if key == "L":
+                sides["LONG"].append(row)
+            elif key == "S":
+                sides["SHORT"].append(row)
+        return overall, {
+            "LONG": self._fast_historic_from_ordered(sides["LONG"], hist_n=len(sides["LONG"])) if sides["LONG"] else self._fast_historic_from_ordered((), hist_n=0),
+            "SHORT": self._fast_historic_from_ordered(sides["SHORT"], hist_n=len(sides["SHORT"])) if sides["SHORT"] else self._fast_historic_from_ordered((), hist_n=0),
+        }
+
+    def _fast_historic_from_ordered(self, ordered: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
         cost_pct = float(self.cost_pct)
         cost_frac = cost_as_frac(cost_pct)
-        gross = [finite(row.get("pnl_pct")) for row in ordered]
-        nets = [value - cost_frac for value in gross]
-        wins = sum(1 for value in nets if value > 0)
-        gp = round(sum(value for value in nets if value > 0), 6)
-        gl = round(abs(sum(value for value in nets if value < 0)), 6)
-        decided = sum(1 for value in nets if value != 0)
-        holds = [finite(row.get("hold_s")) for row in ordered]
-        pf_tape = last_n_balanced(ordered, self.pf_n)
-        last15 = self._fast_historic_pf(pf_tape, self.pf_n)
-        sample = len(pf_tape)
-        gross_values = [finite(row.get("pnl_pct")) for row in pf_tape]
-        net_values = [value - cost_frac for value in gross_values]
-        gross_profit = sum(value for value in gross_values if value > 0)
-        gross_loss = abs(sum(value for value in gross_values if value < 0))
-        net_profit = sum(value for value in net_values if value > 0)
-        net_loss = abs(sum(value for value in net_values if value < 0))
         required = self.eval_need()
+        n_rows = len(ordered)
+        wins = 0
+        gp = 0.0
+        gl = 0.0
+        decided = 0
+        nets_sum = 0.0
+        hold_sum = 0.0
+        gross: List[float] = []
+        for row in ordered:
+            value = finite(row.get("pnl_pct"))
+            gross.append(value)
+            net = value - cost_frac
+            nets_sum += net
+            hold_sum += finite(row.get("hold_s"))
+            if net > 0:
+                wins += 1
+                gp += net
+            elif net < 0:
+                gl -= net
+            if net != 0:
+                decided += 1
+        gp = round(gp, 6)
+        gl = round(gl, 6)
+        pf_tape = last_n_balanced(ordered, self.pf_n, ordered=True)
+        if pf_tape is ordered:
+            last15 = self._fast_historic_pf_from_gross(gross, self.pf_n, cost_pct, cost_frac)
+            pf_gross = gross
+        else:
+            pf_gross = [finite(row.get("pnl_pct")) for row in pf_tape]
+            last15 = self._fast_historic_pf_from_gross(pf_gross, self.pf_n, cost_pct, cost_frac)
+        sample = len(pf_tape)
+        gross_profit = sum(value for value in pf_gross if value > 0)
+        gross_loss = abs(sum(value for value in pf_gross if value < 0))
+        net_values_sum = 0.0
+        net_profit = 0.0
+        net_loss = 0.0
+        for value in pf_gross:
+            net = value - cost_frac
+            net_values_sum += net
+            if net > 0:
+                net_profit += net
+            elif net < 0:
+                net_loss -= net
         evaluation = {
             "sampleCount": sample,
             "requiredSamples": required,
             "grossPf": round(gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0), 6),
             "netPf": round(net_profit / net_loss if net_loss > 0 else (99.0 if net_profit > 0 else 0.0), 6),
-            "grossEv": round(sum(gross_values) / sample, 8) if sample else 0.0,
-            "netEv": round(sum(net_values) / sample, 8) if sample else 0.0,
-            "ev": round(sum(net_values) / sample, 8) if sample else 0.0,
+            "grossEv": round(sum(pf_gross) / sample, 8) if sample else 0.0,
+            "netEv": round(net_values_sum / sample, 8) if sample else 0.0,
+            "ev": round(net_values_sum / sample, 8) if sample else 0.0,
             "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
             "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
             "insufficientSample": sample < required,
@@ -2625,10 +2747,17 @@ class SetBook:
             "costSource": "manual-fallback",
             "costSamples": 0,
         }
-        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
+        window_n = max(EVALUATION_WINDOWS)
+        window_tape = last_n_balanced(ordered, window_n, ordered=True)
+        if window_tape is ordered:
+            window_gross = gross
+        elif window_tape is pf_tape:
+            window_gross = pf_gross
+        else:
+            window_gross = [finite(row.get("pnl_pct")) for row in window_tape]
         windows: Dict[str, Dict[str, Any]] = {}
         for requested in EVALUATION_WINDOWS:
-            metric = self._fast_historic_pf(window_tape, requested)
+            metric = self._fast_historic_pf_from_gross(window_gross, requested, cost_pct, cost_frac)
             count = int(metric["count"])
             required_window = max(1, min(int(requested), required))
             windows[f"last{requested}"] = {
@@ -2646,57 +2775,57 @@ class SetBook:
                 "costSamples": int(metric["costSamples"]),
                 "costSubtracted": True,
             }
-        last25 = ordered[-self.deact_n :]
-        if last25:
+        last25_n = min(self.deact_n, n_rows)
+        if last25_n:
+            last25_slice = ordered[-last25_n:]
             last25_avg_r = sum(
-                signed_result_r(
-                    finite(row.get("pnl_pct")),
-                    row_position_cost_pct(row, cost_pct),
-                )
-                for row in last25
-            ) / len(last25)
-            last25_avg_pnl = sum(row_net_pnl(row, cost_pct) for row in last25) / len(last25)
+                signed_result_r(finite(row.get("pnl_pct")), cost_pct)
+                for row in last25_slice
+            ) / last25_n
+            last25_avg_pnl = sum(row_net_pnl(row, cost_pct) for row in last25_slice) / last25_n
         else:
             last25_avg_r = 0.0
             last25_avg_pnl = 0.0
-        dd = drawdown_time_by_symbol(ordered)
+        dd = drawdown_time_by_symbol(ordered, ordered=True)
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         dd_s = float(dd["maxS"])
+        enable_pf = float(self.real_min_pf or 1.02)
+        max_dd = float(self.max_dd_s or 57600)
         return {
-            "n": int(hist_n if hist_n is not None else len(ordered)),
+            "n": int(hist_n if hist_n is not None else n_rows),
             "wins": wins,
             "gp": gp,
             "gl": gl,
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "expectancy": round(sum(nets) / len(nets), 6) if nets else 0.0,
-            "avg_hold_s": round(sum(holds) / len(holds), 1) if holds else 0.0,
+            "expectancy": round(nets_sum / n_rows, 6) if n_rows else 0.0,
+            "avg_hold_s": round(hold_sum / n_rows, 1) if n_rows else 0.0,
             "classic_all": round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0),
             "last15_ratio": ratio,
             "last15_classic": float(last15["classicPf"]),
             "last15_n": n15,
             "last15_r": float(last15["avgR"]),
-            "last25_n": len(last25),
+            "last25_n": last25_n,
             "last25_avg_r": last25_avg_r,
             "last25_avg_pnl": last25_avg_pnl,
             "max_dd_s": float(dd["maxS"]),
             "avg_dd_s": float(dd["avgS"]),
             "dd_episodes": int(dd["episodes"]),
-            "source_n": len(ordered),
+            "source_n": n_rows,
             "validated": n15 >= required and ratio + 1e-9 >= 1.0,
-            "active": bool(n15 >= required and ratio + 1e-9 >= float(self.real_min_pf or 1.02) and dd_s <= float(self.max_dd_s or 57600) + 1e-9),
-            "enablePf": float(self.real_min_pf or 1.02),
-            "ddOk": dd_s <= float(self.max_dd_s or 57600) + 1e-9,
+            "active": bool(n15 >= required and ratio + 1e-9 >= enable_pf and dd_s <= max_dd + 1e-9),
+            "enablePf": enable_pf,
+            "ddOk": dd_s <= max_dd + 1e-9,
             "cost_subtracted": True,
             "cost_pct": cost_pct,
-            "net_avg": float(last15.get("netAvg") or (sum(nets) / len(nets) if nets else 0.0)),
+            "net_avg": float(last15.get("netAvg") or (nets_sum / n_rows if n_rows else 0.0)),
             "gross_pf": float(evaluation.get("grossPf") or 0.0),
             "net_pf": float(evaluation.get("netPf") or 0.0),
             "gross_ev": float(evaluation.get("grossEv") or 0.0),
             "net_ev": float(evaluation.get("netEv") or 0.0),
             "evaluation": evaluation,
             "evaluation_windows": windows,
-            "proven_neg": n15 >= required and ratio + 1e-9 < float(self.real_min_pf or 1.02),
+            "proven_neg": n15 >= required and ratio + 1e-9 < enable_pf,
         }
 
     def _score_metrics(
@@ -2718,14 +2847,22 @@ class SetBook:
         holds = [finite(r.get("hold_s")) for r in ordered]
         avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
         classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-        pf_tape = last_n_balanced(ordered, self.pf_n)
-        last15 = last_n_cost_pf(pf_tape, self.pf_n, self.cost_pct)
+        pf_tape = last_n_balanced(ordered, self.pf_n, ordered=True)
+        last15 = last_n_cost_pf(
+            pf_tape, self.pf_n, self.cost_pct, ordered=True, simple=True if fast_historic else None
+        )
         evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
         # Use one bounded, symbol-balanced tape for every named last-N view.
         # This keeps the 50+/75-position coordinations reproducible without
         # retaining the complete history in each Set.
-        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
-        windows = evaluation_windows(window_tape, self.cost_pct, required_samples=self.eval_need())
+        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS), ordered=True)
+        windows = evaluation_windows(
+            window_tape,
+            self.cost_pct,
+            required_samples=self.eval_need(),
+            ordered=True,
+            simple=True if fast_historic else None,
+        )
         last25 = ordered[-self.deact_n :]
         if last25:
             rs = [signed_result_r(finite(r.get("pnl_pct")), row_position_cost_pct(r, self.cost_pct)) for r in last25]
@@ -2734,7 +2871,7 @@ class SetBook:
         else:
             last25_avg_r = 0.0
             last25_avg_pnl = 0.0
-        dd = drawdown_time_by_symbol(ordered)
+        dd = drawdown_time_by_symbol(ordered, ordered=True)
         need = self.eval_need()
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
@@ -3050,14 +3187,19 @@ class SetBook:
             return False, f"live DDt {dd_s:.0f}s"
         return True, ""
 
-    def _score_one(self, st: SetState) -> None:
+    def _score_one(self, st: SetState, *, bundle: Optional[Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]] = None) -> None:
         self._selection_dirty = True
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
-        tape = list(st.hist) if not st.live else st.tape()
-        if st.live:
+        side_bundle: Optional[Dict[str, Dict[str, Any]]] = None
+        if bundle is not None:
+            m, side_bundle = bundle
+        elif not st.live:
+            m, side_bundle = self._fast_historic_bundle(st.hist, hist_n=len(st.hist), ordered=True)
+        else:
+            tape = st.tape()
             tape.sort(key=lambda r: finite(r.get("t")))
-        m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=not bool(st.live))
+            m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False)
         st.n = m["n"]
         st.wins = m["wins"]
         st.gp = m["gp"]
@@ -3090,7 +3232,7 @@ class SetBook:
         st.avg_hold_s = m["avg_hold_s"]
         st.classic_all = m["classic_all"]
         counts: Dict[str, int] = {}
-        for r in tape:
+        for r in (st.live or st.hist):
             k = str(r.get("reason") or "x").split(":")[0]
             counts[k] = counts.get(k, 0) + 1
         st.exits = counts
@@ -3159,24 +3301,34 @@ class SetBook:
             "optimizationNetAvg": round(live_opt_avg, 8),
             "optimizationMaxDdS": round(float(live_opt_dd.get("maxS") or 0.0), 1),
             "optimizationPositive": live_opt_avg >= 0.0,
-            "tradesPerHour": round(trades_per_hour(st.live), 4),
+            "tradesPerHour": round(trades_per_hour(st.live), 4) if st.live else 0.0,
             "costPct": float(live_opt_pf.get("costPct") or self.cost_pct),
             "costSource": live_opt_pf.get("costSource") or self.cost_source,
         }
         need = self.eval_need()
         enable_pf = float(self.min_pf or 1.02)
         by: Dict[str, Dict[str, Any]] = {}
+        historic = not bool(st.live)
         for side in DIRECTIONS:
-            sub_hist = filter_side(st.hist, side)
-            sub_tape = filter_side(tape, side)
-            sub_live = filter_side(st.live, side)
-            sm = self._score_metrics(
-                sub_tape,
-                hist_n=len(sub_hist),
-                fast_historic=not bool(st.live),
-            )
+            if side_bundle is not None and historic:
+                sm = dict(side_bundle.get(side) or {})
+                sub_live: List[Dict[str, Any]] = []
+            else:
+                sub_hist = filter_side(st.hist, side)
+                sub_live = filter_side(st.live, side)
+                sub_tape = filter_side(st.live or st.hist, side)
+                sm = self._score_metrics(
+                    sub_tape,
+                    hist_n=len(sub_hist),
+                    fast_historic=historic,
+                )
             sm["side"] = side
-            lm = self._score_metrics(sub_live) if sub_live else empty_live
+            if sub_live:
+                lm = self._score_metrics(sub_live)
+                live_opt_n = len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):])
+            else:
+                lm = empty_live
+                live_opt_n = 0
             sm["live"] = {
                 "n": len(sub_live),
                 "last15_n": lm["last15_n"],
@@ -3189,7 +3341,7 @@ class SetBook:
                 "wr": lm["wr"],
                 "validated": lm["validated"],
                 "cost_subtracted": True,
-                "optimization_n": len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):]),
+                "optimization_n": live_opt_n,
             }
             sm["liveN"] = len(sub_live)
             if len(sub_live) >= self.eval_need():
@@ -3208,6 +3360,35 @@ class SetBook:
             sm["deact_reason"] = reason_s
             by[side] = sm
         st.by_side = by
+        if historic:
+            if st.locked:
+                st.active = False
+                st.deact_reason = "locked"
+                return
+            if not self.auto_deact:
+                st.active = True
+                st.deact_reason = ""
+                return
+            need_h = self.eval_need()
+            hist_n15 = int(m.get("last15_n") or 0)
+            hist_pf = float(m.get("last15_ratio") or 0)
+            hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= enable_pf
+            hist_dd_ok = float(m.get("max_dd_s") or 0) <= self.max_dd_s + 1e-9
+            if self.strict_gate:
+                any_side = any(bool((by.get(d) or {}).get("active")) for d in DIRECTIONS)
+                st.active = bool((hist_ok and hist_dd_ok) or any_side)
+                if st.active:
+                    st.deact_reason = ""
+                elif hist_n15 < need_h:
+                    st.deact_reason = "unproven"
+                elif not hist_ok:
+                    st.deact_reason = f"hist PF {hist_pf:.2f}<{enable_pf:.2f}"
+                else:
+                    st.deact_reason = f"hist DDt {m.get('max_dd_s'):.0f}s"
+            else:
+                st.active = True
+                st.deact_reason = ""
+            return
         live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         live25 = live_ordered[-self.deact_n :]
         live_avg = 0.0

@@ -573,7 +573,7 @@ def always_start_test() -> None:
     rec("astart-sidecar-clears-all", okc and not os.path.exists(pause_f) and not os.path.exists(stop_f)
         and not os.path.exists(ph.STOP_ALL_PATH) and os.path.exists(reset_f), msg[:140])
     seq = [c[0] for c in ctl.calls if c]
-    rec("astart-sidecar-retry-after-limit", seq == ["start", "reset-failed", "start"], str(seq))
+    rec("astart-sidecar-retry-after-limit", seq == ["enable", "start", "reset-failed", "enable", "start"], str(seq))
 
     ctl.calls = []
     ctl.fail_first_start = False
@@ -582,6 +582,41 @@ def always_start_test() -> None:
     oks, msgs = ph.apply_control("bingx-t01", "stop")
     rec("astart-sidecar-stop-marks", oks and os.path.exists(stop_f) and not os.path.exists(pause_f)
         and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
+
+    prev_disable_start = os.environ.pop("CTS_DISABLE_LIVE_START", None)
+    prev_disable_heal = os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+    rec("live-start-default-on", ph._live_start_allowed("bingx-x01") and ph._live_heal_allowed("bingx-x01"))
+    rec("vst-start-always-on", ph._live_start_allowed("bingx-x02") and ph._live_heal_allowed("bingx-x02"))
+    live_lane = {"type": "live", "id": "bingx-x01", "label": "Live", "unit": "USDT", "exchange": "BingX"}
+    ph.LANES = [live_lane]
+    ph.ID_TO_LANE = {live_lane["id"]: live_lane}
+    ph.TYPE_TO_ID = {"live": "bingx-x01"}
+    ctl.calls = []
+    ctl.fail_first_start = False
+    live_stop = os.path.join(tmp, "STOP-bingx-x01")
+    live_pause = os.path.join(tmp, "PAUSE-bingx-x01")
+    live_reset = os.path.join(tmp, "reset-eq-bingx-x01")
+    touch(live_stop)
+    ok_live, msg_live = ph.apply_control("bingx-x01", "start")
+    rec("live-start-allowed-by-default", ok_live and "blocked" not in msg_live and not os.path.exists(live_stop)
+        and os.path.exists(live_reset) and any(c and c[0] == "enable" for c in ctl.calls), msg_live[:140])
+    os.environ["CTS_DISABLE_LIVE_START"] = "1"
+    os.environ["CTS_DISABLE_LIVE_HEAL"] = "1"
+    rec("live-start-test-disable", (not ph._live_start_allowed("bingx-x01")) and (not ph._live_heal_allowed("bingx-x01")))
+    rec("vst-start-still-on-when-live-disabled", ph._live_start_allowed("bingx-x02"))
+    ctl.calls = []
+    touch(live_pause)
+    blocked, blocked_msg = ph.apply_control("bingx-x01", "start")
+    rec("live-start-blocked-when-disabled", (not blocked) and "CTS_DISABLE_LIVE_START" in blocked_msg
+        and os.path.exists(live_pause) and not any(c and c[0] == "start" for c in ctl.calls), blocked_msg[:140])
+    if prev_disable_start is None:
+        os.environ.pop("CTS_DISABLE_LIVE_START", None)
+    else:
+        os.environ["CTS_DISABLE_LIVE_START"] = prev_disable_start
+    if prev_disable_heal is None:
+        os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+    else:
+        os.environ["CTS_DISABLE_LIVE_HEAL"] = prev_disable_heal
 
 
 def control_coord_test() -> None:

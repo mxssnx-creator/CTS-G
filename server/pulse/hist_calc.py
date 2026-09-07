@@ -73,8 +73,8 @@ KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
 CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 KLINE_PAGE_MAX = 1440
 REPLAY_SET_CHUNK = 96  # scalar fallback chunk; vector workers use larger tiles
-REPLAY_TILE_SIZE = 512
-REPLAY_QUEUE_MULTIPLIER = 2
+REPLAY_TILE_SIZE = 1024
+REPLAY_QUEUE_MULTIPLIER = 4
 _PUBLIC_REQUEST_INTERVAL_S = 1.05
 _PUBLIC_REQUEST_LOCK = threading.Lock()
 _PUBLIC_REQUEST_LAST = 0.0
@@ -922,26 +922,62 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
     }
 
 
+def _bounded_tape(parts: Any, cap: int) -> List[Dict[str, Any]]:
+    """Keep last-N balanced fills while streaming large independent tapes.
+
+    Pack/core rollups used to concatenate every Set's history (tens of
+    millions of rows) before last-N PF. The published windows are last 5–75
+    (plus the 80/150 coordination views), so bounding to that cap keeps the
+    same PF/EV contract without the full cartesian product in RAM.
+    """
+    cap = max(8, int(cap or 8))
+    buf: List[Dict[str, Any]] = []
+    for rows in parts:
+        if not rows:
+            continue
+        buf.extend(rows)
+        if len(buf) > cap * 8:
+            buf = last_n_balanced(buf, cap)
+    if len(buf) > cap:
+        buf = last_n_balanced(buf, cap)
+    return buf
+
+
 def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
-    tapes: List[Dict[str, Any]] = []
+    cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0)
     if hist:
-        for rows in hist.values():
-            tapes.extend(rows)
+        parts = hist.values()
     else:
-        for st in book.by_idx:
-            tapes.extend(st.hist)
+        parts = (st.hist for st in book.by_idx)
+    by_dir: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
+    dir_n = {"LONG": 0, "SHORT": 0}
+    trim_at = max(cap * 2, 32)
+    for rows in parts:
+        for row in rows:
+            d = str(row.get("side") or row.get("direction") or "")
+            if not d:
+                continue
+            key = "LONG" if d[0] in "Ll" else ("SHORT" if d[0] in "Ss" else "")
+            if not key:
+                continue
+            by_dir[key].append(row)
+            dir_n[key] += 1
+            if len(by_dir[key]) > trim_at:
+                by_dir[key] = last_n_balanced(by_dir[key], cap)
     out: Dict[str, Any] = {}
+    need = book.eval_need()
+    win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
     for d in DIRECTIONS:
-        sub = filter_side(tapes, d)
-        balanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
-        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct)
-        nets = [row_net_pnl(r, book.cost_pct) for r in sub]
+        sub = last_n_balanced(by_dir.get(d) or [], cap)
+        balanced = last_n_balanced(sub, win_n, ordered=True)
+        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct, ordered=True, simple=True)
+        nets = [row_net_pnl(r, book.cost_pct) for r in balanced]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
-        dd = drawdown_time_by_symbol(sub) if sub else {"maxS": 0.0, "avgS": 0.0}
+        dd = drawdown_time_by_symbol(balanced, ordered=True) if balanced else {"maxS": 0.0, "avgS": 0.0}
         out[d] = {
             "direction": d,
-            "n": len(sub),
+            "n": int(dir_n.get(d) or 0),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
@@ -949,57 +985,78 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
-            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
+            "evaluationWindows": evaluation_windows(
+                balanced, book.cost_pct, required_samples=need, ordered=True, simple=True
+            ),
         }
     return out
 
 
 def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
     """Independent pack / kind / pack:kind books plus Block / DCA volume tapes. Cost subtracted."""
+    cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0, 80)
     groups: Dict[str, List[Dict[str, Any]]] = {}
+    group_n: Dict[str, int] = {}
+    trim_at = max(cap * 2, 32)
+    need = book.eval_need()
+    win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
+
+    def add(key: str, rows: Sequence[Dict[str, Any]]) -> None:
+        groups.setdefault(key, [])
+        group_n.setdefault(key, 0)
+        if not rows:
+            return
+        buf = groups[key]
+        buf.extend(rows)
+        group_n[key] += len(rows)
+        if len(buf) > trim_at:
+            groups[key] = last_n_balanced(buf, cap)
+
     for st in book.by_idx:
-        rows = list((hist or {}).get(st.id) or st.hist)
-        groups.setdefault(st.pack, []).extend(rows)
-        groups.setdefault(st.kind, []).extend(rows)
-        groups.setdefault(f"{st.pack}:{st.kind}", []).extend(rows)
-        groups.setdefault("core", []).extend(rows)
+        rows = (hist or {}).get(st.id) or st.hist
+        add(st.pack, rows)
+        add(st.kind, rows)
+        add(f"{st.pack}:{st.kind}", rows)
+        add("core", rows)
     for key in ("block", "block:signals", "dca"):
-        groups.setdefault(key, list((strat or {}).get(key) or []))
+        add(key, (strat or {}).get(key) or [])
     if strat:
         for key, tape in strat.items():
             if key in ("block", "block:signals", "dca"):
                 continue
             if tape:
-                groups[str(key)] = list(tape)
+                add(str(key), tape)
     out: Dict[str, Any] = {}
     for key, tape in groups.items():
         win = book.pf_n
         if key in ("block", "block:signals", "dca", "core"):
-            win = max(book.pf_n, min(80, len(tape) or 1))
-        balanced = last_n_balanced(tape, max(win, max(EVALUATION_WINDOWS)))
-        pf = last_n_cost_pf(balanced, win, book.cost_pct)
-        nets = [row_net_pnl(r, book.cost_pct) for r in tape]
+            win = max(book.pf_n, min(80, int(group_n.get(key) or len(tape) or 1)))
+        bounded = last_n_balanced(tape, max(win, cap))
+        pf = last_n_cost_pf(bounded, win, book.cost_pct, ordered=True, simple=True)
+        nets = [row_net_pnl(r, book.cost_pct) for r in bounded]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
-        dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0}
+        dd = drawdown_time_by_symbol(bounded, ordered=True) if bounded else {"maxS": 0.0, "avgS": 0.0}
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
-            sub = filter_side(tape, d)
+            sub = filter_side(bounded, d)
             if not sub:
                 continue
-            sbalanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
-            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct)
+            sbalanced = last_n_balanced(sub, win_n, ordered=True)
+            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct, ordered=True, simple=True)
             by_dir[d] = {
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
                 "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
                 "costSubtracted": True,
-                "evaluationWindows": evaluation_windows(sbalanced, book.cost_pct, required_samples=book.eval_need()),
+                "evaluationWindows": evaluation_windows(
+                    sbalanced, book.cost_pct, required_samples=need, ordered=True, simple=True
+                ),
             }
         out[key] = {
             "strategy": key,
-            "n": len(tape),
+            "n": int(group_n.get(key) or len(tape)),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
@@ -1007,72 +1064,129 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
-            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
+            "evaluationWindows": evaluation_windows(
+                bounded, book.cost_pct, required_samples=need, ordered=True, simple=True
+            ),
             "bySide": by_dir,
         }
     return out
 
 
-def expand_rows(book: SetBook) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+def expand_rows(book: SetBook, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    ranked = _rank_set_rows(book)
+    picked = ranked if limit is None else ranked[:limit]
+    return [set_row(st, side) for _key, st, side, _validated, _low_sl in picked]
+
+
+def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
+    want = str(side or "").upper()
+    blob = (getattr(st, "by_side", None) or {}).get(want) if want in DIRECTIONS else None
+    n15 = int((blob.get("last15_n") if blob is not None else st.last15_n) or 0)
+    pf = float((blob.get("last15_ratio") if blob is not None else st.last15_ratio) or 0)
+    n = int((blob.get("n") if blob is not None else st.n) or 0)
+    dd = float((blob.get("max_dd_s") if blob is not None else st.max_dd_s) or 0)
+    exp = float((blob.get("expectancy") if blob is not None else st.expectancy) or 0)
+    sl = float(st.sl_ratio or 9)
+    validated = n15 >= 8 and pf + 1e-9 >= 1.0
+    low_sl = sl <= 0.6 + 1e-9 or st.kind == "trail"
+    return (0 if validated else 1, -pf, dd, sl, -exp, -n), validated, low_sl, n
+
+
+def _rank_set_rows(book: SetBook) -> List[Tuple[Tuple, Any, str, bool, bool]]:
+    ranked: List[Tuple[Tuple, Any, str, bool, bool]] = []
     for st in book.by_idx:
-        rows.append(set_row(st))
+        key, validated, low_sl, _n = _rank_set_info(st, "")
+        ranked.append((key, st, "", validated, low_sl))
         for d in DIRECTIONS:
-            side = set_row(st, d)
-            if int(side.get("n") or 0) > 0:
-                rows.append(side)
-    rows.sort(key=rank_tuple)
-    return rows
+            skey, sval, slow, sn = _rank_set_info(st, d)
+            if sn > 0:
+                ranked.append((skey, st, d, sval, slow))
+    ranked.sort(key=lambda item: item[0])
+    return ranked
+
+
+def pick_winner_row(book: SetBook, ranked: Optional[Sequence[Tuple[Tuple, Any, str, bool, bool]]] = None) -> Optional[Dict[str, Any]]:
+    items = list(ranked) if ranked is not None else _rank_set_rows(book)
+    if not items:
+        return None
+    chosen = next((item for item in items if item[3] and item[4]), None)
+    if chosen is None:
+        chosen = next((item for item in items if item[3]), None)
+    if chosen is None:
+        chosen = items[0]
+    return set_row(chosen[1], chosen[2])
 
 
 def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
-    by: Dict[str, List[Dict[str, Any]]] = {}
-    tapes: List[List[Dict[str, Any]]]
-    if hist:
-        tapes = list(hist.values())
-    else:
-        tapes = [list(st.hist) for st in book.by_idx]
-    for tape in tapes:
+    cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0, 80)
+    trim_at = max(cap * 2, 32)
+    need = book.eval_need()
+    win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
+    by_tape: Dict[str, List[Dict[str, Any]]] = {}
+    by_n: Dict[str, int] = {}
+    by_wins: Dict[str, int] = {}
+    by_decided: Dict[str, int] = {}
+    by_dd: Dict[str, List[Dict[str, float]]] = {}
+    by_dir_n: Dict[str, Dict[str, int]] = {}
+    parts = hist.values() if hist else (st.hist for st in book.by_idx)
+    cost = book.cost_pct
+    for tape in parts:
+        per_set: Dict[str, List[Dict[str, Any]]] = {}
         for r in tape:
             s = str(r.get("symbol") or "")
-            if s:
-                by.setdefault(s, []).append(r)
+            if not s:
+                continue
+            by_n[s] = by_n.get(s, 0) + 1
+            net = row_net_pnl(r, cost)
+            if net > 0:
+                by_wins[s] = by_wins.get(s, 0) + 1
+            if net != 0:
+                by_decided[s] = by_decided.get(s, 0) + 1
+            d = str(r.get("side") or r.get("direction") or "")
+            dkey = "LONG" if d[:1] in "Ll" else ("SHORT" if d[:1] in "Ss" else "")
+            if dkey:
+                dir_n = by_dir_n.setdefault(s, {"LONG": 0, "SHORT": 0})
+                dir_n[dkey] += 1
+            buf = by_tape.setdefault(s, [])
+            buf.append(r)
+            if len(buf) > trim_at:
+                by_tape[s] = last_n_balanced(buf, cap)
+            per_set.setdefault(s, []).append(r)
+        for s, rows in per_set.items():
+            by_dd.setdefault(s, []).append(drawdown_time(rows, ordered=True))
     out: List[Dict[str, Any]] = []
-    for s, tape in by.items():
-        balanced = last_n_balanced(tape, max(book.pf_n, max(EVALUATION_WINDOWS)))
-        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct)
-        # One symbol's fills still mix many sets — DDT per set, then max.
-        by_set: Dict[str, List[Dict[str, Any]]] = {}
-        for r in tape:
-            by_set.setdefault(str(r.get("set_id") or r.get("setId") or "?"), []).append(r)
-        parts = [drawdown_time(t) for t in by_set.values() if t]
-        if parts:
+    for s, tape in by_tape.items():
+        balanced = last_n_balanced(tape, win_n)
+        pf = last_n_cost_pf(balanced, book.pf_n, cost, ordered=True, simple=True)
+        dd_parts = by_dd.get(s) or []
+        if dd_parts:
             dd = {
-                "maxS": max(p["maxS"] for p in parts),
-                "avgS": sum(p["avgS"] for p in parts) / len(parts),
+                "maxS": max(p["maxS"] for p in dd_parts),
+                "avgS": sum(p["avgS"] for p in dd_parts) / len(dd_parts),
             }
         else:
-            dd = drawdown_time(tape)
-        nets = [row_net_pnl(r, book.cost_pct) for r in tape]
-        wins = sum(1 for x in nets if x > 0)
-        decided = sum(1 for x in nets if x != 0)
+            dd = drawdown_time(balanced, ordered=True)
+        decided = int(by_decided.get(s) or 0)
+        wins = int(by_wins.get(s) or 0)
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
-            sub = filter_side(tape, d)
+            sub = filter_side(balanced, d)
             if not sub:
                 continue
-            sbalanced = last_n_balanced(sub, max(book.pf_n, max(EVALUATION_WINDOWS)))
-            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct)
+            sbalanced = last_n_balanced(sub, win_n, ordered=True)
+            spf = last_n_cost_pf(sbalanced, book.pf_n, cost, ordered=True, simple=True)
             by_dir[d] = {
-                "n": len(sub),
+                "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
                 "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
-                "evaluationWindows": evaluation_windows(sbalanced, book.cost_pct, required_samples=book.eval_need()),
+                "evaluationWindows": evaluation_windows(
+                    sbalanced, cost, required_samples=need, ordered=True, simple=True
+                ),
             }
         out.append({
             "symbol": s,
-            "n": len(tape),
+            "n": int(by_n.get(s) or len(tape)),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
@@ -1081,7 +1195,9 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
             "costSubtracted": True,
-            "evaluationWindows": evaluation_windows(balanced, book.cost_pct, required_samples=book.eval_need()),
+            "evaluationWindows": evaluation_windows(
+                balanced, cost, required_samples=need, ordered=True, simple=True
+            ),
             "bySide": by_dir,
         })
     out.sort(key=lambda r: (0 if r["validated"] else 1, -r["pf"], r["maxDdS"]))
@@ -1298,15 +1414,7 @@ def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tup
         book.bars.pop(sym, None)
 
 
-def _replay_tile_worker(payload: Tuple[
-    str,
-    List[List[float]],
-    float,
-    Sequence[str],
-    Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int],
-    bool,
-    bool,
-]) -> Tuple[
+def _replay_tile_worker(payload: Tuple[Any, ...]) -> Tuple[
     str,
     int,
     Dict[str, List[Dict[str, Any]]],
@@ -1316,10 +1424,13 @@ def _replay_tile_worker(payload: Tuple[
     float,
 ]:
     """Replay one bounded symbol/config tile without scoring the full catalog."""
-    sym, bars, now, set_ids, prepared, capture_ind, capture_strategy = payload
+    if len(payload) >= 7:
+        sym, bars, now, set_ids, prepared, capture_ind, capture_strategy = payload[:7]
+    else:
+        raise ValueError("replay tile payload is incomplete")
     book = _worker_book()
     started = time.perf_counter()
-    book.bars[sym] = bars
+    book.bars[str(sym)] = bars
     try:
         ids = [str(sid) for sid in set_ids]
         local_hist: Dict[str, List[Dict[str, Any]]] = {}
@@ -1327,7 +1438,7 @@ def _replay_tile_worker(payload: Tuple[
         local_strat: Optional[Dict[str, List[Dict[str, Any]]]] = {} if capture_strategy else None
         local_counts: Dict[str, int] = {}
         nbar = book.replay_symbol_partial(
-            sym,
+            str(sym),
             local_hist,
             now=now,
             ind_hist=local_ind,
@@ -1349,7 +1460,7 @@ def _replay_tile_worker(payload: Tuple[
                 if len(rows) > 2400:
                     local_strat[key] = rows[-2400:]
         return (
-            sym,
+            str(sym),
             nbar,
             local_hist,
             local_ind or {},
@@ -1358,7 +1469,7 @@ def _replay_tile_worker(payload: Tuple[
             (time.perf_counter() - started) * 1000.0,
         )
     finally:
-        book.bars.pop(sym, None)
+        book.bars.pop(str(sym), None)
 
 
 def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:
@@ -1543,8 +1654,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         })
         try:
             cpu = max(1, int(os.cpu_count() or 1))
-            requested_workers = int(body.get("workers") or min(4, cpu))
-            workers = max(1, min(8, cpu, requested_workers))
+            default_workers = max(1, min(cpu, 8))
+            requested_workers = int(body.get("workers") or default_workers)
+            workers = max(1, min(16, cpu, requested_workers))
         except Exception:
             workers = 2
         job["workers"] = workers
@@ -1596,10 +1708,11 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 # Each symbol is committed atomically in on_item(). Replaying
                 # the still-empty aggregate maps here would erase those tapes
                 # and make indications appear gate-closed at the end of a run.
-                rows = expand_rows(book)
-                job["rows"] = rows[:80]
-                job["rowCount"] = len(rows)
-                job["validatedCount"] = sum(1 for r in rows if r.get("validated"))
+                ranked = _rank_set_rows(book)
+                rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:80]]
+                job["rows"] = rows
+                job["rowCount"] = len(ranked)
+                job["validatedCount"] = sum(1 for item in ranked if item[3])
                 job["kinds"] = book.ind_gate_snapshot()
                 # Direction/strategy rollups walk the full per-Set tape and
                 # duplicate rows across groups. They are deliberately built
@@ -1678,16 +1791,17 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         def finish_symbol(state: Dict[str, Any], total: int) -> None:
             nonlocal replay_done
             sym = str(state["symbol"])
-            merge_started = time.perf_counter()
-            book._commit_hist(
-                state["hist"],
-                state["ind"],
-                merge=True,
-                replayed_symbols=[sym],
-                hist_counts=state["counts"],
-                score=False,
-            )
-            timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
+            if state["hist"]:
+                merge_started = time.perf_counter()
+                book._commit_hist(
+                    state["hist"],
+                    state["ind"] or None,
+                    merge=True,
+                    replayed_symbols=[sym],
+                    hist_counts=state["counts"],
+                    score=False,
+                )
+                timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
             for kind, rows in state["ind"].items():
                 if rows:
                     ind_hist[kind] = (ind_hist.get(kind) or []) + rows
@@ -1708,9 +1822,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["checkpoint"]["symbol"] = sym
             job["source"] = state["src"]
             _trim_maps()
-            heavy = replay_done == total or replay_done % 8 == 0
-            if persist or heavy or replay_done % 4 == 0:
-                snapshot(replay_done, total, "replay", heavy=heavy)
+            if persist:
+                heavy = replay_done == total or replay_done % 8 == 0
+                if heavy or replay_done % 4 == 0:
+                    snapshot(replay_done, total, "replay", heavy=heavy)
             state["bars"] = None
             state["prepared"] = None
             symbol_states.pop(sym, None)
@@ -1727,15 +1842,21 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def merge_tile(result: Tuple[Any, ...], meta: Dict[str, Any], total: int) -> None:
             nonlocal replay_tiles_completed, replay_tasks_completed, tile_started_at
-            sym, _nbar, local_hist, local_ind, local_strat, local_counts, tile_ms = result
+            sym, _nbar, local_hist, local_ind, local_strat, local_counts, tile_ms = result[:7]
             state = symbol_states.get(str(sym))
             if state is None:
                 raise RuntimeError(f"replay tile completed for unknown symbol {sym}")
             timings["replayMs"] += float(tile_ms or 0.0)
-            for sid, rows in local_hist.items():
-                if rows:
-                    target = state["hist"].get(sid) or []
-                    state["hist"][sid] = (target + rows)[-hist_cap:]
+            merge_started = time.perf_counter()
+            book._commit_hist(
+                local_hist,
+                local_ind or None,
+                merge=True,
+                replayed_symbols=[str(sym)],
+                hist_counts=local_counts,
+                score=False,
+            )
+            timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
             for kind, rows in local_ind.items():
                 if rows:
                     target = state["ind"].get(kind) or []
@@ -1886,7 +2007,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 f"historic replay incomplete: symbols {replay_done}/{len(symbols)}, "
                 f"tiles {replay_tiles_completed}/{replay_tiles_total}"
             )
-        # One catalog-wide score pass is the only full Set scoring operation.
+        # One catalog-wide score pass after every symbol/config is committed.
         score_started = time.perf_counter()
         book._score_all()
         timings["scoreMs"] = (time.perf_counter() - score_started) * 1000.0
@@ -1899,7 +2020,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         book.progress.ready = True
         book.progress.pct = 100.0
         report_started = time.perf_counter()
-        rows = expand_rows(book)
+        ranked = _rank_set_rows(book)
+        rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
         kinds = book.ind_gate_snapshot()
         by_sym = symbol_rollup(book)
         by_dir = direction_rollup(book)
@@ -1911,13 +2033,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "indications": {k: v.get("evaluationWindows") or {} for k, v in kinds.items() if isinstance(v, dict)},
             "symbols": {str(v.get("symbol")): v.get("evaluationWindows") or {} for v in by_sym if isinstance(v, dict)},
         }
-        winner = rows[0] if rows else None
-        # Prefer a validated low-SL row when one exists in the top slice.
-        top = [r for r in rows if r.get("validated") and r.get("lowSl")]
-        if top:
-            winner = top[0]
-        elif any(r.get("validated") for r in rows):
-            winner = next(r for r in rows if r["validated"])
+        winner = pick_winner_row(book, ranked)
         final_coverage = {
             **book.coverage(),
             "symbols": coverage_counter(len(symbols), replay_done),
@@ -1937,13 +2053,13 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "pct": 100.0,
             "ready": True,
             "detail": (
-                f"{sum(1 for r in rows if r['validated'])}/{len(rows)} validated · "
+                f"{sum(1 for item in ranked if item[3])}/{len(ranked)} validated · "
                 f"{sum(s.n for s in book.sets.values())} fills · {source}"
             ),
             "coverage": final_coverage,
             "rows": rows[:120],
-            "rowCount": len(rows),
-            "validatedCount": sum(1 for r in rows if r.get("validated")),
+            "rowCount": len(ranked),
+            "validatedCount": sum(1 for item in ranked if item[3]),
             "bySymbol": by_sym,
             "byDirection": by_dir,
             "byStrategy": by_strat,

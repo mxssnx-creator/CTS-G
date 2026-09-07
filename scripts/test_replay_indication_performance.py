@@ -214,5 +214,90 @@ class ReplayIndicationTests(unittest.TestCase):
         self.assertIn("def should_abort", pulse_source)
 
 
+class HistoricScoreBundleTests(unittest.TestCase):
+    def test_bundle_matches_separate_side_scores(self):
+        book = SetBook()
+        tape = [
+            {"t": 10.0, "side": "LONG", "pnl": 0.2, "pnl_pct": 0.004, "hold_s": 60, "symbol": "X-USDT", "reason": "tp"},
+            {"t": 20.0, "side": "SHORT", "pnl": -0.1, "pnl_pct": -0.003, "hold_s": 120, "symbol": "X-USDT", "reason": "sl"},
+            {"t": 30.0, "side": "LONG", "pnl": 0.15, "pnl_pct": 0.003, "hold_s": 90, "symbol": "Y-USDT", "reason": "tp"},
+            {"t": 40.0, "side": "SHORT", "pnl": 0.05, "pnl_pct": 0.002, "hold_s": 60, "symbol": "Y-USDT", "reason": "tp"},
+        ]
+        overall, split = book._fast_historic_bundle(tape)
+        direct = book._fast_historic_metrics(tape)
+        self.assertAlmostEqual(overall["last15_ratio"], direct["last15_ratio"], places=6)
+        self.assertEqual(overall["n"], direct["n"])
+        long_only = book._fast_historic_metrics([row for row in tape if row["side"] == "LONG"])
+        short_only = book._fast_historic_metrics([row for row in tape if row["side"] == "SHORT"])
+        self.assertAlmostEqual(split["LONG"]["last15_ratio"], long_only["last15_ratio"], places=6)
+        self.assertAlmostEqual(split["SHORT"]["last15_ratio"], short_only["last15_ratio"], places=6)
+        self.assertEqual(split["LONG"]["n"], 2)
+        self.assertEqual(split["SHORT"]["n"], 2)
+
+    def test_ordered_helpers_match_unsorted_path(self):
+        from set_engine import last_n_balanced, drawdown_time_by_symbol
+        from position_cost import last_n_cost_pf, evaluation_windows
+        tape = [
+            {"t": 40.0, "side": "SHORT", "pnl": 0.05, "pnl_pct": 0.002, "hold_s": 60, "symbol": "Y-USDT"},
+            {"t": 10.0, "side": "LONG", "pnl": 0.2, "pnl_pct": 0.004, "hold_s": 60, "symbol": "X-USDT"},
+            {"t": 30.0, "side": "LONG", "pnl": 0.15, "pnl_pct": 0.003, "hold_s": 90, "symbol": "Y-USDT"},
+            {"t": 20.0, "side": "SHORT", "pnl": -0.1, "pnl_pct": -0.003, "hold_s": 120, "symbol": "X-USDT"},
+        ]
+        ordered = sorted(tape, key=lambda row: row["t"])
+        bal = last_n_balanced(tape, 3)
+        bal_ordered = last_n_balanced(ordered, 3, ordered=True)
+        self.assertEqual([row["t"] for row in bal], [row["t"] for row in bal_ordered])
+        pf = last_n_cost_pf(tape, 3, 0.10)
+        pf_ordered = last_n_cost_pf(ordered, 3, 0.10, ordered=True, simple=True)
+        self.assertAlmostEqual(pf["ratio"], pf_ordered["ratio"], places=6)
+        self.assertEqual(pf["count"], pf_ordered["count"])
+        windows = evaluation_windows(tape, 0.10)
+        windows_ordered = evaluation_windows(ordered, 0.10, ordered=True, simple=True)
+        self.assertEqual(set(windows), set(windows_ordered))
+        for key in windows:
+            self.assertAlmostEqual(windows[key]["pf"], windows_ordered[key]["pf"], places=6)
+            self.assertEqual(windows[key]["n"], windows_ordered[key]["n"])
+        dd = drawdown_time_by_symbol(tape)
+        dd_ordered = drawdown_time_by_symbol(ordered, ordered=True)
+        self.assertAlmostEqual(dd["maxS"], dd_ordered["maxS"], places=4)
+
+    def test_historic_score_windows_and_winner_cover_full_catalog(self):
+        from hist_calc import overlay_from_options, parse_options, expand_rows, pick_winner_row, _rank_set_rows
+        from position_cost import EVALUATION_WINDOWS
+        book = SetBook()
+        book.load(overlay_from_options(parse_options({"hours": 1, "allConfigs": True})))
+        self.assertGreaterEqual(len(book.by_idx), 1000)
+        tape = []
+        t = 1_700_000_000.0
+        for i in range(24):
+            side = "LONG" if i % 2 == 0 else "SHORT"
+            symbol = ("XRP-USDT", "BCH-USDT", "SOL-USDT")[i % 3]
+            tape.append({
+                "t": t + i * 60,
+                "side": side,
+                "direction": side,
+                "pnl": 0.02 if i % 3 else -0.01,
+                "pnl_pct": 0.002 if i % 3 else -0.001,
+                "hold_s": 60,
+                "symbol": symbol,
+                "reason": "tp" if i % 3 else "sl",
+            })
+        sample = book.by_idx[0]
+        sample.hist = list(tape)
+        book._score_one(sample)
+        self.assertEqual(sample.n, 24)
+        self.assertEqual(set(sample.evaluation_windows), {f"last{n}" for n in EVALUATION_WINDOWS})
+        self.assertEqual(sample.evaluation_windows["last15"]["n"], 15)
+        self.assertIn("LONG", sample.by_side)
+        self.assertIn("SHORT", sample.by_side)
+        ranked = _rank_set_rows(book)
+        self.assertGreaterEqual(len(ranked), len(book.by_idx))
+        winner = pick_winner_row(book, ranked)
+        self.assertIsNotNone(winner)
+        self.assertIn("last15Ratio", winner)
+        rows = expand_rows(book, limit=5)
+        self.assertLessEqual(len(rows), 5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
