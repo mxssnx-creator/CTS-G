@@ -29,13 +29,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
 Nice=-5
 CPUWeight=200
-# A full 34,320-set catalog plus bounded multi-symbol history needs headroom
-# above the reclaim threshold; keeping the cap explicit avoids swap-thrashing
-# and watchdog resets while still bounding each connection lane. Swap is
-# disabled for this lane so reclaim cannot turn a bounded replay into a silent
-# multi-minute D-state stall.
-MemoryHigh=2304M
-MemoryMax=3072M
+# A 25-symbol 34,320-set catalog plus klines sits around 2.4–2.6G RSS.
+# MemoryHigh must stay above that working set; reclaim at 2304M turned the
+# first hist slice into a multi-minute futex stall (mem_cgroup_handle_over_high).
+MemoryHigh=3456M
+MemoryMax=3840M
 MemorySwapMax=0
 TasksMax=128
 LimitNOFILE=4096

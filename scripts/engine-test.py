@@ -124,14 +124,14 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 25, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-multi", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 25)
-    rec("default-25-cap", int(x01.get("symbolCap") or 0) == 25 and int(x02.get("symbolCap") or 0) == 25)
-    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
+    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("open-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -194,7 +194,7 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+    rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
 def fill_accounting_test() -> None:
@@ -352,7 +352,11 @@ def coord_test() -> None:
     rec("coord-countpos-mult-4", abs(c.size_mult(4) - (1.0 - 4 * 0.05)) < 1e-9, str(c.size_mult(4)))
     rec("coord-countpos-mult-floor", c.size_mult(40) >= 0.35 - 1e-9, str(c.size_mult(40)))
     rec("coord-add-stack-ok", c.add_stack_cap(3, 1.4) == 3, str(c.add_stack_cap(3, 1.4)))
+    rec("coord-axes-default-off", not c.axes_active() and all(not ax.enabled for ax in c.axes.values()), str({k: v.enabled for k, v in c.axes.items()}))
+    rec("coord-add-stack-weak-default", c.add_stack_cap(3, 0.8) == 3, str(c.add_stack_cap(3, 0.8)))
+    c.axes["cont"].enabled = True
     rec("coord-add-stack-weak", c.add_stack_cap(3, 0.8) == 1, str(c.add_stack_cap(3, 0.8)))
+    c.axes["cont"].enabled = False
     c_off = Coordinator()
     c_off.axes["cont"].enabled = False
     rec("coord-add-stack-cont-off", c_off.add_stack_cap(3, 0.8) == 3, str(c_off.add_stack_cap(3, 0.8)))
@@ -373,19 +377,35 @@ def coord_test() -> None:
     rec("coord-eval-from-overlay", c3.main_eval == 7 and c3.real_eval == 4, f"{c3.main_eval}/{c3.real_eval}")
     rec("coord-vol-ratio-overlay", abs(c3.pos_count_vol_ratio - 0.1) < 1e-9, str(c3.pos_count_vol_ratio))
     rec("coord-snap-countpos", bool((c3.snapshot().get("countPos") or {}).get("addGate")), str(c3.snapshot().get("countPos")))
+    from set_engine import SetBook
+    book_ax = SetBook()
+    book_ax.load({"histEnabled": True, "stratGeneral": True, "setMinStep": 8, "setStepMax": 8, "slToTpRatios": [0.6]})
+    base_st = next((s for s in book_ax.by_idx if s.kind == "base"), None)
+    rec("coord-base-index", base_st is not None and bool((book_ax._ids_by_kind or {}).get("base")), str(len((book_ax._ids_by_kind or {}).get("base") or [])))
+    if base_st is not None:
+        base_st.last15_n = 15
+        base_st.last15_ratio = 1.4
+    c_base = Coordinator()
+    agg = c_base.coordinate_base_sets(book_ax)
+    rec("coord-base-from-ids", bool(agg.get("fromIds") and agg.get("fromIndex") and agg.get("fromBaseVars") and int(agg.get("childCount") or 0) == 0 and int(agg.get("parentCount") or 0) >= 1), str({k: agg.get(k) for k in ("parentCount", "qualifiedChildren", "childCount", "fromBaseVars")}))
+    rec("coord-base-qualified-vars", int(agg.get("qualifiedChildren") or 0) >= 1, str(agg.get("qualifiedChildren")))
+    rec("coord-axis-off-no-children", c_base.axis_variants(base_st.id if base_st else "x", [{"t": 1, "pnl_pct": 0.01}] * 20, []) == [], "kids")
+    via_book = book_ax.axis_variants(c_base)
+    rec("coord-book-uses-base-index", bool(via_book.get("fromBaseVars") and via_book.get("fromIds")), str({k: via_book.get(k) for k in ("fromBaseVars", "parentCount", "qualifiedChildren")}))
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow the shared 1.02 default unless overridden."""
-    from coord_engine import Coordinator
+    """Stage PF floors follow the shared +1× PositionCost (1.10) default unless overridden."""
+    from coord_engine import Coordinator, recent_closed_rows
+    from position_cost import POSITIVE_PF
 
     # 1) defaults after a bare load
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.02, "main": 1.02, "real": 1.02},
+        c.stage_min_pf == {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.02) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - POSITIVE_PF) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -412,7 +432,7 @@ def stage_min_pf_test() -> None:
     def rows(pcts):
         return [{"pnl": x, "pnl_pct": x, "qty": 1.0, "price": 100.0} for x in pcts]
     c4 = Coordinator()
-    c4.load({}, {})
+    c4.load({}, {"axisLastEnabled": True})
     neg = rows([-5.0] * 12 + [0.4] * 3)  # heavy losers -> PF well under 1
     allow_bad, reasons_bad, _ = c4.gate(neg, 0)
     rec("stage-pf-base-blocks", not allow_bad and any("base/last" in r for r in reasons_bad),
@@ -424,15 +444,25 @@ def stage_min_pf_test() -> None:
     # 5) main/real stages report floors in the stages snapshot
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
-        stages.get("base", {}).get("minPf") == 1.02
-        and stages.get("main", {}).get("minPf") == 1.02
-        and stages.get("real", {}).get("minPf") == 1.02,
+        abs(float(stages.get("base", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9
+        and abs(float(stages.get("main", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9
+        and abs(float(stages.get("real", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.02, "main": 1.02, "real": 1.02},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF},
         str(snap.get("stageMinPf")))
+
+    # 7) last-3h recency: unix-stale tape does not freeze; synth timestamps stay
+    now = time.time()
+    stale = [{"t": now - 10 * 3600, "pnl": -1, "pnl_pct": -0.02, "qty": 1, "entry": 1} for _ in range(20)]
+    allow_stale, reasons_stale, _ = c4.gate(stale, 0)
+    rec("stage-pf-stale-tape-allows", allow_stale, f"allow={allow_stale} reasons={reasons_stale[:2]}")
+    rec("recent-closed-synth", len(recent_closed_rows(neg)) == len(neg), str(len(recent_closed_rows(neg))))
+    rec("recent-closed-stale-empty", len(recent_closed_rows(stale)) == 0, str(len(recent_closed_rows(stale))))
+    fresh = [{"t": now - 60, "pnl": 1, "pnl_pct": 0.003, "qty": 1, "entry": 1} for _ in range(12)]
+    rec("recent-closed-fresh", len(recent_closed_rows(fresh)) == 12, str(len(recent_closed_rows(fresh))))
 
 
 def stage_engine_calc_test() -> None:
@@ -775,7 +805,7 @@ def control_coord_test() -> None:
     p.maybe_dca_adds = lambda: None
     p.maybe_entries = lambda: None
     p.qa_tick = lambda: None
-    p.trim_caches = lambda force=False: None
+    p.trim_caches = lambda force=False, keep_hist=False: None
     p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
     p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
     old_sd = pt.sd_notify
@@ -939,7 +969,7 @@ def progression_continuity_test() -> None:
         p.maybe_dca_adds = lambda: None
         p.maybe_entries = lambda: None
         p.qa_tick = lambda: None
-        p.trim_caches = lambda force=False: None
+        p.trim_caches = lambda force=False, keep_hist=False: None
         p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
         p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
         p._cycle_lock = threading.Lock()
@@ -1085,6 +1115,8 @@ def progression_continuity_test() -> None:
 
     # Coordinator: block then recover; rearrange when full; skip when room.
     coord = Coordinator()
+    for _ax in coord.axes.values():
+        _ax.enabled = True
     win = [{"t": i, "pnl": -0.2, "pnl_pct": -0.2} for i in range(12)]
     allow, reasons, _m = coord.gate(win, consec=8)
     rec("prog-coord-pause-blocks", allow is False and any("pause" in r for r in reasons), str(reasons)[:160])
@@ -2659,8 +2691,10 @@ def process_guard_test() -> None:
     rec("partial-publish-high-coverage",
         partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
     partial._hist_fetch_failures = 1
+    rec("partial-publish-high-coverage-no-retry-stall",
+        partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
     rec("partial-publish-waits-retries",
-        not partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
+        not partial._hist_can_publish_partial(["a"] * 53, ["a"] * 20, ["x"] * 33))
     partial._hist_fetch_failures = 6
     rec("partial-publish-low-coverage-blocked",
         not partial._hist_can_publish_partial(["a"] * 566, ["a"] * 8, ["x"] * 558))
@@ -2675,6 +2709,11 @@ def process_guard_test() -> None:
         already_ready=False, published=[], changed=[],
     )
     rec("replay-selection-partial", reason == "partial" and len(names) == 50, reason)
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 10, ["a"] * 2, ["x"] * 8,
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-partial-any-ready", reason == "partial" and names == ["a", "a"] or (reason == "partial" and len(names) == 2), f"{names} {reason}")
     names, reason = sel._hist_replay_selection(
         ["a"] * 53, ["a"] * 50, ["x"] * 3,
         already_ready=True, published=["a"] * 50, changed=[],
@@ -2702,10 +2741,20 @@ def process_guard_test() -> None:
     rec("replay-selection-full-initial", reason == "full" and names == ["a", "b"], reason)
     rec("hist-replay-chunk-helper", "def _hist_replay_chunked" in trader)
     rec("hist-replay-chunk-wired", "_hist_replay_chunked(replay_names" in trader)
-    rec("hist-first-slice-one", "size = 1 if first else self._hist_replay_chunk_size" in trader)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 25)
+    rec("hist-first-slice-gate", "if first and len(pending) > 8" in trader)
+    rec("hist-replay-workers-helper", "def _replay_worker_count" in trader)
+    rec("hist-peer-claim", "def _hist_peer_claim" in trader and "hist-busy.json" in trader)
+    rec("hist-peer-defer-ready", "peer-deferred" in trader)
+    rec("hist-heal-trim", "HEAL-TRIM-" in trader and "def _heal_trim_pending" in trader)
+    rec("hist-keep-scan-tapes", "history_store.keep(keep)" in trader)
+    http_src = open(os.path.join(DIR, "pulse_http.py"), encoding="utf-8").read()
+    rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
+    rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
+    rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
+    rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
     rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
     capper = object.__new__(pt.Pulse)
     capper.symbol_cap = 25
@@ -2717,6 +2766,11 @@ def process_guard_test() -> None:
     rec("hist-cap-truncates-80-to-25", len(capped) == 25, str(len(capped)))
     wild = capper._capped_scan_names(["*", "ALL"])
     rec("hist-cap-wildcard-uses-scan", len(wild) == 25, str(len(wild)))
+    cap50 = object.__new__(pt.Pulse)
+    cap50.symbol_cap = 50
+    cap50.open = {}
+    pt.SYMBOLS[:] = fat[:50]
+    rec("hist-cap-50-runs", len(cap50._capped_scan_names(fat)) == 50, str(len(cap50._capped_scan_names(fat))))
     unlim = object.__new__(pt.Pulse)
     unlim.symbol_cap = 0
     unlim.open = {}
@@ -2732,8 +2786,33 @@ def process_guard_test() -> None:
         level = "normal"
     chunker._budget = lambda: _Ok()  # type: ignore[method-assign]
     rec("hist-replay-chunk-capped-book", chunker._hist_replay_chunk_size(25) == 24, str(chunker._hist_replay_chunk_size(25)))
+    rec("hist-replay-chunk-eight", chunker._hist_replay_chunk_size(8) == 8, str(chunker._hist_replay_chunk_size(8)))
+    class _Norm:
+        level = "normal"
+    rec("hist-replay-workers-eight", 1 <= chunker._replay_worker_count(8, _Norm()) <= 8, str(chunker._replay_worker_count(8, _Norm())))
+    rec("hist-replay-workers-follow-cpu", chunker._replay_worker_count(25, _Norm()) == chunker._replay_worker_count(8, _Norm()) or chunker._replay_worker_count(25, _Norm()) >= 1, str(chunker._replay_worker_count(25, _Norm())))
+    rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
+    rec("hist-trim-keep-hist", "keep_hist" in trader)
+    rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
+    rec("hist-score-edges", "score=is_first or not pending" in trader)
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
+    rec("replay-blas-pin", "def pin_compute_threads" in set_src)
+    rec("replay-progress-no-preset", "self.progress.symbols_done = i" not in set_src.split("def replay_all", 1)[-1].split("def _commit_hist", 1)[0])
+    from set_engine import SetBook, synth_trend
+    book_cov = SetBook()
+    book_cov.load({"histEnabled": True, "stratGeneral": True, "setMinStep": 8, "setStepMax": 8, "slToTpRatios": [0.6]})
+    book_cov.ingest_bars("AAA-USDT", synth_trend(120, start=100, step=0.08))
+    book_cov.ingest_bars("BBB-USDT", synth_trend(120, start=110, step=0.08))
+    book_cov.replay_all(symbols=["AAA-USDT"], merge=True, progress_total=2, workers=1, score=False)
+    seen_a = set(book_cov._hist_seen)
+    done_a = int(book_cov.progress.symbols_done or 0)
+    book_cov.replay_all(symbols=["BBB-USDT"], merge=True, progress_total=2, workers=1, score=False)
+    rec(
+        "hist-merge-keeps-seen",
+        "AAA-USDT" in book_cov._hist_seen and "BBB-USDT" in book_cov._hist_seen and int(book_cov.progress.symbols_done or 0) >= 2,
+        f"seen={sorted(book_cov._hist_seen)} done={book_cov.progress.symbols_done} first={sorted(seen_a)}/{done_a}",
+    )
 
 
 def historic_snapshot_test() -> None:

@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
 from block_active import adjusted_quantity, observe_continuation
-from coord_engine import Coordinator
+from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
 from position_cost import (
@@ -37,6 +37,7 @@ from position_cost import (
     completed_roundtrips,
     resolve_sl_tp,
     POSITION_COST_PCT_DEFAULT,
+    POSITIVE_PF,
     SL_TP_RATIOS,
     SL_TP_MIN,
     SL_TP_MAX,
@@ -50,7 +51,7 @@ from position_cost import (
 )
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows
+from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
@@ -115,7 +116,7 @@ CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
-DEFAULT_SYMBOL_CAP = 25
+DEFAULT_SYMBOL_CAP = 50
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -929,7 +930,7 @@ class Pulse:
         self._hist_deferred = ""
         self._hist_status_write_ts = 0.0
         self._hist_resume_repair = False
-        self.history_store = HistoryStore(CONN_SHORT, retention_bars=600)
+        self.history_store = HistoryStore(CONN_SHORT, retention_bars=max(2400, LOOKBACK_MAX))
         self._hist_status: Dict[str, Any] = read_hist_job(CONN_SHORT)
         checkpoint = self.history_store.checkpoint()
         if isinstance(checkpoint, dict):
@@ -6062,12 +6063,12 @@ class Pulse:
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
-        real_pf = 1.02
+        real_pf = POSITIVE_PF
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.02)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
         except Exception:
-            pass
+            real_pf = POSITIVE_PF
         self.block.enabled = bool(b_en) if b_en is not None else True
         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
             self.block.enabled = True
@@ -6750,11 +6751,12 @@ class Pulse:
             )
 
     def live_recent_pf(self, side: Optional[str] = None, n: int = 8) -> Optional[float]:
-        """Cost-net PF of recent live closes. None until enough samples."""
+        """Cost-net PF of last-3h live closes. None until enough recent samples."""
         rows = list(self.closed or [])
         if side:
             want = str(side).upper()
             rows = [c for c in rows if str(getattr(c, "side", "") or "").upper() == want]
+        rows = recent_closed_rows(rows)
         rows = rows[-max(5, int(n or 8)) :]
         if len(rows) < 5:
             return None
@@ -6960,7 +6962,65 @@ class Pulse:
             from load_engine import Budget
             return Budget()
 
-    def trim_caches(self, force: bool = False) -> None:
+    def _hist_peer_path(self) -> str:
+        return os.path.join(DIR, "hist-busy.json")
+
+    def _hist_peer_busy(self) -> str:
+        """Other lane currently replaying? Empty string if the slot is free."""
+        try:
+            with open(self._hist_peer_path(), encoding="utf-8") as f:
+                blob = json.load(f)
+            owner = str((blob or {}).get("conn") or "")
+            ts = float((blob or {}).get("ts") or 0)
+            if owner and owner != CONN_SHORT and time.time() - ts < 75.0:
+                return owner
+        except Exception:
+            return ""
+        return ""
+
+    def _hist_peer_claim(self) -> bool:
+        peer = self._hist_peer_busy()
+        if peer:
+            return False
+        try:
+            atomic_write(self._hist_peer_path(), {"conn": CONN_SHORT, "pid": os.getpid(), "ts": time.time()})
+        except Exception:
+            return True
+        return True
+
+    def _hist_peer_touch(self) -> None:
+        try:
+            atomic_write(self._hist_peer_path(), {"conn": CONN_SHORT, "pid": os.getpid(), "ts": time.time()})
+        except Exception:
+            pass
+
+    def _hist_peer_release(self) -> None:
+        path = self._hist_peer_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                blob = json.load(f)
+            if str((blob or {}).get("conn") or "") != CONN_SHORT:
+                return
+            os.remove(path)
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+
+    def _heal_trim_pending(self) -> bool:
+        path = os.path.join(DIR, f"HEAL-TRIM-{CONN_SHORT}")
+        return os.path.exists(path)
+
+    def _heal_trim_clear(self) -> None:
+        path = os.path.join(DIR, f"HEAL-TRIM-{CONN_SHORT}")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def trim_caches(self, force: bool = False, *, keep_hist: bool = False) -> None:
         keep = set(SYMBOLS)
         for p in self.open.values():
             if p.symbol:
@@ -6989,15 +7049,24 @@ class Pulse:
         except Exception:
             pass
         try:
-            b = getattr(self.load, "last_budget", None)
-            look = int(getattr(b, "lookback", 180) or 180)
             n += self.sets.trim_bars(keep)
-            n += self.sets.trim_tapes(hist_cap=96, live_cap=64, bar_cap=look)
+            n += int(self.sets.compact_hist_tapes(2500) or 0)
+            if not keep_hist:
+                look = int(getattr(self.sets, "lookback", 0) or 0)
+                if look <= 0:
+                    b = getattr(self.load, "last_budget", None)
+                    look = int(getattr(b, "lookback", 240) or 240)
+                look = max(look, int(getattr(self.sets, "min_bars", 120) or 120), 120)
+                n += self.sets.trim_tapes(hist_cap=96, live_cap=64, bar_cap=look)
         except Exception:
             pass
         try:
             from indication_engine import EXTRA
             n += EXTRA.prune(keep, max_n=48)
+        except Exception:
+            pass
+        try:
+            n += int(self.history_store.keep(keep) or 0)
         except Exception:
             pass
         try:
@@ -7007,7 +7076,10 @@ class Pulse:
         b = getattr(self.load, "last_budget", None)
         if force or (b and b.do_gc):
             try:
-                self.load.free(force=force)
+                # Never bypass the GC cooldown on the hot/hist path. A forced
+                # collect(2)+malloc_trim on the 2GiB catalog stalled the live
+                # cycle for >10s and latched the load governor to critical.
+                self.load.free(force=False)
             except Exception:
                 pass
 
@@ -7282,31 +7354,51 @@ class Pulse:
             best_st = None
             best_n = -1
             best_side = ""
-            for pack_name in ("indications", "general"):
-                for side_n in ("LONG", "SHORT"):
-                    st = None
-                    try:
-                        st = self.sets.pick_any(pack_name, side=side_n) if self.sets.enabled else None
-                    except TypeError:
-                        st = self.sets.pick_any(pack_name) if self.sets.enabled else None
-                    except Exception:
-                        st = None
-                    if not st:
+            sets_map = getattr(self.sets, "sets", None) or {}
+            base_ids = list((getattr(self.sets, "_ids_by_kind", None) or {}).get("base") or [])
+            if base_ids and isinstance(sets_map, dict):
+                for sid in base_ids:
+                    cand = sets_map.get(sid)
+                    if cand is None:
                         continue
-                    blob = (getattr(st, "by_side", None) or {}).get(side_n) or {}
-                    n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                    n = int(getattr(cand, "last15_n", 0) or 0)
                     if best_st is None or n > best_n:
-                        best_st = st
+                        best_st = cand
                         best_n = n
-                        best_side = side_n
-            if best_st:
-                blob = (getattr(best_st, "by_side", None) or {}).get(best_side) or {}
-                intern_metrics = {
-                    "pf": float(blob.get("last15_ratio") or best_st.last15_ratio),
-                    "n": float(blob.get("last15_n") or best_st.last15_n),
-                    "pack": best_st.pack,
-                    "side": best_side,
-                }
+                if best_st is not None:
+                    intern_metrics = {
+                        "pf": float(getattr(best_st, "last15_ratio", 0) or 0),
+                        "n": float(best_n),
+                        "pack": getattr(best_st, "pack", "") or "",
+                        "setId": getattr(best_st, "id", "") or "",
+                    }
+            if not intern_metrics.get("n"):
+                for pack_name in ("indications", "general"):
+                    for side_n in ("LONG", "SHORT"):
+                        st = None
+                        try:
+                            st = self.sets.pick_any(pack_name, side=side_n) if self.sets.enabled else None
+                        except TypeError:
+                            st = self.sets.pick_any(pack_name) if self.sets.enabled else None
+                        except Exception:
+                            st = None
+                        if not st:
+                            continue
+                        blob = (getattr(st, "by_side", None) or {}).get(side_n) or {}
+                        n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                        if best_st is None or n > best_n:
+                            best_st = st
+                            best_n = n
+                            best_side = side_n
+                if best_st:
+                    blob = (getattr(best_st, "by_side", None) or {}).get(best_side) or {}
+                    intern_metrics = {
+                        "pf": float(blob.get("last15_ratio") or best_st.last15_ratio),
+                        "n": float(blob.get("last15_n") or best_st.last15_n),
+                        "pack": best_st.pack,
+                        "side": best_side,
+                        "setId": getattr(best_st, "id", "") or "",
+                    }
         except Exception:
             intern_metrics = {"pf": 0.0, "n": 0}
         allow, reasons, metrics = self.coord.gate(rows, consec, intern=intern_metrics)
@@ -8789,6 +8881,9 @@ class Pulse:
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
             "symbols": SYMBOLS,
+            "symbolCount": len(SYMBOLS),
+            "symbolCap": int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0),
+            "symbolsAll": bool(getattr(self, "overlay_wild", False)),
             "regime": self.regime,
             "halted": self.halted,
             "haltReason": self.halt_reason,
@@ -8918,6 +9013,8 @@ class Pulse:
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
             "rssMb": round(rss_mb(), 1),
+            "load": self.load.snapshot() if hasattr(self, "load") else {},
+            "loadLevel": getattr(self.load, "level", None) if hasattr(self, "load") else None,
             "klinesReady": sum(1 for s in SYMBOLS if s in self.klines),
             "klinesTf": {tf: sum(1 for s in SYMBOLS if s in self.klines_tf.get(tf, {})) for tf in TIMEFRAMES},
             "prices": {s: self.px.get(s) for s in (SYMBOLS if (not hasattr(self, "load") or self.load.last_budget.stats_full or len(SYMBOLS) <= 64) else [p.symbol for p in self.open.values()][:64])},
@@ -8989,7 +9086,28 @@ class Pulse:
         }
         try:
             if callable(getattr(self.sets, "axis_variants", None)):
-                axis_aggregate = self.sets.axis_variants(self.coord)
+                now_ax = time.monotonic()
+                cached_ax = getattr(self, "_axis_ui", None)
+                if cached_ax is not None and now_ax - float(getattr(self, "_axis_ui_ts", 0) or 0) < 12:
+                    axis_aggregate = cached_ax
+                else:
+                    axis_aggregate = self.sets.axis_variants(self.coord)
+                    if isinstance(axis_aggregate, dict):
+                        axis_aggregate = dict(axis_aggregate)
+                        rows = axis_aggregate.pop("rows", None)
+                        if isinstance(rows, list):
+                            axis_aggregate["rowCount"] = axis_aggregate.get("rowCount") or len(rows)
+                        parents = axis_aggregate.get("parents")
+                        if isinstance(parents, list):
+                            axis_aggregate["parentCount"] = axis_aggregate.get("parentCount") or len(parents)
+                            if len(parents) > 24:
+                                axis_aggregate["parents"] = parents[:24]
+                        ids = axis_aggregate.get("parentSetIds")
+                        if isinstance(ids, list) and len(ids) > 32:
+                            axis_aggregate["parentSetIdCount"] = len(ids)
+                            axis_aggregate["parentSetIds"] = ids[:32]
+                    self._axis_ui = axis_aggregate
+                    self._axis_ui_ts = now_ax
         except Exception:
             axis_aggregate = {
                 "parentCount": 0,
@@ -9204,6 +9322,7 @@ class Pulse:
                 "indications": len(getattr(self.indications, "last", {}) or {}),
                 "missingInd": [s for s in SYMBOLS if s not in (getattr(self.indications, "last", {}) or {})][:12],
             },
+            "load": self.load.snapshot() if hasattr(self, "load") else {},
         }
 
     def write_stats(self, force: bool = False) -> None:
@@ -9618,14 +9737,21 @@ class Pulse:
             "updatedAt": time.time(),
         })
 
-    def _capped_scan_names(self, names: Optional[Sequence[str]] = None) -> List[str]:
+    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> List[str]:
         """Bound any symbol list to the configured scan book / symbolCap.
 
-        0 = unlimited. Missing cap defaults to 25. Wildcards and stale
+        0 = unlimited. Missing cap defaults to 50. Wildcards and stale
         all-universe snapshots collapse to the live scan book, not the
-        full exchange catalog.
+        full exchange catalog. A historic request may pass an explicit cap.
         """
-        cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        if cap is None:
+            cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        else:
+            try:
+                cap = int(cap)
+            except (TypeError, ValueError):
+                cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        cap = max(0, cap)
         scan = [str(s) for s in SYMBOLS if s]
         raw = list(names) if names is not None else list(scan)
         wild = False
@@ -9668,8 +9794,8 @@ class Pulse:
             out = (must + rest)[: max(cap, len(must))]
         return out
 
-    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None) -> Tuple[List[str], List[Dict[str, str]]]:
-        names = self._capped_scan_names(requested)
+    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> Tuple[List[str], List[Dict[str, str]]]:
+        names = self._capped_scan_names(requested, cap=cap)
         invalid = [
             {"symbol": symbol, "reason": "missing active exchange contract"}
             for symbol in names
@@ -9677,7 +9803,7 @@ class Pulse:
         ]
         valid = [symbol for symbol in names if symbol in self.contracts]
         if not valid:
-            valid = [symbol for symbol in self._capped_scan_names(None) if symbol in self.contracts]
+            valid = [symbol for symbol in self._capped_scan_names(None, cap=cap) if symbol in self.contracts]
         return valid, invalid
 
     def _hist_coverage(self, book: SetBook, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
@@ -9687,9 +9813,14 @@ class Pulse:
             if i % 8 == 0:
                 sd_notify("WATCHDOG=1")
             item = self.history_store.coverage(symbol, start, end, source="exchange")
-            coverage[symbol] = item
             bars = self.history_store.window(symbol, bars=book.lookback, end=end, source="exchange")
-            if not item.get("contiguous") or len(bars) < book.min_bars:
+            need = max(int(getattr(book, "min_bars", 60) or 60), 60)
+            enough = len(bars) >= need
+            item["barsHeld"] = len(bars)
+            item["enough"] = enough
+            coverage[symbol] = item
+            # Interior holes on thin names must not stall the whole 40h book.
+            if not enough:
                 missing.append(symbol)
             elif bars:
                 book.ingest_bars(symbol, bars)
@@ -9711,6 +9842,10 @@ class Pulse:
         failures = int(getattr(self, "_hist_fetch_failures", 0) or 0)
         coverage_pct = 100.0 * n_done / n_valid
         min_done = max(1, min(24, max(1, n_valid // 5)))
+        # Do not stall the whole book on a couple of exchange gaps. High
+        # coverage is enough to open the gate; remaining gaps keep retrying.
+        if n_done >= min_done and coverage_pct >= 80.0:
+            return True
         return failures >= 2 and n_done >= min_done and coverage_pct >= 50.0
 
     def _hist_replay_selection(
@@ -9742,7 +9877,7 @@ class Pulse:
                     if symbol not in published_set or symbol in changed_set
                 ]
                 return names, ("incremental-gap-fill" if names else "wait-gaps")
-            if self._hist_can_publish_partial(valid_list, completed_list, missing_list) and completed_list:
+            if completed_list:
                 return completed_list, "partial"
             return [], "wait-gaps"
         if already_ready:
@@ -9757,6 +9892,8 @@ class Pulse:
     def _hist_replay_chunk_size(self, n: int) -> int:
         """Bound one isolated replay so the live loop and UI keep moving."""
         total = max(1, int(n or 1))
+        if total <= 8:
+            return total
         budget = self._budget()
         level = str(getattr(budget, "level", "normal") or "normal")
         sets_n = 0
@@ -9766,7 +9903,9 @@ class Pulse:
             sets_n = 0
         # 30k+ set catalogs cannot score 16 symbols without stalling stats.
         if sets_n >= 8000:
-            if level in ("critical", "overload", "busy"):
+            if total <= 64:
+                size = 2 if level in ("critical", "overload") else 4
+            elif level in ("critical", "overload", "busy"):
                 size = 1
             else:
                 size = 2
@@ -9778,6 +9917,22 @@ class Pulse:
             size = 24
         return max(1, min(total, size))
 
+    def _replay_worker_count(self, n_names: int, budget: Any = None) -> int:
+        """Parallel symbol replay. Follow CPU — no extra 4/8 worker cap."""
+        n = max(1, int(n_names or 1))
+        try:
+            cpu = max(1, int(os.cpu_count() or 1))
+        except Exception:
+            cpu = 2
+        level = str(getattr(budget, "level", "normal") or "normal") if budget is not None else "normal"
+        if n <= 1 or level == "critical":
+            return 1
+        if cpu <= 2:
+            return 1
+        if level == "overload":
+            return max(1, min(2, cpu, n))
+        return max(1, min(cpu, n))
+
     def _hist_replay_chunked(self, names: List[str], already: bool, progress_total: int) -> bool:
         """Replay configured names in load-aware slices; first slice opens the gate."""
         pending = [str(s) for s in names if s]
@@ -9788,42 +9943,62 @@ class Pulse:
         done: List[str] = []
         ready = bool(already)
         first = True
-        while pending:
-            if self._hist_request_changed():
-                break
-            size = 1 if first else self._hist_replay_chunk_size(len(pending))
-            first = False
-            chunk = pending[:size]
-            pending = pending[size:]
-            sd_notify("WATCHDOG=1")
-            self.hist_busy = True
-            try:
-                ok = self._replay_sets_isolated(chunk, ready, total)
-            finally:
-                self.hist_busy = False
-            if not ok:
-                with self.state_guard():
-                    self._hist_incremental_symbols.update(chunk)
-                    self._hist_incremental_symbols.update(pending)
-                break
-            published_any = True
-            done.extend(chunk)
-            ready = True
+        claimed = self._hist_peer_claim()
+        if not claimed and ready:
             with self.state_guard():
-                progress = self.sets.progress
-                progress.ready = True
-                progress.symbols_done = len(done)
-                progress.symbols_total = total
-                if pending:
-                    progress.phase = "replay"
-                    progress.detail = f"slice {len(done)}/{total} ready · continuing {len(pending)}"
-            try:
-                self._hist_write_status(self.sets)
-                self.write_stats(force=True)
-            except Exception:
-                pass
-            sd_notify("WATCHDOG=1")
-            time.sleep(0.05)
+                self.sets.progress.phase = "deferred"
+                self.sets.progress.detail = f"history deferred · peer {self._hist_peer_busy()} replaying"
+            return False
+        try:
+            while pending:
+                if self._hist_request_changed():
+                    break
+                size = self._hist_replay_chunk_size(len(pending))
+                if first and len(pending) > 8:
+                    size = min(size, 4)
+                is_first = first
+                first = False
+                chunk = pending[:size]
+                pending = pending[size:]
+                sd_notify("WATCHDOG=1")
+                self.hist_busy = True
+                self._hist_peer_touch()
+                try:
+                    # Score the first slice so intern can open, and the last
+                    # slice so the 50-name book is fully ranked. Middle slices
+                    # only merge fills — rescoring 34k sets per slice stalled 4/50.
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending)
+                finally:
+                    self.hist_busy = False
+                if not ok:
+                    with self.state_guard():
+                        self._hist_incremental_symbols.update(chunk)
+                        self._hist_incremental_symbols.update(pending)
+                    break
+                published_any = True
+                done.extend(chunk)
+                ready = True
+                with self.state_guard():
+                    progress = self.sets.progress
+                    progress.ready = True
+                    progress.symbols_done = max(int(progress.symbols_done or 0), len(done))
+                    progress.symbols_total = total
+                    if pending:
+                        progress.phase = "replay"
+                        progress.detail = f"slice {len(done)}/{total} ready · continuing {len(pending)}"
+                try:
+                    self._hist_write_status(self.sets)
+                    self.write_stats(force=True)
+                except Exception:
+                    pass
+                try:
+                    self.trim_caches(force=False, keep_hist=True)
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
+                time.sleep(0.02 if pending else 0.0)
+        finally:
+            self._hist_peer_release()
         return published_any
 
     def _hist_fetch_durable(self, book: SetBook, generation: int, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
@@ -9837,7 +10012,8 @@ class Pulse:
         for symbol in symbols:
             gaps = list(gaps_by_symbol.get(symbol) or [])
             tail_start = max(start, end - 1)
-            if not any(int(gap["start"]) <= tail_start <= int(gap["end"]) for gap in gaps):
+            tail_missing = any(int(gap["start"]) <= end <= int(gap["end"]) for gap in gaps)
+            if tail_missing and not any(int(gap["start"]) <= tail_start <= int(gap["end"]) for gap in gaps):
                 gaps.append({"start": tail_start, "end": end, "minutes": end - tail_start + 1, "source": "exchange", "error": "tail overlap"})
             for gap in gaps:
                 cursor = max(start, int(gap["start"]))
@@ -10038,7 +10214,7 @@ class Pulse:
                 book.progress.detail = f"fetch empty {stored}/{len(symbols)} · retry in {delay:.0f}s"
         return bool(stored)
 
-    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int) -> bool:
+    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int, score: bool = True) -> bool:
         """Replay a catalog snapshot and atomically publish its result.
 
         Historic scoring is CPU-heavy but read-only with respect to live
@@ -10060,19 +10236,20 @@ class Pulse:
             replay_book = source.replay_clone(names)
             replay_book.progress.ready = bool(already)
             source._running = True
+            prior_done = len(source._hist_seen)
             source.progress = copy.deepcopy(source.progress)
             source.progress.phase = "replay"
-            source.progress.pct = 1.0
-            source.progress.symbol = ""
+            source.progress.pct = max(1.0, float(source.progress.pct or 0))
+            source.progress.symbol = names[0] if names else ""
             source.progress.set_id = ""
             source.progress.bars_done = 0
             source.progress.bars_total = sum(len(replay_book.bars.get(s) or []) for s in names)
             source.progress.sets_done = 0
             source.progress.sets_total = len(replay_book.sets)
-            source.progress.symbols_done = 0
-            source.progress.symbols_total = max(0, int(progress_total or len(names)))
+            source.progress.symbols_done = prior_done
+            source.progress.symbols_total = max(0, int(progress_total or 0), prior_done, len(names))
             source.progress.elapsed_ms = 0.0
-            source.progress.detail = f"{len(names)} symbols · {len(replay_book.sets)} sets"
+            source.progress.detail = f"{prior_done}/{source.progress.symbols_total} · {len(names)} this slice · {len(replay_book.sets)} sets"
             source.progress.ready = bool(already)
         try:
             self._hist_write_status(source)
@@ -10085,7 +10262,22 @@ class Pulse:
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                     keep_ready = bool(already) or bool(source.progress.ready)
+                    keep_done = max(
+                        int(source.progress.symbols_done or 0),
+                        int(replay_book.progress.symbols_done or 0),
+                        len(source._hist_seen),
+                        len(replay_book._hist_seen),
+                        prior_done,
+                    )
+                    keep_total = max(
+                        int(source.progress.symbols_total or 0),
+                        int(replay_book.progress.symbols_total or 0),
+                        int(progress_total or 0),
+                        keep_done,
+                    )
                     source.progress = copy.deepcopy(replay_book.progress)
+                    source.progress.symbols_done = keep_done
+                    source.progress.symbols_total = keep_total
                     if keep_ready:
                         source.progress.ready = True
                     source._running = True
@@ -10111,21 +10303,10 @@ class Pulse:
                 return True
             if self._hist_request_changed():
                 return True
-            return bool(already and self.load.last_budget.level == "critical")
+            return False
 
         budget = getattr(self.load, "last_budget", None)
-        level = str(getattr(budget, "level", "normal") or "normal")
-        if level in ("critical", "overload"):
-            replay_workers = 1
-        else:
-            try:
-                cpu = max(1, int(os.cpu_count() or 1))
-            except Exception:
-                cpu = 2
-            replay_workers = max(1, min(8, cpu, len(names) or 1))
-            if level == "busy":
-                replay_workers = min(replay_workers, 2)
-
+        replay_workers = self._replay_worker_count(len(names or []), budget)
 
         published = False
         affected_ids: List[str] = []
@@ -10182,19 +10363,28 @@ class Pulse:
                     )
                     for key in keys
                 }
-                source._hist_seen = set(replay_book._hist_seen)
-                source._hist_total = int(replay_book._hist_total or 0)
+                source._hist_seen = set(source._hist_seen) | set(replay_book._hist_seen)
+                source._hist_total = max(int(source._hist_total or 0), int(replay_book._hist_total or 0), len(source._hist_seen))
                 source.last_run = float(replay_book.last_run or time.time())
+                keep_done = len(source._hist_seen)
+                keep_total = max(int(progress_total or 0), keep_done, int(source.progress.symbols_total or 0))
                 source.progress = copy.deepcopy(replay_book.progress)
                 source.progress.sets_total = len(source.sets)
                 source.progress.sets_done = len(source.sets)
+                source.progress.symbols_done = keep_done
+                source.progress.symbols_total = keep_total
+                source.progress.detail = f"slice {keep_done}/{keep_total} ready · continuing {max(0, keep_total - keep_done)}"
                 source._snap_cache = None
                 source._live_ov_cache = None
                 self._stats_force = True
                 affected_ids = sorted(affected)
                 published = True
-            if published:
+            if published and score:
                 self._score_committed(source, generation, affected_ids)
+                try:
+                    source.compact_hist_tapes()
+                except Exception:
+                    pass
             return published
         except Exception as exc:
             with self.state_guard():
@@ -10209,18 +10399,42 @@ class Pulse:
 
     def _score_committed(self, book: Any, generation: int, ids: List[str]) -> None:
         """Score a published hist slice without holding the state lock for the catalog."""
-        for i, sid in enumerate(ids):
-            with self.state_guard():
-                if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
-                    return
-                st = book.sets.get(sid)
-                if st is not None:
-                    book._score_one(st)
-            if i % 48 == 0:
-                sd_notify("WATCHDOG=1")
+        todo = [str(s) for s in ids if s]
+        if not todo:
+            return
+
+        def _score_sid(sid: str) -> None:
+            st = book.sets.get(sid)
+            if st is not None:
+                book._score_one(st)
+
+        try:
+            cpu = max(1, int(os.cpu_count() or 1))
+        except Exception:
+            cpu = 2
+        workers = 1 if len(todo) < 16 else max(1, min(cpu, max(1, len(todo) // 16)))
+        if workers <= 1:
+            for i, sid in enumerate(todo):
+                with self.state_guard():
+                    if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                        return
+                    _score_sid(sid)
+                if i % 48 == 0:
+                    sd_notify("WATCHDOG=1")
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
+                done = 0
+                for _ in pool.map(_score_sid, todo, chunksize=max(8, len(todo) // (workers * 4) or 8)):
+                    done += 1
+                    if done % 96 == 0:
+                        sd_notify("WATCHDOG=1")
+                        with self.state_guard():
+                            if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                                return
         with self.state_guard():
             if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                 book._cap_active()
+                book.refresh_progress_detail()
                 book._snap_cache = None
                 book._live_ov_cache = None
 
@@ -10419,7 +10633,19 @@ class Pulse:
                     self._hist_wake.wait(timeout=5.0)
                     continue
                 budget = self._budget()
-                if not bool(getattr(budget, "hist_run", True)):
+                catalog_incomplete = (not ready) or (not bool(getattr(book.progress, "coordination_complete", False)))
+                peer = "" if catalog_incomplete else self._hist_peer_busy()
+                if peer:
+                    with self.state_guard():
+                        book.progress.phase = "deferred"
+                        book.progress.detail = f"history deferred · peer {peer} replaying"
+                        book.progress.stale = bool(book.progress.ready)
+                        book.progress.deferred_reason = f"peer {peer}"
+                    self._hist_checkpoint(book, "peer-deferred")
+                    self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=2.0)
+                    continue
+                if (not bool(getattr(budget, "hist_run", True))) and not catalog_incomplete:
                     with self.state_guard():
                         book.progress.phase = "deferred"
                         book.progress.detail = f"history deferred · load {getattr(budget, 'level', 'unknown')}"
@@ -10455,7 +10681,26 @@ class Pulse:
                     # A wildcard is an explicit request for the frozen dynamic
                     # universe; do not let a stale selectedSymbols mirror win.
                     requested_symbols = list(SYMBOLS)
-                valid, invalid = self._hist_selected_snapshot(requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS))
+                request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
+                request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
+                req_cap = None
+                for src in (request, request_overlay, request_options):
+                    if isinstance(src, dict) and src.get("symbolCap") is not None:
+                        try:
+                            req_cap = max(0, int(src.get("symbolCap")))
+                            break
+                        except (TypeError, ValueError):
+                            req_cap = None
+                ov_cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+                if ov_cap <= 0:
+                    ov_cap = DEFAULT_SYMBOL_CAP
+                # Overlay owns the ranked book. A hist generation must never
+                # assign symbol_cap — stale 25-cap jobs were shrinking a 50 book.
+                use_cap = ov_cap
+                valid, invalid = self._hist_selected_snapshot(
+                    requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS),
+                    cap=use_cap,
+                )
                 self._hist_snapshot_symbols = list(valid)
                 self._hist_invalid_symbols = list(invalid)
                 keep = set(valid)
@@ -10507,6 +10752,8 @@ class Pulse:
                 self._hist_active_request = dict(request)
                 self._hist_active_run_id = run_id
                 self._hist_latest_request_id = run_id
+                if run_id:
+                    self._hist_request_seen = run_id
                 with self.state_guard():
                     progress = book.progress
                     progress.phase = "initial" if mode == "initial" else "backfill"
@@ -10523,7 +10770,15 @@ class Pulse:
                     progress.stale = bool(ready)
                     progress.deferred_reason = ""
                     progress.symbols_total = len(valid)
-                    progress.symbols_done = 0
+                    # Keep the last published count while the book is already
+                    # live so the UI does not flash 0/25 on every hourly run.
+                    if not ready:
+                        progress.symbols_done = 0
+                    else:
+                        try:
+                            progress.symbols_done = max(int(progress.symbols_done or 0), 0)
+                        except Exception:
+                            pass
                     progress.bars_total = len(valid) * lookback
                     progress.bars_done = 0
                     progress.sets_total = len(book.sets)
@@ -10538,7 +10793,12 @@ class Pulse:
                 if self._hist_request_changed():
                     self._hist_checkpoint(book, "superseded-before-replay")
                     continue
-                missing = [symbol for symbol in valid if not bool((coverage.get(symbol) or {}).get("contiguous"))]
+                missing = []
+                for symbol in valid:
+                    item = coverage.get(symbol) or {}
+                    held = int(item.get("barsHeld") or item.get("present") or 0)
+                    if not (item.get("enough") or held >= 60):
+                        missing.append(symbol)
                 gapped = [symbol for symbol in missing if (coverage.get(symbol) or {}).get("gaps")]
                 completed = [symbol for symbol in valid if symbol not in missing]
                 bars_present = sum(int((coverage.get(symbol) or {}).get("present") or 0) for symbol in valid)
@@ -10941,8 +11201,11 @@ class Pulse:
             self.maybe_dca_adds()
         if self.cycle % QA_EVERY == 0:
             self.qa_tick()
-        if self.cycle % 12 == 0:
-            self.trim_caches(force=self.load.last_budget.level in ("overload", "critical"))
+        heal_trim = self._heal_trim_pending()
+        if self.cycle % 12 == 0 or heal_trim:
+            self.trim_caches(force=False, keep_hist=True)
+            if heal_trim:
+                self._heal_trim_clear()
 
     def _watchdog_loop(self) -> None:
         """Independent systemd heartbeat.

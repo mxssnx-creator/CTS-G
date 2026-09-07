@@ -225,6 +225,19 @@ class HistoryStore:
         with self._lock:
             return self._maybe_persist_locked(force=True)
 
+    def keep(self, symbols: Iterable[str]) -> int:
+        """Drop in-memory (and next persist) tapes that are no longer in the scan book."""
+        want = {str(s).strip().upper() for s in symbols if s}
+        dropped = 0
+        with self._lock:
+            for name in list(self._rows):
+                if name not in want:
+                    self._rows.pop(name, None)
+                    dropped += 1
+            if dropped:
+                self._dirty = True
+        return dropped
+
     def _candidate_source(self, source: str, row_source: str = "") -> str:
         value = str(row_source or source or "exchange").strip().lower()
         return value if value in SOURCE_PRIORITY else str(source or "exchange").strip().lower() or "exchange"

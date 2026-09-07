@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 import math
+import os
+import sys
 import time
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -18,9 +20,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
+    POSITIVE_PF,
     cost_aware_metrics,
     EVALUATION_WINDOWS,
     evaluation_windows,
+    is_positive_pf,
     last_n_cost_pf,
     normalize_pf,
     signed_result_r,
@@ -45,6 +49,28 @@ from block_engine import calculate_block_max_additional_ratio, clamp_stack, fini
 from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
+
+def pin_compute_threads(n: int = 1) -> None:
+    """Keep BLAS/OpenMP at one thread so symbol workers do not oversubscribe."""
+    n = max(1, int(n or 1))
+    s = str(n)
+    for key in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+    ):
+        os.environ[key] = s
+    try:
+        import threadpoolctl
+        threadpoolctl.threadpool_limits(limits=n)
+    except Exception:
+        pass
+
+
+pin_compute_threads(1)
 try:
     import numpy as _np
 except Exception:  # pragma: no cover - scalar replay remains the fallback
@@ -69,6 +95,66 @@ STEP_MAX = 22
 # retaining a hard per-set memory bound.  trim_hist distributes this cap over
 # symbols, so a busy multi-symbol book cannot grow without limit.
 HIST_CAP = 80
+_SIDE_LONG = "LONG"
+_SIDE_SHORT = "SHORT"
+
+
+def _intern(value: Any, fallback: str = "") -> str:
+    text = str(value if value is not None else fallback)
+    if not text:
+        return fallback
+    try:
+        return sys.intern(text)
+    except Exception:
+        return text
+
+
+def hist_fill(
+    ts: float,
+    symbol: str,
+    side: Any,
+    pnl_pct: float,
+    hold_s: float,
+    reason: str,
+    *,
+    cost: Optional[float] = None,
+    ind_kind: str = "",
+) -> Dict[str, Any]:
+    """Compact historic fill. PF/DDT/side only — no per-row catalog copies."""
+    side_key = _SIDE_LONG if side in (1, True, _SIDE_LONG, "long", "L", "l") or str(side)[:1] in "Ll" else _SIDE_SHORT
+    rec: Dict[str, Any] = {
+        "t": float(ts),
+        "symbol": _intern(symbol),
+        "side": side_key,
+        "pnl_pct": float(pnl_pct),
+        "hold_s": float(hold_s),
+        "reason": _intern(str(reason or "x")[:40], "x"),
+    }
+    if cost not in (None, 0, 0.0):
+        rec["costPct"] = float(cost)
+    if ind_kind:
+        rec["ind_kind"] = _intern(ind_kind)
+    return rec
+
+
+def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop duplicate hist payload. Live/exchange rows stay intact."""
+    if not isinstance(row, dict):
+        return row
+    if row.get("client_id") or row.get("exchange_confirmed") or row.get("ours"):
+        return row
+    if "pnl" not in row and "set_id" not in row and "direction" not in row and "pack" not in row:
+        return row
+    return hist_fill(
+        finite(row.get("t")),
+        str(row.get("symbol") or ""),
+        row.get("side") or row.get("direction") or "",
+        finite(row.get("pnl_pct")),
+        finite(row.get("hold_s")),
+        str(row.get("reason") or "x"),
+        cost=row.get("position_cost_pct", row.get("costPct")),
+        ind_kind=str(row.get("ind_kind") or ""),
+    )
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}
@@ -118,7 +204,7 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
 
 def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
     """Keep recent fills from every symbol so last-N PF/DDT is not the last 1–2 names."""
-    rows = [r for r in bucket if isinstance(r, dict)]
+    rows = [slim_hist_row(r) for r in bucket if isinstance(r, dict)]
     cap = max(8, int(cap or HIST_CAP))
     if len(rows) <= cap:
         rows.sort(key=lambda r: finite(r.get("t")))
@@ -206,6 +292,24 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
     return out[-n:]
 
 
+def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List[Any]:
+    """Complete last-N: newest chronological fills, no per-symbol subsample.
+
+    PF/DDT gates must see the actual recent tape. ``last_n_balanced`` remains
+    for mixed-market *display* rollups so one name cannot hide the book, but
+    a Set's own last-15/25/50/75 windows are always this tail.
+    """
+    take = max(1, int(n))
+    if ordered:
+        seq = rows if isinstance(rows, list) else list(rows)
+    else:
+        seq = [r for r in rows if r is not None]
+        seq.sort(key=lambda r: finite(r.get("t") if isinstance(r, dict) else getattr(r, "t", 0)))
+    if len(seq) <= take:
+        return seq if isinstance(seq, list) else list(seq)
+    return seq[-take:]
+
+
 def row_ts(row: Any) -> float:
     if isinstance(row, dict):
         return finite(row.get("t"))
@@ -219,9 +323,15 @@ def row_symbol(row: Any) -> str:
 
 
 def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """Signed equity increment for DDT. Prefer stored non-zero pnl, else cost-net of pnl_pct."""
-    pnl = None
+    """Signed equity increment for DDT: always cost-net of the gross move.
+
+    Historic sim rows store ``pnl`` as an already-net fraction (qty=1) while
+    live closes store USDT ``pnl``. Mixing those units inflates live size into
+    a multi-hour fake recovery. ``pnl_pct`` is the shared gross-move fraction
+    on both tapes, so DDT is size-independent and matches PF.
+    """
     pct = None
+    pnl = None
     cost = cost_pct
     if isinstance(row, dict):
         if "pnl" in row and row.get("pnl") is not None:
@@ -239,8 +349,6 @@ def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> flo
             or getattr(row, "costPct", None)
             or cost_pct
         )
-    if pnl is not None and (pct is None or abs(pnl) > 1e-15):
-        return pnl
     if pct is not None:
         return net_pnl_pct(finite(pct), cost)
     return 0.0 if pnl is None else pnl
@@ -642,7 +750,7 @@ class StageRecord:
         }
 
 
-@dataclass
+@dataclass(slots=True)
 class SetState:
     id: str
     pack: str
@@ -709,6 +817,30 @@ class SetState:
     adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
     adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
 
+    def catalog_copy(self) -> "SetState":
+        """Parameter-only clone for isolated replay. No hist/live/eval payload."""
+        return SetState(
+            id=self.id,
+            pack=self.pack,
+            tf=self.tf,
+            sl_ratio=self.sl_ratio,
+            trail_key=self.trail_key,
+            trail_arm=self.trail_arm,
+            trail_give=self.trail_give,
+            step=self.step,
+            tp_pct=self.tp_pct,
+            idx=self.idx,
+            pack_i=self.pack_i,
+            sl_i=self.sl_i,
+            tr_i=self.tr_i,
+            step_i=self.step_i,
+            kind=self.kind,
+            parent_set_id=self.parent_set_id,
+            position_cost_pct=self.position_cost_pct,
+            indication_kind=self.indication_kind,
+            locked=self.locked,
+        )
+
     def tape(self) -> List[Dict[str, Any]]:
         return list(self.hist) + list(self.live)
 
@@ -763,9 +895,9 @@ class SetBook:
         self.refresh_s = 3600.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.02
-        self.stage_min_pf = {"base": 1.02, "main": 1.02, "real": 1.02}
-        self.real_min_pf = 1.02
+        self.min_pf = POSITIVE_PF
+        self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
+        self.real_min_pf = POSITIVE_PF
         self.main_eval = 5
         self.real_eval = 3
         self.max_dd_s = 57600.0
@@ -810,6 +942,9 @@ class SetBook:
         self.trail_enabled = True
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
+        self._by_pack: Dict[str, List[SetState]] = {}
+        self._ids_by_pack: Dict[str, List[str]] = {}
+        self._ids_by_kind: Dict[str, List[str]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         self.progress = Progress()
         self.last_run = 0.0
@@ -890,7 +1025,7 @@ class SetBook:
             "ind_hist", "ind_live", "strategy_hist", "_hist_seen",
             "_hist_total", "_hist_counts", "_hist_set_signature", "_running",
             "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
-            "_pick_lock",
+            "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
         }
         for name, value in self.__dict__.items():
             if name in skip:
@@ -900,47 +1035,19 @@ class SetBook:
             else:
                 setattr(clone, name, value)
 
-        empty_fields = {
-            "strategy_adjustments": {},
-            "stage_ledger": {},
-            "hist": [],
-            "live": [],
-            "exits": {},
-            "by_side": {},
-            "live_eval": {},
-            "evaluation": {},
-            "evaluation_windows": {},
-            "normal_evaluation": {},
-            "adjusted_evaluation": {},
-            "adjustment_deltas": {},
-        }
         states: Dict[str, SetState] = {}
         ordered: List[SetState] = []
         for original in self.by_idx:
-            state = copy.copy(original)
-            for field_name, empty in empty_fields.items():
-                setattr(state, field_name, copy.deepcopy(empty))
-            state.last15_ratio = 1.0
-            state.last15_classic = state.last15_r = 0.0
-            state.last15_n = state.last25_n = 0
-            state.last25_avg_r = state.last25_avg_pnl = 0.0
-            state.max_dd_s = state.avg_dd_s = 0.0
-            state.dd_episodes = 0
-            state.n = state.wins = 0
-            state.gp = state.gl = state.wr = state.expectancy = 0.0
-            state.avg_hold_s = state.classic_all = 0.0
-            state.source_n = 0
-            state.active = False
-            state.deact_reason = ""
-            state.base_pf = state.main_pf = state.real_pf = 0.0
-            state.gross_pf = state.net_pf = state.gross_ev = state.net_ev = 0.0
+            state = original.catalog_copy()
             states[state.id] = state
             ordered.append(state)
         clone.sets = states
         clone.by_idx = ordered
+        clone._reindex()
         wanted = [str(s) for s in symbols] if symbols is not None else list(self.bars)
+        # Replay only reads OHLC. Share the arrays instead of cloning 25×lookback.
         clone.bars = {
-            symbol: [list(row) for row in (self.bars.get(symbol) or [])]
+            symbol: self.bars[symbol]
             for symbol in wanted if self.bars.get(symbol)
         }
         clone.progress = copy.deepcopy(self.progress)
@@ -978,9 +1085,9 @@ class SetBook:
         def _pf(key: str, fallback: float) -> float:
             return normalize_pf(ov.get(key, fallback), fallback)
         self.stage_min_pf = {
-            "base": _pf("baseMinPf", 1.02),
-            "main": _pf("mainMinPf", 1.02),
-            "real": _pf("realMinPf", float(ov.get("setMinPf") or 1.02)),
+            "base": _pf("baseMinPf", POSITIVE_PF),
+            "main": _pf("mainMinPf", POSITIVE_PF),
+            "real": _pf("realMinPf", float(ov.get("setMinPf") or POSITIVE_PF)),
         }
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
@@ -1020,8 +1127,8 @@ class SetBook:
             self.live_test_min_samples = self.eval_need()
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
-        # PROFITABLE (cost-adjusted PF >= 1.02) + DDt under the cap may
-        # drive live orders. Cold/unproven sets keep collecting evidence.
+        # PROFITABLE (cost-adjusted PF >= 1.10 = +1× PositionCost) + DDt under
+        # the cap may drive live orders. Cold/unproven sets keep collecting.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
             raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 110)
@@ -1178,6 +1285,25 @@ class SetBook:
         hi = clamp_step(self.step_max, lo, STEP_MAX)
         return list(range(lo, hi + 1))
 
+    def _reindex(self) -> None:
+        """O(1) pack/kind/id listings used by replay, tiles, and relative ranks."""
+        by_pack: Dict[str, List[SetState]] = {}
+        ids_by_pack: Dict[str, List[str]] = {}
+        ids_by_kind: Dict[str, List[str]] = {}
+        for st in self.by_idx:
+            by_pack.setdefault(st.pack, []).append(st)
+            ids_by_pack.setdefault(st.pack, []).append(st.id)
+            ids_by_kind.setdefault(st.kind, []).append(st.id)
+        self._by_pack = by_pack
+        self._ids_by_pack = ids_by_pack
+        self._ids_by_kind = ids_by_kind
+
+    def ids_for_pack(self, pack: str) -> List[str]:
+        ids = self._ids_by_pack.get(str(pack) or "")
+        if ids:
+            return list(ids)
+        return [st.id for st in self.by_idx if st.pack == pack]
+
     def _rebuild_sets(self) -> None:
         keep = {sid: st for sid, st in self.sets.items()}
         next_sets: Dict[str, SetState] = {}
@@ -1192,6 +1318,7 @@ class SetBook:
             by_idx.append(st)
             idx += 1
         for pack_i, pack in enumerate(self.packs):
+            pack = _intern(pack)
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(self.steps):
                     tp = step_tp_pct(step, self.cost_pct)
@@ -1246,6 +1373,7 @@ class SetBook:
                         _put(st)
         self.sets = next_sets
         self.by_idx = by_idx
+        self._reindex()
         for st in by_idx:
             st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
             st.stage = "Base"
@@ -1329,7 +1457,7 @@ class SetBook:
         self,
         rows: Sequence[Dict[str, Any]],
         *,
-        minimum_pf: float = 1.0,
+        minimum_pf: float = POSITIVE_PF,
     ) -> Tuple[bool, str, Dict[str, Dict[str, Any]]]:
         """Require every sufficiently sampled live window to clear its floor.
 
@@ -1411,7 +1539,7 @@ class SetBook:
             tape = by_config[key]
             if len(tape) < self.eval_need():
                 continue
-            ok, reason, windows = self._live_windows_ok(tape, minimum_pf=1.0)
+            ok, reason, windows = self._live_windows_ok(tape, minimum_pf=POSITIVE_PF)
             last15 = windows.get("last15") or {}
             primary_pf = float(last15.get("pf") or 0.0)
             promoted = bool(ok and int(last15.get("n") or 0) >= self.eval_need() and primary_pf + 1e-9 >= self.real_min_pf)
@@ -1503,6 +1631,35 @@ class SetBook:
                 self.bars[s] = bars[-cap:]
                 n += 1
         return n
+
+    def compact_hist_tapes(self, limit: int = 2500) -> int:
+        """Rewrite fat historic rows in place. Catalog size (all configs) is unchanged."""
+        n = len(self.by_idx)
+        if n <= 0:
+            return 0
+        start = int(getattr(self, "_compact_i", 0) or 0) % n
+        changed = 0
+        i = start
+        seen = 0
+        take = min(max(32, int(limit or 2500)), n)
+        while seen < take:
+            st = self.by_idx[i]
+            i = (i + 1) % n
+            seen += 1
+            tape = st.hist
+            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or "direction" in tape[0] or len(tape[0]) > 8):
+                st.hist = [slim_hist_row(r) for r in tape]
+                changed += 1
+        self._compact_i = i
+        for key, tape in list(self.ind_hist.items()):
+            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or len(tape[0]) > 9):
+                self.ind_hist[key] = [slim_hist_row(r) for r in tape]
+                changed += 1
+        for key, tape in list(self.strategy_hist.items()):
+            if tape and ("pnl" in tape[0] or "set_id" in tape[0] or len(tape[0]) > 9):
+                self.strategy_hist[key] = [slim_hist_row(r) for r in tape]
+                changed += 1
+        return changed
 
     def on_live_close(self, rec: Any) -> None:
         if isinstance(rec, dict):
@@ -1642,17 +1799,13 @@ class SetBook:
             else:
                 names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
             prior_ready = bool(self.progress.ready)
+            prior_seen = set(self._hist_seen)
             if merge:
                 total = max(0, int(progress_total if progress_total is not None else len(names)))
-                if total != self._hist_total:
-                    self._hist_seen.clear()
-                    self._hist_total = total
-                    self._hist_counts = {}
-                elif prior_ready and total > 0 and len(self._hist_seen) >= total:
-                    # The previous cycle completed. Start a fresh refresh
-                    # cycle while retaining the last completed evidence.
-                    self._hist_seen.clear()
-                symbols_total = total
+                # Keep coverage across hourly slices. Clearing on a completed
+                # 25-symbol book made the UI restart at 0/25 after every publish.
+                self._hist_total = max(int(self._hist_total or 0), total, len(self._hist_seen))
+                symbols_total = max(total, len(self._hist_seen), len(names), 1)
             else:
                 symbols_total = len(names)
             self.progress = Progress(
@@ -1660,9 +1813,10 @@ class SetBook:
                 pct=1.0,
                 sets_total=len(self.sets),
                 symbols_total=symbols_total,
+                symbols_done=len(self._hist_seen) if merge else 0,
                 bars_total=sum(len(self.bars.get(s) or []) for s in names),
                 cycle=self.progress.cycle + 1,
-                detail=f"{len(names)} symbols · {len(self.sets)} sets",
+                detail=f"{len(self._hist_seen) if merge else 0}/{symbols_total} · {len(names)} symbols · {len(self.sets)} sets",
                 ready=prior_ready if merge else False,
             )
             hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
@@ -1735,13 +1889,21 @@ class SetBook:
                         self.progress.detail = f"aborted-load {i}/{len(names)}"
                         break
                     self.progress.symbol = symbol
-                    self.progress.symbols_done = i
-                    self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
+                    coverage_now = len(self._hist_seen) if merge else done
+                    denom = symbols_total if merge else len(names)
+                    self.progress.pct = 5.0 + (coverage_now / max(1, denom)) * 80.0
                     self.progress.elapsed_ms = (time.time() - t0) * 1000
-                    self.progress.detail = f"replay {symbol} {i + 1}/{len(names)}"
+                    self.progress.detail = f"replay {symbol} {coverage_now + 1}/{denom}"
                     _sym, local, local_ind, local_strategy = _one(symbol)
                     _merge(_sym, local, local_ind, local_strategy)
                     done += 1
+                    coverage_now = len(self._hist_seen) if merge else done
+                    self.progress.symbols_done = coverage_now
+                    self.progress.pct = 5.0 + (coverage_now / max(1, symbols_total if merge else len(names))) * 80.0
+                    self.progress.detail = (
+                        f"replay {symbol} {coverage_now}/{symbols_total}"
+                        if merge else f"replay {symbol} {done}/{len(names)}"
+                    )
                     if on_symbol:
                         on_symbol(symbol, done, len(names))
                     if on_step:
@@ -1782,11 +1944,15 @@ class SetBook:
                             with lock:
                                 _merge(result_symbol, local, local_ind, local_strategy)
                                 done += 1
+                                coverage_now = len(self._hist_seen) if merge else done
                                 self.progress.symbol = result_symbol
-                                self.progress.symbols_done = done
-                                self.progress.pct = 5.0 + (done / max(1, len(names))) * 80.0
+                                self.progress.symbols_done = coverage_now
+                                self.progress.pct = 5.0 + (coverage_now / max(1, symbols_total if merge else len(names))) * 80.0
                                 self.progress.elapsed_ms = (time.time() - t0) * 1000
-                                self.progress.detail = f"replay {result_symbol} {done}/{len(names)}"
+                                self.progress.detail = (
+                                    f"replay {result_symbol} {coverage_now}/{symbols_total}"
+                                    if merge else f"replay {result_symbol} {done}/{len(names)}"
+                                )
                             if on_symbol:
                                 on_symbol(result_symbol, done, len(names))
                             if on_step:
@@ -1825,11 +1991,11 @@ class SetBook:
                 self.progress.ready = prior_ready if merge else False
                 self.progress.symbols_done = coverage_done
             self.progress.sets_done = len(self.sets)
-            self.progress.detail = (
-                f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
-                f"{sum(s.n for s in self.sets.values())} hist fills"
-                + (f" · coverage {coverage_done}/{symbols_total}" if merge else "")
-                + (" · aborted" if aborted else "")
+            self.refresh_progress_detail(
+                merge=merge,
+                coverage_done=coverage_done,
+                symbols_total=symbols_total,
+                aborted=aborted,
             )
         except Exception as exc:
             self.progress.phase = "error"
@@ -1904,7 +2070,23 @@ class SetBook:
 
     def _score_all(self) -> None:
         """Score the complete catalog once after a batched replay commit."""
-        for st in self.by_idx:
+        states = self.by_idx
+        n = len(states)
+        if n >= 48:
+            try:
+                cpu = max(1, int(os.cpu_count() or 1))
+            except Exception:
+                cpu = 2
+            workers = max(1, min(cpu, n))
+            if workers > 2:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
+                    list(pool.map(self._score_one, states, chunksize=max(8, n // (workers * 4) or 8)))
+                self._selection_dirty = True
+                self._snap_ts = 0.0
+                self._live_ov_ts = 0.0
+                self._cap_active()
+                return
+        for st in states:
             self._score_one(st)
         self._cap_active()
 
@@ -2072,22 +2254,8 @@ class SetBook:
             return pos, None
         raw = (px - entry) / entry * side
         qty = max(0.25, float(pos.get("qty") or 1.0))
-        rec = {
-            "t": ts,
-            "symbol": symbol,
-            "side": "LONG" if side > 0 else "SHORT",
-            "direction": "LONG" if side > 0 else "SHORT",
-            "pnl": net_pnl_pct(raw, self.cost_pct) * qty,
-            "pnl_pct": raw,
-            "hold_s": held * BAR_S,
-            "reason": why,
-            "set_id": st_id,
-            "pack": pack,
-            "costPct": self.cost_pct,
-            "qty": qty,
-            "adds": int(pos.get("adds") or 0),
-            "strategy": strategy,
-        }
+        rec = hist_fill(ts, symbol, side, raw, held * BAR_S, why)
+        rec["strategy"] = _intern(strategy or "core")
         return None, rec
 
     def prepare_replay_signals(
@@ -2261,22 +2429,9 @@ class SetBook:
                         qty = 1.0
                         move = float(raw[j])
                         bucket = hist.setdefault(pack_sets[j].id, [])
-                        bucket.append({
-                            "t": ts,
-                            "symbol": symbol,
-                            "side": "LONG" if want_side > 0 else "SHORT",
-                            "direction": "LONG" if want_side > 0 else "SHORT",
-                            "pnl": net_pnl_pct(move, self.cost_pct) * qty,
-                            "pnl_pct": move,
-                            "hold_s": int(held[j]) * BAR_S,
-                            "reason": why,
-                            "set_id": pack_sets[j].id,
-                            "pack": pack_sets[j].pack,
-                            "costPct": self.cost_pct,
-                            "qty": qty,
-                            "adds": 0,
-                            "strategy": "core",
-                        })
+                        bucket.append(hist_fill(
+                            ts, symbol, want_side, move, int(held[j]) * BAR_S, why,
+                        ))
                         if hist_counts is not None:
                             sid = pack_sets[j].id
                             hist_counts[sid] = int(hist_counts.get(sid, 0)) + 1
@@ -2319,8 +2474,19 @@ class SetBook:
         hist_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         bars = self.bars[symbol]
-        selected = {str(s) for s in (set_ids or self.sets)}
-        replay_sets = [st for st in self.by_idx if st.id in selected]
+        if set_ids is None:
+            replay_sets = self.by_idx
+            by_pack = self._by_pack or {}
+            if not by_pack:
+                for st in replay_sets:
+                    by_pack.setdefault(st.pack, []).append(st)
+            set_map = self.sets
+        else:
+            replay_sets = [self.sets[str(sid)] for sid in set_ids if str(sid) in self.sets]
+            by_pack = {}
+            for st in replay_sets:
+                by_pack.setdefault(st.pack, []).append(st)
+            set_map = {st.id: st for st in replay_sets}
         n = len(bars)
         if prepared is None:
             signals, kind_sigs, warmup = self.prepare_replay_signals(symbol, now, on_step=on_step)
@@ -2330,10 +2496,6 @@ class SetBook:
         time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
         scratch_bars = max(8, int(self.scratch_s / BAR_S))
         honor_tp = bool(getattr(self, "hist_honor_tp", True))
-        by_pack: Dict[str, List[SetState]] = {}
-        for st in replay_sets:
-            by_pack.setdefault(st.pack, []).append(st)
-        set_map = {st.id: st for st in replay_sets}
         for pack, pack_sets in by_pack.items():
             pack_sig = signals.get(pack) or [(0, 0.0, "")] * n
             # Block/DCA hist once per pack, not once per SL×TP book.
@@ -2601,21 +2763,10 @@ class SetBook:
                                     why, px = "scratch+", float(bar[3])
                             if why:
                                 raw = (px - entry) / entry * side
-                                buf.append({
-                                    "t": ts,
-                                    "symbol": symbol,
-                                    "side": "LONG" if side > 0 else "SHORT",
-                                    "direction": "LONG" if side > 0 else "SHORT",
-                                    "pnl": net_pnl_pct(raw, self.cost_pct),
-                                    "pnl_pct": raw,
-                                    "hold_s": held * BAR_S,
-                                    "reason": f"ind:{kind}:{why}",
-                                    "ind_kind": kind,
-                                    "pack": "indications",
-                                    "costPct": self.cost_pct,
-                                    "slRatio": 0.6,
-                                    "tpPct": tp_frac * 100.0,
-                                })
+                                buf.append(hist_fill(
+                                    ts, symbol, side, raw, held * BAR_S, f"ind:{kind}:{why}",
+                                    ind_kind=kind,
+                                ))
                                 open_pos = None
                                 cool = self.cooldown_bars
                             continue
@@ -2778,14 +2929,9 @@ class SetBook:
                 decided += 1
         gp = round(gp, 6)
         gl = round(gl, 6)
-        pf_tape = last_n_balanced(ordered, self.pf_n, ordered=True)
-        if pf_tape is ordered:
-            last15 = self._fast_historic_pf_from_gross(gross, self.pf_n, cost_pct, cost_frac)
-            pf_gross = gross
-        else:
-            pf_gross = [finite(row.get("pnl_pct")) for row in pf_tape]
-            last15 = self._fast_historic_pf_from_gross(pf_gross, self.pf_n, cost_pct, cost_frac)
-        sample = len(pf_tape)
+        pf_gross = last_n_chrono(gross, self.pf_n, ordered=True)
+        last15 = self._fast_historic_pf_from_gross(pf_gross, self.pf_n, cost_pct, cost_frac)
+        sample = len(pf_gross)
         gross_profit = sum(value for value in pf_gross if value > 0)
         gross_loss = abs(sum(value for value in pf_gross if value < 0))
         net_values_sum = 0.0
@@ -2815,17 +2961,9 @@ class SetBook:
             "costSource": "manual-fallback",
             "costSamples": 0,
         }
-        window_n = max(EVALUATION_WINDOWS)
-        window_tape = last_n_balanced(ordered, window_n, ordered=True)
-        if window_tape is ordered:
-            window_gross = gross
-        elif window_tape is pf_tape:
-            window_gross = pf_gross
-        else:
-            window_gross = [finite(row.get("pnl_pct")) for row in window_tape]
         windows: Dict[str, Dict[str, Any]] = {}
         for requested in EVALUATION_WINDOWS:
-            metric = self._fast_historic_pf_from_gross(window_gross, requested, cost_pct, cost_frac)
+            metric = self._fast_historic_pf_from_gross(gross, requested, cost_pct, cost_frac)
             count = int(metric["count"])
             required_window = max(1, min(int(requested), required))
             windows[f"last{requested}"] = {
@@ -2833,7 +2971,7 @@ class SetBook:
                 "n": count,
                 "available": count >= int(requested),
                 "requiredSamples": required_window,
-                "validated": count >= required_window and float(metric["ratio"]) + 1e-9 >= 1.0,
+                "validated": count >= required_window and is_positive_pf(metric["ratio"]),
                 "pf": round(float(metric["ratio"]), 4),
                 "classicPf": float(metric["classicPf"]),
                 "avgR": float(metric["avgR"]),
@@ -2858,7 +2996,7 @@ class SetBook:
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         dd_s = float(dd["maxS"])
-        enable_pf = float(self.real_min_pf or 1.02)
+        enable_pf = float(self.real_min_pf or POSITIVE_PF)
         max_dd = float(self.max_dd_s or 57600)
         _base_n, main_n_req, real_n_req = self._stage_window_ns()
         main_pf_m = self._fast_historic_pf_from_gross(gross, main_n_req, cost_pct, cost_frac)
@@ -2883,7 +3021,7 @@ class SetBook:
             "avg_dd_s": float(dd["avgS"]),
             "dd_episodes": int(dd["episodes"]),
             "source_n": n_rows,
-            "validated": n15 >= required and ratio + 1e-9 >= 1.0,
+            "validated": n15 >= required and is_positive_pf(ratio),
             "active": bool(n15 >= required and ratio + 1e-9 >= enable_pf and dd_s <= max_dd + 1e-9),
             "enablePf": enable_pf,
             "ddOk": dd_s <= max_dd + 1e-9,
@@ -2924,17 +3062,17 @@ class SetBook:
         holds = [finite(r.get("hold_s")) for r in ordered]
         avg_hold = round(sum(holds) / len(holds), 1) if holds else 0.0
         classic = round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0)
-        pf_tape = last_n_balanced(ordered, self.pf_n, ordered=True)
-        last15 = last_n_cost_pf(
-            pf_tape, self.pf_n, self.cost_pct, ordered=True, simple=True if fast_historic else None
+        last15 = self._window_cost_pf(ordered, self.pf_n, simple=True if fast_historic else None)
+        evaluation = cost_aware_metrics(
+            last_n_chrono(ordered, self.pf_n, ordered=True),
+            self.cost_pct,
+            required_samples=self.eval_need(),
         )
-        evaluation = cost_aware_metrics(pf_tape, self.cost_pct, required_samples=self.eval_need())
-        # Use one bounded, symbol-balanced tape for every named last-N view.
-        # This keeps the 50+/75-position coordinations reproducible without
-        # retaining the complete history in each Set.
-        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS), ordered=True)
+        # Complete chronological last-N for every named window. A per-symbol
+        # subsample here made last-15 disagree with main/real and could mark
+        # a winning Set as PF < 1.10.
         windows = evaluation_windows(
-            window_tape,
+            ordered,
             self.cost_pct,
             required_samples=self.eval_need(),
             ordered=True,
@@ -2952,8 +3090,8 @@ class SetBook:
         need = self.eval_need()
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
-        validated = n15 >= need and ratio + 1e-9 >= 1.0
-        enable_pf = float(self.real_min_pf or 1.02)
+        validated = n15 >= need and is_positive_pf(ratio)
+        enable_pf = float(self.real_min_pf or POSITIVE_PF)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
@@ -3020,9 +3158,9 @@ class SetBook:
         real_pf = finite(m.get("real_pf"), base_pf)
         dd_ok = bool(m.get("ddOk", True))
         dd_s = finite(m.get("max_dd_s"), finite(st.max_dd_s))
-        base_floor = float(self.stage_min_pf.get("base", 1.02))
-        main_floor = float(self.stage_min_pf.get("main", 1.02))
-        real_floor = float(self.stage_min_pf.get("real", 1.02))
+        base_floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
+        main_floor = float(self.stage_min_pf.get("main", POSITIVE_PF))
+        real_floor = float(self.stage_min_pf.get("real", POSITIVE_PF))
         base = base_n >= need and base_pf + 1e-9 >= base_floor and dd_ok
         main = base and main_n >= main_req and main_pf + 1e-9 >= main_floor
         real = main and real_n >= real_req and real_pf + 1e-9 >= real_floor
@@ -3218,7 +3356,13 @@ class SetBook:
         }
 
     def axis_variants(self, coordinator: Any) -> Dict[str, Any]:
-        """Generate axis children only from qualified Base parents."""
+        """Coordinate from Base parents. Axis children only when an axis is on."""
+        if coordinator is None:
+            return {"parentCount": 0, "childCount": 0, "axes": {}, "fromBaseVars": True}
+        if not bool(getattr(coordinator, "axes_active", lambda: False)()):
+            fn = getattr(coordinator, "coordinate_base_sets", None)
+            if callable(fn):
+                return fn(self)
         rows: List[Dict[str, Any]] = []
         for parent_id in self.qualified_stage_ids("base"):
             st = self.sets.get(parent_id)
@@ -3251,7 +3395,7 @@ class SetBook:
             return True, ""
         live_rows = sorted((r for r in live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
-        enable_pf = float(self.real_min_pf or 1.02)
+        enable_pf = float(self.real_min_pf or POSITIVE_PF)
         if len(live_rows) < need:
             if not self.strict_gate:
                 return True, ""
@@ -3414,7 +3558,7 @@ class SetBook:
             "costSource": live_opt_pf.get("costSource") or self.cost_source,
         }
         need = self.eval_need()
-        enable_pf = float(self.min_pf or 1.02)
+        enable_pf = float(self.min_pf or POSITIVE_PF)
         by: Dict[str, Dict[str, Any]] = {}
         historic = not bool(st.live)
         for side in DIRECTIONS:
@@ -3599,6 +3743,100 @@ class SetBook:
             st.deact_reason = "" if st.active else "selection limit"
         self._snap_ts = self._live_ov_ts = 0.0
 
+    def refresh_progress_detail(
+        self,
+        *,
+        merge: Optional[bool] = None,
+        coverage_done: Optional[int] = None,
+        symbols_total: Optional[int] = None,
+        aborted: bool = False,
+    ) -> None:
+        """Keep progress.detail aligned with fills, validated, and symbol coverage."""
+        fills = sum(int(s.n or 0) for s in self.sets.values())
+        active_n = sum(1 for s in self.sets.values() if s.active)
+        validated_n = sum(
+            1
+            for s in self.sets.values()
+            if int(s.last15_n or 0) >= self.eval_need() and is_positive_pf(s.last15_ratio)
+        )
+        seen = len(self._hist_seen)
+        total = int(symbols_total if symbols_total is not None else (self.progress.symbols_total or 0) or seen)
+        done = int(coverage_done if coverage_done is not None else (self.progress.symbols_done or seen))
+        parts: List[str] = []
+        if active_n:
+            parts.append(f"{active_n}/{len(self.sets)} active")
+        if validated_n:
+            parts.append(f"{validated_n} validated")
+        parts.append(f"{fills} hist fills")
+        use_cov = bool(merge) if merge is not None else bool(self._hist_seen or total)
+        if use_cov and total:
+            parts.append(f"coverage {done}/{total}")
+        if aborted:
+            parts.append("aborted")
+        self.progress.detail = " · ".join(parts)
+
+    def relative_listings(
+        self,
+        symbols: Optional[Sequence[str]] = None,
+        *,
+        ranked_ids: Optional[Sequence[str]] = None,
+        id_limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Complete pack/kind/id listings. id_limit bounds payload for hot stats."""
+        by_pack: Dict[str, List[str]] = {}
+        by_kind: Dict[str, List[str]] = {}
+        validated_ids: List[str] = []
+        need = self.eval_need()
+        ordered = list(self.by_idx)
+        if ranked_ids is None:
+            ordered = sorted(
+                ordered,
+                key=lambda s: (
+                    0 if int(s.last15_n or 0) >= need and is_positive_pf(s.last15_ratio) else 1,
+                    -float(s.last15_ratio or 0),
+                    float(s.max_dd_s or 0),
+                    s.id,
+                ),
+            )
+            ids = [st.id for st in ordered]
+        else:
+            ids = [str(x) for x in ranked_ids]
+        for st in self.by_idx:
+            by_pack.setdefault(str(st.pack), []).append(st.id)
+            by_kind.setdefault(str(st.kind), []).append(st.id)
+            if int(st.last15_n or 0) >= need and is_positive_pf(st.last15_ratio):
+                validated_ids.append(st.id)
+        if id_limit > 0:
+            ids = ids[:id_limit]
+            validated_ids = validated_ids[:id_limit]
+            pack_payload = {k: v[: min(32, id_limit)] for k, v in (self._ids_by_pack or by_pack).items()}
+            kind_payload = {k: v[: min(32, id_limit)] for k, v in (self._ids_by_kind or by_kind).items()}
+        else:
+            pack_payload = dict(self._ids_by_pack or by_pack)
+            kind_payload = dict(self._ids_by_kind or by_kind)
+        index_by_id = {} if id_limit else {st.id: int(st.idx) for st in self.by_idx}
+        return {
+            "rankedIds": ids,
+            "validatedIds": validated_ids,
+            "byPack": pack_payload,
+            "byKind": kind_payload,
+            "indexById": index_by_id,
+            "symbols": [str(s) for s in (symbols or sorted(self._hist_seen))],
+            "relative": {
+                "sets": len(self.by_idx),
+                "ranked": len(ids) if id_limit else len(self.by_idx),
+                "validated": sum(
+                    1
+                    for s in self.by_idx
+                    if int(s.last15_n or 0) >= need and is_positive_pf(s.last15_ratio)
+                ),
+                "active": sum(1 for s in self.by_idx if s.active),
+                "packs": {k: len(v) for k, v in (self._ids_by_pack or by_pack).items()},
+                "kinds": {k: len(v) for k, v in (self._ids_by_kind or by_kind).items()},
+                "symbolsSeen": len(self._hist_seen),
+            },
+        }
+
     def get_idx(self, idx: int) -> Optional[SetState]:
         if 0 <= idx < len(self.by_idx):
             return self.by_idx[idx]
@@ -3692,7 +3930,7 @@ class SetBook:
         validated_count = sum(
             1
             for st in self.sets.values()
-            if int(st.last15_n or 0) >= need and float(st.last15_ratio or 0) + 1e-9 >= 1.0
+            if int(st.last15_n or 0) >= need and is_positive_pf(st.last15_ratio)
         )
         stage_counts = {"Base": 0, "Main": 0, "Real": 0, "Unqualified": 0}
         stage_parent_counts = {k: set() for k in stage_counts}
@@ -3700,7 +3938,7 @@ class SetBook:
             stage = st.stage if st.stage in stage_counts else "Unqualified"
             stage_counts[stage] += 1
             stage_parent_counts[stage].add(st.parent_set_id or st.id)
-        axis_counts = {a: sum(1 for st in self.by_idx if st.axis_key.startswith(a + ":")) for a in ("prev", "last", "cont", "pause")}
+        axis_counts = {"prev": 0, "last": 0, "cont": 0, "pause": 0}
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -3720,6 +3958,8 @@ class SetBook:
             "validatedCount": validated_count,
             "validationNeed": need,
             "histFills": sum(st.n for st in self.sets.values()),
+            "replaySymbols": len(self._hist_seen),
+            "replayFills": sum(int(st.n or 0) for st in self.sets.values()),
             "indexed": True,
             "independentTrail": bool(getattr(self, "trail_enabled", True)),
             "independentDirection": True,
@@ -3763,7 +4003,7 @@ class SetBook:
                 "last25_avg_r": st.last25_avg_r,
                 "max_dd_s": st.max_dd_s,
                 "n": st.n,
-                "validated": st.last15_n >= self.eval_need() and st.last15_ratio + 1e-9 >= 1.0,
+                "validated": st.last15_n >= self.eval_need() and is_positive_pf(st.last15_ratio),
                 "active": st.active,
             }
         return blob
@@ -3812,7 +4052,7 @@ class SetBook:
         if not passing and not self.strict_gate:
             passing = [
                 s for s in rows
-                if int(view(s).get("last15_n") or 0) >= need and float(view(s).get("last15_ratio") or 0) + 1e-9 >= 1.0
+                if int(view(s).get("last15_n") or 0) >= need and is_positive_pf(view(s).get("last15_ratio"))
             ]
         if not passing and not self.strict_gate:
             passing = [s for s in rows if not proven_neg(s)]
@@ -3962,9 +4202,8 @@ class SetBook:
         tape.sort(key=lambda r: finite(r.get("t")))
         dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
-            balanced = last_n_balanced(tape, max(self.pf_n, max(EVALUATION_WINDOWS)))
-            last = last_n_cost_pf(balanced, self.pf_n, self.cost_pct)
-            windows = evaluation_windows(balanced, self.cost_pct, required_samples=need)
+            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
+            windows = evaluation_windows(tape, self.cost_pct, required_samples=need)
             n = int(last["count"])
             pf = float(last["ratio"])
             net_avg = float(last.get("netAvg") or 0)
@@ -3986,7 +4225,7 @@ class SetBook:
             "netAvg": round(net_avg, 6),
             "costSubtracted": True,
             "validated": n >= need,
-            "profitable": pf + 1e-9 >= 1.0,
+            "profitable": is_positive_pf(pf),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "ddEpisodes": int(dd.get("episodes") or 0),
@@ -4176,7 +4415,7 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
-                    "validated": int(st.last15_n or 0) >= self.eval_need() and float(st.last15_ratio or 0) + 1e-9 >= 1.0,
+                    "validated": int(st.last15_n or 0) >= self.eval_need() and is_positive_pf(st.last15_ratio),
                     "baseQualified": bool((st.stage_ledger or {}).get("base")),
                     "mainQualified": bool((st.stage_ledger or {}).get("main")),
                     "realQualified": bool((st.stage_ledger or {}).get("real")),
@@ -4218,7 +4457,7 @@ class SetBook:
                         "avgHoldS": st.avg_hold_s,
                         "n": st.n,
                         "liveN": len(st.live),
-                        "validated": int(st.last15_n or 0) >= self.eval_need() and float(st.last15_ratio or 0) + 1e-9 >= 1.0,
+                        "validated": int(st.last15_n or 0) >= self.eval_need() and is_positive_pf(st.last15_ratio),
                     },
                     "active": st.active,
                     "deactReason": st.deact_reason,
@@ -4269,7 +4508,7 @@ class SetBook:
             "realEval": int(getattr(self, "real_eval", 3) or 3),
             "deactN": self.deact_n,
             "minPf": self.real_min_pf,
-                "enablePf": 1.02 if float(self.min_pf or 0) <= 0 else self.min_pf,
+                "enablePf": POSITIVE_PF if float(self.min_pf or 0) <= 0 else self.min_pf,
             "enableNeed": self.eval_need(),
             "maxDdS": self.max_dd_s,
             "autoDeact": self.auto_deact,
@@ -4304,6 +4543,7 @@ class SetBook:
             "liveProcessed": int(live_ov.get("processed") or 0),
             "liveActive": int(live_ov.get("active") or 0),
             "index": index,
+            "listings": self.relative_listings(id_limit=120),
             "minStep": self.min_step,
             "minStepCfg": self.min_step_cfg,
             "stepMax": self.step_max,
@@ -4371,18 +4611,35 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
 
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
-    # drawdown time: 3 down, recover, 2 down
+    # drawdown time: 3 down, recover, 2 down — cost-net of pnl_pct (shared units)
     rows = [
-        {"t": 100, "pnl": 1.0, "pnl_pct": 0.003},
-        {"t": 160, "pnl": -0.4, "pnl_pct": -0.002},
-        {"t": 220, "pnl": -0.4, "pnl_pct": -0.002},
-        {"t": 400, "pnl": 1.2, "pnl_pct": 0.004},
-        {"t": 460, "pnl": -0.3, "pnl_pct": -0.0015},
-        {"t": 520, "pnl": -0.3, "pnl_pct": -0.0015},
+        {"t": 100, "pnl_pct": 0.005},
+        {"t": 160, "pnl_pct": -0.002},
+        {"t": 220, "pnl_pct": -0.002},
+        {"t": 400, "pnl_pct": 0.010},
+        {"t": 460, "pnl_pct": -0.002},
+        {"t": 520, "pnl_pct": -0.002},
     ]
     dd = drawdown_time(rows, now=520)
     out.append(("set-dd-episodes", dd["episodes"] == 2.0, f"{dd}"))
     out.append(("set-dd-max", dd["maxS"] >= 120, f"{dd['maxS']}"))
+    from position_cost import is_positive_pf as _is_pos, POSITIVE_PF as _PP
+    mixed_sym = (
+        [{"t": i, "symbol": "A", "pnl_pct": 0.02} for i in range(10)]
+        + [{"t": 100 + i, "symbol": "B", "pnl_pct": -0.02} for i in range(15)]
+    )
+    chrono = last_n_chrono(mixed_sym, 15)
+    bal = last_n_balanced(mixed_sym, 15)
+    out.append(("set-last-n-chrono-newest", all(r["symbol"] == "B" for r in chrono), str({r["symbol"] for r in chrono})))
+    out.append(("set-last-n-balanced-mix", {r["symbol"] for r in bal} == {"A", "B"}, str({r["symbol"] for r in bal})))
+    out.append(("set-positive-pf-floor", _PP == 1.10 and (not _is_pos(1.02)) and _is_pos(1.10), f"floor={_PP}"))
+    live_usdt = {"t": 1, "pnl": 9.0, "pnl_pct": 0.003, "position_cost_pct": 0.15}
+    hist_frac = {"t": 2, "pnl": 0.0015, "pnl_pct": 0.003, "position_cost_pct": 0.15}
+    out.append((
+        "set-ddt-units-match",
+        abs(row_equity_pnl(live_usdt) - row_equity_pnl(hist_frac)) < 1e-12,
+        f"live={row_equity_pnl(live_usdt)} hist={row_equity_pnl(hist_frac)}",
+    ))
     boundary = drawdown_time(
         [
             {"t": 100, "pnl": 1.0},
@@ -4613,6 +4870,39 @@ def self_test() -> List[Tuple[str, bool, str]]:
     combo = {(s.pack, round(s.sl_ratio, 1), s.step, s.trail_key or "") for s in book4.by_idx}
     out.append(("set-combo-unique", len(combo) == len(book4.by_idx), f"unique={len(combo)} n={len(book4.by_idx)}"))
     out.append(("set-get-idx", book4.get_idx(0) is book4.by_idx[0] and book4.get_idx(want - 1) is book4.by_idx[-1], f"0={book4.get_idx(0).id if book4.get_idx(0) else None}"))
+    pack_ids = book4.ids_for_pack("general")
+    out.append((
+        "set-pack-index",
+        bool(pack_ids) and pack_ids == [st.id for st in book4.by_idx if st.pack == "general"]
+        and all(st.pack in book4._by_pack for st in book4.by_idx[:4]),
+        f"general={len(pack_ids)} packs={sorted(book4._ids_by_pack)}",
+    ))
+    clone_idx = book4.replay_clone(["AAA-USDT"] if "AAA-USDT" in book4.bars else None)
+    out.append((
+        "set-clone-reindex",
+        len(clone_idx._ids_by_pack.get("general") or []) == len(pack_ids) and len(clone_idx.sets) == len(book4.sets),
+        f"clone_general={len(clone_idx._ids_by_pack.get('general') or [])}",
+    ))
+    listed = book4.relative_listings()
+    out.append((
+        "set-relative-listings",
+        int((listed.get("relative") or {}).get("sets") or 0) == len(book4.by_idx)
+        and len(listed.get("rankedIds") or []) == len(book4.by_idx)
+        and len(listed.get("indexById") or {}) == len(book4.by_idx)
+        and bool((listed.get("relative") or {}).get("packs")),
+        str(listed.get("relative")),
+    ))
+    fat_row = {
+        "t": 1.0, "symbol": "AAA-USDT", "side": "LONG", "direction": "LONG",
+        "pnl": 0.01, "pnl_pct": 0.002, "hold_s": 60.0, "reason": "tp",
+        "set_id": "general:1m:sl0.6:st8", "pack": "general", "qty": 1.0, "adds": 0, "strategy": "core",
+    }
+    slim = slim_hist_row(fat_row)
+    out.append(("set-hist-slim", "pnl" not in slim and "set_id" not in slim and slim.get("side") == "LONG" and slim.get("pnl_pct") == 0.002, str(slim)))
+    live_keep = slim_hist_row({**fat_row, "client_id": "Gx01x"})
+    out.append(("set-hist-slim-keeps-live", "client_id" in live_keep, str(sorted(live_keep))))
+    out.append(("set-state-slots", hasattr(SetState, "__slots__"), getattr(SetState, "__slots__", ())))
+    out.append(("set-clone-no-hist", all(not st.hist and not st.live for st in clone_idx.by_idx[:8]) and len(clone_idx.by_idx) == len(book4.by_idx), f"n={len(clone_idx.by_idx)}"))
     v = book4.coord_vars(book4.by_idx[0])
     out.append(("set-coord-vars", v.get("idx") == 0 and v.get("kind") == "base" and "step" in v, str(v)))
     trail_row = next((s for s in book4.sets.values() if s.kind == "trail"), None)
@@ -4693,6 +4983,42 @@ def self_test() -> List[Tuple[str, bool, str]]:
     merged_symbols = {str(r.get("symbol")) for r in psecond.hist}
     out.append(("set-replay-partial-gate", first_ok, f"ready={book_partial.progress.ready} symbols={book_partial.progress.symbols_done}/{book_partial.progress.symbols_total} first={first_symbols}"))
     out.append(("set-replay-partial-merge", book_partial.progress.ready and {"FFF-USDT", "GGG-USDT"} <= merged_symbols and psecond.n >= len(psecond.hist), f"symbols={merged_symbols} n={psecond.n} tape={len(psecond.hist)}"))
+    book_mono = SetBook()
+    book_mono.load({
+        "histEnabled": True, "histLookbackBars": 80, "histMinBars": 40,
+        "histWarmup": 16, "setMinStep": 8, "setStepMax": 8,
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "slToTpRatios": [0.6],
+    })
+    book_mono.ingest_bars("MMM-USDT", synth_trend(80, 40.0, 0.1, 0.03))
+    book_mono.ingest_bars("NNN-USDT", synth_trend(80, 41.0, -0.08, 0.03))
+    mono_samples: List[int] = []
+
+    def _mono_step() -> None:
+        mono_samples.append(int(book_mono.progress.symbols_done or 0))
+
+    book_mono.replay_all(
+        now=1_700_000_700,
+        symbols=["MMM-USDT", "NNN-USDT"],
+        workers=1,
+        on_step=_mono_step,
+    )
+    mono_ok = (
+        bool(mono_samples)
+        and all(mono_samples[i] <= mono_samples[i + 1] for i in range(len(mono_samples) - 1))
+        and mono_samples[-1] >= 2
+        and book_mono.progress.ready
+    )
+    out.append((
+        "set-replay-progress-mono",
+        mono_ok,
+        f"n={len(mono_samples)} last={mono_samples[-1:] } samples={mono_samples[:16]}",
+    ))
+    out.append((
+        "set-blas-pin",
+        os.environ.get("OMP_NUM_THREADS") == "1" and os.environ.get("OPENBLAS_NUM_THREADS") == "1",
+        f"omp={os.environ.get('OMP_NUM_THREADS')} blas={os.environ.get('OPENBLAS_NUM_THREADS')}",
+    ))
     old_hist = [dict(psecond.hist[0])] if psecond.hist else []
     book_partial.load({
         "histEnabled": True, "histLookbackBars": 180, "histMinBars": 80,

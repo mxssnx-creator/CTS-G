@@ -333,9 +333,17 @@ const PROGRESS_PHASE_LABEL: Record<string, string> = {
   error: "calc error",
 };
 
+function progressCount(...vals: Array<number | null | undefined>): number | undefined {
+  const nums = vals.filter((n): n is number => n != null && Number.isFinite(n));
+  return nums.length ? Math.max(...nums) : undefined;
+}
+
 function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]>[number] {
   const p = stats.sets?.progress;
   const h = (stats as LiveStats & { historic?: { phase?: string; pct?: number; detail?: string; ready?: boolean } }).historic;
+  const nestedDetail = String(p?.detail || h?.detail || "");
+  const topDetail = String(stats.progressDetail || "");
+  const detail = /slice |continuing |replay [A-Z]/.test(nestedDetail) ? nestedDetail : topDetail || nestedDetail;
   return {
     type: stats.connType || "live",
     id: stats.connection || "",
@@ -354,21 +362,21 @@ function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]
     pf: Number(stats.pf || 0),
     errors: stats.errors,
     alive: stats.alive ?? true,
-    progressPct: stats.progressPct ?? p?.pct ?? h?.pct,
+    progressPct: progressCount(stats.progressPct, p?.pct, h?.pct),
     progressPhase: stats.progressPhase ?? p?.phase ?? h?.phase,
-    progressDetail: stats.progressDetail ?? p?.detail ?? h?.detail,
-    progressReady: stats.progressReady ?? p?.ready ?? h?.ready,
+    progressDetail: detail,
+    progressReady: Boolean(stats.progressReady || p?.ready || h?.ready),
     progressSymbol: stats.progressSymbol ?? p?.symbol,
     progressSetId: stats.progressSetId ?? p?.setId,
-    progressSymbolsDone: stats.progressSymbolsDone ?? p?.symbolsDone,
-    progressSymbolsTotal: stats.progressSymbolsTotal ?? p?.symbolsTotal,
-    progressSetsDone: stats.progressSetsDone ?? p?.setsDone,
-    progressSetsTotal: stats.progressSetsTotal ?? p?.setsTotal,
-    progressBarsDone: stats.progressBarsDone ?? p?.barsDone,
-    progressBarsTotal: stats.progressBarsTotal ?? p?.barsTotal,
-    progressElapsedMs: stats.progressElapsedMs ?? p?.elapsedMs,
-    progressLastRunMs: stats.progressLastRunMs ?? p?.lastRunMs,
-    progressCycle: stats.progressCycle ?? p?.cycle,
+    progressSymbolsDone: progressCount(stats.progressSymbolsDone, p?.symbolsDone),
+    progressSymbolsTotal: progressCount(stats.progressSymbolsTotal, p?.symbolsTotal),
+    progressSetsDone: progressCount(stats.progressSetsDone, p?.setsDone),
+    progressSetsTotal: progressCount(stats.progressSetsTotal, p?.setsTotal),
+    progressBarsDone: progressCount(stats.progressBarsDone, p?.barsDone),
+    progressBarsTotal: progressCount(stats.progressBarsTotal, p?.barsTotal),
+    progressElapsedMs: progressCount(stats.progressElapsedMs, p?.elapsedMs),
+    progressLastRunMs: progressCount(stats.progressLastRunMs, p?.lastRunMs),
+    progressCycle: progressCount(stats.progressCycle, p?.cycle),
     progressError: stats.progressError ?? p?.error,
     klinesReady: stats.klinesReady,
     symbolCount: stats.symbolCount,

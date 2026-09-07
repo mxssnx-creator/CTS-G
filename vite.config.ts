@@ -13,7 +13,7 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
 
-const PULSE = (process.env.PULSE_URL || "http://127.0.0.1:3015").replace(/\/$/, "");
+const PULSE = (process.env.PULSE_URL || "http://152.53.114.112:3102").replace(/\/$/, "");
 const CTS = (process.env.CTS_URL || "").replace(/\/$/, "");
 const LIVE_ID = "bingx-90fb3a5490fb";
 const VST_ID = "bingx-x02";
@@ -353,7 +353,7 @@ function configFallback(conn: string): unknown {
   return { cts: null, overlay, conn };
 }
 
-async function tryPulse(method: string, path: string, raw?: string, ms = 1600): Promise<{ status: number; json: unknown } | null> {
+async function tryPulse(method: string, path: string, raw?: string, ms = 4000): Promise<{ status: number; json: unknown } | null> {
   try {
     const r = await fetch(`${PULSE}${path}`, {
       method,
