@@ -8,6 +8,7 @@ processed Sets and are the only tape that deactivates them.
 from __future__ import annotations
 
 import copy
+import math
 import time
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -30,7 +31,10 @@ from position_cost import (
     SL_TP_STEP,
     sl_tp_grid,
     cost_as_frac,
+    gross_move_pct,
+    net_move_pct,
     net_pnl_pct,
+    ratio_from_r,
     row_net_pnl,
     row_position_cost_pct,
     row_side,
@@ -38,7 +42,7 @@ from position_cost import (
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from block_engine import calculate_block_max_additional_ratio, clamp_stack, finite_number, normalize_block_counts
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 try:
@@ -50,8 +54,8 @@ PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 480
-LOOKBACK_MAX = 4320  # three days of 1m bars for historic validation
+LOOKBACK_DEFAULT = 420
+LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -373,14 +377,10 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     return 0, max(long_c, short_c), "flat"
 
 
-def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
-    """Independent vote per indication kind. Signals / State / Direction / Move / Active / Common."""
-    candles = bars_to_candles(list(bars)[-60:], now=now, period_s=BAR_S)
-    closes = []
-    for b in list(bars)[-60:]:
-        row = ohlcv_row(b)
-        if row:
-            closes.append(row[3])
+def indication_kind_votes_frame(frame: IndicationFrame, settings: Dict[str, Any]) -> List[Tuple[int, float, str]]:
+    """Evaluate every configured indication lane from one parsed candle frame."""
+    candles = frame.candles
+    closes = frame.closes
     want = {
         "sig": bool(settings.get("typeSignals", True)),
         "ta": bool(settings.get("typeState", True)),
@@ -394,61 +394,70 @@ def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, A
     votes: List[Tuple[int, float, str]] = []
     if want["sig"]:
         try:
-            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
+            ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85, frame=frame)
             if ev:
                 votes.append((1 if ev.direction == "long" else -1, float(ev.confidence), "sig"))
         except Exception:
             pass
     if want["ta"]:
         try:
-            ta = evaluate_ta_pack(candles, settings)
+            ta = evaluate_ta_pack(candles, settings, frame=frame)
             if ta:
                 votes.append((1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
         except Exception:
             pass
     if want["dir"] and closes:
         try:
-            drow = evaluate_direction("hist", closes, settings)
+            drow = evaluate_direction("hist", closes, settings, frame=frame)
             if drow:
                 votes.append((1 if drow.direction == "long" else -1, float(drow.confidence), "dir"))
         except Exception:
             pass
     if want["move"] and closes:
         try:
-            mrow = evaluate_move("hist", closes, settings)
+            mrow = evaluate_move("hist", closes, settings, frame=frame)
             if mrow:
                 votes.append((1 if mrow.direction == "long" else -1, float(mrow.confidence), "move"))
         except Exception:
             pass
     if want["act"] and closes:
         try:
-            arow = evaluate_active("hist", closes, settings)
+            arow = evaluate_active("hist", closes, settings, frame=frame)
             if arow:
                 votes.append((1 if arow.direction == "long" else -1, float(arow.confidence), "act"))
         except Exception:
             pass
     if want["common"] and candles:
         try:
-            crow = evaluate_common("hist", candles, settings)
+            crow = evaluate_common("hist", candles, settings, frame=frame)
             if crow:
                 votes.append((1 if crow.direction == "long" else -1, float(crow.confidence), "common"))
         except Exception:
             pass
     if want.get("trend") and closes:
         try:
-            trow = evaluate_trend("hist", closes, settings)
+            trow = evaluate_trend("hist", closes, settings, frame=frame)
             if trow:
                 votes.append((1 if trow.direction == "long" else -1, float(trow.confidence), "trend"))
         except Exception:
             pass
     if want.get("brk") and closes:
         try:
-            brow = evaluate_break("hist", closes, settings)
+            brow = evaluate_break("hist", closes, settings, frame=frame)
             if brow:
                 votes.append((1 if brow.direction == "long" else -1, float(brow.confidence), "brk"))
         except Exception:
             pass
     return votes
+
+
+def indication_kind_votes(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> List[Tuple[int, float, str]]:
+    """Build one bounded frame for callers that provide raw historic bars."""
+    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
+    return indication_kind_votes_frame(frame, settings)
+
+
+_DEFAULT_INDICATION_KIND_VOTES = indication_kind_votes
 
 
 def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float, str]:
@@ -674,15 +683,33 @@ class Progress:
     detail: str = ""
     ready: bool = False
     error: str = ""
+    run_id: str = ""
+    generation: int = 0
+    mode: str = ""
+    requested_start: int = 0
+    requested_end: int = 0
+    watermark: Dict[str, int] = field(default_factory=dict)
+    last_published_watermark: Dict[str, int] = field(default_factory=dict)
+    last_complete_run: float = 0.0
+    next_run_at: float = 0.0
+    valid_symbols: List[str] = field(default_factory=list)
+    invalid_symbols: List[Dict[str, str]] = field(default_factory=list)
+    missing_symbols: List[str] = field(default_factory=list)
+    gapped_symbols: List[str] = field(default_factory=list)
+    stale: bool = False
+    deferred_reason: str = ""
+    coordination_complete: bool = False
 
 
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
         self.lookback = LOOKBACK_DEFAULT
+        self.evaluation_bars = LOOKBACK_DEFAULT
+        self.exact_replay_window = False
         self.min_bars = 120
         self.warmup = WARMUP_DEFAULT
-        self.refresh_s = 90.0
+        self.refresh_s = 3600.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = 1.02
@@ -887,10 +914,12 @@ class SetBook:
     ) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback = max(120, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        self.lookback = max(60, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        self.evaluation_bars = self.lookback
+        self.exact_replay_window = bool(ov.get("histExactWindow", False))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
-        self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
+        self.refresh_s = max(60.0, min(86400.0, float(ov.get("histRefreshS") or 3600)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         def _pf(key: str, fallback: float) -> float:
@@ -934,9 +963,9 @@ class SetBook:
         # drive live orders. Cold/unproven sets keep collecting evidence.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 80)
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 110)
         except Exception:
-            raw_active = 80
+            raw_active = 110
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
@@ -1350,7 +1379,8 @@ class SetBook:
                 continue
             cleaned.append([row[0], row[1], row[2], row[3], row[4]])
         if len(cleaned) >= 16:
-            self.bars[symbol] = cleaned[-self.lookback :]
+            replay_cap = self.lookback + (self.warmup if self.exact_replay_window else 0)
+            self.bars[symbol] = cleaned[-max(self.lookback, replay_cap) :]
 
     def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
         n = 0
@@ -1757,12 +1787,15 @@ class SetBook:
                 k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
                 for k in keys
             }
-        for st in self.by_idx:
+        states = (
+            self.by_idx
+            if not merge
+            else [self.sets[sid] for sid in hist if sid in self.sets]
+        )
+        for st in states:
             # A bounded replay may commit one configuration slice at a time.
             # Do not treat a not-yet-replayed set as an empty result or erase
             # its already committed symbol evidence.
-            if merge and st.id not in hist:
-                continue
             full = hist.get(st.id, [])
             if merge:
                 counts = self._hist_counts.setdefault(st.id, {})
@@ -1806,6 +1839,7 @@ class SetBook:
         strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         set_ids: Optional[Sequence[str]] = None,
         prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
+        hist_counts: Optional[Dict[str, int]] = None,
     ) -> int:
         """Replay one symbol into hist and drop its bars. Independent of other names."""
         if symbol not in self.bars:
@@ -1824,6 +1858,7 @@ class SetBook:
             strat_hist=strat_hist,
             set_ids=set_ids,
             prepared=prepared,
+            hist_counts=hist_counts,
         )
         if drop_bars:
             self.bars.pop(symbol, None)
@@ -1985,18 +2020,30 @@ class SetBook:
         """Build the symbol signal lanes once before replaying config chunks."""
         bars = self.bars[symbol]
         n = len(bars)
-        warmup = min(self.warmup, max(16, n // 5))
+        if self.exact_replay_window:
+            evaluation_bars = min(n, max(60, int(self.evaluation_bars or self.lookback)))
+            warmup = min(self.warmup, max(16, n - evaluation_bars))
+        else:
+            warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
-        base_ts = (now or time.time()) - (n - 1) * BAR_S
+        frame_now = now or time.time()
+        indication_frame = (
+            build_indication_frame(bars, now=frame_now, period_s=BAR_S)
+            if "indications" in self.packs
+            else None
+        )
         for i in range(warmup, n):
             lo = max(0, i + 1 - 60)
             window = bars[lo : i + 1]
-            ts = base_ts + i * BAR_S
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
-            if "indications" in self.packs:
-                votes = indication_kind_votes(window, self.ind_settings, ts)
+            if "indications" in self.packs and indication_frame is not None:
+                if indication_kind_votes is _DEFAULT_INDICATION_KIND_VOTES:
+                    votes = indication_kind_votes_frame(indication_frame.window(lo, i + 1), self.ind_settings)
+                else:
+                    ts = frame_now - (n - 1 - i) * BAR_S
+                    votes = indication_kind_votes(window, self.ind_settings, ts)
                 signals["indications"][i] = votes_to_signal(votes)
                 for d, conf, tag in votes:
                     kind = IND_TAG_KIND.get(tag.strip())
@@ -2018,6 +2065,7 @@ class SetBook:
         scratch_bars: int,
         honor_tp: bool,
         hist: Dict[str, List[Dict[str, Any]]],
+        hist_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         """Replay core configs with columnar state, preserving scalar rules.
 
@@ -2149,6 +2197,9 @@ class SetBook:
                             "adds": 0,
                             "strategy": "core",
                         })
+                        if hist_counts is not None:
+                            sid = pack_sets[j].id
+                            hist_counts[sid] = int(hist_counts.get(sid, 0)) + 1
                         # The scorer only needs the newest bounded evaluation
                         # tape. Trim at append time so a full matrix cannot
                         # retain millions of raw fills before the chunk
@@ -2185,6 +2236,7 @@ class SetBook:
         strat_hist: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         set_ids: Optional[Sequence[str]] = None,
         prepared: Optional[Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int]] = None,
+        hist_counts: Optional[Dict[str, int]] = None,
     ) -> None:
         bars = self.bars[symbol]
         selected = {str(s) for s in (set_ids or self.sets)}
@@ -2215,7 +2267,7 @@ class SetBook:
             if vector_core:
                 self._replay_core_vectorized(
                     symbol, bars, pack_sets, pack_sig, now, warmup,
-                    time_bars, scratch_bars, honor_tp, hist,
+                    time_bars, scratch_bars, honor_tp, hist, hist_counts,
                 )
             for want_side in (1, -1):
                 opens: Dict[str, Dict[str, Any]] = {}
@@ -2252,6 +2304,8 @@ class SetBook:
                         )
                         if rec:
                             hist.setdefault(sid, []).append(rec)
+                            if hist_counts is not None:
+                                hist_counts[sid] = int(hist_counts.get(sid, 0)) + 1
                             dead.append(sid)
                             cools[sid] = self.cooldown_bars
                         else:
@@ -2501,7 +2555,158 @@ class SetBook:
                             tp_px = close * (1 - tp_frac)
                         open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
 
-    def _score_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
+    def _fast_historic_pf(self, rows: Sequence[Dict[str, Any]], requested: int) -> Dict[str, float]:
+        """Score generated historic rows with the exact cost-aware formulas."""
+        window = list(rows)[-max(1, int(requested)) :]
+        cost_pct = float(self.cost_pct)
+        cost_frac = cost_as_frac(cost_pct)
+        gross = [finite(row.get("pnl_pct")) for row in window]
+        nets = [value - cost_frac for value in gross]
+        count = len(gross)
+        avg_r = sum(signed_result_r(value, cost_pct) for value in gross) / count if count else 0.0
+        ratio = ratio_from_r(avg_r) if count else 1.0
+        gp = sum(value for value in nets if value > 0)
+        gl = abs(sum(value for value in nets if value < 0))
+        classic = gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)
+        return {
+            "n": float(requested),
+            "count": float(count),
+            "avgR": round(avg_r, 4),
+            "ratio": round(ratio, 4),
+            "classicPf": round(classic, 4),
+            "costPct": round(cost_pct, 8),
+            "netPct": round(net_move_pct(ratio, cost_pct), 4) if count else 0.0,
+            "grossPct": round(gross_move_pct(ratio, cost_pct), 4) if count else 0.0,
+            "netAvg": round(sum(nets) / count, 6) if count else 0.0,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0.0,
+        }
+
+    def _fast_historic_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
+        """Equivalent historic score using the known simulation row contract."""
+        ordered = sorted(
+            (row for row in tape if isinstance(row, dict)),
+            key=lambda row: finite(row.get("t")),
+        )
+        cost_pct = float(self.cost_pct)
+        cost_frac = cost_as_frac(cost_pct)
+        gross = [finite(row.get("pnl_pct")) for row in ordered]
+        nets = [value - cost_frac for value in gross]
+        wins = sum(1 for value in nets if value > 0)
+        gp = round(sum(value for value in nets if value > 0), 6)
+        gl = round(abs(sum(value for value in nets if value < 0)), 6)
+        decided = sum(1 for value in nets if value != 0)
+        holds = [finite(row.get("hold_s")) for row in ordered]
+        pf_tape = last_n_balanced(ordered, self.pf_n)
+        last15 = self._fast_historic_pf(pf_tape, self.pf_n)
+        sample = len(pf_tape)
+        gross_values = [finite(row.get("pnl_pct")) for row in pf_tape]
+        net_values = [value - cost_frac for value in gross_values]
+        gross_profit = sum(value for value in gross_values if value > 0)
+        gross_loss = abs(sum(value for value in gross_values if value < 0))
+        net_profit = sum(value for value in net_values if value > 0)
+        net_loss = abs(sum(value for value in net_values if value < 0))
+        required = self.eval_need()
+        evaluation = {
+            "sampleCount": sample,
+            "requiredSamples": required,
+            "grossPf": round(gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0), 6),
+            "netPf": round(net_profit / net_loss if net_loss > 0 else (99.0 if net_profit > 0 else 0.0), 6),
+            "grossEv": round(sum(gross_values) / sample, 8) if sample else 0.0,
+            "netEv": round(sum(net_values) / sample, 8) if sample else 0.0,
+            "ev": round(sum(net_values) / sample, 8) if sample else 0.0,
+            "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
+            "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
+            "insufficientSample": sample < required,
+            "status": "insufficient-sample" if sample < required else "qualified-sample",
+            "costPct": cost_pct,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0,
+        }
+        window_tape = last_n_balanced(ordered, max(EVALUATION_WINDOWS))
+        windows: Dict[str, Dict[str, Any]] = {}
+        for requested in EVALUATION_WINDOWS:
+            metric = self._fast_historic_pf(window_tape, requested)
+            count = int(metric["count"])
+            required_window = max(1, min(int(requested), required))
+            windows[f"last{requested}"] = {
+                "requestedN": int(requested),
+                "n": count,
+                "available": count >= int(requested),
+                "requiredSamples": required_window,
+                "validated": count >= required_window and float(metric["ratio"]) + 1e-9 >= 1.0,
+                "pf": round(float(metric["ratio"]), 4),
+                "classicPf": float(metric["classicPf"]),
+                "avgR": float(metric["avgR"]),
+                "netAvg": float(metric["netAvg"]),
+                "netPct": float(metric["netPct"]),
+                "costPct": float(metric["costPct"]),
+                "costSamples": int(metric["costSamples"]),
+                "costSubtracted": True,
+            }
+        last25 = ordered[-self.deact_n :]
+        if last25:
+            last25_avg_r = sum(
+                signed_result_r(
+                    finite(row.get("pnl_pct")),
+                    row_position_cost_pct(row, cost_pct),
+                )
+                for row in last25
+            ) / len(last25)
+            last25_avg_pnl = sum(row_net_pnl(row, cost_pct) for row in last25) / len(last25)
+        else:
+            last25_avg_r = 0.0
+            last25_avg_pnl = 0.0
+        dd = drawdown_time_by_symbol(ordered)
+        n15 = int(last15["count"])
+        ratio = float(last15["ratio"])
+        dd_s = float(dd["maxS"])
+        return {
+            "n": int(hist_n if hist_n is not None else len(ordered)),
+            "wins": wins,
+            "gp": gp,
+            "gl": gl,
+            "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
+            "expectancy": round(sum(nets) / len(nets), 6) if nets else 0.0,
+            "avg_hold_s": round(sum(holds) / len(holds), 1) if holds else 0.0,
+            "classic_all": round(gp / gl, 4) if gl > 0 else (99.0 if gp > 0 else 0.0),
+            "last15_ratio": ratio,
+            "last15_classic": float(last15["classicPf"]),
+            "last15_n": n15,
+            "last15_r": float(last15["avgR"]),
+            "last25_n": len(last25),
+            "last25_avg_r": last25_avg_r,
+            "last25_avg_pnl": last25_avg_pnl,
+            "max_dd_s": float(dd["maxS"]),
+            "avg_dd_s": float(dd["avgS"]),
+            "dd_episodes": int(dd["episodes"]),
+            "source_n": len(ordered),
+            "validated": n15 >= required and ratio + 1e-9 >= 1.0,
+            "active": bool(n15 >= required and ratio + 1e-9 >= float(self.real_min_pf or 1.02) and dd_s <= float(self.max_dd_s or 57600) + 1e-9),
+            "enablePf": float(self.real_min_pf or 1.02),
+            "ddOk": dd_s <= float(self.max_dd_s or 57600) + 1e-9,
+            "cost_subtracted": True,
+            "cost_pct": cost_pct,
+            "net_avg": float(last15.get("netAvg") or (sum(nets) / len(nets) if nets else 0.0)),
+            "gross_pf": float(evaluation.get("grossPf") or 0.0),
+            "net_pf": float(evaluation.get("netPf") or 0.0),
+            "gross_ev": float(evaluation.get("grossEv") or 0.0),
+            "net_ev": float(evaluation.get("netEv") or 0.0),
+            "evaluation": evaluation,
+            "evaluation_windows": windows,
+            "proven_neg": n15 >= required and ratio + 1e-9 < float(self.real_min_pf or 1.02),
+        }
+
+    def _score_metrics(
+        self,
+        tape: Sequence[Dict[str, Any]],
+        hist_n: Optional[int] = None,
+        fast_historic: bool = False,
+    ) -> Dict[str, Any]:
+        if fast_historic:
+            return self._fast_historic_metrics(tape, hist_n=hist_n)
         ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
         nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
         wins = sum(1 for x in nets if x > 0)
@@ -2849,9 +3054,10 @@ class SetBook:
         self._selection_dirty = True
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
-        tape = st.tape()
-        tape.sort(key=lambda r: finite(r.get("t")))
-        m = self._score_metrics(tape, hist_n=len(st.hist))
+        tape = list(st.hist) if not st.live else st.tape()
+        if st.live:
+            tape.sort(key=lambda r: finite(r.get("t")))
+        m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=not bool(st.live))
         st.n = m["n"]
         st.wins = m["wins"]
         st.gp = m["gp"]
@@ -2900,16 +3106,37 @@ class SetBook:
         st.dd_episodes = m["dd_episodes"]
         st.source_n = m["source_n"]
         st.stage_ledger = self._stage_qualification(st, m)
-        need = self.eval_need()
-        live_m = self._score_metrics(st.live)
-        live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
-        live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
-        live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
-        live_opt_dd = drawdown_time_by_symbol(live_opt_window) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
-        live_opt_avg = (
-            sum(row_net_pnl(r, self.cost_pct) for r in live_opt_window) / len(live_opt_window)
-            if live_opt_window else 0.0
-        )
+        empty_live = {
+            "last15_n": 0,
+            "last15_ratio": 1.0,
+            "last15_r": 0.0,
+            "evaluation_windows": {},
+            "net_avg": 0.0,
+            "expectancy": 0.0,
+            "wr": 0.0,
+            "max_dd_s": 0.0,
+            "avg_dd_s": 0.0,
+            "gp": 0.0,
+            "gl": 0.0,
+            "validated": False,
+        }
+        if st.live:
+            live_m = self._score_metrics(st.live)
+            live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+            live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
+            live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
+            live_opt_dd = drawdown_time_by_symbol(live_opt_window) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+            live_opt_avg = (
+                sum(row_net_pnl(r, self.cost_pct) for r in live_opt_window) / len(live_opt_window)
+                if live_opt_window else 0.0
+            )
+        else:
+            live_m = empty_live
+            live_ordered = []
+            live_opt_window = []
+            live_opt_pf = {"ratio": 1.0, "costPct": self.cost_pct, "costSource": self.cost_source}
+            live_opt_dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+            live_opt_avg = 0.0
         st.live_eval = {
             "n": len(st.live),
             "last15N": int(live_m["last15_n"]),
@@ -2943,9 +3170,13 @@ class SetBook:
             sub_hist = filter_side(st.hist, side)
             sub_tape = filter_side(tape, side)
             sub_live = filter_side(st.live, side)
-            sm = self._score_metrics(sub_tape, hist_n=len(sub_hist))
+            sm = self._score_metrics(
+                sub_tape,
+                hist_n=len(sub_hist),
+                fast_historic=not bool(st.live),
+            )
             sm["side"] = side
-            lm = self._score_metrics(sub_live)
+            lm = self._score_metrics(sub_live) if sub_live else empty_live
             sm["live"] = {
                 "n": len(sub_live),
                 "last15_n": lm["last15_n"],
@@ -3801,12 +4032,29 @@ class SetBook:
                 "symbolsDone": p.symbols_done,
                 "symbolsTotal": p.symbols_total,
                 "elapsedMs": round(p.elapsed_ms, 1),
-                "lastRunMs": round(p.last_run_ms, 1),
-                "cycle": p.cycle,
-                "detail": p.detail,
-                "ready": p.ready,
-                "error": p.error,
-            },
+                    "lastRunMs": round(p.last_run_ms, 1),
+                    "cycle": p.cycle,
+                    "detail": p.detail,
+                    "ready": p.ready,
+                    "error": p.error,
+                    "runId": p.run_id,
+                    "generation": p.generation,
+                    "mode": p.mode,
+                    "requestedStart": p.requested_start,
+                    "requestedEnd": p.requested_end,
+                    "watermark": dict(p.watermark),
+                    "lastPublishedWatermark": dict(p.last_published_watermark),
+                    "lastCompleteRun": p.last_complete_run,
+                    "nextRunAt": p.next_run_at,
+                    "validSymbols": list(p.valid_symbols),
+                    "invalidSymbols": list(p.invalid_symbols),
+                    "missingSymbols": list(p.missing_symbols),
+                    "gappedSymbols": list(p.gapped_symbols),
+                    "stale": p.stale,
+                    "deferredReason": p.deferred_reason,
+                    "coordinationComplete": p.coordination_complete,
+                },
+
             "rows": rows,
         }
         self._snap_cache = out

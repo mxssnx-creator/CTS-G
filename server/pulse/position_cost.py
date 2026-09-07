@@ -171,6 +171,25 @@ def row_has_measured_cost(row: Any) -> bool:
     )
 
 
+def _is_simple_historic_row(row: Any) -> bool:
+    """Identify generated gross-move rows that cannot carry measured cost."""
+    if not isinstance(row, dict) or row.get("pnl_pct") is None:
+        return False
+    if any(row.get(key) is not None for key in (
+        "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
+        "totalFee", "totalCommission", "entry_fee", "entryFee", "exit_fee", "exitFee",
+        "fee", "fees", "commission", "commissionAmount", "fee_rate", "feeRate",
+        "commissionRate", "makerFeeRate", "takerFeeRate",
+    )):
+        return False
+    source = str(row.get("cost_source") or row.get("costSource") or row.get("source") or "").lower()
+    return not any(token in source for token in ("live", "exchange", "cost"))
+
+
+def _simple_historic_tape(rows: Sequence[Any]) -> bool:
+    return all(_is_simple_historic_row(row) for row in rows)
+
+
 def exchange_order_cost_sample(row: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> Optional[Dict[str, float]]:
     """Normalize one exchange order/fill into a measured round-trip sample."""
     notion = row_notional(row)
@@ -327,6 +346,8 @@ def row_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
 
 def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """Net fraction after subtracting one PositionCost. Always from the gross move."""
+    if _is_simple_historic_row(row):
+        return net_pnl_pct(finite(row.get("pnl_pct")), cost_pct)
     actual_cost = row_position_cost_pct(row, cost_pct)
     return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
 
@@ -431,6 +452,30 @@ def last_n_cost_pf(
         list(rows),
         key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
     )[-max(1, int(n)) :]
+    if _simple_historic_tape(window):
+        cost = normalize_position_cost_pct(cost_pct)
+        cost_frac = cost_as_frac(cost)
+        gross_values = [finite(row.get("pnl_pct")) for row in window]
+        net_values = [value - cost_frac for value in gross_values]
+        count = len(gross_values)
+        avg_r = sum(signed_result_r(value, cost) for value in gross_values) / count if count else 0.0
+        gp_fast = sum(value for value in net_values if value > 0)
+        gl_fast = abs(sum(value for value in net_values if value < 0))
+        classic_fast = gp_fast / gl_fast if gl_fast > 0 else (99.0 if gp_fast > 0 else 0.0)
+        return {
+            "n": float(n),
+            "count": float(count),
+            "avgR": round(avg_r, 4),
+            "ratio": round(ratio_from_r(avg_r), 4) if count else RATIO_BASE,
+            "classicPf": round(classic_fast, 4),
+            "costPct": cost,
+            "netPct": round(net_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
+            "grossPct": round(gross_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
+            "netAvg": round(sum(net_values) / count, 6) if count else 0.0,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0,
+        }
     rs: List[float] = []
     nets: List[float] = []
     gp = gl = 0.0
@@ -552,6 +597,30 @@ def cost_aware_metrics(
     statistical certainty; callers can show the explicit insufficient status.
     """
     cost = normalize_position_cost_pct(cost_pct)
+    if _simple_historic_tape(rows):
+        gross = [finite(row.get("pnl_pct")) for row in rows]
+        net = [value - cost_as_frac(cost) for value in gross]
+        sample = len(gross)
+        required = max(1, int(required_samples or 1))
+        gross_pf = _classic_pf(gross)
+        net_pf = _classic_pf(net)
+        return {
+            "sampleCount": sample,
+            "requiredSamples": required,
+            "grossPf": round(gross_pf, 6),
+            "netPf": round(net_pf, 6),
+            "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
+            "netEv": round(sum(net) / sample, 8) if sample else 0.0,
+            "ev": round(sum(net) / sample, 8) if sample else 0.0,
+            "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
+            "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
+            "insufficientSample": sample < required,
+            "status": "insufficient-sample" if sample < required else "qualified-sample",
+            "costPct": cost,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0,
+        }
     gross: List[float] = []
     net: List[float] = []
     measured = 0

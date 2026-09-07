@@ -43,7 +43,7 @@ from set_engine import (
     last_n_balanced,
     synth_trend,
 )
-from storage_paths import path_for
+from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
 DEFAULT_SYMBOLS = [
@@ -60,19 +60,26 @@ DEFAULT_SYMBOLS = [
     "1000PEPE-USDT",
     "KAS-USDT",
 ]
-HOURS_DEFAULT = 20
-# The bounded three-day/72-hour validation window is the maximum supported
-# public window. Keep the exchange request bounded to avoid unbounded RAM/CPU.
+HOURS_DEFAULT = 7
+HOURS_MIN = 1
+# The bounded fourteen-day/336-hour validation window is the maximum
+# supported public window. Keep the exchange request bounded to avoid
+# unbounded RAM/CPU.
 HOURS_MAX = LOOKBACK_MAX // 60  # never claim more history than the bounded replay holds
 BARS_PER_HOUR = 60
+HIST_WARMUP_BARS = 30
 KLINE_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
 KLINE_URL_V3 = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
 CONTRACTS_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
 KLINE_PAGE_MAX = 1440
-REPLAY_SET_CHUNK = 96
+REPLAY_SET_CHUNK = 96  # scalar fallback chunk; vector workers use larger tiles
+REPLAY_TILE_SIZE = 512
+REPLAY_QUEUE_MULTIPLIER = 2
 _PUBLIC_REQUEST_INTERVAL_S = 1.05
 _PUBLIC_REQUEST_LOCK = threading.Lock()
 _PUBLIC_REQUEST_LAST = 0.0
+_PUBLIC_REQUEST_WAIT_S = 0.0
+_PUBLIC_REQUEST_COUNT = 0
 
 # Coordinated low-DD books. Block ON, DCA OFF, SL 0.3 or 0.6, tight DD.
 _SHARED = {
@@ -303,27 +310,36 @@ PRESETS: List[Dict[str, Any]] = [
     },
 ]
 def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
+    """Convert a requested evaluation window to bounded one-minute bars."""
     try:
         h = float(hours)
     except Exception:
         h = float(default)
-    h = max(2.0, min(HOURS_MAX, h))
-    return max(120, min(LOOKBACK_MAX, int(round(h * BARS_PER_HOUR))))
+    h = max(float(HOURS_MIN), min(float(HOURS_MAX), h))
+    return max(BARS_PER_HOUR, min(LOOKBACK_MAX, int(round(h * BARS_PER_HOUR))))
 
 
-def job_path() -> str:
+def _connection_id(connection: Optional[str] = None) -> str:
+    raw = str(connection or os.environ.get("PULSE_CONN") or "bingx-x02").replace("connection:", "")
+    return "".join(ch for ch in raw if ch.isalnum() or ch in "._-") or "bingx-x02"
+
+
+def job_path(connection: Optional[str] = None) -> str:
     env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
-    if env:
+    if env and connection in (None, ""):
         return env
-    return path_for("hist-calc.json")
+    return path_for(f"hist-calc-{_connection_id(connection)}.json")
 
 
-def req_path() -> str:
-    return job_path().replace("hist-calc.json", "hist-calc-req.json")
+def req_path(connection: Optional[str] = None) -> str:
+    env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
+    if env and connection in (None, ""):
+        return env.replace("hist-calc.json", "hist-calc-req.json")
+    return path_for(f"hist-calc-req-{_connection_id(connection)}.json")
 
 
-def _pid_path() -> str:
-    return job_path().replace("hist-calc.json", "hist-calc.pid")
+def _pid_path(connection: Optional[str] = None) -> str:
+    return path_for(f"hist-calc-{_connection_id(connection)}.pid")
 
 
 def _write_pid(pid: Optional[int] = None) -> None:
@@ -374,16 +390,13 @@ def is_running() -> bool:
 
 
 def _atomic_write(path: str, blob: Dict[str, Any]) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(blob, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    storage_atomic_write(path, blob)
 
 
-def read_job() -> Dict[str, Any]:
-    p = job_path()
+def read_job(connection: Optional[str] = None) -> Dict[str, Any]:
+    p = job_path(connection)
     if not os.path.exists(p):
-        return idle_job()
+        return idle_job(connection)
     try:
         with open(p) as f:
             j = json.load(f)
@@ -391,15 +404,32 @@ def read_job() -> Dict[str, Any]:
             return j
     except Exception:
         pass
-    return idle_job()
+    return idle_job(connection)
 
 
-def idle_job() -> Dict[str, Any]:
+def idle_job(connection: Optional[str] = None) -> Dict[str, Any]:
     return {
         "ok": True,
         "phase": "idle",
         "pct": 0.0,
         "detail": "no calc yet",
+        "connection": _connection_id(connection),
+        "runId": "",
+        "generation": 0,
+        "mode": "idle",
+        "selectedSymbols": [],
+        "validSymbols": [],
+        "invalidSymbols": [],
+        "missingSymbols": [],
+        "requestedStart": 0,
+        "requestedEnd": 0,
+        "watermark": {},
+        "lastPublishedWatermark": {},
+        "lastCompleteRun": 0,
+        "nextRunAt": 0,
+        "stale": False,
+        "deferredReason": "",
+        "coordinationComplete": False,
         "hours": HOURS_DEFAULT,
         "lookback": hours_to_bars(HOURS_DEFAULT),
         "symbols": [],
@@ -418,7 +448,8 @@ def idle_job() -> Dict[str, Any]:
         "startedAt": 0,
         "finishedAt": 0,
         "source": "",
-        "independent": True,
+        "shared": True,
+        "independent": False,
         "independence": {
             "symbol": True,
             "direction": True,
@@ -494,7 +525,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             raw_hours = None
     if raw_hours is not None:
         try:
-            opt["hours"] = max(2, min(HOURS_MAX, int(float(raw_hours))))
+            opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(float(raw_hours))))
         except Exception:
             pass
     for k, lo, hi in (("minStep", 1, 22), ("stepMax", 1, 22)):
@@ -554,17 +585,34 @@ def parse_klines(data: Any) -> List[List[float]]:
 
 def _public_json(url: str, timeout: float = 12.0) -> Any:
     """Globally pace public BingX calls; the documented quote limit is 1/s/IP."""
-    global _PUBLIC_REQUEST_LAST
+    global _PUBLIC_REQUEST_LAST, _PUBLIC_REQUEST_WAIT_S, _PUBLIC_REQUEST_COUNT
     with _PUBLIC_REQUEST_LOCK:
-        wait_s = _PUBLIC_REQUEST_INTERVAL_S - (time.monotonic() - _PUBLIC_REQUEST_LAST)
+        wait_s = max(0.0, _PUBLIC_REQUEST_INTERVAL_S - (time.monotonic() - _PUBLIC_REQUEST_LAST))
         if wait_s > 0:
             time.sleep(wait_s)
+        _PUBLIC_REQUEST_WAIT_S += wait_s
+        _PUBLIC_REQUEST_COUNT += 1
         req = urllib.request.Request(url, headers={"User-Agent": "cts-g-hist-calc/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode() or "{}")
         finally:
             _PUBLIC_REQUEST_LAST = time.monotonic()
+
+
+def _reset_public_request_stats() -> None:
+    global _PUBLIC_REQUEST_WAIT_S, _PUBLIC_REQUEST_COUNT
+    with _PUBLIC_REQUEST_LOCK:
+        _PUBLIC_REQUEST_WAIT_S = 0.0
+        _PUBLIC_REQUEST_COUNT = 0
+
+
+def _public_request_stats() -> Dict[str, Any]:
+    with _PUBLIC_REQUEST_LOCK:
+        return {
+            "count": int(_PUBLIC_REQUEST_COUNT),
+            "waitMs": round(_PUBLIC_REQUEST_WAIT_S * 1000.0, 1),
+        }
 
 
 def _timed_klines(data: Any) -> List[Tuple[int, List[float]]]:
@@ -728,8 +776,9 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov: Dict[str, Any] = {
         "histEnabled": True,
         "histLookbackBars": lookback,
-        "histMinBars": min(120, lookback),
-        "histWarmup": 30,
+        "histMinBars": min(BARS_PER_HOUR, lookback),
+        "histWarmup": HIST_WARMUP_BARS,
+        "histExactWindow": True,
         "setUseHistoricGate": True,
         "setStrictGate": True,
         "preferMinimalRange": bool(opt.get("preferMinimalRange", opt.get("preferMinimalPositive", False))),
@@ -1043,7 +1092,8 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     lookback = hours_to_bars(opt.get("hours"))
     patch: Dict[str, Any] = {
         "histLookbackBars": lookback,
-        "histMinBars": min(120, lookback),
+        "histMinBars": min(BARS_PER_HOUR, lookback),
+        "histExactWindow": True,
         "histEnabled": True,
         "setUseHistoricGate": True,
         "setStrictGate": True,
@@ -1214,81 +1264,101 @@ def pipeline_symbols(
     return "live"
 
 
-_HIST_WORKER_OVERLAY: Optional[Dict[str, Any]] = None
+_HIST_WORKER_BOOK: Optional[SetBook] = None
 
 
 def _init_replay_worker(overlay: Dict[str, Any]) -> None:
-    global _HIST_WORKER_OVERLAY
-    _HIST_WORKER_OVERLAY = overlay
-
-
-def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
-    str, int, Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[str, int]
-]:
-    """Replay one symbol in a separate process so CPU-heavy configs run in parallel."""
-    sym, bars, now = payload
+    """Build one reusable catalog per process instead of once per tile."""
+    global _HIST_WORKER_BOOK
     book = SetBook()
-    book.load(dict(_HIST_WORKER_OVERLAY or {}))
-    book.ingest_bars(sym, bars)
-    prepared = book.prepare_replay_signals(sym, now)
-    forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
-    set_ids = [st.id for st in book.by_idx]
-    chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
-    strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
-    accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
-    accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
-    accumulated_counts: Dict[str, int] = {}
-    nbar = len(bars)
-    for chunk_i, chunk_ids in enumerate(chunks):
-        local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
-        local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
-        book.replay_symbol_partial(
+    book.load(dict(overlay or {}))
+    _HIST_WORKER_BOOK = book
+
+
+def _worker_book() -> SetBook:
+    book = _HIST_WORKER_BOOK
+    if book is None:
+        raise RuntimeError("historic replay worker was not initialized")
+    return book
+
+
+def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
+    str, int, Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int], Dict[str, Any], float
+]:
+    """Prepare all indication lanes once for one symbol."""
+    sym, bars, now = payload
+    book = _worker_book()
+    started = time.perf_counter()
+    book.bars[sym] = bars
+    try:
+        prepared = book.prepare_replay_signals(sym, now)
+        forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
+        return sym, len(bars), prepared, forced, (time.perf_counter() - started) * 1000.0
+    finally:
+        book.bars.pop(sym, None)
+
+
+def _replay_tile_worker(payload: Tuple[
+    str,
+    List[List[float]],
+    float,
+    Sequence[str],
+    Tuple[Dict[str, List[Tuple[int, float, str]]], Dict[str, List[Tuple[int, float]]], int],
+    bool,
+    bool,
+]) -> Tuple[
+    str,
+    int,
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, int],
+    float,
+]:
+    """Replay one bounded symbol/config tile without scoring the full catalog."""
+    sym, bars, now, set_ids, prepared, capture_ind, capture_strategy = payload
+    book = _worker_book()
+    started = time.perf_counter()
+    book.bars[sym] = bars
+    try:
+        ids = [str(sid) for sid in set_ids]
+        local_hist: Dict[str, List[Dict[str, Any]]] = {}
+        local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if capture_ind else None
+        local_strat: Optional[Dict[str, List[Dict[str, Any]]]] = {} if capture_strategy else None
+        local_counts: Dict[str, int] = {}
+        nbar = book.replay_symbol_partial(
             sym,
             local_hist,
             now=now,
             ind_hist=local_ind,
-            drop_bars=chunk_i == len(chunks) - 1,
-            strat_hist=strat_hist if chunk_i == 0 else None,
-            set_ids=chunk_ids,
+            drop_bars=True,
+            strat_hist=local_strat,
+            set_ids=ids,
             prepared=prepared,
+            hist_counts=local_counts,
         )
-        # Chunking bounds the replay working set. Accumulate the resulting
-        # rows and merge into the catalog once; repeatedly sorting every
-        # config's existing tape per chunk made a full matrix effectively
-        # quadratic and looked like a hung worker.
         for sid, rows in local_hist.items():
-            if rows:
-                # A worker may produce millions of fills for one symbol. The
-                # parent only needs the bounded recent tape for PF/DDT; keep
-                # the exact full count separately so validation and coverage
-                # still report every processed execution without retaining the
-                # complete raw replay in every process.
-                tail = accumulated_hist.get(sid) or []
-                accumulated_hist[sid] = (tail + rows)[-HIST_CAP:]
-                accumulated_counts[sid] = int(accumulated_counts.get(sid, 0)) + len(rows)
-        if local_ind:
+            if len(rows) > HIST_CAP:
+                local_hist[sid] = rows[-HIST_CAP:]
+        if local_ind is not None:
             for kind, rows in local_ind.items():
-                if rows:
-                    tail = accumulated_ind.get(kind) or []
-                    accumulated_ind[kind] = (tail + rows)[-HIST_CAP:]
-    book._commit_hist(
-        accumulated_hist,
-        accumulated_ind,
-        merge=True,
-        replayed_symbols=[sym],
-        hist_counts=accumulated_counts,
-        score=False,
-    )
-    book._score_all()
-    return (
-        sym,
-        nbar,
-        {st.id: list(st.hist) for st in book.by_idx if st.hist},
-        {k: list(v) for k, v in book.ind_hist.items()},
-        strat_hist,
-        {st.id: int(st.n or 0) for st in book.by_idx},
-        forced,
-    )
+                if len(rows) > HIST_CAP:
+                    local_ind[kind] = rows[-HIST_CAP:]
+        if local_strat is not None:
+            for key, rows in local_strat.items():
+                if len(rows) > 2400:
+                    local_strat[key] = rows[-2400:]
+        return (
+            sym,
+            nbar,
+            local_hist,
+            local_ind or {},
+            local_strat or {},
+            local_counts,
+            (time.perf_counter() - started) * 1000.0,
+        )
+    finally:
+        book.bars.pop(sym, None)
 
 
 def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: int = 0) -> Dict[str, Any]:
@@ -1358,9 +1428,29 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
     opt = parse_options(body)
     symbols = resolve_symbols(body)
     lookback = hours_to_bars(opt["hours"])
+    warmup_bars = HIST_WARMUP_BARS
+    fetch_bars = lookback + warmup_bars
     synth = bool(body.get("synth"))
     extra = body.get("overlay") if isinstance(body.get("overlay"), dict) else None
     t0 = time.time()
+    request_end = int(t0)
+    evaluation_start = request_end - lookback * 60
+    fetch_start = request_end - fetch_bars * 60
+    mono0 = time.perf_counter()
+    _reset_public_request_stats()
+    timings: Dict[str, Any] = {
+        "fetchMs": 0.0,
+        "fetchWaitMs": 0.0,
+        "fetchRequests": 0,
+        "signalMs": 0.0,
+        "signalWallMs": 0.0,
+        "replayMs": 0.0,
+        "replayWallMs": 0.0,
+        "mergeMs": 0.0,
+        "scoreMs": 0.0,
+        "reportMs": 0.0,
+        "totalMs": 0.0,
+    }
     _set_running(True)
     if persist:
         _write_pid()
@@ -1368,17 +1458,28 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         **idle_job(),
         "phase": "fetch",
         "pct": 1.0,
-        "detail": f"{len(symbols)} symbols · {lookback} bars · {opt['hours']}h",
+        "detail": f"{len(symbols)} symbols · {lookback} evaluation bars + {warmup_bars} warmup · {opt['hours']}h",
         "hours": opt["hours"],
         "lookback": lookback,
+        "evaluationBars": lookback,
+        "warmupBars": warmup_bars,
+        "requestedBars": fetch_bars,
+        "requestedStart": evaluation_start,
+        "requestedEnd": request_end,
+        "evaluationStart": evaluation_start,
+        "evaluationEnd": request_end,
+        "fetchStart": fetch_start,
+        "fetchEnd": request_end,
         "symbols": list(symbols),
         "options": opt,
         "startedAt": t0,
+        "timings": timings,
         "independent": True,
         "coverage": {
             **SetBook().coverage(),
             "symbols": coverage_counter(len(symbols), 0),
-            "bars": coverage_counter(len(symbols) * lookback, 0),
+            "bars": coverage_counter(len(symbols) * fetch_bars, 0),
+            "evaluationBars": coverage_counter(len(symbols) * lookback, 0),
             "sets": coverage_counter(0, 0),
             "evaluations": coverage_counter(0, 0),
         },
@@ -1398,6 +1499,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["phase"] = phase
         job["pct"] = round(pct, 1)
         job["detail"] = detail
+        timings["fetchWaitMs"] = _public_request_stats()["waitMs"]
+        timings["fetchRequests"] = _public_request_stats()["count"]
+        timings["totalMs"] = round((time.perf_counter() - mono0) * 1000.0, 1)
+        job["timings"] = dict(timings)
         job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
         if persist:
             try:
@@ -1409,13 +1514,33 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
     replay_pool: Optional[ProcessPoolExecutor] = None
     try:
         ov = overlay_from_options(opt, extra)
+        try:
+            warmup_bars = max(16, min(80, int(ov.get("histWarmup") or HIST_WARMUP_BARS)))
+        except Exception:
+            warmup_bars = HIST_WARMUP_BARS
+        fetch_bars = lookback + warmup_bars
+        job.update({
+            "warmupBars": warmup_bars,
+            "requestedBars": fetch_bars,
+            "detail": f"{len(symbols)} symbols · {lookback} evaluation bars + {warmup_bars} warmup · {opt['hours']}h",
+        })
         book = SetBook()
         book.load(ov)
         job["coverage"] = book.coverage()
-        hist: Dict[str, List[Dict[str, Any]]] = {}
         ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
+        request_end = int(now)
+        evaluation_start = request_end - lookback * 60
+        fetch_start = request_end - fetch_bars * 60
+        job.update({
+            "requestedStart": evaluation_start,
+            "requestedEnd": request_end,
+            "evaluationStart": evaluation_start,
+            "evaluationEnd": request_end,
+            "fetchStart": fetch_start,
+            "fetchEnd": request_end,
+        })
         try:
             cpu = max(1, int(os.cpu_count() or 1))
             requested_workers = int(body.get("workers") or min(4, cpu))
@@ -1433,9 +1558,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def _trim_maps() -> None:
 
-            for k, v in list(hist.items()):
-                if len(v) > hist_cap:
-                    hist[k] = v[-hist_cap:]
             for k, v in list(ind_hist.items()):
                 if len(v) > hist_cap:
                     ind_hist[k] = v[-hist_cap:]
@@ -1447,7 +1569,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["coverage"] = {
                 **book.coverage(),
                 "symbols": coverage_counter(len(symbols), done),
-                "bars": coverage_counter(len(symbols) * lookback, bars_done),
+                "bars": coverage_counter(len(symbols) * fetch_bars, bars_done),
+                "evaluationBars": coverage_counter(len(symbols) * lookback, int(job.get("_evaluationBarsDone") or 0)),
                 "sets": coverage_counter(requested_sets, done * len(book.by_idx)),
                 "evaluations": coverage_counter(requested_sets, done * len(book.by_idx)),
                 "source": source,
@@ -1497,115 +1620,290 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 except Exception:
                     pass
 
-        replay_pending: List[Tuple[Any, str, str]] = []
+        replay_pending: Dict[Any, Dict[str, Any]] = {}
+        symbol_states: Dict[str, Dict[str, Any]] = {}
         replay_done = 0
+        replay_tasks_submitted = 0
+        replay_tasks_completed = 0
+        replay_tiles_total = 0
+        replay_tiles_completed = 0
+        tile_cursor = 0
+        next_symbol_index = 0
+        completed_states: Dict[str, Dict[str, Any]] = {}
+        prep_completed = 0
+        prep_started_at: Optional[float] = None
+        tile_started_at: Optional[float] = None
+        queue_limit = max(workers, workers * REPLAY_QUEUE_MULTIPLIER)
+        all_tile_specs: List[Tuple[str, int, List[str], bool, bool]] = []
+        for pack in book.packs:
+            pack_ids = [st.id for st in book.by_idx if st.pack == pack]
+            if not pack_ids:
+                continue
+            seed = next((sid for sid in pack_ids if book.sets[sid].kind == "base"), pack_ids[0])
+            ordered_ids = [seed] + [sid for sid in pack_ids if sid != seed]
+            for tile_i, start in enumerate(range(0, len(ordered_ids), REPLAY_TILE_SIZE)):
+                ids = ordered_ids[start:start + REPLAY_TILE_SIZE]
+                all_tile_specs.append((
+                    pack,
+                    tile_i,
+                    ids,
+                    pack == "indications" and tile_i == 0,
+                    tile_i == 0,
+                ))
+        replay_tiles_total = len(symbols) * len(all_tile_specs)
+        job["replayTiles"] = {
+            "requested": replay_tiles_total,
+            "submitted": 0,
+            "completed": 0,
+            "tileSize": REPLAY_TILE_SIZE,
+            "queueLimit": queue_limit,
+        }
 
-        def commit_replay(result: Tuple[Any, ...], src: str, total: int) -> None:
+        def update_task_status() -> None:
+            job["replayTasks"] = {
+                "requested": len(symbols) + replay_tiles_total,
+                "submitted": replay_tasks_submitted,
+                "completed": replay_tasks_completed,
+                "inFlight": len(replay_pending),
+                "workers": workers,
+            }
+            job["replayTiles"] = {
+                "requested": replay_tiles_total,
+                "submitted": max(0, replay_tasks_submitted - len(symbols)),
+                "completed": replay_tiles_completed,
+                "tileSize": REPLAY_TILE_SIZE,
+                "queueLimit": queue_limit,
+            }
+
+        def finish_symbol(state: Dict[str, Any], total: int) -> None:
             nonlocal replay_done
-            sym, nbar, local_hist, local_ind, local_strat, local_counts, forced = result
-            if forced.get("completed"):
-                forced_results.append(forced)
-                forced_sources[sym] = "historical-market" if src == "live" else src
+            sym = str(state["symbol"])
+            merge_started = time.perf_counter()
             book._commit_hist(
-                local_hist,
-                local_ind,
+                state["hist"],
+                state["ind"],
                 merge=True,
                 replayed_symbols=[sym],
-                hist_counts=local_counts,
+                hist_counts=state["counts"],
                 score=False,
             )
-            for key, rows in local_strat.items():
-                strat_hist.setdefault(key, []).extend(rows)
-            job["_barsDone"] = int(job.get("_barsDone") or 0) + int(nbar)
+            timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
+            for kind, rows in state["ind"].items():
+                if rows:
+                    ind_hist[kind] = (ind_hist.get(kind) or []) + rows
+                    if len(ind_hist[kind]) > hist_cap:
+                        ind_hist[kind] = ind_hist[kind][-hist_cap:]
+            for key, rows in state["strat"].items():
+                if rows:
+                    strat_hist.setdefault(key, []).extend(rows)
+            forced = state.get("forced") or {}
+            if forced.get("completed"):
+                forced_results.append(forced)
+                forced_sources[sym] = "historical-market" if state["src"] == "live" else state["src"]
+            job["_barsDone"] = int(job.get("_barsDone") or 0) + int(state["nbar"])
+            job["_evaluationBarsDone"] = int(job.get("_evaluationBarsDone") or 0) + min(
+                lookback, max(0, int(state["nbar"]) - warmup_bars)
+            )
             replay_done += 1
             job["checkpoint"]["symbol"] = sym
-            job["source"] = src
+            job["source"] = state["src"]
             _trim_maps()
             heavy = replay_done == total or replay_done % 8 == 0
             if persist or heavy or replay_done % 4 == 0:
                 snapshot(replay_done, total, "replay", heavy=heavy)
+            state["bars"] = None
+            state["prepared"] = None
+            symbol_states.pop(sym, None)
+
+        def flush_completed_symbols(total: int) -> None:
+            nonlocal next_symbol_index
+            while next_symbol_index < len(symbols):
+                sym = symbols[next_symbol_index]
+                state = completed_states.pop(sym, None)
+                if state is None:
+                    return
+                finish_symbol(state, total)
+                next_symbol_index += 1
+
+        def merge_tile(result: Tuple[Any, ...], meta: Dict[str, Any], total: int) -> None:
+            nonlocal replay_tiles_completed, replay_tasks_completed, tile_started_at
+            sym, _nbar, local_hist, local_ind, local_strat, local_counts, tile_ms = result
+            state = symbol_states.get(str(sym))
+            if state is None:
+                raise RuntimeError(f"replay tile completed for unknown symbol {sym}")
+            timings["replayMs"] += float(tile_ms or 0.0)
+            for sid, rows in local_hist.items():
+                if rows:
+                    target = state["hist"].get(sid) or []
+                    state["hist"][sid] = (target + rows)[-hist_cap:]
+            for kind, rows in local_ind.items():
+                if rows:
+                    target = state["ind"].get(kind) or []
+                    state["ind"][kind] = (target + rows)[-hist_cap:]
+            for key, rows in local_strat.items():
+                if rows:
+                    target = state["strat"].get(key) or []
+                    state["strat"][key] = (target + rows)[-2400:]
+            for sid, count in local_counts.items():
+                state["counts"][sid] = int(state["counts"].get(sid, 0)) + int(count)
+            state["tilesDone"] += 1
+            replay_tiles_completed += 1
+            replay_tasks_completed += 1
+            if replay_tiles_completed == replay_tiles_total and tile_started_at is not None:
+                timings["replayWallMs"] = (time.perf_counter() - tile_started_at) * 1000.0
+            if state["tilesDone"] >= state["tilesTotal"]:
+                completed_states[str(sym)] = state
+                flush_completed_symbols(total)
+
+        def fill_tile_queue() -> None:
+            nonlocal tile_cursor, replay_tasks_submitted, tile_started_at
+            if replay_pool is None:
+                return
+            while len(replay_pending) < queue_limit:
+                ready = [
+                    state for state in symbol_states.values()
+                    if state.get("prepared") is not None
+                    and int(state.get("nextTile") or 0) < len(state.get("tiles") or [])
+                ]
+                if not ready:
+                    return
+                state = ready[tile_cursor % len(ready)]
+                tile_cursor += 1
+                tile_i = int(state["nextTile"])
+                pack, _pack_tile_i, ids, capture_ind, capture_strategy = state["tiles"][tile_i]
+                state["nextTile"] = tile_i + 1
+                if tile_started_at is None:
+                    tile_started_at = time.perf_counter()
+                future = replay_pool.submit(
+                    _replay_tile_worker,
+                    (
+                        state["symbol"],
+                        state["bars"],
+                        now,
+                        ids,
+                        state["prepared"],
+                        capture_ind,
+                        capture_strategy,
+                    ),
+                )
+                replay_pending[future] = {
+                    "kind": "tile",
+                    "symbol": state["symbol"],
+                    "pack": pack,
+                    "tile": tile_i,
+                }
+                replay_tasks_submitted += 1
+
+        def handle_prepare(result: Tuple[Any, ...], meta: Dict[str, Any], total: int) -> None:
+            nonlocal prep_completed
+            sym, nbar, prepared, forced, signal_ms = result
+            state = symbol_states.get(str(sym))
+            if state is None:
+                raise RuntimeError(f"replay preparation completed for unknown symbol {sym}")
+            state["nbar"] = int(nbar)
+            state["prepared"] = prepared
+            state["forced"] = forced
+            state["prepMs"] = float(signal_ms or 0.0)
+            timings["signalMs"] += float(signal_ms or 0.0)
+            prep_completed += 1
+            if prep_completed == len(symbols) and prep_started_at is not None:
+                timings["signalWallMs"] = (time.perf_counter() - prep_started_at) * 1000.0
+            fill_tile_queue()
+
+        def drain_replay(total: int) -> None:
+            """Drain any completed preparation/tile without queue-order blocking."""
+            nonlocal replay_tasks_completed
+            if not replay_pending:
+                return
+            finished, _ = wait(tuple(replay_pending), return_when=FIRST_COMPLETED)
+            for future in finished:
+                meta = replay_pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    job["replayFailure"] = {
+                        "symbol": meta.get("symbol", ""),
+                        "kind": meta.get("kind", ""),
+                        "tile": meta.get("tile"),
+                        "error": str(exc)[:240],
+                    }
+                    raise
+                if meta.get("kind") == "prepare":
+                    replay_tasks_completed += 1
+                    handle_prepare(result, meta, total)
+                else:
+                    merge_tile(result, meta, total)
+                fill_tile_queue()
+                update_task_status()
 
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
-            # Fetching is I/O-bound, while replay is CPU-bound. Use separate
-            # processes for replay so requested workers actually use all cores.
-            if replay_pool is not None:
-                replay_pending.append((replay_pool.submit(_replay_symbol_worker, (sym, bars, now)), sym, src))
-                if len(replay_pending) < workers:
-                    return
-                future, _queued_sym, queued_src = replay_pending.pop(0)
-                commit_replay(future.result(), queued_src, total)
-                return
+            nonlocal replay_tasks_submitted, prep_started_at
+            state = {
+                "symbol": sym,
+                "src": src,
+                "bars": bars,
+                "prepared": None,
+                "forced": None,
+                "nbar": len(bars),
+                "hist": {},
+                "ind": {},
+                "strat": {},
+                "counts": {},
+                "tiles": list(all_tile_specs),
+                "nextTile": 0,
+                "tilesDone": 0,
+                "tilesTotal": len(all_tile_specs),
+            }
+            symbol_states[sym] = state
+            if prep_started_at is None:
+                prep_started_at = time.perf_counter()
+            if replay_pool is None:
+                raise RuntimeError("historic replay pool was not created")
+            future = replay_pool.submit(_prepare_symbol_worker, (sym, bars, now))
+            replay_pending[future] = {"kind": "prepare", "symbol": sym, "tile": None}
+            replay_tasks_submitted += 1
+            update_task_status()
+            while len(replay_pending) >= queue_limit:
+                drain_replay(total)
 
-            book.ingest_bars(sym, bars)
-            prepared = book.prepare_replay_signals(sym, now)
-            forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
-            set_ids = [st.id for st in book.by_idx]
-            chunks = [set_ids[i:i + REPLAY_SET_CHUNK] for i in range(0, len(set_ids), REPLAY_SET_CHUNK)]
-            accumulated_hist: Dict[str, List[Dict[str, Any]]] = {}
-            accumulated_ind: Dict[str, List[Dict[str, Any]]] = {}
-            accumulated_counts: Dict[str, int] = {}
-            nbar = 0
-            for chunk_i, chunk_ids in enumerate(chunks):
-                local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in chunk_ids}
-                local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if chunk_i == 0 else None
-                chunk_nbar = book.replay_symbol_partial(
-                    sym, local_hist, now=now, ind_hist=local_ind,
-                    drop_bars=chunk_i == len(chunks) - 1,
-                    strat_hist=strat_hist if chunk_i == 0 else None,
-                    set_ids=chunk_ids, prepared=prepared,
-                )
-                nbar = max(nbar, chunk_nbar)
-                for sid, rows in local_hist.items():
-                    if rows:
-                        tail = accumulated_hist.get(sid) or []
-                        accumulated_hist[sid] = (tail + rows)[-hist_cap:]
-                        accumulated_counts[sid] = int(accumulated_counts.get(sid, 0)) + len(rows)
-                if local_ind:
-                    for kind, rows in local_ind.items():
-                        if rows:
-                            tail = accumulated_ind.get(kind) or []
-                            accumulated_ind[kind] = (tail + rows)[-hist_cap:]
-            book._commit_hist(
-                accumulated_hist,
-                accumulated_ind,
-                merge=True,
-                replayed_symbols=[sym],
-                hist_counts=accumulated_counts,
-                score=False,
-            )
-            commit_replay((sym, nbar, {}, {}, {"block": [], "dca": []}, {}, forced), src, total)
-
-        if workers > 1:
-            replay_pool = ProcessPoolExecutor(
-                max_workers=workers,
-                initializer=_init_replay_worker,
-                initargs=(ov,),
-            )
-        source = pipeline_symbols(symbols, lookback, synth, workers, on_item, on_prog=prog)
+        replay_pool = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_replay_worker,
+            initargs=(ov,),
+        )
+        source_started = time.perf_counter()
+        source = pipeline_symbols(symbols, fetch_bars, synth, workers, on_item, on_prog=prog)
+        timings["fetchMs"] = (time.perf_counter() - source_started) * 1000.0
         while replay_pending:
-            future, _queued_sym, queued_src = replay_pending.pop(0)
-            commit_replay(future.result(), queued_src, len(symbols))
+            drain_replay(len(symbols))
+        flush_completed_symbols(len(symbols))
+        update_task_status()
         if replay_pool is not None:
             replay_pool.shutdown(wait=True, cancel_futures=True)
             replay_pool = None
-        # All symbols/chunks are now present. One catalog-wide score pass
-        # avoids repeatedly recalculating every config while replay workers
-        # stream symbol-local evidence into the aggregate book.
+        if replay_done != len(symbols) or replay_tiles_completed != replay_tiles_total:
+            raise RuntimeError(
+                f"historic replay incomplete: symbols {replay_done}/{len(symbols)}, "
+                f"tiles {replay_tiles_completed}/{replay_tiles_total}"
+            )
+        # One catalog-wide score pass is the only full Set scoring operation.
+        score_started = time.perf_counter()
         book._score_all()
+        timings["scoreMs"] = (time.perf_counter() - score_started) * 1000.0
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")
-        # Each completed symbol was already committed atomically in on_item.
-        # Do not replay an empty aggregate here: _commit_hist(..., merge=False)
-        # would erase the completed symbol tapes and make coverage look empty.
+        # Each completed symbol was committed atomically after all of its
+        # tiles. Do not replay an empty aggregate here: it would erase tapes.
         book.progress.phase = "ready"
         book.progress.ready = True
         book.progress.pct = 100.0
+        report_started = time.perf_counter()
         rows = expand_rows(book)
         kinds = book.ind_gate_snapshot()
-        by_sym = symbol_rollup(book, hist)
-        by_dir = direction_rollup(book, hist)
-        by_strat = strategy_rollup(book, hist, strat_hist)
+        by_sym = symbol_rollup(book)
+        by_dir = direction_rollup(book)
+        by_strat = strategy_rollup(book, strat=strat_hist)
         evaluation_summary = {
             "windows": list(EVALUATION_WINDOWS),
             "directions": {k: v.get("evaluationWindows") or {} for k, v in by_dir.items()},
@@ -1620,6 +1918,20 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             winner = top[0]
         elif any(r.get("validated") for r in rows):
             winner = next(r for r in rows if r["validated"])
+        final_coverage = {
+            **book.coverage(),
+            "symbols": coverage_counter(len(symbols), replay_done),
+            "bars": coverage_counter(len(symbols) * fetch_bars, int(job.get("_barsDone") or 0)),
+            "evaluationBars": coverage_counter(len(symbols) * lookback, int(job.get("_evaluationBarsDone") or 0)),
+            "sets": coverage_counter(requested_sets, replay_done * len(book.by_idx)),
+            "evaluations": coverage_counter(requested_sets, replay_done * len(book.by_idx)),
+            "tasks": coverage_counter(len(symbols) + replay_tiles_total, replay_tasks_completed),
+            "source": source,
+        }
+        timings["reportMs"] = (time.perf_counter() - report_started) * 1000.0
+        timings["fetchWaitMs"] = _public_request_stats()["waitMs"]
+        timings["fetchRequests"] = _public_request_stats()["count"]
+        timings["totalMs"] = (time.perf_counter() - mono0) * 1000.0
         job.update({
             "phase": "ready",
             "pct": 100.0,
@@ -1628,7 +1940,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 f"{sum(1 for r in rows if r['validated'])}/{len(rows)} validated · "
                 f"{sum(s.n for s in book.sets.values())} fills · {source}"
             ),
-            "coverage": book.coverage(),
+            "coverage": final_coverage,
             "rows": rows[:120],
             "rowCount": len(rows),
             "validatedCount": sum(1 for r in rows if r.get("validated")),
@@ -1641,6 +1953,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "winner": winner,
             "apply": winner_patch(winner, opt, by_strat, source=str(job.get("source") or source or "")),
             "presets": public_presets(),
+            "timings": dict(timings),
+            "replayTasks": job.get("replayTasks") or {},
+            "replayTiles": job.get("replayTiles") or {},
             "progress": {
                 "phase": book.progress.phase,
                 "pct": book.progress.pct,
@@ -1677,6 +1992,10 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         job["phase"] = "error"
         job["error"] = traceback.format_exc()[-400:]
         job["detail"] = job["error"][:180]
+        timings["fetchWaitMs"] = _public_request_stats()["waitMs"]
+        timings["fetchRequests"] = _public_request_stats()["count"]
+        timings["totalMs"] = (time.perf_counter() - mono0) * 1000.0
+        job["timings"] = dict(timings)
         job["finishedAt"] = time.time()
         job["elapsedMs"] = round((time.time() - t0) * 1000, 1)
         if persist:
@@ -1693,59 +2012,89 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             _clear_pid()
 
 
-def start_job(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if is_running():
-        cur = read_job()
-        cur["ok"] = True
-        cur["detail"] = cur.get("detail") or "calc already running"
-        return cur
-    body = body if isinstance(body, dict) else {}
+def write_job(job: Dict[str, Any], connection: Optional[str] = None) -> Dict[str, Any]:
+    """Persist the status consumed by both the HTTP lane and the engine lane."""
+    payload = dict(job or {})
+    payload.setdefault("connection", _connection_id(connection))
+    payload.setdefault("ok", True)
     try:
-        _atomic_write(req_path(), body)
+        _atomic_write(job_path(connection), payload)
     except Exception:
         pass
-    seed = idle_job()
+    return payload
+
+
+def read_request(connection: Optional[str] = None) -> Dict[str, Any]:
+    path = req_path(connection)
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+    """Queue one generation for the running Pulse lane.
+
+    The request file is intentionally the hand-off boundary.  The engine owns
+    fetching, replay, coordination, and publication; repeated UI clicks only
+    replace this newest request and never create a divergent subprocess.
+    """
+    cid = _connection_id(connection)
+    body = dict(body) if isinstance(body, dict) else {}
+    current = read_job(cid)
+    previous_request = read_request(cid)
+    generation = max(
+        int(current.get("generation") or 0),
+        int(previous_request.get("generation") or 0),
+    ) + 1
+    requested_at = time.time()
+    run_id = f"{cid}:{generation}:{int(requested_at * 1000)}"
+    options = parse_options(body)
+    request = {
+        **body,
+        "connection": cid,
+        "runId": run_id,
+        "generation": generation,
+        "mode": str(body.get("mode") or "manual"),
+        "requestedAt": requested_at,
+        "options": options,
+    }
+    try:
+        _atomic_write(req_path(cid), request)
+    except Exception:
+        pass
+    # Keep the last published rows, coverage, winner, and watermark visible
+    # while the newest request waits for the lane. The request is a coalescing
+    # hand-off, not a reason to erase the only good snapshot.
+    seed = idle_job(cid)
+    seed.update(current if isinstance(current, dict) else {})
+    selected = body.get("selectedSymbols") or body.get("symbols") or []
     seed.update({
+        "ok": True,
         "phase": "queued",
         "pct": 0.5,
-        "detail": "starting independent historic calc",
-        "options": parse_options(body),
-        "hours": parse_options(body)["hours"],
-        "startedAt": time.time(),
+        "detail": "queued on shared historic lane",
+        "options": options,
+        "hours": options["hours"],
+        "lookback": hours_to_bars(options["hours"]),
+        "startedAt": requested_at,
+        "runId": run_id,
+        "generation": generation,
+        "mode": request["mode"],
+        "symbols": list(selected) if isinstance(selected, list) else [],
+        "selectedSymbols": list(selected) if isinstance(selected, list) else [],
+        "requestOptions": options,
+        "requestOverlay": dict(body.get("overlay")) if isinstance(body.get("overlay"), dict) else {},
+        "stale": bool(current.get("ready") or current.get("stale")),
+        "deferredReason": "awaiting running connection worker",
+        "shared": True,
+        "independent": False,
     })
-    try:
-        _atomic_write(job_path(), seed)
-    except Exception:
-        pass
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    script = os.path.join(here, "hist_calc.py")
-    logp = job_path().replace("hist-calc.json", "hist-calc.log")
-    try:
-        logf = open(logp, "ab", buffering=0)
-    except Exception:
-        logf = subprocess.DEVNULL
-    try:
-        proc = subprocess.Popen(
-            ["nice", "-n", "15", sys.executable, "-u", script, "--req", req_path()],
-            cwd=here,
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
-        _write_pid(proc.pid)
-        seed["pid"] = proc.pid
-        seed["detached"] = True
-    except Exception as exc:
-        seed["phase"] = "error"
-        seed["error"] = str(exc)[:200]
-        seed["detail"] = seed["error"]
-        try:
-            _atomic_write(job_path(), seed)
-        except Exception:
-            pass
-    return seed
+    return write_job(seed, cid)
 
 
 def apply_preset(preset_id: str) -> Optional[Dict[str, Any]]:
@@ -1776,11 +2125,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("preset-step-bounds", all(3 <= lo <= hi <= 22 for lo, hi in zip(step_grid, step_max)), str(list(zip(step_grid, step_max))))
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
-    rec("hours-clamp", hours_to_bars(99) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
-    range_series = {hours: hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120)}
+    rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
+    rec("hours-one-hour", hours_to_bars(1) == 60 and parse_options({"hours": 1})["hours"] == 1)
+    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 60)
+    range_series = {hours: hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
-        range_series == {2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 4320},
+        range_series == {1: 60, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
@@ -1795,7 +2146,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
     )))
-    rec("opt-hours-20", parse_options({})["hours"] == 20)
+    rec("opt-hours-default-7", parse_options({})["hours"] == 7)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
     rec("klines-parse-list", len(parse_klines([[0, 1, 2, 0.5, 1.2, 3]])) == 1)
@@ -2018,12 +2369,11 @@ if __name__ == "__main__":
         except Exception:
             body = {}
     if "--bg" in args:
-        print(json.dumps(start_job(body)))
-        # keep process alive until the worker finishes
-        while is_running():
-            time.sleep(0.2)
-        print(json.dumps(read_job()))
-        raise SystemExit(0)
+        # Production HTTP requests are lane requests.  The direct CLI remains
+        # an offline/compatibility harness and owns its synchronous worker.
+        job = run_calc(body, persist=True)
+        print(json.dumps(job))
+        raise SystemExit(0 if job.get("phase") == "ready" else 1)
     job = run_calc(body, persist=True)
     print(json.dumps({k: job.get(k) for k in ("ok", "phase", "pct", "detail", "hours", "lookback", "rowCount", "validatedCount", "source", "error", "elapsedMs", "winner")}))
     raise SystemExit(0 if job.get("phase") == "ready" else 1)

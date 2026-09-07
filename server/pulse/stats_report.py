@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Full Pulse results export: PF / DDT / PositionCost-net, per Set intern, Block, DCA."""
+"""Full Pulse results export: JSON, Markdown, and standalone HTML for PF / DDT / PositionCost-net, per Set intern, Block, DCA."""
 from __future__ import annotations
 
 import json
 import os
 import time
+from html import escape
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
@@ -505,10 +506,18 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "source": r.get("source") or ("live-exchange" if int(r.get("liveN") or 0) else "hist-sim"),
         })
     blob: Dict[str, Any] = {
-        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "connection": conn or st.get("connection") or "",
-        "mode": st.get("mode"),
-        "unit": st.get("unit"),
+    "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "connection": conn or st.get("connection") or "",
+    "mode": st.get("mode"),
+    "unit": st.get("unit"),
+    "running": bool(st.get("running")),
+    "halted": bool(st.get("halted")),
+    "paused": bool(st.get("paused")),
+    "haltReason": st.get("haltReason"),
+    "historic": st.get("historic") or {},
+    "historicTimings": (st.get("historic") or {}).get("timings") or {},
+    "historicCoverage": (st.get("historic") or {}).get("coverage") or {},
+
         "equity": st.get("equity"),
         "startEquity": st.get("startEquity"),
         "available": st.get("available"),
@@ -661,6 +670,352 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     return blob
 
 
+def render_html(blob: Dict[str, Any]) -> str:
+    """Render the canonical stats blob as a self-contained, human-readable report."""
+
+    def number(value: Any, digits: int = 2) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return escape(str(value))
+        if value != value:
+            return "—"
+        if value == float("inf"):
+            return "∞"
+        if value == float("-inf"):
+            return "−∞"
+        return f"{value:,.{digits}f}"
+
+    def signed(value: Any, digits: int = 4) -> str:
+        try:
+            value_num = float(value)
+        except (TypeError, ValueError):
+            return number(value, digits)
+        return ("+" if value_num >= 0 else "") + number(value_num, digits)
+
+    def text(value: Any, fallback: str = "—") -> str:
+        return escape(str(value if value not in (None, "") else fallback))
+
+    def cell(value: Any, class_name: str = "") -> str:
+        cls = f' class="{escape(class_name, quote=True)}"' if class_name else ""
+        return f"<td{cls}>{value}</td>"
+
+    def metric_class(value: Any) -> str:
+        try:
+            return "positive" if float(value) >= 0 else "negative"
+        except (TypeError, ValueError):
+            return ""
+
+    def pf_class(value: Any, count: Any) -> str:
+        try:
+            if int(count or 0) < 1:
+                return "muted"
+            return "positive" if float(value or 0) >= 1.1 else "negative" if float(value or 0) < 1 else ""
+        except (TypeError, ValueError):
+            return "muted"
+
+    def timestamp(value: Any) -> str:
+        try:
+            value = float(value)
+            return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(value)) if value > 0 else "—"
+        except (TypeError, ValueError, OverflowError):
+            return "—"
+
+    def table(headers: List[str], rows: List[List[str]], empty: str = "No data available") -> str:
+        head = "".join(f'<th scope="col">{escape(header)}</th>' for header in headers)
+        if rows:
+            body = "".join("<tr>" + "".join(row) + "</tr>" for row in rows)
+        else:
+            body = f'<tr><td class="empty" colspan="{len(headers)}">{escape(empty)}</td></tr>'
+        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+
+    def json_text(value: Any) -> str:
+        try:
+            return escape(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+        except Exception:
+            return escape(str(value))
+
+    connection = text(blob.get("connection"), "unknown")
+    unit = text(blob.get("unit"), "—")
+    mode = text(blob.get("mode"), "—")
+    generated = text(blob.get("generatedAt"), "—")
+    running = bool(blob.get("running", False))
+    status = "RUNNING" if running else "STOPPED"
+    status_class = "positive" if running else "muted"
+    cost = (blob.get("costAccounting") or {}).get("last15") or {}
+    windows = blob.get("profitFactor") or {}
+    last15 = windows.get("last15") or cost
+    ddt = (blob.get("drawdownTime") or {}).get("afterCost") or {}
+    coverage = blob.get("coverage") or {}
+    sets_coverage = coverage.get("sets") or {}
+    historic = blob.get("historic") or {}
+    historic_coverage = historic.get("coverage") or {}
+    historic_symbols = historic_coverage.get("symbols") or {}
+    historic_bars = historic_coverage.get("bars") or {}
+    gate = blob.get("coordGate") or {}
+    set_rows = [row for row in (blob.get("sets") or []) if isinstance(row, dict)]
+    set_rows.sort(key=lambda row: (-float(row.get("last15Ratio") or 0), float(row.get("maxDdS") or 0)))
+    symbols = blob.get("symbols") or []
+    closed = [row for row in (blob.get("closed") or []) if isinstance(row, dict)]
+    open_rows = [row for row in (blob.get("open") or []) if isinstance(row, dict)]
+
+    overview_cards = "".join(
+        [
+            f'<div class="card"><span class="label">Equity</span><strong>{number(blob.get("equity"), 4)}</strong><small>{unit} · start {number(blob.get("startEquity"), 4)}</small></div>',
+            f'<div class="card"><span class="label">Session PnL</span><strong class="{metric_class(blob.get("sessionPnl"))}">{signed(blob.get("sessionPnl"), 4)}</strong><small>{number(blob.get("wins"), 0)}W / {number(blob.get("losses"), 0)}L · {number(blob.get("winRate"), 1)}% WR</small></div>',
+            f'<div class="card"><span class="label">Last 15 cost PF</span><strong class="{pf_class(last15.get("ratio"), last15.get("count"))}">{number(last15.get("ratio"), 2)}</strong><small>n {number(last15.get("count"), 0)} · min {number((blob.get("costAccounting") or {}).get("minPf"), 2)}</small></div>',
+            f'<div class="card"><span class="label">Drawdown time</span><strong>{number(float(ddt.get("maxDdS") or 0) / 3600, 2)} h</strong><small>{number(ddt.get("episodes"), 0)} episodes · avg {number(float(ddt.get("avgDdS") or 0) / 3600, 2)} h</small></div>',
+            f'<div class="card"><span class="label">Set coverage</span><strong>{number(sets_coverage.get("validatedCount", blob.get("setValidated")), 0)} / {number(sets_coverage.get("setCount", blob.get("setCount")), 0)}</strong><small>{number(sets_coverage.get("activeCount", blob.get("setActive")), 0)} active · {number(blob.get("histFills"), 0)} historic fills</small></div>',
+        ]
+    )
+
+    window_rows: List[List[str]] = []
+    for name in ("last5", "last15", "last25", "last50", "last75", "all"):
+        item = windows.get(name) or {}
+        window_rows.append(
+            [
+                cell(text(name)),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("wins"), 0)),
+                cell(number(item.get("losses"), 0)),
+                cell(number(item.get("pfAfterCost", item.get("pf")), 2), pf_class(item.get("pfAfterCost", item.get("pf")), item.get("n"))),
+                cell(number(item.get("classicPf"), 2)),
+                cell(signed(item.get("netAfterCost", item.get("net")), 4), metric_class(item.get("netAfterCost", item.get("net")))),
+                cell(number(item.get("avgHoldS"), 0)),
+            ]
+        )
+
+    symbol_rows: List[List[str]] = []
+    for item in sorted((row for row in (blob.get("bySymbol") or []) if isinstance(row, dict)), key=lambda row: -float(row.get("netAfterCost", row.get("net", 0)) or 0)):
+        symbol_rows.append(
+            [
+                cell(text(item.get("symbol"))),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("wins"), 0)),
+                cell(number(item.get("losses"), 0)),
+                cell(number(item.get("pfAfterCost", item.get("pf")), 2), pf_class(item.get("pfAfterCost", item.get("pf")), item.get("n"))),
+                cell(signed(item.get("netAfterCost", item.get("net")), 4), metric_class(item.get("netAfterCost", item.get("net")))),
+                cell(number(float(item.get("maxDdS") or 0) / 3600, 2)),
+            ]
+        )
+
+    indication_rows: List[List[str]] = []
+    for kind, item in sorted((blob.get("byIndication") or {}).items()):
+        if not isinstance(item, dict):
+            continue
+        indication_rows.append(
+            [
+                cell(text(kind)),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("wins"), 0)),
+                cell(number(item.get("losses"), 0)),
+                cell(number(item.get("pfAfterCost", item.get("pf")), 2), pf_class(item.get("pfAfterCost", item.get("pf")), item.get("n"))),
+                cell(number(item.get("wr"), 1) + "%"),
+                cell(number(float(item.get("maxDdS") or 0) / 3600, 2)),
+                cell("pass" if item.get("validated") and item.get("profitable") else "review" if item.get("n") else "cold", "positive" if item.get("validated") and item.get("profitable") else "muted"),
+            ]
+        )
+
+    strategy_rows: List[List[str]] = []
+    for strategy, item in sorted((blob.get("byStrategy") or {}).items()):
+        if not isinstance(item, dict):
+            continue
+        strategy_rows.append(
+            [
+                cell(text(strategy)),
+                cell("on" if item.get("enabled") else "off", "positive" if item.get("enabled") else "muted"),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("pfAfterCost", item.get("pf")), 2), pf_class(item.get("pfAfterCost", item.get("pf")), item.get("n"))),
+                cell(number(item.get("wr"), 1) + "%"),
+                cell(number(float(item.get("maxDdS") or 0) / 3600, 2)),
+            ]
+        )
+
+    pack_rows: List[List[str]] = []
+    for pack, item in sorted((blob.get("byPack") or {}).items()):
+        if not isinstance(item, dict):
+            continue
+        pack_rows.append(
+            [
+                cell(text(pack)),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("pfAfterCost", item.get("pf")), 2), pf_class(item.get("pfAfterCost", item.get("pf")), item.get("n"))),
+                cell(signed(item.get("netAfterCost", item.get("net")), 4), metric_class(item.get("netAfterCost", item.get("net")))),
+                cell(number(item.get("wr"), 1) + "%"),
+            ]
+        )
+
+    set_html_rows: List[List[str]] = []
+    for item in set_rows[:60]:
+        set_html_rows.append(
+            [
+                cell(text(item.get("id"))),
+                cell(text(item.get("pack"))),
+                cell(text(item.get("indicationKind"))),
+                cell(number(item.get("n"), 0)),
+                cell(number(item.get("last15Ratio"), 2), pf_class(item.get("last15Ratio"), item.get("n"))),
+                cell(number(item.get("last25AvgR"), 2), metric_class(item.get("last25AvgR"))),
+                cell(number(item.get("expectancyNetCost"), 4), metric_class(item.get("expectancyNetCost"))),
+                cell(number(float(item.get("maxDdS") or 0) / 3600, 2)),
+                cell("on" if item.get("active") else text(item.get("deactReason"), "off"), "positive" if item.get("active") else "muted"),
+            ]
+        )
+
+    open_html_rows: List[List[str]] = []
+    for item in open_rows[:60]:
+        open_html_rows.append(
+            [
+                cell(text(item.get("symbol"))),
+                cell(text(item.get("side"))),
+                cell(number(item.get("qty"), 4)),
+                cell(number(item.get("entry"), 6)),
+                cell(number(item.get("px"), 6)),
+                cell(signed(item.get("uPnlPct"), 3) + "%", metric_class(item.get("uPnlPct"))),
+                cell(text(item.get("pack"))),
+                cell("protected" if item.get("controls") else "missing", "positive" if item.get("controls") else "muted"),
+            ]
+        )
+
+    close_html_rows: List[List[str]] = []
+    for item in reversed(closed[-40:]):
+        close_html_rows.append(
+            [
+                cell(timestamp(item.get("t"))),
+                cell(text(item.get("symbol"))),
+                cell(text(item.get("side"))),
+                cell(number(item.get("qty"), 4)),
+                cell(number(item.get("entry"), 6)),
+                cell(number(item.get("exit"), 6)),
+                cell(signed(item.get("pnl"), 4), metric_class(item.get("pnl"))),
+                cell(signed(float(item.get("pnl_pct") or 0) * 100, 3) + "%", metric_class(item.get("pnl_pct"))),
+                cell(text(item.get("reason"))),
+            ]
+        )
+
+    strategies = coverage.get("strategies") or {}
+    indication_types = coverage.get("indicationTypes") or {}
+    coverage_rows = [
+        [cell("Status"), cell(f'<span class="{status_class}">{status}</span>')],
+        [cell("Connection"), cell(connection)],
+        [cell("Mode"), cell(mode)],
+        [cell("Historic phase"), cell(text(historic.get("phase"), "idle"))],
+        [cell("Historic symbols"), cell(f"{number(historic_symbols.get('completed', len(historic.get('validSymbols') or [])), 0)} / {number(historic_symbols.get('valid', len(historic.get('selectedSymbols') or [])), 0)} valid · {number(len(historic.get('gappedSymbols') or []), 0)} gapped")],
+        [cell("Historic bars"), cell(f"{number(historic_bars.get('completed'), 0)} / {number(historic_bars.get('requested'), 0)} · {number(historic_bars.get('missing'), 0)} missing")],
+        [cell("Published watermark"), cell(f"{number(len(historic.get('lastPublishedWatermark') or historic.get('watermark') or {}), 0)} symbols")],
+        [cell("Last complete run"), cell(timestamp(historic.get("lastCompleteRun")))],
+        [cell("Next complete run"), cell(timestamp(historic.get("nextRunAt")))],
+        [cell("Historic tape"), cell("complete" if historic.get("coordinationComplete") else "partial", "positive" if historic.get("coordinationComplete") else "muted")],
+        [cell("Symbols"), cell(f"{number(len(symbols), 0)} configured")],
+        [cell("Websocket"), cell(number(coverage.get("wsOk"), 0))],
+        [cell("Price coverage"), cell(number(coverage.get("px"), 0))],
+        [cell("QA pass / fail"), cell(f"{number(coverage.get('qaPass'), 0)} / {number(coverage.get('qaFail'), 0)}")],
+        [cell("Control gaps"), cell(number(coverage.get("controlsMissing"), 0))],
+        [cell("Coordination gate"), cell("open" if gate.get("allow") else "closed", "positive" if gate.get("allow") else "muted")],
+        [cell("Strategies"), cell(", ".join(f"{escape(str(key))}={'on' if value else 'off'}" for key, value in sorted(strategies.items())))],
+        [cell("Indication types"), cell(", ".join(f"{escape(str(key))}={'on' if value else 'off'}" for key, value in sorted(indication_types.items())))],
+    ]
+
+    metadata = {
+        "generatedAt": blob.get("generatedAt"),
+        "connection": blob.get("connection"),
+        "mode": blob.get("mode"),
+        "costAccounting": blob.get("costAccounting"),
+        "coverage": blob.get("coverage"),
+        "coordGate": blob.get("coordGate"),
+        "historic": blob.get("historic"),
+        "setsProgress": blob.get("setsProgress"),
+    }
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>CTS-G · Pulse results · {connection}</title>
+<style>
+:root {{
+  --bg: #07110e;
+  --panel: #0f221c;
+  --text: #d9f0e6;
+  --muted: #7f9d90;
+  --accent: #3dcf8e;
+  color-scheme: dark;
+  font: 15px/1.5 system-ui, sans-serif;
+}}
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; background: var(--bg); color: var(--text); }}
+main {{ max-width: 1440px; margin: 0 auto; padding: 28px 20px 64px; }}
+header {{ border-bottom: 1px solid color-mix(in srgb, var(--muted) 35%, var(--bg)); padding: 12px 0 24px; }}
+h1 {{ max-width: 900px; margin: 8px 0 10px; font-size: clamp(28px, 5vw, 52px); line-height: 1.08; letter-spacing: -.04em; }}
+h2 {{ margin: 0 0 14px; font-size: 20px; letter-spacing: -.02em; }}
+h3 {{ margin: 20px 0 8px; font-size: 15px; }}
+p {{ max-width: 92ch; }}
+.label {{ color: var(--muted); font: 11px/1.2 ui-monospace, monospace; letter-spacing: .14em; text-transform: uppercase; }}
+.muted {{ color: var(--muted); }}
+.positive {{ color: var(--accent); }}
+.negative {{ color: var(--muted); }}
+.card-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin: 22px 0; }}
+.card {{ min-height: 122px; border: 1px solid color-mix(in srgb, var(--muted) 28%, var(--bg)); background: var(--panel); border-radius: 12px; padding: 15px; }}
+.card strong {{ display: block; margin-top: 12px; font: 600 clamp(22px, 3vw, 32px)/1 ui-monospace, monospace; letter-spacing: -.04em; }}
+.card small {{ display: block; margin-top: 10px; color: var(--muted); font-size: 12px; }}
+.panel {{ margin-top: 16px; border: 1px solid color-mix(in srgb, var(--muted) 28%, var(--bg)); background: var(--panel); border-radius: 12px; padding: 18px; }}
+.panel-head {{ display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; }}
+.table-wrap {{ overflow-x: auto; border: 1px solid color-mix(in srgb, var(--muted) 22%, var(--bg)); border-radius: 8px; }}
+table {{ width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }}
+th, td {{ padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--muted) 20%, var(--bg)); text-align: left; white-space: nowrap; vertical-align: top; }}
+th {{ position: sticky; top: 0; background: var(--panel); color: var(--muted); font: 11px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }}
+tbody tr:last-child td {{ border-bottom: 0; }}
+tbody tr:nth-child(even) {{ background: color-mix(in srgb, var(--muted) 5%, var(--panel)); }}
+td {{ font-size: 13px; }}
+.empty {{ padding: 24px; color: var(--muted); text-align: center; }}
+.two {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }}
+.status-line {{ display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font: 12px ui-monospace, monospace; }}
+.status-line b {{ color: var(--text); font-weight: 500; }}
+details {{ border-top: 1px solid color-mix(in srgb, var(--muted) 25%, var(--bg)); margin-top: 16px; padding-top: 12px; }}
+summary {{ cursor: pointer; color: var(--muted); }}
+pre {{ max-height: 420px; overflow: auto; padding: 14px; background: var(--bg); border-radius: 8px; color: var(--muted); font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
+footer {{ padding-top: 20px; color: var(--muted); font-size: 12px; }}
+@media (max-width: 980px) {{ .card-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }} }}
+@media (max-width: 680px) {{ main {{ padding: 18px 12px 48px; }} .card-grid, .two {{ grid-template-columns: 1fr; }} .panel {{ padding: 14px; }} }}
+@media print {{ body {{ background: var(--text); color: var(--bg); }} .panel, .card {{ break-inside: avoid; }} }}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="label">CTS-G · canonical live stats export</div>
+  <h1>Pulse results · {connection}</h1>
+  <p class="muted">One self-contained HTML report generated from the same canonical stats blob as the JSON and Markdown exports. Generated {generated}.</p>
+  <div class="status-line"><span>status <b class="{status_class}">{status}</b></span><span>mode <b>{mode}</b></span><span>unit <b>{unit}</b></span><span>closed <b>{number(blob.get("closedN"), 0)}</b></span><span>open <b>{number(blob.get("openCount"), 0)}</b></span></div>
+</header>
+<section class="card-grid">{overview_cards}</section>
+<section class="panel"><div class="panel-head"><h2>Profit factor windows</h2><span class="muted">PositionCost deducted · neutral 1.00 · +1× cost 1.10</span></div>{table(["Window", "N", "Wins", "Losses", "Cost PF", "Classic PF", "Net", "Avg hold s"], window_rows)}</section>
+<section class="two">
+  <div class="panel"><h2>By symbol</h2>{table(["Symbol", "N", "Wins", "Losses", "Cost PF", "Net", "Max DDt h"], symbol_rows)}</div>
+  <div class="panel"><h2>By indication type</h2>{table(["Type", "N", "Wins", "Losses", "Cost PF", "WR", "Max DDt h", "Gate"], indication_rows)}</div>
+</section>
+<section class="two">
+  <div class="panel"><h2>By strategy</h2>{table(["Strategy", "State", "N", "Cost PF", "WR", "Max DDt h"], strategy_rows)}</div>
+  <div class="panel"><h2>By pack</h2>{table(["Pack", "N", "Cost PF", "Net", "WR"], pack_rows)}</div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Independent Set ranking</h2><span class="muted">top {min(len(set_rows), 60)} of {len(set_rows)} rows · cost-net evidence</span></div>{table(["Set", "Pack", "Kind", "N", "PF15", "R25", "E", "Max DDt h", "State"], set_html_rows)}</section>
+<section class="two">
+  <div class="panel"><h2>Open book</h2>{table(["Symbol", "Side", "Qty", "Entry", "Mark", "uPnL %", "Pack", "Controls"], open_html_rows)}</div>
+  <div class="panel"><h2>Recent closed tape</h2>{table(["Time", "Symbol", "Side", "Qty", "Entry", "Exit", "PnL", "Move %", "Reason"], close_html_rows)}</div>
+</section>
+<section class="panel"><div class="panel-head"><h2>Coverage and gate</h2><span class="muted">engine health, catalog state, and coordination decision</span></div>{table(["Metric", "Value"], coverage_rows)}{gate.get("reasons") and f'<p class="muted">Gate reasons: {escape(" · ".join(str(reason) for reason in gate.get("reasons") or []))}</p>' or ""}</section>
+<section class="panel"><h2>Report lineage</h2><p class="muted">This report is read-only evidence. It does not start the engine, submit orders, alter a gate, or promote a candidate. Re-run the export after the next complete stats snapshot to capture fresh values.</p><details><summary>Show structured metadata</summary><pre>{json_text(metadata)}</pre></details></section>
+<footer>CTS-G Pulse · no external libraries, tracking, or remote assets.</footer>
+</main>
+</body>
+</html>"""
+
+
 def render_md(blob: Dict[str, Any]) -> str:
     pc = (blob.get("costAccounting") or {}).get("last15") or {}
     pf = blob.get("profitFactor") or {}
@@ -776,7 +1131,15 @@ def render_md(blob: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(st: Dict[str, Any], dest_json: str, dest_md: str, *, cost_pct: float, conn: str) -> Dict[str, Any]:
+def write(
+    st: Dict[str, Any],
+    dest_json: str,
+    dest_md: str,
+    *,
+    cost_pct: float,
+    conn: str,
+    dest_html: Optional[str] = None,
+) -> Dict[str, Any]:
     blob = build(st, cost_pct=cost_pct, conn=conn)
     tmp = dest_json + ".tmp"
     with open(tmp, "w") as f:
@@ -784,6 +1147,11 @@ def write(st: Dict[str, Any], dest_json: str, dest_md: str, *, cost_pct: float, 
     os.replace(tmp, dest_json)
     with open(dest_md, "w") as f:
         f.write(render_md(blob))
+    if dest_html:
+        html_tmp = dest_html + ".tmp"
+        with open(html_tmp, "w") as f:
+            f.write(render_html(blob))
+        os.replace(html_tmp, dest_html)
     return blob
 
 
@@ -816,6 +1184,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     blob = build({"closed": rows, "sets": {"rows": [], "setCount": 0, "activeCount": 0}, "open": [], "pfCost": {"n": 15, "minPf": 1.1}}, cost_pct=0.15, conn="x02")
     md = render_md(blob)
     out.append(("rep-md", "PositionCost" in md and "Independent Sets" in md, md[:80]))
+    html_report = render_html(blob)
+    out.append(("rep-html", "<!doctype html>" in html_report and "Profit factor windows" in html_report and "metadata" in html_report, html_report[:80]))
     out.append(("rep-blob", blob["costAccounting"]["positionCostPct"] == 0.15 and blob["occupancy"]["maxOnePerSymbolDirSet"], str(blob["costAccounting"]["last15"])))
     out.append(("rep-dir", set((blob.get("byDirection") or {}).keys()) == {"LONG", "SHORT"}, str(blob.get("byDirection"))))
     out.append(("rep-dir-cost", all(bool(v.get("costSubtracted")) for v in (blob.get("byDirection") or {}).values()), str(blob.get("byDirection"))))

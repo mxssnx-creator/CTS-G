@@ -1,5 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync, openSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
@@ -467,13 +466,14 @@ function pulseControlPlugin(): Plugin {
           }
           if (pathOnly === "/hist-calc.json") {
             if (method === "GET") {
-              const pulse = await tryPulse("GET", "/hist-calc.json");
+              const pulse = await tryPulse("GET", `/hist-calc.json?conn=${encodeURIComponent(conn)}`);
               const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
               if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
                 jsonRes(res as ServerResponse, pulse.status, pulse.json);
                 return;
               }
-              const local = join(process.cwd(), "server/pulse/hist-calc.json");
+              const laneId = conn === "vst" || conn === "bingx-x02" ? "bingx-x02" : "bingx-x01";
+              const local = join(process.cwd(), `server/pulse/hist-calc-${laneId}.json`);
               if (existsSync(local)) {
                 try {
                   jsonRes(res as ServerResponse, 200, JSON.parse(readFileSync(local, "utf8")));
@@ -487,7 +487,9 @@ function pulseControlPlugin(): Plugin {
                 phase: "idle",
                 pct: 0,
                 detail: "no calc yet",
-                independent: true,
+                connection: conn,
+                shared: true,
+                independent: false,
                 rows: [],
                 kinds: {},
                 bySymbol: [],
@@ -499,45 +501,21 @@ function pulseControlPlugin(): Plugin {
               return;
             }
             const raw = await readReqBody(req);
-            const pulse = await tryPulse("POST", "/hist-calc.json", raw, 8000);
+            const pulse = await tryPulse("POST", `/hist-calc.json?conn=${encodeURIComponent(conn)}`, raw, 8000);
             const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
             if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
               jsonRes(res as ServerResponse, pulse.status, pulse.json);
               return;
             }
-            const dir = join(process.cwd(), "server/pulse");
-            const reqFile = join(dir, "hist-calc-req.json");
-            try {
-              writeFileSync(reqFile, raw || "{}");
-            } catch {
-              /* ignore */
-            }
-            const seed = {
-              ok: true,
-              phase: "queued",
-              pct: 1,
-              detail: "starting independent 20h calc",
-              independent: true,
-            };
-            try {
-              writeFileSync(join(dir, "hist-calc.json"), JSON.stringify(seed));
-            } catch {
-              /* ignore */
-            }
-            try {
-              const logFd = openSync(join(dir, "hist-calc.log"), "a");
-              const child = spawn("python3", [join(dir, "hist_calc.py"), "--run", "--req", reqFile], {
-                cwd: dir,
-                detached: true,
-                stdio: ["ignore", logFd, logFd],
-                env: { ...process.env, CTS_HIST_CALC_PATH: join(dir, "hist-calc.json") },
+              jsonRes(res as ServerResponse, 503, {
+                ok: false,
+                phase: "deferred",
+                detail: "shared historic lane unavailable",
+                connection: conn,
+                shared: true,
+                independent: false,
               });
-              child.unref();
-            } catch (err) {
-              jsonRes(res as ServerResponse, 500, { ok: false, phase: "error", detail: String(err) });
-              return;
-            }
-            jsonRes(res as ServerResponse, 200, seed);
+
             return;
           }
           if (pathOnly === "/user-presets.json") {
@@ -724,6 +702,23 @@ function statsFallback(conn: string): Record<string, unknown> {
   };
 }
 
+function reportFallbackHtml(conn: string): string {
+  const stats = statsFallback(conn);
+  const escapeHtml = (value: unknown) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return String(value ?? "").replace(/[&<>"']/g, (character) => entities[character] || character);
+  };
+  const connection = escapeHtml(stats.connection || conn || "overall");
+  const detail = escapeHtml(stats.detail || "The pulse sidecar is not responding.");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CTS-G · stats waiting</title><style>:root{--bg:#07110e;--panel:#0f221c;--text:#d9f0e6;--muted:#7f9d90;--accent:#3dcf8e;color-scheme:dark;font:15px/1.5 system-ui,sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}main{max-width:720px;margin:auto;padding:32px 20px}.label{color:var(--muted);font:11px ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase}section{margin-top:20px;border:1px solid color-mix(in srgb,var(--muted) 30%,var(--bg));background:var(--panel);border-radius:12px;padding:20px}h1{font-size:clamp(26px,6vw,44px);line-height:1.1;letter-spacing:-.04em;margin:10px 0}p{color:var(--muted)}strong{color:var(--accent);font:600 22px ui-monospace,monospace}</style></head><body><main><div class="label">CTS-G · canonical live stats export</div><h1>Stats report waiting</h1><section><p>The preview can display the report as soon as the pulse sidecar responds. No orders or state changes are performed by this page.</p><p>Connection: <strong>${connection}</strong></p><p>${detail}</p></section></main></body></html>`;
+}
+
 function pulseProxy(path: string): Record<string, ProxyOptions> {
   return {
     [path]: {
@@ -737,7 +732,23 @@ function pulseProxy(path: string): Record<string, ProxyOptions> {
         proxy.on("error", (_err, req, res) => {
           const r = res as import("node:http").ServerResponse;
           if (!r || r.headersSent) return;
-          if (String(req.url || "").startsWith("/stats.json")) {
+          const requestUrl = String(req.url || "");
+          if (requestUrl.startsWith("/results-export.html")) {
+            let conn = "overall";
+            try {
+              conn = new URL(requestUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
+            } catch {
+              /* keep overall */
+            }
+            const body = reportFallbackHtml(conn);
+            r.writeHead(503, {
+              "Content-Type": "text/html; charset=utf-8",
+              "Content-Length": Buffer.byteLength(body),
+            });
+            r.end(body);
+            return;
+          }
+          if (requestUrl.startsWith("/stats.json")) {
             try {
               const body = readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8");
               r.writeHead(200, { "Content-Type": "application/json" });
@@ -789,6 +800,7 @@ export default defineConfig(({ command, isPreview }) => ({
       ...pulseProxy("/stats"),
       ...pulseProxy("/results-export.json"),
       ...pulseProxy("/results-export.md"),
+      ...pulseProxy("/results-export.html"),
     },
   },
   preview: {
