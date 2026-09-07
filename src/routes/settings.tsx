@@ -224,7 +224,7 @@ function SettingsPage() {
         trailing: true,
         stratBlock: true,
         stratDca: false,
-        hours: Math.max(2, Math.round(Number(preset?.patch.histLookbackBars || 420) / 60)),
+        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 420) / 60)),
         allConfigs: true,
       }));
     }

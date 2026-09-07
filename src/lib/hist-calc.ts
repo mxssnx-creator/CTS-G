@@ -142,6 +142,30 @@ export type ForcedConfigSummary = {
   connection?: string; trialMode?: boolean;
 };
 
+export type HistCalcTimings = {
+  fetchMs?: number;
+  fetchWaitMs?: number;
+  fetchRequests?: number;
+  signalMs?: number;
+  signalWallMs?: number;
+  replayMs?: number;
+  replayWallMs?: number;
+  mergeMs?: number;
+  scoreMs?: number;
+  reportMs?: number;
+  totalMs?: number;
+};
+
+export type HistCalcTaskStatus = {
+  requested?: number;
+  submitted?: number;
+  completed?: number;
+  inFlight?: number;
+  workers?: number;
+  tileSize?: number;
+  queueLimit?: number;
+};
+
 export type HistCalcJob = {
   forcedConfigs?: ForcedConfigSummary;
   ok?: boolean;
@@ -150,6 +174,9 @@ export type HistCalcJob = {
   detail: string;
   hours?: number;
   lookback?: number;
+  evaluationBars?: number;
+  warmupBars?: number;
+  requestedBars?: number;
   symbols?: string[];
   options?: HistCalcOptions;
   coverage?: {
@@ -186,6 +213,10 @@ export type HistCalcJob = {
   presets?: Array<{ id: string; name: string; hint: string }>;
   error?: string;
   elapsedMs?: number;
+  timings?: HistCalcTimings;
+  replayTasks?: HistCalcTaskStatus;
+  replayTiles?: HistCalcTaskStatus;
+  replayFailure?: { symbol?: string; kind?: string; tile?: number; error?: string };
   source?: string;
   connection?: string;
   runId?: string;
