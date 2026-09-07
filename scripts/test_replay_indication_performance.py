@@ -22,7 +22,7 @@ from indication_engine import (  # noqa: E402
     IndicationBook,
     build_indication_frame,
 )
-from set_engine import IND_TAG_KIND, indication_kind_votes, indication_kind_votes_frame  # noqa: E402
+from set_engine import IND_TAG_KIND, SetBook, indication_kind_votes, indication_kind_votes_frame, synth_trend  # noqa: E402
 
 
 class _RecordingExecutor:
@@ -126,6 +126,77 @@ class ReplayIndicationTests(unittest.TestCase):
                 book.process("XRP-USDT", _fixture("rising"), want_extra=True)
         self.assertIs(extra.peek(*pair), ready)
 
+    def test_one_hour_window_and_tile_parity(self):
+        overlay = {
+            "histEnabled": True,
+            "histLookbackBars": 60,
+            "histMinBars": 60,
+            "histWarmup": 30,
+            "histExactWindow": True,
+            "stratIndications": False,
+            "stratGeneral": True,
+            "stratTrailing": False,
+            "stratBlock": False,
+            "histSimulateBlock": False,
+            "histSimulateDca": False,
+            "setMinStep": 1,
+            "setStepMax": 2,
+            "slToTpRatios": [0.6],
+        }
+        bars = synth_trend(90, 100.0, 0.18, 0.03)
+
+        reference = SetBook()
+        reference.load(overlay)
+        reference.ingest_bars("PARITY-USDT", bars)
+        prepared = reference.prepare_replay_signals("PARITY-USDT", now=1_700_000_000.0)
+        self.assertEqual(prepared[2], 30)
+        reference_hist = {}
+        reference_counts = {}
+        self.assertEqual(
+            reference.replay_symbol_partial(
+                "PARITY-USDT",
+                reference_hist,
+                now=1_700_000_000.0,
+                drop_bars=False,
+                prepared=prepared,
+                hist_counts=reference_counts,
+            ),
+            90,
+        )
+
+        tiled = SetBook()
+        tiled.load(overlay)
+        tiled.ingest_bars("PARITY-USDT", bars)
+        tiled_prepared = tiled.prepare_replay_signals("PARITY-USDT", now=1_700_000_000.0)
+        tiled_hist = {}
+        tiled_counts = {}
+        ids = [state.id for state in tiled.by_idx]
+        for start in range(0, len(ids), 1):
+            local = {}
+            local_counts = {}
+            tiled.replay_symbol_partial(
+                "PARITY-USDT",
+                local,
+                now=1_700_000_000.0,
+                drop_bars=False,
+                set_ids=ids[start : start + 1],
+                prepared=tiled_prepared,
+                hist_counts=local_counts,
+            )
+            tiled_hist.update(local)
+            tiled_counts.update(local_counts)
+
+        def signature(rows):
+            return [
+                (row.get("t"), row.get("side"), round(float(row.get("pnl_pct") or 0), 10), row.get("reason"))
+                for row in rows
+            ]
+
+        self.assertEqual(set(reference_hist), set(tiled_hist))
+        for set_id in reference_hist:
+            self.assertEqual(signature(reference_hist[set_id]), signature(tiled_hist[set_id]), set_id)
+            self.assertEqual(reference_counts.get(set_id), tiled_counts.get(set_id), set_id)
+
     def test_scheduler_contracts_are_bounded_and_nonblocking(self):
         pulse_source = (PULSE / "pulse_trader.py").read_text()
         hist_source = (PULSE / "hist_calc.py").read_text()
@@ -136,6 +207,7 @@ class ReplayIndicationTests(unittest.TestCase):
         self.assertNotRegex(hist_source, r"sleep\(\s*0\.12")
         self.assertIn("_hist_wake", pulse_source)
         self.assertIn("FIRST_COMPLETED", hist_source)
+        self.assertIn("REPLAY_TILE_SIZE", hist_source)
         self.assertIn("replay_workers = max(1, min(8, cpu, len(names) or 1))", pulse_source)
         self.assertIn("max_workers=w", set_source)
         self.assertIn("generation", pulse_source)

@@ -515,6 +515,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     "paused": bool(st.get("paused")),
     "haltReason": st.get("haltReason"),
     "historic": st.get("historic") or {},
+    "historicTimings": (st.get("historic") or {}).get("timings") or {},
+    "historicCoverage": (st.get("historic") or {}).get("coverage") or {},
 
         "equity": st.get("equity"),
         "startEquity": st.get("startEquity"),

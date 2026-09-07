@@ -143,11 +143,16 @@ redis_ready
             pulse_http.write_overlay("../../outside", {"setMinStep": 1})
 
     def test_storage_and_historic_range_contracts(self):
-        from hist_calc import HOURS_MAX, hours_to_bars, parse_options
+        from hist_calc import HOURS_MAX, hours_to_bars, overlay_from_options, parse_options
         self.assertEqual(HOURS_MAX, 336)
+        self.assertEqual(hours_to_bars(1), 60)
+        one_hour = overlay_from_options(parse_options({"hours": 1}))
+        self.assertEqual(one_hour["histLookbackBars"], 60)
+        self.assertEqual(one_hour["histWarmup"], 30)
+        self.assertTrue(one_hour["histExactWindow"])
         self.assertEqual(
-            {hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120, 336)},
-            {120, 240, 1200, 1440, 2880, 4320, 7200, 20160},
+            {hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)},
+            {60, 120, 240, 1200, 1440, 2880, 4320, 7200, 20160},
         )
         options = parse_options({"hours": 9999, "minStep": -3, "stepMax": 999})
         self.assertEqual(options["hours"], HOURS_MAX)

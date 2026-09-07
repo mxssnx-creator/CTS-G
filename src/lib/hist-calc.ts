@@ -177,6 +177,12 @@ export type HistCalcJob = {
   evaluationBars?: number;
   warmupBars?: number;
   requestedBars?: number;
+  requestedStart?: number;
+  requestedEnd?: number;
+  evaluationStart?: number;
+  evaluationEnd?: number;
+  fetchStart?: number;
+  fetchEnd?: number;
   symbols?: string[];
   options?: HistCalcOptions;
   coverage?: {
@@ -187,6 +193,10 @@ export type HistCalcJob = {
     histFills?: number;
     symbols?: { requested?: number; valid?: number; completed?: number; failed?: number; gapped?: number; invalid?: number; coveragePct?: number };
     bars?: { requested?: number; completed?: number; missing?: number; gapped?: number; coveragePct?: number };
+    evaluationBars?: { requested?: number; completed?: number; coveragePct?: number };
+    sets?: { requested?: number; completed?: number; coveragePct?: number };
+    evaluations?: { requested?: number; completed?: number; coveragePct?: number };
+    tasks?: { requested?: number; completed?: number; coveragePct?: number };
     gaps?: Array<{ symbol?: string; start?: number; end?: number; minutes?: number; error?: string }>;
     dims?: Record<string, number>;
     families?: { base?: number; trail?: number };
@@ -227,8 +237,6 @@ export type HistCalcJob = {
   invalidSymbols?: Array<{ symbol?: string; reason?: string }>;
   missingSymbols?: string[];
   gappedSymbols?: string[];
-  requestedStart?: number;
-  requestedEnd?: number;
   watermark?: Record<string, number>;
   lastPublishedWatermark?: Record<string, number>;
   lastCompleteRun?: number;

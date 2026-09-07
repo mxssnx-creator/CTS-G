@@ -808,6 +808,26 @@ function SettingsPage() {
                       />
                       <KV k="Source" v={String(calcJob.source || "shared lane")} />
                       <KV k="Run" v={`${calcJob.mode || "shared"} · generation ${calcJob.generation ?? 0}`} />
+                      <KV
+                        k="Evaluation window"
+                        v={`${calcJob.evaluationBars ?? calcJob.lookback ?? calcOpt.hours * 60} bars + ${calcJob.warmupBars ?? 0} warmup`}
+                      />
+                      <KV
+                        k="Replay timing"
+                        v={
+                          calcJob.timings
+                            ? `fetch ${Math.round(calcJob.timings.fetchMs ?? 0)}ms · replay ${Math.round(calcJob.timings.replayWallMs ?? 0)}ms · score ${Math.round(calcJob.timings.scoreMs ?? 0)}ms`
+                            : "—"
+                        }
+                      />
+                      <KV
+                        k="Replay queue"
+                        v={
+                          calcJob.replayTasks
+                            ? `${calcJob.replayTasks.completed ?? 0}/${calcJob.replayTasks.requested ?? 0} tasks · ${calcJob.replayTasks.workers ?? calcJob.workers ?? 0} workers`
+                            : "—"
+                        }
+                      />
                       <KV k="Lookback" v={`${calcJob.lookback ?? calcOpt.hours * 60} bars`} />
                       <KV
                         k="Set product"

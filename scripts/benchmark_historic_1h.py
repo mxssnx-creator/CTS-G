@@ -24,11 +24,11 @@ from hist_calc import run_calc  # noqa: E402
 DEFAULT_SYMBOLS = ["XRP-USDT", "BCH-USDT", "SOL-USDT"]
 
 
-def benchmark_once(symbols: List[str], workers: int, real: bool) -> Dict[str, Any]:
+def benchmark_once(symbols: List[str], workers: int, real: bool, all_symbols: bool = False) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "hours": 1,
         "symbols": symbols,
-        "allSymbols": False,
+        "allSymbols": all_symbols,
         "allConfigs": True,
         "trailing": True,
         "stratBlock": True,
@@ -53,7 +53,8 @@ def benchmark_once(symbols: List[str], workers: int, real: bool) -> Dict[str, An
     return {
         "benchmark": "historic-1h",
         "mode": "real" if real else "synthetic",
-        "symbols": symbols,
+        "allSymbols": all_symbols,
+        "symbols": job.get("symbols") or symbols,
         "workers": workers,
         "wallMs": round(wall_ms, 1),
         "rssMb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 1),
@@ -63,6 +64,12 @@ def benchmark_once(symbols: List[str], workers: int, real: bool) -> Dict[str, An
         "evaluationBars": job.get("evaluationBars"),
         "warmupBars": job.get("warmupBars"),
         "requestedBars": job.get("requestedBars"),
+        "requestedStart": job.get("requestedStart"),
+        "requestedEnd": job.get("requestedEnd"),
+        "evaluationStart": job.get("evaluationStart"),
+        "evaluationEnd": job.get("evaluationEnd"),
+        "fetchStart": job.get("fetchStart"),
+        "fetchEnd": job.get("fetchEnd"),
         "source": job.get("source"),
         "sets": coverage.get("setCount", coverage.get("product", 0)),
         "rows": job.get("rowCount", 0),
@@ -90,12 +97,13 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=1, help="repeat every worker count")
     args = parser.parse_args()
 
-    symbols = ["*"] if args.all_symbols else [str(symbol).upper() for symbol in args.symbols]
+    all_symbols = bool(args.all_symbols)
+    symbols = [] if all_symbols else [str(symbol).upper() for symbol in args.symbols]
     workers = sorted({max(1, int(value)) for value in args.workers})
     repeat = max(1, int(args.repeat))
     for worker_count in workers:
         for iteration in range(repeat):
-            row = benchmark_once(symbols, worker_count, args.real)
+            row = benchmark_once(symbols, worker_count, args.real, all_symbols=all_symbols)
             row["iteration"] = iteration + 1
             print(json.dumps(row, sort_keys=True), flush=True)
     return 0

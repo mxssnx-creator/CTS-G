@@ -1322,7 +1322,7 @@ def _replay_tile_worker(payload: Tuple[
     book.bars[sym] = bars
     try:
         ids = [str(sid) for sid in set_ids]
-        local_hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in ids}
+        local_hist: Dict[str, List[Dict[str, Any]]] = {}
         local_ind: Optional[Dict[str, List[Dict[str, Any]]]] = {} if capture_ind else None
         local_strat: Optional[Dict[str, List[Dict[str, Any]]]] = {} if capture_strategy else None
         local_counts: Dict[str, int] = {}
@@ -1433,6 +1433,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
     synth = bool(body.get("synth"))
     extra = body.get("overlay") if isinstance(body.get("overlay"), dict) else None
     t0 = time.time()
+    request_end = int(t0)
+    evaluation_start = request_end - lookback * 60
+    fetch_start = request_end - fetch_bars * 60
     mono0 = time.perf_counter()
     _reset_public_request_stats()
     timings: Dict[str, Any] = {
@@ -1461,6 +1464,12 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         "evaluationBars": lookback,
         "warmupBars": warmup_bars,
         "requestedBars": fetch_bars,
+        "requestedStart": evaluation_start,
+        "requestedEnd": request_end,
+        "evaluationStart": evaluation_start,
+        "evaluationEnd": request_end,
+        "fetchStart": fetch_start,
+        "fetchEnd": request_end,
         "symbols": list(symbols),
         "options": opt,
         "startedAt": t0,
@@ -1518,10 +1527,20 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         book = SetBook()
         book.load(ov)
         job["coverage"] = book.coverage()
-        hist: Dict[str, List[Dict[str, Any]]] = {}
         ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         strat_hist: Dict[str, List[Dict[str, Any]]] = {"block": [], "dca": []}
         now = time.time()
+        request_end = int(now)
+        evaluation_start = request_end - lookback * 60
+        fetch_start = request_end - fetch_bars * 60
+        job.update({
+            "requestedStart": evaluation_start,
+            "requestedEnd": request_end,
+            "evaluationStart": evaluation_start,
+            "evaluationEnd": request_end,
+            "fetchStart": fetch_start,
+            "fetchEnd": request_end,
+        })
         try:
             cpu = max(1, int(os.cpu_count() or 1))
             requested_workers = int(body.get("workers") or min(4, cpu))
@@ -1539,9 +1558,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         def _trim_maps() -> None:
 
-            for k, v in list(hist.items()):
-                if len(v) > hist_cap:
-                    hist[k] = v[-hist_cap:]
             for k, v in list(ind_hist.items()):
                 if len(v) > hist_cap:
                     ind_hist[k] = v[-hist_cap:]
@@ -1618,7 +1634,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         prep_started_at: Optional[float] = None
         tile_started_at: Optional[float] = None
         queue_limit = max(workers, workers * REPLAY_QUEUE_MULTIPLIER)
-        all_set_ids = [st.id for st in book.by_idx]
         all_tile_specs: List[Tuple[str, int, List[str], bool, bool]] = []
         for pack in book.packs:
             pack_ids = [st.id for st in book.by_idx if st.pack == pack]
@@ -1673,11 +1688,6 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 score=False,
             )
             timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
-            for sid, rows in state["hist"].items():
-                if rows:
-                    hist[sid] = (hist.get(sid) or []) + rows
-                    if len(hist[sid]) > hist_cap:
-                        hist[sid] = hist[sid][-hist_cap:]
             for kind, rows in state["ind"].items():
                 if rows:
                     ind_hist[kind] = (ind_hist.get(kind) or []) + rows
@@ -1891,9 +1901,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         report_started = time.perf_counter()
         rows = expand_rows(book)
         kinds = book.ind_gate_snapshot()
-        by_sym = symbol_rollup(book, hist)
-        by_dir = direction_rollup(book, hist)
-        by_strat = strategy_rollup(book, hist, strat_hist)
+        by_sym = symbol_rollup(book)
+        by_dir = direction_rollup(book)
+        by_strat = strategy_rollup(book, strat=strat_hist)
         evaluation_summary = {
             "windows": list(EVALUATION_WINDOWS),
             "directions": {k: v.get("evaluationWindows") or {} for k, v in by_dir.items()},
@@ -2116,11 +2126,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
-    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) >= 120)
-    range_series = {hours: hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120, 336)}
+    rec("hours-one-hour", hours_to_bars(1) == 60 and parse_options({"hours": 1})["hours"] == 1)
+    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 60)
+    range_series = {hours: hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
-        range_series == {2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
+        range_series == {1: 60, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})

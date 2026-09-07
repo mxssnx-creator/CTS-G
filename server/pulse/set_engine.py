@@ -31,7 +31,10 @@ from position_cost import (
     SL_TP_STEP,
     sl_tp_grid,
     cost_as_frac,
+    gross_move_pct,
+    net_move_pct,
     net_pnl_pct,
+    ratio_from_r,
     row_net_pnl,
     row_position_cost_pct,
     row_side,
@@ -1376,7 +1379,8 @@ class SetBook:
                 continue
             cleaned.append([row[0], row[1], row[2], row[3], row[4]])
         if len(cleaned) >= 16:
-            self.bars[symbol] = cleaned[-self.lookback :]
+            replay_cap = self.lookback + (self.warmup if self.exact_replay_window else 0)
+            self.bars[symbol] = cleaned[-max(self.lookback, replay_cap) :]
 
     def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
         n = 0
@@ -2552,7 +2556,7 @@ class SetBook:
                         open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
 
     def _fast_historic_pf(self, rows: Sequence[Dict[str, Any]], requested: int) -> Dict[str, float]:
-        """Score generated historic rows without re-parsing live cost fields."""
+        """Score generated historic rows with the exact cost-aware formulas."""
         window = list(rows)[-max(1, int(requested)) :]
         cost_pct = float(self.cost_pct)
         cost_frac = cost_as_frac(cost_pct)
@@ -2560,19 +2564,19 @@ class SetBook:
         nets = [value - cost_frac for value in gross]
         count = len(gross)
         avg_r = sum(signed_result_r(value, cost_pct) for value in gross) / count if count else 0.0
+        ratio = ratio_from_r(avg_r) if count else 1.0
         gp = sum(value for value in nets if value > 0)
         gl = abs(sum(value for value in nets if value < 0))
         classic = gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)
-        ratio = round(1.0 + avg_r * 0.1, 4) if count else 1.0
         return {
             "n": float(requested),
             "count": float(count),
             "avgR": round(avg_r, 4),
-            "ratio": ratio,
+            "ratio": round(ratio, 4),
             "classicPf": round(classic, 4),
             "costPct": round(cost_pct, 8),
-            "netPct": round(cost_pct * avg_r, 4) if count else 0.0,
-            "grossPct": round(cost_pct * (1.0 + avg_r), 4) if count else 0.0,
+            "netPct": round(net_move_pct(ratio, cost_pct), 4) if count else 0.0,
+            "grossPct": round(gross_move_pct(ratio, cost_pct), 4) if count else 0.0,
             "netAvg": round(sum(nets) / count, 6) if count else 0.0,
             "costSubtracted": True,
             "costSource": "manual-fallback",
@@ -2581,7 +2585,10 @@ class SetBook:
 
     def _fast_historic_metrics(self, tape: Sequence[Dict[str, Any]], hist_n: Optional[int] = None) -> Dict[str, Any]:
         """Equivalent historic score using the known simulation row contract."""
-        ordered = list(tape)
+        ordered = sorted(
+            (row for row in tape if isinstance(row, dict)),
+            key=lambda row: finite(row.get("t")),
+        )
         cost_pct = float(self.cost_pct)
         cost_frac = cost_as_frac(cost_pct)
         gross = [finite(row.get("pnl_pct")) for row in ordered]
@@ -2594,18 +2601,18 @@ class SetBook:
         pf_tape = last_n_balanced(ordered, self.pf_n)
         last15 = self._fast_historic_pf(pf_tape, self.pf_n)
         sample = len(pf_tape)
-        gross_pf = sum(value for value in [finite(row.get("pnl_pct")) for row in pf_tape] if value > 0)
-        gross_loss = abs(sum(value for value in [finite(row.get("pnl_pct")) for row in pf_tape] if value < 0))
         gross_values = [finite(row.get("pnl_pct")) for row in pf_tape]
         net_values = [value - cost_frac for value in gross_values]
-        net_gp = sum(value for value in net_values if value > 0)
-        net_gl = abs(sum(value for value in net_values if value < 0))
+        gross_profit = sum(value for value in gross_values if value > 0)
+        gross_loss = abs(sum(value for value in gross_values if value < 0))
+        net_profit = sum(value for value in net_values if value > 0)
+        net_loss = abs(sum(value for value in net_values if value < 0))
         required = self.eval_need()
         evaluation = {
             "sampleCount": sample,
             "requiredSamples": required,
-            "grossPf": round(gross_pf / gross_loss if gross_loss > 0 else (99.0 if gross_pf > 0 else 0.0), 6),
-            "netPf": round(net_gp / net_gl if net_gl > 0 else (99.0 if net_gp > 0 else 0.0), 6),
+            "grossPf": round(gross_profit / gross_loss if gross_loss > 0 else (99.0 if gross_profit > 0 else 0.0), 6),
+            "netPf": round(net_profit / net_loss if net_loss > 0 else (99.0 if net_profit > 0 else 0.0), 6),
             "grossEv": round(sum(gross_values) / sample, 8) if sample else 0.0,
             "netEv": round(sum(net_values) / sample, 8) if sample else 0.0,
             "ev": round(sum(net_values) / sample, 8) if sample else 0.0,
@@ -2635,16 +2642,23 @@ class SetBook:
                 "avgR": float(metric["avgR"]),
                 "netAvg": float(metric["netAvg"]),
                 "netPct": float(metric["netPct"]),
-                "costPct": cost_pct,
-                "costSamples": 0,
+                "costPct": float(metric["costPct"]),
+                "costSamples": int(metric["costSamples"]),
                 "costSubtracted": True,
             }
         last25 = ordered[-self.deact_n :]
-        last25_values = [finite(row.get("pnl_pct")) for row in last25]
-        last25_avg_r = (
-            sum(signed_result_r(value, cost_pct) for value in last25_values) / len(last25_values)
-            if last25_values else 0.0
-        )
+        if last25:
+            last25_avg_r = sum(
+                signed_result_r(
+                    finite(row.get("pnl_pct")),
+                    row_position_cost_pct(row, cost_pct),
+                )
+                for row in last25
+            ) / len(last25)
+            last25_avg_pnl = sum(row_net_pnl(row, cost_pct) for row in last25) / len(last25)
+        else:
+            last25_avg_r = 0.0
+            last25_avg_pnl = 0.0
         dd = drawdown_time_by_symbol(ordered)
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
@@ -2664,7 +2678,7 @@ class SetBook:
             "last15_r": float(last15["avgR"]),
             "last25_n": len(last25),
             "last25_avg_r": last25_avg_r,
-            "last25_avg_pnl": sum(value - cost_frac for value in last25_values) / len(last25_values) if last25_values else 0.0,
+            "last25_avg_pnl": last25_avg_pnl,
             "max_dd_s": float(dd["maxS"]),
             "avg_dd_s": float(dd["avgS"]),
             "dd_episodes": int(dd["episodes"]),
