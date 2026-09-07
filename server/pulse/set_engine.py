@@ -1648,7 +1648,6 @@ class SetBook:
                     self._hist_seen.clear()
                     self._hist_total = total
                     self._hist_counts = {}
-                    prior_ready = False
                 elif prior_ready and total > 0 and len(self._hist_seen) >= total:
                     # The previous cycle completed. Start a fresh refresh
                     # cycle while retaining the last completed evidence.
@@ -1748,6 +1747,7 @@ class SetBook:
                     if on_step:
                         on_step()
                     time.sleep(0)
+            else:
                 # Keep at most one worker's worth of symbols in flight. The old
                 # submit-all approach retained every future and its captured
                 # payload until the slowest symbol finished.

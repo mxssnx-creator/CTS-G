@@ -46,6 +46,7 @@ from set_engine import (
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
+DEFAULT_SYMBOL_CAP = 25
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
     "XRP-USDT",
@@ -734,6 +735,19 @@ def load_universe() -> List[str]:
     return out
 
 
+def configured_symbol_cap(body: Optional[Dict[str, Any]] = None) -> int:
+    """0 = unlimited. Missing overlay cap defaults to 25, not the full book."""
+    body = body if isinstance(body, dict) else {}
+    ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
+    for src in (body, ov):
+        if src.get("symbolCap") is not None:
+            try:
+                return max(0, int(src.get("symbolCap")))
+            except (TypeError, ValueError):
+                continue
+    return DEFAULT_SYMBOL_CAP
+
+
 def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
     body = body if isinstance(body, dict) else {}
     opt = parse_options(body)
@@ -768,7 +782,13 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
             continue
         seen.add(s)
         out.append(s)
-    return mandatory_symbols(out or list(DEFAULT_SYMBOLS))
+    out = mandatory_symbols(out or list(DEFAULT_SYMBOLS))
+    cap = configured_symbol_cap(body)
+    if cap > 0 and len(out) > cap:
+        must = [s for s in FORCED_SYMBOLS if s in out]
+        rest = [s for s in out if s not in must]
+        out = (must + rest)[: max(cap, len(must))]
+    return out
 
 
 def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2296,6 +2316,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
+    rec("symbol-cap-default-25", configured_symbol_cap({}) == 25)
+    rec("symbol-cap-explicit-unlimited", configured_symbol_cap({"symbolCap": 0}) == 0)
+    rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
+    capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
+    rec("resolve-respects-cap", 1 <= len(capped) <= max(25, len(FORCED_SYMBOLS)), str(len(capped)))
     rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 22, str(parse_options({})))
     rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",

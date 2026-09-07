@@ -22,7 +22,7 @@ from contextlib import nullcontext
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
@@ -114,7 +114,8 @@ LIVE_COST_PATH = os.path.join(DIR, f"live-position-cost-{CONN_SHORT}.json")
 CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
-MAX_SYMBOLS = 0  # 0 = unlimited
+MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
+DEFAULT_SYMBOL_CAP = 25
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -2552,33 +2553,34 @@ class Pulse:
             if s and s not in seen_open:
                 open_syms.append(s)
                 seen_open.add(s)
+        cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
         wild = bool(getattr(self, "overlay_wild", False))
-        cap = int(getattr(self, "symbol_cap", 0) or 0)
-        if not getattr(self, "symbols_dynamic", True):
-            have = set(SYMBOLS)
-            chosen = [s for s in names if s in have]
-            for s in SYMBOLS:
-                if s not in set(chosen):
-                    chosen.append(s)
-        elif wild or cap <= 0:
-            chosen = names
+        dyn = bool(getattr(self, "symbols_dynamic", True))
+        if dyn:
+            pool = names
         else:
-            chosen = []
-            seen = set()
-            for s in open_syms + names:
-                if s in seen:
-                    continue
-                seen.add(s)
-                chosen.append(s)
-                if len(chosen) >= cap and all(x in seen for x in open_syms):
-                    break
-            for s in open_syms:
-                if s not in seen:
-                    chosen.append(s)
-                    seen.add(s)
+            have = set(SYMBOLS)
+            pool = [s for s in names if s in have]
+            pool.extend(s for s in SYMBOLS if s not in set(pool))
+        must = []
+        seen_must = set()
+        for s in open_syms + [str(x) for x in FORCED_SYMBOLS if x in self.contracts or x in pool]:
+            if s and s not in seen_must:
+                must.append(s)
+                seen_must.add(s)
+        chosen: List[str] = []
+        seen = set()
+        for s in must + pool:
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            chosen.append(s)
+            if cap > 0 and len(chosen) >= cap and all(x in seen for x in must):
+                break
+        if cap <= 0:
+            chosen = list(dict.fromkeys(must + pool))
         if not chosen:
             return
-        chosen = list(dict.fromkeys(chosen + [s for s in FORCED_SYMBOLS if s in self.contracts]))
         old = list(SYMBOLS)
         if chosen == old:
             self.last_dyn_sel = now
@@ -2637,8 +2639,9 @@ class Pulse:
     def seed_px_bars(self) -> None:
         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
         minute = int(time.time() // 60)
+        scan = set(SYMBOLS)
         for s, px in list(self.px.items()):
-            if px <= 0:
+            if px <= 0 or s not in scan:
                 continue
             rec = self.bar_min.get(s)
             if not rec or int(rec[0]) != minute:
@@ -6005,9 +6008,12 @@ class Pulse:
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
-            self.symbol_cap = max(0, int(ov.get("symbolCap") if ov.get("symbolCap") is not None else 0))
+            if ov.get("symbolCap") is None:
+                self.symbol_cap = DEFAULT_SYMBOL_CAP
+            else:
+                self.symbol_cap = max(0, int(ov["symbolCap"]))
         except Exception:
-            self.symbol_cap = 0
+            self.symbol_cap = DEFAULT_SYMBOL_CAP
         wild = bool(ov.get("symbolsAll"))
         cleaned: List[str] = []
         seen = set()
@@ -6028,16 +6034,18 @@ class Pulse:
                 cleaned.append(s)
                 if MAX_SYMBOLS > 0 and len(cleaned) >= MAX_SYMBOLS:
                     break
+                if self.symbol_cap > 0 and len(cleaned) >= self.symbol_cap:
+                    break
         self.overlay_wild = bool(wild)
         if wild:
             extra = load_contracts(None)
             names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
             names.sort()
             if names:
-                SYMBOLS[:] = names
+                SYMBOLS[:] = names[: self.symbol_cap] if self.symbol_cap > 0 else names
                 self.contracts.update(extra)
         elif cleaned:
-            SYMBOLS[:] = cleaned
+            SYMBOLS[:] = cleaned[: self.symbol_cap] if self.symbol_cap > 0 else cleaned
         self.ensure_contracts()
         try:
             self.apply_dynamic_symbols(force=True)
@@ -8686,6 +8694,19 @@ class Pulse:
         ind_snap = self.indications.snapshot()
         sets_snap = self.sets.snapshot(full=False)
         historic_snap = dict(getattr(self, "_hist_status", {}) or {})
+        prog = (sets_snap.get("progress") or {}) if isinstance(sets_snap, dict) else {}
+        hist_phase = str(historic_snap.get("phase") or "")
+        prog_phase = str(prog.get("phase") or "")
+        phase = hist_phase if hist_phase and hist_phase not in ("idle",) else (prog_phase or hist_phase or "idle")
+        if hist_phase in ("backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial") and prog_phase in ("idle", "ready", ""):
+            phase = hist_phase
+        pct_raw = historic_snap.get("pct") if historic_snap.get("pct") is not None else prog.get("pct")
+        try:
+            pct_val = round(float(pct_raw or 0), 1)
+        except (TypeError, ValueError):
+            pct_val = 0.0
+        ready_flag = bool(prog.get("ready") if prog.get("ready") is not None else historic_snap.get("ready"))
+        detail = str(historic_snap.get("detail") or prog.get("detail") or "")
         coord_snap = self.coord.snapshot()
         if isinstance(coord_snap, dict):
             coord_snap["historic"] = {
@@ -8795,6 +8816,22 @@ class Pulse:
             "pulse": self.pulse_snapshot(),
             "coord": coord_snap,
             "historic": historic_snap,
+            "progressPct": pct_val,
+            "progressPhase": phase,
+            "progressDetail": detail,
+            "progressReady": ready_flag,
+            "progressSymbol": prog.get("symbol") or "",
+            "progressSetId": prog.get("setId") or "",
+            "progressSymbolsDone": prog.get("symbolsDone"),
+            "progressSymbolsTotal": prog.get("symbolsTotal"),
+            "progressSetsDone": prog.get("setsDone"),
+            "progressSetsTotal": prog.get("setsTotal"),
+            "progressBarsDone": prog.get("barsDone"),
+            "progressBarsTotal": prog.get("barsTotal"),
+            "progressElapsedMs": prog.get("elapsedMs"),
+            "progressLastRunMs": prog.get("lastRunMs"),
+            "progressCycle": prog.get("cycle"),
+            "progressError": prog.get("error") or "",
             "pfCost": pc,
             "positionCost": position_cost,
             "profitFactor": pc["ratio"],
@@ -9581,21 +9618,66 @@ class Pulse:
             "updatedAt": time.time(),
         })
 
-    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None) -> Tuple[List[str], List[Dict[str, str]]]:
-        names = list(requested or SYMBOLS)
+    def _capped_scan_names(self, names: Optional[Sequence[str]] = None) -> List[str]:
+        """Bound any symbol list to the configured scan book / symbolCap.
+
+        0 = unlimited. Missing cap defaults to 25. Wildcards and stale
+        all-universe snapshots collapse to the live scan book, not the
+        full exchange catalog.
+        """
+        cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        scan = [str(s) for s in SYMBOLS if s]
+        raw = list(names) if names is not None else list(scan)
+        wild = False
+        out: List[str] = []
         seen: set[str] = set()
-        normalized: List[str] = []
-        for raw in names:
-            symbol = str(raw or "").strip().upper().replace("_", "-")
-            if symbol and symbol not in seen:
-                seen.add(symbol)
-                normalized.append(symbol)
+        for raw_s in raw:
+            token = str(raw_s or "").strip().upper().replace("_", "-")
+            if token in ("*", "ALL", "UNLIMITED", ""):
+                wild = True
+                continue
+            if token.endswith("USDT") and not token.endswith("-USDT"):
+                token = token[:-4] + "-USDT"
+            if not token.endswith("-USDT") or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        if wild or not out:
+            out = list(scan)
+        if cap > 0 and len(out) > cap:
+            must: List[str] = []
+            seen_must: set[str] = set()
+            raw_open = getattr(self, "open", None)
+            if isinstance(raw_open, dict):
+                open_iter = raw_open.values()
+            elif isinstance(raw_open, (list, tuple)):
+                open_iter = raw_open
+            else:
+                open_iter = []
+            for p in list(open_iter):
+                s = str(getattr(p, "symbol", "") or "")
+                if s and s not in seen_must:
+                    must.append(s)
+                    seen_must.add(s)
+            for s in FORCED_SYMBOLS:
+                token = str(s or "")
+                if token and token not in seen_must and (token in out or token in scan):
+                    must.append(token)
+                    seen_must.add(token)
+            rest = [s for s in out if s not in seen_must]
+            out = (must + rest)[: max(cap, len(must))]
+        return out
+
+    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None) -> Tuple[List[str], List[Dict[str, str]]]:
+        names = self._capped_scan_names(requested)
         invalid = [
             {"symbol": symbol, "reason": "missing active exchange contract"}
-            for symbol in normalized
+            for symbol in names
             if symbol not in self.contracts
         ]
-        valid = [symbol for symbol in normalized if symbol in self.contracts]
+        valid = [symbol for symbol in names if symbol in self.contracts]
+        if not valid:
+            valid = [symbol for symbol in self._capped_scan_names(None) if symbol in self.contracts]
         return valid, invalid
 
     def _hist_coverage(self, book: SetBook, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
@@ -9671,6 +9753,78 @@ class Pulse:
             ]
             return names, ("incremental" if names else "skip-unchanged")
         return valid_list, "full"
+
+    def _hist_replay_chunk_size(self, n: int) -> int:
+        """Bound one isolated replay so the live loop and UI keep moving."""
+        total = max(1, int(n or 1))
+        budget = self._budget()
+        level = str(getattr(budget, "level", "normal") or "normal")
+        sets_n = 0
+        try:
+            sets_n = len(getattr(getattr(self, "sets", None), "sets", {}) or {})
+        except Exception:
+            sets_n = 0
+        # 30k+ set catalogs cannot score 16 symbols without stalling stats.
+        if sets_n >= 8000:
+            if level in ("critical", "overload", "busy"):
+                size = 1
+            else:
+                size = 2
+        elif level in ("critical", "overload"):
+            size = 8
+        elif level == "busy":
+            size = 16
+        else:
+            size = 24
+        return max(1, min(total, size))
+
+    def _hist_replay_chunked(self, names: List[str], already: bool, progress_total: int) -> bool:
+        """Replay configured names in load-aware slices; first slice opens the gate."""
+        pending = [str(s) for s in names if s]
+        if not pending:
+            return False
+        total = max(int(progress_total or 0), len(pending))
+        published_any = False
+        done: List[str] = []
+        ready = bool(already)
+        first = True
+        while pending:
+            if self._hist_request_changed():
+                break
+            size = 1 if first else self._hist_replay_chunk_size(len(pending))
+            first = False
+            chunk = pending[:size]
+            pending = pending[size:]
+            sd_notify("WATCHDOG=1")
+            self.hist_busy = True
+            try:
+                ok = self._replay_sets_isolated(chunk, ready, total)
+            finally:
+                self.hist_busy = False
+            if not ok:
+                with self.state_guard():
+                    self._hist_incremental_symbols.update(chunk)
+                    self._hist_incremental_symbols.update(pending)
+                break
+            published_any = True
+            done.extend(chunk)
+            ready = True
+            with self.state_guard():
+                progress = self.sets.progress
+                progress.ready = True
+                progress.symbols_done = len(done)
+                progress.symbols_total = total
+                if pending:
+                    progress.phase = "replay"
+                    progress.detail = f"slice {len(done)}/{total} ready · continuing {len(pending)}"
+            try:
+                self._hist_write_status(self.sets)
+                self.write_stats(force=True)
+            except Exception:
+                pass
+            sd_notify("WATCHDOG=1")
+            time.sleep(0.05)
+        return published_any
 
     def _hist_fetch_durable(self, book: SetBook, generation: int, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         """Fetch only missing exchange minutes, with a two-minute tail overlap."""
@@ -9930,7 +10084,10 @@ class Pulse:
             should_write = False
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                    keep_ready = bool(already) or bool(source.progress.ready)
                     source.progress = copy.deepcopy(replay_book.progress)
+                    if keep_ready:
+                        source.progress.ready = True
                     source._running = True
                     now_m = time.monotonic()
                     should_write = now_m - float(getattr(self, "_hist_status_write_ts", 0.0) or 0.0) >= 0.75
@@ -9940,6 +10097,14 @@ class Pulse:
                     self._hist_write_status(source)
                 except Exception:
                     pass
+                now_stats = time.monotonic()
+                if now_stats - float(getattr(self, "_hist_stats_write_ts", 0.0) or 0.0) >= 1.5:
+                    self._hist_stats_write_ts = now_stats
+                    try:
+                        self.write_stats(force=True)
+                    except Exception:
+                        pass
+            time.sleep(0)
 
         def should_abort() -> bool:
             if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
@@ -10143,7 +10308,8 @@ class Pulse:
                 return False
             self._hist_incremental_symbols.difference_update(pending)
             previous = copy.deepcopy(book.progress)
-            valid = set(previous.valid_symbols or SYMBOLS)
+            valid_list = self._capped_scan_names(previous.valid_symbols or SYMBOLS)
+            valid = set(valid_list)
             names = [symbol for symbol in pending if symbol in valid]
             if not names:
                 return False
@@ -10162,21 +10328,19 @@ class Pulse:
             book.progress.phase = "incremental"
             book.progress.pct = 100.0
             book.progress.detail = f"incremental closed-bar update · {len(names)} symbols"
-            book.progress.symbols_done = len(previous.valid_symbols) - len(retry)
-            book.progress.symbols_total = len(previous.valid_symbols)
+            book.progress.symbols_done = len(valid_list) - len(retry)
+            book.progress.symbols_total = len(valid_list)
 
-        self.hist_busy = True
-        try:
-            replayed = self._replay_sets_isolated(names, True, len(previous.valid_symbols))
-        finally:
-            self.hist_busy = False
+        replayed = self._hist_replay_chunked(names, True, len(valid_list))
         if not replayed:
             with self.state_guard():
                 self._hist_incremental_symbols.update(names)
             return False
-        watermark = dict(previous.watermark)
+        keep = set(valid_list)
+        watermark = {str(sym): int(ts) for sym, ts in dict(previous.watermark or {}).items() if str(sym) in keep}
         for symbol in names:
             watermark[symbol] = int(self.history_store.watermark(symbol, source=None) or watermark.get(symbol, 0))
+        published = {str(sym): int(ts) for sym, ts in dict(previous.last_published_watermark or {}).items() if str(sym) in keep}
         with self.state_guard():
             progress = self.sets.progress
             progress.phase = "ready"
@@ -10188,10 +10352,10 @@ class Pulse:
             progress.requested_start = previous.requested_start
             progress.requested_end = previous.requested_end
             progress.watermark = watermark
-            progress.last_published_watermark = dict(previous.last_published_watermark)
+            progress.last_published_watermark = published
             progress.last_complete_run = previous.last_complete_run
             progress.next_run_at = previous.next_run_at
-            progress.valid_symbols = list(previous.valid_symbols)
+            progress.valid_symbols = list(valid_list)
             progress.invalid_symbols = list(previous.invalid_symbols)
             progress.missing_symbols = []
             progress.gapped_symbols = []
@@ -10294,6 +10458,12 @@ class Pulse:
                 valid, invalid = self._hist_selected_snapshot(requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS))
                 self._hist_snapshot_symbols = list(valid)
                 self._hist_invalid_symbols = list(invalid)
+                keep = set(valid)
+                self._hist_last_published_watermark = {
+                    str(sym): int(ts)
+                    for sym, ts in (getattr(self, "_hist_last_published_watermark", {}) or {}).items()
+                    if str(sym) in keep
+                }
                 lookback = int(book.lookback)
                 if manual:
                     request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
@@ -10401,7 +10571,12 @@ class Pulse:
                     progress.gapped_symbols = list(gapped)
                     progress.symbols_done = len(completed)
                     progress.bars_done = bars_present
-                    progress.watermark = dict(self.history_store.watermark())
+                    keep_wm = set(valid)
+                    progress.watermark = {
+                        str(sym): int(ts)
+                        for sym, ts in dict(self.history_store.watermark() or {}).items()
+                        if str(sym) in keep_wm
+                    }
                     progress.pct = 20.0 if missing else 35.0
                     progress.phase = "gap" if missing else "replay"
                     progress.detail = (
@@ -10455,23 +10630,21 @@ class Pulse:
                         )
                         book.progress.deferred_reason = ""
 
-                self.hist_busy = True
-                try:
-                    with self.state_guard():
-                        already = bool(book.progress.ready)
-                    progress_total = max(
-                        len(completed),
-                        len(replay_names),
-                        len(getattr(self, "_hist_last_published_watermark", {}) or {}),
-                    )
-                    replayed = self._replay_sets_isolated(replay_names, already, progress_total)
-                finally:
-                    self.hist_busy = False
+                with self.state_guard():
+                    already = bool(book.progress.ready)
+                # Never inflate the replay denominator from a previous
+                # uncapped watermark (old 500+ symbol runs).
+                progress_total = max(len(valid), len(replay_names))
+                replayed = self._hist_replay_chunked(replay_names, already, progress_total)
                 if not replayed or self._hist_request_changed():
                     self._hist_checkpoint(book, "superseded-or-deferred")
                     self._hist_wake.wait(timeout=1.0)
                     continue
-                watermark = dict(getattr(self, "_hist_last_published_watermark", {}) or {})
+                watermark = {
+                    str(sym): int(ts)
+                    for sym, ts in dict(getattr(self, "_hist_last_published_watermark", {}) or {}).items()
+                    if str(sym) in set(valid)
+                }
                 for symbol in replay_names:
                     watermark[symbol] = int(self.history_store.watermark(symbol, source="exchange") or 0)
                 complete_at = time.time()

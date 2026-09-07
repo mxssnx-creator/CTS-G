@@ -124,13 +124,14 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 25, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
-    rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 25)
+    rec("default-25-cap", int(x01.get("symbolCap") or 0) == 25 and int(x02.get("symbolCap") or 0) == 25)
+    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -2699,6 +2700,40 @@ def process_guard_test() -> None:
         already_ready=False, published=[], changed=[],
     )
     rec("replay-selection-full-initial", reason == "full" and names == ["a", "b"], reason)
+    rec("hist-replay-chunk-helper", "def _hist_replay_chunked" in trader)
+    rec("hist-replay-chunk-wired", "_hist_replay_chunked(replay_names" in trader)
+    rec("hist-first-slice-one", "size = 1 if first else self._hist_replay_chunk_size" in trader)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 25)
+    rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
+    rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
+    rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
+    capper = object.__new__(pt.Pulse)
+    capper.symbol_cap = 25
+    capper.open = {}
+    orig_syms = list(pt.SYMBOLS)
+    fat = [f"S{i}-USDT" for i in range(80)]
+    pt.SYMBOLS[:] = fat[:25]
+    capped = capper._capped_scan_names(fat)
+    rec("hist-cap-truncates-80-to-25", len(capped) == 25, str(len(capped)))
+    wild = capper._capped_scan_names(["*", "ALL"])
+    rec("hist-cap-wildcard-uses-scan", len(wild) == 25, str(len(wild)))
+    unlim = object.__new__(pt.Pulse)
+    unlim.symbol_cap = 0
+    unlim.open = {}
+    pt.SYMBOLS[:] = fat
+    rec("hist-cap-zero-unlimited", len(unlim._capped_scan_names(fat)) == 80, str(len(unlim._capped_scan_names(fat))))
+    pt.SYMBOLS[:] = orig_syms
+    chunker = object.__new__(pt.Pulse)
+    class _Busy:
+        level = "overload"
+    chunker._budget = lambda: _Busy()  # type: ignore[method-assign]
+    rec("hist-replay-chunk-overload", chunker._hist_replay_chunk_size(566) == 8, str(chunker._hist_replay_chunk_size(566)))
+    class _Ok:
+        level = "normal"
+    chunker._budget = lambda: _Ok()  # type: ignore[method-assign]
+    rec("hist-replay-chunk-capped-book", chunker._hist_replay_chunk_size(25) == 24, str(chunker._hist_replay_chunk_size(25)))
+    set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
+    rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
 
 
 def historic_snapshot_test() -> None:

@@ -312,18 +312,21 @@ function SettingsPage() {
   const onCalcAll = async (activeOverlay = overlay, activeCalcOpt = calcOpt) => {
     setCalcBusy(true);
     setSaveMsg(null);
-    const allSym = activeCalcOpt.allSymbols || activeOverlay.symbolsAll || activeOverlay.symbols.includes("*");
+    const cap = Math.max(0, Math.round(Number(activeOverlay.symbolCap) || 0));
+    const allSym = Boolean(activeCalcOpt.allSymbols || activeOverlay.symbolsAll);
+    const selected = (activeOverlay.symbols || []).filter((s) => s !== "*" && s !== "ALL");
     const j = await startHistCalc({
       ...activeCalcOpt,
       allConfigs: true,
       allSymbols: allSym,
-      symbols: allSym ? ["*"] : activeOverlay.symbols,
+      symbolCap: cap,
+      symbols: allSym ? [] : selected,
       preferMinimalRange: activeOverlay.preferMinimalRange,
       additionalCoordination: activeOverlay.additionalCoordination,
       coordOptimizationN: activeOverlay.coordOptimizationN,
       connection: histConn,
-      overlay: activeOverlay,
-      selectedSymbols: activeOverlay.symbols,
+      overlay: { ...activeOverlay, symbolCap: cap },
+      selectedSymbols: allSym ? [] : selected,
     });
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
@@ -725,7 +728,7 @@ function SettingsPage() {
                   <EnableSlider
                     label="All symbols"
                     on={calcOpt.allSymbols}
-                    hint={calcOpt.allSymbols ? "ranked universe (capped)" : "selected list only"}
+                    hint={calcOpt.allSymbols ? "ranked universe · cap from settings" : "selected list only"}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
                   />
                   <EnableSlider
@@ -2068,7 +2071,7 @@ function SettingsPage() {
               />
               <div className="mt-3">
                 <Grid>
-                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="0 = unlimited. With Dynamic on, the engine keeps every USDT-M name (ranked max leverage then 1H vol) plus any open positions." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="Default 25. 0 = unlimited. Live scan and historic calc use only this many ranked names." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">

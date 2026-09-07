@@ -13,7 +13,7 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
-export const DEFAULT_SYMBOL_COUNT = 12;
+export const DEFAULT_SYMBOL_COUNT = 25;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [
@@ -322,7 +322,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: true,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 0,
+  symbolCap: 25,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,
@@ -868,7 +868,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   if (live?.symbolsAll != null) out.symbolsAll = bool(live.symbolsAll, out.symbolsAll);
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);
   out.symbolsDynamic = bool(out.symbolsDynamic, true);
-  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, 0)));
+  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, DEFAULT_SYMBOL_COUNT)));
   if (out.trailRecalcGive && live?.trailGivePct == null) {
     out.trailGivePct = trailGiveFromArm(out.trailArmPct, out.trailGiveFactor, out.trailGiveMin, out.trailGiveMax);
   }
@@ -970,6 +970,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolsDynamic = next.symbolsDynamic !== false;
 
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
+  if (next.symbolsAll && next.symbolCap === 0 && overlay.symbolCap == null) {
+    next.symbolCap = DEFAULT_SYMBOL_COUNT;
+  }
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;
   const dist = [...(next.dcaStepDistancesPct || [0.5, 1, 1.5, 2])];

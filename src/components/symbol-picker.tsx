@@ -128,9 +128,9 @@ export function SymbolPicker({
           <span className="ml-2 text-muted">default {DEFAULT_SYMBOL_COUNT}</span>
         </p>
         <div className="flex flex-wrap gap-2">
-          <Mini onClick={() => applyTop(DEFAULT_SYMBOL_COUNT)}>Default 12</Mini>
+          <Mini onClick={() => applyTop(DEFAULT_SYMBOL_COUNT)}>Default {DEFAULT_SYMBOL_COUNT}</Mini>
           <Mini onClick={() => applyTop(12)}>Top 12</Mini>
-          <Mini onClick={() => applyTop(24)}>Top 24</Mini>
+          <Mini onClick={() => applyTop(25)}>Top 25</Mini>
           <Mini onClick={() => applyTop(50)}>Top 50</Mini>
           <Mini onClick={() => onChange(["*"])}>All unlimited</Mini>
           <Mini onClick={() => onChange([])}>Clear</Mini>

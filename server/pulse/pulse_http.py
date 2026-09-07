@@ -856,13 +856,48 @@ def _sets_lane(lane: dict, st: dict) -> dict:
     }
 
 
+def _lane_progress(st: dict) -> dict:
+    sets = st.get("sets") or {}
+    prog = dict(sets.get("progress") or {})
+    hist = st.get("historic") or {}
+    if st.get("progressPhase"):
+        return {
+            "pct": st.get("progressPct") if st.get("progressPct") is not None else prog.get("pct"),
+            "phase": st.get("progressPhase"),
+            "detail": st.get("progressDetail") or prog.get("detail") or hist.get("detail"),
+            "ready": st.get("progressReady") if st.get("progressReady") is not None else prog.get("ready"),
+            "symbol": st.get("progressSymbol") or prog.get("symbol") or "",
+            "setId": st.get("progressSetId") or prog.get("setId") or "",
+            "symbolsDone": st.get("progressSymbolsDone") if st.get("progressSymbolsDone") is not None else prog.get("symbolsDone"),
+            "symbolsTotal": st.get("progressSymbolsTotal") if st.get("progressSymbolsTotal") is not None else prog.get("symbolsTotal"),
+            "setsDone": st.get("progressSetsDone") if st.get("progressSetsDone") is not None else prog.get("setsDone"),
+            "setsTotal": st.get("progressSetsTotal") if st.get("progressSetsTotal") is not None else prog.get("setsTotal"),
+            "barsDone": st.get("progressBarsDone") if st.get("progressBarsDone") is not None else prog.get("barsDone"),
+            "barsTotal": st.get("progressBarsTotal") if st.get("progressBarsTotal") is not None else prog.get("barsTotal"),
+            "elapsedMs": st.get("progressElapsedMs") if st.get("progressElapsedMs") is not None else prog.get("elapsedMs"),
+            "lastRunMs": st.get("progressLastRunMs") if st.get("progressLastRunMs") is not None else prog.get("lastRunMs"),
+            "cycle": st.get("progressCycle") if st.get("progressCycle") is not None else prog.get("cycle"),
+            "error": st.get("progressError") or prog.get("error") or "",
+        }
+    hist_phase = str(hist.get("phase") or "")
+    if hist_phase in ("backfill", "fetch", "gap", "initial", "catalog", "replay", "score", "partial") and str(prog.get("phase") or "idle") in ("idle", "ready", ""):
+        prog = {
+            **prog,
+            "phase": hist.get("phase"),
+            "pct": hist.get("pct") if hist.get("pct") is not None else prog.get("pct"),
+            "detail": hist.get("detail") or prog.get("detail"),
+            "ready": hist.get("ready") if hist.get("ready") is not None else prog.get("ready"),
+        }
+    return prog
+
+
 def lane_summary(lane: dict) -> dict:
     st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
-    prog = sets.get("progress") or {}
+    prog = _lane_progress(st)
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
