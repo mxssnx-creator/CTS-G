@@ -2649,6 +2649,8 @@ def process_guard_test() -> None:
     rec("watchdog-heartbeat-loop", "def _watchdog_loop" in trader and 'name="watchdog"' in trader)
     rec("hist-durable-watchdog", "sd_notify(\"WATCHDOG=1\")" in trader and "def _hist_fetch_durable" in trader)
     rec("hist-partial-publish-helper", "def _hist_can_publish_partial" in trader)
+    rec("hist-replay-selection-helper", "def _hist_replay_selection" in trader)
+    rec("hist-durable-deferred-persist", "persist=False" in trader and "history_store.flush" in trader)
 
     import pulse_trader as pt
     partial = object.__new__(pt.Pulse)
@@ -2665,6 +2667,38 @@ def process_guard_test() -> None:
         partial._hist_can_publish_partial(["a"] * 10, ["a"] * 10, []))
     rec("partial-publish-empty-blocked",
         not partial._hist_can_publish_partial(["a"] * 10, [], ["a"] * 10))
+    sel = object.__new__(pt.Pulse)
+    sel._hist_fetch_failures = 2
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 53, ["a"] * 50, ["x"] * 3,
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-partial", reason == "partial" and len(names) == 50, reason)
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 53, ["a"] * 50, ["x"] * 3,
+        already_ready=True, published=["a"] * 50, changed=[],
+    )
+    rec("replay-selection-wait-existing-partial", reason == "wait-gaps" and names == [], reason)
+    names, reason = sel._hist_replay_selection(
+        ["a", "b", "c"], ["a", "b"], ["c"],
+        already_ready=True, published=["a"], changed=[],
+    )
+    rec("replay-selection-add-new-contiguous", reason == "incremental-gap-fill" and names == ["b"], f"{names} {reason}")
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=True, published=["a", "b"], changed=[],
+    )
+    rec("replay-selection-skip-unchanged", reason == "skip-unchanged" and names == [], reason)
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=True, published=["a", "b"], changed=["b"],
+    )
+    rec("replay-selection-changed-only", reason == "incremental" and names == ["b"], str(names))
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-full-initial", reason == "full" and names == ["a", "b"], reason)
 
 
 def historic_snapshot_test() -> None:

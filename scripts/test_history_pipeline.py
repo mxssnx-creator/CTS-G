@@ -2,6 +2,7 @@
 """Focused no-network tests for durable rolling 1m history."""
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import tempfile
@@ -54,6 +55,36 @@ class HistoryPipelineTests(unittest.TestCase):
             restarted = HistoryStore("bingx-x01", retention_bars=120, path=path, checkpoint_path=checkpoint)
             self.assertEqual([row["minute"] for row in restarted.records("X-USDT")], list(range(6, 126)))
             self.assertEqual(restarted.watermark("X-USDT", source="exchange"), 125)
+
+    def test_bulk_merge_defers_persist_until_flush(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / "history.json")
+            checkpoint = str(pathlib.Path(directory) / "checkpoint.json")
+            store = HistoryStore("bingx-x01", retention_bars=120, path=path, checkpoint_path=checkpoint)
+            store.merge("X-USDT", [{"minute": 1, "bar": bar(10.0)}], source="exchange", persist=False)
+            self.assertFalse(os.path.exists(path))
+            store.merge("Y-USDT", [{"minute": 1, "bar": bar(11.0)}], source="exchange", persist=False)
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(store.flush())
+            self.assertTrue(os.path.exists(path))
+            restarted = HistoryStore("bingx-x01", retention_bars=120, path=path, checkpoint_path=checkpoint)
+            self.assertEqual(len(restarted.records("X-USDT")), 1)
+            self.assertEqual(len(restarted.records("Y-USDT")), 1)
+
+    def test_persist_debounce_skips_immediate_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(pathlib.Path(directory) / "history.json")
+            checkpoint = str(pathlib.Path(directory) / "checkpoint.json")
+            store = HistoryStore("bingx-x01", retention_bars=120, path=path, checkpoint_path=checkpoint)
+            store._persist_interval_s = 60.0
+            store.merge("X-USDT", [{"minute": 1, "bar": bar(10.0)}], source="exchange")
+            first_mtime = os.path.getmtime(path)
+            store.merge("X-USDT", [{"minute": 2, "bar": bar(11.0)}], source="exchange")
+            self.assertEqual(os.path.getmtime(path), first_mtime)
+            self.assertTrue(store.flush())
+            self.assertGreaterEqual(os.path.getmtime(path), first_mtime)
+            restarted = HistoryStore("bingx-x01", retention_bars=120, path=path, checkpoint_path=checkpoint)
+            self.assertEqual([row["minute"] for row in restarted.records("X-USDT")], [1, 2])
 
     def test_missing_ranges_are_contiguous_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

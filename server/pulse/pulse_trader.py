@@ -2648,7 +2648,7 @@ class Pulse:
                     bars.append(closed_bar)
                     del bars[:-KLINE_LIMIT]
                     try:
-                        self.history_store.merge_bar(s, int(rec[0]), closed_bar, source="mark", quality="live-observed", closed=True)
+                        self.history_store.merge_bar(s, int(rec[0]), closed_bar, source="mark", quality="live-observed", closed=True, persist=False)
                     except Exception:
                         pass
                     with self.state_guard():
@@ -9631,12 +9631,54 @@ class Pulse:
         min_done = max(1, min(24, max(1, n_valid // 5)))
         return failures >= 2 and n_done >= min_done and coverage_pct >= 50.0
 
+    def _hist_replay_selection(
+        self,
+        valid: Sequence[str],
+        completed: Sequence[str],
+        missing: Sequence[str],
+        *,
+        already_ready: bool,
+        published: Sequence[str],
+        changed: Sequence[str],
+    ) -> Tuple[List[str], str]:
+        """Choose the smallest symbol slice that should be replayed.
+
+        Empty names mean the durable lane should wait or skip: either gaps are
+        still blocking the first publish, or an already-live book has no new
+        closed minutes to score.
+        """
+        valid_list = [str(symbol) for symbol in valid]
+        completed_list = [str(symbol) for symbol in completed]
+        missing_list = [str(symbol) for symbol in missing]
+        published_set = {str(symbol) for symbol in published}
+        changed_set = {str(symbol) for symbol in changed}
+        if missing_list:
+            if already_ready:
+                names = [
+                    symbol
+                    for symbol in completed_list
+                    if symbol not in published_set or symbol in changed_set
+                ]
+                return names, ("incremental-gap-fill" if names else "wait-gaps")
+            if self._hist_can_publish_partial(valid_list, completed_list, missing_list) and completed_list:
+                return completed_list, "partial"
+            return [], "wait-gaps"
+        if already_ready:
+            names = [
+                symbol
+                for symbol in valid_list
+                if symbol not in published_set or symbol in changed_set
+            ]
+            return names, ("incremental" if names else "skip-unchanged")
+        return valid_list, "full"
+
     def _hist_fetch_durable(self, book: SetBook, generation: int, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         """Fetch only missing exchange minutes, with a two-minute tail overlap."""
-        gaps_by_symbol: Dict[str, List[Dict[str, Any]]] = {
-            symbol: self.history_store.missing_ranges(symbol, start, end, source="exchange")
-            for symbol in symbols
-        }
+        gaps_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+        for i, symbol in enumerate(symbols):
+            if i % 8 == 0:
+                sd_notify("WATCHDOG=1")
+            gaps_by_symbol[symbol] = self.history_store.missing_ranges(symbol, start, end, source="exchange")
         requests: List[Tuple[str, Dict[str, Any]]] = []
         for symbol in symbols:
             gaps = list(gaps_by_symbol.get(symbol) or [])
@@ -9657,6 +9699,7 @@ class Pulse:
                     }))
                     cursor = page_end + 1
         if not requests:
+            self._hist_fetch_changed = set()
             return self._hist_coverage(book, symbols, start, end)[0], {}
         self._hist_progress_update(
             book,
@@ -9668,6 +9711,7 @@ class Pulse:
         )
         failures: Dict[str, str] = {}
         stored = 0
+        changed: set[str] = set()
         for offset in range(0, len(requests), 4):
             sd_notify("WATCHDOG=1")
             if self._hist_request_changed():
@@ -9696,9 +9740,17 @@ class Pulse:
                 if not parsed:
                     failures[symbol] = "exchange returned no valid timestamped 1m bars"
                     continue
-                result = self.history_store.merge(symbol, parsed, source="exchange", quality="exchange-confirmed")
+                result = self.history_store.merge(symbol, parsed, source="exchange", quality="exchange-confirmed", persist=False)
                 stored += int(result.get("inserted") or 0) + int(result.get("replaced") or 0)
+                if int(result.get("inserted") or 0) > 0:
+                    changed.add(symbol)
             sd_notify("WATCHDOG=1")
+            if (offset // 4) and (offset // 4) % 40 == 0:
+                try:
+                    self.history_store.flush()
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
             self._hist_progress_update(
                 book,
                 generation,
@@ -9706,10 +9758,17 @@ class Pulse:
                 pct=round(100.0 * min(offset + len(batch), len(requests)) / max(1, len(requests)), 1),
             )
             time.sleep(0)
+        try:
+            sd_notify("WATCHDOG=1")
+            self.history_store.flush()
+            sd_notify("WATCHDOG=1")
+        except Exception:
+            pass
         coverage, missing = self._hist_coverage(book, symbols, start, end)
         for symbol in missing:
             failures.setdefault(symbol, "unresolved exchange gap")
         self._hist_fetch_stored = stored
+        self._hist_fetch_changed = set(changed)
         if failures or missing:
             self._hist_fetch_failures = min(6, int(self._hist_fetch_failures or 0) + 1)
         else:
@@ -10337,6 +10396,7 @@ class Pulse:
                 }
                 with self.state_guard():
                     progress = book.progress
+                    already_ready = bool(progress.ready)
                     progress.missing_symbols = list(missing)
                     progress.gapped_symbols = list(gapped)
                     progress.symbols_done = len(completed)
@@ -10350,24 +10410,48 @@ class Pulse:
                     )
                     progress.deferred_reason = "unresolved exchange gap" if missing else ""
                 self._hist_write_status(book, coverage=coverage_blob)
-                replay_names = list(completed if missing else valid)
+                replay_names, replay_reason = self._hist_replay_selection(
+                    valid,
+                    completed,
+                    missing,
+                    already_ready=already_ready,
+                    published=list(getattr(self, "_hist_last_published_watermark", {}) or {}),
+                    changed=list(getattr(self, "_hist_fetch_changed", set()) or []),
+                )
                 if missing:
                     retry_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
                     self._hist_next_hourly_at = retry_at
-                    already_ready = False
                     with self.state_guard():
                         book.progress.next_run_at = retry_at
-                        already_ready = bool(book.progress.ready)
                     self._hist_checkpoint(book, "gap")
                     self._hist_write_status(book, nextRunAt=retry_at)
-                    can_partial = self._hist_can_publish_partial(valid, completed, missing)
-                    if already_ready or not can_partial or not replay_names:
-                        self._hist_wake.wait(timeout=min(5.0, max(0.5, retry_at - time.time())))
-                        continue
+                if replay_reason == "wait-gaps":
+                    self._hist_wake.wait(timeout=min(5.0, max(0.5, float(self._hist_next_hourly_at or time.time() + 5.0) - time.time())))
+                    continue
+                if replay_reason == "skip-unchanged":
+                    complete_at = time.time()
+                    with self.state_guard():
+                        refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+                    self._hist_next_hourly_at = complete_at + refresh_s
+                    with self.state_guard():
+                        progress = book.progress
+                        progress.phase = "ready"
+                        progress.pct = 100.0
+                        progress.ready = True
+                        progress.last_complete_run = complete_at
+                        progress.next_run_at = self._hist_next_hourly_at
+                        progress.stale = False
+                        progress.deferred_reason = ""
+                        progress.coordination_complete = True
+                        progress.detail = f"coverage unchanged · {len(valid)} symbols · skip replay"
+                    self._hist_write_status(book, coverage=coverage_blob, nextRunAt=self._hist_next_hourly_at)
+                    self._hist_checkpoint(book, "skip-unchanged")
+                    continue
+                if missing:
                     with self.state_guard():
                         book.progress.phase = "replay"
                         book.progress.detail = (
-                            f"partial coverage {len(completed)}/{len(valid)} · replaying contiguous"
+                            f"partial coverage {len(completed)}/{len(valid)} · replaying {len(replay_names)} contiguous"
                         )
                         book.progress.deferred_reason = ""
 
@@ -10375,14 +10459,21 @@ class Pulse:
                 try:
                     with self.state_guard():
                         already = bool(book.progress.ready)
-                    replayed = self._replay_sets_isolated(replay_names, already, len(replay_names))
+                    progress_total = max(
+                        len(completed),
+                        len(replay_names),
+                        len(getattr(self, "_hist_last_published_watermark", {}) or {}),
+                    )
+                    replayed = self._replay_sets_isolated(replay_names, already, progress_total)
                 finally:
                     self.hist_busy = False
                 if not replayed or self._hist_request_changed():
                     self._hist_checkpoint(book, "superseded-or-deferred")
                     self._hist_wake.wait(timeout=1.0)
                     continue
-                watermark = {symbol: int(self.history_store.watermark(symbol, source="exchange") or 0) for symbol in replay_names}
+                watermark = dict(getattr(self, "_hist_last_published_watermark", {}) or {})
+                for symbol in replay_names:
+                    watermark[symbol] = int(self.history_store.watermark(symbol, source="exchange") or 0)
                 complete_at = time.time()
                 self._hist_last_published_watermark = dict(watermark)
                 if not missing:
@@ -10403,7 +10494,10 @@ class Pulse:
                     progress.next_run_at = self._hist_next_hourly_at
                     progress.watermark = dict(watermark)
                     progress.last_published_watermark = dict(watermark)
-                    progress.valid_symbols = list(replay_names)
+                    if already_ready:
+                        progress.valid_symbols = list(dict.fromkeys(list(progress.valid_symbols or []) + list(replay_names)))
+                    else:
+                        progress.valid_symbols = list(replay_names)
                     progress.missing_symbols = list(missing)
                     progress.gapped_symbols = list(gapped)
                     progress.stale = False
@@ -10411,7 +10505,7 @@ class Pulse:
                     progress.coordination_complete = True
                     if missing:
                         progress.detail = (
-                            f"published partial {mode} replay · {len(replay_names)}/{len(valid)} symbols · {len(missing)} gaps retry"
+                            f"published partial {mode} replay · {len(progress.valid_symbols)}/{len(valid)} symbols · {len(missing)} gaps retry"
                         )
                     else:
                         progress.detail = f"published complete {mode} replay · {len(valid)} symbols · next hourly refresh"
@@ -10686,6 +10780,12 @@ class Pulse:
         stop = getattr(self, "_watchdog_stop", None)
         while True:
             sd_notify("WATCHDOG=1")
+            try:
+                store = getattr(self, "history_store", None)
+                if store is not None and hasattr(store, "flush"):
+                    store.flush()
+            except Exception:
+                pass
             if stop is None:
                 time.sleep(5.0)
                 continue

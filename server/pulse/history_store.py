@@ -137,6 +137,9 @@ class HistoryStore:
         self._lock = threading.RLock()
         self._rows: Dict[str, Dict[int, Dict[str, Any]]] = {}
         self._loaded = False
+        self._dirty = False
+        self._last_persist_mono = 0.0
+        self._persist_interval_s = 3.0
         self._load()
 
     def _load(self) -> None:
@@ -200,6 +203,28 @@ class HistoryStore:
         }
         atomic_write(self.path, payload)
 
+    def _maybe_persist_locked(self, *, force: bool = False) -> bool:
+        """Write the on-disk snapshot at most once per interval unless forced.
+
+        A 500-symbol lane is tens of megabytes of JSON. Dumping it after every
+        merge holds the GIL long enough to starve systemd watchdog pings.
+        """
+        if not self._dirty:
+            return False
+        now = time.monotonic()
+        interval = max(0.25, float(getattr(self, "_persist_interval_s", 3.0) or 3.0))
+        if not force and self._last_persist_mono > 0.0 and (now - self._last_persist_mono) < interval:
+            return False
+        self._persist_locked()
+        self._dirty = False
+        self._last_persist_mono = now
+        return True
+
+    def flush(self) -> bool:
+        """Persist any deferred bars. Safe to call from a heartbeat thread."""
+        with self._lock:
+            return self._maybe_persist_locked(force=True)
+
     def _candidate_source(self, source: str, row_source: str = "") -> str:
         value = str(row_source or source or "exchange").strip().lower()
         return value if value in SOURCE_PRIORITY else str(source or "exchange").strip().lower() or "exchange"
@@ -259,8 +284,10 @@ class HistoryStore:
                 target[minute] = candidate
                 replaced += 1
             self._rows[name] = self._compact_rows(target)
-            if persist and (inserted or replaced):
-                self._persist_locked()
+            if inserted or replaced:
+                self._dirty = True
+                if persist:
+                    self._maybe_persist_locked(force=False)
             watermark = max(self._rows[name], default=0)
         return {"inserted": inserted, "replaced": replaced, "ignored": ignored, "watermark": watermark}
 
