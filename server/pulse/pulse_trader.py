@@ -1056,6 +1056,7 @@ class Pulse:
         self.strat_general = True
         self.tf_on = {"1m": True, "5m": True, "15m": True}
         self._hist_stop = threading.Event()
+        self._watchdog_stop = threading.Event()
         self.apply_live_config(initial=True)
 
     def group_of(self, sym: str) -> str:
@@ -2752,6 +2753,7 @@ class Pulse:
             for i in range(0, len(reqs), 4):
                 if time.time() < self.kline_ban:
                     break
+                sd_notify("WATCHDOG=1")
                 chunk = reqs[i : i + 4]
                 rows = self.api.gather_public(chunk, timeout=6.0)
                 for _path, extra, body in rows:
@@ -9599,7 +9601,9 @@ class Pulse:
     def _hist_coverage(self, book: SetBook, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
         coverage: Dict[str, Dict[str, Any]] = {}
         missing: List[str] = []
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
+            if i % 8 == 0:
+                sd_notify("WATCHDOG=1")
             item = self.history_store.coverage(symbol, start, end, source="exchange")
             coverage[symbol] = item
             bars = self.history_store.window(symbol, bars=book.lookback, end=end, source="exchange")
@@ -9608,6 +9612,24 @@ class Pulse:
             elif bars:
                 book.ingest_bars(symbol, bars)
         return coverage, missing
+
+    def _hist_can_publish_partial(
+        self,
+        valid: Sequence[str],
+        completed: Sequence[str],
+        missing: Sequence[str],
+    ) -> bool:
+        """Allow a contiguous subset to go live instead of stalling forever on gaps."""
+        if not missing:
+            return True
+        n_valid = len(valid)
+        n_done = len(completed)
+        if n_done <= 0 or n_valid <= 0:
+            return False
+        failures = int(getattr(self, "_hist_fetch_failures", 0) or 0)
+        coverage_pct = 100.0 * n_done / n_valid
+        min_done = max(1, min(24, max(1, n_valid // 5)))
+        return failures >= 2 and n_done >= min_done and coverage_pct >= 50.0
 
     def _hist_fetch_durable(self, book: SetBook, generation: int, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         """Fetch only missing exchange minutes, with a two-minute tail overlap."""
@@ -9647,6 +9669,7 @@ class Pulse:
         failures: Dict[str, str] = {}
         stored = 0
         for offset in range(0, len(requests), 4):
+            sd_notify("WATCHDOG=1")
             if self._hist_request_changed():
                 break
             batch = requests[offset : offset + 4]
@@ -9664,6 +9687,7 @@ class Pulse:
             except Exception as exc:
                 for symbol, _params in batch:
                     failures[symbol] = str(exc)[:160]
+                time.sleep(0)
                 continue
             for _path, params, body in rows:
                 symbol = str(params.get("symbol") or "")
@@ -9674,12 +9698,14 @@ class Pulse:
                     continue
                 result = self.history_store.merge(symbol, parsed, source="exchange", quality="exchange-confirmed")
                 stored += int(result.get("inserted") or 0) + int(result.get("replaced") or 0)
+            sd_notify("WATCHDOG=1")
             self._hist_progress_update(
                 book,
                 generation,
                 detail=f"backfill {min(offset + len(batch), len(requests))}/{len(requests)} ranges · {stored} bars",
                 pct=round(100.0 * min(offset + len(batch), len(requests)) / max(1, len(requests)), 1),
             )
+            time.sleep(0)
         coverage, missing = self._hist_coverage(book, symbols, start, end)
         for symbol in missing:
             failures.setdefault(symbol, "unresolved exchange gap")
@@ -9692,6 +9718,7 @@ class Pulse:
 
     def _hist_progress_update(self, book: SetBook, generation: int, **values: Any) -> bool:
         """Update replay/fetch progress only while its catalog is current."""
+        sd_notify("WATCHDOG=1")
         with self.state_guard():
             if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                 return False
@@ -10001,8 +10028,10 @@ class Pulse:
             source.progress.detail = "building full catalog"
 
         try:
+            sd_notify("WATCHDOG=1")
             built = SetBook()
             built.load(overlay, cts, rebuild=True)
+            sd_notify("WATCHDOG=1")
             with self.state_guard():
                 current_generation = int(getattr(self, "_sets_generation", 0) or 0)
                 if self.sets is not source or current_generation != generation:
@@ -10117,6 +10146,7 @@ class Pulse:
     def _hist_loop_durable(self) -> None:
         """One lane-owned initial/hourly/gap state machine for historic replay."""
         while not self._hist_stop.is_set():
+            sd_notify("WATCHDOG=1")
             self._hist_wake.clear()
             if not self._catalog_ready.is_set():
                 self._hist_wake.wait(timeout=5.0)
@@ -10320,35 +10350,50 @@ class Pulse:
                     )
                     progress.deferred_reason = "unresolved exchange gap" if missing else ""
                 self._hist_write_status(book, coverage=coverage_blob)
+                replay_names = list(completed if missing else valid)
                 if missing:
                     retry_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
                     self._hist_next_hourly_at = retry_at
+                    already_ready = False
                     with self.state_guard():
                         book.progress.next_run_at = retry_at
+                        already_ready = bool(book.progress.ready)
                     self._hist_checkpoint(book, "gap")
                     self._hist_write_status(book, nextRunAt=retry_at)
-                    self._hist_wake.wait(timeout=min(5.0, max(0.5, retry_at - time.time())))
-                    continue
+                    can_partial = self._hist_can_publish_partial(valid, completed, missing)
+                    if already_ready or not can_partial or not replay_names:
+                        self._hist_wake.wait(timeout=min(5.0, max(0.5, retry_at - time.time())))
+                        continue
+                    with self.state_guard():
+                        book.progress.phase = "replay"
+                        book.progress.detail = (
+                            f"partial coverage {len(completed)}/{len(valid)} · replaying contiguous"
+                        )
+                        book.progress.deferred_reason = ""
 
                 self.hist_busy = True
                 try:
                     with self.state_guard():
                         already = bool(book.progress.ready)
-                    replayed = self._replay_sets_isolated(valid, already, len(valid))
+                    replayed = self._replay_sets_isolated(replay_names, already, len(replay_names))
                 finally:
                     self.hist_busy = False
                 if not replayed or self._hist_request_changed():
                     self._hist_checkpoint(book, "superseded-or-deferred")
                     self._hist_wake.wait(timeout=1.0)
                     continue
-                watermark = {symbol: int(self.history_store.watermark(symbol, source="exchange") or 0) for symbol in valid}
+                watermark = {symbol: int(self.history_store.watermark(symbol, source="exchange") or 0) for symbol in replay_names}
                 complete_at = time.time()
                 self._hist_last_published_watermark = dict(watermark)
-                self._hist_fetch_failures = 0
+                if not missing:
+                    self._hist_fetch_failures = 0
                 self._hist_last_closed_minute = max(watermark.values(), default=0)
                 with self.state_guard():
                     refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
-                self._hist_next_hourly_at = complete_at + refresh_s
+                if missing:
+                    self._hist_next_hourly_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
+                else:
+                    self._hist_next_hourly_at = complete_at + refresh_s
                 with self.state_guard():
                     progress = book.progress
                     progress.phase = "ready"
@@ -10358,10 +10403,18 @@ class Pulse:
                     progress.next_run_at = self._hist_next_hourly_at
                     progress.watermark = dict(watermark)
                     progress.last_published_watermark = dict(watermark)
+                    progress.valid_symbols = list(replay_names)
+                    progress.missing_symbols = list(missing)
+                    progress.gapped_symbols = list(gapped)
                     progress.stale = False
                     progress.deferred_reason = ""
                     progress.coordination_complete = True
-                    progress.detail = f"published complete {mode} replay · {len(valid)} symbols · next hourly refresh"
+                    if missing:
+                        progress.detail = (
+                            f"published partial {mode} replay · {len(replay_names)}/{len(valid)} symbols · {len(missing)} gaps retry"
+                        )
+                    else:
+                        progress.detail = f"published complete {mode} replay · {len(valid)} symbols · next hourly refresh"
                     if request:
                         self._hist_request_seen = run_id
                 self._hist_write_status(book, coverage=coverage_blob, finishedAt=complete_at, lastCompleteRun=complete_at, nextRunAt=self._hist_next_hourly_at)
@@ -10624,9 +10677,29 @@ class Pulse:
         if self.cycle % 12 == 0:
             self.trim_caches(force=self.load.last_budget.level in ("overload", "critical"))
 
+    def _watchdog_loop(self) -> None:
+        """Independent systemd heartbeat.
+
+        Sleep releases the GIL so catalog bootstrap, durable 1m backfill, and
+        historic scoring cannot starve Type=notify WatchdogSec.
+        """
+        stop = getattr(self, "_watchdog_stop", None)
+        while True:
+            sd_notify("WATCHDOG=1")
+            if stop is None:
+                time.sleep(5.0)
+                continue
+            if stop.is_set():
+                return
+            stop.wait(timeout=5.0)
+
     def run(self) -> None:
         log(f"pulse start {CONN_SHORT} {BASE}")
         sd_notify("READY=1\nWATCHDOG=1")
+        # Heartbeat must start before any blocking REST/catalog work. A 566
+        # symbol kline fill or 13k-set catalog can otherwise exceed WatchdogSec
+        # before the main loop ever runs.
+        threading.Thread(target=self._watchdog_loop, name="watchdog", daemon=True).start()
         # The full configured catalog is built after READY on a worker.  This
         # keeps systemd startup bounded while preserving complete set
         # enumeration and the same atomic generation checks used by replay.

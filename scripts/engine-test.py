@@ -2646,6 +2646,25 @@ def process_guard_test() -> None:
     rec("recon-pending-not-failure", "confirmed_book_only" in trader and "pending_absent" in trader)
     rec("stop-file-negative-control", "os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)" in trader and "halt_reason = \"stopped\"" in trader)
     rec("async-shared-rate-trip", "self._take(\"public\", path)" in fast and "self._trip(path, body)" in fast)
+    rec("watchdog-heartbeat-loop", "def _watchdog_loop" in trader and 'name="watchdog"' in trader)
+    rec("hist-durable-watchdog", "sd_notify(\"WATCHDOG=1\")" in trader and "def _hist_fetch_durable" in trader)
+    rec("hist-partial-publish-helper", "def _hist_can_publish_partial" in trader)
+
+    import pulse_trader as pt
+    partial = object.__new__(pt.Pulse)
+    partial._hist_fetch_failures = 2
+    rec("partial-publish-high-coverage",
+        partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
+    partial._hist_fetch_failures = 1
+    rec("partial-publish-waits-retries",
+        not partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
+    partial._hist_fetch_failures = 6
+    rec("partial-publish-low-coverage-blocked",
+        not partial._hist_can_publish_partial(["a"] * 566, ["a"] * 8, ["x"] * 558))
+    rec("partial-publish-complete",
+        partial._hist_can_publish_partial(["a"] * 10, ["a"] * 10, []))
+    rec("partial-publish-empty-blocked",
+        not partial._hist_can_publish_partial(["a"] * 10, [], ["a"] * 10))
 
 
 def historic_snapshot_test() -> None:
