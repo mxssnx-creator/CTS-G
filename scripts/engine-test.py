@@ -546,7 +546,7 @@ def always_start_test() -> None:
 
         def __call__(self, *args, timeout: float = 25.0):
             self.calls.append(args)
-            if args and args[0] == "start" and self.fail_first_start:
+            if args and args[0] in ("start", "restart") and self.fail_first_start:
                 self.fail_first_start = False
                 return 1, "start-limit-hit"
             return 0, "ok"
@@ -573,7 +573,7 @@ def always_start_test() -> None:
     rec("astart-sidecar-clears-all", okc and not os.path.exists(pause_f) and not os.path.exists(stop_f)
         and not os.path.exists(ph.STOP_ALL_PATH) and os.path.exists(reset_f), msg[:140])
     seq = [c[0] for c in ctl.calls if c]
-    rec("astart-sidecar-retry-after-limit", seq == ["enable", "start", "reset-failed", "enable", "start"], str(seq))
+    rec("astart-sidecar-retry-after-limit", seq == ["enable", "restart", "reset-failed", "enable", "restart"], str(seq))
 
     ctl.calls = []
     ctl.fail_first_start = False

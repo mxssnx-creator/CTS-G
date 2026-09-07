@@ -528,12 +528,15 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             # on the next balance tick, so a latched drawdown/equity halt clears.
             _touch(reset_eq)
             _sysctl("enable", unit, timeout=8)
-            rc, out = _sysctl("start", unit)
+            # start is a no-op when the unit is already active, so an in-memory
+            # "stopped" latch would stick. Restart always picks up cleared flags.
+            verb = "restart" if action == "start" else "start"
+            rc, out = _sysctl(verb, unit)
             if rc != 0:
                 # start-limit-hit after a crash loop blocks start — reset and retry once.
                 _sysctl("reset-failed", unit, timeout=8)
                 _sysctl("enable", unit, timeout=8)
-                rc, out = _sysctl("start", unit)
+                rc, out = _sysctl(verb, unit)
             st = unit_state(cid, fresh=True)
             notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
