@@ -44,6 +44,7 @@ from set_engine import (
     drawdown_time,
     drawdown_time_by_symbol,
     last_n_chrono,
+    merge_hist_rows,
     pin_compute_threads,
     synth_trend,
 )
@@ -1886,6 +1887,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
 
         replay_pending: Dict[Any, Dict[str, Any]] = {}
         symbol_states: Dict[str, Dict[str, Any]] = {}
+        replayed_set_ids = tuple(str(st.id) for st in book.by_idx)
         replay_done = 0
         replay_tasks_submitted = 0
         replay_tasks_completed = 0
@@ -1948,17 +1950,17 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         def finish_symbol(state: Dict[str, Any], total: int) -> None:
             nonlocal replay_done
             sym = str(state["symbol"])
-            if state["hist"]:
-                merge_started = time.perf_counter()
-                book._commit_hist(
-                    state["hist"],
-                    state["ind"] or None,
-                    merge=True,
-                    replayed_symbols=[sym],
-                    hist_counts=state["counts"],
-                    score=False,
-                )
-                timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
+            merge_started = time.perf_counter()
+            book._commit_hist(
+                state["hist"],
+                state["ind"] or None,
+                merge=True,
+                replayed_symbols=[sym],
+                hist_counts=state["counts"],
+                score=False,
+                replayed_set_ids=state["replayedIds"],
+            )
+            timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
             for kind, rows in state["ind"].items():
                 if rows:
                     ind_hist[kind] = (ind_hist.get(kind) or []) + rows
@@ -2004,16 +2006,11 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             if state is None:
                 raise RuntimeError(f"replay tile completed for unknown symbol {sym}")
             timings["replayMs"] += float(tile_ms or 0.0)
-            merge_started = time.perf_counter()
-            book._commit_hist(
-                local_hist,
-                local_ind or None,
-                merge=True,
-                replayed_symbols=[str(sym)],
-                hist_counts=local_counts,
-                score=False,
-            )
-            timings["mergeMs"] += (time.perf_counter() - merge_started) * 1000.0
+            for sid, rows in local_hist.items():
+                if not rows:
+                    continue
+                previous = state["hist"].get(sid) or []
+                state["hist"][sid] = merge_hist_rows(previous, rows, [str(sym)]) if previous else rows[-hist_cap:]
             for kind, rows in local_ind.items():
                 if rows:
                     target = state["ind"].get(kind) or []
@@ -2147,6 +2144,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 "ind": {},
                 "strat": {},
                 "counts": {},
+                "replayedIds": replayed_set_ids,
                 "tiles": list(all_tile_specs),
                 "nextTile": 0,
                 "tilesDone": 0,

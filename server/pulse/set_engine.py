@@ -202,12 +202,26 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     return len(keys) / span_h
 
 
+def hist_sort_key(row: Any) -> Tuple[float, str, str, str, float, float]:
+    """Stable chronological ordering when fills share an exchange timestamp."""
+    if isinstance(row, dict):
+        return (
+            finite(row.get("t")),
+            str(row.get("symbol") or ""),
+            str(row.get("side") or row.get("direction") or ""),
+            str(row.get("reason") or ""),
+            round(finite(row.get("pnl_pct")), 10),
+            round(finite(row.get("hold_s")), 3),
+        )
+    return (finite(getattr(row, "t", 0)), "", "", "", 0.0, 0.0)
+
+
 def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
     """Keep recent fills from every symbol so last-N PF/DDT is not the last 1–2 names."""
     rows = [slim_hist_row(r) for r in bucket if isinstance(r, dict)]
     cap = max(8, int(cap or HIST_CAP))
     if len(rows) <= cap:
-        rows.sort(key=lambda r: finite(r.get("t")))
+        rows.sort(key=hist_sort_key)
         return rows
     by: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
@@ -215,9 +229,9 @@ def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dic
     per = max(3, cap // max(1, len(by)))
     out: List[Dict[str, Any]] = []
     for tape in by.values():
-        tape.sort(key=lambda r: finite(r.get("t")))
+        tape.sort(key=hist_sort_key)
         out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
+    out.sort(key=hist_sort_key)
     return out[-cap:]
 
 
@@ -260,7 +274,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if isinstance(r, dict)]
-        seq.sort(key=lambda r: finite(r.get("t")))
+        seq.sort(key=hist_sort_key)
     if len(seq) <= n:
         return seq
     by: Dict[str, List[Dict[str, Any]]] = {}
@@ -272,13 +286,13 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
     if len(names) >= n:
         recent = sorted(names, key=lambda s: finite(by[s][-1].get("t")), reverse=True)[:n]
         picked = [by[s][-1] for s in recent]
-        picked.sort(key=lambda r: finite(r.get("t")))
+        picked.sort(key=hist_sort_key)
         return picked
     per = max(1, n // len(names))
     out: List[Dict[str, Any]] = []
     for tape in by.values():
         out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
+    out.sort(key=hist_sort_key)
     if len(out) < n:
         taken = {id(x) for x in out}
         for r in reversed(seq):
@@ -288,7 +302,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
             taken.add(id(r))
             if len(out) >= n:
                 break
-        out.sort(key=lambda r: finite(r.get("t")))
+        out.sort(key=hist_sort_key)
     return out[-n:]
 
 
@@ -304,7 +318,7 @@ def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if r is not None]
-        seq.sort(key=lambda r: finite(r.get("t") if isinstance(r, dict) else getattr(r, "t", 0)))
+        seq.sort(key=hist_sort_key)
     if len(seq) <= take:
         return seq if isinstance(seq, list) else list(seq)
     return seq[-take:]
@@ -1803,7 +1817,7 @@ class SetBook:
             if merge:
                 total = max(0, int(progress_total if progress_total is not None else len(names)))
                 # Keep coverage across hourly slices. Clearing on a completed
-                # 25-symbol book made the UI restart at 0/25 after every publish.
+                # Ranked-book refreshes made the UI restart at 0/N after every publish.
                 self._hist_total = max(int(self._hist_total or 0), total, len(self._hist_seen))
                 symbols_total = max(total, len(self._hist_seen), len(names), 1)
             else:
@@ -2020,6 +2034,7 @@ class SetBook:
         hist_counts: Optional[Dict[str, int]] = None,
         score: bool = True,
         score_ids: Optional[Sequence[str]] = None,
+        replayed_set_ids: Optional[Sequence[str]] = None,
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
         score_set = {str(s) for s in score_ids} if score_ids is not None else None
@@ -2032,10 +2047,11 @@ class SetBook:
                 k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
                 for k in keys
             }
+        replay_ids = replayed_set_ids if replayed_set_ids is not None else hist.keys()
         states = (
             self.by_idx
             if not merge
-            else [self.sets[sid] for sid in hist if sid in self.sets]
+            else [self.sets[str(sid)] for sid in replay_ids if str(sid) in self.sets]
         )
         for st in states:
             # A bounded replay may commit one configuration slice at a time.
@@ -2058,7 +2074,7 @@ class SetBook:
                     self._score_one(st)
                 st.n = sum(counts.values())
             else:
-                full.sort(key=lambda r: finite(r.get("t")))
+                full.sort(key=hist_sort_key)
                 st.hist = full
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
@@ -3450,7 +3466,7 @@ class SetBook:
             m, side_bundle = self._fast_historic_bundle(st.hist, hist_n=len(st.hist), ordered=True)
         else:
             tape = st.tape()
-            tape.sort(key=lambda r: finite(r.get("t")))
+            tape.sort(key=hist_sort_key)
             m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False)
         st.n = m["n"]
         st.wins = m["wins"]
@@ -4199,7 +4215,7 @@ class SetBook:
         else:
             tape = filter_side(hist + live, side)
             source = "mixed" if live_side else "hist-sim"
-        tape.sort(key=lambda r: finite(r.get("t")))
+        tape.sort(key=hist_sort_key)
         dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
             last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
@@ -4283,7 +4299,7 @@ class SetBook:
                     continue
                 seen.add(cid)
                 fills.append(r)
-        fills.sort(key=lambda r: finite(r.get("t")))
+        fills.sort(key=hist_sort_key)
         m = self._score_metrics(fills)
         rows = []
         for s in sorted(processed, key=lambda x: (-len(x.live), -float((x.live_eval or {}).get("last15Ratio") or 0), x.max_dd_s)):

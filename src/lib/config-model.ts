@@ -13,7 +13,7 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
-export const DEFAULT_SYMBOL_COUNT = 25;
+export const DEFAULT_SYMBOL_COUNT = 50;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [

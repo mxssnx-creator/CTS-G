@@ -22,6 +22,7 @@ from indication_engine import (  # noqa: E402
     IndicationBook,
     build_indication_frame,
 )
+import set_engine as set_engine_module  # noqa: E402
 from set_engine import IND_TAG_KIND, SetBook, indication_kind_votes, indication_kind_votes_frame, synth_trend  # noqa: E402
 
 
@@ -197,6 +198,109 @@ class ReplayIndicationTests(unittest.TestCase):
             self.assertEqual(signature(reference_hist[set_id]), signature(tiled_hist[set_id]), set_id)
             self.assertEqual(reference_counts.get(set_id), tiled_counts.get(set_id), set_id)
 
+    def test_vectorized_replay_matches_scalar_reference(self):
+        if set_engine_module._np is None:
+            self.skipTest("numpy is unavailable")
+        overlay = {
+            "histEnabled": True,
+            "histLookbackBars": 60,
+            "histMinBars": 60,
+            "histWarmup": 30,
+            "histExactWindow": True,
+            "stratIndications": False,
+            "stratGeneral": True,
+            "stratTrailing": False,
+            "stratBlock": False,
+            "histSimulateBlock": False,
+            "histSimulateDca": False,
+            "setMinStep": 1,
+            "setStepMax": 2,
+            "slToTpRatios": [0.6],
+        }
+        bars = synth_trend(90, 100.0, 0.18, 0.03)
+
+        def replay(vector):
+            original = set_engine_module._np
+            with patch.object(set_engine_module, "_np", original if vector else None):
+                book = SetBook()
+                book.load(overlay)
+                book.ingest_bars("REFERENCE-USDT", bars)
+                hist = {}
+                counts = {}
+                book.replay_symbol_partial(
+                    "REFERENCE-USDT",
+                    hist,
+                    now=1_700_000_000.0,
+                    drop_bars=False,
+                    hist_counts=counts,
+                )
+                ids = [state.id for state in book.by_idx]
+                signature = lambda rows: sorted(
+                    (
+                        row.get("t"),
+                        row.get("side"),
+                        round(float(row.get("pnl_pct") or 0), 12),
+                        row.get("reason"),
+                        row.get("hold_s"),
+                    )
+                    for row in rows
+                )
+                return {sid: signature(hist.get(sid) or []) for sid in ids}, {
+                    sid: int(counts.get(sid) or 0) for sid in ids
+                }
+
+        vector, vector_counts = replay(True)
+        scalar, scalar_counts = replay(False)
+        self.assertEqual(vector, scalar)
+        self.assertEqual(vector_counts, scalar_counts)
+
+    def test_tile_merge_replaces_replayed_symbol_without_duplicates(self):
+        overlay = {
+            "histEnabled": True,
+            "histLookbackBars": 60,
+            "histMinBars": 60,
+            "histWarmup": 30,
+            "histExactWindow": True,
+            "stratIndications": False,
+            "stratGeneral": True,
+            "stratTrailing": False,
+            "stratBlock": False,
+            "histSimulateBlock": False,
+            "histSimulateDca": False,
+            "setMinStep": 1,
+            "setStepMax": 1,
+            "slToTpRatios": [0.6],
+        }
+        book = SetBook()
+        book.load(overlay)
+        state = book.by_idx[0]
+        symbol = "MERGE-USDT"
+        state.hist = [{"t": 1.0, "symbol": symbol, "side": "LONG", "pnl_pct": -0.002, "reason": "sl", "hold_s": 60}]
+        book._hist_counts = {state.id: {symbol: 1}}
+        replacement = {"t": 2.0, "symbol": symbol, "side": "LONG", "pnl_pct": 0.003, "reason": "tp", "hold_s": 60}
+        for _ in range(2):
+            book._commit_hist(
+                {state.id: [replacement]},
+                merge=True,
+                replayed_symbols=[symbol],
+                hist_counts={state.id: 1},
+                replayed_set_ids=[state.id],
+                score=False,
+            )
+        self.assertEqual(len(state.hist), 1)
+        self.assertEqual(state.hist[0]["t"], 2.0)
+        self.assertEqual(state.n, 1)
+        book._commit_hist(
+            {},
+            merge=True,
+            replayed_symbols=[symbol],
+            hist_counts={},
+            replayed_set_ids=[state.id],
+            score=False,
+        )
+        self.assertEqual(state.hist, [])
+        self.assertEqual(state.n, 0)
+
     def test_scheduler_contracts_are_bounded_and_nonblocking(self):
         pulse_source = (PULSE / "pulse_trader.py").read_text()
         hist_source = (PULSE / "hist_calc.py").read_text()
@@ -208,7 +312,8 @@ class ReplayIndicationTests(unittest.TestCase):
         self.assertIn("_hist_wake", pulse_source)
         self.assertIn("FIRST_COMPLETED", hist_source)
         self.assertIn("REPLAY_TILE_SIZE", hist_source)
-        self.assertIn("replay_workers = max(1, min(8, cpu, len(names) or 1))", pulse_source)
+        self.assertIn("replay_pool_workers", hist_source)
+        self.assertIn("queue_limit = max(workers, workers * REPLAY_QUEUE_MULTIPLIER)", hist_source)
         self.assertIn("max_workers=w", set_source)
         self.assertIn("generation", pulse_source)
         self.assertIn("def should_abort", pulse_source)

@@ -10718,7 +10718,7 @@ class Pulse:
                         if requested_hours <= 0 and request_overlay.get("histLookbackBars") is not None:
                             requested_hours = float(request_overlay.get("histLookbackBars")) / 60.0
                         if requested_hours > 0:
-                            lookback = max(120, min(20160, int(round(requested_hours * 60))))
+                            lookback = max(60, min(20160, int(round(requested_hours * 60))))
                     except (TypeError, ValueError):
                         pass
                     if lookback != book.lookback:

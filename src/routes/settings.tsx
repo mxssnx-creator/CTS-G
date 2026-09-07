@@ -2089,7 +2089,8 @@ function SettingsPage() {
               </p>
               <div className="mt-3">
                 <Grid>
-                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="Default 25. 0 = unlimited. Live scan and historic calc use only this many ranked names." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="Default 50. 0 = unlimited. Live scan and historic calc use only this many ranked names."
+ onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">

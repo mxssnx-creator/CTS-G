@@ -277,7 +277,7 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   stratGeneral: true,
   allConfigs: true,
   allSymbols: true,
-  symbolCap: 25,
+  symbolCap: 50,
   indTypeSignals: true,
   indTypeState: true,
   indTypeDirection: true,

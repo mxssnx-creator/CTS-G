@@ -113,6 +113,52 @@ class HistoryPipelineTests(unittest.TestCase):
             self.assertEqual(gaps[0]["end"], 6)
             self.assertEqual(gaps[0]["source"], "exchange")
 
+    def test_explicit_one_hour_request_keeps_sixty_bar_window(self) -> None:
+        pulse_source = (PULSE / "pulse_trader.py").read_text()
+        self.assertIn("lookback = max(60, min(20160", pulse_source)
+        self.assertNotIn("lookback = max(120, min(20160", pulse_source)
+        self.assertEqual(hist_calc.hours_to_bars(1), 60)
+        self.assertEqual(hist_calc.parse_options({"hours": 1})["hours"], 1)
+
+    def test_one_hour_calc_reports_evaluation_and_stage_timing(self) -> None:
+        body = {
+            "synth": True,
+            "hours": 1,
+            "symbols": ["XRP-USDT"],
+            "allConfigs": False,
+            "minStep": 1,
+            "stepMax": 1,
+            "trailing": False,
+            "stratIndications": False,
+            "stratGeneral": True,
+            "stratBlock": False,
+            "stratDca": False,
+            "workers": 1,
+        }
+        job = hist_calc.run_calc(body, persist=False)
+        repeat = hist_calc.run_calc(body, persist=False)
+        self.assertEqual(job.get("phase"), "ready")
+        self.assertFalse(job.get("error"))
+        self.assertEqual(job.get("hours"), 1)
+        self.assertEqual(job.get("lookback"), 60)
+        self.assertEqual(job.get("evaluationBars"), 60)
+        self.assertEqual(job.get("warmupBars"), 30)
+        self.assertEqual(job.get("requestedBars"), 90)
+        timings = job.get("timings") or {}
+        self.assertTrue({"fetchMs", "replayWallMs", "mergeMs", "scoreMs", "reportMs", "totalMs"} <= set(timings))
+        coverage = job.get("coverage") or {}
+        for key in ("symbols", "bars", "evaluationBars", "sets", "evaluations", "tasks"):
+            self.assertEqual((coverage.get(key) or {}).get("coveragePct"), 100.0, key)
+        compact = lambda value: sorted(
+            (row.get("id"), row.get("direction"), row.get("n"), row.get("last15Ratio"), row.get("maxDdS"))
+            for row in value.get("rows") or []
+        )
+        self.assertEqual(compact(job), compact(repeat))
+        self.assertEqual(
+            {key: (job.get("coverage") or {}).get(key) for key in ("product", "histFills", "validatedCount")},
+            {key: (repeat.get("coverage") or {}).get(key) for key in ("product", "histFills", "validatedCount")},
+        )
+
     def test_manual_requests_are_generation_safe_and_shared(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def scoped_path(name: str) -> str:

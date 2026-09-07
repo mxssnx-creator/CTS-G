@@ -31,13 +31,13 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to adjusted execution, 110 Sets and 25 symbols", () => {
+test("new and legacy settings default to adjusted execution, 110 Sets and 50 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, false);
     assert.equal(value.blockActive, true);
     assert.equal(value.setMaxActive, 110);
     assert.equal(value.stratGeneral, true);
-    assert.equal(value.symbolCap, 25);
+    assert.equal(value.symbolCap, 50);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
