@@ -142,12 +142,13 @@ def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dic
             strat = "normal" if name in INDICATION_KINDS else strategy({**row, "strategy": name.split(":")[0]})
             sid = str(row.get("set_id") or "")
             tp = number(row.get("tp_pct")) * 100 or None
-            key = (kind, strat, sid, range_key(tp), pack)
+            key = (kind, strat, sid, range_key(tp), pack, str(row.get("ind_config") or ""))
             buckets[key].append(row)
         for key, samples in buckets.items():
             first = samples[0]
             out.add({"id": stable_key("system", name, *key), "setId": key[2], "scope": "system",
                      "indicationKind": key[0], "strategyType": key[1], "pack": key[4],
+                     "indicationConfig": key[5],
                      "tf": "1m", "slRatio": first.get("sl_ratio"), "trailKey": "",
                      "step": first.get("step"), "tpPct": number(first.get("tp_pct")) * 100 or None}, samples)
 

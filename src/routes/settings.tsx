@@ -2063,6 +2063,14 @@ function SettingsPage() {
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
                 <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
                 <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
+                {(overlay.indTrendRanges ?? [13, 21, 34]).map((period, index, periods) => (
+                  <Num key={`trend-${index}`} label={`Trend EMA range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent EMA calculation · fast period = 0.38 × range" onChange={(value) => patch("indTrendRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indBreakRanges ?? [8, 16, 32]).map((period, index, periods) => (
+                  <Num key={`break-${index}`} label={`Break range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent breakout calculation in candles" onChange={(value) => patch("indBreakRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />
                 <Num label="Min agreement" value={overlay.indMinAgreement} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinAgreement", v)} />
@@ -2312,7 +2320,7 @@ function SettingsPage() {
 
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-4 rounded-radius border border-border bg-surface p-4">
+    <section className="min-w-0 space-y-4 rounded-radius border border-border bg-surface p-4">
       <div>
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="mt-1 text-sm text-muted">{hint}</p> : null}

@@ -272,6 +272,8 @@ export type PulseOverlay = {
   indTypeSignals: boolean;
   indTypeTrend: boolean;
   indTypeBreak: boolean;
+  indTrendRanges?: number[];
+  indBreakRanges?: number[];
   noise: number;
   volWeight: number;
   minStep: number;
@@ -446,6 +448,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeCommon: true,
   indTypeSignals: true,
   indTypeTrend: true,
+  indTrendRanges: [13, 21, 34],
+  indBreakRanges: [8, 16, 32],
   indTypeBreak: true,
   noise: 0.05,
   volWeight: 0.3,
@@ -608,6 +612,8 @@ export type CtsSettings = {
   indTypeSignals?: boolean;
   indTypeTrend?: boolean;
   indTypeBreak?: boolean;
+  indTrendRanges?: number[];
+  indBreakRanges?: number[];
   activeNoiseFilter?: number;
   activeVolatilityWeight?: number;
   posCountsVolumeRatio?: number;
@@ -810,6 +816,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTypeCommon: bool(cts.indTypeCommon, true),
     indTypeSignals: bool(cts.indTypeSignals, true),
     indTypeTrend: bool(cts.indTypeTrend, true),
+    indTrendRanges: Array.isArray(cts.indTrendRanges) ? cts.indTrendRanges : [13, 21, 34],
+    indBreakRanges: Array.isArray(cts.indBreakRanges) ? cts.indBreakRanges : [8, 16, 32],
     indTypeBreak: bool(cts.indTypeBreak, true),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),

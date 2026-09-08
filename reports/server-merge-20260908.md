@@ -37,5 +37,5 @@ pre-work Git bundle is in `/workspace/backups/CTS-G/20260908-before-independent-
 
 These checks verify source integration. They are not a 12-hour market replay,
 an unlimited-duration availability test or proof of profitable live execution.
-The user's follow-up requirement to process every valid candidate instead of
-selecting one symbol/Set winner is the next implementation task.
+The subsequent implementation and current release status are documented in
+`validation-20260908/verification.md`.

@@ -45,10 +45,10 @@ market replay. Normal transport cooldowns, configured position/Set caps,
 qualification, margin, STOP/PAUSE and protection requirements still apply.
 Legacy aggregate-control mode remains an aggregate position mode.
 
-The wider request still includes Trend/Break range expansion, 30-step/unlimited-TP
-settings, Overall-page synchronization, a full exit-attribution audit and the
-requested 12-hour market/configuration matrix. This entry change does not claim
-those separate items or unlimited uptime/profitability have been verified.
+This document records the entry-scheduling checkpoint. Subsequent Trend/Break
+range expansion, 30-step/unlimited-TP settings, Overall-page synchronization,
+event corrections, the twelve-hour market matrix and remaining release blockers
+are recorded in `validation-20260908/verification.md`.
 
 Publication checkpoint: automatic approval review rejected publishing this new
 source to the public `mxssnx-creator/CTS-G` repository. Ownership and push rights

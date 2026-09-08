@@ -94,7 +94,7 @@ function DeskPage() {
       {conn === "overall" && (stats?.lanes?.length ?? 0) > 0 ? <LaneBoard stats={stats!} /> : null}
 
       <section className="grid gap-3 lg:grid-cols-3">
-        <div className="rounded-radius border border-border bg-surface p-5 lg:col-span-2">
+        <div className="min-w-0 rounded-radius border border-border bg-surface p-5 lg:col-span-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-mono text-xs tracking-wide text-muted uppercase">Equity</p>

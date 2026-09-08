@@ -129,7 +129,7 @@ function ResultsPage() {
       {statsTab === "coverage" ? <div id="results-panel-coverage" role="tabpanel"><CoveragePanel live={stats} /></div> : null}
       {statsTab === "indications" ? <div id="results-panel-indications" role="tabpanel"><IndicationKindsPanel stats={stats} /></div> : null}
       {statsTab === "strategies" ? (
-        <div id="results-panel-strategies" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-strategies" className="min-w-0 grid gap-3" role="tabpanel">
           <StrategyStatsPanel stats={stats} />
           <ExitResults stats={stats} />
           <BlockResults stats={stats} />
@@ -137,13 +137,13 @@ function ResultsPage() {
         </div>
       ) : null}
       {statsTab === "sets" ? (
-        <div id="results-panel-sets" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-sets" className="min-w-0 grid gap-3" role="tabpanel">
           <InternResults stats={stats} />
           <SetResults stats={stats} />
         </div>
       ) : null}
       {statsTab === "controls" ? (
-        <div id="results-panel-controls" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-controls" className="min-w-0 grid gap-3" role="tabpanel">
           <ControlHealthPanel stats={stats} />
           <ActivityPanel stats={stats} />
         </div>
@@ -152,8 +152,8 @@ function ResultsPage() {
       {statsTab === "report" ? <HtmlReportPanel conn={conn} /> : null}
 
       {statsTab === "overview" ? (
-        <div id="results-panel-overview" className="grid gap-3" role="tabpanel">
-          <section className="grid gap-3 lg:grid-cols-2">
+        <div id="results-panel-overview" className="min-w-0 grid gap-3" role="tabpanel">
+          <section className="min-w-0 grid gap-3 lg:grid-cols-2">
             <Card title="Equity curve">
               <EquityArea data={d.equityCurve} />
             </Card>
@@ -162,7 +162,7 @@ function ResultsPage() {
             </Card>
           </section>
 
-          <section className="grid gap-3 lg:grid-cols-2">
+          <section className="min-w-0 grid gap-3 lg:grid-cols-2">
             <Card title="By symbol">
               <SymbolBars data={d.bySymbol} />
             </Card>
@@ -466,7 +466,7 @@ function Hero({ k, v, s, good, bad }: { k: string; v: string; s: string; good?: 
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="rounded-radius border border-border bg-surface p-4">
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4">
       <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
       {children}
     </section>
@@ -476,7 +476,8 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 function InternResults({ stats }: { stats: LiveStats | null }) {
   const gate = (stats?.coord as { gate?: { allow?: boolean; reasons?: string[] } } | undefined)?.gate;
   const sets = stats?.sets;
-  const rows = [...(sets?.rows ?? [])].sort((a, b) => (b.last15Ratio || 0) - (a.last15Ratio || 0)).slice(0, 8);
+  const rows = [...(sets?.rows ?? [])].filter((row) => !row.axisKey || enabledAxes(stats).includes(row.axisKey.split(":")[0]))
+    .sort((a, b) => (b.last15Ratio || 0) - (a.last15Ratio || 0)).slice(0, 8);
   return (
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
@@ -506,7 +507,6 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
                 <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                 <td className="py-1.5 text-right">
                   {r.n}
-                  {r.liveN ? `+${r.liveN}` : ""}
                 </td>
                 <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
               </tr>

@@ -7,11 +7,29 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server/pulse"))
 from event_ledger import EventLedger
-from pulse_http import merge_activity_summaries
+from pulse_http import merge_activity_summaries, merge_axis_enablement
 from pulse_trader import Pulse
 
 
 class ActivityGroupTests(unittest.TestCase):
+    def test_overall_axis_visibility_includes_every_lane(self):
+        off = {"coord": {"axes": {"last": {"enabled": False}}}}
+        on = {"coverage": {"coord": {"axes": {"last": {"enabled": True}, "prev": {"enabled": False}}}}}
+        self.assertTrue(merge_axis_enablement([off, on])["last"]["enabled"])
+        self.assertFalse(merge_axis_enablement([off, on])["prev"]["enabled"])
+        self.assertFalse(merge_axis_enablement([off, off])["last"]["enabled"])
+
+    def test_response_and_rejection_are_one_order_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = EventLedger(str(pathlib.Path(tmp) / "events.json"), "test")
+            for kind in ("exchange_response", "rejected"):
+                ledger.record(kind, kind, client_id="order-1", indication_kind="trend", strategy="block", status="rejected")
+            ledger.record("rejected", "another-order", client_id="order-2", indication_kind="trend", strategy="block", status="rejected")
+            result = ledger.summary()
+            self.assertEqual(result["byIndication"]["trend"]["rejected"], 2)
+            self.assertEqual(result["byStrategy"]["block"]["rejected"], 2)
+            self.assertEqual(result["eventCount"], 3)
+
     def test_answered_requests_are_not_pending_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = EventLedger(str(pathlib.Path(tmp) / "events.json"), "test", max_events=512)

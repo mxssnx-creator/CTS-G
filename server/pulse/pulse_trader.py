@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
-from block_active import adjusted_quantity, observe_continuation
+from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog
@@ -1065,7 +1065,7 @@ class Pulse:
         self.strat_trail = True
         self.normal_execution_enabled = False
         self.block_active = True
-        self._block_reference_anchors = {}
+        self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
         self.strat_general = True
         self.tf_on = {"1m": True, "5m": True, "15m": True}
@@ -4357,7 +4357,7 @@ class Pulse:
             return reject(f"overall live PF below {self.coord.min_pf:.2f}")
         anchors = getattr(self, "_block_reference_anchors", None)
         if anchors is None:
-            anchors = self._block_reference_anchors = {}
+            anchors = self._block_reference_anchors = ContinuationBook()
         key = (sym, side, execution_lane or chosen.id)
         if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
             return reject("reference needs 45 seconds and 0.2% continuation")
@@ -6431,6 +6431,8 @@ class Pulse:
             "indTypeSignals": bool(self.indications.settings.get("typeSignals", True)),
             "indTypeTrend": bool(self.indications.settings.get("typeTrend", True)),
             "indTypeBreak": bool(self.indications.settings.get("typeBreak", True)),
+            "indTrendRanges": list(self.indications.settings.get("trendRanges") or [13, 21, 34]),
+            "indBreakRanges": list(self.indications.settings.get("breakRanges") or [8, 16, 32]),
             "histEnabled": self.sets.enabled,
             "histLookbackBars": self.sets.lookback,
             "histMinBars": self.sets.min_bars,
@@ -11540,6 +11542,12 @@ def main() -> None:
         BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
     else:
         BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
+    if str(os.environ.get("CTS_VST_ONLY") or "").lower() in ("1", "true", "yes"):
+        endpoint = urlparse(BASE)
+        if (CONN_SHORT != "bingx-x02" or endpoint.scheme != "https" or endpoint.hostname != "open-api-vst.bingx.com"
+                or endpoint.port not in (None, 443) or endpoint.username or endpoint.password
+                or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment):
+            raise SystemExit("VST-only deployment requires the verified X02 demo endpoint")
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
     Pulse(api, load_contracts()).run()
 

@@ -7,6 +7,7 @@ export type SetOverviewRow = {
   parentSetId?: string;
   scope: SetScope;
   indicationKind: string;
+  indicationConfig?: string;
   strategyType: string;
   tpRange: string;
   tpPct?: number | null;
@@ -88,7 +89,7 @@ export function enabledAxes(stats: Pick<LiveStats, "coord" | "coverage"> | null)
 }
 
 export function setLabel(row: SetOverviewRow) {
-  return [row.indicationKind, row.strategyType, `TP ${tpRangeLabel(row.tpRange)}`,
+  return [row.indicationKind, row.indicationConfig, row.strategyType, row.pack, row.tf, `TP ${tpRangeLabel(row.tpRange)}`,
     row.slRatio == null ? "" : `sl${setMetric(row.slRatio, 2)}`,
-    row.step ? `st${row.step}` : "", row.axisKey, row.side, row.connection].filter(Boolean).join(" · ");
+    row.step ? `st${row.step}` : "", row.trailKey ? `trail ${row.trailKey}` : "", row.axisKey, row.side, row.connection].filter(Boolean).join(" · ");
 }

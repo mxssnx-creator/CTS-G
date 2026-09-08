@@ -8,12 +8,31 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server' / 'pulse'))
 import pulse_trader as pt
-from block_active import adjusted_quantity, observe_continuation
+from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from block_engine import BlockBook
 from set_engine import SetBook, SetState
 
 
 class BlockActiveTests(unittest.TestCase):
+    def test_many_configurations_share_one_expiry_sweep_and_expire_exactly(self):
+        class Counted(ContinuationBook):
+            sweeps = 0
+            def items(self):
+                self.sweeps += 1
+                return super().items()
+        anchors = Counted()
+        for i in range(1000):
+            self.assertFalse(observe_continuation(anchors, str(i), 100, 1, 0))
+        self.assertEqual(anchors.sweeps, 1)
+        for i in range(1000):
+            self.assertTrue(observe_continuation(anchors, str(i), 101, 1, 45))
+        self.assertEqual(anchors.sweeps, 2)
+        observe_continuation(anchors, 'new', 100, 1, 224.8)
+        self.assertFalse(observe_continuation(anchors, '0', 102, 1, 225.2))
+        self.assertEqual(anchors['0']['at'], 225.2)
+        observe_continuation(anchors, 'new', 100, 1, 226)
+        self.assertLessEqual(len(anchors), 2)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

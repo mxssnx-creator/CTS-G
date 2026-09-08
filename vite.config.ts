@@ -370,7 +370,7 @@ async function tryPulse(method: string, path: string, raw?: string, ms = 4000): 
 
 /** Pulse sidecar first; local overlay + CTS worker if :3015 is down. */
 function pulseControlPlugin(): Plugin {
-  return {
+  const plugin: Plugin = {
     name: "pulse-control-fallback",
     apply: "serve",
     configureServer(server) {
@@ -604,6 +604,8 @@ function pulseControlPlugin(): Plugin {
       });
     },
   };
+  plugin.configurePreviewServer = plugin.configureServer as Plugin["configurePreviewServer"];
+  return plugin;
 }
 
 function statsFallback(conn: string): Record<string, unknown> {
@@ -813,6 +815,13 @@ export default defineConfig(({ command, isPreview }) => ({
     host: "127.0.0.1",
     port: 8081,
     strictPort: true,
+    proxy: {
+      ...pulseProxy("/stats.json"),
+      ...pulseProxy("/stats"),
+      ...pulseProxy("/results-export.json"),
+      ...pulseProxy("/results-export.md"),
+      ...pulseProxy("/results-export.html"),
+    },
   },
   resolve: { tsconfigPaths: true },
   plugins: [

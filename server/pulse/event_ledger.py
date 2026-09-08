@@ -263,6 +263,7 @@ class EventLedger:
 
     def _outcome_counts(self, attr: str, known: Iterable[str]) -> Dict[str, Dict[str, int]]:
         out = {key: {"evaluated": 0, "qualified": 0, "selected": 0, "entered": 0, "exited": 0, "blocked": 0, "rejected": 0, "paused": 0, "long": 0, "short": 0} for key in known}
+        rejected_orders = set()
         for event in self.events:
             key = str(getattr(event, attr, "") or "")
             if attr == "axis_key" and ":" in key:
@@ -283,9 +284,14 @@ class EventLedger:
             if event_type == "close":
                 bucket["exited"] += 1
             if event_type == "rejected" or status in ("blocked", "rejected"):
-                bucket["rejected"] += 1
-                if status == "blocked":
-                    bucket["blocked"] += 1
+                # A failed exchange response and its rejection event describe
+                # one order outcome. Retain both events without doubling it.
+                identity = (key, event.connection, event.client_id or event.order_id or event.event_id, status)
+                if identity not in rejected_orders:
+                    rejected_orders.add(identity)
+                    bucket["rejected"] += 1
+                    if status == "blocked":
+                        bucket["blocked"] += 1
             if status == "paused":
                 bucket["paused"] += 1
             if event.side.upper() == "LONG":

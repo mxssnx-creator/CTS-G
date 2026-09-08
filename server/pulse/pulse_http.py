@@ -1230,6 +1230,19 @@ def _pick_detail(lane_defs: list) -> tuple:
     return lane_defs[0], {}
 
 
+def merge_axis_enablement(states) -> dict:
+    """Overall visibility follows every lane's flags, never one chosen desk."""
+    axes = {}
+    for state in states:
+        runtime = (state.get("coord") or {}).get("axes")
+        if runtime is None:
+            runtime = ((state.get("coverage") or {}).get("coord") or {}).get("axes") or {}
+        for key, value in runtime.items():
+            axes.setdefault(key, {"enabled": False})
+            axes[key]["enabled"] = axes[key]["enabled"] or value.get("enabled") is True
+    return axes
+
+
 def merge_overall() -> dict:
     lanes = [lane_summary(l) for l in LANES]
     opens = []
@@ -1334,6 +1347,7 @@ def merge_overall() -> dict:
         "detailConn": detail_lane.get("id"),
         "detailType": detail_lane.get("type"),
         "sets": sets,
+        "coord": {"axes": merge_axis_enablement(stats_by_id.values())},
     }
     try:
         from stats_report import merge_kind_stats, merge_strategy_stats

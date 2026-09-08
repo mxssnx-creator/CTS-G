@@ -331,7 +331,7 @@ The Settings catalog exposes the same bounded ranges used by the engines:
 | Axis | Supported range / meaning |
 |---|---|
 | SL:TP | `0.1–3.0`, step `0.1` (30 independent ratios) |
-| TP steps | `3–22`, every integer is a separate Set |
+| TP steps | `3–30`, every integer is a separate Set; maximum defaults to 30 |
 | Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
 | Historic | `120–20160` 1m bars, `2–336h` (up to fourteen days); min bars and warmup remain bounded by the replay window |
 | Block | Historic evaluates counts `1–12`; live stack is bounded to `1–6`; `0` selects the default live stack `3` |
@@ -359,6 +359,20 @@ snapshot, so displayed counts cannot be inferred from a truncated top-N table.
 
 After merge, update `/workspace/CTS-G`, deploy with the repository scripts,
 verify all services, and create a new post-merge checkpoint.
+
+### Current verification checkpoint (2026-09-08)
+
+The integrated independent-entry and hierarchical-overview work is documented in
+`reports/validation-20260908/verification.md`. Current defaults are TP 0.3% to
+unlimited (`tpMaxPct=0`), SL 0.15–3%, maximum step 30, and PF thresholds
+1.05–1.35. Trend/Break ranges have independent identities and replay tapes.
+Existing explicitly configured live settings remain authoritative.
+
+The latest private transfer and public GitHub publication were rejected by
+automatic approval review. Do not retry via another transport. The source is
+committed and locally backed up; finish the updated browser QA and VST-only
+installation after explicit payload/destination approval. No restart or high
+exchange-order acceptance test has been completed by this work.
 
 ## Installed VPS baseline (verified 2026-09-02)
 

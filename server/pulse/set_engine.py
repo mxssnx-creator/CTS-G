@@ -8,6 +8,7 @@ processed Sets and are the only tape that deactivates them.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import sys
@@ -47,7 +48,7 @@ from position_cost import (
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
 from block_engine import calculate_block_max_additional_ratio, clamp_stack, finite_number, normalize_block_counts
-from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 
@@ -157,7 +158,7 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any]:
         ind_kind=str(row.get("ind_kind") or ""),
     )
     if str(row.get("strategy") or "") in ("block", "dca") or row.get("ind_kind"):
-        for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key"):
+        for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key", "ind_config"):
             if key in row:
                 compact[key] = row[key]
     return compact
@@ -1238,6 +1239,8 @@ class SetBook:
             "typeCommon": bool(ov.get("indTypeCommon", True)),
             "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
             "dirRange": int(ov.get("indDirRange") or 10),
+            "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
+            "breakRanges": indication_ranges(ov.get("indBreakRanges"), (8, 16, 32)),
             "dirMinChange": float(ov.get("indDirMinChange") or 0.001),
             "moveRange": int(ov.get("indMoveRange") or 10),
             "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
@@ -1398,7 +1401,8 @@ class SetBook:
             st.indication_kind = "" if st.pack != "indications" else "signals"
             st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
-        signature = (tuple(next_sets), self.sl_min, self.sl_max, self.tp_min, self.tp_max)
+        signature = (tuple(next_sets), self.sl_min, self.sl_max, self.tp_min, self.tp_max,
+                     json.dumps(self.ind_settings, sort_keys=True))
         if signature != self._hist_set_signature:
             self._hist_set_signature = signature
             self._hist_seen.clear()
@@ -2313,6 +2317,12 @@ class SetBook:
                     kind = IND_TAG_KIND.get(tag.strip())
                     if kind:
                         kind_sigs[kind][i] = (d, conf)
+                # General pack votes retain their normal baseline. Additional
+                # Trend/Break configurations replay as independent tapes.
+                config_frame = indication_frame.window(lo, i + 1)
+                for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
+                    key = row.kind + "|" + row.mode
+                    kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
             if on_step and i % 50 == 0:
                 on_step()
                 time.sleep(0)
@@ -2754,7 +2764,8 @@ class SetBook:
         base_ts = now - (n - 1) * BAR_S
         tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
         sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
-        for kind, sigs in kind_sigs.items():
+        for config_key, sigs in kind_sigs.items():
+                kind, _, config = config_key.partition("|")
                 if not any(d != 0 for d, _ in sigs):
                     continue
                 buf = ind_hist.setdefault(kind, [])
@@ -2783,6 +2794,8 @@ class SetBook:
                                 )
                                 rec.update(tp_pct=tp_frac, sl_ratio=sl_frac / tp_frac,
                                            step=self.min_step_cfg, pack="indications")
+                                if config:
+                                    rec["ind_config"] = config
                                 buf.append(rec)
                                 open_pos = None
                                 cool = self.cooldown_bars
@@ -5232,7 +5245,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
     # hist replay scores each indication kind independently (not pack-consensus copies)
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
