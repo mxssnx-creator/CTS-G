@@ -28,6 +28,9 @@ CTS_G_NAME = re.sub(r"[^A-Za-z0-9._-]", "", os.environ.get("CTS_G_NAME", "cts-g"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_HTML_RESPONSE_BYTES = 8 * 1024 * 1024
+STATS_READ_MAX_BYTES = 24 * 1024 * 1024
+_STATS_CACHE: dict = {}
+_STATS_CACHE_LOCK = threading.Lock()
 _OVERLAY_LOCKS = {cid: threading.RLock() for cid in ("bingx-x01", "bingx-x02")}
 
 
@@ -406,6 +409,58 @@ def slim_for_ui(st: dict) -> dict:
         out["openCountReported"] = len(opens)
         out["openTruncated"] = True
         out["open"] = opens[:256]
+    cov = dict(out.get("coverage") or {})
+    if cov:
+        coord = dict(cov.get("coord") or {})
+        if coord:
+            variants = dict(coord.get("variants") or {})
+            if variants:
+                rows = variants.get("rows")
+                parents = variants.get("parents")
+                if isinstance(rows, list):
+                    variants["rowCount"] = variants.get("rowCount") or len(rows)
+                    variants.pop("rows", None)
+                if isinstance(parents, list):
+                    variants["parentCount"] = variants.get("parentCount") or len(parents)
+                    variants.pop("parents", None)
+                qch = variants.get("qualifiedChildren")
+                if isinstance(qch, list):
+                    variants["qualifiedChildCount"] = len(qch)
+                    variants.pop("qualifiedChildren", None)
+                ids = variants.get("parentSetIds")
+                if isinstance(ids, list) and len(ids) > 32:
+                    variants["parentSetIdCount"] = len(ids)
+                    variants["parentSetIds"] = ids[:32]
+                coord["variants"] = variants
+            cov["coord"] = coord
+        hist = dict(cov.get("history") or {})
+        if hist and isinstance(hist.get("rows"), list) and len(hist["rows"]) > 24:
+            hist = dict(hist)
+            hist["rowCount"] = len(hist["rows"])
+            hist["rows"] = hist["rows"][:24]
+            cov["history"] = hist
+        out["coverage"] = cov
+    historic = dict(out.get("historic") or {})
+    if isinstance(historic.get("rows"), list) and len(historic["rows"]) > 40:
+        historic = dict(historic)
+        historic["rowCount"] = len(historic["rows"])
+        historic["rows"] = historic["rows"][:40]
+        out["historic"] = historic
+    sets = dict(out.get("sets") or {})
+    if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
+        sets = dict(sets)
+        sets["rowCount"] = len(sets["rows"])
+        sets["rows"] = sets["rows"][:40]
+        out["sets"] = sets
+    lev = out.get("leverageMap")
+    if isinstance(lev, dict) and len(lev) > 40:
+        keep_lev_syms = set(open_syms) | set((out.get("symbols") or [])[:25])
+        out["leverageMap"] = {s: lev[s] for s in keep_lev_syms if s in lev}
+        out["leverageMapCount"] = len(lev)
+    lev_m = out.get("leverageMax")
+    if isinstance(lev_m, dict) and len(lev_m) > 40:
+        keep_syms = set(open_syms) | set((out.get("symbols") or [])[:25])
+        out["leverageMax"] = {s: lev_m[s] for s in keep_syms if s in lev_m}
     return out
 
 
@@ -416,6 +471,60 @@ def stamp_stats(st: dict, conn: str) -> dict:
     out["connType"] = lane.get("type") or out.get("connType") or ("vst" if "x02" in conn else "live")
     out["unit"] = lane.get("unit") or out.get("unit")
     out["exchange"] = lane.get("exchange") or out.get("exchange")
+    # Same progress schema on every connection. Values stay unique per lane.
+    sets = out.get("sets") if isinstance(out.get("sets"), dict) else {}
+    nested = dict(sets.get("progress") or {}) if isinstance(sets, dict) else {}
+    hist = out.get("historic") if isinstance(out.get("historic"), dict) else {}
+
+    def _pick(*vals):
+        for v in vals:
+            if v is None or v == "":
+                continue
+            return v
+        return None
+
+    progress = {
+        "connection": conn,
+        "connType": out["connType"],
+        "phase": _pick(out.get("progressPhase"), nested.get("phase"), hist.get("phase"), "idle"),
+        "pct": _pick(out.get("progressPct"), nested.get("pct"), hist.get("pct"), 0),
+        "detail": _pick(out.get("progressDetail"), nested.get("detail"), hist.get("detail"), ""),
+        "ready": bool(_pick(out.get("progressReady"), nested.get("ready"), hist.get("ready"), False)),
+        "symbol": _pick(out.get("progressSymbol"), nested.get("symbol"), "") or "",
+        "setId": _pick(out.get("progressSetId"), nested.get("setId"), "") or "",
+        "symbolsDone": _pick(out.get("progressSymbolsDone"), nested.get("symbolsDone"), 0) or 0,
+        "symbolsTotal": _pick(out.get("progressSymbolsTotal"), nested.get("symbolsTotal"), 0) or 0,
+        "setsDone": _pick(out.get("progressSetsDone"), nested.get("setsDone"), 0) or 0,
+        "setsTotal": _pick(out.get("progressSetsTotal"), nested.get("setsTotal"), 0) or 0,
+        "barsDone": _pick(out.get("progressBarsDone"), nested.get("barsDone"), 0) or 0,
+        "barsTotal": _pick(out.get("progressBarsTotal"), nested.get("barsTotal"), 0) or 0,
+        "elapsedMs": _pick(out.get("progressElapsedMs"), nested.get("elapsedMs"), 0) or 0,
+        "lastRunMs": _pick(out.get("progressLastRunMs"), nested.get("lastRunMs"), 0) or 0,
+        "cycle": _pick(out.get("progressCycle"), nested.get("cycle"), 0) or 0,
+        "error": _pick(out.get("progressError"), nested.get("error"), "") or "",
+        "validSymbols": list(nested.get("validSymbols") or []),
+        "gappedSymbols": list(nested.get("gappedSymbols") or []),
+        "missingSymbols": list(nested.get("missingSymbols") or []),
+    }
+    out["progress"] = progress
+    out["progressPhase"] = progress["phase"]
+    out["progressPct"] = progress["pct"]
+    out["progressDetail"] = progress["detail"]
+    out["progressReady"] = progress["ready"]
+    out["progressSymbol"] = progress["symbol"]
+    out["progressSetId"] = progress["setId"]
+    out["progressSymbolsDone"] = progress["symbolsDone"]
+    out["progressSymbolsTotal"] = progress["symbolsTotal"]
+    out["progressSetsDone"] = progress["setsDone"]
+    out["progressSetsTotal"] = progress["setsTotal"]
+    out["progressBarsDone"] = progress["barsDone"]
+    out["progressBarsTotal"] = progress["barsTotal"]
+    out["progressElapsedMs"] = progress["elapsedMs"]
+    out["progressLastRunMs"] = progress["lastRunMs"]
+    out["progressCycle"] = progress["cycle"]
+    out["progressError"] = progress["error"]
+    if out.get("symbolCap") is None:
+        out["symbolCap"] = (out.get("engine") or {}).get("symbolCap") if isinstance(out.get("engine"), dict) else None
     paused = bool(out.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{conn}"))
     out["paused"] = paused
     if paused:
@@ -441,6 +550,20 @@ def stamp_stats(st: dict, conn: str) -> dict:
             out["haltReason"] = "service failed" if state == "failed" else "service inactive"
     elif out["statsAgeS"] > 20:
         out["stale"] = True
+    eng = out.get("engine") if isinstance(out.get("engine"), dict) else {}
+    load = out.get("load") if isinstance(out.get("load"), dict) else None
+    if not load:
+        load = eng.get("load") if isinstance(eng, dict) else None
+    cov = out.get("coverage") if isinstance(out.get("coverage"), dict) else {}
+    if not load and isinstance(cov, dict):
+        load = cov.get("load") if isinstance(cov.get("load"), dict) else None
+    if isinstance(load, dict) and load:
+        out["load"] = load
+        out["loadLevel"] = load.get("level") or out.get("loadLevel")
+        if isinstance(cov, dict):
+            cov = dict(cov)
+            cov["load"] = load
+            out["coverage"] = cov
     return out
 
 
@@ -647,12 +770,20 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
 
 
 def load_json(path: str) -> dict:
+    return load_json_bounded(path, MAX_RETAINED_FILE_BYTES)
+
+
+def load_json_bounded(path: str, max_bytes: int) -> dict:
     try:
-        if not path or os.path.getsize(path) > MAX_RETAINED_FILE_BYTES:
+        if not path or not os.path.exists(path):
             return {}
+        size = os.path.getsize(path)
+        if size <= 0:
+            return {}
+        limit = max(int(max_bytes or 0), MAX_RETAINED_FILE_BYTES)
         with open(path, "rb") as f:
-            raw = f.read(MAX_RETAINED_FILE_BYTES + 1)
-        if len(raw) > MAX_RETAINED_FILE_BYTES:
+            raw = f.read(limit + 1)
+        if len(raw) > limit:
             return {}
         data = json.loads(raw.decode("utf-8"))
         return data if isinstance(data, dict) else {}
@@ -693,7 +824,28 @@ def load_overlay(conn: str) -> dict:
 
 
 def load_stats(conn: str) -> dict:
-    return load_json(stats_path(conn))
+    path = stats_path(conn)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = path
+    mtime = st.st_mtime
+    size = st.st_size
+    with _STATS_CACHE_LOCK:
+        hit = _STATS_CACHE.get(key)
+        if hit and hit[0] == mtime and hit[1] == size:
+            return hit[2]
+    data = load_json_bounded(path, STATS_READ_MAX_BYTES)
+    if not data:
+        return {}
+    slim = slim_for_ui(data)
+    with _STATS_CACHE_LOCK:
+        _STATS_CACHE[key] = (mtime, size, slim)
+        if len(_STATS_CACHE) > 8:
+            for old in list(_STATS_CACHE)[: len(_STATS_CACHE) - 4]:
+                _STATS_CACHE.pop(old, None)
+    return slim
 
 
 def _report_number(value, default=0.0) -> float:
@@ -856,13 +1008,63 @@ def _sets_lane(lane: dict, st: dict) -> dict:
     }
 
 
+def _num_max(*vals):
+    nums = []
+    for v in vals:
+        if v is None:
+            continue
+        try:
+            nums.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return max(nums) if nums else None
+
+
+def _lane_progress(st: dict) -> dict:
+    sets = st.get("sets") or {}
+    prog = dict(sets.get("progress") or {})
+    hist = st.get("historic") or {}
+    nested_detail = str(prog.get("detail") or hist.get("detail") or "")
+    top_detail = str(st.get("progressDetail") or "")
+    detail = nested_detail if ("slice " in nested_detail or "continuing " in nested_detail) else (top_detail or nested_detail)
+    if st.get("progressPhase"):
+        return {
+            "pct": _num_max(st.get("progressPct"), prog.get("pct"), hist.get("pct")),
+            "phase": st.get("progressPhase") or prog.get("phase") or hist.get("phase"),
+            "detail": detail,
+            "ready": bool(st.get("progressReady") or prog.get("ready") or hist.get("ready")),
+            "symbol": st.get("progressSymbol") or prog.get("symbol") or "",
+            "setId": st.get("progressSetId") or prog.get("setId") or "",
+            "symbolsDone": _num_max(st.get("progressSymbolsDone"), prog.get("symbolsDone")),
+            "symbolsTotal": _num_max(st.get("progressSymbolsTotal"), prog.get("symbolsTotal")),
+            "setsDone": _num_max(st.get("progressSetsDone"), prog.get("setsDone")),
+            "setsTotal": _num_max(st.get("progressSetsTotal"), prog.get("setsTotal")),
+            "barsDone": _num_max(st.get("progressBarsDone"), prog.get("barsDone")),
+            "barsTotal": _num_max(st.get("progressBarsTotal"), prog.get("barsTotal")),
+            "elapsedMs": _num_max(st.get("progressElapsedMs"), prog.get("elapsedMs")),
+            "lastRunMs": _num_max(st.get("progressLastRunMs"), prog.get("lastRunMs")),
+            "cycle": _num_max(st.get("progressCycle"), prog.get("cycle")),
+            "error": st.get("progressError") or prog.get("error") or "",
+        }
+    hist_phase = str(hist.get("phase") or "")
+    if hist_phase in ("backfill", "fetch", "gap", "initial", "catalog", "replay", "score", "partial") and str(prog.get("phase") or "idle") in ("idle", "ready", ""):
+        prog = {
+            **prog,
+            "phase": hist.get("phase"),
+            "pct": hist.get("pct") if hist.get("pct") is not None else prog.get("pct"),
+            "detail": hist.get("detail") or prog.get("detail"),
+            "ready": hist.get("ready") if hist.get("ready") is not None else prog.get("ready"),
+        }
+    return prog
+
+
 def lane_summary(lane: dict) -> dict:
     st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
-    prog = sets.get("progress") or {}
+    prog = _lane_progress(st)
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
@@ -934,6 +1136,8 @@ def lane_summary(lane: dict) -> dict:
         "lastError": _short_err(st.get("lastError")),
         "trackPrefix": eng.get("trackPrefix"),
         "cycle": st.get("cycle"),
+        "loadLevel": (st.get("load") or {}).get("level") if isinstance(st.get("load"), dict) else (eng.get("load") or {}).get("level") if isinstance(eng.get("load"), dict) else st.get("loadLevel"),
+        "load": st.get("load") if isinstance(st.get("load"), dict) else (eng.get("load") if isinstance(eng.get("load"), dict) else {}),
     }
 
 
@@ -1153,8 +1357,51 @@ def merge_overall() -> dict:
             continue
         if k in ("pfCost", "profitFactor", "pf", "pfNeutral", "pfPlus1xCost", "pfScale"):
             continue
+        if k in (
+            "coverage", "coord", "pulse", "indications", "engine", "variants",
+            "exits", "block", "dca", "api", "byIndication", "byStrategy",
+            "klinesTf", "signals", "prices", "regime", "cycle", "scanMs", "rssMb",
+            "forcedConfigs", "configEvidence",
+        ):
+            continue
         if detail_st.get(k) is not None:
             out[k] = detail_st.get(k)
+    # Unique per-lane progress; overall does not inherit one desk's hist tape.
+    out["progress"] = {
+        "connection": "overall",
+        "connType": "overall",
+        "phase": "lanes",
+        "pct": None,
+        "detail": "per-connection",
+        "ready": all(bool(l.get("progressReady")) for l in lanes) if lanes else False,
+        "symbol": "",
+        "setId": "",
+        "symbolsDone": None,
+        "symbolsTotal": None,
+        "setsDone": None,
+        "setsTotal": None,
+        "barsDone": None,
+        "barsTotal": None,
+        "elapsedMs": None,
+        "lastRunMs": None,
+        "cycle": None,
+        "error": "",
+        "lanes": [
+            {
+                "connection": l.get("id"),
+                "connType": l.get("type"),
+                "phase": l.get("progressPhase"),
+                "pct": l.get("progressPct"),
+                "detail": l.get("progressDetail"),
+                "ready": l.get("progressReady"),
+                "symbolsDone": l.get("progressSymbolsDone"),
+                "symbolsTotal": l.get("progressSymbolsTotal"),
+                "setsDone": l.get("progressSetsDone"),
+                "setsTotal": l.get("progressSetsTotal"),
+            }
+            for l in lanes
+        ],
+    }
     return slim_for_ui(out)
 
 
@@ -1193,6 +1440,11 @@ def connections_blob() -> dict:
                     "progressPct": l.get("progressPct"),
                     "progressPhase": l.get("progressPhase"),
                     "progressReady": l.get("progressReady"),
+                    "progressDetail": l.get("progressDetail"),
+                    "progressSymbolsDone": l.get("progressSymbolsDone"),
+                    "progressSymbolsTotal": l.get("progressSymbolsTotal"),
+                    "progressSetsDone": l.get("progressSetsDone"),
+                    "progressSetsTotal": l.get("progressSetsTotal"),
                     "hotMs": l.get("hotMs"),
                     "pfCost": l.get("pfCost"),
                     "controlsOk": l.get("controlsOk"),
@@ -1387,7 +1639,22 @@ class Handler(SimpleHTTPRequestHandler):
                     ],
                 })
                 return
-            self._json({"cts": load_cts(conn), "overlay": load_overlay(conn), "conn": conn})
+            ov = load_overlay(conn)
+            self._json({
+                "cts": load_cts(conn),
+                "overlay": ov,
+                "conn": conn,
+                "connType": "vst" if "x02" in conn else "live",
+                "symbolCap": ov.get("symbolCap"),
+                "symbolsAll": ov.get("symbolsAll"),
+                "histLookbackBars": ov.get("histLookbackBars"),
+                "maxOpen": ov.get("maxOpen"),
+                "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
+                "controlOrders": ov.get("controlOrders"),
+                "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
+                "dcaEnabled": ov.get("dcaEnabled"),
+                "blockActive": ov.get("blockActive"),
+            })
             return
         if path in ("/stats.json", "/live-stats.json"):
             if conn == "overall":
@@ -1519,8 +1786,13 @@ class Handler(SimpleHTTPRequestHandler):
 def heal_loop() -> None:
     """Restart crashed/failed engines unless the user stopped them on purpose.
     After a crash loop systemd start-limit leaves a unit dead; reset-failed +
-    start revives it, so the desk always comes back on its own."""
+    start revives it, so the desk always comes back on its own.
+
+    A live unit whose stats file stops moving is treated as stuck: first ask
+    it to trim caches, then (after a long stall) recycle the unit.
+    """
     last: dict = {}
+    last_trim: dict = {}
     while True:
         try:
             for lane in LANES:
@@ -1533,10 +1805,32 @@ def heal_loop() -> None:
                 with CONTROL_LOCK:
                     if os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH):
                         continue
-                    state = unit_state(cid, fresh=True)
-                    if state == "active":
+                    if os.path.exists(os.path.join(DIR, f"PAUSE-{cid}")):
                         continue
+                    state = unit_state(cid, fresh=True)
                     now = time.time()
+                    age = stats_age(cid)
+                    if state == "active":
+                        if age > 75.0:
+                            trim_path = os.path.join(DIR, f"HEAL-TRIM-{cid}")
+                            if now - float(last_trim.get(cid, 0) or 0) >= 60.0:
+                                last_trim[cid] = now
+                                try:
+                                    with open(trim_path, "a"):
+                                        pass
+                                    append_bounded_line(os.path.join(DIR, "http.log"), f"heal-trim {cid} statsAge={age:.0f}s\n")
+                                except Exception:
+                                    pass
+                        if age > 300.0 and now - float(last.get(cid, 0) or 0) >= 180.0:
+                            last[cid] = now
+                            unit = engine_unit(cid)
+                            _sysctl("reset-failed", unit, timeout=8)
+                            rc, out = _sysctl("restart", unit)
+                            try:
+                                append_bounded_line(os.path.join(DIR, "http.log"), f"heal-stuck {cid} age={age:.0f}s rc={rc} {out[:120]}\n")
+                            except Exception:
+                                pass
+                        continue
                     if now - float(last.get(cid, 0) or 0) < 150.0:
                         continue
                     suffix = re.sub(r"[^A-Za-z0-9]", "_", cid).upper()

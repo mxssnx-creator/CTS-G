@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 import json
+import multiprocessing as mp
 import os
 import subprocess
 import sys
@@ -23,11 +24,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
     EVALUATION_WINDOWS,
+    POSITIVE_PF,
     SL_TP_RATIOS,
     SL_TP_MIN,
     SL_TP_MAX,
     SL_TP_STEP,
     evaluation_windows,
+    is_positive_pf,
     last_n_cost_pf,
     row_net_pnl,
     filter_side,
@@ -40,12 +43,14 @@ from set_engine import (
     SetBook,
     drawdown_time,
     drawdown_time_by_symbol,
-    last_n_balanced,
+    last_n_chrono,
+    pin_compute_threads,
     synth_trend,
 )
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
+DEFAULT_SYMBOL_CAP = 50
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
     "XRP-USDT",
@@ -104,10 +109,10 @@ _SHARED = {
     "exitPeakOn": True,
     "indEnabled": True,
     "stratIndications": True,
-    "axisPrevEnabled": True,
-    "axisLastEnabled": True,
-    "axisContEnabled": True,
-    "axisPauseEnabled": True,
+    "axisPrevEnabled": False,
+    "axisLastEnabled": False,
+    "axisContEnabled": False,
+    "axisPauseEnabled": False,
     "slToTpAuto": True,
     "trailAuto": True,
     "trailRecalcGive": True,
@@ -132,11 +137,11 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.1,
             "trailArmMin": 0.3,
             "trailArmMax": 0.3,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
-            "baseMinPf": 1.02,
-            "mainMinPf": 1.02,
-            "realMinPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
+            "baseMinPf": POSITIVE_PF,
+            "mainMinPf": POSITIVE_PF,
+            "realMinPf": POSITIVE_PF,
             "setMaxDdTimeS": 900,
             "maxDdTimeS": 900,
             "histLookbackBars": 1200,
@@ -161,11 +166,11 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.2,
             "trailArmMin": 0.6,
             "trailArmMax": 0.6,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
-            "baseMinPf": 1.02,
-            "mainMinPf": 1.02,
-            "realMinPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
+            "baseMinPf": POSITIVE_PF,
+            "mainMinPf": POSITIVE_PF,
+            "realMinPf": POSITIVE_PF,
             "setMaxDdTimeS": 1200,
             "maxDdTimeS": 1200,
             "histLookbackBars": 1200,
@@ -186,11 +191,11 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.2,
             "trailArmMin": 0.6,
             "trailArmMax": 0.6,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
-            "baseMinPf": 1.02,
-            "mainMinPf": 1.02,
-            "realMinPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
+            "baseMinPf": POSITIVE_PF,
+            "mainMinPf": POSITIVE_PF,
+            "realMinPf": POSITIVE_PF,
             "setMaxDdTimeS": 1800,
             "histLookbackBars": 720,
             "stratGeneral": True,
@@ -210,8 +215,8 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.1,
             "trailArmMin": 0.3,
             "trailArmMax": 0.9,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
             "setMaxDdTimeS": 1200,
             "histLookbackBars": 1200,
             "stratGeneral": True,
@@ -235,8 +240,8 @@ PRESETS: List[Dict[str, Any]] = [
             "stratIndications": True,
             "indMinAgreement": 0.7,
             "indMinConfidence": 0.65,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
             "setMaxDdTimeS": 1500,
             "histLookbackBars": 1200,
         },
@@ -255,8 +260,8 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.2,
             "blockMaxStack": 6,
             "blockVolumeRatio": 0.25,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
             "setMaxDdTimeS": 1800,
             "histLookbackBars": 720,
             "stratGeneral": True,
@@ -276,11 +281,11 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.1,
             "trailArmMin": 0.3,
             "trailArmMax": 0.3,
-            "baseMinPf": 1.02,
-            "mainMinPf": 1.02,
-            "realMinPf": 1.02,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
+            "baseMinPf": POSITIVE_PF,
+            "mainMinPf": POSITIVE_PF,
+            "realMinPf": POSITIVE_PF,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
             "setMaxDdTimeS": 600,
             "maxDdTimeS": 600,
             "histLookbackBars": 1200,
@@ -301,8 +306,8 @@ PRESETS: List[Dict[str, Any]] = [
             "trailGivePct": 0.2,
             "trailArmMin": 0.3,
             "trailArmMax": 1.5,
-            "setMinPf": 1.02,
-            "minPf": 1.02,
+            "setMinPf": POSITIVE_PF,
+            "minPf": POSITIVE_PF,
             "setMaxDdTimeS": 1800,
             "histLookbackBars": 1200,
             "stratGeneral": True,
@@ -734,6 +739,19 @@ def load_universe() -> List[str]:
     return out
 
 
+def configured_symbol_cap(body: Optional[Dict[str, Any]] = None) -> int:
+    """0 = unlimited. Missing overlay cap defaults to 50, not the full book."""
+    body = body if isinstance(body, dict) else {}
+    ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
+    for src in (body, ov):
+        if src.get("symbolCap") is not None:
+            try:
+                return max(0, int(src.get("symbolCap")))
+            except (TypeError, ValueError):
+                continue
+    return DEFAULT_SYMBOL_CAP
+
+
 def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
     body = body if isinstance(body, dict) else {}
     opt = parse_options(body)
@@ -768,7 +786,13 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
             continue
         seen.add(s)
         out.append(s)
-    return mandatory_symbols(out or list(DEFAULT_SYMBOLS))
+    out = mandatory_symbols(out or list(DEFAULT_SYMBOLS))
+    cap = configured_symbol_cap(body)
+    if cap > 0 and len(out) > cap:
+        must = [s for s in FORCED_SYMBOLS if s in out]
+        rest = [s for s in out if s not in must]
+        out = (must + rest)[: max(cap, len(must))]
+    return out
 
 
 def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -786,7 +810,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "coordOptimizationN": int(opt.get("coordOptimizationN") or 50),
         "setAutoDeact": True,
         "setMinSamples": 8,
-        "setMinPf": 1.02,
+        "setMinPf": POSITIVE_PF,
         "setMaxDdTimeS": 57600,
         "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 1),
@@ -855,7 +879,7 @@ def rank_tuple(row: Dict[str, Any]) -> Tuple:
     dd = float(row.get("maxDdS") or 0)
     sl = float(row.get("slRatio") or 9)
     exp = float(row.get("expectancy") or 0)
-    validated = n >= 8 and pf + 1e-9 >= 1.0
+    validated = n >= 8 and is_positive_pf(pf)
     return (0 if validated else 1, -pf, dd, sl, -exp, -int(row.get("n") or 0))
 
 
@@ -915,7 +939,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "classicPf": float(g("classic_all", st.classic_all) or 0),
         "active": bool(g("active", st.active)),
         "deactReason": st.deact_reason if not want else "",
-        "validated": n15 >= 8 and pf + 1e-9 >= 1.0,
+        "validated": n15 >= 8 and is_positive_pf(pf),
         "lowSl": st.sl_ratio <= 0.6 + 1e-9 or st.kind == "trail",
         "costSubtracted": True,
         "bySide": by_side_pub,
@@ -923,23 +947,25 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
 
 
 def _bounded_tape(parts: Any, cap: int) -> List[Dict[str, Any]]:
-    """Keep last-N balanced fills while streaming large independent tapes.
+    """Keep the chronological last-N while streaming large independent tapes.
 
     Pack/core rollups used to concatenate every Set's history (tens of
     millions of rows) before last-N PF. The published windows are last 5–75
     (plus the 80/150 coordination views), so bounding to that cap keeps the
-    same PF/EV contract without the full cartesian product in RAM.
+    same PF/EV contract without the full cartesian product in RAM. PF gates
+    must see the actual recent tail, not a per-symbol balanced subsample.
     """
     cap = max(8, int(cap or 8))
+    keep = max(cap * 2, 32)
     buf: List[Dict[str, Any]] = []
     for rows in parts:
         if not rows:
             continue
         buf.extend(rows)
-        if len(buf) > cap * 8:
-            buf = last_n_balanced(buf, cap)
-    if len(buf) > cap:
-        buf = last_n_balanced(buf, cap)
+        if len(buf) > keep * 4:
+            buf = last_n_chrono(buf, keep)
+    if len(buf) > keep:
+        buf = last_n_chrono(buf, keep)
     return buf
 
 
@@ -963,18 +989,17 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             by_dir[key].append(row)
             dir_n[key] += 1
             if len(by_dir[key]) > trim_at:
-                by_dir[key] = last_n_balanced(by_dir[key], cap)
+                by_dir[key] = last_n_chrono(by_dir[key], cap)
     out: Dict[str, Any] = {}
     need = book.eval_need()
     win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
     for d in DIRECTIONS:
-        sub = last_n_balanced(by_dir.get(d) or [], cap)
-        balanced = last_n_balanced(sub, win_n, ordered=True)
-        pf = last_n_cost_pf(balanced, book.pf_n, book.cost_pct, ordered=True, simple=True)
-        nets = [row_net_pnl(r, book.cost_pct) for r in balanced]
+        seq = last_n_chrono(by_dir.get(d) or [], cap)
+        pf = last_n_cost_pf(seq, book.pf_n, book.cost_pct, ordered=True, simple=True)
+        nets = [row_net_pnl(r, book.cost_pct) for r in seq]
         wins = sum(1 for x in nets if x > 0)
         decided = sum(1 for x in nets if x != 0)
-        dd = drawdown_time_by_symbol(balanced, ordered=True) if balanced else {"maxS": 0.0, "avgS": 0.0}
+        dd = drawdown_time_by_symbol(seq, ordered=True) if seq else {"maxS": 0.0, "avgS": 0.0}
         out[d] = {
             "direction": d,
             "n": int(dir_n.get(d) or 0),
@@ -983,10 +1008,10 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
-                balanced, book.cost_pct, required_samples=need, ordered=True, simple=True
+                seq, book.cost_pct, required_samples=need, ordered=True, simple=True
             ),
         }
     return out
@@ -1010,7 +1035,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         buf.extend(rows)
         group_n[key] += len(rows)
         if len(buf) > trim_at:
-            groups[key] = last_n_balanced(buf, cap)
+            groups[key] = last_n_chrono(buf, cap)
 
     for st in book.by_idx:
         rows = (hist or {}).get(st.id) or st.hist
@@ -1031,7 +1056,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         win = book.pf_n
         if key in ("block", "block:signals", "dca", "core"):
             win = max(book.pf_n, min(80, int(group_n.get(key) or len(tape) or 1)))
-        bounded = last_n_balanced(tape, max(win, cap))
+        bounded = last_n_chrono(tape, max(win, cap))
         pf = last_n_cost_pf(bounded, win, book.cost_pct, ordered=True, simple=True)
         nets = [row_net_pnl(r, book.cost_pct) for r in bounded]
         wins = sum(1 for x in nets if x > 0)
@@ -1042,16 +1067,16 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             sub = filter_side(bounded, d)
             if not sub:
                 continue
-            sbalanced = last_n_balanced(sub, win_n, ordered=True)
-            spf = last_n_cost_pf(sbalanced, book.pf_n, book.cost_pct, ordered=True, simple=True)
+            stail = last_n_chrono(sub, win_n, ordered=True)
+            spf = last_n_cost_pf(stail, book.pf_n, book.cost_pct, ordered=True, simple=True)
             by_dir[d] = {
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
+                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
                 "costSubtracted": True,
                 "evaluationWindows": evaluation_windows(
-                    sbalanced, book.cost_pct, required_samples=need, ordered=True, simple=True
+                    stail, book.cost_pct, required_samples=need, ordered=True, simple=True
                 ),
             }
         out[key] = {
@@ -1062,7 +1087,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 bounded, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1070,6 +1095,51 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "bySide": by_dir,
         }
     return out
+
+
+def catalog_listings(
+    book: SetBook,
+    ranked: Sequence[Tuple[Tuple, Any, str, bool, bool]],
+    symbols: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Complete id/key listings. Preview rows stay bounded; identity is full."""
+    ranked_ids: List[str] = []
+    validated_ids: List[str] = []
+    seen: set[str] = set()
+    by_pack: Dict[str, List[str]] = {}
+    by_kind: Dict[str, List[str]] = {}
+    by_dir: Dict[str, List[str]] = {"LONG": [], "SHORT": []}
+    for _key, st, side, validated, _low in ranked:
+        sid = str(st.id)
+        if side:
+            if side in by_dir:
+                by_dir[side].append(sid)
+            continue
+        if sid in seen:
+            continue
+        seen.add(sid)
+        ranked_ids.append(sid)
+        by_pack.setdefault(str(st.pack), []).append(sid)
+        by_kind.setdefault(str(st.kind), []).append(sid)
+        if validated:
+            validated_ids.append(sid)
+    index_by_id = {st.id: int(st.idx) for st in book.by_idx}
+    return {
+        "rankedIds": ranked_ids,
+        "validatedIds": validated_ids,
+        "byPack": by_pack or dict(getattr(book, "_ids_by_pack", {}) or {}),
+        "byKind": by_kind or dict(getattr(book, "_ids_by_kind", {}) or {}),
+        "byDirection": by_dir,
+        "indexById": index_by_id,
+        "symbols": [str(s) for s in (symbols or [])],
+        "relative": {
+            "sets": len(book.by_idx),
+            "ranked": len(ranked_ids),
+            "validated": len(validated_ids),
+            "packs": {k: len(v) for k, v in by_pack.items()},
+            "kinds": {k: len(v) for k, v in by_kind.items()},
+        },
+    }
 
 
 def expand_rows(book: SetBook, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -1087,7 +1157,7 @@ def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
     dd = float((blob.get("max_dd_s") if blob is not None else st.max_dd_s) or 0)
     exp = float((blob.get("expectancy") if blob is not None else st.expectancy) or 0)
     sl = float(st.sl_ratio or 9)
-    validated = n15 >= 8 and pf + 1e-9 >= 1.0
+    validated = n15 >= 8 and is_positive_pf(pf)
     low_sl = sl <= 0.6 + 1e-9 or st.kind == "trail"
     return (0 if validated else 1, -pf, dd, sl, -exp, -n), validated, low_sl, n
 
@@ -1150,14 +1220,14 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             buf = by_tape.setdefault(s, [])
             buf.append(r)
             if len(buf) > trim_at:
-                by_tape[s] = last_n_balanced(buf, cap)
+                by_tape[s] = last_n_chrono(buf, cap)
             per_set.setdefault(s, []).append(r)
         for s, rows in per_set.items():
             by_dd.setdefault(s, []).append(drawdown_time(rows, ordered=True))
     out: List[Dict[str, Any]] = []
     for s, tape in by_tape.items():
-        balanced = last_n_balanced(tape, win_n)
-        pf = last_n_cost_pf(balanced, book.pf_n, cost, ordered=True, simple=True)
+        tail = last_n_chrono(tape, win_n)
+        pf = last_n_cost_pf(tail, book.pf_n, cost, ordered=True, simple=True)
         dd_parts = by_dd.get(s) or []
         if dd_parts:
             dd = {
@@ -1165,23 +1235,23 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
                 "avgS": sum(p["avgS"] for p in dd_parts) / len(dd_parts),
             }
         else:
-            dd = drawdown_time(balanced, ordered=True)
+            dd = drawdown_time(tail, ordered=True)
         decided = int(by_decided.get(s) or 0)
         wins = int(by_wins.get(s) or 0)
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
-            sub = filter_side(balanced, d)
+            sub = filter_side(tail, d)
             if not sub:
                 continue
-            sbalanced = last_n_balanced(sub, win_n, ordered=True)
-            spf = last_n_cost_pf(sbalanced, book.pf_n, cost, ordered=True, simple=True)
+            stail = last_n_chrono(sub, win_n, ordered=True)
+            spf = last_n_cost_pf(stail, book.pf_n, cost, ordered=True, simple=True)
             by_dir[d] = {
                 "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and float(spf["ratio"]) + 1e-9 >= 1.0,
+                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
                 "evaluationWindows": evaluation_windows(
-                    sbalanced, cost, required_samples=need, ordered=True, simple=True
+                    stail, cost, required_samples=need, ordered=True, simple=True
                 ),
             }
         out.append({
@@ -1193,10 +1263,10 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and float(pf["ratio"]) + 1e-9 >= 1.0,
+            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
-                balanced, cost, required_samples=need, ordered=True, simple=True
+                tail, cost, required_samples=need, ordered=True, simple=True
             ),
             "bySide": by_dir,
         })
@@ -1265,7 +1335,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         and str(source or "") not in ("synth",)
     )
     block_pf = float(block.get("pf") or 0)
-    block_ok = bool(block.get("validated")) and block_pf >= 1.0 and float(block.get("netAvg") or 0) >= 0
+    block_ok = bool(block.get("validated")) and is_positive_pf(block_pf) and float(block.get("netAvg") or 0) >= 0
     # Stable continuous: Block remainder stays on when it doesn't destroy PF.
     # DCA only when its independent tape is validated, +EV, PF≥1.25, DD capped.
     patch["blockEnabled"] = True
@@ -1383,9 +1453,32 @@ def pipeline_symbols(
 _HIST_WORKER_BOOK: Optional[SetBook] = None
 
 
+def replay_pool_workers(
+    n_symbols: int,
+    n_sets: int = 0,
+    requested: Optional[int] = None,
+    cpu: Optional[int] = None,
+) -> int:
+    """Process-pool size follows CPU and symbol count. No extra fat-catalog cap."""
+    n_symbols = max(1, int(n_symbols or 1))
+    try:
+        cpu_n = max(1, int(cpu if cpu is not None else (os.cpu_count() or 1)))
+    except Exception:
+        cpu_n = 2
+    cap = max(1, min(cpu_n, n_symbols))
+    if requested is None:
+        return cap
+    try:
+        want = int(requested)
+    except Exception:
+        return cap
+    return max(1, min(n_symbols, want))
+
+
 def _init_replay_worker(overlay: Dict[str, Any]) -> None:
     """Build one reusable catalog per process instead of once per tile."""
     global _HIST_WORKER_BOOK
+    pin_compute_threads(1)
     book = SetBook()
     book.load(dict(overlay or {}))
     _HIST_WORKER_BOOK = book
@@ -1466,6 +1559,60 @@ def _replay_tile_worker(payload: Tuple[Any, ...]) -> Tuple[
             local_ind or {},
             local_strat or {},
             local_counts,
+            (time.perf_counter() - started) * 1000.0,
+        )
+    finally:
+        book.bars.pop(str(sym), None)
+
+
+def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tuple[
+    str,
+    int,
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, List[Dict[str, Any]]],
+    Dict[str, int],
+    Dict[str, Any],
+    float,
+]:
+    """Prepare + replay one symbol in a single process hop (small books)."""
+    pin_compute_threads(1)
+    sym, bars, now = payload
+    book = _worker_book()
+    started = time.perf_counter()
+    book.bars[str(sym)] = bars
+    try:
+        local_hist: Dict[str, List[Dict[str, Any]]] = {}
+        local_ind: Dict[str, List[Dict[str, Any]]] = {}
+        local_strat: Dict[str, List[Dict[str, Any]]] = {}
+        local_counts: Dict[str, int] = {}
+        nbar = book.replay_symbol_partial(
+            str(sym),
+            local_hist,
+            now=now,
+            ind_hist=local_ind,
+            drop_bars=True,
+            strat_hist=local_strat,
+            hist_counts=local_counts,
+        )
+        for sid, rows in local_hist.items():
+            if len(rows) > HIST_CAP:
+                local_hist[sid] = rows[-HIST_CAP:]
+        for kind, rows in local_ind.items():
+            if len(rows) > HIST_CAP:
+                local_ind[kind] = rows[-HIST_CAP:]
+        for key, rows in local_strat.items():
+            if len(rows) > 2400:
+                local_strat[key] = rows[-2400:]
+        forced = evaluate_forced_symbol(str(sym), bars, book.ind_settings, now, cost_pct=book.cost_pct)
+        return (
+            str(sym),
+            int(nbar),
+            local_hist,
+            local_ind,
+            local_strat,
+            local_counts,
+            forced if isinstance(forced, dict) else {},
             (time.perf_counter() - started) * 1000.0,
         )
     finally:
@@ -1654,9 +1801,11 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         })
         try:
             cpu = max(1, int(os.cpu_count() or 1))
-            default_workers = max(1, min(cpu, 8))
-            requested_workers = int(body.get("workers") or default_workers)
-            workers = max(1, min(16, cpu, requested_workers))
+            requested_raw = body.get("workers")
+            requested_workers: Optional[int] = None
+            if requested_raw not in (None, "", 0, "0"):
+                requested_workers = int(requested_raw)
+            workers = replay_pool_workers(len(symbols), len(book.by_idx), requested_workers, cpu)
         except Exception:
             workers = 2
         job["workers"] = workers
@@ -1713,6 +1862,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 job["rows"] = rows
                 job["rowCount"] = len(ranked)
                 job["validatedCount"] = sum(1 for item in ranked if item[3])
+                job["listings"] = catalog_listings(book, ranked, symbols)
+                job["index"] = (job["listings"] or {}).get("indexById") or {}
                 job["kinds"] = book.ind_gate_snapshot()
                 # Direction/strategy rollups walk the full per-Set tape and
                 # duplicate rows across groups. They are deliberately built
@@ -1749,7 +1900,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         queue_limit = max(workers, workers * REPLAY_QUEUE_MULTIPLIER)
         all_tile_specs: List[Tuple[str, int, List[str], bool, bool]] = []
         for pack in book.packs:
-            pack_ids = [st.id for st in book.by_idx if st.pack == pack]
+            pack_ids = book.ids_for_pack(pack)
             if not pack_ids:
                 continue
             seed = next((sid for sid in pack_ids if book.sets[sid].kind == "base"), pack_ids[0])
@@ -1763,7 +1914,13 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                     pack == "indications" and tile_i == 0,
                     tile_i == 0,
                 ))
-        replay_tiles_total = len(symbols) * len(all_tile_specs)
+        use_oneshot = len(symbols) <= 32 or len(all_tile_specs) <= 1
+        if use_oneshot:
+            replay_tiles_total = 0
+            queue_limit = max(1, min(len(symbols), max(workers, workers * 2)))
+        else:
+            replay_tiles_total = len(symbols) * len(all_tile_specs)
+        job["replayMode"] = "oneshot" if use_oneshot else "tiled"
         job["replayTiles"] = {
             "requested": replay_tiles_total,
             "submitted": 0,
@@ -1822,9 +1979,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             job["checkpoint"]["symbol"] = sym
             job["source"] = state["src"]
             _trim_maps()
-            if persist:
-                heavy = replay_done == total or replay_done % 8 == 0
-                if heavy or replay_done % 4 == 0:
+            heavy = persist and (replay_done == total or replay_done % 8 == 0)
+            if persist or total <= 8:
+                if heavy or replay_done == total or total <= 8 or replay_done % 4 == 0:
                     snapshot(replay_done, total, "replay", heavy=heavy)
             state["bars"] = None
             state["prepared"] = None
@@ -1873,8 +2030,25 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             if replay_tiles_completed == replay_tiles_total and tile_started_at is not None:
                 timings["replayWallMs"] = (time.perf_counter() - tile_started_at) * 1000.0
             if state["tilesDone"] >= state["tilesTotal"]:
-                completed_states[str(sym)] = state
-                flush_completed_symbols(total)
+                finish_symbol(state, total)
+
+        def handle_symbol(result: Tuple[Any, ...], meta: Dict[str, Any], total: int) -> None:
+            nonlocal replay_tasks_completed, tile_started_at
+            sym, nbar, local_hist, local_ind, local_strat, local_counts, forced, ms = result[:8]
+            state = symbol_states.get(str(sym))
+            if state is None:
+                raise RuntimeError(f"oneshot replay completed for unknown symbol {sym}")
+            timings["replayMs"] += float(ms or 0.0)
+            state["nbar"] = int(nbar)
+            state["hist"] = local_hist or {}
+            state["ind"] = local_ind or {}
+            state["strat"] = local_strat or {}
+            state["counts"] = local_counts or {}
+            state["forced"] = forced if isinstance(forced, dict) else {}
+            replay_tasks_completed += 1
+            if tile_started_at is not None and replay_done + 1 >= total:
+                timings["replayWallMs"] = (time.perf_counter() - tile_started_at) * 1000.0
+            finish_symbol(state, total)
 
         def fill_tile_queue() -> None:
             nonlocal tile_cursor, replay_tasks_submitted, tile_started_at
@@ -1952,13 +2126,16 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 if meta.get("kind") == "prepare":
                     replay_tasks_completed += 1
                     handle_prepare(result, meta, total)
+                elif meta.get("kind") == "symbol":
+                    handle_symbol(result, meta, total)
                 else:
                     merge_tile(result, meta, total)
-                fill_tile_queue()
+                if not use_oneshot:
+                    fill_tile_queue()
                 update_task_status()
 
         def on_item(sym: str, bars: List[List[float]], src: str, done: int, total: int) -> None:
-            nonlocal replay_tasks_submitted, prep_started_at
+            nonlocal replay_tasks_submitted, prep_started_at, tile_started_at
             state = {
                 "symbol": sym,
                 "src": src,
@@ -1980,20 +2157,34 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 prep_started_at = time.perf_counter()
             if replay_pool is None:
                 raise RuntimeError("historic replay pool was not created")
-            future = replay_pool.submit(_prepare_symbol_worker, (sym, bars, now))
-            replay_pending[future] = {"kind": "prepare", "symbol": sym, "tile": None}
+            if use_oneshot:
+                if tile_started_at is None:
+                    tile_started_at = time.perf_counter()
+                future = replay_pool.submit(_replay_symbol_worker, (sym, bars, now))
+                replay_pending[future] = {"kind": "symbol", "symbol": sym, "tile": None}
+            else:
+                future = replay_pool.submit(_prepare_symbol_worker, (sym, bars, now))
+                replay_pending[future] = {"kind": "prepare", "symbol": sym, "tile": None}
             replay_tasks_submitted += 1
             update_task_status()
             while len(replay_pending) >= queue_limit:
                 drain_replay(total)
 
-        replay_pool = ProcessPoolExecutor(
-            max_workers=workers,
-            initializer=_init_replay_worker,
-            initargs=(ov,),
-        )
+        try:
+            ctx = mp.get_context("fork")
+        except Exception:
+            ctx = None
+        pool_kwargs: Dict[str, Any] = {
+            "max_workers": workers,
+            "initializer": _init_replay_worker,
+            "initargs": (ov,),
+        }
+        if ctx is not None:
+            pool_kwargs["mp_context"] = ctx
+        replay_pool = ProcessPoolExecutor(**pool_kwargs)
         source_started = time.perf_counter()
-        source = pipeline_symbols(symbols, fetch_bars, synth, workers, on_item, on_prog=prog)
+        fetch_workers = max(1, min(len(symbols), max(workers, 4)))
+        source = pipeline_symbols(symbols, fetch_bars, synth, fetch_workers, on_item, on_prog=prog)
         timings["fetchMs"] = (time.perf_counter() - source_started) * 1000.0
         while replay_pending:
             drain_replay(len(symbols))
@@ -2002,15 +2193,11 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         if replay_pool is not None:
             replay_pool.shutdown(wait=True, cancel_futures=True)
             replay_pool = None
-        if replay_done != len(symbols) or replay_tiles_completed != replay_tiles_total:
+        if replay_done != len(symbols) or (not use_oneshot and replay_tiles_completed != replay_tiles_total):
             raise RuntimeError(
                 f"historic replay incomplete: symbols {replay_done}/{len(symbols)}, "
-                f"tiles {replay_tiles_completed}/{replay_tiles_total}"
+                f"tiles {replay_tiles_completed}/{replay_tiles_total} mode={job.get('replayMode')}"
             )
-        # One catalog-wide score pass after every symbol/config is committed.
-        score_started = time.perf_counter()
-        book._score_all()
-        timings["scoreMs"] = (time.perf_counter() - score_started) * 1000.0
         job["source"] = source
         job["barsHeld"] = len(book.bars)
         prog("score", 94.0, "score PF · DDT")
@@ -2020,12 +2207,34 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         book.progress.ready = True
         book.progress.pct = 100.0
         report_started = time.perf_counter()
-        ranked = _rank_set_rows(book)
+        score_started = time.perf_counter()
+        try:
+            report_cpu = max(1, int(os.cpu_count() or 1))
+        except Exception:
+            report_cpu = 2
+        if report_cpu <= 2:
+            book._score_all()
+            timings["scoreMs"] = (time.perf_counter() - score_started) * 1000.0
+            kinds = book.ind_gate_snapshot()
+            ranked = _rank_set_rows(book)
+            by_sym = symbol_rollup(book)
+            by_dir = direction_rollup(book)
+            by_strat = strategy_rollup(book, strat=strat_hist)
+        else:
+            with ThreadPoolExecutor(max_workers=min(4, report_cpu), thread_name_prefix="hist-report") as report_pool:
+                score_fut = report_pool.submit(book._score_all)
+                sym_fut = report_pool.submit(symbol_rollup, book)
+                dir_fut = report_pool.submit(direction_rollup, book)
+                strat_fut = report_pool.submit(strategy_rollup, book, None, strat_hist)
+                score_fut.result()
+                timings["scoreMs"] = (time.perf_counter() - score_started) * 1000.0
+                kinds = book.ind_gate_snapshot()
+                ranked = _rank_set_rows(book)
+                by_sym = sym_fut.result()
+                by_dir = dir_fut.result()
+                by_strat = strat_fut.result()
         rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
-        kinds = book.ind_gate_snapshot()
-        by_sym = symbol_rollup(book)
-        by_dir = direction_rollup(book)
-        by_strat = strategy_rollup(book, strat=strat_hist)
+        listings = catalog_listings(book, ranked, symbols)
         evaluation_summary = {
             "windows": list(EVALUATION_WINDOWS),
             "directions": {k: v.get("evaluationWindows") or {} for k, v in by_dir.items()},
@@ -2063,6 +2272,8 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "bySymbol": by_sym,
             "byDirection": by_dir,
             "byStrategy": by_strat,
+            "listings": listings,
+            "index": listings.get("indexById") or {},
             "kinds": kinds,
             "evaluationWindows": evaluation_summary,
             "forcedConfigs": forced_summary(forced_results, forced_sources, now),
@@ -2266,6 +2477,26 @@ def self_test() -> List[Tuple[str, bool, str]]:
         out.append((name, bool(ok), str(detail)[:220]))
 
     rec("preset-count", len(PRESETS) == 8, str(len(PRESETS)))
+    src = open(__file__, encoding="utf-8").read()
+    prod_src = src.split("def self_test", 1)[0]
+    rec("calc-pf-chrono-not-balanced", "last_n_balanced(" not in prod_src)
+    from set_engine import last_n_balanced as _bal
+    mixed = (
+        [{"t": 1000 + i, "symbol": "A-USDT", "pnl_pct": 0.004, "side": "LONG"} for i in range(20)]
+        + [{"t": 2000 + i, "symbol": "B-USDT", "pnl_pct": -0.003, "side": "LONG"} for i in range(15)]
+    )
+    chrono15 = last_n_chrono(mixed, 15)
+    bal15 = _bal(mixed, 15)
+    rec("chrono-last15-is-recent-hot", {r["symbol"] for r in chrono15} == {"B-USDT"}, str({r["symbol"] for r in chrono15}))
+    rec(
+        "balanced-last15-mixes-symbols",
+        {"A-USDT", "B-USDT"} <= {r["symbol"] for r in bal15},
+        str({r["symbol"] for r in bal15}),
+    )
+    c_pf = float(last_n_cost_pf(chrono15, 15, ordered=True)["ratio"])
+    b_pf = float(last_n_cost_pf(bal15, 15, ordered=True)["ratio"])
+    rec("chrono-pf-differs-from-balanced", abs(c_pf - b_pf) > 1e-4, f"chrono={c_pf} bal={b_pf}")
+    rec("chrono-last15-not-positive", not is_positive_pf(c_pf), f"chrono={c_pf}")
     rec("preset-recommended", sum(1 for p in PRESETS if p.get("recommended")) >= 2)
     ids = [p["id"] for p in PRESETS]
     rec("preset-unique", len(ids) == len(set(ids)), str(ids))
@@ -2296,6 +2527,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
+    rec("symbol-cap-default-50", configured_symbol_cap({}) == 50)
+    rec("symbol-cap-explicit-unlimited", configured_symbol_cap({"symbolCap": 0}) == 0)
+    rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
+    capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
+    rec("resolve-respects-cap", 1 <= len(capped) <= max(25, len(FORCED_SYMBOLS)), str(len(capped)))
     rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 22, str(parse_options({})))
     rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
@@ -2330,7 +2566,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-rows", int(job.get("rowCount") or 0) >= 20, str(job.get("rowCount")))
     covj = job.get("coverage") or {}
     rec("calc-validated-count", 0 <= int(job.get("validatedCount") or 0) <= int(job.get("rowCount") or 0) and 0 <= int(covj.get("validatedCount") or 0) <= int(covj.get("setCount") or covj.get("product") or 0), f"rows={job.get('validatedCount')}/{job.get('rowCount')} catalog={covj.get('validatedCount')}/{covj.get('setCount')}")
-    rec("calc-positive-pf-validation", all(float(r.get("last15Ratio") or 0) + 1e-9 >= 1.0 for r in (job.get("rows") or []) if r.get("validated")), "validated rows have PF >= 1.0 after cost")
+    rec("calc-positive-pf-validation", all(is_positive_pf(r.get("last15Ratio")) for r in (job.get("rows") or []) if r.get("validated")), "validated rows have PF >= 1.10 after cost")
     rec(
         "calc-evaluation-windows",
         set((job.get("evaluationWindows") or {}).get("windows") or []) == set(EVALUATION_WINDOWS)
@@ -2387,6 +2623,40 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-apply", isinstance(job.get("apply"), dict) and job["apply"].get("blockEnabled") is True)
     rec("calc-block-flag", job.get("options", {}).get("stratBlock") is True)
     rec("calc-coverage", int((job.get("coverage") or {}).get("product") or 0) >= 20, str(job.get("coverage")))
+    cov_run = job.get("coverage") or {}
+    rec(
+        "calc-coverage-symbols-complete",
+        float(((cov_run.get("symbols") or {}).get("coveragePct") or 0)) == 100.0
+        and int((cov_run.get("symbols") or {}).get("completed") or 0) == int((cov_run.get("symbols") or {}).get("requested") or 0),
+        str(cov_run.get("symbols")),
+    )
+    rec(
+        "calc-coverage-sets-complete",
+        float(((cov_run.get("sets") or {}).get("coveragePct") or 0)) == 100.0
+        and int((cov_run.get("sets") or {}).get("completed") or 0) == int((cov_run.get("sets") or {}).get("requested") or 0)
+        and int((cov_run.get("sets") or {}).get("requested") or 0) == int(cov_run.get("product") or 0) * int((cov_run.get("symbols") or {}).get("requested") or 0),
+        str(cov_run.get("sets")),
+    )
+    rec(
+        "calc-coverage-tasks-complete",
+        float(((cov_run.get("tasks") or {}).get("coveragePct") or 0)) == 100.0,
+        str(cov_run.get("tasks")),
+    )
+    rec(
+        "calc-listings-complete",
+        len((job.get("listings") or {}).get("rankedIds") or []) == int(cov_run.get("product") or 0)
+        and len((job.get("listings") or {}).get("indexById") or {}) == int(cov_run.get("product") or 0)
+        and int(((job.get("listings") or {}).get("relative") or {}).get("sets") or 0) == int(cov_run.get("product") or 0),
+        str((job.get("listings") or {}).get("relative")),
+    )
+    rec(
+        "calc-windows-complete",
+        all(
+            set(((r.get("evaluationWindows") or {})).keys()) >= {"last5", "last15", "last25"}
+            for r in (job.get("rows") or [])[:8]
+        ) if job.get("rows") else False,
+        str(list(((job.get("rows") or [{}])[0].get("evaluationWindows") or {}).keys())),
+    )
 
     # Trailing off: no trail family
     off = run_calc({**body, "trailing": False, "hours": 4}, persist=False)
@@ -2422,6 +2692,21 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-async", long_job.get("async") is True and long_job.get("partial") is True)
     rec("calc-drop-bars", int(long_job.get("barsHeld") or 0) == 0, str(long_job.get("barsHeld")))
     rec("calc-workers", int(long_job.get("workers") or 0) >= 1, str(long_job.get("workers")))
+    rec("calc-oneshot-worker", "def _replay_symbol_worker" in prod_src)
+    rec("calc-pool-workers-helper", "def replay_pool_workers" in prod_src)
+    rec("calc-oneshot-small-book", job.get("replayMode") == "oneshot", str(job.get("replayMode")))
+    rec("calc-20h-oneshot", long_job.get("replayMode") == "oneshot", str(long_job.get("replayMode")))
+    rec("pool-workers-small-cpu", replay_pool_workers(8, 780, None, 2) == 2, str(replay_pool_workers(8, 780, None, 2)))
+    rec("pool-workers-eight-cpu", replay_pool_workers(8, 780, None, 8) == 8, str(replay_pool_workers(8, 780, None, 8)))
+    rec("pool-workers-fat-uses-cpu", replay_pool_workers(25, 34000, None, 8) == 8, str(replay_pool_workers(25, 34000, None, 8)))
+    rec("pool-workers-honor", replay_pool_workers(8, 780, 4, 2) == 4, str(replay_pool_workers(8, 780, 4, 2)))
+    rec(
+        "calc-listings-index",
+        isinstance(job.get("listings"), dict)
+        and len((job.get("listings") or {}).get("rankedIds") or []) >= int(job.get("rowCount") or 0) / 4
+        and isinstance((job.get("listings") or {}).get("relative"), dict),
+        str({k: (len(v) if isinstance(v, list) else v) for k, v in ((job.get("listings") or {}).items()) if k != "indexById"}),
+    )
 
     pipe = run_calc({**body, "workers": 3, "hours": 4}, persist=False)
     rec("calc-pipe-ready", pipe.get("phase") == "ready" and not pipe.get("error"), f"{pipe.get('phase')} {pipe.get('error')}")

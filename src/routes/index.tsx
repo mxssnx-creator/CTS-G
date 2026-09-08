@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   ArrowDownRight,
@@ -32,18 +32,19 @@ export const Route = createFileRoute("/")({ component: DeskPage });
 function DeskPage() {
   const { conn } = useConnection();
   const [raw, setRaw] = useState<LiveStats | null>(null);
+  const cacheRef = useRef<Partial<Record<string, LiveStats>>>({});
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    setRaw(null);
-    // Non-overlapping poll: the next pull is scheduled only after the
-    // current one finished, so slow fetches can never stack up. Control
-    // actions (start/stop/pause) trigger an immediate extra pull via the
-    // pulse:control event instead of waiting out the cadence.
+    const cached = cacheRef.current[conn];
+    if (cached) setRaw(cached);
     const pull = async () => {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
-      setRaw(s);
+      if (s) {
+        cacheRef.current[conn] = s;
+        setRaw(s);
+      }
       const hidden = typeof document !== "undefined" && document.hidden;
       timer = setTimeout(pull, hidden ? 8000 : 3500);
     };
@@ -134,6 +135,7 @@ function DeskPage() {
             <Meter label="Drawdown" value={d.ddPct} max={18} danger={d.ddPct > 8} />
           </div>
           <CoordStrip stats={stats} />
+          {stats ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
           <div className="mt-3">
             <CoverageBar live={stats} />
           </div>
@@ -317,7 +319,12 @@ function DeskPage() {
 const PROGRESS_PHASE_LABEL: Record<string, string> = {
   idle: "idle",
   starting: "starting",
+  catalog: "building catalog",
   fetch: "fetching history",
+  backfill: "backfilling history",
+  gap: "repairing history gaps",
+  initial: "initial history",
+  incremental: "updating closed bars",
   replay: "calculating sets",
   score: "scoring sets",
   partial: "partial history coverage",
@@ -326,12 +333,62 @@ const PROGRESS_PHASE_LABEL: Record<string, string> = {
   error: "calc error",
 };
 
+function progressCount(...vals: Array<number | null | undefined>): number | undefined {
+  const nums = vals.filter((n): n is number => n != null && Number.isFinite(n));
+  return nums.length ? Math.max(...nums) : undefined;
+}
+
+function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]>[number] {
+  const p = stats.sets?.progress;
+  const h = (stats as LiveStats & { historic?: { phase?: string; pct?: number; detail?: string; ready?: boolean } }).historic;
+  const nestedDetail = String(p?.detail || h?.detail || "");
+  const topDetail = String(stats.progressDetail || "");
+  const detail = /slice |continuing |replay [A-Z]/.test(nestedDetail) ? nestedDetail : topDetail || nestedDetail;
+  return {
+    type: stats.connType || "live",
+    id: stats.connection || "",
+    label: stats.connType || "desk",
+    unit: stats.unit || "",
+    exchange: stats.exchange || "",
+    running: stats.running,
+    halted: stats.halted,
+    equity: stats.equity,
+    available: stats.available,
+    unrealized: stats.unrealized,
+    openCount: stats.openCount,
+    wins: stats.wins,
+    losses: stats.losses,
+    sessionPnl: stats.sessionPnl,
+    pf: Number(stats.pf || 0),
+    errors: stats.errors,
+    alive: stats.alive ?? true,
+    progressPct: progressCount(stats.progressPct, p?.pct, h?.pct),
+    progressPhase: stats.progressPhase ?? p?.phase ?? h?.phase,
+    progressDetail: detail,
+    progressReady: Boolean(stats.progressReady || p?.ready || h?.ready),
+    progressSymbol: stats.progressSymbol ?? p?.symbol,
+    progressSetId: stats.progressSetId ?? p?.setId,
+    progressSymbolsDone: progressCount(stats.progressSymbolsDone, p?.symbolsDone),
+    progressSymbolsTotal: progressCount(stats.progressSymbolsTotal, p?.symbolsTotal),
+    progressSetsDone: progressCount(stats.progressSetsDone, p?.setsDone),
+    progressSetsTotal: progressCount(stats.progressSetsTotal, p?.setsTotal),
+    progressBarsDone: progressCount(stats.progressBarsDone, p?.barsDone),
+    progressBarsTotal: progressCount(stats.progressBarsTotal, p?.barsTotal),
+    progressElapsedMs: progressCount(stats.progressElapsedMs, p?.elapsedMs),
+    progressLastRunMs: progressCount(stats.progressLastRunMs, p?.lastRunMs),
+    progressCycle: progressCount(stats.progressCycle, p?.cycle),
+    progressError: stats.progressError ?? p?.error,
+    klinesReady: stats.klinesReady,
+    symbolCount: stats.symbolCount,
+  };
+}
+
 function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const pct = Math.max(0, Math.min(100, l.progressPct ?? 0));
   const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
   const phase = starting ? "starting" : String(l.progressPhase || "idle");
   const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
-  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
+  const updating = ["fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial", "incremental"].includes(phase);
   const busy = updating || !l.progressReady;
   const gate = l.progressReady ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const details: Array<[string, string]> = [];
