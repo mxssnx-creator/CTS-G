@@ -126,12 +126,14 @@ def overlay_test() -> None:
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-cap", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-multi", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
     rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
     rec("open-cap-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
+    rec("open-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -195,6 +197,7 @@ def controls_test() -> None:
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
     rec("bounded-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
+    rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
 def fill_accounting_test() -> None:
@@ -2754,6 +2757,7 @@ def process_guard_test() -> None:
     rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
+    rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
     rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
     capper = object.__new__(pt.Pulse)
     capper.symbol_cap = 25
@@ -2765,6 +2769,11 @@ def process_guard_test() -> None:
     rec("hist-cap-truncates-80-to-25", len(capped) == 25, str(len(capped)))
     wild = capper._capped_scan_names(["*", "ALL"])
     rec("hist-cap-wildcard-uses-scan", len(wild) == 25, str(len(wild)))
+    cap50 = object.__new__(pt.Pulse)
+    cap50.symbol_cap = 50
+    cap50.open = {}
+    pt.SYMBOLS[:] = fat[:50]
+    rec("hist-cap-50-runs", len(cap50._capped_scan_names(fat)) == 50, str(len(cap50._capped_scan_names(fat))))
     unlim = object.__new__(pt.Pulse)
     unlim.symbol_cap = 0
     unlim.open = {}
@@ -2788,6 +2797,7 @@ def process_guard_test() -> None:
     rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
     rec("hist-trim-keep-hist", "keep_hist" in trader)
     rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
+    rec("hist-score-edges", "score=is_first or not pending" in trader)
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
     rec("replay-blas-pin", "def pin_compute_threads" in set_src)

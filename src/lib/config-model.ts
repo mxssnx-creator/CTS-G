@@ -14,6 +14,7 @@ export const PULSE_SYMBOLS = [
 ] as const;
 
 export const DEFAULT_SYMBOL_COUNT = 50;
+export const DEFAULT_SYMBOL_COUNT = 25;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [
@@ -82,6 +83,7 @@ export function capSymbols(list: string[]): string[] {
 }
 
 /** Cap 0 + All/* is unlimited. Cap 50 with universe ranking is the default book, not "all". */
+/** Cap 0 + All/* is unlimited. Cap 25 with universe ranking is the default book, not "all". */
 export function isUnlimitedSymbolBook(overlay: {
   symbolCap?: number;
   symbolsAll?: boolean;
@@ -376,13 +378,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
-  axisPrevEnabled: true,
+  axisPrevEnabled: false,
   axisPrevMaxWindow: 12,
-  axisLastEnabled: true,
+  axisLastEnabled: false,
   axisLastMaxWindow: 4,
-  axisContEnabled: true,
+  axisContEnabled: false,
   axisContMaxWindow: 8,
-  axisPauseEnabled: true,
+  axisPauseEnabled: false,
   axisPauseMaxWindow: 8,
   prevPosWindow: 25,
   prevPosMinCount: 5,
@@ -741,13 +743,13 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 1),
-    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
+    axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
-    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
+    axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
     axisLastMaxWindow: num(cts.axisLastMaxWindow ?? nestedAxis(coord, "last", "maxWindow"), 4),
-    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), true),
+    axisContEnabled: bool(cts.axisContEnabled ?? nestedAxis(coord, "cont", "enabled"), false),
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
-    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
+    axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), false),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
     prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),

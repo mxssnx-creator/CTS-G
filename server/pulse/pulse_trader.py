@@ -10399,6 +10399,10 @@ class Pulse:
                     pass
             if published and score:
                 self._score_committed(source, generation, affected_ids)
+                try:
+                    source.compact_hist_tapes()
+                except Exception:
+                    pass
             return published
         except Exception as exc:
             with self.state_guard():
