@@ -208,7 +208,22 @@ class ReplayIndicationTests(unittest.TestCase):
         self.assertIn("_hist_wake", pulse_source)
         self.assertIn("FIRST_COMPLETED", hist_source)
         self.assertIn("REPLAY_TILE_SIZE", hist_source)
-        self.assertIn("replay_workers = max(1, min(8, cpu, len(names) or 1))", pulse_source)
+        # Scheduling now follows available CPUs and reduces work under load.
+        # Verify the contract rather than an obsolete literal worker cap.
+        import pulse_trader as trader
+        from types import SimpleNamespace
+        worker = trader.Pulse.__new__(trader.Pulse)
+        for cpu in (1, 2, 4, 16):
+            for count in (0, 1, 4, 50):
+                for level in ("normal", "overload", "critical"):
+                    with self.subTest(cpu=cpu, count=count, level=level), patch.object(trader.os, "cpu_count", return_value=cpu):
+                        got = worker._replay_worker_count(count, SimpleNamespace(level=level))
+                        self.assertGreaterEqual(got, 1)
+                        self.assertLessEqual(got, min(cpu, max(1, count)))
+                        if level == "critical" or cpu <= 2:
+                            self.assertEqual(got, 1)
+                        if level == "overload":
+                            self.assertLessEqual(got, 2)
         self.assertIn("max_workers=w", set_source)
         self.assertIn("generation", pulse_source)
         self.assertIn("def should_abort", pulse_source)

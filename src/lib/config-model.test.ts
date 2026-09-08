@@ -12,7 +12,7 @@ import {
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.02, key);
+      assert.equal(value[key], 1.10, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -31,19 +31,19 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to adjusted execution, 110 Sets and 25 symbols", () => {
+test("new and legacy settings default to adjusted execution, 110 Sets and 50 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, false);
     assert.equal(value.blockActive, true);
     assert.equal(value.setMaxActive, 110);
     assert.equal(value.stratGeneral, true);
-    assert.equal(value.symbolCap, 25);
+    assert.equal(value.symbolCap, 50);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
 });
 
-test("All/* with cap 25 is the ranked default book, not unlimited", () => {
+test("an explicit All/* cap of 25 stays ranked and is not unlimited", () => {
   const ranked = syncOverlayFlags(overlayFromCts({}, { symbolsAll: true, symbols: ["*"], symbolCap: 25 }));
   assert.equal(ranked.symbolCap, 25);
   assert.equal(ranked.symbolsAll, true);

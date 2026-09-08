@@ -24,7 +24,7 @@ class BlockActiveTests(unittest.TestCase):
         self.view = dict(last15_n=12, last15_ratio=1.8, net_avg=.1, max_dd_s=10)
         self.st = NS(id='general:sl0.6:st3', active=True, sl_ratio=.6, tp_pct=.0045,
                      idx=0, kind='base', step=3, parent_set_id='', volume_ratio=1)
-        p.sets = NS(enabled=True, progress=NS(ready=True), eval_need=lambda: 8,
+        p.sets = NS(enabled=True, use_historic_gate=True, progress=NS(ready=True), eval_need=lambda: 8,
                     real_min_pf=1.15, max_dd_s=27000, _side_view=lambda *_: self.view,
                     pick_any=lambda *a, **k: self.st)
         p.coord = NS(min_pf=1.05, gate=lambda *a, **k: (True, [], {}))
