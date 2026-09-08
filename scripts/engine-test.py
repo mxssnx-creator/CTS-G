@@ -124,14 +124,14 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 25, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-open-cap", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 25)
-    rec("default-25-cap", int(x01.get("symbolCap") or 0) == 25 and int(x02.get("symbolCap") or 0) == 25)
-    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
+    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("open-cap-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -194,7 +194,7 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+    rec("bounded-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
 
 
 def fill_accounting_test() -> None:
