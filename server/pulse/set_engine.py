@@ -35,6 +35,7 @@ from position_cost import (
     SL_TP_STEP,
     sl_tp_grid,
     cost_as_frac,
+    clamp_pct,
     gross_move_pct,
     net_move_pct,
     net_pnl_pct,
@@ -90,7 +91,7 @@ FEE_PCT = 0.001  # round-trip, matches live close_pos
 # eventually preferred for live selection.
 STEP_MIN = 1
 STEP_LIVE_MIN = 1
-STEP_MAX = 22
+STEP_MAX = 30
 # Keep enough recent fills for the 5/10/15/25/50/75 evaluation windows while
 # retaining a hard per-set memory bound.  trim_hist distributes this cap over
 # symbols, so a busy multi-symbol book cannot grow without limit.
@@ -145,7 +146,7 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any]:
         return row
     if "pnl" not in row and "set_id" not in row and "direction" not in row and "pack" not in row:
         return row
-    return hist_fill(
+    compact = hist_fill(
         finite(row.get("t")),
         str(row.get("symbol") or ""),
         row.get("side") or row.get("direction") or "",
@@ -155,6 +156,11 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any]:
         cost=row.get("position_cost_pct", row.get("costPct")),
         ind_kind=str(row.get("ind_kind") or ""),
     )
+    if str(row.get("strategy") or "") in ("block", "dca") or row.get("ind_kind"):
+        for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key"):
+            if key in row:
+                compact[key] = row[key]
+    return compact
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}
@@ -947,6 +953,8 @@ class SetBook:
         self._ids_by_kind: Dict[str, List[str]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         self.progress = Progress()
+        self.sl_min, self.sl_max = 0.0015, 0.03
+        self.tp_min, self.tp_max = 0.003, 0.0
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
         self.locks: Dict[str, bool] = {}
@@ -1073,6 +1081,11 @@ class SetBook:
         rebuild: bool = True,
     ) -> None:
         cts = cts or {}
+        self.sl_min = min(.03, max(.0015, finite(ov.get("slMinPct"), .15) / 100))
+        self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
+        self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
+        cap = finite(ov.get("tpMaxPct"), 0.) / 100
+        self.tp_max = max(self.tp_min, cap) if cap > 0 else 0.
         self.enabled = bool(ov.get("histEnabled", True))
         self.lookback = max(60, min(LOOKBACK_MAX, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.evaluation_bars = self.lookback
@@ -1321,7 +1334,7 @@ class SetBook:
             pack = _intern(pack)
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(self.steps):
-                    tp = step_tp_pct(step, self.cost_pct)
+                    tp = clamp_pct(step_tp_pct(step, self.cost_pct), self.tp_min, self.tp_max)
                     sid = make_set_id(pack, sl, "", step)
                     prev = keep.get(sid)
                     if prev:
@@ -1385,7 +1398,7 @@ class SetBook:
             st.indication_kind = "" if st.pack != "indications" else "signals"
             st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
-        signature = tuple(next_sets)
+        signature = (tuple(next_sets), self.sl_min, self.sl_max, self.tp_min, self.tp_max)
         if signature != self._hist_set_signature:
             self._hist_set_signature = signature
             self._hist_seen.clear()
@@ -1707,7 +1720,7 @@ class SetBook:
             }
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
         original = rec if isinstance(rec, dict) else vars(rec)
-        for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source",
+        for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
                     "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane"):
             if key in original:
                 row[key] = original[key]
@@ -2256,6 +2269,10 @@ class SetBook:
         qty = max(0.25, float(pos.get("qty") or 1.0))
         rec = hist_fill(ts, symbol, side, raw, held * BAR_S, why)
         rec["strategy"] = _intern(strategy or "core")
+        if strategy in ("block", "dca"):
+            rec.update(set_id=_intern(st_id), pack=_intern(pack), tp_pct=tp_frac,
+                       sl_ratio=sl_frac / tp_frac if tp_frac else 0,
+                       step=self._record_step({"set_id": st_id}))
         return None, rec
 
     def prepare_replay_signals(
@@ -2330,11 +2347,11 @@ class SetBook:
         m = len(pack_sets)
         side_values = (1, -1)
         tp_frac = np.asarray(
-            [max(0.0020, float(st.tp_pct)) for st in pack_sets],
+            [clamp_pct(float(st.tp_pct), self.tp_min, self.tp_max) for st in pack_sets],
             dtype=float,
         )
         sl_frac = np.asarray(
-            [max(0.0015, float(st.tp_pct) * max(0.3, float(st.sl_ratio or 0.6))) for st in pack_sets],
+            [clamp_pct(float(tp) * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max) for st, tp in zip(pack_sets, tp_frac)],
             dtype=float,
         )
         trailing = np.asarray([str(st.kind or "") == "trail" for st in pack_sets], dtype=bool)
@@ -2533,8 +2550,8 @@ class SetBook:
                     dead: List[str] = []
                     for sid, pos in opens.items():
                         st = set_map[sid]
-                        sl_frac = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
-                        tp_frac = max(0.0020, st.tp_pct)
+                        sl_frac = clamp_pct(st.tp_pct * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                        tp_frac = clamp_pct(st.tp_pct, self.tp_min, self.tp_max)
                         use_trail = st.kind == "trail"
                         arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
                         give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
@@ -2558,11 +2575,8 @@ class SetBook:
                         if representative is None and representative_cool > 0:
                             representative_cool -= 1
                         if representative is not None:
-                            rep_sl = max(
-                                0.0015,
-                                strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)),
-                            )
-                            rep_tp = max(0.0020, strat_seed.tp_pct)
+                            rep_tp = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
+                            rep_sl = clamp_pct(rep_tp * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
                             representative, rep_rec = self._advance_pos(
                                 representative, bar, i, strategy="core",
                                 sl_frac=rep_sl, tp_frac=rep_tp, use_trail=False,
@@ -2573,8 +2587,8 @@ class SetBook:
                             if rep_rec:
                                 representative_cool = self.cooldown_bars
                     if blk_pos is not None and strat_seed is not None:
-                        sl_frac = max(0.0015, strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)))
-                        tp_frac = max(0.0020, strat_seed.tp_pct)
+                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
                         blk_pos, recb = self._advance_pos(
                             blk_pos, bar, i, strategy="block",
                             sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
@@ -2584,8 +2598,8 @@ class SetBook:
                         if recb and strat_hist is not None:
                             strat_hist["block"].append(recb)
                     if dca_pos is not None and strat_seed is not None:
-                        sl_frac = max(0.0015, strat_seed.tp_pct * max(0.3, float(strat_seed.sl_ratio or 0.6)))
-                        tp_frac = max(0.0020, strat_seed.tp_pct)
+                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
                         dca_pos, recd = self._advance_pos(
                             dca_pos, bar, i, strategy="dca",
                             sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
@@ -2607,8 +2621,8 @@ class SetBook:
                             continue
                         if vector_core and st is strat_seed and (representative is not None or representative_cool > 0):
                             continue
-                        sl_frac = max(0.0015, st.tp_pct * max(0.3, float(st.sl_ratio or 0.6)))
-                        tp_frac = max(0.0020, st.tp_pct)
+                        sl_frac = clamp_pct(st.tp_pct * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                        tp_frac = clamp_pct(st.tp_pct, self.tp_min, self.tp_max)
                         if d > 0:
                             sl = close * (1 - sl_frac)
                             tp = close * (1 + tp_frac)
@@ -2681,8 +2695,8 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        tp_frac = max(0.0020, step_tp_pct(self.min_step_cfg, self.cost_pct))
-        sl_frac = max(0.0015, tp_frac * 0.6)
+        tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
+        sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
         for want_side in (1, -1):
             open_pos: Optional[Dict[str, Any]] = None
             cool = 0
@@ -2738,8 +2752,8 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        tp_frac = max(0.0020, step_tp_pct(self.min_step_cfg, self.cost_pct))
-        sl_frac = max(0.0015, tp_frac * 0.6)
+        tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
+        sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
         for kind, sigs in kind_sigs.items():
                 if not any(d != 0 for d, _ in sigs):
                     continue
@@ -2763,10 +2777,13 @@ class SetBook:
                                     why, px = "scratch+", float(bar[3])
                             if why:
                                 raw = (px - entry) / entry * side
-                                buf.append(hist_fill(
+                                rec = hist_fill(
                                     ts, symbol, side, raw, held * BAR_S, f"ind:{kind}:{why}",
                                     ind_kind=kind,
-                                ))
+                                )
+                                rec.update(tp_pct=tp_frac, sl_ratio=sl_frac / tp_frac,
+                                           step=self.min_step_cfg, pack="indications")
+                                buf.append(rec)
                                 open_pos = None
                                 cool = self.cooldown_bars
                             continue

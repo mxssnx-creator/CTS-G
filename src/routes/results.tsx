@@ -13,6 +13,8 @@ import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
 
 type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
 
@@ -517,9 +519,9 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
 }
 
 function SetResults({ stats }: { stats: LiveStats | null }) {
-  const rows = stats?.sets?.rows ?? [];
   return (
-    <Card title="Independent Sets · last 15 PF · max DD time · last 25 R">
+    <Card title="Independent Sets · PF · max DD time · last 25 R">
+      <SetGroups sets={stats?.sets} axesEnabled={enabledAxes(stats).length > 0}>{(rows) => (
       <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
@@ -547,26 +549,26 @@ function SetResults({ stats }: { stats: LiveStats | null }) {
               rows.map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5">
-                    {r.pack} sl{r.slRatio.toFixed(1)} st{r.step ?? "—"} {r.trailKey}
+                    {setLabel(r)}
                   </td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
-                    {r.liveN ? `+${r.liveN}` : ""}
                   </td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
-                  <td className="py-1.5 text-right">{Number(r.wr ?? 0).toFixed(0)}%</td>
-                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{Number(r.expectancy ?? 0).toFixed(4)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(Number(r.avgHoldS ?? 0) * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.avgDdS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.n ? setMetric(r.last15Ratio) : "—"}</td>
+                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.last25AvgR)}</td>
+                  <td className="py-1.5 text-right">{r.wr == null ? "—" : `${setMetric(r.wr, 0)}%`}</td>
+                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.expectancy, 4)}</td>
+                  <td className="py-1.5 text-right">{r.avgHoldS == null ? "—" : formatDuration(r.avgHoldS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.avgDdS == null ? "—" : formatDuration(r.avgDdS * 1000)}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
+      )}</SetGroups>
     </Card>
   );
 }

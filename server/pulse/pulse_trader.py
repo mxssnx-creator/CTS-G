@@ -1054,10 +1054,10 @@ class Pulse:
         self._config_evidence_cache_ts = 0.0
         self._load_config_evidence()
         self.pf_window = 15
-        self.sl_min = 0.0020
-        self.sl_max = 0.0120
-        self.tp_min = 0.0035
-        self.tp_max = 0.0240
+        self.sl_min = 0.0015
+        self.sl_max = 0.0300
+        self.tp_min = 0.0030
+        self.tp_max = 0.0
         self.tp_cost_ratio = 5.0
         self.sl_to_tp = 0.64
         self.strat_ind = True
@@ -2418,6 +2418,17 @@ class Pulse:
             "member_count": max(1, int(getattr(pos, "member_count", 1) or 1)),
         }
 
+    @staticmethod
+    def event_strategy(pos: Position) -> str:
+        strategy = str(getattr(pos, "strategy", "") or "")
+        if strategy in ("block", "dca"):
+            return strategy
+        if getattr(pos, "axis_key", ""):
+            return "axis"
+        if getattr(pos, "trail_key", "") not in ("", "0", "off"):
+            return "trailing"
+        return str(getattr(pos, "pack", "") or "normal")
+
     def event_summary(self) -> Dict[str, Any]:
         ledger = getattr(self, "event_ledger", None)
         if ledger is None:
@@ -2429,8 +2440,10 @@ class Pulse:
             exchange_open = -1
         return ledger.summary(
             internal_open=len(getattr(self, "open", {}) or {}),
+            internal_position_groups=len({(p.symbol, p.side) for p in (getattr(self, "open", {}) or {}).values() if float(p.qty or 0) > 0}),
             exchange_open=exchange_open,
             internal_closed=len(getattr(self, "closed", ()) or ()),
+            pending_count=len(getattr(self, "pending_orders", {}) or {}),
         )
 
     def ingest_ws_px(self) -> int:
@@ -3117,7 +3130,7 @@ class Pulse:
         sl = float(pos.sl_pct) if pos and pos.sl_pct > 0 else SL_PCT
         sl = max(sl_lo, min(sl_hi, sl))
         tp_lo = float(self.tp_min)
-        tp_hi = float(self.tp_max)
+        tp_hi = float(self.tp_max) if self.tp_max > 0 else float("inf")
         tp = float(pos.tp_pct) if pos and pos.tp_pct > 0 else TP_PCT
         tp = max(tp_lo, min(tp_hi, tp))
         return sl, tp, sl_lo, sl_hi
@@ -3331,7 +3344,7 @@ class Pulse:
                     side=pos.side,
                     set_id=pos.set_id,
                     indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     qty=pos.qty,
@@ -3350,7 +3363,7 @@ class Pulse:
                     side=pos.side,
                     set_id=pos.set_id,
                     indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     order_id=extract_oid(r),
@@ -3372,7 +3385,7 @@ class Pulse:
                             side=pos.side,
                             set_id=pos.set_id,
                             indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     order_id=oid,
@@ -3599,7 +3612,7 @@ class Pulse:
             side=pos.side,
             set_id=pos.set_id,
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
             qty=pos.qty,
             detail="batch SL/TP protection",
@@ -3616,7 +3629,7 @@ class Pulse:
             side=pos.side,
             set_id=pos.set_id,
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
             qty=pos.qty,
             detail="batch SL/TP protection",
@@ -4297,7 +4310,7 @@ class Pulse:
             set_id=pos.set_id,
             parent_set_id=pos.parent_set_id,
             indication_kind=pos.ind_kind,
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             client_id=cid,
             order_id=order_id,
@@ -4520,6 +4533,11 @@ class Pulse:
             parts = str(reason).split(":")
             ind_kind_hint = parts[1] if len(parts) > 1 else ""
         parent_set_id = str(getattr(chosen, "parent_set_id", "") or set_id)
+        event_strategy = "block" if execution_plan else (
+            "axis" if getattr(chosen, "axis_key", "") else
+            "trailing" if getattr(chosen, "kind", "") == "trail" else pack
+        )
+        event_axis = f"block-active:{execution_plan['blockCount']}" if execution_plan else str(getattr(chosen, "axis_key", "") or "")
         entry_key = stable_key(CONN_SHORT, "entry", cid)
         self.record_event(
             "entry_intent",
@@ -4529,9 +4547,9 @@ class Pulse:
             side=side,
             set_id=set_id,
             parent_set_id=parent_set_id,
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            axis_key=event_axis,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             qty=qty,
             price=px,
@@ -4545,10 +4563,10 @@ class Pulse:
         if forced_row is not None:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
         elif chosen and getattr(chosen, "step", 0):
-            tp_pct_a = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
+            tp_pct_a = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
             sl_pct_a = max(self.sl_min, min(self.sl_max, tp_pct_a * sl_ratio))
             if self.exits.enabled and self.exits.ignore_tp:
-                tp_pct_a = min(self.tp_max, max(tp_pct_a, sl_pct_a * 3.0))
+                tp_pct_a = min(self.tp_max or float("inf"), max(tp_pct_a, sl_pct_a * 3.0))
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
         tp_a = px * (1 + tp_pct_a) if direction > 0 else px * (1 - tp_pct_a)
         pending_meta = {
@@ -4615,7 +4633,7 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             qty=qty,
             price=px,
@@ -4683,8 +4701,8 @@ class Pulse:
                     return
                 self.errors += 1
                 self.last_error = f"order {sym} {short}"[:160]
-                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
-                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=event_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=event_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
                 self._clear_pending(cid)
                 log(f"ORDER FAIL {sym} {side} {short}")
                 return
@@ -4698,7 +4716,7 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             order_id=extract_oid(r),
             qty=qty,
@@ -4765,7 +4783,7 @@ class Pulse:
             bind_sl_to_tp=True,
         )
         if chosen and getattr(chosen, "step", 0):
-            tp_pct = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
+            tp_pct = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
             sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
             src = f"step{chosen.step}xcost"
         if forced_row is not None:
@@ -4775,7 +4793,7 @@ class Pulse:
         if forced_row is None and self.exits.enabled and self.exits.ignore_tp:
             # Ignore-TP means the normal target is not an early close; the
             # exchange safety target still respects the configured 3% ceiling.
-            tp_pct = min(self.tp_max, max(tp_pct, sl_pct * 3.0))
+            tp_pct = min(self.tp_max or float("inf"), max(tp_pct, sl_pct * 3.0))
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
             symbol=sym, side=side, qty=filled, entry=avg, opened_at=time.time(),
@@ -4848,9 +4866,9 @@ class Pulse:
             side=side,
             set_id=set_id,
             parent_set_id=str(getattr(chosen, "parent_set_id", "") or set_id),
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            axis_key=pos.axis_key,
             indication_kind=ind_kind,
-            strategy=pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             order_id=real_oid(data.get("orderId") or data.get("orderID")),
             client_id=cid,
@@ -5079,7 +5097,7 @@ class Pulse:
             set_id=pos.set_id,
             parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             client_id=pos.client_id,
             order_id=close_oid,
@@ -5226,7 +5244,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 qty=pos.qty,
@@ -5254,7 +5272,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 order_id=close_oid,
@@ -5347,7 +5365,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 qty=pos.qty,
@@ -6102,10 +6120,11 @@ class Pulse:
                 value = fallback
             return max(0.1, min(3.0, value)) / 100.0
 
-        self.sl_min = _risk_pct("slMinPct", 0.20)
+        self.sl_min = max(0.0015, _risk_pct("slMinPct", 0.15))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
-        self.tp_min = _risk_pct("tpMinPct", 0.30)
-        self.tp_max = max(self.tp_min, _risk_pct("tpMaxPct", 3.0))
+        self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
+        tp_cap = finite_number(ov.get("tpMaxPct"), 0.0)
+        self.tp_max = max(self.tp_min, tp_cap / 100) if tp_cap > 0 else 0.0
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
         self.variants.load(calc_ov, cts)
         self.sl_to_tp = self.variants.current_sl()
@@ -8893,7 +8912,9 @@ class Pulse:
         cov = self._coverage_blob()
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
-        sets_snap = self.sets.snapshot(full=False)
+        sets_snap = dict(self.sets.snapshot(full=False))
+        if getattr(self, "_sets_overview", None) is not None:
+            sets_snap["overview"] = self._sets_overview
         historic_snap = dict(getattr(self, "_hist_status", {}) or {})
         prog = (sets_snap.get("progress") or {}) if isinstance(sets_snap, dict) else {}
         hist_phase = str(historic_snap.get("phase") or "")
@@ -9204,6 +9225,8 @@ class Pulse:
                     if isinstance(axis_aggregate, dict):
                         axis_aggregate = dict(axis_aggregate)
                         rows = axis_aggregate.pop("rows", None)
+                        from set_overview import build_overview
+                        self._sets_overview = build_overview(self.sets, rows or [], axis_enabled=self.coord.axes_active())
                         if isinstance(rows, list):
                             axis_aggregate["rowCount"] = axis_aggregate.get("rowCount") or len(rows)
                         parents = axis_aggregate.get("parents")
@@ -10702,12 +10725,19 @@ class Pulse:
             progress.last_complete_run = previous.last_complete_run
             progress.next_run_at = previous.next_run_at
             progress.valid_symbols = list(valid_list)
+            # This publication belongs to the frozen current universe. Old
+            # symbols retained for evidence must not produce e.g. 65/13.
+            missing = sorted(sym for sym in valid_list if int(watermark.get(sym) or 0) <= 0 or sym in retry)
+            progress.symbols_total = len(valid_list)
+            progress.symbols_done = len(valid_list) - len(missing)
+            progress.pct = 100.0 * progress.symbols_done / max(1, progress.symbols_total)
+            progress.phase = "partial" if missing else "ready"
             progress.invalid_symbols = list(previous.invalid_symbols)
-            progress.missing_symbols = []
+            progress.missing_symbols = missing
             progress.gapped_symbols = []
-            progress.stale = False
+            progress.stale = bool(missing)
             progress.deferred_reason = ""
-            progress.coordination_complete = True
+            progress.coordination_complete = not missing
             progress.detail = f"incremental closed-bar update · {len(names)} symbols · hourly publish pending"
         self._hist_write_status(self.sets)
         return True

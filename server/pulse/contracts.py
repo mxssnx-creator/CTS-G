@@ -12,9 +12,9 @@ INDICATION_KINDS = ("state", "signals", "active", "direction", "move", "common",
 STRATEGIES = ("indications", "general", "block", "trailing", "dca", "exits")
 DIRECTIONS = ("LONG", "SHORT")
 
-PF_MIN = 0.80
-PF_MAX = 2.50
-PF_STEP = 0.02
+PF_MIN = 1.05
+PF_MAX = 1.35
+PF_STEP = 0.01
 VOLUME_RATIO_UNIT = 0.01
 
 
@@ -27,7 +27,7 @@ def finite_number(value: Any, fallback: float = 0.0) -> float:
 
 
 def normalize_pf(value: Any, fallback: float = 1.0) -> float:
-    """Normalize every PF floor/control to the shared 0.80..2.50 contract."""
+    """Normalize every PF floor/control to the shared 1.05..1.35 contract."""
     parsed = finite_number(value, finite_number(fallback, 1.0))
     return round(max(PF_MIN, min(PF_MAX, parsed)), 2)
 

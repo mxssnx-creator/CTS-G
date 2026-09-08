@@ -25,6 +25,8 @@ import {
 import { CoverageBar } from "@/components/coverage-overview";
 import { KindStrategyStrip } from "@/components/kind-strategy-stats";
 import { ActivityPanel } from "@/components/activity-overview";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
 import type { ConnType } from "@/lib/connections";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
@@ -530,7 +532,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
-        {(["prev", "last", "cont", "pause"] as const).map((k) => {
+        {(["prev", "last", "cont", "pause"] as const).filter((k) => axes[k]?.enabled).map((k) => {
           const a = axes[k];
           return (
             <span key={k} className={a?.enabled ? "text-fg" : "text-faint"}>
@@ -625,7 +627,6 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
 function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const s = stats?.sets;
   const p = s?.progress;
-  const rows = (s?.rows ?? []).slice(0, 8);
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
   const updating = ["fetch", "replay", "score", "partial"].includes(phase);
@@ -679,20 +680,22 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           </p>
         </>
       )}
-      {rows.length ? (
+      <div className="mt-3">
+        <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
           {rows.map((r) => (
             <div key={r.id} className="flex items-center justify-between gap-2">
-              <span className={r.active ? "text-fg" : "text-faint"}>
-                {r.pack?.slice(0, 3) || r.id.slice(0, 8)} sl{Number(r.slRatio || 0).toFixed(1)} st{r.step ?? "—"}
+              <span className={`min-w-0 truncate ${r.active ? "text-fg" : "text-faint"}`} title={setLabel(r)}>
+                {setLabel(r)}
               </span>
               <span className={r.active ? "text-primary" : "text-danger"}>
-                {r.last15Ratio.toFixed(2)} · {formatDuration(r.maxDdS * 1000)} · R{r.last25AvgR.toFixed(1)}
+                {r.n ? setMetric(r.last15Ratio) : "—"} · {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)} · R{setMetric(r.last25AvgR, 1)}
               </span>
             </div>
           ))}
         </div>
-      ) : null}
+        )}</SetGroups>
+      </div>
       {p?.error ? <p className="mt-1 text-danger">{p.error}</p> : null}
     </div>
   );

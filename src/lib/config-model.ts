@@ -103,9 +103,9 @@ export const SL_TP_MIN = 0.1;
 export const SL_TP_MAX = 3.0;
 export const SL_TP_STEP = 0.1;
 
-export const PF_MIN = 0.8;
-export const PF_MAX = 2.5;
-export const PF_STEP = 0.02;
+export const PF_MIN = 1.05;
+export const PF_MAX = 1.35;
+export const PF_STEP = 0.01;
 
 export function normalizePf(value: number, fallback: number): number {
   const parsed = Number.isFinite(value) ? value : fallback;
@@ -408,10 +408,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
   coordOptimizationN: 150,
   pfWindow: 15,
-  slMinPct: 0.2,
+  slMinPct: 0.15,
   slMaxPct: 3.0,
   tpMinPct: 0.3,
-  tpMaxPct: 3.0,
+  tpMaxPct: 0,
   tpCostRatio: 5,
   slToTpRatio: 0.6,
   slToTpAuto: true,
@@ -484,7 +484,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setReactivate: true,
   setMaxActive: 110,
   setMinStep: 1,
-  setStepMax: 22,
+  setStepMax: 30,
   setStepAdapt: true,
   exitEnabled: true,
   exitIgnoreTp: true,
@@ -772,10 +772,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ),
     coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
     pfWindow: num(cts.pfWindow, 15),
-    slMinPct: num(cts.slMinPct, 0.2),
+    slMinPct: num(cts.slMinPct, 0.15),
     slMaxPct: num(cts.slMaxPct, 3.0),
     tpMinPct: num(cts.tpMinPct, 0.3),
-    tpMaxPct: num(cts.tpMaxPct, 3.0),
+    tpMaxPct: num(cts.tpMaxPct, 0),
     tpCostRatio: num(cts.tpCostRatio, 5),
     slToTpRatio: snapSlToTp(num(cts.slToTpRatio, 0.6)),
     slToTpAuto: bool(cts.slToTpAuto, true),
@@ -836,7 +836,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setReactivate: bool(cts.setReactivate, true),
     setMaxActive: num(cts.setMaxActive, 110),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
-    setStepMax: num(cts.setStepMax, 22),
+    setStepMax: num(cts.setStepMax, 30),
     setStepAdapt: bool(cts.setStepAdapt, true),
     exitEnabled: bool(cts.exitEnabled, true),
     exitIgnoreTp: bool(cts.exitIgnoreTp, true),
@@ -860,11 +860,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...live,
   };
   const pct = (value: number, fallback: number): number =>
-    Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 10) / 10;
-  out.slMinPct = pct(out.slMinPct, 0.2);
+    Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 100) / 100;
+  out.slMinPct = Math.max(0.15, pct(out.slMinPct, 0.15));
   out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
-  out.tpMinPct = pct(out.tpMinPct, 0.3);
-  out.tpMaxPct = Math.max(out.tpMinPct, pct(out.tpMaxPct, 3.0));
+  out.tpMinPct = Math.max(0.3, pct(out.tpMinPct, 0.3));
+  out.tpMaxPct = num(out.tpMaxPct, 0) <= 0 ? 0 : Math.max(out.tpMinPct, num(out.tpMaxPct, 0));
   out.slToTpMin = SL_TP_MIN;
   out.slToTpMax = SL_TP_MAX;
   out.slToTpStep = SL_TP_STEP;
@@ -873,8 +873,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.trailArmMax = 1.5;
   out.trailGiveMin = 0.1;
   out.trailGiveMax = 0.5;
-  out.setMinStep = Math.max(1, Math.min(22, Math.round(num(out.setMinStep, 1))));
-  out.setStepMax = Math.max(out.setMinStep, Math.min(22, Math.round(num(out.setStepMax, 22))));
+  out.setMinStep = Math.max(1, Math.min(30, Math.round(num(out.setMinStep, 1))));
+  out.setStepMax = Math.max(out.setMinStep, Math.min(30, Math.round(num(out.setStepMax, 30))));
+  for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
+    out[key] = normalizePf(out[key], 1.1);
+  }
   out.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.maxDdTimeS, 57600) / 600) * 600));
   out.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.setMaxDdTimeS, 57600) / 600) * 600));
   out.modules = {
@@ -963,6 +966,15 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
       ? [...new Set(overlay.blockCounts.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6))].sort((a, b) => a - b)
       : [1, 2, 3, 4, 5, 6],
   };
+  for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
+    next[key] = normalizePf(next[key], 1.1);
+  }
+  next.slMinPct = Math.max(.15, Math.min(3, num(next.slMinPct, .15)));
+  next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
+  next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));
+  next.tpMaxPct = num(next.tpMaxPct, 0) <= 0 ? 0 : Math.max(next.tpMinPct, next.tpMaxPct);
+  next.setMinStep = Math.max(1, Math.min(30, Math.round(num(next.setMinStep, 1))));
+  next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
     next.symbolsAll = true;

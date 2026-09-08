@@ -21,6 +21,7 @@ from storage_paths import (
     storage_info,
 )
 from runtime_scope import redis_key
+from set_overview import merge_overviews
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
@@ -1149,7 +1150,7 @@ def merge_activity_summaries(summaries: list) -> dict:
         "errorCount", "internalClosed", "pendingCount", "recoveredCount", "discrepantCount",
     )
     out = {key: 0 for key in scalar_keys}
-    out.update({"internalOpen": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
+    out.update({"internalOpen": 0, "internalPositionGroups": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
     exchange_known = True
     parity_bad = False
 
@@ -1180,6 +1181,7 @@ def merge_activity_summaries(summaries: list) -> dict:
                 continue
         try:
             out["internalOpen"] += int(summary.get("internalOpen") or 0)
+            out["internalPositionGroups"] += int(summary.get("internalPositionGroups", summary.get("internalOpen")) or 0)
         except Exception:
             pass
         try:
@@ -1213,7 +1215,7 @@ def merge_activity_summaries(summaries: list) -> dict:
     elif not exchange_known:
         out["parity"] = "pending"
     else:
-        out["parity"] = "match" if out["internalOpen"] == out["exchangeOpen"] else "discrepant"
+        out["parity"] = "match" if out["internalPositionGroups"] == out["exchangeOpen"] else "discrepant"
     return out
 
 
@@ -1276,6 +1278,11 @@ def merge_overall() -> dict:
     activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
+    overview = merge_overviews([(lane["label"], (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("overview")) for lane in LANES])
+    if overview is not None:
+        sets["overview"] = overview
+        for key in ("setCount", "activeCount", "validatedCount"):
+            sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
     out = {
         "running": running_any,
         "mode": "OVERALL",

@@ -294,7 +294,8 @@ class EventLedger:
                 bucket["short"] += 1
         return out
 
-    def summary(self, *, internal_open: int = 0, exchange_open: int = -1, internal_closed: int = 0) -> Dict[str, Any]:
+    def summary(self, *, internal_open: int = 0, exchange_open: int = -1, internal_closed: int = 0,
+                internal_position_groups: Optional[int] = None, pending_count: int = 0) -> Dict[str, Any]:
         with self._lock:
             events = list(self.events)
             by_type = {key: 0 for key in EVENT_TYPES}
@@ -307,7 +308,10 @@ class EventLedger:
                 if event.code:
                     codes[event.code] = codes.get(event.code, 0) + 1
             exchange_known = int(exchange_open) >= 0
-            parity = "pending" if not exchange_known else ("match" if int(internal_open) == int(exchange_open) else "discrepant")
+            # An exchange nets all independent config orders for one
+            # symbol+direction. Compare those position groups, not Set count.
+            group_count = int(internal_open) if internal_position_groups is None else int(internal_position_groups)
+            parity = "pending" if not exchange_known else ("match" if group_count == int(exchange_open) else "discrepant")
             # Financial totals are sourced from the authoritative close
             # events.  Exchange fill callbacks can repeat the same realized
             # result for a close order; counting every request/fill event
@@ -335,10 +339,13 @@ class EventLedger:
                 "cancellationCount": by_type.get("cancellation", 0),
                 "errorCount": by_type.get("error", 0),
                 "internalOpen": int(internal_open),
+                "internalPositionGroups": group_count,
                 "exchangeOpen": int(exchange_open),
                 "internalClosed": int(internal_closed),
                 "parity": parity,
-                "pendingCount": sum(1 for event in events if event.status.lower() == "pending"),
+                # Historical request events retain their original status;
+                # they are not a queue of orders still awaiting execution.
+                "pendingCount": max(0, int(pending_count)),
                 "recoveredCount": sum(1 for event in events if event.status.lower() == "recovered"),
                 "discrepantCount": sum(1 for event in events if event.status.lower() in ("discrepant", "mismatch")),
                 "byIndication": self._outcome_counts("indication_kind", INDICATION_KINDS),

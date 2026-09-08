@@ -44,6 +44,8 @@ import {
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -487,7 +489,7 @@ function SettingsPage() {
                       onChange={(v) => patch("maxOpen", Math.round(v))}
                     />
                     <Num
-                      label="Symbol cap"
+                      label="Symbols count"
                       value={overlay.symbolCap}
                       min={0}
                       max={10000}
@@ -495,6 +497,11 @@ function SettingsPage() {
                       hint={`Target ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = unlimited`}
                       onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
                     />
+                    <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
+                    <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
+                    <Num label="Set PF minimum" value={overlay.setMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("setMinPf", normalizePf(v, overlay.setMinPf))} />
+                    <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
+                    <Toggle label="Control orders per configuration" on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
                   </Grid>
                 </div>
               </div>
@@ -703,7 +710,7 @@ function SettingsPage() {
                     label="Minimal Step Range"
                     value={calcOpt.minStep}
                     min={1}
-                    max={22}
+                    max={30}
                     step={1}
                     hint={`Sets below step ${calcOpt.minStep} are not calculated`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, minStep: Math.round(v), stepMax: Math.max(o.stepMax, Math.round(v)) }))}
@@ -712,7 +719,7 @@ function SettingsPage() {
                     label="Step max"
                     value={calcOpt.stepMax}
                     min={2}
-                    max={22}
+                    max={30}
                     step={1}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
                   />
@@ -1226,10 +1233,10 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={0.15} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
                 <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
-                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
-                <Slider label="TP max" value={overlay.tpMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
+                <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
                   value={overlay.tpCostRatio}
@@ -1360,19 +1367,19 @@ function SettingsPage() {
                   label="Minimal Step Range"
                   value={overlay.setMinStep}
                   min={1}
-                  max={22}
+                  max={30}
                   step={1}
                   hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed.`}
-                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(30, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
                   min={1}
-                  max={22}
+                  max={30}
                   step={1}
                   hint="Upper TP step. Every integer from min through max is its own Set."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(30, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -1933,7 +1940,7 @@ function SettingsPage() {
                 />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={22} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(22, Math.round(v))))} />
+                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(30, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
@@ -2551,7 +2558,6 @@ function LiveAxis({
 function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: PulseOverlay }) {
   const sets = stats?.sets;
   const p = sets?.progress;
-  const rows = sets?.rows ?? [];
   const liveOv = sets?.liveOverview;
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
@@ -2578,6 +2584,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
           live on-exchange {liveOv?.active ?? sets?.liveActive ?? 0}/{liveOv?.processed ?? sets?.liveProcessed ?? 0} processed · fills {liveOv?.fills ?? sets?.liveFills ?? 0} · PF {Number(liveOv?.last15Ratio ?? 0).toFixed(2)} net {(Number(liveOv?.netAvg ?? 0) * 100).toFixed(3)}% · cost subtracted · deact from live only
         </p>
       </div>
+      <SetGroups sets={sets} axesEnabled={enabledAxes(stats).length > 0} limit={40}>{(rows) => (
       <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
@@ -2599,28 +2606,25 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 </td>
               </tr>
             ) : (
-              rows.slice(0, 40).map((r) => {
-                const liveN = r.liveN || r.live?.n || 0;
-                const pf = liveN ? Number(r.live?.last15Ratio ?? r.last15Ratio) : r.last15Ratio;
-                const ddt = liveN ? Number(r.live?.maxDdS ?? r.maxDdS) : r.maxDdS;
+              rows.map((r) => {
+                const pf = r.last15Ratio;
+                const ddt = r.maxDdS;
                 return (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5">
-                    {r.pack} · sl{r.slRatio.toFixed(1)} · st{r.step ?? "—"} · {r.trailKey}
-                    {liveN ? " · live" : " · hist"}
+                    {setLabel(r)}
                   </td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
-                    {liveN ? `+${liveN}` : ""}
                   </td>
-                  <td className={`py-1.5 text-right ${pf + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
-                    {pf.toFixed(2)}
+                  <td className={`py-1.5 text-right ${(pf ?? 0) + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                    {r.n ? setMetric(pf) : "—"}
                   </td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>
-                    {r.last25AvgR.toFixed(2)}
+                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>
+                    {setMetric(r.last25AvgR)}
                   </td>
-                  <td className="py-1.5 text-right">{formatDuration(ddt * 1000)}</td>
+                  <td className="py-1.5 text-right">{ddt == null ? "—" : formatDuration(ddt * 1000)}</td>
                   <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
                 </tr>
                 );
@@ -2629,6 +2633,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
           </tbody>
         </table>
       </div>
+      )}</SetGroups>
     </div>
   );
 }

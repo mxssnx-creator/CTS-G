@@ -15,9 +15,9 @@ POSITION_COST_PCT_DEFAULT = 0.10
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 # User-facing PF controls share one contract across UI, overlay, and workers.
-PF_MIN = 0.80
-PF_MAX = 2.50
-PF_STEP = 0.02
+PF_MIN = 1.05
+PF_MAX = 1.35
+PF_STEP = 0.01
 RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
@@ -710,7 +710,8 @@ def cost_aware_metrics(
 
 
 def clamp_pct(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+    # Zero is the persisted, JSON-safe unlimited upper bound for TP.
+    return max(lo, min(hi, value) if hi > 0 else value)
 
 
 def resolve_sl_tp(

@@ -8,10 +8,30 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server' / 'pulse'))
 from pulse_trader import Pulse, ctrl_err_kind
-from set_engine import SetBook
+from set_engine import SetBook, synth_trend
 
 
 class ServerSnapshotMergeTests(unittest.TestCase):
+    def test_incremental_progress_counts_current_universe_and_missing_watermarks(self):
+        book = SetBook()
+        book.progress.ready = True
+        book.progress.valid_symbols = ["A-USDT", "B-USDT"]
+        book.progress.watermark = {"A-USDT": 100, "B-USDT": 0, "OLD-USDT": 99}
+        book._hist_seen = {f"OLD-{i}" for i in range(65)}
+        p = Pulse.__new__(Pulse)
+        p.sets = book; p._sets_generation = 1; p._state_lock = threading.RLock()
+        p._hist_incremental_symbols = {"A-USDT"}
+        p._capped_scan_names = lambda values: list(values)
+        p.history_store = SimpleNamespace(window=Mock(return_value=synth_trend(180)), watermark=Mock(return_value=101))
+        p._hist_replay_chunked = Mock(return_value=True)
+        p._hist_write_status = Mock()
+        self.assertTrue(p._hist_incremental_replay())
+        self.assertEqual((book.progress.symbols_done, book.progress.symbols_total), (1, 2))
+        self.assertEqual(book.progress.missing_symbols, ["B-USDT"])
+        self.assertFalse(book.progress.coordination_complete)
+        self.assertEqual(book.progress.phase, "partial")
+        self.assertTrue(book.progress.ready)  # prior gate survives an incremental update
+
     def test_all_flat_exchange_messages_are_classified(self):
         for message in ('position not exist', 'position does not exist', 'No position to close'):
             self.assertEqual(ctrl_err_kind(message), 'flat')

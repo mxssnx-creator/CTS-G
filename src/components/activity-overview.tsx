@@ -1,4 +1,5 @@
 import type { ActivityCounts, ActivityEvent, ActivitySummary, LiveStats } from "@/lib/live-stats";
+import { enabledAxes } from "@/lib/set-overview";
 
 const EVENT_TYPES = [
   "entry_intent",
@@ -89,7 +90,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
         <Metric label="Controls" value={activity.protectionEventCount ?? 0} />
         <Metric label="Closes" value={activity.closeEventCount ?? 0} />
         <Metric label="Errors" value={activity.errorCount ?? 0} tone="danger" />
-        <Metric label="Retries" value={activity.duplicateCount ?? 0} tone="warn" />
+        <Metric label="Duplicates" value={activity.duplicateCount ?? 0} tone="warn" />
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 font-mono text-xs">
@@ -103,11 +104,12 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
       <div className="mt-3 grid gap-3 lg:grid-cols-3">
         <OutcomeTable title="Indication outcomes" values={activity.byIndication} />
         <OutcomeTable title="Strategy outcomes" values={activity.byStrategy} />
-        <OutcomeTable title="Coordination outcomes" values={activity.byAxis} />
+        {enabledAxes(stats).length ? <OutcomeTable title="Coordination outcomes" values={Object.fromEntries(Object.entries(activity.byAxis ?? {}).filter(([key]) => enabledAxes(stats).includes(key.split(":")[0])))} /> : null}
       </div>
 
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs text-muted">
         <span>internal open {activity.internalOpen ?? 0}</span>
+        {activity.internalPositionGroups == null ? null : <span>symbol + direction groups {activity.internalPositionGroups}</span>}
         <span>exchange open {activity.exchangeOpen == null || activity.exchangeOpen < 0 ? "—" : activity.exchangeOpen}</span>
         <span>closed {activity.internalClosed ?? 0}</span>
         <span>pending {activity.pendingCount ?? 0}</span>

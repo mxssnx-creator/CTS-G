@@ -1,4 +1,5 @@
 import type { EvaluationWindow } from "./hist-calc";
+import type { SetOverview } from "./set-overview";
 
 export type LiveOpen = {
   symbol: string;
@@ -200,6 +201,7 @@ export type ActivitySummary = {
   cancellationCount?: number;
   errorCount?: number;
   internalOpen?: number;
+  internalPositionGroups?: number;
   exchangeOpen?: number;
   internalClosed?: number;
   parity?: "match" | "pending" | "discrepant" | string;
@@ -700,6 +702,7 @@ export type LiveStats = {
     steps?: number[];
     activeCount?: number;
     validatedCount?: number;
+    overview?: SetOverview;
     histFills?: number;
     liveFills?: number;
     liveProcessed?: number;
@@ -770,6 +773,7 @@ export type LiveStats = {
     };
     rows?: Array<{
       id: string;
+      kind?: string;
       pack?: string;
       parentSetId?: string;
       stage?: string;

@@ -47,6 +47,17 @@ class Exchange:
 
 
 class AllValidEntries(unittest.TestCase):
+    def test_unlimited_tp_keeps_selected_range_and_sl_cap(self):
+        p = self.pulse(self.book(1))
+        selected = p.sets.by_idx[0]
+        selected.tp_pct = .08
+        p.tp_max = 0
+        p.place('X-USDT', 1, 'trend', .9, selected_set=selected)
+        self.assertEqual(len(p.open), 1)
+        pos = next(iter(p.open.values()))
+        self.assertAlmostEqual(pos.tp_pct, .08)
+        self.assertAlmostEqual(pos.sl_pct, .03)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

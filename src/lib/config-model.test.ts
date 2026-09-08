@@ -20,6 +20,22 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
   }
 });
 
+test("risk and step limits preserve unlimited TP and the 0.15 percent SL floor", () => {
+  for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
+    assert.equal(value.tpMinPct, .3);
+    assert.equal(value.tpMaxPct, 0);
+    assert.equal(value.slMinPct, .15);
+    assert.equal(value.slMaxPct, 3);
+    assert.equal(value.setStepMax, 30);
+  }
+  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, setStepMax: 70, minPf: 2.5, setMinPf: .8 });
+  assert.equal(value.tpMaxPct, 12);
+  assert.equal(value.slMinPct, .15);
+  assert.equal(value.setStepMax, 30);
+  assert.equal(value.minPf, 1.35);
+  assert.equal(value.setMinPf, 1.05);
+});
+
 test("saving a measured cost never overwrites the explicit fallback", () => {
   const value = syncOverlayFlags(overlayFromCts({}, {
     positionCostPct: 0.087, positionCostFallbackPct: 0.1,
