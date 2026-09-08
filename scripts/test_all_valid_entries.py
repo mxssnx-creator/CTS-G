@@ -47,6 +47,75 @@ class Exchange:
 
 
 class AllValidEntries(unittest.TestCase):
+    def test_250_sets_open_500_independent_normal_and_block_orders_with_exact_volume(self):
+        from block_engine import BlockBook
+        p=self.pulse(self.book(250))
+        p.normal_execution_enabled=True; p.block_active=True; p.strat_block=True
+        p.block=BlockBook('',{}); p.recon_ok=True; p.coord.min_pf=1.1
+        p.live_recent_pf=lambda *a,**k:None
+        p._coord_add_state=lambda **k:(True,6,1.8,[])
+        p._block_reference_anchors={}
+        for st in p.sets.by_idx:
+            st.last15_ratio=1.8
+            lane=pt.stable_key('general',st.id,'general')
+            p._block_reference_anchors[('X-USDT','LONG','block-active:'+lane)]=dict(at=pt.time.time()-60,seen=pt.time.time(),price=99.5,direction=1)
+            p.place('X-USDT',1,'trend',.9,selected_set=st)
+        positions=list(p.open.values())
+        self.assertEqual(len(positions),500,p.last_error)
+        self.assertEqual(len({pos.execution_lane for pos in positions}),500)
+        self.assertEqual(len({pos.control_group_key for pos in positions}),500)
+        self.assertAlmostEqual(sum(pos.qty for pos in positions if pos.strategy=='block'),250*.012)
+        self.assertAlmostEqual(sum(pos.qty for pos in positions if pos.strategy!='block'),250*.05)
+        self.assertEqual(len(p.api.posts),500)
+
+    def test_normal_and_block_active_execute_independently_with_separate_ownership(self):
+        from block_engine import BlockBook
+        for normal in (False, True):
+            for active in (False, True):
+                p = self.pulse(self.book(1))
+                p.normal_execution_enabled = normal
+                p.block_active = active
+                p.strat_block = True
+                p.block = BlockBook('', {})
+                p.recon_ok = True
+                p.coord.min_pf = 1.1
+                p.live_recent_pf = lambda *a, **k: None
+                p._coord_add_state = lambda **k: (True, 6, 1.8, [])
+                st = p.sets.by_idx[0]
+                st.last15_ratio = 1.8
+                lane = pt.stable_key('general', st.id, 'general')
+                p._block_reference_anchors = {('X-USDT','LONG','block-active:'+lane):
+                    dict(at=pt.time.time()-60, seen=pt.time.time(), price=99.5, direction=1)}
+                p.place('X-USDT', 1, 'trend', .9, selected_set=st)
+                normals = [v for v in p.open.values() if v.strategy != 'block']
+                blocks = [v for v in p.open.values() if v.strategy == 'block']
+                self.assertEqual(len(normals), int(normal), (normal, active, p.last_error))
+                self.assertEqual(len(blocks), int(active), (normal, active, p.last_error, getattr(p, '_execution_decision', None)))
+                if normals: self.assertAlmostEqual(normals[0].qty, .05)
+                if blocks:
+                    self.assertAlmostEqual(blocks[0].qty, .012)
+                    self.assertTrue(blocks[0].execution_lane.startswith('block-active:'))
+                if normal and active:
+                    self.assertNotEqual(normals[0].control_group_key, blocks[0].control_group_key)
+
+    def test_trailing_execution_does_not_require_normal_enabled(self):
+        p = self.pulse(self.book(1))
+        p.normal_execution_enabled = False
+        p.strat_trail = True
+        st = p.sets.by_idx[0]
+        st.kind = 'trail'; st.trail_key = '0.3:0.1'; st.trail_arm = .3; st.trail_give = .1
+        p.place('X-USDT', 1, 'trend', .9, selected_set=st)
+        self.assertEqual(len(p.open), 1)
+        self.assertEqual(next(iter(p.open.values())).trail_key, '0.3:0.1')
+
+    def test_cooperative_entry_budget_eventually_visits_the_whole_catalog(self):
+        p = self.pulse()
+        p.system_settings = {'systemEntryBatch': 8, 'systemEntryBudgetMs': 1000}
+        matrix = list(range(257))
+        visited = set()
+        for _ in range(34): visited.update(p.entry_candidate_window(matrix))
+        self.assertEqual(visited, set(matrix))
+
     def test_unlimited_tp_keeps_selected_range_and_sl_cap(self):
         p = self.pulse(self.book(1))
         selected = p.sets.by_idx[0]

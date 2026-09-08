@@ -103,6 +103,8 @@ export const SL_TP_MIN = 0.1;
 export const SL_TP_MAX = 3.0;
 export const SL_TP_STEP = 0.1;
 
+import { normalizeSystemSettings } from "./system-settings.ts";
+
 export const PF_MIN = 1.05;
 export const PF_MAX = 1.35;
 export const PF_STEP = 0.01;
@@ -160,7 +162,7 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
   return Math.round(Math.min(gmax, Math.max(gmin, g)) * 100) / 100;
 }
 
-export type PulseOverlay = {
+export type PulseOverlay = import("./system-settings").SystemSettings & {
   targetNotional: number;
   volumeFactor: number;
   leverage: number;
@@ -186,6 +188,7 @@ export type PulseOverlay = {
   controlOrdersPerConfig: boolean;
   normalExecutionEnabled: boolean;
   blockActive: boolean;
+  blockActiveMinLevel: number;
   blockEnabled: boolean;
   blockMaxStack: number;
   blockVolumeRatio: number;
@@ -332,6 +335,7 @@ export type PulseOverlay = {
 };
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
+  ...normalizeSystemSettings(),
   targetNotional: 2.15,
   volumeFactor: 1,
   leverage: 150,
@@ -356,6 +360,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   controlOrders: true,
   controlOrdersPerConfig: true,
   normalExecutionEnabled: false,
+  blockActiveMinLevel: 0,
   blockActive: true,
   blockEnabled: true,
   blockMaxStack: 6,
@@ -543,6 +548,7 @@ export type CtsSettings = {
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
   normalExecutionEnabled?: boolean;
+  blockActiveMinLevel?: number;
   blockActive?: boolean;
   blockActiveLiveEnabled?: boolean;
   blockActiveRealEnabled?: boolean;
@@ -732,6 +738,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
     normalExecutionEnabled: bool(cts.normalExecutionEnabled, false),
+    blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
     blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
@@ -867,6 +874,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     rearrangeGap: num(cts.rearrangeGap, 0.22),
     ...live,
   };
+  Object.assign(out, normalizeSystemSettings({ ...cts, ...live }));
+  out.stratGeneral = true; // Permanent calculation basis; not an execution toggle.
+  out.histEnabled = true;
+  out.blockActiveMinLevel = Math.max(0, Math.min(out.blockMaxStack || 6, Math.trunc(num(out.blockActiveMinLevel, 0))));
   const pct = (value: number, fallback: number): number =>
     Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 100) / 100;
   out.slMinPct = Math.max(0.15, pct(out.slMinPct, 0.15));
@@ -966,6 +977,10 @@ export async function fetchCtsSettings(conn = "overall"): Promise<CtsSettings | 
 export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const next: PulseOverlay = {
     ...overlay,
+    ...normalizeSystemSettings(overlay),
+    stratGeneral: true,
+    histEnabled: true,
+    blockActiveMinLevel: Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(num(overlay.blockActiveMinLevel, 0)))),
     symbols: capSymbols(overlay.symbols || []),
     blockMaxStack: Math.max(1, Math.min(6, Math.trunc(num(overlay.blockMaxStack, 6)) || 6)),
     blockVolumeRatio: Math.max(0.05, Math.min(2, num(overlay.blockVolumeRatio, 0.25))),

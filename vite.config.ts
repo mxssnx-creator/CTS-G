@@ -157,8 +157,19 @@ function jsonRes(res: ServerResponse, status: number, body: unknown) {
 function readReqBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    let size = 0;
+    let oversized = false;
+    req.on("data", (c) => {
+      if (oversized) return;
+      const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
+      size += chunk.length;
+      if (size > 256 * 1024) {
+        oversized = true;
+        chunks.length = 0;
+        reject(new Error("Request exceeds 256 KiB limit"));
+      } else chunks.push(chunk);
+    });
+    req.on("end", () => { if (!oversized) resolve(Buffer.concat(chunks).toString("utf8")); });
     req.on("error", reject);
   });
 }
@@ -378,9 +389,30 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
+        const handled = ["/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
+          return;
+        }
+        if (pathOnly === "/system.json") {
+          if (method !== "GET" && method !== "POST") {
+            jsonRes(res as ServerResponse, 405, { ok: false, detail: "Use GET or POST" });
+            return;
+          }
+          const origin = req.headers.origin;
+          if (method === "POST" && origin) {
+            let sameOrigin = false;
+            try { sameOrigin = new URL(origin).host === req.headers.host; } catch { /* Invalid origin is rejected. */ }
+            if (!sameOrigin) {
+              jsonRes(res as ServerResponse, 403, { ok: false, detail: "Same-origin maintenance required" });
+              return;
+            }
+          }
+          let raw: string | undefined;
+          try { raw = method === "GET" ? undefined : await readReqBody(req); }
+          catch { jsonRes(res as ServerResponse, 413, { ok: false, detail: "Request exceeds bounded payload limit" }); return; }
+          const result = await tryPulse(method, rawUrl, raw, 10000);
+          jsonRes(res as ServerResponse, result?.status ?? 503, result?.json ?? { ok: false, detail: "System statistics service unavailable" });
           return;
         }
         if (pathOnly === "/live-stats.json") {

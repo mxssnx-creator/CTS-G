@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, Iterable, List, Optional
 
 from contracts import AXES, INDICATION_KINDS, STRATEGIES, stable_key
+from storage_paths import atomic_write
 
 EVENT_TYPES = (
     "evaluation",
@@ -83,8 +84,8 @@ def _metadata(value: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, item in list(value.items())[:24]:
         try:
-            json.dumps(item)
-            out[str(key)[:60]] = item
+            encoded = json.dumps(item, allow_nan=False)
+            out[str(key)[:60]] = item if len(encoded.encode()) <= 512 else "[bounded metadata]"
         except Exception:
             out[str(key)[:60]] = str(item)[:120]
     return out
@@ -93,7 +94,7 @@ def _metadata(value: Any) -> Dict[str, Any]:
 class EventLedger:
     """Keep the latest committed actions, deduped by connection + event ID."""
 
-    def __init__(self, path: str = "", connection: str = "", max_events: int = 512) -> None:
+    def __init__(self, path: str = "", connection: str = "", max_events: int = 512, flush_interval_s: float = 0) -> None:
         self.path = path
         self.connection = str(connection or "")
         self.max_events = max(32, min(4096, int(max_events or 512)))
@@ -101,6 +102,10 @@ class EventLedger:
         self._ids: set[str] = set()
         self.duplicate_count = 0
         self._lock = threading.RLock()
+        self.flush_interval_s = max(0, float(flush_interval_s))
+        self._last_save = 0.0
+        self._dirty = False
+        self.persistence_error = ""
         self._load()
 
     def _load(self) -> None:
@@ -173,13 +178,18 @@ class EventLedger:
                 "duplicateCount": int(self.duplicate_count),
                 "events": [event.as_dict() for event in self.events],
             }
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as state_file:
-                json.dump(payload, state_file, separators=(",", ":"))
-            os.replace(tmp, self.path)
-        except Exception:
+            atomic_write(self.path, payload)
+            self._dirty = False
+            self._last_save = time.monotonic()
+            self.persistence_error = ""
+        except Exception as exc:
             # Activity accounting must never stop trading when persistence is unavailable.
-            pass
+            self.persistence_error = type(exc).__name__
+
+    def flush(self):
+        with self._lock:
+            if self._dirty:
+                self._save_locked()
 
     def record(
         self,
@@ -216,6 +226,7 @@ class EventLedger:
         with self._lock:
             if key in self._ids:
                 self.duplicate_count += 1
+                self._dirty = True
                 return False
             event = LedgerEvent(
                 event_id=key,
@@ -244,9 +255,14 @@ class EventLedger:
                 detail=_text(fields.get("detail"), 240),
                 metadata=_metadata(fields.get("metadata")),
             )
+            if len(self.events) == self.max_events:
+                self._ids.discard(self.events[0].event_id)
             self.events.append(event)
-            self._ids = {item.event_id for item in self.events}
-            self._save_locked()
+            self._ids.add(event.event_id)
+            self._dirty = True
+            if (time.monotonic() - self._last_save >= self.flush_interval_s
+                    or normalized_type in ("entry_intent", "fill", "close", "position_open")):
+                self._save_locked()
             return True
 
     def tail(self, n: int = 32) -> List[Dict[str, Any]]:

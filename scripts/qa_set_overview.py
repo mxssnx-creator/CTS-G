@@ -66,6 +66,13 @@ class Handler(BaseHTTPRequestHandler):
             data = {"symbols":[]}
         elif self.path.startswith("/hist-calc.json"):
             data = {"status":"idle"}
+        elif self.path.startswith("/system.json"):
+            import time
+            data = {"connection":"overall", "lanes":[{"connection":"bingx-x02","persistent":True,
+                    "snapshotAt":time.time(),"cpuPct":18.5,"memoryMb":256,"dbKeys":350,"dbBytes":1048576,
+                    "requestsPerSec":2,"sessionRunningS":3600,"counters":{"recoveries":1,"crashes":0},
+                    "calculationCache":{"hits":250,"misses":50,"cachedSets":350,"accountedBytes":1048576,
+                                        "entryLimit":350,"trimTargetPct":80}}]}
         payload=json.dumps(data,allow_nan=False).encode()
         self.send_response(200);self.send_header("Content-Type","application/json");self.send_header("Cache-Control","no-store")
         self.send_header("Content-Length",str(len(payload)));self.end_headers();self.wfile.write(payload)

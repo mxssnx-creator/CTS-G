@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, unquote
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import (
@@ -21,7 +21,10 @@ from storage_paths import (
     storage_info,
 )
 from runtime_scope import redis_key
+from redis_coordination import coordinator as redis_config
 from set_overview import merge_overviews
+from system_settings import calculation_overlay
+from runtime_statistics import StatisticsStore, lane_directory, read_status, redis_health
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
@@ -176,27 +179,16 @@ def resolve_conn(raw: str) -> str:
 
 def redis_hgetall(key: str) -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
+        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
+        return redis_config.read_hash(key)
     except Exception:
         return {}
-    lines = (p.stdout or "").splitlines()
-    out = {}
-    for i in range(0, len(lines) - 1, 2):
-        out[lines[i]] = lines[i + 1]
-    return out
 
 
 def redis_hset(key: str, mapping: dict) -> bool:
-    args = ["redis-cli", "HSET", redis_key(key)]
-    for k, v in mapping.items():
-        if v is None:
-            continue
-        args.extend([str(k), str(v)])
-    if len(args) <= 3:
-        return False
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=6)
-        return p.returncode == 0
+        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
+        return redis_config.write_hash(key, mapping)
     except Exception:
         return False
 
@@ -355,6 +347,7 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     with _OVERLAY_LOCKS[cid]:
         cur = load_overlay(cid)
         cur.update(overlay)
+        cur = calculation_overlay(cur)
         atomic_write(dest, cur)
     return cur
 
@@ -802,14 +795,7 @@ def load_cts(conn: str) -> dict:
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
-    except Exception:
-        return {}
-    lines = (p.stdout or "").splitlines()
-    out = {}
-    for i in range(0, len(lines) - 1, 2):
-        out[lines[i]] = parse_val(lines[i + 1])
+    out = {k: parse_val(v) for k, v in redis_hgetall(key).items()}
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -1525,7 +1511,19 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        normalized_path = "/" + os.path.normpath(unquote(path)).lstrip("/")
+        if normalized_path == "/statistics" or normalized_path.startswith("/statistics/"):
+            self._json({"ok": False, "detail": "statistics files are private; use the status endpoint"}, 404)
+            return
         conn = resolve_conn(qs(self.path).get("conn", ""))
+        if path == "/system.json":
+            if conn == "overall":
+                self._json({"connection": "overall", "lanes": [read_status(DIR, lane["id"]) for lane in LANES], "sharedDatabase": redis_health()})
+            elif conn in ID_TO_LANE:
+                self._json({**read_status(DIR, conn), "sharedDatabase": redis_health()})
+            else:
+                self._json({"ok": False, "detail": "pick a known connection"}, 400)
+            return
         if path in ("/connections.json", "/connections"):
             self._json(connections_blob())
             return
@@ -1707,6 +1705,42 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_error(400, "invalid json")
             return
+        if path == "/system.json":
+            # The dashboard proxy is local. Reject direct cross-origin browser
+            # writes to this maintenance endpoint even though old GETs use CORS.
+            origin = self.headers.get("Origin", "")
+            host = self.headers.get("Host", "").split(":", 1)[0]
+            if origin and urlparse(origin).hostname != host:
+                self._json({"ok": False, "detail": "same-origin maintenance required"}, 403)
+                return
+            if conn not in ID_TO_LANE or not isinstance(body, dict):
+                self._json({"ok": False, "detail": "select one connection for maintenance"}, 400)
+                return
+            if not (lane_directory(DIR, conn) / "statistics.sqlite3").exists():
+                self._json({"ok": False, "detail": "statistics database has not been initialized"}, 409)
+                return
+            store = None
+            try:
+                action = body.get("action")
+                if action not in ("backup", "compact", "reset"):
+                    raise ValueError("choose backup, compact or reset")
+                store = StatisticsStore(DIR, conn, load_overlay(conn))
+                if action == "reset":
+                    result = store.reset(body.get("scope"), body.get("confirmation"))
+                elif action == "backup":
+                    result = {"ok": True, "detail": "Verified statistics backup saved", "backup": store.backup()}
+                else:
+                    store.maintain()
+                    result = {"ok": True, "detail": "Expired details pruned and database compacted; totals preserved"}
+                self._json(result)
+            except ValueError as exc:
+                self._json({"ok": False, "detail": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "detail": f"Maintenance failed: {type(exc).__name__}; retry is safe"}, 503)
+            finally:
+                if store:
+                    store.close()
+            return
         if path in ("/control.json", "/control"):
             action = str((body or {}).get("action") or "").lower().strip()
             ok, detail = apply_control(conn or "overall", action)
@@ -1858,8 +1892,7 @@ def heal_loop() -> None:
                     env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
                     if not env_key:
                         try:
-                            p = subprocess.run(["redis-cli", "HGET", redis_key(f"connection:{cid}"), "api_key"], capture_output=True, text=True, timeout=6)
-                            env_key = (p.stdout or "").strip()
+                            env_key = redis_hgetall(f"connection:{cid}").get("api_key", "").strip()
                         except Exception:
                             env_key = ""
                     if not env_key:

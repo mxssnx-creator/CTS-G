@@ -9,6 +9,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
@@ -314,6 +315,7 @@ function DeskPage() {
           })()}
         </div>
       </section>
+      <SystemHealthFooter conn={conn} />
     </DeskShell>
   );
 }

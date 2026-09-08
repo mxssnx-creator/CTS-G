@@ -46,11 +46,14 @@ import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, t
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
 import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
+import { SystemSettingsPanel } from "@/components/system-settings";
+import { SystemHealthFooter } from "@/components/system-health";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
 const SECTIONS = [
   "overview",
+  "system",
   "presets",
   "connection",
   "profit",
@@ -468,6 +471,7 @@ function SettingsPage() {
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
+          {section === "system" && <SystemSettingsPanel conn={conn} overlay={overlay} patch={patch} navigate={setSection} />}
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
           {section === "overview" && (
             <Card title="Coverage · controls · live overviews" hint="Scan, packs, indication types, block counts, set families, recon and order protection — all live">
@@ -507,17 +511,16 @@ function SettingsPage() {
               </div>
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General calculation" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Exchange execution without adjustments · disabled by default; calculation continues" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Effective simple positions in Simulated and Live · default OFF · independent of additional strategies" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
-                <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
+                <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
               <p className="text-sm text-muted">
-                These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
+                General calculations remain active as the common basis. Normal (General) only controls effective simple positions. Save persists the settings for the selected connection.
               </p>
               <div className="rounded-lg border border-border bg-bg2 p-3">
                 <p className="font-mono text-xs uppercase text-muted">Best configs · low drawdown</p>
@@ -1287,7 +1290,7 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General calculation" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Simple positions in Simulated and Live · default OFF · internal General basis always active" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -1305,7 +1308,7 @@ function SettingsPage() {
               hint="Settings min/max is the catalog. Every pack × SL in range × TP-step in range is its own book. Live only fires validated +EV Sets."
             >
               <Grid>
-                <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
+                <p className="text-sm text-muted">Historic 1m basis · always active</p>
                 <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
                 <Toggle label="Strict validated gate" on={overlay.setStrictGate !== false} onChange={(v) => patch("setStrictGate", v)} />
                 <Toggle label="Auto-deactivate" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
@@ -1557,6 +1560,9 @@ function SettingsPage() {
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
                 />
+                <div className="min-w-0 space-y-3 rounded-lg border border-border bg-bg2 p-3 sm:col-span-2">
+                <h3 className="text-sm font-medium">Block → Active</h3>
+                <Grid>
                 <Toggle
                   label="Active"
                   on={overlay.blockActive}
@@ -1572,8 +1578,12 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Unadjusted exchange entries · disabled by default" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <p className="text-sm text-muted">Active observes a qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; existing and pending same-side quantities reduce the order. Normal calculations remain available. Profitability is measured, never guaranteed.</p>
+                <Num label="Minimum valid Block level" value={overlay.blockActiveMinLevel} min={0} max={overlay.blockMaxStack || 6} step={1}
+                  hint="0 = normal virtual basis (default) · higher = minimum Block count · adjusted quantity only"
+                  onChange={(v) => patch("blockActiveMinLevel", Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(v))))} />
+                </Grid>
+                <p className="text-sm text-muted">Independent of Normal (General). Active observes its qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; its own existing and pending quantities reduce the order. Level 0 uses the normal virtual basis and never makes an unadjusted Block order valid.</p>
+                </div>
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}
@@ -2314,6 +2324,7 @@ function SettingsPage() {
           </div>
         </div>
       ) : null}
+      {section === "overview" && <SystemHealthFooter conn={conn} />}
     </DeskShell>
   );
 }

@@ -4,6 +4,7 @@ import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { fetchLiveStats, pickView, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
@@ -199,6 +200,7 @@ function ResultsPage() {
           <ClosedTape rows={closed} />
         </div>
       ) : null}
+      <SystemHealthFooter conn={conn} />
     </DeskShell>
   );
 }

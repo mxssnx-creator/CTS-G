@@ -66,6 +66,28 @@ class BlockActiveTests(unittest.TestCase):
         self.assertEqual(r['normalQtyExecuted'], 0)
         self.assertEqual(r['blockCount'], 1)
 
+    def test_minimum_level_filters_only_block_counts_and_never_creates_normal_volume(self):
+        for normal in (False, True):
+            self.p.normal_execution_enabled = normal
+            for level in range(7):
+                self.p.block_active_min_level = level
+                result = self.plan()
+                self.assertEqual(result['blockCount'], max(1, level))
+                self.assertEqual(result['minimumLevel'], level)
+                self.assertEqual(result['normalQtyExecuted'], 0)
+                self.assertAlmostEqual(result['requestedQty'], 8 * min(1, max(1, level) * .25))
+        self.p.block.counts = [1, 2]
+        self.p.block_active_min_level = 3
+        self.assertIsNone(self.plan())
+
+    def test_normal_positions_do_not_cover_block_but_legacy_block_adjustments_do(self):
+        lane = 'block-active:baseline'
+        self.p._block_reference_anchors[('X-USDT','LONG',lane)] = dict(at=0, seen=50, price=100, direction=1)
+        self.p.positions_for = lambda *a: [NS(qty=8, execution_lane='baseline', strategy='core'), NS(qty=.5, execution_lane='baseline', strategy='block')]
+        with patch.object(pt.time, 'time', return_value=60):
+            result = self.p.block_active_plan('X-USDT','LONG',self.st,8,100.3,execution_lane=lane)
+        self.assertAlmostEqual(result['requestedQty'], 1.5)
+
     def test_overall_owned_and_pending_deducted(self):
         self.p.positions_for = lambda *a: [NS(qty=.5)]
         self.p.pending_orders = {'a': dict(symbol='X-USDT', side='LONG', kind='entry', requested_qty=1, filled_qty=.25)}

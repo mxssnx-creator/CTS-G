@@ -216,6 +216,7 @@ export type ActivitySummary = {
 };
 
 export type LiveStats = {
+  system?: import("./system-settings").SystemStatus;
   positionCost?: {
     manualPct?: number;
     effectivePct?: number;

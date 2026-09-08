@@ -316,6 +316,16 @@ class FastBingX:
     def start_ws(self, symbols: List[str]) -> None:
         self.hub.start(symbols)
 
+    def configure_limits(self, settings):
+        from system_settings import normalize_system_settings
+        limits = normalize_system_settings(settings)
+        for lane, key in (("public", "systemPublicRps"), ("private", "systemPrivateRps"), ("order", "systemOrderRps")):
+            bucket = self.buckets[lane]
+            with bucket.lock:
+                bucket.rate = limits[key]
+                bucket.burst = min(LIMITS[lane][1], max(1, bucket.rate * 2))
+                bucket.tokens = min(bucket.tokens, bucket.burst)
+
     def _on_px(self, symbol: str, px: float) -> None:
         self.px[symbol] = px
         self.stats["ws"] += 1
@@ -567,6 +577,7 @@ class AsyncBridge:
             return fut.result(timeout)
         except Exception as e:
             self.err.write("async-gather", msg=str(e)[:200])
+            fut.cancel()  # Timed-out batches must not keep consuming connections.
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 
     async def _gather(self, reqs: List[Tuple[str, Dict[str, Any]]]):

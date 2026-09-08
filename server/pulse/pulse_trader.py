@@ -63,6 +63,10 @@ from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import redis_key, order_tag
+from system_settings import calculation_overlay, normalize_system_settings
+from runtime_statistics import RuntimeMonitor, persistent_activity
+from redis_coordination import coordinator as redis_config
+from calculation_cache import CalculationCache
 
 _CID_SEQUENCE_LOCK = threading.Lock()
 _CID_SEQUENCES: Dict[str, Tuple[int, int]] = {}
@@ -640,8 +644,7 @@ def redis_hget(field: str) -> str:
     connection-scoped so x01 and x02 can never cross-read each other.
     """
     try:
-        p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-        value = (p.stdout or "").strip()
+        value = redis_config.read_hash(f"connection:{CONN_SHORT}").get(field, "").strip()
         if value and value != "(nil)":
             return value
     except FileNotFoundError:
@@ -671,26 +674,24 @@ def load_json_file(path: str) -> dict:
 
 def dump_cts_settings() -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(f"settings:connection_settings:{CONN_SHORT}")], capture_output=True, text=True, timeout=6)
+        raw = redis_config.read_hash(f"settings:connection_settings:{CONN_SHORT}")
     except Exception:
         return {}
-    lines = (p.stdout or "").splitlines()
     out = {}
-    for i in range(0, len(lines) - 1, 2):
-        v = lines[i + 1]
+    for key, v in raw.items():
         if v[:1] in "{[":
             try:
-                out[lines[i]] = json.loads(v)
+                out[key] = json.loads(v)
                 continue
             except Exception:
                 pass
         if v in ("true", "false"):
-            out[lines[i]] = v == "true"
+            out[key] = v == "true"
             continue
         try:
-            out[lines[i]] = float(v) if "." in v else int(v)
+            out[key] = float(v) if "." in v else int(v)
         except Exception:
-            out[lines[i]] = v
+            out[key] = v
     try:
         tmp = CTS_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -913,7 +914,7 @@ class Pulse:
         self._hist_wake = threading.Event()
         self.last_event = "boot"
         self.event_n = 0
-        self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
+        self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
         self._oo_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self.mods: Dict[str, bool] = {}
         self.last_bal = 0.0
@@ -1071,7 +1072,15 @@ class Pulse:
         self.tf_on = {"1m": True, "5m": True, "15m": True}
         self._hist_stop = threading.Event()
         self._watchdog_stop = threading.Event()
+        self.calculation_cache = CalculationCache(CONN_SHORT)
         self.apply_live_config(initial=True)
+        self.runtime = None
+        try:
+            self.runtime = RuntimeMonitor(DIR, CONN_SHORT, self.overlay)
+            for row in self.strategy_closes():
+                self.runtime.record_trade(asdict(row), self.start_eq)
+        except Exception as exc:
+            self.last_error = f"Statistics initialization: {type(exc).__name__}"
 
     def group_of(self, sym: str) -> str:
         for g, s in GROUPS.items():
@@ -2396,7 +2405,7 @@ class Pulse:
         try:
             ledger = getattr(self, "event_ledger", None)
             if ledger is None:
-                ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
+                ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
                 self.event_ledger = ledger
             fields.setdefault("connection", CONN_SHORT)
             committed = bool(ledger.record(event_type, event_id, status=status, **fields))
@@ -4361,21 +4370,31 @@ class Pulse:
         key = (sym, side, execution_lane or chosen.id)
         if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
             return reject("reference needs 45 seconds and 0.2% continuation")
+        def same_lane(lane, strategy):
+            if not execution_lane or lane == execution_lane:
+                return True
+            # Pre-split Block Active positions retain their existing controls.
+            # Credit their quantity only to Block, never to the normal lane.
+            return (execution_lane.startswith("block-active:") and lane == execution_lane.removeprefix("block-active:")
+                    and strategy == "block")
         owned = sum(max(0.0, float(p.qty)) for p in self.positions_for(sym, side)
-                    if not execution_lane or getattr(p, "execution_lane", "") == execution_lane)
+                    if same_lane(getattr(p, "execution_lane", ""), getattr(p, "strategy", "")))
         pending = sum(max(0.0, float(r.get("requested_qty") or 0) - float(r.get("filled_qty") or 0))
                       for r in (getattr(self, "pending_orders", {}) or {}).values()
                       if r.get("symbol") == sym and str(r.get("side") or "").upper() == side
-                      and (not execution_lane or (r.get("metadata") or {}).get("execution_lane") == execution_lane)
+                      and same_lane((r.get("metadata") or {}).get("execution_lane", ""), (r.get("metadata") or {}).get("strategy", ""))
                       and str(r.get("kind") or "entry") in ("entry", "block", "dca"))
         # Counts are independent alternatives, never summed into six orders.
+        min_level = int(getattr(self, "block_active_min_level", 0))
         for count in sorted(self.block.counts):
+            if count < max(1, min_level) or count > getattr(self.block, "max_stack", 6):
+                continue
             allowed, cap, _, _ = self._coord_add_state(count=count)
             formula = self.block.formula(reference_qty, count)
             if not allowed or count > cap or pf < formula["blockMinPF"]:
                 continue
             own = [r for r in rows if r.parent_set_id == chosen.id
-                   and (not execution_lane or getattr(r, "execution_lane", "") == execution_lane)
+                   and same_lane(getattr(r, "execution_lane", ""), getattr(r, "strategy", ""))
                    and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
             if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
                 continue
@@ -4383,18 +4402,41 @@ class Pulse:
             if qty <= 0:
                 continue
             decision = {"mode": "block-active", "allowed": True, "reason": "qualified adjusted delta",
-                        "parentSetId": chosen.id, "blockCount": count, "referenceQty": reference_qty,
+                        "parentSetId": chosen.id, "blockCount": count, "minimumLevel": min_level, "referenceQty": reference_qty,
                         "volumeIncrement": formula["volumeIncrement"], "ownedQty": owned,
                         "pendingQty": pending, "requestedQty": qty, "normalQtyExecuted": 0}
             self._execution_decision = decision
             return decision
-        return reject("counts blocked or overall target already satisfied")
+        return reject("counts below minimum level, blocked or adjusted target already satisfied")
 
-    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None) -> None:
-        normal_allowed = getattr(self, "normal_execution_enabled", False) is True
-        if forced_row is not None and not normal_allowed:
+    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None, execution_strategy=None) -> None:
+        normal_enabled = getattr(self, "normal_execution_enabled", False) is True
+        trail_enabled = (forced_row is None and getattr(selected_set, "kind", "") == "trail"
+                         and bool(getattr(self, "strat_trail", False)))
+        block_enabled = (forced_row is None and bool(getattr(self, "block_active", True))
+                         and bool(getattr(self, "strat_block", False)) and bool(getattr(getattr(self, "block", None), "enabled", False)))
+        if execution_strategy is None:
+            # Independent candidates: a successful Block decision must never
+            # replace Normal, and a failed Block decision cannot enable Normal.
+            modes = (["trailing"] if trail_enabled else ["normal"] if normal_enabled else [])
+            if block_enabled:
+                modes.append("block-active")
+            cursor = int(getattr(self, "_execution_strategy_cursor", 0))
+            self._execution_strategy_cursor = cursor + 1
+            if modes:
+                start = cursor % len(modes)
+                for mode in modes[start:] + modes[:start]:
+                    try:
+                        self.place(sym, direction, reason, conf, forced_row, selected_set=selected_set, execution_strategy=mode)
+                    except Exception:
+                        if len(modes) == 1:
+                            raise
+                        self.errors += 1
+                        self.last_error = f"Independent {mode} entry failed for {sym}"
             return
-        if not normal_allowed and not getattr(self, "block_active", True):
+        normal_allowed = ((execution_strategy == "normal" and normal_enabled)
+                          or (execution_strategy == "trailing" and trail_enabled))
+        if not normal_allowed and not (execution_strategy == "block-active" and block_enabled):
             return
         if self.entries_blocked():
             return
@@ -4418,8 +4460,11 @@ class Pulse:
         exact = re.search(r"\bcfg=([a-f0-9]{16})\b", reason)
         signal_key = exact.group(1) if exact else (reason.split(":")[1] if pack == "indications" else "general")
         execution_lane = stable_key(pack, selected_set.id, signal_key) if selected_set is not None else ""
+        if execution_strategy == "block-active" and execution_lane:
+            execution_lane = "block-active:" + execution_lane
         if execution_lane and normal_allowed and any(
-                getattr(p, "execution_lane", "") == execution_lane for p in self.positions_for(sym, side)):
+                getattr(p, "execution_lane", "") == execution_lane and getattr(p, "strategy", "") != "block"
+                for p in self.positions_for(sym, side)):
             return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
@@ -4427,6 +4472,7 @@ class Pulse:
                 and str(pending.get("symbol") or "") == sym
                 and str(pending.get("side") or "").upper() == side
                 and (not execution_lane or (pending.get("metadata") or {}).get("execution_lane") == execution_lane)
+                and not (normal_allowed and (pending.get("metadata") or {}).get("strategy") == "block")
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
@@ -4504,7 +4550,7 @@ class Pulse:
             # Keep lightweight in-process fakes and older adapters compatible.
             qty = self.size_qty(c, px)
         execution_plan = None
-        if forced_row is None and getattr(self, "block_active", True):
+        if execution_strategy == "block-active":
             execution_plan = self.block_active_plan(sym, side, chosen, qty, px, execution_lane=execution_lane)
         if execution_plan:
             qty = self.round_qty(c, execution_plan["requestedQty"])
@@ -5127,6 +5173,9 @@ class Pulse:
             if final_fill:
                 rec.roundtrip_result = dict(pos.roundtrip_result)
             self.closed.append(rec)
+            runtime = getattr(self, "runtime", None)
+            if runtime:
+                runtime.record_trade(asdict(rec), getattr(self, "start_eq", 0))
             # Each confirmed execution leg is a realized financial event and
             # is therefore counted exactly once. A cumulative close may emit
             # several legs; the delta/idempotency guard above prevents a
@@ -6050,7 +6099,26 @@ class Pulse:
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
+        # General stays available as the reference calculation. Only Normal
+        # controls effective unadjusted positions in simulated/demo and live.
+        ov = calculation_overlay(ov, cts)
         self.overlay = ov
+        self.system_settings = normalize_system_settings(ov)
+        redis_config.configure(self.system_settings)
+        if getattr(self, "calculation_cache", None):
+            self.calculation_cache.configure(ov)
+            self.sets.calculation_cache = self.calculation_cache
+        runtime = getattr(self, "runtime", None)
+        if runtime:
+            try:
+                runtime.configure(ov)
+            except Exception as exc:
+                self.last_error = f"Statistics settings: {type(exc).__name__}"
+        if hasattr(self.api, "configure_limits"):
+            self.api.configure_limits(ov)
+        from storage_paths import configure_retention
+        for path in (LOG_PATH, ERR_PATH, TRADES_PATH):
+            configure_retention(path, ov["systemLogMaxLines"], int(ov["systemLogMaxMb"] * 1024 * 1024))
         try:
             self.overlay_mtime = os.path.getmtime(OVERLAY_PATH)
         except Exception:
@@ -6139,7 +6207,8 @@ class Pulse:
         self.strat_trail = bool(ov.get("stratTrailing", True))
         self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", False)) is True
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
-        self.strat_general = bool(ov.get("stratGeneral", True))
+        self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
+        self.strat_general = True
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
@@ -6237,6 +6306,10 @@ class Pulse:
         self._catalog_overlay = dict(calc_ov)
         self._catalog_cts = dict(cts)
         self.sets.load(calc_ov, cts, rebuild=not initial)
+        self.history_store.configure(
+            max(int(ov["systemHistoryRetentionBars"]), self.sets.lookback + self.sets.warmup + 2),
+            ov["systemHistoryPersistS"],
+        )
         self.exits.load(calc_ov, cts)
         self.dca.load(calc_ov, cts)
         # Component loaders establish their own state; this final propagation
@@ -6418,6 +6491,7 @@ class Pulse:
             "stratBlock": self.strat_block,
             "stratTrailing": self.strat_trail,
             "normalExecutionEnabled": self.normal_execution_enabled,
+            "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
             "stratDca": getattr(self, "strat_dca", True),
@@ -7711,8 +7785,9 @@ class Pulse:
         if not ranked:
             return
         start = int(getattr(self, "_entry_cursor", 0) or 0) % len(ranked)
-        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S))
-        for offset in range(len(ranked)):
+        settings = getattr(self, "system_settings", {})
+        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S, settings.get("systemEntryBudgetMs", 500) / 1000))
+        for offset in range(min(len(ranked), int(settings.get("systemEntryBatch", 256)))):
             if offset and time.monotonic() >= deadline:
                 break
             index = (start + offset) % len(ranked)
@@ -8869,6 +8944,7 @@ class Pulse:
 
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
+        act = persistent_activity(act, getattr(getattr(self, "runtime", None), "snapshot", {}), getattr(self, "start_eq", 0))
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
         dd = float(act["drawdownPct"])
@@ -8982,6 +9058,7 @@ class Pulse:
             "startedAt": self.started,
             "now": time.time(),
             "uptimeS": age,
+            "system": dict(getattr(getattr(self, "runtime", None), "snapshot", {}) or {}),
             "equity": round(self.equity, 4),
             "walletEquity": round(self.equity, 4),
             "startEquity": round(self.start_eq, 4),
@@ -8996,7 +9073,7 @@ class Pulse:
             "systemLoss": round(float(act["loss"]), 4),
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act["unrealized"]), 4),
-            "systemSource": "system-orders",
+            "systemSource": act.get("source", "system-orders"),
             "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
             "drawdownAmount": act["drawdownAmount"],
@@ -9460,22 +9537,30 @@ class Pulse:
         }
 
     def write_stats(self, force: bool = False) -> None:
+        if not self._stats_lock.acquire(blocking=False):
+            return
+        try:
+            self._write_stats_locked(force)
+        finally:
+            self._stats_lock.release()
+
+    def _write_stats_locked(self, force: bool = False) -> None:
         now = time.monotonic()
         fat = bool(getattr(getattr(self.load, "last_budget", None), "stats_full", False))
-        min_dt = 0.95 if fat else 1.6
+        min_dt = max(0.95 if fat else 1.6, getattr(self, "system_settings", {}).get("systemStatsIntervalS", 2))
         if not force and not self._stats_force and now - self._stats_ts < min_dt:
             return
         self._stats_ts = now
         self._stats_force = False
-        blob = json.dumps(self.stats(), separators=(",", ":"))
+        stats = self.stats()
         # State dir may be missing on a fresh box (or after a manual wipe):
         # recreate it instead of dropping every stats write on the floor.
         os.makedirs(DIR, exist_ok=True)
-        tmp = STATS_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(blob)
-        os.replace(tmp, STATS_PATH)
-        if force or int(now) % 15 < 2:
+        # Unique temporary file and fsync make overlapping writers restart-safe.
+        atomic_write(STATS_PATH, stats)
+        # Forced progress snapshots must not trigger a full report every tick.
+        if now - float(getattr(self, "_report_ts", 0)) >= getattr(self, "system_settings", {}).get("systemReportIntervalS", 30):
+            self._report_ts = now
             try:
                 self.write_results_export()
             except Exception:
@@ -10052,16 +10137,17 @@ class Pulse:
         return max(1, min(total, size))
 
     def _replay_worker_count(self, n_names: int, budget: Any = None) -> int:
-        """Parallel symbol replay. Follow CPU — no extra 4/8 worker cap."""
+        """Parallel symbol replay within configured worker and load ceilings."""
         n = max(1, int(n_names or 1))
         try:
             cpu = max(1, int(os.cpu_count() or 1))
         except Exception:
             cpu = 2
+        cpu = min(cpu, int(getattr(self, "system_settings", {}).get("systemWorkers", 2)))
         level = str(getattr(budget, "level", "normal") or "normal") if budget is not None else "normal"
         if n <= 1 or level == "critical":
             return 1
-        if cpu <= 2:
+        if cpu <= 1:
             return 1
         if level == "overload":
             return max(1, min(2, cpu, n))
@@ -10560,34 +10646,29 @@ class Pulse:
         if not todo:
             return
 
-        def _score_sid(sid: str) -> None:
-            st = book.sets.get(sid)
-            if st is not None:
-                book._score_one(st)
-
         try:
             cpu = max(1, int(os.cpu_count() or 1))
         except Exception:
             cpu = 2
-        workers = 1 if len(todo) < 16 else max(1, min(cpu, max(1, len(todo) // 16)))
+        workers = 1 if len(todo) < 16 else max(1, min(cpu, int(getattr(self, "system_settings", {}).get("systemWorkers", 2)), max(1, len(todo) // 16)))
         if workers <= 1:
-            for i, sid in enumerate(todo):
+            for i in range(0, len(todo), 32):
                 with self.state_guard():
                     if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                         return
-                    _score_sid(sid)
-                if i % 48 == 0:
-                    sd_notify("WATCHDOG=1")
+                states = [book.sets[sid] for sid in todo[i:i+32] if sid in book.sets]
+                for pair in book.score_pairs(states):
+                    book._score_pair(pair)
+                sd_notify("WATCHDOG=1")
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
-                done = 0
-                for _ in pool.map(_score_sid, todo, chunksize=max(8, len(todo) // (workers * 4) or 8)):
-                    done += 1
-                    if done % 96 == 0:
-                        sd_notify("WATCHDOG=1")
-                        with self.state_guard():
-                            if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
-                                return
+                for start in range(0, len(todo), 32):
+                    with self.state_guard():
+                        if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                            return
+                    states = [book.sets[sid] for sid in todo[start:start+32] if sid in book.sets]
+                    list(pool.map(book._score_pair, book.score_pairs(states)))
+                    sd_notify("WATCHDOG=1")
         with self.state_guard():
             if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                 book._cap_active()
@@ -10625,6 +10706,7 @@ class Pulse:
         try:
             sd_notify("WATCHDOG=1")
             built = SetBook()
+            built.calculation_cache = getattr(self, "calculation_cache", None)
             built.load(overlay, cts, rebuild=True)
             sd_notify("WATCHDOG=1")
             with self.state_guard():
@@ -11391,6 +11473,19 @@ class Pulse:
 
     def run(self) -> None:
         log(f"pulse start {CONN_SHORT} {BASE}")
+        if getattr(self, "runtime", None):
+            self.runtime.start(self)
+        else:
+            def retry_statistics():
+                while not self._hist_stop.wait(30):
+                    try:
+                        monitor = RuntimeMonitor(DIR, CONN_SHORT, self.overlay)
+                        self.runtime = monitor
+                        monitor.start(self)
+                        return
+                    except Exception as exc:
+                        self.last_error = f"Statistics recovery: {type(exc).__name__}"
+            threading.Thread(target=retry_statistics, name="statistics-recovery", daemon=True).start()
         sd_notify("READY=1\nWATCHDOG=1")
         # Heartbeat must start before any blocking REST/catalog work. A 566
         # symbol kline fill or 13k-set catalog can otherwise exceed WatchdogSec
@@ -11455,7 +11550,11 @@ class Pulse:
                 # stats/UI readers, history progress, or control watcher.
                 with self._cycle_lock:
                     self._one_cycle()
+                if getattr(self, "runtime", None):
+                    self.runtime.note_success()
             except Exception:
+                if getattr(self, "runtime", None):
+                    self.runtime.note_failure()
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-400:]
                 log("LOOP " + self.last_error)
@@ -11549,7 +11648,24 @@ def main() -> None:
                 or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment):
             raise SystemExit("VST-only deployment requires the verified X02 demo endpoint")
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
-    Pulse(api, load_contracts()).run()
+    pulse = Pulse(api, load_contracts())
+    import signal
+    def stop_service(_signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_service)
+    clean = False
+    try:
+        pulse.run()
+        clean = True
+    except KeyboardInterrupt:
+        clean = True
+    except SystemExit as exc:
+        clean = exc.code in (None, 0)
+        if not clean:
+            raise
+    finally:
+        if getattr(pulse, "runtime", None):
+            pulse.runtime.finish(clean=clean)
 
 
 if __name__ == "__main__":

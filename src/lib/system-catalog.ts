@@ -27,7 +27,7 @@ export const MODULES: SysModule[] = [
   { id: "core.engine", layer: "core", name: "Pulse engine", summary: "Independent live loop, adopt, stats dump", status: "live", defaultOn: true },
   { id: "core.watchdog", layer: "core", name: "Watchdog", summary: "Hang restart if a scan stalls", status: "live", defaultOn: true },
   { id: "core.load", layer: "core", name: "Load governor", summary: "Partial scans, RSS caps, cache trim, thread backpressure", status: "live", defaultOn: true },
-  { id: "core.historic", layer: "core", name: "1m historic", summary: "Prehistoric replay on 1-minute bars for every Set", status: "live", toggle: "histEnabled", defaultOn: true },
+  { id: "core.historic", layer: "core", name: "1m historic", summary: "Always-active 1-minute reference replay for every Set", status: "live", defaultOn: true },
   { id: "feed.ws", layer: "feed", name: "WebSocket marks", summary: "Venue stream for last price", status: "live", defaultOn: true },
   { id: "feed.rest", layer: "feed", name: "REST snapshot", summary: "Ticker + kline batch with rate buckets", status: "live", defaultOn: true },
   { id: "feed.universeRank", layer: "feed", name: "Universe rank", summary: "Dynamic book: exchange max leverage then 1H volatility", status: "live", toggle: "symbolsDynamic", defaultOn: true },
@@ -43,7 +43,7 @@ export const MODULES: SysModule[] = [
   { id: "strategy.indications", layer: "strategy", name: "Indications", summary: "Signals coordinated: min 3 sources, 0.6 agreement, low-stop consensus", status: "live", toggle: "indEnabled", defaultOn: true },
   { id: "strategy.block", layer: "strategy", name: "Block strategy", summary: "Counts 1–6 on a live parent · independent PF per stack", status: "live", toggle: "blockEnabled", defaultOn: true },
   { id: "strategy.coord", layer: "strategy", name: "Coordination axes", summary: "Prev / last / cont / pause windows gate new risk", status: "live", defaultOn: true },
-  { id: "strategy.sets", layer: "strategy", name: "Independent Sets", summary: "Pack × SL:TP × trail × step × LONG/SHORT books with 1m historic · cost-net PF", status: "live", toggle: "histEnabled", defaultOn: true },
+  { id: "strategy.sets", layer: "strategy", name: "Independent Sets", summary: "Always-active General calculation basis · independent SL:TP, steps and evaluation books", status: "live", defaultOn: true },
   { id: "strategy.trailing", layer: "strategy", name: "Trailing recals", summary: "Independent arm/give range · auto pick on last-N", status: "live", toggle: "stratTrailing", defaultOn: true },
   { id: "strategy.trailRecalc", layer: "strategy", name: "Trail auto-recalc", summary: "Pick arm:give from last-N independent of SL:TP", status: "live", toggle: "trailAuto", defaultOn: true },
   { id: "strategy.dca", layer: "strategy", name: "DCA", summary: "Independent CTS steps on adverse move · own PF book", status: "live", toggle: "dcaEnabled", defaultOn: false },
@@ -65,6 +65,7 @@ export const MODULES: SysModule[] = [
 
 export function modulesFromOverlay(o: PulseOverlay): Record<string, boolean> {
   const out: Record<string, boolean> = { ...(o.modules ?? {}) };
+  out["strategy.sets"] = out["core.historic"] = true;
   for (const m of MODULES) {
     if (out[m.id] === undefined) {
       if (m.toggle) out[m.id] = Boolean(o[m.toggle]);
@@ -104,8 +105,9 @@ export function applyModule(
     next.blockEnabled = on;
     next.stratBlock = on;
   }
-  if (id === "strategy.sets") {
-    next.histEnabled = on;
+  if (id === "strategy.sets" || id === "core.historic") {
+    next.histEnabled = true;
+    next.modules = { ...next.modules, "strategy.sets": true, "core.historic": true };
   }
   if (id === "strategy.exits") {
     next.exitEnabled = on;

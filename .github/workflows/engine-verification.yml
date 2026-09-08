@@ -22,9 +22,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: server/pulse/requirements.txt
+          cache-dependency-path: |
+            server/pulse/requirements.txt
+            scripts/requirements-test.txt
       - name: Install isolated declared dependencies
-        run: python -m pip install -r server/pulse/requirements.txt
+        run: python -m pip install -r server/pulse/requirements.txt -r scripts/requirements-test.txt
       - name: Import and installation namespace contracts
         run: python scripts/release-contract-test.py
       - name: Forced grid and replay correctness

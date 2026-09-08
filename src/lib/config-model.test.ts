@@ -9,6 +9,34 @@ import {
   syncOverlayFlags,
 } from "./config-model.ts";
 
+test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
+  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, false);
+  assert.equal(DEFAULT_OVERLAY.blockActiveMinLevel, 0);
+  for (const normal of [false, true]) for (const active of [false, true]) for (const level of [0, 1, 3, 6]) {
+    const loaded = overlayFromCts({}, { normalExecutionEnabled: normal, blockActive: active,
+      blockActiveMinLevel: level, stratGeneral: false, histEnabled: false });
+    const saved = syncOverlayFlags(loaded);
+    assert.equal(saved.normalExecutionEnabled, normal);
+    assert.equal(saved.blockActive, active);
+    assert.equal(saved.blockActiveMinLevel, level);
+    assert.equal(saved.stratGeneral, true);
+    assert.equal(saved.histEnabled, true);
+    assert.equal(saved.modules?.["core.historic"], true);
+  }
+});
+
+test("System settings survive save and use bounded values without disabling automatic memory", () => {
+  const saved = syncOverlayFlags(overlayFromCts({}, { systemWorkers: 99, systemDbMaxMb: 4,
+    systemStatsIntervalS: 9, systemOrderRps: 50, rssSoftMb: 0, rssHardMb: 0, blockMaxStack: 3, blockActiveMinLevel: 6 }));
+  assert.equal(saved.systemWorkers, 8);
+  assert.equal(saved.systemDbMaxMb, 8);
+  assert.equal(saved.systemOrderRps, 2.4);
+  assert.equal(saved.systemStatsIntervalS, 9);
+  assert.equal(saved.rssSoftMb, 0);
+  assert.equal(saved.rssHardMb, 0);
+  assert.equal(saved.blockActiveMinLevel, 3);
+});
+
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)

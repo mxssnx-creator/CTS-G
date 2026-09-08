@@ -12,21 +12,24 @@ class SettingsPersistence(unittest.TestCase):
                 list(pool.map(lambda i:ph.write_overlay('vst',{f'field{i}':i}),range(60)))
             ph.write_overlay('live',{'sentinel':'x01'})
             vst=ph.load_overlay('bingx-x02');live=ph.load_overlay('bingx-x01')
-            self.assertEqual(vst,{f'field{i}':i for i in range(60)})
-            self.assertEqual(live,{'sentinel':'x01'})
+            self.assertEqual({k:v for k,v in vst.items() if k.startswith('field')},{f'field{i}':i for i in range(60)})
+            self.assertEqual(live['sentinel'],'x01')
+            self.assertFalse(any(k.startswith('field') for k in live))
+            self.assertTrue(vst['stratGeneral'])
             self.assertFalse(list(pathlib.Path(d).glob('*.tmp')))
     def test_nonfinite_or_nonobject_cannot_overwrite_saved_settings(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             ph.write_overlay('vst',{'volumeFactor':.1})
+            saved=ph.load_overlay('bingx-x02')
             for bad in ({'volumeFactor':float('nan')},{'nested':[float('inf')]},[]):
                 with self.assertRaises(ValueError):ph.write_overlay('vst',bad)
-                self.assertEqual(ph.load_overlay('bingx-x02'),{'volumeFactor':.1})
+                self.assertEqual(ph.load_overlay('bingx-x02'),saved)
     def test_execution_settings_roundtrip_without_disabling_calculation(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             ph.write_overlay('vst',{'normalExecutionEnabled':False,'blockActive':True,'setMaxActive':50,'stratGeneral':True})
             ph.write_overlay('vst',{'blockActive':False})
             value=ph.load_overlay('bingx-x02')
-            self.assertEqual(value,{'normalExecutionEnabled':False,'blockActive':False,'setMaxActive':50,'stratGeneral':True})
+            self.assertEqual({k:value[k] for k in ('normalExecutionEnabled','blockActive','setMaxActive','stratGeneral')},{'normalExecutionEnabled':False,'blockActive':False,'setMaxActive':50,'stratGeneral':True})
             ph.write_overlay('vst',{'normalExecutionEnabled':True})
             self.assertTrue(ph.load_overlay('bingx-x02')['normalExecutionEnabled'])
     def test_invalid_lane_cannot_write_a_file(self):

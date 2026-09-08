@@ -112,7 +112,8 @@
     "strategy.trailing": true
   },
   "noise": 0.05,
-  "normalExecutionEnabled": true,
+  "normalExecutionEnabled": false,
+  "blockActiveMinLevel": 0,
   "pfWindow": 15,
   "posCountsVolumeRatio": 0.05,
   "positionCostFallbackPct": 0.1,

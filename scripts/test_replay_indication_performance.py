@@ -220,7 +220,8 @@ class ReplayIndicationTests(unittest.TestCase):
                         got = worker._replay_worker_count(count, SimpleNamespace(level=level))
                         self.assertGreaterEqual(got, 1)
                         self.assertLessEqual(got, min(cpu, max(1, count)))
-                        if level == "critical" or cpu <= 2:
+                        self.assertLessEqual(got, 2)  # configured default worker ceiling
+                        if level == "critical" or cpu <= 1:
                             self.assertEqual(got, 1)
                         if level == "overload":
                             self.assertLessEqual(got, 2)

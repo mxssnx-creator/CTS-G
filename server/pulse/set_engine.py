@@ -894,6 +894,7 @@ class Progress:
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
+        self.calculation_cache = None
         self.lookback = LOOKBACK_DEFAULT
         self.evaluation_bars = LOOKBACK_DEFAULT
         self.exact_replay_window = False
@@ -1005,6 +1006,7 @@ class SetBook:
         """
         state = dict(self.__dict__)
         state.pop("_pick_lock", None)
+        state["calculation_cache"] = None  # Never pickle live Redis connections.
         # A copied book must never serve a snapshot produced by the live
         # book.  Besides stale rows, the cache can retain the full preview
         # matrix and defeat the bounded replay-memory contract.
@@ -1082,6 +1084,8 @@ class SetBook:
         rebuild: bool = True,
     ) -> None:
         cts = cts or {}
+        from system_settings import normalize_system_settings
+        self.system_workers = normalize_system_settings(ov)["systemWorkers"]
         self.sl_min = min(.03, max(.0015, finite(ov.get("slMinPct"), .15) / 100))
         self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
         self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
@@ -1725,7 +1729,7 @@ class SetBook:
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
         original = rec if isinstance(rec, dict) else vars(rec)
         for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
-                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane"):
+                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id"):
             if key in original:
                 row[key] = original[key]
         if ind_kind not in IND_KINDS:
@@ -1751,10 +1755,9 @@ class SetBook:
             row["ind_kind"] = ind_kind
             row["indKind"] = ind_kind
             tape = self.ind_live.setdefault(ind_kind, [])
-            cid0 = row.get("client_id") or ""
-            if not (cid0 and any(r.get("client_id") == cid0 for r in tape)):
+            if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in tape):
                 tape.append(dict(row))
-                self.ind_live[ind_kind] = trim_hist(tape, HIST_CAP)
+                self.ind_live[ind_kind] = sorted(tape, key=lambda r: finite(r.get("t")))[-HIST_CAP:]
         extra = ""
         if isinstance(rec, dict):
             extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
@@ -1771,15 +1774,23 @@ class SetBook:
                 targets.append(st)
         if not targets:
             return
-        cid = row.get("client_id") or ""
         for st in targets:
-            if cid and any(r.get("client_id") == cid for r in st.live):
+            if any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in st.live):
                 continue
             st.live.append(row)
-            st.live = st.live[-80:]
+            st.live = sorted(st.live, key=lambda r: finite(r.get("t")))[-80:]
             self._score_one(st)
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
+
+    @staticmethod
+    def _live_fill_identity(row):
+        fill = row.get("close_fill_id")
+        if fill:
+            return ("fill", str(fill))
+        if row.get("client_id") and not row.get("partial"):
+            return ("legacy", row["client_id"])
+        return ("partial", row.get("client_id"), row.get("t"), row.get("qty"), row.get("pnl"))
 
     def seed_live(self, closed: Sequence[Any]) -> None:
         for rec in closed:
@@ -2094,18 +2105,31 @@ class SetBook:
                 cpu = max(1, int(os.cpu_count() or 1))
             except Exception:
                 cpu = 2
-            workers = max(1, min(cpu, n))
-            if workers > 2:
+            workers = max(1, min(cpu, n, getattr(self, "system_workers", 2)))
+            if workers > 1:
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
-                    list(pool.map(self._score_one, states, chunksize=max(8, n // (workers * 4) or 8)))
+                    for start in range(0, n, 32):
+                        list(pool.map(self._score_pair, self.score_pairs(states[start:start+32])))
                 self._selection_dirty = True
                 self._snap_ts = 0.0
                 self._live_ov_ts = 0.0
                 self._cap_active()
                 return
-        for st in states:
-            self._score_one(st)
+        for start in range(0, n, 32):
+            for pair in self.score_pairs(states[start:start+32]):
+                self._score_pair(pair)
         self._cap_active()
+
+    def score_pairs(self, states):
+        cache = getattr(self, "calculation_cache", None)
+        return cache.prepare(self, states) if cache else [(st, None) for st in states]
+
+    def _score_pair(self, pair):
+        state, bundle = pair
+        if bundle is not None and hasattr(bundle, "signature"):
+            cache = self.calculation_cache
+            bundle = bundle.value if not state.live and cache and cache.signature(self, state) == bundle.signature else None
+        self._score_one(state, bundle=bundle)
 
     def replay_symbol_partial(
         self,
