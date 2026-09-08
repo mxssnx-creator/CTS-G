@@ -13,6 +13,7 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
+export const DEFAULT_SYMBOL_COUNT = 50;
 export const DEFAULT_SYMBOL_COUNT = 25;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
@@ -81,6 +82,7 @@ export function capSymbols(list: string[]): string[] {
   return list.slice(0, MAX_SYMBOLS);
 }
 
+/** Cap 0 + All/* is unlimited. Cap 50 with universe ranking is the default book, not "all". */
 /** Cap 0 + All/* is unlimited. Cap 25 with universe ranking is the default book, not "all". */
 export function isUnlimitedSymbolBook(overlay: {
   symbolCap?: number;

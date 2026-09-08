@@ -470,6 +470,34 @@ function SettingsPage() {
           {section === "overview" && (
             <Card title="Coverage · controls · live overviews" hint="Scan, packs, indication types, block counts, set families, recon and order protection — all live">
               <CoveragePanel live={stats} />
+              <div data-testid="capacity-caps" className="rounded-lg border border-border bg-bg2 p-3">
+                <div>
+                  <p className="font-mono text-xs uppercase text-muted">Capacity caps</p>
+                  <p className="mt-1 text-sm text-muted">Set the live order ceiling and ranked symbol book without leaving the first settings page.</p>
+                </div>
+                <div className="mt-3">
+                  <Grid>
+                    <Num
+                      label="Open-order cap"
+                      value={overlay.maxOpen}
+                      min={0}
+                      max={10000}
+                      step={1}
+                      hint="Target 100 open orders · 0 = unlimited"
+                      onChange={(v) => patch("maxOpen", Math.round(v))}
+                    />
+                    <Num
+                      label="Symbol cap"
+                      value={overlay.symbolCap}
+                      min={0}
+                      max={10000}
+                      step={1}
+                      hint={`Target ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = unlimited`}
+                      onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
+                    />
+                  </Grid>
+                </div>
+              </div>
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="General calculation" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />

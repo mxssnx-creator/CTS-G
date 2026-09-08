@@ -1650,6 +1650,10 @@ class Handler(SimpleHTTPRequestHandler):
                 "histLookbackBars": ov.get("histLookbackBars"),
                 "maxOpen": ov.get("maxOpen"),
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
+                "controlOrders": ov.get("controlOrders"),
+                "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
+                "dcaEnabled": ov.get("dcaEnabled"),
+                "blockActive": ov.get("blockActive"),
             })
             return
         if path in ("/stats.json", "/live-stats.json"):

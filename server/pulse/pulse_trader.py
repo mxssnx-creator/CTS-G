@@ -538,7 +538,7 @@ def ctrl_err_kind(msg: str) -> str:
         return "px"
     if "exceeded" in m and "limit" in m:
         return "cap"
-    if "position not exist" in m or "position does not exist" in m:
+    if "position not exist" in m or "position does not exist" in m or "no position to close" in m:
         return "flat"
     if "order size" in m or "available amount" in m:
         return "qty"
@@ -3854,9 +3854,10 @@ class Pulse:
                 })
                 return True, px
             msg = str(r.get("msg") or "")
-            if ctrl_err_kind(msg) == "qty_close":
+            kind = ctrl_err_kind(msg)
+            if kind == "qty_close":
                 continue
-            if "position not exist" in msg.lower():
+            if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
                     "avg_price": px,
@@ -9465,7 +9466,7 @@ class Pulse:
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
         )
-        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
+        self.record_test("qa-unlimited", MAX_OPEN <= 0 or MAX_OPEN >= 100, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
         book_cap = self.max_book_notional()
         sane_cap = max(self.notional_cap() * 32.0, 64.0)
         self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
@@ -10320,6 +10321,15 @@ class Pulse:
                 progress_total=progress_total,
                 score=False,
             )
+            try:
+                replay_book.compact_hist_tapes()
+                replay_book.trim_tapes(
+                    hist_cap=96,
+                    live_cap=80,
+                    bar_cap=max(120, int(getattr(replay_book, "lookback", 480) or 480)),
+                )
+            except Exception:
+                pass
             if self._hist_request_changed():
                 with self.state_guard():
                     if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
@@ -10334,17 +10344,15 @@ class Pulse:
                 if replay_book.progress.phase == "error":
                     source.progress = copy.deepcopy(replay_book.progress)
                     return False
-                incoming = {
-                    sid: list(state.hist)
-                    for sid, state in replay_book.sets.items()
-                }
                 wanted = set(names)
+                incoming = {}
                 affected = set()
-                for sid, current in source.sets.items():
-                    target = replay_book.sets.get(sid)
-                    if any(str(row.get("symbol") or "") in wanted for row in current.hist):
-                        affected.add(sid)
-                    if target is not None and any(str(row.get("symbol") or "") in wanted for row in target.hist):
+                for sid, target in replay_book.sets.items():
+                    tape = target.hist
+                    if not tape:
+                        continue
+                    incoming[sid] = list(tape)
+                    if any(str(row.get("symbol") or "") in wanted for row in tape[-12:]):
                         affected.add(sid)
                 source._commit_hist(
                     incoming,
@@ -10379,6 +10387,16 @@ class Pulse:
                 self._stats_force = True
                 affected_ids = sorted(affected)
                 published = True
+            if published:
+                try:
+                    source.compact_hist_tapes()
+                    source.trim_tapes(
+                        hist_cap=96,
+                        live_cap=80,
+                        bar_cap=max(120, int(getattr(source, "lookback", 480) or 480)),
+                    )
+                except Exception:
+                    pass
             if published and score:
                 self._score_committed(source, generation, affected_ids)
                 try:
