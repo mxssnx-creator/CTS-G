@@ -2751,7 +2751,7 @@ def process_guard_test() -> None:
     rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
     rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
     rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 25)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
