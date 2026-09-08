@@ -431,3 +431,61 @@ publication, and a concurrent configuration change invalidates a stale build.
 - Do not print secrets in CI logs, shell traces, chat responses or diagnostics.
 - Use `deploy/remote-access.env.example` only as a schema. The populated
   `deploy/remote-access.env` is ignored and must remain private.
+
+## Continuity checkpoint — System and Redis, 2026-09-08
+
+Canonical workspace: `/workspace/CTS-G`, branch
+`codex/all-valid-entry-sets-20260908`. Verified implementation commit:
+`3030de88ae57a49224c5979699398782bf696ec5`. The implementation worktree was clean when backed up.
+`origin/main` was fetched successfully at
+`dc5f772641a7c803c63f47e54b3d3747075317b0`; the feature commits have not been
+publicly pushed or merged. A subsequent checkpoint commit records these notes
+and preserves the workspace preview startup helper; use its Git HEAD and final
+backup manifest for the complete checkout.
+
+Verified implementation backup: `/workspace/backups/CTS-G/20260908T232335Z-3030de8-verified`.
+It includes the complete Git bundle, source archive, clean tracked diff and
+manifest. Both `git bundle verify` and `sha256sum -c SHA256SUMS` passed.
+
+- Bundle SHA-256: `f23dcaccaad4535872bc9de293e16e6d320573ac68e1923c4bbf2ee97bccbfac`.
+- SHA256SUMS SHA-256: `95e080631fb3926ff69a82c610e5e2b38d5a949fbd6ee9eb5252b0977381d9fc`.
+
+Normal (General) defaults OFF and controls ordinary effective simulated/live
+execution independently of Block Active. Internal General/historical evaluation
+remains ON. Block minimum level defaults to 0; effective Block entries require a
+positive adjusted increment. Cached calculation limits are 350 Sets per lane and
+350 versions per Set, retaining the newest 280 at full capacity, with additional
+per-Set/global byte ceilings. These limits never truncate the full calculation
+catalog. Low cache reuse falls back to local calculation to avoid Redis/AOF churn.
+Lifetime confirmed statistics have individual SQLite files under the persistent
+data root. System settings, scoped backup/reset and resource footers are included.
+
+Verification is documented in
+`reports/validation-20260908-system/verification.md`: 185 Python tests,
+399 engine checks, 13 release contracts, 16 forced-config tests, 191 JavaScript
+and 49 TypeScript tests passed (four pre-existing absent-skill checks skipped).
+Type checking, ESLint and production build passed. The retained 12-hour market
+replay completed all 43,680 Sets / 131,040 symbol-config evaluations in 62.89s.
+The offline load test opened 500 distinct simulated orders from 250 Sets, with
+independent Normal/Block ownership and verified volumes. Redis script tests use
+fakeredis with Lua; native VPS performance has not been benchmarked.
+
+Remote Redis configuration was backed up at
+`/var/backups/cts-g-redis/20260908T225503Z/` and its lazy expiry/server-delete/
+user-delete settings were enabled, with active expiry effort 3. Configuration
+rewrite and post-change PING/AOF/RDB checks passed. Shared eviction policy and
+memory ceiling were preserved. The 1,490,124 pre-existing keys largely sampled
+from CTS-K-N were not purged. Trading services were not restarted.
+
+Latest observed installed application remains clean at
+`f12253eb908756af0c855f6ae8d0e2496be1a596`. Desk/HTTP/X01 were active; X02/VST
+was inactive. This supersedes older notes describing X01 as stopped. No mainnet
+start/restart/order action was performed here.
+
+Still pending: exact-source private transfer, updated browser desktop/mobile
+acceptance, VST-only reinstall/restart and exchange-order acceptance, public
+push/PR/merge. Chromium was unavailable and its official download failed locally.
+Prior automatic approval review explicitly rejected the private source update
+and public publication without concrete payload/destination approval. Do not
+retry those source transfers through another transport. The separately authorized
+Redis tuning is complete and does not count as deployment of this implementation.
