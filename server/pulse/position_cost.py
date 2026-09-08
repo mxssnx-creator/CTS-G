@@ -22,6 +22,9 @@ RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 15
+# +1× PositionCost net. 1.00 is only break-even after cost; validated /
+# positive results must clear this floor so "PF > 1.10" is the real edge.
+POSITIVE_PF = RATIO_BASE + RATIO_SCALE
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -432,6 +435,11 @@ def r_from_ratio(ratio: float) -> float:
     return (finite(ratio, RATIO_BASE) - RATIO_BASE) / RATIO_SCALE
 
 
+def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
+    """True when cost-scale PF has earned at least +1× PositionCost (1.10)."""
+    return finite(ratio) + 1e-9 >= finite(floor, POSITIVE_PF)
+
+
 def net_move_pct(ratio: float, cost_pct: float) -> float:
     return finite(cost_pct) * r_from_ratio(ratio)
 
@@ -569,7 +577,7 @@ def evaluation_windows(
             "n": count,
             "available": count >= requested,
             "requiredSamples": required,
-            "validated": count >= required and ratio + 1e-9 >= RATIO_BASE,
+            "validated": count >= required and is_positive_pf(ratio),
             "pf": round(ratio, 4),
             "classicPf": float(metric.get("classicPf") or 0.0),
             "avgR": float(metric.get("avgR") or 0.0),

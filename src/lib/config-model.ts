@@ -13,7 +13,7 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
-export const DEFAULT_SYMBOL_COUNT = 12;
+export const DEFAULT_SYMBOL_COUNT = 25;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [
@@ -79,6 +79,23 @@ export function rankSymbolRows<T extends SymbolRankRow>(rows: T[], sort: string)
 export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
+}
+
+/** Cap 0 + All/* is unlimited. Cap 25 with universe ranking is the default book, not "all". */
+export function isUnlimitedSymbolBook(overlay: {
+  symbolCap?: number;
+  symbolsAll?: boolean;
+  symbols?: string[];
+}): boolean {
+  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
+  return cap === 0 && Boolean(
+    overlay.symbolsAll || overlay.symbols?.includes("*") || overlay.symbols?.includes("ALL"),
+  );
+}
+
+export function rankedSymbolCap(overlay: { symbolCap?: number }): number {
+  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
+  return cap > 0 ? cap : DEFAULT_SYMBOL_COUNT;
 }
 // Full independent risk catalog. PF remains the coordinator's primary
 // objective; this axis controls the evaluated SL:TP range only.
@@ -322,7 +339,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsAll: true,
   symbolsDynamic: true,
   symbolSort: "vol1h",
-  symbolCap: 0,
+  symbolCap: 25,
   slPct: 0.48,
   tpPct: 0.75,
   trailArmPct: 0.3,
@@ -868,7 +885,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   if (live?.symbolsAll != null) out.symbolsAll = bool(live.symbolsAll, out.symbolsAll);
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);
   out.symbolsDynamic = bool(out.symbolsDynamic, true);
-  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, 0)));
+  out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, DEFAULT_SYMBOL_COUNT)));
   if (out.trailRecalcGive && live?.trailGivePct == null) {
     out.trailGivePct = trailGiveFromArm(out.trailArmPct, out.trailGiveFactor, out.trailGiveMin, out.trailGiveMax);
   }
@@ -970,6 +987,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolsDynamic = next.symbolsDynamic !== false;
 
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
+  if (next.symbolCap === 0 && overlay.symbolCap == null) {
+    next.symbolCap = DEFAULT_SYMBOL_COUNT;
+  }
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;
   const dist = [...(next.dcaStepDistancesPct || [0.5, 1, 1.5, 2])];

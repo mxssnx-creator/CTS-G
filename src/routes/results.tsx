@@ -37,12 +37,11 @@ function ResultsPage() {
   useEffect(() => {
     let alive = true;
     setStatsTab("overview");
-    setRaw(null);
     let timer: ReturnType<typeof setTimeout> | null = null;
     const pull = async () => {
       const s = await fetchLiveStats(conn);
       if (!alive) return;
-      setRaw(s);
+      if (s) setRaw(s);
       const hidden = typeof document !== "undefined" && document.hidden;
       timer = setTimeout(pull, hidden ? 8000 : 4000);
     };

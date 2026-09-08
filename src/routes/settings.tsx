@@ -26,7 +26,7 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
-import { MAX_SYMBOLS } from "@/lib/config-model";
+import { DEFAULT_SYMBOL_COUNT, isUnlimitedSymbolBook } from "@/lib/config-model";
 import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
 import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
 import {
@@ -312,18 +312,21 @@ function SettingsPage() {
   const onCalcAll = async (activeOverlay = overlay, activeCalcOpt = calcOpt) => {
     setCalcBusy(true);
     setSaveMsg(null);
-    const allSym = activeCalcOpt.allSymbols || activeOverlay.symbolsAll || activeOverlay.symbols.includes("*");
+    const cap = Math.max(0, Math.round(Number(activeOverlay.symbolCap) || 0));
+    const allSym = Boolean(activeCalcOpt.allSymbols);
+    const selected = (activeOverlay.symbols || []).filter((s) => s !== "*" && s !== "ALL");
     const j = await startHistCalc({
       ...activeCalcOpt,
       allConfigs: true,
       allSymbols: allSym,
-      symbols: allSym ? ["*"] : activeOverlay.symbols,
+      symbolCap: cap,
+      symbols: allSym ? [] : selected,
       preferMinimalRange: activeOverlay.preferMinimalRange,
       additionalCoordination: activeOverlay.additionalCoordination,
       coordOptimizationN: activeOverlay.coordOptimizationN,
       connection: histConn,
-      overlay: activeOverlay,
-      selectedSymbols: activeOverlay.symbols,
+      overlay: { ...activeOverlay, symbolCap: cap },
+      selectedSymbols: allSym ? [] : selected,
     });
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
@@ -723,9 +726,13 @@ function SettingsPage() {
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stratGeneral: v }))}
                   />
                   <EnableSlider
-                    label="All symbols"
+                    label="Ranked universe"
                     on={calcOpt.allSymbols}
-                    hint={calcOpt.allSymbols ? "ranked universe (capped)" : "selected list only"}
+                    hint={
+                      overlay.symbolCap > 0
+                        ? `top ${overlay.symbolCap} by leverage then 1H vol · not the full book`
+                        : "every listed USDT-M swap"
+                    }
                     onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
                   />
                   <EnableSlider
@@ -2057,30 +2064,45 @@ function SettingsPage() {
           )}
 
           {section === "symbols" && (
-            <Card title="Symbols" hint={`Default rank · max leverage then Volatility 1H · cap ${MAX_SYMBOLS > 0 ? MAX_SYMBOLS : "unlimited"}`}>
+            <Card title="Symbols" hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked names · max leverage then Volatility 1H · 0 = unlimited`}>
               <Toggle
-                label="All USDT-M swaps"
-                on={overlay.symbolsAll || overlay.symbols.includes("*") || overlay.symbols.includes("ALL")}
+                label="All unlimited"
+                on={isUnlimitedSymbolBook(overlay)}
                 onChange={(v) => {
-                  patch("symbolsAll", v);
-                  patch("symbols", v ? ["*"] : [...overlay.symbols.filter((s) => s !== "*" && s !== "ALL")]);
+                  dirtyRef.current = true;
+                  setOverlay((o) =>
+                    v
+                      ? { ...o, symbolCap: 0, symbolsAll: true, symbols: ["*"] }
+                      : {
+                          ...o,
+                          symbolCap: o.symbolCap > 0 ? o.symbolCap : DEFAULT_SYMBOL_COUNT,
+                          symbolsAll: true,
+                          symbols: ["*"],
+                        },
+                  );
+                  setDirty(true);
+                  setSaveMsg(null);
                 }}
               />
+              <p className="mt-2 text-xs text-muted">
+                Off keeps the default {DEFAULT_SYMBOL_COUNT}-name ranked book. On processes every USDT-M swap.
+              </p>
               <div className="mt-3">
                 <Grid>
-                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="0 = unlimited. With Dynamic on, the engine keeps every USDT-M name (ranked max leverage then 1H vol) plus any open positions." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="Default 25. 0 = unlimited. Live scan and historic calc use only this many ranked names." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">
                 <SymbolPicker
                   selected={overlay.symbols}
+                  cap={overlay.symbolCap}
                   sort={overlay.symbolSort}
                   dynamic={overlay.symbolsDynamic !== false}
                   onSortChange={(s) => patch("symbolSort", s)}
                   onDynamicChange={(v) => patch("symbolsDynamic", v)}
                   onCap={(n) => {
                     patch("symbolCap", n);
-                    patch("symbolsAll", false);
+                    if (n === 0) patch("symbolsAll", true);
                   }}
                   onChange={(next) => {
                     patch("symbols", next);
