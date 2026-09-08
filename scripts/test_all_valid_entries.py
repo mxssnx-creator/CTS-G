@@ -142,10 +142,20 @@ class AllValidEntries(unittest.TestCase):
         matrix = EntryMatrix(signals, {('general', 'LONG'): states})
         self.assertEqual(len(matrix), 3_400_000)
         self.assertEqual(len(matrix.signals), 100)
-        self.assertEqual(len(matrix.ends), 100)
+        self.assertEqual(len(matrix.ends), 1)
         self.assertIs(matrix.sets_by_scope[('general', 'LONG')], states)
-        self.assertEqual(matrix[33999][-1], 33999)
-        self.assertEqual(matrix[34000][-1], 0)
+        self.assertEqual(len({matrix[i][1] for i in range(100)}), 100)
+        self.assertEqual(len({matrix[i][-1] for i in range(100)}), 100)
+
+    def test_round_robin_ragged_scopes_cover_every_pair_once(self):
+        signals = [(.9, 'A', 1, 'gen:trend'), (.8, 'B', 1, 'gen:trend'),
+                   (.7, 'A', -1, 'ind:trend')]
+        scopes = {('general', 'LONG'): list(range(5)), ('indications', 'SHORT'): list(range(2))}
+        matrix = EntryMatrix(signals, scopes)
+        actual = [(matrix[i][1], matrix[i][2], matrix[i][-1]) for i in range(len(matrix))]
+        expected = {(s[1], s[2], state) for s in signals for state in scopes[EntryMatrix.scope(s)]}
+        self.assertEqual(len(actual), len(expected))
+        self.assertEqual(set(actual), expected)
 
     def test_scheduler_opens_250_independent_orders_on_one_symbol_and_range(self):
         p = self.pulse(self.book(250))

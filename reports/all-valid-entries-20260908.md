@@ -55,3 +55,18 @@ source to the public `mxssnx-creator/CTS-G` repository. Ownership and push right
 were verified; the remaining requirement is explicit authorization for public
 disclosure. Do not bypass that rejection through another transport or connector.
 Source commits and protected Git bundles are retained locally.
+
+Final integration checkpoint: GitHub PR #46 independently merged the captured
+server work into `dc5f772641a7c803c63f47e54b3d3747075317b0`. The server now has a
+clean worktree at `f12253eb908756af0c855f6ae8d0e2496be1a596`; the correctly named
+`cts-g-pulse@bingx-x01.service` and `cts-g-pulse@bingx-x02.service` were both
+observed active. This work did not install/restart them. This branch incorporates
+the newer main and its capacity fields, resolves duplicate declarations/tests,
+and retains the entry and history corrections.
+
+The integrated engine suite passed 399/399 checks. Node tests passed (191 script
+tests, four optional-file skips, 41 TypeScript tests); typecheck, lint and build
+passed. Release and forced contracts passed 12 and 16 tests respectively. Python
+discovery passed 123 tests before the final round-robin fairness regression;
+the final focused suite passed all 11 entry tests. The dispatcher interleaves
+symbols and configurations instead of exhausting one symbol's catalog first.

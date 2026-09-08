@@ -8,14 +8,22 @@ class EntryMatrix:
         self.signals = []
         self.ends = []
         self.sets_by_scope = sets_by_scope
-        total = 0
+        self.phases = []
         for signal in sorted(signals, key=lambda r: (r[1], r[2], r[3])):
             scope = self.scope(signal)
             count = len(sets_by_scope.get(scope, ()))
             if count:
                 self.signals.append(signal)
-                total += count
-                self.ends.append(total)
+        # Round-robin signals as well as Sets: a huge catalog on the first
+        # symbol must not consume every slice before the next symbol is seen.
+        counts = [len(sets_by_scope[self.scope(row)]) for row in self.signals]
+        start = total = 0
+        for end in sorted(set(counts)):
+            active = [i for i, count in enumerate(counts) if count > start]
+            self.phases.append((start, active))
+            total += (end - start) * len(active)
+            self.ends.append(total)
+            start = end
 
     @staticmethod
     def scope(signal):
@@ -28,7 +36,12 @@ class EntryMatrix:
     def __getitem__(self, index):
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        lane = bisect_right(self.ends, index)
+        phase = bisect_right(self.ends, index)
+        round_start, active = self.phases[phase]
+        offset = index - (self.ends[phase - 1] if phase else 0)
+        round_index, signal_offset = divmod(offset, len(active))
+        lane = active[signal_offset]
         signal = self.signals[lane]
-        start = self.ends[lane - 1] if lane else 0
-        return (*signal, self.sets_by_scope[self.scope(signal)][index - start])
+        states = self.sets_by_scope[self.scope(signal)]
+        selected = (round_start + round_index + lane) % len(states)
+        return (*signal, states[selected])
