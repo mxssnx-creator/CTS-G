@@ -35,4 +35,26 @@ class ClientOrderIds(unittest.TestCase):
         cid = p.cid('o')
         self.assertEqual(p.parse_track(cid)['group_token'], '')
 
+    def test_large_indices_and_independent_tokens_roundtrip(self):
+        p = self.pulse()
+        for idx in (1000, 34319, 50000):
+            st = SimpleNamespace(id=f'general:1m:sl0.6:st30:{idx}', pack='general',
+                                 sl_ratio=.6, trail_key='', step=30, idx=idx)
+            p.sets.get_idx = lambda index: st if index == idx else None
+            for tag in ('Gx02', 'G123456x02'):
+                for independent in (False, True):
+                    pos = SimpleNamespace(set_id=st.id, pack='general', set_idx=idx,
+                        execution_lane='variant' if independent else '',
+                        control_group_key='lane:independent' if independent else 'v1:abcdefgh',
+                        control_range_key='sl0048-tp0075')
+                    with patch.object(pt, 'TAG', tag):
+                        ids = [p.cid('u', pos=pos) for _ in range(100)]
+                        self.assertEqual(len(set(ids)), 100)
+                        for cid in ids:
+                            parsed = p.parse_track(cid)
+                            self.assertEqual(len(cid), 32)
+                            self.assertEqual(parsed['idx'], idx)
+                            self.assertEqual(parsed['set_id'], st.id)
+                            self.assertEqual(parsed['group_token'], pt.control_group_token(pos.control_group_key, pos.control_range_key))
+
 if __name__ == '__main__': unittest.main()

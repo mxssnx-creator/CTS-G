@@ -1708,7 +1708,7 @@ class SetBook:
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
         original = rec if isinstance(rec, dict) else vars(rec)
         for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source",
-                    "exchange_confirmed", "partial", "strategy", "member_count"):
+                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane"):
             if key in original:
                 row[key] = original[key]
         if ind_kind not in IND_KINDS:
@@ -4008,7 +4008,7 @@ class SetBook:
             }
         return blob
 
-    def pick(self, pack: str, kind: str = "base", side: Optional[str] = None) -> Optional[SetState]:
+    def pick(self, pack: str, kind: str = "base", side: Optional[str] = None, *, all_valid: bool = False):
         gated = bool(self.progress.ready and self.use_historic_gate)
         want_side = str(side or "").strip().upper()
         if want_side in ("L", "1", "BUY"):
@@ -4072,6 +4072,13 @@ class SetBook:
             ok, _reason, _windows = self._live_windows_ok(scoped, minimum_pf=1.0)
             return ok
         live_pass = [s for s in passing if live_ok(s)]
+        if all_valid:
+            # Qualification is independent of ranking and of a sibling's live
+            # evidence. Every valid base/trail gets an execution opportunity.
+            return [s for s in live_pass
+                    if side_on(s)
+                    and 0 <= float(view(s).get("max_dd_s") or 0) <= self.max_dd_s
+                    and math.isfinite(float(view(s).get("last15_ratio") or 0))]
         live_evidenced = [s for s in live_pass if len(live_rows(s)) >= need]
         # Once a Set has enough own exchange evidence, do not let a merely
         # historic sibling win by default.  This keeps the measured live pool
@@ -4158,6 +4165,34 @@ class SetBook:
 
     def pick_trail(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         return self.pick(pack, kind="trail", side=side)
+
+    def pick_all(self, pack: str, side: Optional[str] = None) -> List[SetState]:
+        """All eligible base and trailing configurations in stable catalog order."""
+        return sorted(
+            (self.pick(pack, "base", side=side, all_valid=True) or [])
+            + (self.pick(pack, "trail", side=side, all_valid=True) or []),
+            key=lambda s: (s.idx, s.id),
+        )
+
+    def execution_allowed(self, st: SetState, pack: str, side: str) -> bool:
+        """Revalidate the exact selected object at the submission boundary."""
+        if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
+            return False
+        if self.use_historic_gate and not self.progress.ready:
+            return False
+        if st.deact_reason == "selection limit":
+            return False
+        view = self._side_view(st, side)
+        active = (st.by_side.get(side) or {}).get("active", st.active)
+        pf = float(view.get("last15_ratio") or 0)
+        dd = float(view.get("max_dd_s") or 0)
+        if not active or not math.isfinite(pf) or not math.isfinite(dd) or dd < 0 or dd > self.max_dd_s:
+            return False
+        if self.strict_gate and (int(view.get("last15_n") or 0) < self.eval_need() or pf + 1e-9 < self.real_min_pf):
+            return False
+        if int(view.get("last15_n") or 0) >= self.eval_need() and pf < 1.0:
+            return False
+        return self._live_windows_ok(filter_side(st.live, side), minimum_pf=1.0)[0]
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)

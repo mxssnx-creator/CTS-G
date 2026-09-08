@@ -7,6 +7,8 @@ lowStopConsensus) plus the indication-stage RSI/MACD/EMA pack.
 from __future__ import annotations
 
 import time
+import hashlib
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -130,6 +132,11 @@ class Indication:
     t: float
     timeframe: str = ""
     kind: str = "state"
+
+    @property
+    def entry_key(self) -> str:
+        identity = repr((self.kind, self.mode, self.timeframe, self.direction))
+        return hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
@@ -1580,6 +1587,11 @@ class IndicationBook:
     def match(self, symbol: str, reason: str) -> Optional[Indication]:
         rows = self.last.get(symbol) or []
         low = (reason or "").lower()
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", low)
+        if exact:
+            # A disappeared/reversed configuration must not be substituted by
+            # a stronger sibling between scan and exchange submission.
+            return next((i for i in rows if i.entry_key == exact.group(1)), None)
         bits = [b for b in low.split(":") if b]
         want_kind = ""
         if bits and bits[0] == "ind" and len(bits) > 1:
@@ -1612,10 +1624,15 @@ class IndicationBook:
         min_conf: float = 0.52,
         allow: Optional[Any] = None,
     ) -> List[Tuple["Indication", float, int]]:
-        """Return every eligible kind lane without a consensus requirement."""
-        by = self.kinds_for(symbol)
+        """Return every eligible kind/mode/timeframe/direction configuration."""
+        by = {}
+        for indication in self.last.get(symbol) or []:
+            previous = by.get(indication.entry_key)
+            if previous is None or indication.confidence > previous.confidence:
+                by[indication.entry_key] = indication
         out: List[Tuple["Indication", float, int]] = []
-        for kind, indication in by.items():
+        for indication in by.values():
+            kind = indication.kind
             if callable(allow):
                 try:
                     if not bool(allow(kind, indication.direction)):

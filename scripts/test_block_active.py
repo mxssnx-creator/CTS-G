@@ -56,6 +56,16 @@ class BlockActiveTests(unittest.TestCase):
         self.p.positions_for = lambda *a: [NS(qty=8)]
         self.assertIsNone(self.plan())
 
+    def test_independent_execution_lane_deducts_only_its_own_adjustments(self):
+        self.p._block_reference_anchors[('X-USDT', 'LONG', 'this-lane')] = dict(at=0, seen=50, price=100, direction=1)
+        self.p.positions_for = lambda *a: [NS(qty=8, execution_lane='other-lane'), NS(qty=.5, execution_lane='this-lane')]
+        self.p.pending_orders = {'other': dict(symbol='X-USDT', side='LONG', kind='entry',
+            requested_qty=8, filled_qty=0, metadata={'execution_lane': 'other-lane'})}
+        with patch.object(pt.time, 'time', return_value=60):
+            result = self.p.block_active_plan('X-USDT', 'LONG', self.st, 8, 100.3, execution_lane='this-lane')
+        self.assertEqual(result['requestedQty'], 1.5)
+        self.assertEqual(result['normalQtyExecuted'], 0)
+
     def test_all_counts_and_ratios_remain_additive(self):
         for count in range(1, 7):
             for ratio in (.05, .25, .5, 1, 2):
@@ -125,6 +135,7 @@ class BlockActiveTests(unittest.TestCase):
         p.record_event=Mock(); p._remember_pending=Mock()
         p.sl_min=.001; p.sl_max=.03; p.tp_min=.002; p.tp_max=.03
         p.position_cost_pct=.15; p.tp_cost_ratio=3
+        p.exits=NS(enabled=False, ignore_tp=False)
         p.api=NS(post=Mock(side_effect=RuntimeError('exchange boundary')))
         return p
 

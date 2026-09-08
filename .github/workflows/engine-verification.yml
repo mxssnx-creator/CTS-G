@@ -31,3 +31,5 @@ jobs:
         run: python scripts/forced-config-test.py
       - name: Complete offline engine suite
         run: python scripts/engine-test.py
+      - name: Independent entries, partial fills and configuration regressions
+        run: python -m unittest discover -s scripts -p 'test_*.py'

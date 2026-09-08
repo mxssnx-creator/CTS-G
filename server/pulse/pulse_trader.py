@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
 from block_active import adjusted_quantity, observe_continuation
+from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
@@ -35,6 +36,7 @@ from position_cost import (
     last_n_cost_pf,
     evaluation_windows,
     completed_roundtrips,
+    accumulate_close,
     resolve_sl_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
@@ -189,10 +191,12 @@ def parse_control_range(value: Any) -> Tuple[int, int]:
     return sl_bp, tp_bp
 
 
-def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> str:
+def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any, execution_lane: str = "") -> str:
     """Stable logical control identity: symbol + side + normalized SL/TP range."""
     sym = str(symbol or "").strip().upper()
     side_u = str(side or "").strip().upper()
+    if execution_lane:
+        return "lane:" + stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct), execution_lane)
     return stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct))
 
 
@@ -204,6 +208,10 @@ def control_group_token(group_key: Any, range_key: Any = "") -> str:
     malformed range metadata, so an upgrade never loses the ability to match a
     previously placed order by its client ID.
     """
+    if str(group_key or "").startswith("lane:"):
+        # Range tokens are intentionally shared by legacy range aggregates.
+        # Independent execution lanes must carry a distinct matching token.
+        return hashlib.sha256(str(group_key).encode()).hexdigest()[:8]
     sl_bp, tp_bp = parse_control_range(range_key)
     if 0 < sl_bp <= 999 and 0 < tp_bp <= 999:
         return f"r{sl_bp:03d}{tp_bp:03d}"
@@ -739,6 +747,7 @@ class Position:
     sl_pct: float = 0.0
     tp_pct: float = 0.0
     set_id: str = ""
+    execution_lane: str = ""
     set_idx: int = -1
     trail_set_id: str = ""
     trail_idx: int = -1
@@ -783,6 +792,7 @@ class Position:
     strategy: str = "core"
     close_started_qty: float = 0.0
     close_applied_qty: float = 0.0
+    roundtrip_result: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -802,6 +812,7 @@ class Closed:
     sl_pct: float = 0.0
     tp_pct: float = 0.0
     set_id: str = ""
+    execution_lane: str = ""
     pack: str = ""
     trail_set_id: str = ""
     client_id: str = ""
@@ -826,6 +837,7 @@ class Closed:
     strategy: str = "core"
     roundtrip_qty: float = 0.0
     close_fill_id: str = ""
+    roundtrip_result: Dict[str, Any] = field(default_factory=dict)
 
 
 class Pulse:
@@ -1118,7 +1130,8 @@ class Pulse:
             pos.control_tp_bp = tp_bp
             pos.control_range_key = f"sl{sl_bp:04d}-tp{tp_bp:04d}"
             pos.control_group_key = make_control_group_key(
-                pos.symbol, pos.side, sl_bp / 10000.0, tp_bp / 10000.0
+                pos.symbol, pos.side, sl_bp / 10000.0, tp_bp / 10000.0,
+                getattr(pos, "execution_lane", ""),
             )
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
@@ -1212,6 +1225,30 @@ class Pulse:
             if pos.symbol == symbol and (not side_u or str(pos.side).upper() == side_u)
         ]
 
+    def entry_slot_count(self) -> int:
+        """Confirmed and pending lanes share the configured open-slot budget."""
+        pending = set()
+        for cid, row in (getattr(self, "pending_orders", {}) or {}).items():
+            if str(row.get("kind") or "entry") != "entry":
+                continue
+            if _sf(row.get("requested_qty")) <= _sf(row.get("filled_qty")) + 1e-12:
+                continue
+            if self._position_for_client(cid) is None:
+                pending.add(row.get("group_key") or cid)
+        return len(self.open) + len(pending)
+
+    def pending_entry_margin(self) -> float:
+        reserved = 0.0
+        for row in (getattr(self, "pending_orders", {}) or {}).values():
+            if str(row.get("kind") or "entry") != "entry":
+                continue
+            meta = row.get("metadata") or {}
+            remaining = max(0.0, _sf(row.get("requested_qty")) - _sf(row.get("filled_qty")))
+            price = _sf(meta.get("reference_price")) or _sf(self.px.get(row.get("symbol")))
+            leverage = max(1.0, _sf(meta.get("leverage"), 1.0))
+            reserved += remaining * price / leverage
+        return reserved
+
     def position_for_group(self, group_key: str) -> Optional[Position]:
         pos = self.open.get(str(group_key))
         if pos is not None:
@@ -1222,16 +1259,14 @@ class Pulse:
         token = str(token or "")
         if not token:
             return None
-        return next(
-            (
-                p for p in self.positions_for(symbol, side)
-                if token in control_group_tokens(
-                    getattr(p, "control_group_key", ""),
-                    getattr(p, "control_range_key", ""),
-                )
-            ),
-            None,
-        )
+        matches = [
+            p for p in self.positions_for(symbol, side)
+            if token in control_group_tokens(
+                getattr(p, "control_group_key", ""),
+                getattr(p, "control_range_key", ""),
+            )
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def remove_position(self, pos: Position) -> Optional[Position]:
         key = self.position_key(pos)
@@ -1887,7 +1922,8 @@ class Pulse:
         if not os.path.exists(OPEN_PATH):
             return
         try:
-            data = json.load(open(OPEN_PATH))
+            with open(OPEN_PATH) as saved:
+                data = json.load(saved)
         except Exception:
             return
         fields = {f.name for f in Position.__dataclass_fields__.values()}  # type: ignore[attr-defined]
@@ -1990,6 +2026,16 @@ class Pulse:
                 pos.control_group_key,
                 getattr(pos, "control_range_key", ""),
             )
+        if idx >= 1000 or (pos is not None and getattr(pos, "execution_lane", "")):
+            if idx < 0 or idx >= 36 ** 4:
+                raise ValueError("Set index cannot be encoded in client order ID")
+            value, encoded = idx, ""
+            for _ in range(4):
+                value, digit = divmod(value, 36)
+                encoded = (string.digits + string.ascii_lowercase)[digit] + encoded
+            fingerprint = hashlib.sha256(set_id.encode()).hexdigest()[:3]
+            prefix = f"{TAG}{kind}v{encoded}{fingerprint}{group_token.ljust(8, '0')}"
+            return prefix + client_order_nonce(prefix, 32 - len(prefix))
         prefix = f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{group_token}"
         # Preserve parser offsets and the complete group token. Use all space
         # for grouped orders; ungrouped five-character tails retain their legacy
@@ -2017,6 +2063,40 @@ class Pulse:
         low = s.lower()
         tag = TAG.lower()
         rest = s[len(TAG):] if low.startswith(tag) else s
+        if rest[1:2] == "v":
+            if len(rest) < 18:
+                return None
+            try:
+                idx = int(rest[2:6], 36)
+            except ValueError:
+                return None
+            st_obj = self.sets.get_idx(idx) if hasattr(self, "sets") else None
+            if st_obj is not None and hashlib.sha256(st_obj.id.encode()).hexdigest()[:3] != rest[6:9]:
+                st_obj = None
+            token = "" if rest[9:17] == "00000000" else rest[9:17]
+            sl_bp = tp_bp = 0
+            if re.fullmatch(r"r\d{6}0", token):
+                token = token[:7]
+                sl_bp, tp_bp = int(token[1:4]), int(token[4:7])
+            return {
+                "kind": rest[0], "idx": idx if st_obj else -1,
+                "set_id": st_obj.id if st_obj else "",
+                "pack": st_obj.pack if st_obj else "general",
+                "sl": st_obj.sl_ratio if st_obj else 0.6,
+                "trail": getattr(st_obj, "trail_key", ""),
+                "trail_arm": getattr(st_obj, "trail_arm", 0),
+                "trail_give": getattr(st_obj, "trail_give", 0),
+                "step": getattr(st_obj, "step", 0),
+                "parent_set_id": getattr(st_obj, "parent_set_id", ""),
+                "axis_key": getattr(st_obj, "axis_key", ""),
+                "relative_count": getattr(st_obj, "relative_count", 1),
+                "volume_ratio": getattr(st_obj, "volume_ratio", 1.0),
+                "ind_kind": getattr(st_obj, "ind_kind", ""),
+                "group_token": token,
+                "control_range_key": f"sl{sl_bp:04d}-tp{tp_bp:04d}" if sl_bp and tp_bp else "",
+                "control_sl_bp": sl_bp, "control_tp_bp": tp_bp,
+                "sl_pct": sl_bp / 10000., "tp_pct": tp_bp / 10000.,
+            }
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
@@ -3897,7 +3977,7 @@ class Pulse:
                 return True
         return False
 
-    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
+    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str, selected_set=None) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
         if conf < 0.50:
             return "low-conf"
@@ -3938,8 +4018,10 @@ class Pulse:
                     return "ind-gate"
             except Exception:
                 pass
-        chosen = None
         side_name = "LONG" if direction > 0 else "SHORT"
+        if selected_set is not None:
+            return None if self.sets.execution_allowed(selected_set, pack, side_name) else "set-gate"
+        chosen = None
         try:
             chosen = self.sets.pick_any(pack, side=side_name) if self.sets.enabled else None
             if not chosen and self.sets.enabled:
@@ -4129,9 +4211,10 @@ class Pulse:
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             set_id=str(meta.get("set_id") or meta.get("setId") or ""),
-            set_idx=int(meta.get("set_idx") or meta.get("setIdx") or -1),
+            execution_lane=str(meta.get("execution_lane") or ""),
+            set_idx=int(meta.get("set_idx", meta.get("setIdx", -1))),
             trail_set_id=str(meta.get("trail_set_id") or meta.get("trailSetId") or ""),
-            trail_idx=int(meta.get("trail_idx") or meta.get("trailIdx") or -1),
+            trail_idx=int(meta.get("trail_idx", meta.get("trailIdx", -1))),
             pack=str(meta.get("pack") or "general"),
             client_id=cid,
             ours=True,
@@ -4224,7 +4307,7 @@ class Pulse:
         )
         return pos
 
-    def block_active_plan(self, sym, side, chosen, reference_qty, px):
+    def block_active_plan(self, sym, side, chosen, reference_qty, px, execution_lane=""):
         """Plan one overall quantity delta, with no normal exchange parent."""
         self._execution_decision = {"mode": "block-active", "allowed": False, "reason": "disabled"}
         if not (getattr(self, "block_active", True) and self.block.enabled
@@ -4262,13 +4345,15 @@ class Pulse:
         anchors = getattr(self, "_block_reference_anchors", None)
         if anchors is None:
             anchors = self._block_reference_anchors = {}
-        key = (sym, side, chosen.id)
+        key = (sym, side, execution_lane or chosen.id)
         if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
             return reject("reference needs 45 seconds and 0.2% continuation")
-        owned = sum(max(0.0, float(p.qty)) for p in self.positions_for(sym, side))
+        owned = sum(max(0.0, float(p.qty)) for p in self.positions_for(sym, side)
+                    if not execution_lane or getattr(p, "execution_lane", "") == execution_lane)
         pending = sum(max(0.0, float(r.get("requested_qty") or 0) - float(r.get("filled_qty") or 0))
                       for r in (getattr(self, "pending_orders", {}) or {}).values()
                       if r.get("symbol") == sym and str(r.get("side") or "").upper() == side
+                      and (not execution_lane or (r.get("metadata") or {}).get("execution_lane") == execution_lane)
                       and str(r.get("kind") or "entry") in ("entry", "block", "dca"))
         # Counts are independent alternatives, never summed into six orders.
         for count in sorted(self.block.counts):
@@ -4277,6 +4362,7 @@ class Pulse:
             if not allowed or count > cap or pf < formula["blockMinPF"]:
                 continue
             own = [r for r in rows if r.parent_set_id == chosen.id
+                   and (not execution_lane or getattr(r, "execution_lane", "") == execution_lane)
                    and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
             if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
                 continue
@@ -4291,7 +4377,7 @@ class Pulse:
             return decision
         return reject("counts blocked or overall target already satisfied")
 
-    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None) -> None:
+    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None) -> None:
         normal_allowed = getattr(self, "normal_execution_enabled", False) is True
         if forced_row is not None and not normal_allowed:
             return
@@ -4312,14 +4398,22 @@ class Pulse:
             return
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
-        if MAX_OPEN > 0 and len(self.open) >= MAX_OPEN:
+        if MAX_OPEN > 0 and self.entry_slot_count() >= MAX_OPEN:
             return
         side = "LONG" if direction > 0 else "SHORT"
+        pack = "indications" if str(reason).startswith("ind:") else "general"
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", reason)
+        signal_key = exact.group(1) if exact else (reason.split(":")[1] if pack == "indications" else "general")
+        execution_lane = stable_key(pack, selected_set.id, signal_key) if selected_set is not None else ""
+        if execution_lane and normal_allowed and any(
+                getattr(p, "execution_lane", "") == execution_lane for p in self.positions_for(sym, side)):
+            return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
                 str(pending.get("kind") or "entry") == "entry"
                 and str(pending.get("symbol") or "") == sym
                 and str(pending.get("side") or "").upper() == side
+                and (not execution_lane or (pending.get("metadata") or {}).get("execution_lane") == execution_lane)
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
@@ -4337,7 +4431,8 @@ class Pulse:
                 return
             skip = None
         else:
-            skip = self.entry_sense(sym, direction, reason, conf, pack)
+            skip = (self.entry_sense(sym, direction, reason, conf, pack, selected_set)
+                    if selected_set is not None else self.entry_sense(sym, direction, reason, conf, pack))
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
                 log(f"SKIP {sym} {skip}", every=40.0, key="sense", quiet=True)
@@ -4348,20 +4443,21 @@ class Pulse:
         if not c or px <= 0:
             return
         order_side = "BUY" if direction > 0 else "SELL"
-        chosen = None
-        try:
-            chosen = self.sets.pick_any(pack, side=side)
-            if not chosen:
-                chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
-        except TypeError:
+        chosen = selected_set
+        if chosen is None:
             try:
-                chosen = self.sets.pick_any(pack)
+                chosen = self.sets.pick_any(pack, side=side)
                 if not chosen:
-                    chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                    chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
+            except TypeError:
+                try:
+                    chosen = self.sets.pick_any(pack)
+                    if not chosen:
+                        chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                except Exception:
+                    chosen = None
             except Exception:
                 chosen = None
-        except Exception:
-            chosen = None
         set_idx = -1
         trail_set_id = ""
         trail_idx = -1
@@ -4396,7 +4492,7 @@ class Pulse:
             qty = self.size_qty(c, px)
         execution_plan = None
         if forced_row is None and getattr(self, "block_active", True):
-            execution_plan = self.block_active_plan(sym, side, chosen, qty, px)
+            execution_plan = self.block_active_plan(sym, side, chosen, qty, px, execution_lane=execution_lane)
         if execution_plan:
             qty = self.round_qty(c, execution_plan["requestedQty"])
             if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
@@ -4416,7 +4512,7 @@ class Pulse:
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
-        if margin > float(self.available or 0) * 0.95:
+        if margin > max(0.0, float(self.available or 0) - self.pending_entry_margin()) * 0.95:
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         ind_kind_hint = ""
@@ -4448,9 +4544,17 @@ class Pulse:
         )
         if forced_row is not None:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
+        elif chosen and getattr(chosen, "step", 0):
+            tp_pct_a = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
+            sl_pct_a = max(self.sl_min, min(self.sl_max, tp_pct_a * sl_ratio))
+            if self.exits.enabled and self.exits.ignore_tp:
+                tp_pct_a = min(self.tp_max, max(tp_pct_a, sl_pct_a * 3.0))
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
         tp_a = px * (1 + tp_pct_a) if direction > 0 else px * (1 - tp_pct_a)
         pending_meta = {
+            "execution_lane": execution_lane,
+            "reference_price": px,
+            "leverage": lev,
             "reason": reason,
             "confidence": conf,
             "set_id": set_id,
@@ -4475,7 +4579,7 @@ class Pulse:
                                 relative_count=execution_plan["blockCount"],
                                 volume_ratio=execution_plan["volumeIncrement"], strategy="block",
                                 execution=execution_plan)
-        pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a)
+        pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a, execution_lane)
         pending_meta["control_group_key"] = pending_group_key
         self._remember_pending(
             kind="entry",
@@ -4681,6 +4785,7 @@ class Pulse:
             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
             sl_pct=sl_pct, tp_pct=tp_pct,
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
+            execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
             parent_set_id=parent_set_id,
             axis_key=str(pending_meta["axis_key"]),
@@ -4946,6 +5051,7 @@ class Pulse:
             time.time(), pos.symbol, pos.side, fill_qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
+            execution_lane=getattr(pos, "execution_lane", ""),
             ind_kind=str(getattr(pos, "ind_kind", "") or ""),
             parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
             axis_key=str(getattr(pos, "axis_key", "") or ""),
@@ -4999,6 +5105,9 @@ class Pulse:
             },
         )
         if not skip:
+            pos.roundtrip_result = accumulate_close(getattr(pos, "roundtrip_result", {}), asdict(rec))
+            if final_fill:
+                rec.roundtrip_result = dict(pos.roundtrip_result)
             self.closed.append(rec)
             # Each confirmed execution leg is a realized financial event and
             # is therefore counted exactly once. A cumulative close may emit
@@ -5650,6 +5759,11 @@ class Pulse:
                     sl_pct=float(rec.get("sl_pct") or rec.get("slPct") or 0),
                     tp_pct=float(rec.get("tp_pct") or rec.get("tpPct") or 0),
                     set_id=str(rec.get("set_id") or rec.get("setId") or ""),
+                    execution_lane=str(rec.get("execution_lane") or ""),
+                    parent_set_id=str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
+                    axis_key=str(rec.get("axis_key") or rec.get("axisKey") or ""),
+                    relative_count=int(rec.get("relative_count") or rec.get("relativeCount") or 1),
+                    volume_ratio=float(rec.get("volume_ratio") or rec.get("volumeRatio") or 1),
                     pack=str(rec.get("pack") or ""),
                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                     ours=bool(rec.get("ours", True)),
@@ -5671,6 +5785,7 @@ class Pulse:
                     partial=bool(rec.get("partial")), strategy=str(rec.get("strategy") or "core"),
                     roundtrip_qty=_sf(rec.get("roundtrip_qty"), 0.0),
                     close_fill_id=str(rec.get("close_fill_id") or ""),
+                    roundtrip_result=dict(rec.get("roundtrip_result") or {}),
                 )
                 cid = c.client_id
                 if not self.cid_ours(cid) and not c.set_id:
@@ -7410,7 +7525,7 @@ class Pulse:
             self.maybe_forced_entries()
         slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Ratio", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
-        best: Dict[str, Tuple[float, str, int, str]] = {}
+        candidates: Dict[Tuple[str, int, str], Tuple[float, str, int, str]] = {}
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
             def _ind_allow(kind: str, direction: str = "") -> bool:
                 gate = getattr(self.sets, "indication_ok", None)
@@ -7446,23 +7561,19 @@ class Pulse:
                         continue
                     pick, conf, agree_n = picked
                     d = 1 if pick.direction == "long" else -1
-                    why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
-                    current = best.get(s)
-                    if current is None or float(conf) > current[0]:
-                        best[s] = (float(conf), s, d, why)
+                    why = f"ind:{pick.kind}:{pick.mode} cfg={pick.entry_key}"
+                    candidates[(s, d, why)] = (float(conf), s, d, why)
         if self.strat_general:
             for s in SYMBOLS:
                 d, why, conf = self.score(s)
                 if d == 0:
                     continue
-                cur = best.get(s)
-                if not cur or conf > cur[0]:
-                    best[s] = (conf, s, d, f"gen:{why}")
-        ranked = sorted(best.values(), reverse=True)
+                candidates[(s, d, "general")] = (conf, s, d, f"gen:{why}")
+        ranked = sorted(candidates.values(), reverse=True)
         anchors = getattr(self, "_block_reference_anchors", {})
+        current_sides = {(row[1], "LONG" if row[2] > 0 else "SHORT") for row in ranked}
         for key in list(anchors):
-            current = best.get(key[0])
-            if current is None or ("LONG" if current[2] > 0 else "SHORT") != key[1]:
+            if key[:2] not in current_sides:
                 anchors.pop(key, None)
         intern = {}
         intern_any = False
@@ -7515,8 +7626,6 @@ class Pulse:
                 self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
                 log(f"COORD rearr {from_key} -> {swap['to']} gap={swap['conf']:.2f}")
         if len(self.open) >= slot_cap:
-            self.maybe_block_adds()
-            self.maybe_dca_adds()
             return
         n_l = sum(1 for _, _, d, _ in ranked if d > 0)
         n_s = sum(1 for _, _, d, _ in ranked if d < 0)
@@ -7534,28 +7643,30 @@ class Pulse:
             ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
-        for conf, s, d, why in self.entry_candidate_window(ranked):
+        by_scope = {}
+        for pack_name in ("general", "indications"):
+            for side_name in ("LONG", "SHORT"):
+                if self.sets.enabled:
+                    by_scope[(pack_name, side_name)] = self.sets.pick_all(pack_name, side=side_name)
+                else:
+                    by_scope[(pack_name, side_name)] = [None]
+        matrix = EntryMatrix(ranked, by_scope)
+        self._entry_candidate_count = len(matrix)
+        for conf, s, d, why, selected in self.entry_candidate_window(matrix):
             if self.entries_blocked():
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
-            pack = "indications" if str(why).startswith("ind:") else "general"
-            if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
-                if not intern.get(pack):
-                    alt = "general" if pack == "indications" else "indications"
-                    if intern.get(alt):
-                        pack = alt
-                    elif getattr(self.sets, "strict_gate", False):
-                        # Strict: both packs closed -> this candidate cannot
-                        # bind a validated + profitable set. Skip it.
-                        skipped += 1
-                        continue
-                    elif intern_any:
-                        pack = "general" if intern.get("general") else "indications"
-                    else:
-                        pack = "general"
             before = len(self.open)
-            self.place(s, d, why, conf)
+            try:
+                self.place(s, d, why, conf, selected_set=selected)
+            except Exception as exc:
+                # The pending intent remains durable when an exchange result
+                # is uncertain. A failed lane cannot starve its siblings.
+                self.errors += 1
+                self.last_error = f"entry {s}: {type(exc).__name__}: {str(exc)[:140]}"
+                skipped += 1
+                continue
             if len(self.open) > before:
                 placed += 1
             else:
@@ -7569,9 +7680,6 @@ class Pulse:
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
             self.skip_log["entry0"] = time.time()
-        self.maybe_block_adds()
-        self.maybe_dca_adds()
-
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
