@@ -22,20 +22,24 @@ from contextlib import nullcontext
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
-from coord_engine import Coordinator
+from block_active import ContinuationBook, adjusted_quantity, observe_continuation
+from entry_dispatch import EntryMatrix
+from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
 from position_cost import (
     last_n_cost_pf,
     evaluation_windows,
     completed_roundtrips,
+    accumulate_close,
     resolve_sl_tp,
     POSITION_COST_PCT_DEFAULT,
+    POSITIVE_PF,
     SL_TP_RATIOS,
     SL_TP_MIN,
     SL_TP_MAX,
@@ -49,14 +53,48 @@ from position_cost import (
 )
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows
+from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
 from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
+from history_store import BAR_S, HistoryStore, parse_exchange_rows
+from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import redis_key, order_tag
+from system_settings import calculation_overlay, normalize_system_settings
+from runtime_statistics import RuntimeMonitor, persistent_activity
+from redis_coordination import coordinator as redis_config
+from calculation_cache import CalculationCache
+
+_CID_SEQUENCE_LOCK = threading.Lock()
+_CID_SEQUENCES: Dict[str, Tuple[int, int]] = {}
+
+
+def client_order_nonce(prefix: str, width: int) -> str:
+    """Never reuse a suffix for a prefix in this process; fail on exhaustion.
+
+    Randomize the starting point across process restarts. Exchange uniqueness
+    checks remain authoritative across restarts; this is not a durable ledger.
+    """
+    if width < 1:
+        raise ValueError("Client-order prefix leaves no nonce space")
+    limit = 36 ** width
+    with _CID_SEQUENCE_LOCK:
+        start, used = _CID_SEQUENCES.get(prefix, (None, 0))
+        if start is None:
+            start = random.SystemRandom().randrange(limit)
+        if used >= limit:
+            raise RuntimeError("Client-order nonce space exhausted")
+        value = (start + used) % limit
+        _CID_SEQUENCES[prefix] = (start, used + 1)
+    chars = string.digits + string.ascii_lowercase
+    result = ""
+    for _ in range(width):
+        value, digit = divmod(value, 36)
+        result = chars[digit] + result
+    return result
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = redis_key(f"connection:{CONN_SHORT}")
@@ -83,7 +121,8 @@ LIVE_COST_PATH = os.path.join(DIR, f"live-position-cost-{CONN_SHORT}.json")
 CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
-MAX_SYMBOLS = 0  # 0 = unlimited
+MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
+DEFAULT_SYMBOL_CAP = 50
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -156,10 +195,12 @@ def parse_control_range(value: Any) -> Tuple[int, int]:
     return sl_bp, tp_bp
 
 
-def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any) -> str:
+def make_control_group_key(symbol: Any, side: Any, sl_pct: Any, tp_pct: Any, execution_lane: str = "") -> str:
     """Stable logical control identity: symbol + side + normalized SL/TP range."""
     sym = str(symbol or "").strip().upper()
     side_u = str(side or "").strip().upper()
+    if execution_lane:
+        return "lane:" + stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct), execution_lane)
     return stable_key("control-group", sym, side_u, control_range_key(sl_pct, tp_pct))
 
 
@@ -171,6 +212,10 @@ def control_group_token(group_key: Any, range_key: Any = "") -> str:
     malformed range metadata, so an upgrade never loses the ability to match a
     previously placed order by its client ID.
     """
+    if str(group_key or "").startswith("lane:"):
+        # Range tokens are intentionally shared by legacy range aggregates.
+        # Independent execution lanes must carry a distinct matching token.
+        return hashlib.sha256(str(group_key).encode()).hexdigest()[:8]
     sl_bp, tp_bp = parse_control_range(range_key)
     if 0 < sl_bp <= 999 and 0 < tp_bp <= 999:
         return f"r{sl_bp:03d}{tp_bp:03d}"
@@ -245,7 +290,7 @@ TRAIL_ARM = 0.0032
 TRAIL_GIVE = 0.0016
 TIME_STOP_S = 21600
 MAX_HOLD_S = 21600
-MAX_DD_TIME_S = 27000.0  # default 450 minutes; configurable 10..650 minutes
+MAX_DD_TIME_S = 57600.0  # default and upper bound 16 hours; configurable 10..960 minutes
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
@@ -488,6 +533,28 @@ def sl_bounds(side: str, mark: float, last: float, entry: float, liq: float, tic
     return float(lower), float(upper)
 
 
+def valid_position_snapshot(rows: Any) -> bool:
+    """Only a complete, well-formed venue response can establish absence."""
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                return False
+            raw_amount = row.get("positionAmt")
+            if raw_amount is None or raw_amount == "":
+                raw_amount = row.get("availableAmt")
+            amount = float(raw_amount)
+            if not math.isfinite(amount):
+                return False
+            if abs(amount) > 1e-12 and (not row.get("symbol") or
+                    str(row.get("positionSide") or "").upper() not in ("", "LONG", "SHORT")):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return True
+
+
 def ctrl_err_kind(msg: str) -> str:
     m = str(msg or "").lower()
     compact = m.replace(" ", "")
@@ -505,7 +572,7 @@ def ctrl_err_kind(msg: str) -> str:
         return "px"
     if "exceeded" in m and "limit" in m:
         return "cap"
-    if "position not exist" in m or "position does not exist" in m:
+    if "position not exist" in m or "position does not exist" in m or "no position to close" in m:
         return "flat"
     if "order size" in m or "available amount" in m:
         return "qty"
@@ -599,8 +666,7 @@ def redis_hget(field: str) -> str:
     connection-scoped so x01 and x02 can never cross-read each other.
     """
     try:
-        p = subprocess.run(["redis-cli", "HGET", REDIS_CONN, field], capture_output=True, text=True)
-        value = (p.stdout or "").strip()
+        value = redis_config.read_hash(f"connection:{CONN_SHORT}").get(field, "").strip()
         if value and value != "(nil)":
             return value
     except FileNotFoundError:
@@ -630,26 +696,24 @@ def load_json_file(path: str) -> dict:
 
 def dump_cts_settings() -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(f"settings:connection_settings:{CONN_SHORT}")], capture_output=True, text=True, timeout=6)
+        raw = redis_config.read_hash(f"settings:connection_settings:{CONN_SHORT}")
     except Exception:
         return {}
-    lines = (p.stdout or "").splitlines()
     out = {}
-    for i in range(0, len(lines) - 1, 2):
-        v = lines[i + 1]
+    for key, v in raw.items():
         if v[:1] in "{[":
             try:
-                out[lines[i]] = json.loads(v)
+                out[key] = json.loads(v)
                 continue
             except Exception:
                 pass
         if v in ("true", "false"):
-            out[lines[i]] = v == "true"
+            out[key] = v == "true"
             continue
         try:
-            out[lines[i]] = float(v) if "." in v else int(v)
+            out[key] = float(v) if "." in v else int(v)
         except Exception:
-            out[lines[i]] = v
+            out[key] = v
     try:
         tmp = CTS_PATH + ".tmp"
         with open(tmp, "w") as f:
@@ -706,6 +770,7 @@ class Position:
     sl_pct: float = 0.0
     tp_pct: float = 0.0
     set_id: str = ""
+    execution_lane: str = ""
     set_idx: int = -1
     trail_set_id: str = ""
     trail_idx: int = -1
@@ -750,6 +815,7 @@ class Position:
     strategy: str = "core"
     close_started_qty: float = 0.0
     close_applied_qty: float = 0.0
+    roundtrip_result: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -769,6 +835,7 @@ class Closed:
     sl_pct: float = 0.0
     tp_pct: float = 0.0
     set_id: str = ""
+    execution_lane: str = ""
     pack: str = ""
     trail_set_id: str = ""
     client_id: str = ""
@@ -793,6 +860,7 @@ class Closed:
     strategy: str = "core"
     roundtrip_qty: float = 0.0
     close_fill_id: str = ""
+    roundtrip_result: Dict[str, Any] = field(default_factory=dict)
 
 
 class Pulse:
@@ -849,6 +917,10 @@ class Pulse:
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
         self.last_scan_ms = 0.0
+        self.last_scan_cpu_ms = 0.0
+        self.last_cycle_stages = {}
+        self._cycle_stage_ms = {}
+        self._active_cycle_stage = ""
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
         self.cycle_overrun = False
@@ -865,9 +937,10 @@ class Pulse:
         self.skip_log: Dict[str, float] = {}
         self.last_rest_tick = 0.0
         self.wake_ev = threading.Event()
+        self._hist_wake = threading.Event()
         self.last_event = "boot"
         self.event_n = 0
-        self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
+        self.event_ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
         self._oo_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self.mods: Dict[str, bool] = {}
         self.last_bal = 0.0
@@ -887,12 +960,37 @@ class Pulse:
         # starving HTTP/state readers or the history worker.
         self._cycle_lock = threading.Lock()
         self._qa_lock = threading.Lock()
+        self._stats_last: Dict[str, Any] = {}
         self.hist_busy = False
         self._hist_fetch_next = 0.0
         self._hist_fetch_failures = 0
         self._hist_fetch_last = 0.0
         self._hist_fetch_stored = 0
         self._hist_deferred = ""
+        self._hist_status_write_ts = 0.0
+        self._hist_resume_repair = False
+        self.history_store = HistoryStore(CONN_SHORT, retention_bars=max(2400, LOOKBACK_MAX))
+        self._hist_status: Dict[str, Any] = read_hist_job(CONN_SHORT)
+        checkpoint = self.history_store.checkpoint()
+        if isinstance(checkpoint, dict):
+            # A checkpoint is the durable recovery boundary. Keep the last
+            # published watermark visible until the fresh lane proves a new
+            # complete replay; the entry gate still starts closed on restart.
+            for key in ("runId", "generation", "mode", "watermark", "lastPublishedWatermark", "lastCompleteRun"):
+                if not self._hist_status.get(key) and checkpoint.get(key):
+                    self._hist_status[key] = checkpoint[key]
+        self._hist_request_seen = ""
+        self._hist_active_request: Dict[str, Any] = {}
+        self._hist_active_run_id = ""
+        self._hist_request_check_ts = 0.0
+        self._hist_latest_request_id = ""
+        self._hist_next_hourly_at = 0.0
+        self._hist_last_closed_minute = 0
+        self._hist_snapshot_symbols: List[str] = []
+        self._hist_invalid_symbols: List[Dict[str, str]] = []
+        self._hist_gap_symbols: List[str] = []
+        self._hist_incremental_symbols: set[str] = set()
+        self._hist_last_published_watermark: Dict[str, int] = dict(self._hist_status.get("lastPublishedWatermark") or {})
         self._stats_ts = 0.0
         self._stats_force = False
         self.last_scan_io = False
@@ -983,19 +1081,32 @@ class Pulse:
         self._config_evidence_cache_ts = 0.0
         self._load_config_evidence()
         self.pf_window = 15
-        self.sl_min = 0.0020
-        self.sl_max = 0.0120
-        self.tp_min = 0.0035
-        self.tp_max = 0.0240
+        self.sl_min = 0.0015
+        self.sl_max = 0.0300
+        self.tp_min = 0.0030
+        self.tp_max = 0.0
         self.tp_cost_ratio = 5.0
         self.sl_to_tp = 0.64
         self.strat_ind = True
         self.strat_block = True
         self.strat_trail = True
+        self.normal_execution_enabled = False
+        self.block_active = True
+        self._block_reference_anchors = ContinuationBook()
+        self._execution_decision = {}
         self.strat_general = True
         self.tf_on = {"1m": True, "5m": True, "15m": True}
-        self._hist_stop = False
+        self._hist_stop = threading.Event()
+        self._watchdog_stop = threading.Event()
+        self.calculation_cache = CalculationCache(CONN_SHORT)
         self.apply_live_config(initial=True)
+        self.runtime = None
+        try:
+            self.runtime = RuntimeMonitor(DIR, CONN_SHORT, self.overlay)
+            for row in self.strategy_closes():
+                self.runtime.record_trade(asdict(row), self.start_eq)
+        except Exception as exc:
+            self.last_error = f"Statistics initialization: {type(exc).__name__}"
 
     def group_of(self, sym: str) -> str:
         for g, s in GROUPS.items():
@@ -1054,7 +1165,8 @@ class Pulse:
             pos.control_tp_bp = tp_bp
             pos.control_range_key = f"sl{sl_bp:04d}-tp{tp_bp:04d}"
             pos.control_group_key = make_control_group_key(
-                pos.symbol, pos.side, sl_bp / 10000.0, tp_bp / 10000.0
+                pos.symbol, pos.side, sl_bp / 10000.0, tp_bp / 10000.0,
+                getattr(pos, "execution_lane", ""),
             )
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
@@ -1148,6 +1260,30 @@ class Pulse:
             if pos.symbol == symbol and (not side_u or str(pos.side).upper() == side_u)
         ]
 
+    def entry_slot_count(self) -> int:
+        """Confirmed and pending lanes share the configured open-slot budget."""
+        pending = set()
+        for cid, row in (getattr(self, "pending_orders", {}) or {}).items():
+            if str(row.get("kind") or "entry") != "entry":
+                continue
+            if _sf(row.get("requested_qty")) <= _sf(row.get("filled_qty")) + 1e-12:
+                continue
+            if self._position_for_client(cid) is None:
+                pending.add(row.get("group_key") or cid)
+        return len(self.open) + len(pending)
+
+    def pending_entry_margin(self) -> float:
+        reserved = 0.0
+        for row in (getattr(self, "pending_orders", {}) or {}).values():
+            if str(row.get("kind") or "entry") != "entry":
+                continue
+            meta = row.get("metadata") or {}
+            remaining = max(0.0, _sf(row.get("requested_qty")) - _sf(row.get("filled_qty")))
+            price = _sf(meta.get("reference_price")) or _sf(self.px.get(row.get("symbol")))
+            leverage = max(1.0, _sf(meta.get("leverage"), 1.0))
+            reserved += remaining * price / leverage
+        return reserved
+
     def position_for_group(self, group_key: str) -> Optional[Position]:
         pos = self.open.get(str(group_key))
         if pos is not None:
@@ -1158,16 +1294,14 @@ class Pulse:
         token = str(token or "")
         if not token:
             return None
-        return next(
-            (
-                p for p in self.positions_for(symbol, side)
-                if token in control_group_tokens(
-                    getattr(p, "control_group_key", ""),
-                    getattr(p, "control_range_key", ""),
-                )
-            ),
-            None,
-        )
+        matches = [
+            p for p in self.positions_for(symbol, side)
+            if token in control_group_tokens(
+                getattr(p, "control_group_key", ""),
+                getattr(p, "control_range_key", ""),
+            )
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def remove_position(self, pos: Position) -> Optional[Position]:
         key = self.position_key(pos)
@@ -1823,7 +1957,8 @@ class Pulse:
         if not os.path.exists(OPEN_PATH):
             return
         try:
-            data = json.load(open(OPEN_PATH))
+            with open(OPEN_PATH) as saved:
+                data = json.load(saved)
         except Exception:
             return
         fields = {f.name for f in Position.__dataclass_fields__.values()}  # type: ignore[attr-defined]
@@ -1926,11 +2061,22 @@ class Pulse:
                 pos.control_group_key,
                 getattr(pos, "control_range_key", ""),
             )
-        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-        # Keep the historical parser offsets intact: bytes after set index are
-        # now a range-group token plus a short nonce for per-config controls.
-        suffix = (group_token + nonce[:2]) if group_token else nonce
-        return f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{suffix}"[:32]
+        if idx >= 1000 or (pos is not None and getattr(pos, "execution_lane", "")):
+            if idx < 0 or idx >= 36 ** 4:
+                raise ValueError("Set index cannot be encoded in client order ID")
+            value, encoded = idx, ""
+            for _ in range(4):
+                value, digit = divmod(value, 36)
+                encoded = (string.digits + string.ascii_lowercase)[digit] + encoded
+            fingerprint = hashlib.sha256(set_id.encode()).hexdigest()[:3]
+            prefix = f"{TAG}{kind}v{encoded}{fingerprint}{group_token.ljust(8, '0')}"
+            return prefix + client_order_nonce(prefix, 32 - len(prefix))
+        prefix = f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{group_token}"
+        # Preserve parser offsets and the complete group token. Use all space
+        # for grouped orders; ungrouped five-character tails retain their legacy
+        # interpretation (an eight-character tail is a legacy group token).
+        width = 32 - len(prefix) if group_token else min(5, 32 - len(prefix))
+        return prefix + client_order_nonce(prefix, width)
 
     def cid_ours(self, cid: str) -> bool:
         """Only this process + this connection watermark (Gx01 / Gx02). Never CTS or other bots."""
@@ -1952,6 +2098,40 @@ class Pulse:
         low = s.lower()
         tag = TAG.lower()
         rest = s[len(TAG):] if low.startswith(tag) else s
+        if rest[1:2] == "v":
+            if len(rest) < 18:
+                return None
+            try:
+                idx = int(rest[2:6], 36)
+            except ValueError:
+                return None
+            st_obj = self.sets.get_idx(idx) if hasattr(self, "sets") else None
+            if st_obj is not None and hashlib.sha256(st_obj.id.encode()).hexdigest()[:3] != rest[6:9]:
+                st_obj = None
+            token = "" if rest[9:17] == "00000000" else rest[9:17]
+            sl_bp = tp_bp = 0
+            if re.fullmatch(r"r\d{6}0", token):
+                token = token[:7]
+                sl_bp, tp_bp = int(token[1:4]), int(token[4:7])
+            return {
+                "kind": rest[0], "idx": idx if st_obj else -1,
+                "set_id": st_obj.id if st_obj else "",
+                "pack": st_obj.pack if st_obj else "general",
+                "sl": st_obj.sl_ratio if st_obj else 0.6,
+                "trail": getattr(st_obj, "trail_key", ""),
+                "trail_arm": getattr(st_obj, "trail_arm", 0),
+                "trail_give": getattr(st_obj, "trail_give", 0),
+                "step": getattr(st_obj, "step", 0),
+                "parent_set_id": getattr(st_obj, "parent_set_id", ""),
+                "axis_key": getattr(st_obj, "axis_key", ""),
+                "relative_count": getattr(st_obj, "relative_count", 1),
+                "volume_ratio": getattr(st_obj, "volume_ratio", 1.0),
+                "ind_kind": getattr(st_obj, "ind_kind", ""),
+                "group_token": token,
+                "control_range_key": f"sl{sl_bp:04d}-tp{tp_bp:04d}" if sl_bp and tp_bp else "",
+                "control_sl_bp": sl_bp, "control_tp_bp": tp_bp,
+                "sl_pct": sl_bp / 10000., "tp_pct": tp_bp / 10000.,
+            }
         if len(rest) < 6:
             return {"kind": rest[:1], "pack": "general", "set_id": ""}
         kind = rest[:1]
@@ -2053,7 +2233,10 @@ class Pulse:
         rec = {"name": name, "pass": passed, "detail": detail[:180], "t": time.time()}
         prev = self.test_map.get(name)
         self.test_map[name] = rec
-        self.tests = list(self.test_map.values())[-28:]
+        recent = sorted(self.test_map.values(), key=lambda row: float(row.get("t") or 0), reverse=True)
+        failures = [row for row in recent if not row.get("pass")]
+        successes = [row for row in recent if row.get("pass")]
+        self.tests = (failures + successes)[:28]
         if prev is not None and bool(prev.get("pass")) == bool(passed):
             return
         if passed:
@@ -2061,6 +2244,8 @@ class Pulse:
             if prev is not None and not prev.get("pass"):
                 self.qa_fail = max(0, self.qa_fail - 1)
         else:
+            if prev is not None and prev.get("pass"):
+                self.qa_pass = max(0, self.qa_pass - 1)
             self.qa_fail += 1
             log(f"TEST FAIL {name} {detail}"[:240], every=20.0, key=f"fail:{name}")
 
@@ -2220,13 +2405,38 @@ class Pulse:
             self.wake_ev.set()
         except Exception:
             pass
+        # Control/config must also unstick the historic lane. Market ticks
+        # must not, or a busy websocket would busy-loop replay.
+        if kind in ("ctrl", "config", "catalog", "stop", "start", "pause", "resume"):
+            try:
+                self._hist_wake.set()
+            except Exception:
+                pass
+
+    def _wait_wake(self, timeout: float, ev: Optional[threading.Event] = None) -> bool:
+        """Wait for a bump without dropping one that arrived during the last cycle.
+
+        Wait first, then clear. A set event from Start/ctrl/fill during the
+        cycle returns immediately instead of sitting behind SCAN_S.
+        """
+        event = ev if ev is not None else getattr(self, "wake_ev", None)
+        wait_s = float(timeout or 0.0)
+        if event is None:
+            if wait_s > 0:
+                time.sleep(wait_s)
+            return False
+        if wait_s <= 0:
+            return bool(event.is_set())
+        hit = bool(event.wait(timeout=wait_s))
+        event.clear()
+        return hit
 
     def record_event(self, event_type: str, event_id: str = "", status: str = "", **fields: Any) -> bool:
         """Commit one bounded activity event without allowing telemetry to stop the engine."""
         try:
             ledger = getattr(self, "event_ledger", None)
             if ledger is None:
-                ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512)
+                ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
                 self.event_ledger = ledger
             fields.setdefault("connection", CONN_SHORT)
             committed = bool(ledger.record(event_type, event_id, status=status, **fields))
@@ -2248,6 +2458,17 @@ class Pulse:
             "member_count": max(1, int(getattr(pos, "member_count", 1) or 1)),
         }
 
+    @staticmethod
+    def event_strategy(pos: Position) -> str:
+        strategy = str(getattr(pos, "strategy", "") or "")
+        if strategy in ("block", "dca"):
+            return strategy
+        if getattr(pos, "axis_key", ""):
+            return "axis"
+        if getattr(pos, "trail_key", "") not in ("", "0", "off"):
+            return "trailing"
+        return str(getattr(pos, "pack", "") or "normal")
+
     def event_summary(self) -> Dict[str, Any]:
         ledger = getattr(self, "event_ledger", None)
         if ledger is None:
@@ -2259,8 +2480,11 @@ class Pulse:
             exchange_open = -1
         return ledger.summary(
             internal_open=len(getattr(self, "open", {}) or {}),
+            internal_position_groups=len({(p.symbol, p.side) for p in (getattr(self, "open", {}) or {}).values() if float(p.qty or 0) > 0}),
             exchange_open=exchange_open,
             internal_closed=len(getattr(self, "closed", ()) or ()),
+            pending_count=len(getattr(self, "pending_orders", {}) or {}),
+            reconciliation_pending=bool(getattr(self, "recon_pending", False)),
         )
 
     def ingest_ws_px(self) -> int:
@@ -2464,33 +2688,34 @@ class Pulse:
             if s and s not in seen_open:
                 open_syms.append(s)
                 seen_open.add(s)
+        cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
         wild = bool(getattr(self, "overlay_wild", False))
-        cap = int(getattr(self, "symbol_cap", 0) or 0)
-        if not getattr(self, "symbols_dynamic", True):
-            have = set(SYMBOLS)
-            chosen = [s for s in names if s in have]
-            for s in SYMBOLS:
-                if s not in set(chosen):
-                    chosen.append(s)
-        elif wild or cap <= 0:
-            chosen = names
+        dyn = bool(getattr(self, "symbols_dynamic", True))
+        if dyn:
+            pool = names
         else:
-            chosen = []
-            seen = set()
-            for s in open_syms + names:
-                if s in seen:
-                    continue
-                seen.add(s)
-                chosen.append(s)
-                if len(chosen) >= cap and all(x in seen for x in open_syms):
-                    break
-            for s in open_syms:
-                if s not in seen:
-                    chosen.append(s)
-                    seen.add(s)
+            have = set(SYMBOLS)
+            pool = [s for s in names if s in have]
+            pool.extend(s for s in SYMBOLS if s not in set(pool))
+        must = []
+        seen_must = set()
+        for s in open_syms + [str(x) for x in FORCED_SYMBOLS if x in self.contracts or x in pool]:
+            if s and s not in seen_must:
+                must.append(s)
+                seen_must.add(s)
+        chosen: List[str] = []
+        seen = set()
+        for s in must + pool:
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            chosen.append(s)
+            if cap > 0 and len(chosen) >= cap and all(x in seen for x in must):
+                break
+        if cap <= 0:
+            chosen = list(dict.fromkeys(must + pool))
         if not chosen:
             return
-        chosen = list(dict.fromkeys(chosen + [s for s in FORCED_SYMBOLS if s in self.contracts]))
         old = list(SYMBOLS)
         if chosen == old:
             self.last_dyn_sel = now
@@ -2549,15 +2774,26 @@ class Pulse:
     def seed_px_bars(self) -> None:
         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
         minute = int(time.time() // 60)
+        scan = set(SYMBOLS)
         for s, px in list(self.px.items()):
-            if px <= 0:
+            if px <= 0 or s not in scan:
                 continue
             rec = self.bar_min.get(s)
             if not rec or int(rec[0]) != minute:
                 if rec:
+                    closed_bar = [rec[1], rec[2], rec[3], rec[4], 0.0]
                     bars = self.klines_tf["1m"].setdefault(s, [])
-                    bars.append([rec[1], rec[2], rec[3], rec[4], 0.0])
+                    bars.append(closed_bar)
                     del bars[:-KLINE_LIMIT]
+                    try:
+                        self.history_store.merge_bar(s, int(rec[0]), closed_bar, source="mark", quality="live-observed", closed=True, persist=False)
+                    except Exception:
+                        pass
+                    with self.state_guard():
+                        pending = getattr(self, "_hist_incremental_symbols", None)
+                        if pending is not None:
+                            pending.add(s)
+                    self._hist_wake.set()
                 self.bar_min[s] = [float(minute), px, px, px, px]
             else:
                 rec[2] = max(rec[2], px)
@@ -2655,6 +2891,7 @@ class Pulse:
             for i in range(0, len(reqs), 4):
                 if time.time() < self.kline_ban:
                     break
+                sd_notify("WATCHDOG=1")
                 chunk = reqs[i : i + 4]
                 rows = self.api.gather_public(chunk, timeout=6.0)
                 for _path, extra, body in rows:
@@ -2671,6 +2908,7 @@ class Pulse:
         # successful storage advances the aggregate refresh marker.
         if stored:
             self.last_kline = now
+            self._hist_wake.set()
 
     def ema(self, xs: List[float], n: int) -> float:
         if not xs:
@@ -2933,7 +3171,7 @@ class Pulse:
         sl = float(pos.sl_pct) if pos and pos.sl_pct > 0 else SL_PCT
         sl = max(sl_lo, min(sl_hi, sl))
         tp_lo = float(self.tp_min)
-        tp_hi = float(self.tp_max)
+        tp_hi = float(self.tp_max) if self.tp_max > 0 else float("inf")
         tp = float(pos.tp_pct) if pos and pos.tp_pct > 0 else TP_PCT
         tp = max(tp_lo, min(tp_hi, tp))
         return sl, tp, sl_lo, sl_hi
@@ -3080,11 +3318,25 @@ class Pulse:
                 price = self.round_px(c, price)
         return price
 
+    def _controls_waiting_for_position(self, pos: Position) -> bool:
+        return time.time() < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
+
+    def _defer_missing_position_controls(self, pos: Position, response: Dict[str, Any]) -> bool:
+        if str(response.get("code")) != "109420" and ctrl_err_kind(str(response.get("msg") or "")) != "flat":
+            return False
+        # One absent exchange position covers every independent set on this
+        # symbol+direction. Alternate payloads/prices cannot repair absence.
+        # Keep the book and existing protection until reconciliation confirms
+        # exchange truth; stop sibling sets from exhausting the venue budget.
+        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = time.time() + 60.0
+        self.recon_pending = True
+        return True
+
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
-        if time.time() < self.ctrl_skip.get("__order_cap__", 0):
+        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
@@ -3147,7 +3399,7 @@ class Pulse:
                     side=pos.side,
                     set_id=pos.set_id,
                     indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     qty=pos.qty,
@@ -3166,7 +3418,7 @@ class Pulse:
                     side=pos.side,
                     set_id=pos.set_id,
                     indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     order_id=extract_oid(r),
@@ -3175,6 +3427,8 @@ class Pulse:
                 )
                 if r.get("cooled"):
                     return ""
+                if not self.ok(r) and self._defer_missing_position_controls(pos, r):
+                    return have_this
                 msg = str(r.get("msg") or "")
                 kind_err = ctrl_err_kind(msg)
                 if self.ok(r):
@@ -3188,7 +3442,7 @@ class Pulse:
                             side=pos.side,
                             set_id=pos.set_id,
                             indication_kind=getattr(pos, "ind_kind", ""),
-                    strategy=pos.pack,
+                    strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                     client_id=cid,
                     order_id=oid,
@@ -3255,13 +3509,7 @@ class Pulse:
                 self.errors += 1
                 self.last_error = f"{kind} {pos.symbol} {short}"[:160]
                 log(f"CTRL FAIL {kind} {pos.symbol} {pos.side} {short} px={price} mark={self.px.get(pos.symbol)}")
-            low2 = msg.lower()
-            if kind_err == "flat" or "position not exist" in low2:
-                self.ctrl_skip[scope] = time.time() + 20
-                age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
-                if age > 90.0 and self._exchange_flat(pos):
-                    self.drop_ghost(pos, "ctrl-no-position")
-            elif kind_err in ("px", "liq"):
+            if kind_err in ("px", "liq"):
                 self.ctrl_skip[scope] = time.time() + 45
             elif kind_err == "qty":
                 self.ctrl_skip[scope] = time.time() + 60
@@ -3297,6 +3545,16 @@ class Pulse:
         api = getattr(self, "api", None)
         retry_after = getattr(api, "order_retry_after", None)
         if callable(retry_after) and retry_after() > 0:
+            return True
+        sets = getattr(self, "sets", None)
+        if (
+            sets is not None
+            and bool(getattr(sets, "enabled", False))
+            and bool(getattr(sets, "use_historic_gate", False))
+            and not bool(getattr(getattr(sets, "progress", None), "ready", False))
+        ):
+            # DCA and Block adds are new orders too; management and protective
+            # controls use separate paths and remain available during startup.
             return True
         return False
 
@@ -3364,7 +3622,7 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
-        if time.time() < self.ctrl_skip.get("__order_cap__", 0):
+        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
         # A range pair is quantity-matched. If the parent grew since the last
         # placement, remove only this group's old pair before creating the new
@@ -3405,7 +3663,7 @@ class Pulse:
             side=pos.side,
             set_id=pos.set_id,
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
             qty=pos.qty,
             detail="batch SL/TP protection",
@@ -3422,12 +3680,14 @@ class Pulse:
             side=pos.side,
             set_id=pos.set_id,
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
             qty=pos.qty,
             detail="batch SL/TP protection",
         )
-        data = r.get("data") or {}
+        if r.get("cooled") or (not self.ok(r) and self._defer_missing_position_controls(pos, r)):
+            return
+        data = (r.get("data") or {}) if self.ok(r) else {}
         rows = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(rows, list):
             rows = []
@@ -3436,6 +3696,7 @@ class Pulse:
                 continue
             code = o.get("code")
             if code not in (0, None, "0", ""):
+                self._defer_missing_position_controls(pos, o)
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
             if not oid:
@@ -3448,11 +3709,11 @@ class Pulse:
             elif typ in TP_TYPES or kind in ("v", "t"):
                 pos.tp_oid = pos.sec_tp_oid = oid
                 pos.tp = want_tp
-        if not real_oid(pos.sl_oid):
+        if not real_oid(pos.sl_oid) and not self._controls_waiting_for_position(pos):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
                 pos.sl = want_sl
-        if not real_oid(pos.tp_oid):
+        if not real_oid(pos.tp_oid) and not self._controls_waiting_for_position(pos):
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
                 pos.tp = want_tp
@@ -3470,7 +3731,7 @@ class Pulse:
             # New entries attach protection before joining the local book.
             # Only a previously tracked position disappearing means retirement.
             return tracked_at_start and not any(candidate is pos for candidate in self.open.values())
-        if now < self.ctrl_skip.get("__order_cap__", 0):
+        if now < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
@@ -3482,7 +3743,7 @@ class Pulse:
         pos.sec_sl, pos.sec_tp = sec_sl, sec_tp
         if not real_oid(pos.sl_oid) and not real_oid(pos.tp_oid):
             self.place_ctrl_pair(pos)
-            if retired():
+            if retired() or self._controls_waiting_for_position(pos):
                 return
             if real_oid(pos.sl_oid) and real_oid(pos.tp_oid):
                 return
@@ -3740,9 +4001,10 @@ class Pulse:
                 })
                 return True, px
             msg = str(r.get("msg") or "")
-            if ctrl_err_kind(msg) == "qty_close":
+            kind = ctrl_err_kind(msg)
+            if kind == "qty_close":
                 continue
-            if "position not exist" in msg.lower():
+            if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
                     "avg_price": px,
@@ -3782,7 +4044,7 @@ class Pulse:
                 return True
         return False
 
-    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
+    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str, selected_set=None) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
         if conf < 0.50:
             return "low-conf"
@@ -3791,6 +4053,12 @@ class Pulse:
         side = "LONG" if direction > 0 else "SHORT"
         if self.occupying(sym, side, pack):
             return "slot-taken"
+        if self.sets.enabled and self.sets.use_historic_gate and not getattr(
+                getattr(self.sets, "progress", None), "ready", False):
+            # A live tape can qualify a Set before the first complete historic
+            # snapshot.  The initial run is still the safety boundary: keep
+            # protective/reconciliation lanes alive, but do not open entries.
+            return "historic-gate"
         if pack == "indications":
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
                 return "ind-off"
@@ -3817,8 +4085,10 @@ class Pulse:
                     return "ind-gate"
             except Exception:
                 pass
-        chosen = None
         side_name = "LONG" if direction > 0 else "SHORT"
+        if selected_set is not None:
+            return None if self.sets.execution_allowed(selected_set, pack, side_name) else "set-gate"
+        chosen = None
         try:
             chosen = self.sets.pick_any(pack, side=side_name) if self.sets.enabled else None
             if not chosen and self.sets.enabled:
@@ -4008,9 +4278,10 @@ class Pulse:
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             set_id=str(meta.get("set_id") or meta.get("setId") or ""),
-            set_idx=int(meta.get("set_idx") or meta.get("setIdx") or -1),
+            execution_lane=str(meta.get("execution_lane") or ""),
+            set_idx=int(meta.get("set_idx", meta.get("setIdx", -1))),
             trail_set_id=str(meta.get("trail_set_id") or meta.get("trailSetId") or ""),
-            trail_idx=int(meta.get("trail_idx") or meta.get("trailIdx") or -1),
+            trail_idx=int(meta.get("trail_idx", meta.get("trailIdx", -1))),
             pack=str(meta.get("pack") or "general"),
             client_id=cid,
             ours=True,
@@ -4021,6 +4292,7 @@ class Pulse:
             relative_count=int(meta.get("relative_count") or meta.get("relativeCount") or 1),
             volume_ratio=float(meta.get("volume_ratio") or meta.get("volumeRatio") or 1.0),
             ind_kind=str(meta.get("ind_kind") or meta.get("indKind") or ""),
+            strategy=str(meta.get("strategy") or "core"),
             exchange_qty=fill_qty,
             pending_qty=max(0.0, float(row.get("requested_qty") or 0.0) - fill_qty),
             last_fill_at=time.time(),
@@ -4092,7 +4364,7 @@ class Pulse:
             set_id=pos.set_id,
             parent_set_id=pos.parent_set_id,
             indication_kind=pos.ind_kind,
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             client_id=cid,
             order_id=order_id,
@@ -4102,8 +4374,121 @@ class Pulse:
         )
         return pos
 
-    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None) -> None:
+    def block_active_plan(self, sym, side, chosen, reference_qty, px, execution_lane=""):
+        """Plan one overall quantity delta, with no normal exchange parent."""
+        self._execution_decision = {"mode": "block-active", "allowed": False, "reason": "disabled"}
+        if not (getattr(self, "block_active", True) and self.block.enabled
+                and self.strat_block and self.block.active_live and self.block.active_real):
+            return None
+        def reject(reason):
+            self._execution_decision["reason"] = reason
+            return None
+        if not chosen or not self.sets.enabled or not self.sets.progress.ready:
+            return reject("qualified reference unavailable")
+        if not self.control_orders or not self.recon_ok or getattr(self, "recon_pending", False):
+            return reject("confirmed reconciliation and controls required")
+        view = self.sets._side_view(chosen, side)
+        n = int(view.get("last15_n") or 0)
+        pf = float(view.get("last15_ratio") or 0)
+        net = float(view.get("net_avg", getattr(chosen, "expectancy", 0)) or 0)
+        ddt = float(view.get("max_dd_s") or 0)
+        if (not chosen.active or n < max(8, self.sets.eval_need()) or
+                not math.isfinite(pf) or pf < self.sets.real_min_pf or
+                not math.isfinite(net) or net <= 0 or
+                not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
+            return reject("reference sample/PF/net/DD qualification failed")
+        rows = self.strategy_closes()
+        consec = 0
+        for row in reversed(rows):
+            if row.pnl >= 0:
+                break
+            consec += 1
+        allow, reasons, _ = self.coord.gate(rows, consec, intern={"pf": pf, "n": n})
+        if not allow:
+            return reject("overall coordination: " + "; ".join(reasons))
+        live_pf = self.live_recent_pf(side, n=8)
+        if live_pf is not None and (not math.isfinite(live_pf) or live_pf + 1e-9 < self.coord.min_pf):
+            return reject(f"overall live PF below {self.coord.min_pf:.2f}")
+        anchors = getattr(self, "_block_reference_anchors", None)
+        if anchors is None:
+            anchors = self._block_reference_anchors = ContinuationBook()
+        key = (sym, side, execution_lane or chosen.id)
+        if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
+            return reject("reference needs 45 seconds and 0.2% continuation")
+        def same_lane(lane, strategy):
+            if not execution_lane or lane == execution_lane:
+                return True
+            # Pre-split Block Active positions retain their existing controls.
+            # Credit their quantity only to Block, never to the normal lane.
+            return (execution_lane.startswith("block-active:") and lane == execution_lane.removeprefix("block-active:")
+                    and strategy == "block")
+        owned = sum(max(0.0, float(p.qty)) for p in self.positions_for(sym, side)
+                    if same_lane(getattr(p, "execution_lane", ""), getattr(p, "strategy", "")))
+        pending = sum(max(0.0, float(r.get("requested_qty") or 0) - float(r.get("filled_qty") or 0))
+                      for r in (getattr(self, "pending_orders", {}) or {}).values()
+                      if r.get("symbol") == sym and str(r.get("side") or "").upper() == side
+                      and same_lane((r.get("metadata") or {}).get("execution_lane", ""), (r.get("metadata") or {}).get("strategy", ""))
+                      and str(r.get("kind") or "entry") in ("entry", "block", "dca"))
+        # Counts are independent alternatives, never summed into six orders.
+        min_level = int(getattr(self, "block_active_min_level", 0))
+        for count in sorted(self.block.counts):
+            if count < max(1, min_level) or count > getattr(self.block, "max_stack", 6):
+                continue
+            allowed, cap, _, _ = self._coord_add_state(count=count)
+            formula = self.block.formula(reference_qty, count)
+            if not allowed or count > cap or pf < formula["blockMinPF"]:
+                continue
+            own = [r for r in rows if r.parent_set_id == chosen.id
+                   and same_lane(getattr(r, "execution_lane", ""), getattr(r, "strategy", ""))
+                   and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
+            if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
+                continue
+            qty = adjusted_quantity(reference_qty, formula["volumeIncrement"], owned, pending)
+            if qty <= 0:
+                continue
+            decision = {"mode": "block-active", "allowed": True, "reason": "qualified adjusted delta",
+                        "parentSetId": chosen.id, "blockCount": count, "minimumLevel": min_level, "referenceQty": reference_qty,
+                        "volumeIncrement": formula["volumeIncrement"], "ownedQty": owned,
+                        "pendingQty": pending, "requestedQty": qty, "normalQtyExecuted": 0}
+            self._execution_decision = decision
+            return decision
+        return reject("counts below minimum level, blocked or adjusted target already satisfied")
+
+    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None, execution_strategy=None) -> None:
+        normal_enabled = getattr(self, "normal_execution_enabled", False) is True
+        trail_enabled = (forced_row is None and getattr(selected_set, "kind", "") == "trail"
+                         and bool(getattr(self, "strat_trail", False)))
+        block_enabled = (forced_row is None and bool(getattr(self, "block_active", True))
+                         and bool(getattr(self, "strat_block", False)) and bool(getattr(getattr(self, "block", None), "enabled", False)))
+        if execution_strategy is None:
+            # Independent candidates: a successful Block decision must never
+            # replace Normal, and a failed Block decision cannot enable Normal.
+            modes = (["trailing"] if trail_enabled else ["normal"] if normal_enabled else [])
+            if block_enabled:
+                modes.append("block-active")
+            cursor = int(getattr(self, "_execution_strategy_cursor", 0))
+            self._execution_strategy_cursor = cursor + 1
+            if modes:
+                start = cursor % len(modes)
+                for mode in modes[start:] + modes[:start]:
+                    try:
+                        self.place(sym, direction, reason, conf, forced_row, selected_set=selected_set, execution_strategy=mode)
+                    except Exception:
+                        if len(modes) == 1:
+                            raise
+                        self.errors += 1
+                        self.last_error = f"Independent {mode} entry failed for {sym}"
+            return
+        normal_allowed = ((execution_strategy == "normal" and normal_enabled)
+                          or (execution_strategy == "trailing" and trail_enabled))
+        if not normal_allowed and not (execution_strategy == "block-active" and block_enabled):
+            return
         if self.entries_blocked():
+            return
+        if self.sets.enabled and self.sets.use_historic_gate and not getattr(
+                getattr(self.sets, "progress", None), "ready", False):
+            # Keep forced/demo and direct callers behind the same initial
+            # historic publication boundary as normal signal entries.
             return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
             return
@@ -4113,14 +4498,26 @@ class Pulse:
             return
         if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
             return
-        if MAX_OPEN > 0 and len(self.open) >= MAX_OPEN:
+        if MAX_OPEN > 0 and self.entry_slot_count() >= MAX_OPEN:
             return
         side = "LONG" if direction > 0 else "SHORT"
+        pack = "indications" if str(reason).startswith("ind:") else "general"
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", reason)
+        signal_key = exact.group(1) if exact else (reason.split(":")[1] if pack == "indications" else "general")
+        execution_lane = stable_key(pack, selected_set.id, signal_key) if selected_set is not None else ""
+        if execution_strategy == "block-active" and execution_lane:
+            execution_lane = "block-active:" + execution_lane
+        if execution_lane and normal_allowed and any(
+                getattr(p, "execution_lane", "") == execution_lane and getattr(p, "strategy", "") != "block"
+                for p in self.positions_for(sym, side)):
+            return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
                 str(pending.get("kind") or "entry") == "entry"
                 and str(pending.get("symbol") or "") == sym
                 and str(pending.get("side") or "").upper() == side
+                and (not execution_lane or (pending.get("metadata") or {}).get("execution_lane") == execution_lane)
+                and not (normal_allowed and (pending.get("metadata") or {}).get("strategy") == "block")
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
@@ -4138,7 +4535,8 @@ class Pulse:
                 return
             skip = None
         else:
-            skip = self.entry_sense(sym, direction, reason, conf, pack)
+            skip = (self.entry_sense(sym, direction, reason, conf, pack, selected_set)
+                    if selected_set is not None else self.entry_sense(sym, direction, reason, conf, pack))
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
                 log(f"SKIP {sym} {skip}", every=40.0, key="sense", quiet=True)
@@ -4149,20 +4547,21 @@ class Pulse:
         if not c or px <= 0:
             return
         order_side = "BUY" if direction > 0 else "SELL"
-        chosen = None
-        try:
-            chosen = self.sets.pick_any(pack, side=side)
-            if not chosen:
-                chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
-        except TypeError:
+        chosen = selected_set
+        if chosen is None:
             try:
-                chosen = self.sets.pick_any(pack)
+                chosen = self.sets.pick_any(pack, side=side)
                 if not chosen:
-                    chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                    chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
+            except TypeError:
+                try:
+                    chosen = self.sets.pick_any(pack)
+                    if not chosen:
+                        chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                except Exception:
+                    chosen = None
             except Exception:
                 chosen = None
-        except Exception:
-            chosen = None
         set_idx = -1
         trail_set_id = ""
         trail_idx = -1
@@ -4195,6 +4594,16 @@ class Pulse:
         except TypeError:
             # Keep lightweight in-process fakes and older adapters compatible.
             qty = self.size_qty(c, px)
+        execution_plan = None
+        if execution_strategy == "block-active":
+            execution_plan = self.block_active_plan(sym, side, chosen, qty, px, execution_lane=execution_lane)
+        if execution_plan:
+            qty = self.round_qty(c, execution_plan["requestedQty"])
+            if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
+                self._execution_decision.update(allowed=False, reason="adjusted quantity below exchange minimum")
+                return
+        elif not normal_allowed:
+            return
         if qty <= 0:
             return
         notional = qty * px
@@ -4207,7 +4616,7 @@ class Pulse:
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
-        if margin > float(self.available or 0) * 0.95:
+        if margin > max(0.0, float(self.available or 0) - self.pending_entry_margin()) * 0.95:
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         ind_kind_hint = ""
@@ -4215,6 +4624,11 @@ class Pulse:
             parts = str(reason).split(":")
             ind_kind_hint = parts[1] if len(parts) > 1 else ""
         parent_set_id = str(getattr(chosen, "parent_set_id", "") or set_id)
+        event_strategy = "block" if execution_plan else (
+            "axis" if getattr(chosen, "axis_key", "") else
+            "trailing" if getattr(chosen, "kind", "") == "trail" else pack
+        )
+        event_axis = f"block-active:{execution_plan['blockCount']}" if execution_plan else str(getattr(chosen, "axis_key", "") or "")
         entry_key = stable_key(CONN_SHORT, "entry", cid)
         self.record_event(
             "entry_intent",
@@ -4224,13 +4638,13 @@ class Pulse:
             side=side,
             set_id=set_id,
             parent_set_id=parent_set_id,
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            axis_key=event_axis,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             qty=qty,
             price=px,
-            metadata={"reason": reason, "confidence": conf, "setIdx": set_idx},
+            metadata={"reason": reason, "confidence": conf, "setIdx": set_idx, "execution": execution_plan or {"mode": "normal"}},
         )
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
             base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
@@ -4239,9 +4653,17 @@ class Pulse:
         )
         if forced_row is not None:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
+        elif chosen and getattr(chosen, "step", 0):
+            tp_pct_a = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
+            sl_pct_a = max(self.sl_min, min(self.sl_max, tp_pct_a * sl_ratio))
+            if self.exits.enabled and self.exits.ignore_tp:
+                tp_pct_a = min(self.tp_max or float("inf"), max(tp_pct_a, sl_pct_a * 3.0))
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
         tp_a = px * (1 + tp_pct_a) if direction > 0 else px * (1 - tp_pct_a)
         pending_meta = {
+            "execution_lane": execution_lane,
+            "reference_price": px,
+            "leverage": lev,
             "reason": reason,
             "confidence": conf,
             "set_id": set_id,
@@ -4261,7 +4683,12 @@ class Pulse:
             "trail_arm": trail_arm / 100.0,
             "trail_give": trail_give / 100.0,
         }
-        pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a)
+        if execution_plan:
+            pending_meta.update(axis_key=f"block-active:{execution_plan['blockCount']}",
+                                relative_count=execution_plan["blockCount"],
+                                volume_ratio=execution_plan["volumeIncrement"], strategy="block",
+                                execution=execution_plan)
+        pending_group_key = make_control_group_key(sym, side, sl_pct_a, tp_pct_a, execution_lane)
         pending_meta["control_group_key"] = pending_group_key
         self._remember_pending(
             kind="entry",
@@ -4297,7 +4724,7 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             qty=qty,
             price=px,
@@ -4333,7 +4760,7 @@ class Pulse:
                 self.did_io = True
                 msg = str(r.get("msg") or "")
             m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-            if m2 and not self.ok(r) and c is not None:
+            if m2 and not execution_plan and not self.ok(r) and c is not None:
                 need = float(m2.group(1))
                 c.min_qty = max(float(c.min_qty or 0), need)
                 qty = self.round_qty_up(c, need)
@@ -4365,8 +4792,8 @@ class Pulse:
                     return
                 self.errors += 1
                 self.last_error = f"order {sym} {short}"[:160]
-                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
-                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=pack, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("exchange_response", stable_key(entry_key, "response"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=event_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
+                self.record_event("rejected", stable_key(entry_key, "rejected"), status="rejected", code=r.get("code"), symbol=sym, side=side, set_id=set_id, parent_set_id=parent_set_id, indication_kind=ind_kind_hint, strategy=event_strategy, client_id=cid, qty=qty, price=px, detail=self.last_error)
                 self._clear_pending(cid)
                 log(f"ORDER FAIL {sym} {side} {short}")
                 return
@@ -4380,7 +4807,7 @@ class Pulse:
             set_id=set_id,
             parent_set_id=parent_set_id,
             indication_kind=ind_kind_hint,
-            strategy=pack,
+            strategy=event_strategy,
             client_id=cid,
             order_id=extract_oid(r),
             qty=qty,
@@ -4447,7 +4874,7 @@ class Pulse:
             bind_sl_to_tp=True,
         )
         if chosen and getattr(chosen, "step", 0):
-            tp_pct = max(self.tp_min, min(self.tp_max, chosen.tp_pct))
+            tp_pct = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
             sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
             src = f"step{chosen.step}xcost"
         if forced_row is not None:
@@ -4457,7 +4884,7 @@ class Pulse:
         if forced_row is None and self.exits.enabled and self.exits.ignore_tp:
             # Ignore-TP means the normal target is not an early close; the
             # exchange safety target still respects the configured 3% ceiling.
-            tp_pct = min(self.tp_max, max(tp_pct, sl_pct * 3.0))
+            tp_pct = min(self.tp_max or float("inf"), max(tp_pct, sl_pct * 3.0))
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
             symbol=sym, side=side, qty=filled, entry=avg, opened_at=time.time(),
@@ -4467,11 +4894,13 @@ class Pulse:
             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
             sl_pct=sl_pct, tp_pct=tp_pct,
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
+            execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
             parent_set_id=parent_set_id,
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
-            relative_count=int(getattr(chosen, "relative_count", 1) or 1),
-            volume_ratio=float(getattr(chosen, "volume_ratio", 1.0) or 1.0),
+            axis_key=str(pending_meta["axis_key"]),
+            relative_count=int(pending_meta["relative_count"]),
+            volume_ratio=float(pending_meta["volume_ratio"]),
+            strategy="block" if execution_plan else "core",
             exchange_qty=filled,
             pending_qty=max(0.0, qty - filled),
             last_fill_at=time.time(),
@@ -4528,9 +4957,9 @@ class Pulse:
             side=side,
             set_id=set_id,
             parent_set_id=str(getattr(chosen, "parent_set_id", "") or set_id),
-            axis_key=str(getattr(chosen, "axis_key", "") or ""),
+            axis_key=pos.axis_key,
             indication_kind=ind_kind,
-            strategy=pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             order_id=real_oid(data.get("orderId") or data.get("orderID")),
             client_id=cid,
@@ -4576,7 +5005,10 @@ class Pulse:
             return False
         if not self.ok(r):
             return False
-        for p in (r.get("data") or []):
+        rows = r.get("data")
+        if not valid_position_snapshot(rows):
+            return False
+        for p in rows:
             if str(p.get("symbol") or "") != pos.symbol:
                 continue
             side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
@@ -4731,6 +5163,7 @@ class Pulse:
             time.time(), pos.symbol, pos.side, fill_qty, pos.entry, exit_px, pnl, pnl_pct, reason, hold,
             sl_ratio=pos.sl_ratio, trail_key=pos.trail_key, sl_pct=pos.sl_pct, tp_pct=pos.tp_pct,
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
+            execution_lane=getattr(pos, "execution_lane", ""),
             ind_kind=str(getattr(pos, "ind_kind", "") or ""),
             parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
             axis_key=str(getattr(pos, "axis_key", "") or ""),
@@ -4758,7 +5191,7 @@ class Pulse:
             set_id=pos.set_id,
             parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
             indication_kind=getattr(pos, "ind_kind", ""),
-            strategy=pos.pack,
+            strategy=self.event_strategy(pos),
             **self.control_event_fields(pos),
             client_id=pos.client_id,
             order_id=close_oid,
@@ -4784,7 +5217,13 @@ class Pulse:
             },
         )
         if not skip:
+            pos.roundtrip_result = accumulate_close(getattr(pos, "roundtrip_result", {}), asdict(rec))
+            if final_fill:
+                rec.roundtrip_result = dict(pos.roundtrip_result)
             self.closed.append(rec)
+            runtime = getattr(self, "runtime", None)
+            if runtime:
+                runtime.record_trade(asdict(rec), getattr(self, "start_eq", 0))
             # Each confirmed execution leg is a realized financial event and
             # is therefore counted exactly once. A cumulative close may emit
             # several legs; the delta/idempotency guard above prevents a
@@ -4902,7 +5341,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 qty=pos.qty,
@@ -4930,7 +5369,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 order_id=close_oid,
@@ -5023,7 +5462,7 @@ class Pulse:
                 side=pos.side,
                 set_id=pos.set_id,
                 indication_kind=getattr(pos, "ind_kind", ""),
-                strategy=pos.pack,
+                strategy=self.event_strategy(pos),
                     **self.control_event_fields(pos),
                 client_id=pos.client_id,
                 qty=pos.qty,
@@ -5435,6 +5874,11 @@ class Pulse:
                     sl_pct=float(rec.get("sl_pct") or rec.get("slPct") or 0),
                     tp_pct=float(rec.get("tp_pct") or rec.get("tpPct") or 0),
                     set_id=str(rec.get("set_id") or rec.get("setId") or ""),
+                    execution_lane=str(rec.get("execution_lane") or ""),
+                    parent_set_id=str(rec.get("parent_set_id") or rec.get("parentSetId") or ""),
+                    axis_key=str(rec.get("axis_key") or rec.get("axisKey") or ""),
+                    relative_count=int(rec.get("relative_count") or rec.get("relativeCount") or 1),
+                    volume_ratio=float(rec.get("volume_ratio") or rec.get("volumeRatio") or 1),
                     pack=str(rec.get("pack") or ""),
                     client_id=str(rec.get("client_id") or rec.get("clientId") or ""),
                     ours=bool(rec.get("ours", True)),
@@ -5456,15 +5900,16 @@ class Pulse:
                     partial=bool(rec.get("partial")), strategy=str(rec.get("strategy") or "core"),
                     roundtrip_qty=_sf(rec.get("roundtrip_qty"), 0.0),
                     close_fill_id=str(rec.get("close_fill_id") or ""),
+                    roundtrip_result=dict(rec.get("roundtrip_result") or {}),
                 )
                 cid = c.client_id
                 if not self.cid_ours(cid) and not c.set_id:
                     continue
                 if cid and not self.cid_ours(cid):
                     continue
-                if "oversized" in str(c.reason or "").lower():
+                if not c.exchange_confirmed and "oversized" in str(c.reason or "").lower():
                     continue
-                if abs(c.qty * c.entry) > 40:
+                if not c.exchange_confirmed and abs(c.qty * c.entry) > 40:
                     continue
                 if c.conn and c.conn != CONN_SHORT:
                     continue
@@ -5702,7 +6147,26 @@ class Pulse:
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
+        # General stays available as the reference calculation. Only Normal
+        # controls effective unadjusted positions in simulated/demo and live.
+        ov = calculation_overlay(ov, cts)
         self.overlay = ov
+        self.system_settings = normalize_system_settings(ov)
+        redis_config.configure(self.system_settings)
+        if getattr(self, "calculation_cache", None):
+            self.calculation_cache.configure(ov)
+            self.sets.calculation_cache = self.calculation_cache
+        runtime = getattr(self, "runtime", None)
+        if runtime:
+            try:
+                runtime.configure(ov)
+            except Exception as exc:
+                self.last_error = f"Statistics settings: {type(exc).__name__}"
+        if hasattr(self.api, "configure_limits"):
+            self.api.configure_limits(ov)
+        from storage_paths import configure_retention
+        for path in (LOG_PATH, ERR_PATH, TRADES_PATH):
+            configure_retention(path, ov["systemLogMaxLines"], int(ov["systemLogMaxMb"] * 1024 * 1024))
         try:
             self.overlay_mtime = os.path.getmtime(OVERLAY_PATH)
         except Exception:
@@ -5737,9 +6201,9 @@ class Pulse:
         else:
             TIME_STOP_S = MAX_HOLD_S
         if ov.get("maxDdTimeS") is not None:
-            MAX_DD_TIME_S = min(650.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
+            MAX_DD_TIME_S = min(960.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
         else:
-            MAX_DD_TIME_S = 0.0
+            MAX_DD_TIME_S = 57600.0
         if ov.get("scratchS"):
             SCRATCH_S = float(ov["scratchS"])
         if ov.get("scratchMinPct") is not None:
@@ -5772,10 +6236,11 @@ class Pulse:
                 value = fallback
             return max(0.1, min(3.0, value)) / 100.0
 
-        self.sl_min = _risk_pct("slMinPct", 0.20)
+        self.sl_min = max(0.0015, _risk_pct("slMinPct", 0.15))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
-        self.tp_min = _risk_pct("tpMinPct", 0.30)
-        self.tp_max = max(self.tp_min, _risk_pct("tpMaxPct", 3.0))
+        self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
+        tp_cap = finite_number(ov.get("tpMaxPct"), 0.0)
+        self.tp_max = max(self.tp_min, tp_cap / 100) if tp_cap > 0 else 0.0
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
         self.variants.load(calc_ov, cts)
         self.sl_to_tp = self.variants.current_sl()
@@ -5788,14 +6253,20 @@ class Pulse:
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
         self.strat_trail = bool(ov.get("stratTrailing", True))
-        self.strat_general = bool(ov.get("stratGeneral", True))
+        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", False)) is True
+        self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
+        self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
+        self.strat_general = True
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
-            self.symbol_cap = max(0, int(ov.get("symbolCap") if ov.get("symbolCap") is not None else 0))
+            if ov.get("symbolCap") is None:
+                self.symbol_cap = DEFAULT_SYMBOL_CAP
+            else:
+                self.symbol_cap = max(0, int(ov["symbolCap"]))
         except Exception:
-            self.symbol_cap = 0
+            self.symbol_cap = DEFAULT_SYMBOL_CAP
         wild = bool(ov.get("symbolsAll"))
         cleaned: List[str] = []
         seen = set()
@@ -5816,16 +6287,18 @@ class Pulse:
                 cleaned.append(s)
                 if MAX_SYMBOLS > 0 and len(cleaned) >= MAX_SYMBOLS:
                     break
+                if self.symbol_cap > 0 and len(cleaned) >= self.symbol_cap:
+                    break
         self.overlay_wild = bool(wild)
         if wild:
             extra = load_contracts(None)
             names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
             names.sort()
             if names:
-                SYMBOLS[:] = names
+                SYMBOLS[:] = names[: self.symbol_cap] if self.symbol_cap > 0 else names
                 self.contracts.update(extra)
         elif cleaned:
-            SYMBOLS[:] = cleaned
+            SYMBOLS[:] = cleaned[: self.symbol_cap] if self.symbol_cap > 0 else cleaned
         self.ensure_contracts()
         try:
             self.apply_dynamic_symbols(force=True)
@@ -5842,12 +6315,12 @@ class Pulse:
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
         b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
-        real_pf = 1.1
+        real_pf = POSITIVE_PF
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.25)
+            real_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
         except Exception:
-            pass
+            real_pf = POSITIVE_PF
         self.block.enabled = bool(b_en) if b_en is not None else True
         if ov.get("blockEnabled") is None and cts.get("variantBlockEnabled") is None:
             self.block.enabled = True
@@ -5881,6 +6354,10 @@ class Pulse:
         self._catalog_overlay = dict(calc_ov)
         self._catalog_cts = dict(cts)
         self.sets.load(calc_ov, cts, rebuild=not initial)
+        self.history_store.configure(
+            max(int(ov["systemHistoryRetentionBars"]), self.sets.lookback + self.sets.warmup + 2),
+            ov["systemHistoryPersistS"],
+        )
         self.exits.load(calc_ov, cts)
         self.dca.load(calc_ov, cts)
         # Component loaders establish their own state; this final propagation
@@ -5948,13 +6425,18 @@ class Pulse:
         # and its dependent strategy settings are installed so that stale
         # replay results are discarded instead of replacing new settings.
         self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
+        self._hist_next_hourly_at = 0.0
+        self._hist_wake.set()
         if self.sets.sets:
             self._catalog_ready.set()
+            self._hist_wake.set()
         elif initial:
             self._catalog_ready.clear()
             self.sets.progress.phase = "catalog"
             self.sets.progress.pct = 0.0
             self.sets.progress.detail = "catalog bootstrap deferred"
+        if not initial:
+            self.bump("config")
 
     def seed_lev_from_contracts(self) -> None:
         for s, c in self.contracts.items():
@@ -6056,6 +6538,9 @@ class Pulse:
             "stratIndications": self.strat_ind,
             "stratBlock": self.strat_block,
             "stratTrailing": self.strat_trail,
+            "normalExecutionEnabled": self.normal_execution_enabled,
+            "blockActiveMinLevel": self.block_active_min_level,
+            "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
             "stratDca": getattr(self, "strat_dca", True),
             "dcaEnabled": bool(self.dca.enabled),
@@ -6068,6 +6553,8 @@ class Pulse:
             "indTypeSignals": bool(self.indications.settings.get("typeSignals", True)),
             "indTypeTrend": bool(self.indications.settings.get("typeTrend", True)),
             "indTypeBreak": bool(self.indications.settings.get("typeBreak", True)),
+            "indTrendRanges": list(self.indications.settings.get("trendRanges") or [13, 21, 34]),
+            "indBreakRanges": list(self.indications.settings.get("breakRanges") or [8, 16, 32]),
             "histEnabled": self.sets.enabled,
             "histLookbackBars": self.sets.lookback,
             "histMinBars": self.sets.min_bars,
@@ -6242,7 +6729,8 @@ class Pulse:
             if time.time() - self.skip_log.get("add-gate", 0) > 45:
                 log("COORD add-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-add", quiet=True)
                 self.skip_log["add-gate"] = time.time()
-            return
+            # Overall pause/last must not freeze other Block counts; per-count
+            # add_gate still runs inside the lane loop.
         if time.time() - self.block_last_emit < max(12.0, STAGGER_S * 8):
             return
         if os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
@@ -6270,6 +6758,8 @@ class Pulse:
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
+            if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
@@ -6338,7 +6828,7 @@ class Pulse:
             # Live book losing → don't pyramid more size.
             try:
                 live_pf = self.live_recent_pf(pos.side, n=8)
-                if live_pf is not None and live_pf + 1e-9 < 1.25:
+                if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
                     continue
             except Exception:
                 pass
@@ -6520,11 +7010,12 @@ class Pulse:
             )
 
     def live_recent_pf(self, side: Optional[str] = None, n: int = 8) -> Optional[float]:
-        """Cost-net PF of recent live closes. None until enough samples."""
+        """Cost-net PF of last-3h live closes. None until enough recent samples."""
         rows = list(self.closed or [])
         if side:
             want = str(side).upper()
             rows = [c for c in rows if str(getattr(c, "side", "") or "").upper() == want]
+        rows = recent_closed_rows(rows)
         rows = rows[-max(5, int(n or 8)) :]
         if len(rows) < 5:
             return None
@@ -6541,7 +7032,7 @@ class Pulse:
         if self.entries_blocked():
             return
         live_pf = self.live_recent_pf(n=8)
-        if live_pf is not None and live_pf + 1e-9 < 1.25:
+        if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
             return
         allow_add, _, _, add_reasons = self._coord_add_state()
         if not allow_add:
@@ -6554,6 +7045,8 @@ class Pulse:
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
         for pos in list(self.open.values()):
+            if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
@@ -6728,7 +7221,65 @@ class Pulse:
             from load_engine import Budget
             return Budget()
 
-    def trim_caches(self, force: bool = False) -> None:
+    def _hist_peer_path(self) -> str:
+        return os.path.join(DIR, "hist-busy.json")
+
+    def _hist_peer_busy(self) -> str:
+        """Other lane currently replaying? Empty string if the slot is free."""
+        try:
+            with open(self._hist_peer_path(), encoding="utf-8") as f:
+                blob = json.load(f)
+            owner = str((blob or {}).get("conn") or "")
+            ts = float((blob or {}).get("ts") or 0)
+            if owner and owner != CONN_SHORT and time.time() - ts < 75.0:
+                return owner
+        except Exception:
+            return ""
+        return ""
+
+    def _hist_peer_claim(self) -> bool:
+        peer = self._hist_peer_busy()
+        if peer:
+            return False
+        try:
+            atomic_write(self._hist_peer_path(), {"conn": CONN_SHORT, "pid": os.getpid(), "ts": time.time()})
+        except Exception:
+            return True
+        return True
+
+    def _hist_peer_touch(self) -> None:
+        try:
+            atomic_write(self._hist_peer_path(), {"conn": CONN_SHORT, "pid": os.getpid(), "ts": time.time()})
+        except Exception:
+            pass
+
+    def _hist_peer_release(self) -> None:
+        path = self._hist_peer_path()
+        try:
+            with open(path, encoding="utf-8") as f:
+                blob = json.load(f)
+            if str((blob or {}).get("conn") or "") != CONN_SHORT:
+                return
+            os.remove(path)
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+
+    def _heal_trim_pending(self) -> bool:
+        path = os.path.join(DIR, f"HEAL-TRIM-{CONN_SHORT}")
+        return os.path.exists(path)
+
+    def _heal_trim_clear(self) -> None:
+        path = os.path.join(DIR, f"HEAL-TRIM-{CONN_SHORT}")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def trim_caches(self, force: bool = False, *, keep_hist: bool = False) -> None:
         keep = set(SYMBOLS)
         for p in self.open.values():
             if p.symbol:
@@ -6757,15 +7308,24 @@ class Pulse:
         except Exception:
             pass
         try:
-            b = getattr(self.load, "last_budget", None)
-            look = int(getattr(b, "lookback", 180) or 180)
             n += self.sets.trim_bars(keep)
-            n += self.sets.trim_tapes(hist_cap=96, live_cap=64, bar_cap=look)
+            n += int(self.sets.compact_hist_tapes(2500) or 0)
+            if not keep_hist:
+                look = int(getattr(self.sets, "lookback", 0) or 0)
+                if look <= 0:
+                    b = getattr(self.load, "last_budget", None)
+                    look = int(getattr(b, "lookback", 240) or 240)
+                look = max(look, int(getattr(self.sets, "min_bars", 120) or 120), 120)
+                n += self.sets.trim_tapes(hist_cap=96, live_cap=64, bar_cap=look)
         except Exception:
             pass
         try:
             from indication_engine import EXTRA
             n += EXTRA.prune(keep, max_n=48)
+        except Exception:
+            pass
+        try:
+            n += int(self.history_store.keep(keep) or 0)
         except Exception:
             pass
         try:
@@ -6775,7 +7335,10 @@ class Pulse:
         b = getattr(self.load, "last_budget", None)
         if force or (b and b.do_gc):
             try:
-                self.load.free(force=force)
+                # Never bypass the GC cooldown on the hot/hist path. A forced
+                # collect(2)+malloc_trim on the 2GiB catalog stalled the live
+                # cycle for >10s and latched the load governor to critical.
+                self.load.free(force=False)
             except Exception:
                 pass
 
@@ -6847,13 +7410,14 @@ class Pulse:
             if conn and conn != CONN_SHORT:
                 continue
             n = abs(float(c.qty) * float(c.entry or 0))
-            if n > cap:
+            confirmed = bool(getattr(c, "exchange_confirmed", False))
+            if not confirmed and n > cap:
                 continue
-            if "ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",):
+            if not confirmed and ("ctrl-no-position" in str(c.reason or "").lower() or str(c.reason or "") in ("no-ctrl",)):
                 continue
-            if "oversized" in str(c.reason or "").lower():
+            if not confirmed and "oversized" in str(c.reason or "").lower():
                 continue
-            if n > self.max_book_notional() * 1.05:
+            if not confirmed and n > self.max_book_notional() * 1.05:
                 continue
             out.append(c)
         tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
@@ -6891,16 +7455,27 @@ class Pulse:
         net = realized + upnl
         wins = sum(1 for c in closes if float(c.pnl) > 0)
         losses = sum(1 for c in closes if float(c.pnl) < 0)
-        peak = 0.0
-        eq = 0.0
+        # Drawdown is a decline relative to capital at the corresponding
+        # equity peak, not a decline divided by accumulated *profits*.
+        # A tiny first win previously produced thousands of percent DD, while
+        # an all-losing tape incorrectly returned zero.
+        capital = max(0.0, float(getattr(self, "start_eq", 0) or 0))
+        peak = capital
+        eq = capital
         max_dd = 0.0
+        dd_pct = 0.0
         for c in sorted(closes, key=lambda x: float(getattr(x, "t", 0) or 0)):
             eq += float(c.pnl)
             if eq > peak:
                 peak = eq
             if peak - eq > max_dd:
                 max_dd = peak - eq
-        dd_pct = (max_dd / peak * 100.0) if peak > 1e-12 else 0.0
+            if capital > 0 and peak > 1e-12:
+                dd_pct = max(dd_pct, (peak - eq) / peak * 100.0)
+        # Current own-book mark is available; past intratrade extrema are not.
+        max_dd = max(max_dd, peak - (eq + upnl))
+        if capital > 0 and peak > 1e-12:
+            dd_pct = max(dd_pct, (peak - (eq + upnl)) / peak * 100.0)
         traded = sum(abs(float(c.qty) * float(c.entry or 0)) for c in closes)
         for p in self.open.values():
             if getattr(p, "ours", True) is False:
@@ -6918,6 +7493,9 @@ class Pulse:
             "wins": wins,
             "losses": losses,
             "drawdownPct": round(max(0.0, dd_pct), 3),
+            "drawdownAmount": round(max(0.0, max_dd), 6),
+            "drawdownAvailable": capital > 0,
+            "drawdownBasis": "retained-system-tape-plus-current-mark / starting-capital",
             "tradedNotional": round(traded, 4),
             "pnlPct": round(pnl_pct, 3),
             "source": "system-orders",
@@ -7035,31 +7613,51 @@ class Pulse:
             best_st = None
             best_n = -1
             best_side = ""
-            for pack_name in ("indications", "general"):
-                for side_n in ("LONG", "SHORT"):
-                    st = None
-                    try:
-                        st = self.sets.pick_any(pack_name, side=side_n) if self.sets.enabled else None
-                    except TypeError:
-                        st = self.sets.pick_any(pack_name) if self.sets.enabled else None
-                    except Exception:
-                        st = None
-                    if not st:
+            sets_map = getattr(self.sets, "sets", None) or {}
+            base_ids = list((getattr(self.sets, "_ids_by_kind", None) or {}).get("base") or [])
+            if base_ids and isinstance(sets_map, dict):
+                for sid in base_ids:
+                    cand = sets_map.get(sid)
+                    if cand is None:
                         continue
-                    blob = (getattr(st, "by_side", None) or {}).get(side_n) or {}
-                    n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                    n = int(getattr(cand, "last15_n", 0) or 0)
                     if best_st is None or n > best_n:
-                        best_st = st
+                        best_st = cand
                         best_n = n
-                        best_side = side_n
-            if best_st:
-                blob = (getattr(best_st, "by_side", None) or {}).get(best_side) or {}
-                intern_metrics = {
-                    "pf": float(blob.get("last15_ratio") or best_st.last15_ratio),
-                    "n": float(blob.get("last15_n") or best_st.last15_n),
-                    "pack": best_st.pack,
-                    "side": best_side,
-                }
+                if best_st is not None:
+                    intern_metrics = {
+                        "pf": float(getattr(best_st, "last15_ratio", 0) or 0),
+                        "n": float(best_n),
+                        "pack": getattr(best_st, "pack", "") or "",
+                        "setId": getattr(best_st, "id", "") or "",
+                    }
+            if not intern_metrics.get("n"):
+                for pack_name in ("indications", "general"):
+                    for side_n in ("LONG", "SHORT"):
+                        st = None
+                        try:
+                            st = self.sets.pick_any(pack_name, side=side_n) if self.sets.enabled else None
+                        except TypeError:
+                            st = self.sets.pick_any(pack_name) if self.sets.enabled else None
+                        except Exception:
+                            st = None
+                        if not st:
+                            continue
+                        blob = (getattr(st, "by_side", None) or {}).get(side_n) or {}
+                        n = int(blob.get("last15_n") or getattr(st, "last15_n", 0) or 0)
+                        if best_st is None or n > best_n:
+                            best_st = st
+                            best_n = n
+                            best_side = side_n
+                if best_st:
+                    blob = (getattr(best_st, "by_side", None) or {}).get(best_side) or {}
+                    intern_metrics = {
+                        "pf": float(blob.get("last15_ratio") or best_st.last15_ratio),
+                        "n": float(blob.get("last15_n") or best_st.last15_n),
+                        "pack": best_st.pack,
+                        "side": best_side,
+                        "setId": getattr(best_st, "id", "") or "",
+                    }
         except Exception:
             intern_metrics = {"pf": 0.0, "n": 0}
         allow, reasons, metrics = self.coord.gate(rows, consec, intern=intern_metrics)
@@ -7070,7 +7668,7 @@ class Pulse:
             self.maybe_forced_entries()
         slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Ratio", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
-        best: Dict[str, Tuple[float, str, int, str]] = {}
+        candidates: Dict[Tuple[str, int, str], Tuple[float, str, int, str]] = {}
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
             def _ind_allow(kind: str, direction: str = "") -> bool:
                 gate = getattr(self.sets, "indication_ok", None)
@@ -7106,19 +7704,20 @@ class Pulse:
                         continue
                     pick, conf, agree_n = picked
                     d = 1 if pick.direction == "long" else -1
-                    why = f"ind:{pick.kind}:{pick.mode}:{pick.agreement:.2f}:a{agree_n}:{','.join(pick.sources[:3])}"
-                    current = best.get(s)
-                    if current is None or float(conf) > current[0]:
-                        best[s] = (float(conf), s, d, why)
+                    why = f"ind:{pick.kind}:{pick.mode} cfg={pick.entry_key}"
+                    candidates[(s, d, why)] = (float(conf), s, d, why)
         if self.strat_general:
             for s in SYMBOLS:
                 d, why, conf = self.score(s)
                 if d == 0:
                     continue
-                cur = best.get(s)
-                if not cur or conf > cur[0]:
-                    best[s] = (conf, s, d, f"gen:{why}")
-        ranked = sorted(best.values(), reverse=True)
+                candidates[(s, d, "general")] = (conf, s, d, f"gen:{why}")
+        ranked = sorted(candidates.values(), reverse=True)
+        anchors = getattr(self, "_block_reference_anchors", {})
+        current_sides = {(row[1], "LONG" if row[2] > 0 else "SHORT") for row in ranked}
+        for key in list(anchors):
+            if key[:2] not in current_sides:
+                anchors.pop(key, None)
         intern = {}
         intern_any = False
         hist_ready = bool(self.sets.enabled and getattr(self.sets, "progress", None) and self.sets.progress.ready)
@@ -7170,8 +7769,6 @@ class Pulse:
                 self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
                 log(f"COORD rearr {from_key} -> {swap['to']} gap={swap['conf']:.2f}")
         if len(self.open) >= slot_cap:
-            self.maybe_block_adds()
-            self.maybe_dca_adds()
             return
         n_l = sum(1 for _, _, d, _ in ranked if d > 0)
         n_s = sum(1 for _, _, d, _ in ranked if d < 0)
@@ -7189,28 +7786,30 @@ class Pulse:
             ranked = sorted(ranked, key=_min_n)
         placed = 0
         skipped = 0
-        for conf, s, d, why in self.entry_candidate_window(ranked):
+        by_scope = {}
+        for pack_name in ("general", "indications"):
+            for side_name in ("LONG", "SHORT"):
+                if self.sets.enabled:
+                    by_scope[(pack_name, side_name)] = self.sets.pick_all(pack_name, side=side_name)
+                else:
+                    by_scope[(pack_name, side_name)] = [None]
+        matrix = EntryMatrix(ranked, by_scope)
+        self._entry_candidate_count = len(matrix)
+        for conf, s, d, why, selected in self.entry_candidate_window(matrix):
             if self.entries_blocked():
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
-            pack = "indications" if str(why).startswith("ind:") else "general"
-            if self.sets.enabled and self.sets.use_historic_gate and self.sets.progress.ready:
-                if not intern.get(pack):
-                    alt = "general" if pack == "indications" else "indications"
-                    if intern.get(alt):
-                        pack = alt
-                    elif getattr(self.sets, "strict_gate", False):
-                        # Strict: both packs closed -> this candidate cannot
-                        # bind a validated + profitable set. Skip it.
-                        skipped += 1
-                        continue
-                    elif intern_any:
-                        pack = "general" if intern.get("general") else "indications"
-                    else:
-                        pack = "general"
             before = len(self.open)
-            self.place(s, d, why, conf)
+            try:
+                self.place(s, d, why, conf, selected_set=selected)
+            except Exception as exc:
+                # The pending intent remains durable when an exchange result
+                # is uncertain. A failed lane cannot starve its siblings.
+                self.errors += 1
+                self.last_error = f"entry {s}: {type(exc).__name__}: {str(exc)[:140]}"
+                skipped += 1
+                continue
             if len(self.open) > before:
                 placed += 1
             else:
@@ -7224,9 +7823,6 @@ class Pulse:
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
             self.skip_log["entry0"] = time.time()
-        self.maybe_block_adds()
-        self.maybe_dca_adds()
-
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
@@ -7237,8 +7833,9 @@ class Pulse:
         if not ranked:
             return
         start = int(getattr(self, "_entry_cursor", 0) or 0) % len(ranked)
-        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S))
-        for offset in range(len(ranked)):
+        settings = getattr(self, "system_settings", {})
+        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S, settings.get("systemEntryBudgetMs", 500) / 1000))
+        for offset in range(min(len(ranked), int(settings.get("systemEntryBatch", 256)))):
             if offset and time.monotonic() >= deadline:
                 break
             index = (start + offset) % len(ranked)
@@ -7427,10 +8024,18 @@ class Pulse:
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail=str(r.get("msg") or "positions failed"))
             self.recon_ok = False
             self.recon_pending = False
+            self._empty_rest_streak = 0
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
-        rows = r.get("data") or []
-        if not isinstance(rows, list):
+        rows = r.get("data")
+        if not valid_position_snapshot(rows):
+            # Unknown/malformed truth is not a confirmed empty exchange. Do
+            # not advance absence counters or mutate ownership from a partial
+            # payload: that could discard our still-open protected position.
+            self.recon_ok = False
+            self.recon_pending = False
+            self.recon_detail = "positions payload malformed"
+            self._empty_rest_streak = 0
             self.record_event("error", stable_key(request_key, "payload"), status="error", code=r.get("code"), detail="positions payload malformed")
             return
         self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed", code=r.get("code"), qty=len(rows), detail="positions", metadata={"rows": len(rows)})
@@ -8335,12 +8940,41 @@ class Pulse:
     def stats(self) -> Dict[str, Any]:
         # HTTP readers and the hot/warm workers can arrive concurrently. A
         # re-entrant guard keeps JSON snapshots internally consistent without
-        # blocking recursive stats writes.
-        with self.state_guard():
-            return self._stats_unlocked()
+        # blocking recursive stats writes. Never wait on a historic commit:
+        # scoring 10k+ sets under the same lock used to freeze the live cycle.
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            blob = self._stats_unlocked()
+            self._stats_last = blob
+            return blob
+        got = False
+        try:
+            got = bool(lock.acquire(timeout=0.08))
+        except TypeError:
+            lock.acquire()
+            got = True
+        if not got:
+            stale = dict(getattr(self, "_stats_last", None) or {})
+            stale.update({
+                "running": True,
+                "alive": True,
+                "cycle": int(getattr(self, "cycle", 0) or 0),
+                "scanMs": float(getattr(self, "last_scan_ms", 0) or 0),
+                "halted": bool(getattr(self, "halted", False)),
+                "haltReason": getattr(self, "halt_reason", None),
+                "statsDeferred": True,
+            })
+            return stale
+        try:
+            blob = self._stats_unlocked()
+            self._stats_last = blob
+            return blob
+        finally:
+            lock.release()
 
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
+        act = persistent_activity(act, getattr(getattr(self, "runtime", None), "snapshot", {}), getattr(self, "start_eq", 0))
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
         dd = float(act["drawdownPct"])
@@ -8348,6 +8982,16 @@ class Pulse:
         per_min = (act["wins"] + act["losses"]) / (age / 60) if age > 1 else 0
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(act["closes"], self.pf_window, self.position_cost_pct)
+        try:
+            need = int(self.sets.eval_need()) if hasattr(self.sets, "eval_need") else 8
+        except Exception:
+            need = 8
+        pc["evaluationWindows"] = evaluation_windows(act["closes"], self.position_cost_pct, required_samples=need)
+        ddt = self._ddt_blob(act["closes"])
+        pc["maxDdS"] = ddt.get("maxDdS")
+        pc["avgDdS"] = ddt.get("avgDdS")
+        pc["ddEpisodes"] = ddt.get("episodes")
+        pc["currentS"] = ddt.get("currentS")
         pc["minPf"] = self.coord.min_pf
         pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
@@ -8367,14 +9011,40 @@ class Pulse:
         sim_n, sim_upnl = self.sim_stats()
         closed_n = 80 if getattr(getattr(self.load, "last_budget", None), "stats_full", True) else 40
         closed_out = []
-        for c in list(act["closes"])[-closed_n:][::-1]:
+        all_closed_rows = []
+        for c in list(act["closes"]):
             d = asdict(c)
             d["indKind"] = d.get("ind_kind") or ""
-            closed_out.append(d)
+            all_closed_rows.append(d)
+        closed_out = all_closed_rows[-closed_n:][::-1]
         cov = self._coverage_blob()
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
-        sets_snap = self.sets.snapshot(full=False)
+        sets_snap = dict(self.sets.snapshot(full=False))
+        if getattr(self, "_sets_overview", None) is not None:
+            sets_snap["overview"] = self._sets_overview
+        historic_snap = dict(getattr(self, "_hist_status", {}) or {})
+        prog = (sets_snap.get("progress") or {}) if isinstance(sets_snap, dict) else {}
+        hist_phase = str(historic_snap.get("phase") or "")
+        prog_phase = str(prog.get("phase") or "")
+        phase = hist_phase if hist_phase and hist_phase not in ("idle",) else (prog_phase or hist_phase or "idle")
+        if hist_phase in ("backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial") and prog_phase in ("idle", "ready", ""):
+            phase = hist_phase
+        pct_raw = historic_snap.get("pct") if historic_snap.get("pct") is not None else prog.get("pct")
+        try:
+            pct_val = round(float(pct_raw or 0), 1)
+        except (TypeError, ValueError):
+            pct_val = 0.0
+        ready_flag = bool(prog.get("ready") if prog.get("ready") is not None else historic_snap.get("ready"))
+        detail = str(historic_snap.get("detail") or prog.get("detail") or "")
+        coord_snap = self.coord.snapshot()
+        if isinstance(coord_snap, dict):
+            coord_snap["historic"] = {
+                "runId": historic_snap.get("runId"),
+                "generation": historic_snap.get("generation"),
+                "watermark": historic_snap.get("lastPublishedWatermark") or historic_snap.get("watermark") or {},
+                "complete": bool(historic_snap.get("coordinationComplete")),
+            }
         config_evidence = self._config_evidence_snapshot()
         try:
             from stats_report import merge_kind_stats, merge_strategy_stats
@@ -8383,7 +9053,7 @@ class Pulse:
             last_m = float(getattr(self, "_stats_merge_ts", 0) or 0)
             if fat or now_m - last_m >= 3.5 or not getattr(self, "_by_ind_cache", None):
                 by_ind = merge_kind_stats(
-                    closed_out,
+                    all_closed_rows,
                     self.position_cost_pct,
                     gate=sets_snap.get("indGate") or cov.get("indicationGate") or {},
                     hits=cov.get("indicationHits") or ind_snap.get("typeHits") or {},
@@ -8391,7 +9061,7 @@ class Pulse:
                     kind_live=ind_snap.get("kindStats") or {},
                 )
                 by_strat = merge_strategy_stats(
-                    closed_out,
+                    all_closed_rows,
                     self.position_cost_pct,
                     coverage=cov,
                     block=self.block.snapshot(),
@@ -8418,6 +9088,7 @@ class Pulse:
             "startedAt": self.started,
             "now": time.time(),
             "uptimeS": age,
+            "system": dict(getattr(getattr(self, "runtime", None), "snapshot", {}) or {}),
             "equity": round(self.equity, 4),
             "walletEquity": round(self.equity, 4),
             "startEquity": round(self.start_eq, 4),
@@ -8432,9 +9103,12 @@ class Pulse:
             "systemLoss": round(float(act["loss"]), 4),
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act["unrealized"]), 4),
-            "systemSource": "system-orders",
+            "systemSource": act.get("source", "system-orders"),
             "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
+            "drawdownAmount": act["drawdownAmount"],
+            "drawdownAvailable": act["drawdownAvailable"],
+            "drawdownBasis": act["drawdownBasis"],
             "wins": int(act["wins"]),
             "losses": int(act["losses"]),
             "winRate": round(wr, 1),
@@ -8446,6 +9120,9 @@ class Pulse:
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
             "symbols": SYMBOLS,
+            "symbolCount": len(SYMBOLS),
+            "symbolCap": int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0),
+            "symbolsAll": bool(getattr(self, "overlay_wild", False)),
             "regime": self.regime,
             "halted": self.halted,
             "haltReason": self.halt_reason,
@@ -8468,10 +9145,27 @@ class Pulse:
             "activity": activity,
             "events": activity.get("tail") or [],
             "maxHoldS": MAX_HOLD_S,
-            "tests": self.tests[-24:],
+            "tests": self.tests[:24],
             "block": self.block.snapshot(),
             "pulse": self.pulse_snapshot(),
-            "coord": self.coord.snapshot(),
+            "coord": coord_snap,
+            "historic": historic_snap,
+            "progressPct": pct_val,
+            "progressPhase": phase,
+            "progressDetail": detail,
+            "progressReady": ready_flag,
+            "progressSymbol": prog.get("symbol") or "",
+            "progressSetId": prog.get("setId") or "",
+            "progressSymbolsDone": prog.get("symbolsDone"),
+            "progressSymbolsTotal": prog.get("symbolsTotal"),
+            "progressSetsDone": prog.get("setsDone"),
+            "progressSetsTotal": prog.get("setsTotal"),
+            "progressBarsDone": prog.get("barsDone"),
+            "progressBarsTotal": prog.get("barsTotal"),
+            "progressElapsedMs": prog.get("elapsedMs"),
+            "progressLastRunMs": prog.get("lastRunMs"),
+            "progressCycle": prog.get("cycle"),
+            "progressError": prog.get("error") or "",
             "pfCost": pc,
             "positionCost": position_cost,
             "profitFactor": pc["ratio"],
@@ -8538,6 +9232,8 @@ class Pulse:
                     "trail": p.trail,
                     "trailPending": getattr(p, "trail_pending", None),
                     "setId": p.set_id,
+                    "executionLane": getattr(p, "execution_lane", ""),
+                    "strategy": getattr(p, "strategy", ""),
                     "parentSetId": getattr(p, "parent_set_id", "") or p.set_id,
                     "axisKey": getattr(p, "axis_key", ""),
                     "relativeCount": int(getattr(p, "relative_count", 1) or 1),
@@ -8558,11 +9254,18 @@ class Pulse:
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
             "rssMb": round(rss_mb(), 1),
+            "load": self.load.snapshot() if hasattr(self, "load") else {},
+            "loadLevel": getattr(self.load, "level", None) if hasattr(self, "load") else None,
             "klinesReady": sum(1 for s in SYMBOLS if s in self.klines),
             "klinesTf": {tf: sum(1 for s in SYMBOLS if s in self.klines_tf.get(tf, {})) for tf in TIMEFRAMES},
             "prices": {s: self.px.get(s) for s in (SYMBOLS if (not hasattr(self, "load") or self.load.last_budget.stats_full or len(SYMBOLS) <= 64) else [p.symbol for p in self.open.values()][:64])},
             "engine": {
                 "hotMs": round(self.last_scan_ms, 1),
+                "hotCpuMs": round(getattr(self, "last_scan_cpu_ms", 0.0), 1),
+                "stagesMs": dict(getattr(self, "last_cycle_stages", {})),
+                "activeStage": getattr(self, "_active_cycle_stage", ""),
+                "activeStageMs": round((time.perf_counter() - self._active_stage_at) * 1000.0, 1) if getattr(self, "_active_cycle_stage", "") else 0.0,
+                "cycleWallOverrun": self.last_scan_ms > SCAN_S * 1000.0,
                 "warmMs": round(self.warm_ms, 1),
                 "asyncP50": snap.get("asyncP50"),
                 "asyncN": snap.get("asyncN"),
@@ -8629,7 +9332,30 @@ class Pulse:
         }
         try:
             if callable(getattr(self.sets, "axis_variants", None)):
-                axis_aggregate = self.sets.axis_variants(self.coord)
+                now_ax = time.monotonic()
+                cached_ax = getattr(self, "_axis_ui", None)
+                if cached_ax is not None and now_ax - float(getattr(self, "_axis_ui_ts", 0) or 0) < 12:
+                    axis_aggregate = cached_ax
+                else:
+                    axis_aggregate = self.sets.axis_variants(self.coord)
+                    if isinstance(axis_aggregate, dict):
+                        axis_aggregate = dict(axis_aggregate)
+                        rows = axis_aggregate.pop("rows", None)
+                        from set_overview import build_overview
+                        self._sets_overview = build_overview(self.sets, rows or [], axis_enabled=self.coord.axes_active())
+                        if isinstance(rows, list):
+                            axis_aggregate["rowCount"] = axis_aggregate.get("rowCount") or len(rows)
+                        parents = axis_aggregate.get("parents")
+                        if isinstance(parents, list):
+                            axis_aggregate["parentCount"] = axis_aggregate.get("parentCount") or len(parents)
+                            if len(parents) > 24:
+                                axis_aggregate["parents"] = parents[:24]
+                        ids = axis_aggregate.get("parentSetIds")
+                        if isinstance(ids, list) and len(ids) > 32:
+                            axis_aggregate["parentSetIdCount"] = len(ids)
+                            axis_aggregate["parentSetIds"] = ids[:32]
+                    self._axis_ui = axis_aggregate
+                    self._axis_ui_ts = now_ax
         except Exception:
             axis_aggregate = {
                 "parentCount": 0,
@@ -8680,6 +9406,12 @@ class Pulse:
             },
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
+            "executionPolicy": {
+                "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
+                "blockActive": bool(getattr(self, "block_active", True)),
+            "targetActiveSets": int(getattr(self.sets, "max_active", 80)),
+                "decision": dict(getattr(self, "_execution_decision", {}) or {}),
+            },
             "stageFlow": scov.get("stageFlow") or stage_flow,
             "evaluations": {
                 "requiredSamples": int(getattr(self.sets, "eval_need", lambda: 8)()),
@@ -8741,6 +9473,23 @@ class Pulse:
                 "phase": getattr(progress, "phase", "idle"),
                 "ready": bool(getattr(progress, "ready", False)),
                 "detail": str(getattr(progress, "detail", ""))[:180],
+                "runId": str(getattr(progress, "run_id", "") or ""),
+                "generation": int(getattr(progress, "generation", 0) or 0),
+                "mode": str(getattr(progress, "mode", "") or ""),
+                "requestedStart": int(getattr(progress, "requested_start", 0) or 0),
+                "requestedEnd": int(getattr(progress, "requested_end", 0) or 0),
+                "watermark": dict(getattr(progress, "watermark", {}) or {}),
+                "lastPublishedWatermark": dict(getattr(progress, "last_published_watermark", {}) or {}),
+                "lastCompleteRun": float(getattr(progress, "last_complete_run", 0.0) or 0.0),
+                "nextRunAt": float(getattr(progress, "next_run_at", 0.0) or 0.0),
+                "validSymbols": list(getattr(progress, "valid_symbols", []) or []),
+                "invalidSymbols": list(getattr(progress, "invalid_symbols", []) or []),
+                "missingSymbols": list(getattr(progress, "missing_symbols", []) or []),
+                "gappedSymbols": list(getattr(progress, "gapped_symbols", []) or []),
+                "stale": bool(getattr(progress, "stale", False)),
+                "deferredReason": str(getattr(progress, "deferred_reason", "") or "")[:180],
+                "coordinationComplete": bool(getattr(progress, "coordination_complete", False)),
+                "coverage": dict(getattr(self, "_hist_status", {}).get("coverage") or {}),
                 "fetchStored": int(getattr(self, "_hist_fetch_stored", 0) or 0),
                 "fetchFailures": int(getattr(self, "_hist_fetch_failures", 0) or 0),
                 "fetchNext": float(getattr(self, "_hist_fetch_next", 0.0) or 0.0),
@@ -8821,25 +9570,34 @@ class Pulse:
                 "indications": len(getattr(self.indications, "last", {}) or {}),
                 "missingInd": [s for s in SYMBOLS if s not in (getattr(self.indications, "last", {}) or {})][:12],
             },
+            "load": self.load.snapshot() if hasattr(self, "load") else {},
         }
 
     def write_stats(self, force: bool = False) -> None:
+        if not self._stats_lock.acquire(blocking=False):
+            return
+        try:
+            self._write_stats_locked(force)
+        finally:
+            self._stats_lock.release()
+
+    def _write_stats_locked(self, force: bool = False) -> None:
         now = time.monotonic()
         fat = bool(getattr(getattr(self.load, "last_budget", None), "stats_full", False))
-        min_dt = 0.95 if fat else 1.6
+        min_dt = max(0.95 if fat else 1.6, getattr(self, "system_settings", {}).get("systemStatsIntervalS", 2))
         if not force and not self._stats_force and now - self._stats_ts < min_dt:
             return
         self._stats_ts = now
         self._stats_force = False
-        blob = json.dumps(self.stats(), separators=(",", ":"))
+        stats = self.stats()
         # State dir may be missing on a fresh box (or after a manual wipe):
         # recreate it instead of dropping every stats write on the floor.
         os.makedirs(DIR, exist_ok=True)
-        tmp = STATS_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(blob)
-        os.replace(tmp, STATS_PATH)
-        if force or int(now) % 15 < 2:
+        # Unique temporary file and fsync make overlapping writers restart-safe.
+        atomic_write(STATS_PATH, stats)
+        # Forced progress snapshots must not trigger a full report every tick.
+        if now - float(getattr(self, "_report_ts", 0)) >= getattr(self, "system_settings", {}).get("systemReportIntervalS", 30):
+            self._report_ts = now
             try:
                 self.write_results_export()
             except Exception:
@@ -8881,38 +9639,33 @@ class Pulse:
 
     def _ddt_blob(self, closed: List[Any]) -> Dict[str, Any]:
         from set_engine import drawdown_time_by_symbol
-        recs = []
-        for c in closed:
-            if isinstance(c, dict):
-                recs.append({"t": c.get("t"), "symbol": c.get("symbol") or "?", "pnl": c.get("pnl")})
-            else:
-                recs.append({"t": getattr(c, "t", 0), "symbol": getattr(c, "symbol", "?") or "?", "pnl": getattr(c, "pnl", 0)})
-        d = drawdown_time_by_symbol(recs)
+        d = drawdown_time_by_symbol(closed)
         return {"maxDdS": d.get("maxS"), "avgDdS": d.get("avgS"), "episodes": d.get("episodes"), "maxDepth": d.get("maxDepth"), "currentS": d.get("currentS")}
 
     def _by_symbol_blob(self, closed: List[Any]) -> List[Dict[str, Any]]:
-        buckets: Dict[str, List[float]] = {}
-        ddt_rows: Dict[str, List[Dict[str, Any]]] = {}
+        buckets: Dict[str, List[Any]] = {}
         for c in closed:
             if isinstance(c, dict):
-                s, pnl, t = c.get("symbol") or "?", float(c.get("pnl") or 0), c.get("t")
+                s = str(c.get("symbol") or "?")
             else:
-                s, pnl, t = getattr(c, "symbol", "?"), float(getattr(c, "pnl", 0) or 0), getattr(c, "t", 0)
-            buckets.setdefault(s, []).append(pnl)
-            ddt_rows.setdefault(s, []).append({"t": t, "pnl": pnl})
-        from set_engine import drawdown_time_by_symbol
+                s = str(getattr(c, "symbol", "?") or "?")
+            buckets.setdefault(s, []).append(c)
+        from set_engine import drawdown_time_by_symbol, row_equity_pnl
         out = []
-        for s, pnls in buckets.items():
+        for s, rows in buckets.items():
+            pnls = [row_equity_pnl(c, self.position_cost_pct) for c in rows]
             gp = sum(x for x in pnls if x > 0)
             gl = abs(sum(x for x in pnls if x < 0))
-            d = drawdown_time_by_symbol(ddt_rows.get(s) or [])
+            d = drawdown_time_by_symbol(rows)
+            cost = last_n_cost_pf(rows, len(rows) or 1, self.position_cost_pct)
             out.append({
                 "symbol": s,
                 "n": len(pnls),
                 "wins": sum(1 for x in pnls if x > 0),
                 "losses": sum(1 for x in pnls if x < 0),
                 "net": round(sum(pnls), 6),
-                "pf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
+                "pf": round(float(cost.get("ratio") or 1.0), 4),
+                "classicPf": round(99.0 if gp > 0 and gl <= 0 else (gp / gl if gl else 0.0), 4),
                 "maxDdS": d.get("maxS"),
                 "avgDdS": d.get("avgS"),
             })
@@ -8928,6 +9681,7 @@ class Pulse:
             os.path.join(DIR, f"results-export-{CONN_SHORT}.md"),
             cost_pct=self.position_cost_pct,
             conn=CONN_SHORT,
+            dest_html=os.path.join(DIR, f"results-export-{CONN_SHORT}.html"),
         )
 
     def qa_tick(self) -> None:
@@ -8967,7 +9721,7 @@ class Pulse:
             hasattr(self, "load") and str(getattr(self.load, "level", "")) in ("idle", "normal", "busy", "overload", "critical"),
             f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
         )
-        self.record_test("qa-unlimited", MAX_OPEN <= 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
+        self.record_test("qa-unlimited", MAX_OPEN <= 0 or MAX_OPEN >= 100, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
         book_cap = self.max_book_notional()
         sane_cap = max(self.notional_cap() * 32.0, 64.0)
         self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
@@ -9069,12 +9823,7 @@ class Pulse:
             warm_ind or len(have) >= need or (rotating and len(have) >= 8),
             f"{len(have)}/{len(scored) or len(SYMBOLS)} miss={miss}",
         )
-        types = snap_ind.get("types") or {}
-        self.record_test(
-            "qa-ind-types",
-            all(types.get(k) for k in ("state", "direction", "move", "active", "common", "signals")),
-            f"types={types} hits={snap_ind.get('typeHits')}",
-        )
+        self._qa_indication_types(snap_ind)
         try:
             from indication_engine import self_test as ind_self
             fails = [n for n, ok, _ in ind_self() if not ok]
@@ -9140,8 +9889,493 @@ class Pulse:
             str(tr_g),
         )
 
+    def _history_bounds(self, lookback: int, end_minute: Optional[int] = None) -> Tuple[int, int]:
+        end = int(end_minute if end_minute is not None else (time.time() // 60) - 1)
+        end = max(1, end)
+        return end - max(1, int(lookback)) + 1, end
+
+    def _hist_request_changed(self) -> bool:
+        """Check the coalescing request channel without reading it on every bar."""
+        now = time.monotonic()
+        check_ts = float(getattr(self, "_hist_request_check_ts", 0.0) or 0.0)
+        active_run_id = str(getattr(self, "_hist_active_run_id", "") or "")
+        latest_run_id = str(getattr(self, "_hist_latest_request_id", "") or "")
+        if now - check_ts < 0.35:
+            return bool(active_run_id and latest_run_id and latest_run_id != active_run_id)
+        self._hist_request_check_ts = now
+        request = read_hist_request(CONN_SHORT)
+        latest = str(request.get("runId") or "")
+        self._hist_latest_request_id = latest
+        # The request file is a durable status boundary and intentionally
+        # remains after publication. Only a generation newer than the last
+        # consumed request may invalidate an in-flight automatic run.
+        return bool(
+            active_run_id
+            and latest
+            and latest != active_run_id
+            and latest != self._hist_request_seen
+        )
+
+    def _hist_new_request(self, *, consume: bool = True) -> Dict[str, Any]:
+        request = read_hist_request(CONN_SHORT)
+        run_id = str(request.get("runId") or "")
+        if not run_id or run_id == self._hist_request_seen:
+            return {}
+        self._hist_latest_request_id = run_id
+        if consume:
+            self._hist_request_seen = run_id
+        return request
+
+    def _hist_write_status(self, book: Optional[SetBook] = None, **values: Any) -> None:
+        current = book or self.sets
+        with self.state_guard():
+            progress = current.progress
+            payload = dict(self._hist_status or {})
+            payload.update(values)
+            payload.update({
+                "ok": True,
+                "connection": CONN_SHORT,
+                "phase": progress.phase,
+                "pct": round(float(progress.pct or 0.0), 1),
+                "detail": progress.detail,
+                "ready": bool(progress.ready),
+                "lookback": int(current.lookback),
+                "hours": round(float(current.lookback) / 60.0, 2),
+                "runId": progress.run_id or payload.get("runId") or "",
+                "generation": int(progress.generation or payload.get("generation") or 0),
+                "mode": progress.mode or payload.get("mode") or "",
+                "requestedStart": int(progress.requested_start or payload.get("requestedStart") or 0),
+                "requestedEnd": int(progress.requested_end or payload.get("requestedEnd") or 0),
+                "watermark": dict(progress.watermark or payload.get("watermark") or {}),
+                "lastPublishedWatermark": dict(progress.last_published_watermark or self._hist_last_published_watermark or {}),
+                "lastCompleteRun": float(progress.last_complete_run or payload.get("lastCompleteRun") or 0.0),
+                "nextRunAt": float(progress.next_run_at or self._hist_next_hourly_at or 0.0),
+                "validSymbols": list(progress.valid_symbols),
+                "invalidSymbols": list(progress.invalid_symbols),
+                "missingSymbols": list(progress.missing_symbols),
+                "gappedSymbols": list(progress.gapped_symbols),
+                "stale": bool(progress.stale),
+                "deferredReason": progress.deferred_reason,
+                "coordinationComplete": bool(progress.coordination_complete),
+                "shared": True,
+                "independent": False,
+            })
+            self._hist_status = payload
+        try:
+            snapshot = current.snapshot(full=False)
+            payload["rows"] = snapshot.get("rows") or []
+            payload["rowCount"] = len(snapshot.get("rows") or [])
+            payload["validatedCount"] = snapshot.get("validatedCount") or 0
+            if not payload.get("coverage"):
+                payload["coverage"] = snapshot.get("coverage") or {}
+            payload["progress"] = snapshot.get("progress") or {}
+        except Exception:
+            pass
+        write_hist_job(payload, CONN_SHORT)
+
+    def _qa_indication_types(self, snapshot: dict) -> None:
+        """A deliberately disabled indication is a valid configuration.
+
+        Verify all eight reported flags against the applied settings, including
+        Trend and Break. Missing flags or a real settings/report mismatch fail.
+        """
+        types = snapshot.get("types") or {}
+        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break")
+        expected = {kind: bool(self.indications.settings.get("type" + kind.title(), True)) for kind in kinds}
+        mismatches = [kind for kind in kinds if types.get(kind) is not expected[kind]]
+        self.record_test("qa-ind-types", not mismatches, f"types={types} mismatch={mismatches}")
+
+    def _hist_checkpoint(self, book: Optional[SetBook] = None, reason: str = "") -> None:
+        current = book or self.sets
+        progress = current.progress
+        self.history_store.checkpoint({
+            "runId": progress.run_id,
+            "generation": int(progress.generation or 0),
+            "mode": progress.mode,
+            "phase": progress.phase,
+            "reason": reason,
+            "symbols": list(progress.valid_symbols),
+            "watermark": dict(progress.watermark),
+            "lastPublishedWatermark": dict(progress.last_published_watermark),
+            "updatedAt": time.time(),
+        })
+
+    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> List[str]:
+        """Bound any symbol list to the configured scan book / symbolCap.
+
+        0 = unlimited. Missing cap defaults to 50. Wildcards and stale
+        all-universe snapshots collapse to the live scan book, not the
+        full exchange catalog. A historic request may pass an explicit cap.
+        """
+        if cap is None:
+            cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        else:
+            try:
+                cap = int(cap)
+            except (TypeError, ValueError):
+                cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+        cap = max(0, cap)
+        scan = [str(s) for s in SYMBOLS if s]
+        raw = list(names) if names is not None else list(scan)
+        wild = False
+        out: List[str] = []
+        seen: set[str] = set()
+        for raw_s in raw:
+            token = str(raw_s or "").strip().upper().replace("_", "-")
+            if token in ("*", "ALL", "UNLIMITED", ""):
+                wild = True
+                continue
+            if token.endswith("USDT") and not token.endswith("-USDT"):
+                token = token[:-4] + "-USDT"
+            if not token.endswith("-USDT") or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        if wild or not out:
+            out = list(scan)
+        if cap > 0 and len(out) > cap:
+            must: List[str] = []
+            seen_must: set[str] = set()
+            raw_open = getattr(self, "open", None)
+            if isinstance(raw_open, dict):
+                open_iter = raw_open.values()
+            elif isinstance(raw_open, (list, tuple)):
+                open_iter = raw_open
+            else:
+                open_iter = []
+            for p in list(open_iter):
+                s = str(getattr(p, "symbol", "") or "")
+                if s and s not in seen_must:
+                    must.append(s)
+                    seen_must.add(s)
+            for s in FORCED_SYMBOLS:
+                token = str(s or "")
+                if token and token not in seen_must and (token in out or token in scan):
+                    must.append(token)
+                    seen_must.add(token)
+            rest = [s for s in out if s not in seen_must]
+            out = (must + rest)[: max(cap, len(must))]
+        return out
+
+    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> Tuple[List[str], List[Dict[str, str]]]:
+        names = self._capped_scan_names(requested, cap=cap)
+        invalid = [
+            {"symbol": symbol, "reason": "missing active exchange contract"}
+            for symbol in names
+            if symbol not in self.contracts
+        ]
+        valid = [symbol for symbol in names if symbol in self.contracts]
+        if not valid:
+            valid = [symbol for symbol in self._capped_scan_names(None, cap=cap) if symbol in self.contracts]
+        return valid, invalid
+
+    def _hist_coverage(self, book: SetBook, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+        coverage: Dict[str, Dict[str, Any]] = {}
+        missing: List[str] = []
+        for i, symbol in enumerate(symbols):
+            if i % 8 == 0:
+                sd_notify("WATCHDOG=1")
+            item = self.history_store.coverage(symbol, start, end, source="exchange")
+            bars = self.history_store.window(symbol, bars=book.lookback, end=end, source="exchange")
+            need = max(int(getattr(book, "min_bars", 60) or 60), 60)
+            enough = len(bars) >= need
+            item["barsHeld"] = len(bars)
+            item["enough"] = enough
+            coverage[symbol] = item
+            # Interior holes on thin names must not stall the whole 40h book.
+            if not enough:
+                missing.append(symbol)
+            elif bars:
+                book.ingest_bars(symbol, bars)
+        return coverage, missing
+
+    def _hist_can_publish_partial(
+        self,
+        valid: Sequence[str],
+        completed: Sequence[str],
+        missing: Sequence[str],
+    ) -> bool:
+        """Allow a contiguous subset to go live instead of stalling forever on gaps."""
+        if not missing:
+            return True
+        n_valid = len(valid)
+        n_done = len(completed)
+        if n_done <= 0 or n_valid <= 0:
+            return False
+        failures = int(getattr(self, "_hist_fetch_failures", 0) or 0)
+        coverage_pct = 100.0 * n_done / n_valid
+        min_done = max(1, min(24, max(1, n_valid // 5)))
+        # Do not stall the whole book on a couple of exchange gaps. High
+        # coverage is enough to open the gate; remaining gaps keep retrying.
+        if n_done >= min_done and coverage_pct >= 80.0:
+            return True
+        return failures >= 2 and n_done >= min_done and coverage_pct >= 50.0
+
+    def _hist_replay_selection(
+        self,
+        valid: Sequence[str],
+        completed: Sequence[str],
+        missing: Sequence[str],
+        *,
+        already_ready: bool,
+        published: Sequence[str],
+        changed: Sequence[str],
+    ) -> Tuple[List[str], str]:
+        """Choose the smallest symbol slice that should be replayed.
+
+        Empty names mean the durable lane should wait or skip: either gaps are
+        still blocking the first publish, or an already-live book has no new
+        closed minutes to score.
+        """
+        valid_list = [str(symbol) for symbol in valid]
+        completed_list = [str(symbol) for symbol in completed]
+        missing_list = [str(symbol) for symbol in missing]
+        published_set = {str(symbol) for symbol in published}
+        changed_set = {str(symbol) for symbol in changed}
+        if missing_list:
+            if already_ready:
+                names = [
+                    symbol
+                    for symbol in completed_list
+                    if symbol not in published_set or symbol in changed_set
+                ]
+                return names, ("incremental-gap-fill" if names else "wait-gaps")
+            if completed_list:
+                return completed_list, "partial"
+            return [], "wait-gaps"
+        if already_ready:
+            names = [
+                symbol
+                for symbol in valid_list
+                if symbol not in published_set or symbol in changed_set
+            ]
+            return names, ("incremental" if names else "skip-unchanged")
+        return valid_list, "full"
+
+    def _hist_replay_chunk_size(self, n: int) -> int:
+        """Bound one isolated replay so the live loop and UI keep moving."""
+        total = max(1, int(n or 1))
+        if total <= 8:
+            return total
+        budget = self._budget()
+        level = str(getattr(budget, "level", "normal") or "normal")
+        sets_n = 0
+        try:
+            sets_n = len(getattr(getattr(self, "sets", None), "sets", {}) or {})
+        except Exception:
+            sets_n = 0
+        # 30k+ set catalogs cannot score 16 symbols without stalling stats.
+        if sets_n >= 8000:
+            if total <= 64:
+                size = 2 if level in ("critical", "overload") else 4
+            elif level in ("critical", "overload", "busy"):
+                size = 1
+            else:
+                size = 2
+        elif level in ("critical", "overload"):
+            size = 8
+        elif level == "busy":
+            size = 16
+        else:
+            size = 24
+        return max(1, min(total, size))
+
+    def _replay_worker_count(self, n_names: int, budget: Any = None) -> int:
+        """Parallel symbol replay within configured worker and load ceilings."""
+        n = max(1, int(n_names or 1))
+        try:
+            cpu = max(1, int(os.cpu_count() or 1))
+        except Exception:
+            cpu = 2
+        cpu = min(cpu, int(getattr(self, "system_settings", {}).get("systemWorkers", 2)))
+        level = str(getattr(budget, "level", "normal") or "normal") if budget is not None else "normal"
+        if n <= 1 or level == "critical":
+            return 1
+        if cpu <= 1:
+            return 1
+        if level in ("busy", "overload"):
+            return 1  # one transient replay tape while the retained catalog is near its ceiling
+        return max(1, min(cpu, n))
+
+    def _hist_replay_chunked(self, names: List[str], already: bool, progress_total: int) -> bool:
+        """Replay configured names in load-aware slices; first slice opens the gate."""
+        pending = [str(s) for s in names if s]
+        if not pending:
+            return False
+        total = max(int(progress_total or 0), len(pending))
+        published_any = False
+        done: List[str] = []
+        # Coverage belongs to this frozen run; historical symbols from an old
+        # universe must never turn a new initial/hourly pass into 100%.
+        run_completed = set(self.sets.progress.valid_symbols) - set(pending) - set(self.sets.progress.missing_symbols)
+        ready = bool(already)
+        first = True
+        claimed = self._hist_peer_claim()
+        if not claimed and ready:
+            with self.state_guard():
+                self.sets.progress.phase = "deferred"
+                self.sets.progress.detail = f"history deferred · peer {self._hist_peer_busy()} replaying"
+            return False
+        try:
+            while pending:
+                if self._hist_request_changed():
+                    break
+                size = self._hist_replay_chunk_size(len(pending))
+                if first and len(pending) > 8:
+                    size = min(size, 4)
+                is_first = first
+                first = False
+                chunk = pending[:size]
+                pending = pending[size:]
+                sd_notify("WATCHDOG=1")
+                self.hist_busy = True
+                self._hist_peer_touch()
+                try:
+                    # Score the first slice so intern can open, and the last
+                    # slice so the 50-name book is fully ranked. Middle slices
+                    # only merge fills — rescoring 34k sets per slice stalled 4/50.
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending, completed_symbols=run_completed)
+                finally:
+                    self.hist_busy = False
+                if not ok:
+                    with self.state_guard():
+                        self._hist_incremental_symbols.update(chunk)
+                        self._hist_incremental_symbols.update(pending)
+                    break
+                published_any = True
+                done.extend(chunk)
+                run_completed.update(chunk)
+                ready = True
+                with self.state_guard():
+                    progress = self.sets.progress
+                    progress.ready = True
+                    progress.symbols_done = max(int(progress.symbols_done or 0), len(done))
+                    progress.symbols_total = total
+                    if pending:
+                        progress.phase = "replay"
+                        progress.detail = f"slice {len(done)}/{total} ready · continuing {len(pending)}"
+                try:
+                    self._hist_write_status(self.sets)
+                    self.write_stats(force=True)
+                except Exception:
+                    pass
+                try:
+                    self.trim_caches(force=False, keep_hist=True)
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
+                time.sleep(0.02 if pending else 0.0)
+        finally:
+            self._hist_peer_release()
+        return published_any
+
+    def _hist_fetch_durable(self, book: SetBook, generation: int, symbols: Sequence[str], start: int, end: int) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+        """Fetch only missing exchange minutes, with a two-minute tail overlap."""
+        gaps_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+        for i, symbol in enumerate(symbols):
+            if i % 8 == 0:
+                sd_notify("WATCHDOG=1")
+            gaps_by_symbol[symbol] = self.history_store.missing_ranges(symbol, start, end, source="exchange")
+        requests: List[Tuple[str, Dict[str, Any]]] = []
+        for symbol in symbols:
+            gaps = list(gaps_by_symbol.get(symbol) or [])
+            tail_start = max(start, end - 1)
+            tail_missing = any(int(gap["start"]) <= end <= int(gap["end"]) for gap in gaps)
+            if tail_missing and not any(int(gap["start"]) <= tail_start <= int(gap["end"]) for gap in gaps):
+                gaps.append({"start": tail_start, "end": end, "minutes": end - tail_start + 1, "source": "exchange", "error": "tail overlap"})
+            for gap in gaps:
+                cursor = max(start, int(gap["start"]))
+                gap_end = min(end, int(gap["end"]))
+                while cursor <= gap_end:
+                    page_end = min(gap_end, cursor + 1439)
+                    requests.append((symbol, {
+                        "symbol": symbol,
+                        "interval": "1m",
+                        "startTime": str(cursor * 60_000),
+                        "endTime": str((page_end + 1) * 60_000),
+                        "limit": str(page_end - cursor + 1),
+                    }))
+                    cursor = page_end + 1
+        if not requests:
+            self._hist_fetch_changed = set()
+            return self._hist_coverage(book, symbols, start, end)[0], {}
+        self._hist_progress_update(
+            book,
+            generation,
+            phase="backfill",
+            detail=f"backfill {len(requests)} exact ranges",
+            bars_total=max(0, (end - start + 1) * len(symbols)),
+            symbols_total=len(symbols),
+        )
+        failures: Dict[str, str] = {}
+        stored = 0
+        changed: set[str] = set()
+        for offset in range(0, len(requests), 4):
+            sd_notify("WATCHDOG=1")
+            if self._hist_request_changed():
+                break
+            batch = requests[offset : offset + 4]
+            rows: List[Tuple[str, Dict[str, Any], Any]] = []
+            try:
+                if hasattr(self.api, "gather_public"):
+                    rows = self.api.gather_public([
+                        ("/openApi/swap/v2/quote/klines", params) for _symbol, params in batch
+                    ], timeout=8.0)
+                else:
+                    rows = [
+                        ("/openApi/swap/v2/quote/klines", params, self.api.public("/openApi/swap/v2/quote/klines", params))
+                        for _symbol, params in batch
+                    ]
+            except Exception as exc:
+                for symbol, _params in batch:
+                    failures[symbol] = str(exc)[:160]
+                time.sleep(0)
+                continue
+            for _path, params, body in rows:
+                symbol = str(params.get("symbol") or "")
+                payload = body.get("data") if isinstance(body, dict) else None
+                parsed = parse_exchange_rows(payload)
+                if not parsed:
+                    failures[symbol] = "exchange returned no valid timestamped 1m bars"
+                    continue
+                result = self.history_store.merge(symbol, parsed, source="exchange", quality="exchange-confirmed", persist=False)
+                stored += int(result.get("inserted") or 0) + int(result.get("replaced") or 0)
+                if int(result.get("inserted") or 0) > 0:
+                    changed.add(symbol)
+            sd_notify("WATCHDOG=1")
+            if (offset // 4) and (offset // 4) % 40 == 0:
+                try:
+                    self.history_store.flush()
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
+            self._hist_progress_update(
+                book,
+                generation,
+                detail=f"backfill {min(offset + len(batch), len(requests))}/{len(requests)} ranges · {stored} bars",
+                pct=round(100.0 * min(offset + len(batch), len(requests)) / max(1, len(requests)), 1),
+            )
+            time.sleep(0)
+        try:
+            sd_notify("WATCHDOG=1")
+            self.history_store.flush()
+            sd_notify("WATCHDOG=1")
+        except Exception:
+            pass
+        coverage, missing = self._hist_coverage(book, symbols, start, end)
+        for symbol in missing:
+            failures.setdefault(symbol, "unresolved exchange gap")
+        self._hist_fetch_stored = stored
+        self._hist_fetch_changed = set(changed)
+        if failures or missing:
+            self._hist_fetch_failures = min(6, int(self._hist_fetch_failures or 0) + 1)
+        else:
+            self._hist_fetch_failures = 0
+        return coverage, failures
+
     def _hist_progress_update(self, book: SetBook, generation: int, **values: Any) -> bool:
         """Update replay/fetch progress only while its catalog is current."""
+        sd_notify("WATCHDOG=1")
         with self.state_guard():
             if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                 return False
@@ -9149,7 +10383,16 @@ class Pulse:
             for key, value in values.items():
                 if hasattr(progress, key):
                     setattr(progress, key, value)
-            return True
+        # Progress is durable status too, but status writes are throttled so a
+        # large replay cannot turn every inner vector callback into a disk sync.
+        now = time.monotonic()
+        if now - float(getattr(self, "_hist_status_write_ts", 0.0) or 0.0) >= 0.75:
+            self._hist_status_write_ts = now
+            try:
+                self._hist_write_status(book)
+            except Exception:
+                pass
+        return True
 
     def _hist_fetch(self) -> bool:
         # Network I/O is deliberately outside the shared state lock.  Only a
@@ -9219,7 +10462,6 @@ class Pulse:
                 bars = self._parse_klines((body or {}).get("data"))
                 if symbol and bars:
                     fetched[symbol] = bars
-            time.sleep(0.12)
         stored = len(fetched)
         with self.state_guard():
             if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
@@ -9240,7 +10482,7 @@ class Pulse:
                 book.progress.detail = f"fetch empty {stored}/{len(symbols)} · retry in {delay:.0f}s"
         return bool(stored)
 
-    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int) -> bool:
+    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int, score: bool = True, completed_symbols: Optional[set] = None) -> bool:
         """Replay a catalog snapshot and atomically publish its result.
 
         Historic scoring is CPU-heavy but read-only with respect to live
@@ -9260,106 +10502,243 @@ class Pulse:
             # history.  Keep the source book live and build only a lean,
             # metadata-equivalent replay catalog with the selected bars.
             replay_book = source.replay_clone(names)
+            run_progress = copy.deepcopy(source.progress)
+            run_completed = set(completed_symbols) if completed_symbols is not None else set(source._hist_seen)
+            if run_progress.valid_symbols:
+                run_completed.intersection_update(run_progress.valid_symbols)
+            replay_book._hist_seen = set(run_completed)
+            replay_book._hist_total = max(0, int(progress_total or 0))
             replay_book.progress.ready = bool(already)
             source._running = True
+            prior_done = len(run_completed)
             source.progress = copy.deepcopy(source.progress)
             source.progress.phase = "replay"
-            source.progress.pct = 1.0
-            source.progress.symbol = ""
+            source.progress.pct = 35.0 + 60.0 * min(prior_done, progress_total) / max(1, progress_total)
+            source.progress.symbol = names[0] if names else ""
             source.progress.set_id = ""
             source.progress.bars_done = 0
             source.progress.bars_total = sum(len(replay_book.bars.get(s) or []) for s in names)
             source.progress.sets_done = 0
             source.progress.sets_total = len(replay_book.sets)
-            source.progress.symbols_done = 0
-            source.progress.symbols_total = max(0, int(progress_total or len(names)))
+            source.progress.symbols_done = prior_done
+            source.progress.symbols_total = max(0, int(progress_total or 0), prior_done, len(names))
             source.progress.elapsed_ms = 0.0
-            source.progress.detail = f"{len(names)} symbols · {len(replay_book.sets)} sets"
+            source.progress.detail = f"{prior_done}/{source.progress.symbols_total} · {len(names)} this slice · {len(replay_book.sets)} sets"
             source.progress.ready = bool(already)
+
+        def merge_progress():
+            # A replay clone resets Progress internally. Preserve the run's
+            # identity, coverage/gap metadata and prior publication watermark.
+            progress = copy.deepcopy(replay_book.progress)
+            for key in ("run_id", "generation", "mode", "requested_start", "requested_end", "watermark",
+                        "last_published_watermark", "last_complete_run", "next_run_at", "valid_symbols",
+                        "invalid_symbols", "missing_symbols", "gapped_symbols", "stale", "deferred_reason"):
+                setattr(progress, key, copy.deepcopy(getattr(run_progress, key)))
+            seen = run_completed | (set(replay_book._hist_seen) & set(names))
+            progress.symbols_total = max(1, int(progress_total or 0))
+            progress.symbols_done = min(len(seen), progress.symbols_total)
+            progress.pct = 35.0 + 60.0 * progress.symbols_done / progress.symbols_total
+            progress.ready = bool(already) or bool(source.progress.ready) or bool(progress.ready)
+            progress.coordination_complete = False  # only the durable publisher completes the full run
+            return progress
+        try:
+            self._hist_write_status(source)
+        except Exception:
+            pass
 
         def publish_progress() -> None:
             sd_notify("WATCHDOG=1")
+            if should_abort():
+                # Inner symbol callbacks must release a superseded long replay;
+                # cancelling only pending futures waits for entire symbols.
+                raise RuntimeError("Replay superseded by a newer generation")
+            should_write = False
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
-                    source.progress = copy.deepcopy(replay_book.progress)
+                    keep_ready = bool(already) or bool(source.progress.ready)
+                    source.progress = merge_progress()
+                    if keep_ready:
+                        source.progress.ready = True
                     source._running = True
+                    now_m = time.monotonic()
+                    should_write = now_m - float(getattr(self, "_hist_status_write_ts", 0.0) or 0.0) >= 0.75
+            if should_write:
+                self._hist_status_write_ts = time.monotonic()
+                try:
+                    self._hist_write_status(source)
+                except Exception:
+                    pass
+                now_stats = time.monotonic()
+                if now_stats - float(getattr(self, "_hist_stats_write_ts", 0.0) or 0.0) >= 1.5:
+                    self._hist_stats_write_ts = now_stats
+                    try:
+                        self.write_stats(force=True)
+                    except Exception:
+                        pass
+            time.sleep(0)
 
         def should_abort() -> bool:
             if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                 return True
-            return bool(already and self.load.last_budget.level == "critical")
+            if self._hist_request_changed():
+                return True
+            return False
 
+        budget = getattr(self.load, "last_budget", None)
+        replay_workers = self._replay_worker_count(len(names or []), budget)
+
+        published = False
+        affected_ids: List[str] = []
         try:
             replay_book.replay_all(
                 on_step=publish_progress,
                 symbols=names,
                 abort=should_abort,
+                workers=replay_workers,
                 merge=True,
                 progress_total=progress_total,
                 score=False,
             )
+            try:
+                replay_book.compact_hist_tapes()
+                replay_book.trim_tapes(
+                    hist_cap=96,
+                    live_cap=80,
+                    bar_cap=max(120, int(getattr(replay_book, "lookback", 480) or 480)),
+                )
+            except Exception:
+                pass
+            if self._hist_request_changed():
+                with self.state_guard():
+                    if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                        source.progress.phase = "deferred"
+                        source.progress.detail = "replay superseded by newer generation"
+                        source.progress.deferred_reason = "newer manual/config generation"
+                return False
+
+            with self.state_guard():
+                if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                    return False
+                if replay_book.progress.phase == "error":
+                    source.progress = merge_progress()
+                    return False
+                wanted = set(names)
+                incoming = {}
+                affected = set()
+                # An empty replacement still removes prior evidence. Score
+                # every affected Set, including rows outside the newest 12.
+                for sid, current in source.sets.items():
+                    if any(str(row.get("symbol") or "") in wanted for row in current.hist):
+                        affected.add(sid)
+                for sid, target in replay_book.sets.items():
+                    tape = target.hist
+                    # Empty is a completed result, not an omitted config.
+                    incoming[sid] = list(tape)
+                    if not tape:
+                        continue
+                    if any(str(row.get("symbol") or "") in wanted for row in tape):
+                        affected.add(sid)
+                source._commit_hist(
+                    incoming,
+                    replay_book.ind_hist,
+                    merge=True,
+                    replayed_symbols=names,
+                    score=False,
+                    score_ids=affected,
+                )
+                keys = set(source.strategy_hist) | set(replay_book.strategy_hist)
+                source.strategy_hist = {
+                    key: merge_hist_rows(
+                        source.strategy_hist.get(key) or [],
+                        replay_book.strategy_hist.get(key) or [],
+                        names,
+                    )
+                    for key in keys
+                }
+                source._hist_seen = set(source._hist_seen) | set(replay_book._hist_seen)
+                source._hist_total = max(int(source._hist_total or 0), int(replay_book._hist_total or 0), len(source._hist_seen))
+                source.last_run = float(replay_book.last_run or time.time())
+                source.progress = merge_progress()
+                keep_done = source.progress.symbols_done
+                keep_total = source.progress.symbols_total
+                source.progress.sets_total = len(source.sets)
+                source.progress.sets_done = len(source.sets)
+                source.progress.symbols_done = keep_done
+                source.progress.symbols_total = keep_total
+                source.progress.detail = f"slice {keep_done}/{keep_total} ready · continuing {max(0, keep_total - keep_done)}"
+                source._snap_cache = None
+                source._live_ov_cache = None
+                self._stats_force = True
+                affected_ids = sorted(affected)
+                published = True
+            if published:
+                try:
+                    source.compact_hist_tapes()
+                    source.trim_tapes(
+                        hist_cap=96,
+                        live_cap=80,
+                        bar_cap=max(120, int(getattr(source, "lookback", 480) or 480)),
+                    )
+                except Exception:
+                    pass
+            if published and score:
+                self._score_committed(source, generation, affected_ids)
+                try:
+                    source.compact_hist_tapes()
+                except Exception:
+                    pass
+            return published
         except Exception as exc:
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
-                    source.progress.phase = "error"
-                    source.progress.error = str(exc)[:220]
-                    source._running = False
+                    if self._hist_request_changed():
+                        source.progress.phase = "deferred"
+                        source.progress.detail = "replay superseded by newer generation"
+                        source.progress.deferred_reason = "newer manual/config generation"
+                    else:
+                        source.progress.phase = "error"
+                        source.progress.error = str(exc)[:220]
             return False
-
-        with self.state_guard():
-            if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
-                if self.sets is source:
+        finally:
+            with self.state_guard():
+                if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                     source._running = False
-                return False
-            if replay_book.progress.phase == "error":
-                source.progress = copy.deepcopy(replay_book.progress)
-                source._running = False
-                return False
-            # Commit only the selected symbol slice into the live source book.
-            # Exchange/live evidence stays in place, so a fill or control event
-            # that arrived during replay cannot be overwritten by a stale
-            # snapshot.  All IDs are included so a refreshed empty slice also
-            # removes that symbol's previous historic rows; scoring is limited
-            # to states actually touched by old or new rows.
-            incoming = {
-                sid: list(state.hist)
-                for sid, state in replay_book.sets.items()
-            }
-            wanted = set(names)
-            affected = set()
-            for sid, current in source.sets.items():
-                target = replay_book.sets.get(sid)
-                if any(str(row.get("symbol") or "") in wanted for row in current.hist):
-                    affected.add(sid)
-                if target is not None and any(str(row.get("symbol") or "") in wanted for row in target.hist):
-                    affected.add(sid)
-            source._commit_hist(
-                incoming,
-                replay_book.ind_hist,
-                merge=True,
-                replayed_symbols=names,
-                score_ids=affected,
-            )
-            keys = set(source.strategy_hist) | set(replay_book.strategy_hist)
-            source.strategy_hist = {
-                key: merge_hist_rows(
-                    source.strategy_hist.get(key) or [],
-                    replay_book.strategy_hist.get(key) or [],
-                    names,
-                )
-                for key in keys
-            }
-            source._hist_seen = set(replay_book._hist_seen)
-            source._hist_total = int(replay_book._hist_total or 0)
-            source.last_run = float(replay_book.last_run or time.time())
-            source.progress = copy.deepcopy(replay_book.progress)
-            source.progress.sets_total = len(source.sets)
-            source.progress.sets_done = len(source.sets)
-            source._running = False
-            source._snap_cache = None
-            source._live_ov_cache = None
-            self._stats_force = True
-            return True
+
+    def _score_committed(self, book: Any, generation: int, ids: List[str]) -> None:
+        """Score a published hist slice without holding the state lock for the catalog."""
+        todo = [str(s) for s in ids if s]
+        if not todo:
+            return
+
+        try:
+            cpu = max(1, int(os.cpu_count() or 1))
+        except Exception:
+            cpu = 2
+        workers = 1 if len(todo) < 16 else max(1, min(cpu, int(getattr(self, "system_settings", {}).get("systemWorkers", 2)), max(1, len(todo) // 16)))
+        if workers <= 1:
+            for i in range(0, len(todo), 32):
+                with self.state_guard():
+                    if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                        return
+                states = [book.sets[sid] for sid in todo[i:i+32] if sid in book.sets]
+                for pair in book.score_pairs(states):
+                    book._score_pair(pair)
+                sd_notify("WATCHDOG=1")
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
+                for start in range(0, len(todo), 32):
+                    with self.state_guard():
+                        if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                            return
+                    states = [book.sets[sid] for sid in todo[start:start+32] if sid in book.sets]
+                    list(pool.map(book._score_pair, book.score_pairs(states)))
+                    sd_notify("WATCHDOG=1")
+        with self.state_guard():
+            if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                book._cap_active()
+                book.refresh_progress_detail()
+                book._snap_cache = None
+                book._live_ov_cache = None
 
     def _bootstrap_catalog(self) -> None:
         """Build the initial full-range catalog without blocking service start.
@@ -9389,8 +10768,11 @@ class Pulse:
             source.progress.detail = "building full catalog"
 
         try:
+            sd_notify("WATCHDOG=1")
             built = SetBook()
+            built.calculation_cache = getattr(self, "calculation_cache", None)
             built.load(overlay, cts, rebuild=True)
+            sd_notify("WATCHDOG=1")
             with self.state_guard():
                 current_generation = int(getattr(self, "_sets_generation", 0) or 0)
                 if self.sets is not source or current_generation != generation:
@@ -9409,6 +10791,7 @@ class Pulse:
                 self.sets = built
                 self._sets_generation += 1
                 self._catalog_ready.set()
+                self._hist_wake.set()
                 self._stats_force = True
         except Exception as exc:
             with self.state_guard():
@@ -9420,9 +10803,492 @@ class Pulse:
             with self.state_guard():
                 self._catalog_bootstrap_running = False
 
+    def stop_history(self) -> None:
+        """Stop the history worker and wake it if it is in an idle wait."""
+        self._hist_stop.set()
+        self._hist_wake.set()
+
+    def _hist_incremental_replay(self) -> bool:
+        """Replay only symbols whose closed live bar watermark advanced.
+
+        A complete hourly run remains the publication boundary for the full
+        catalog. Between those runs, a one-symbol slice keeps current Set and
+        indication evidence fresh without rescoring every selected symbol.
+        """
+        with self.state_guard():
+            book = self.sets
+            generation = int(getattr(self, "_sets_generation", 0) or 0)
+            if not book.enabled or not book.progress.ready or book._running:
+                return False
+            pending = sorted(str(symbol) for symbol in getattr(self, "_hist_incremental_symbols", set()))
+            if not pending:
+                return False
+            self._hist_incremental_symbols.difference_update(pending)
+            previous = copy.deepcopy(book.progress)
+            valid_list = self._capped_scan_names(previous.valid_symbols or SYMBOLS)
+            valid = set(valid_list)
+            names = [symbol for symbol in pending if symbol in valid]
+            if not names:
+                return False
+            end = int(time.time() // 60) - 1
+            retry: List[str] = []
+            for symbol in names:
+                bars = self.history_store.window(symbol, bars=book.lookback, end=end, source=None)
+                if len(bars) < book.min_bars:
+                    retry.append(symbol)
+                    continue
+                book.ingest_bars(symbol, bars)
+            self._hist_incremental_symbols.update(retry)
+            names = [symbol for symbol in names if symbol not in retry]
+            if not names:
+                return False
+            book.progress.phase = "incremental"
+            book.progress.pct = 100.0
+            book.progress.detail = f"incremental closed-bar update · {len(names)} symbols"
+            book.progress.symbols_done = len(valid_list) - len(retry)
+            book.progress.symbols_total = len(valid_list)
+
+        replayed = self._hist_replay_chunked(names, True, len(valid_list))
+        if not replayed:
+            with self.state_guard():
+                self._hist_incremental_symbols.update(names)
+            return False
+        keep = set(valid_list)
+        watermark = {str(sym): int(ts) for sym, ts in dict(previous.watermark or {}).items() if str(sym) in keep}
+        for symbol in names:
+            watermark[symbol] = int(self.history_store.watermark(symbol, source=None) or watermark.get(symbol, 0))
+        published = {str(sym): int(ts) for sym, ts in dict(previous.last_published_watermark or {}).items() if str(sym) in keep}
+        with self.state_guard():
+            progress = self.sets.progress
+            progress.phase = "ready"
+            progress.pct = 100.0
+            progress.ready = True
+            progress.run_id = previous.run_id
+            progress.generation = previous.generation
+            progress.mode = previous.mode
+            progress.requested_start = previous.requested_start
+            progress.requested_end = previous.requested_end
+            progress.watermark = watermark
+            progress.last_published_watermark = published
+            progress.last_complete_run = previous.last_complete_run
+            progress.next_run_at = previous.next_run_at
+            progress.valid_symbols = list(valid_list)
+            # This publication belongs to the frozen current universe. Old
+            # symbols retained for evidence must not produce e.g. 65/13.
+            missing = sorted(sym for sym in valid_list if int(watermark.get(sym) or 0) <= 0 or sym in retry)
+            progress.symbols_total = len(valid_list)
+            progress.symbols_done = len(valid_list) - len(missing)
+            progress.pct = 100.0 * progress.symbols_done / max(1, progress.symbols_total)
+            progress.phase = "partial" if missing else "ready"
+            progress.invalid_symbols = list(previous.invalid_symbols)
+            progress.missing_symbols = missing
+            progress.gapped_symbols = []
+            progress.stale = bool(missing)
+            progress.deferred_reason = ""
+            progress.coordination_complete = not missing
+            progress.detail = f"incremental closed-bar update · {len(names)} symbols · hourly publish pending"
+        self._hist_write_status(self.sets)
+        return True
+
+    def _hist_loop_durable(self) -> None:
+        """One lane-owned initial/hourly/gap state machine for historic replay."""
+        while not self._hist_stop.is_set():
+            sd_notify("WATCHDOG=1")
+            self._hist_wake.clear()
+            if not self._catalog_ready.is_set():
+                self._hist_wake.wait(timeout=5.0)
+                continue
+            paused = os.path.exists(PAUSE_PATH) or os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
+            if not paused and bool(getattr(self, "_hist_resume_repair", False)):
+                # A pause/stop can leave an exchange gap even when its next
+                # hourly deadline has not arrived. Force the exact durable
+                # backfill path before allowing incremental replay again.
+                self._hist_resume_repair = False
+                self._hist_next_hourly_at = 0.0
+                with self.state_guard():
+                    if self.sets.progress.ready:
+                        self.sets.progress.phase = "gap"
+                        self.sets.progress.detail = "resume requires exchange gap repair"
+                        self.sets.progress.stale = True
+            # Peek until pause/load gates are clear so a manual request keeps
+            # its explicit range instead of being consumed while deferred.
+            request = self._hist_new_request(consume=False)
+            try:
+                with self.state_guard():
+                    book = self.sets
+                    now = time.time()
+                    ready = bool(book.progress.ready)
+                    manual = bool(request)
+                    # The same deadline drives the first run, hourly refreshes,
+                    # and bounded retry of an unresolved exchange gap.
+                    hourly_due = now >= float(self._hist_next_hourly_at or 0.0)
+                    enabled = bool(book.enabled)
+                if paused:
+                    self._hist_resume_repair = True
+                    with self.state_guard():
+                        book.progress.phase = "paused"
+                        book.progress.detail = "historic lane paused · watermark checkpointed"
+                        book.progress.stale = bool(book.progress.ready)
+                        book.progress.deferred_reason = "pause/stop control"
+                    self._hist_checkpoint(book, "paused")
+                    self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=2.0)
+                    continue
+                if not enabled:
+                    with self.state_guard():
+                        book.progress.phase = "ready"
+                        book.progress.ready = True
+                        book.progress.detail = "historic lane disabled"
+                    self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=5.0)
+                    continue
+                budget = self._budget()
+                catalog_incomplete = (not ready) or (not bool(getattr(book.progress, "coordination_complete", False)))
+                peer = "" if catalog_incomplete else self._hist_peer_busy()
+                if peer:
+                    with self.state_guard():
+                        book.progress.phase = "deferred"
+                        book.progress.detail = f"history deferred · peer {peer} replaying"
+                        book.progress.stale = bool(book.progress.ready)
+                        book.progress.deferred_reason = f"peer {peer}"
+                    self._hist_checkpoint(book, "peer-deferred")
+                    self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=2.0)
+                    continue
+                if (not bool(getattr(budget, "hist_run", True))) and not catalog_incomplete:
+                    with self.state_guard():
+                        book.progress.phase = "deferred"
+                        book.progress.detail = f"history deferred · load {getattr(budget, 'level', 'unknown')}"
+                        book.progress.stale = bool(book.progress.ready)
+                        book.progress.deferred_reason = f"load {getattr(budget, 'level', 'unknown')}"
+                    self._hist_checkpoint(book, "load-deferred")
+                    self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=2.0)
+                    continue
+                incremental_pending = False
+                with self.state_guard():
+                    incremental_pending = bool(getattr(self, "_hist_incremental_symbols", set()))
+                if ready and not manual and not hourly_due and incremental_pending:
+                    self._hist_incremental_replay()
+                    self._hist_wake.wait(timeout=0.25)
+                    continue
+                if not manual and not hourly_due:
+                    wait_s = min(max(float(self._hist_next_hourly_at or now + 5.0) - now, 0.25), 10.0)
+                    self._hist_wake.wait(timeout=wait_s)
+                    continue
+                mode = str(request.get("mode") or ("initial" if not ready else "hourly"))
+                run_id = str(request.get("runId") or f"{CONN_SHORT}:{int(now * 1000)}")
+                run_generation = int(request.get("generation") or (int(getattr(self, "_sets_generation", 0) or 0) + 1))
+                raw_symbols = request.get("symbols")
+                selected_symbols = request.get("selectedSymbols")
+                requested_symbols = selected_symbols or raw_symbols or list(SYMBOLS)
+                wildcard_requested = bool(request.get("allSymbols")) or any(
+                    isinstance(values, list)
+                    and any(str(value).strip().upper() in ("*", "ALL", "UNLIMITED") for value in values)
+                    for values in (raw_symbols, selected_symbols)
+                )
+                if wildcard_requested:
+                    # A wildcard is an explicit request for the frozen dynamic
+                    # universe; do not let a stale selectedSymbols mirror win.
+                    requested_symbols = list(SYMBOLS)
+                request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
+                request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
+                req_cap = None
+                for src in (request, request_overlay, request_options):
+                    if isinstance(src, dict) and src.get("symbolCap") is not None:
+                        try:
+                            req_cap = max(0, int(src.get("symbolCap")))
+                            break
+                        except (TypeError, ValueError):
+                            req_cap = None
+                ov_cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
+                if ov_cap <= 0:
+                    ov_cap = DEFAULT_SYMBOL_CAP
+                # Overlay owns the ranked book. A hist generation must never
+                # assign symbol_cap — stale 25-cap jobs were shrinking a 50 book.
+                use_cap = ov_cap
+                valid, invalid = self._hist_selected_snapshot(
+                    requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS),
+                    cap=use_cap,
+                )
+                self._hist_snapshot_symbols = list(valid)
+                self._hist_invalid_symbols = list(invalid)
+                keep = set(valid)
+                self._hist_last_published_watermark = {
+                    str(sym): int(ts)
+                    for sym, ts in (getattr(self, "_hist_last_published_watermark", {}) or {}).items()
+                    if str(sym) in keep
+                }
+                lookback = int(book.lookback)
+                if manual:
+                    request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
+                    request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
+                    try:
+                        requested_hours = float(request.get("hours")) if request.get("hours") is not None else 0.0
+                        if requested_hours <= 0 and request_overlay.get("histLookbackBars") is not None:
+                            requested_hours = float(request_overlay.get("histLookbackBars")) / 60.0
+                        if requested_hours > 0:
+                            lookback = max(120, min(20160, int(round(requested_hours * 60))))
+                    except (TypeError, ValueError):
+                        pass
+                    if lookback != book.lookback:
+                        book.lookback = lookback
+                    try:
+                        refresh_raw = request.get("refreshS") or request_overlay.get("histRefreshS")
+                        if refresh_raw is not None:
+                            book.refresh_s = max(60.0, min(86400.0, float(refresh_raw)))
+                    except (TypeError, ValueError):
+                        pass
+                    # These controls are replay-lane settings. They are
+                    # applied to the shared SetBook snapshot without spawning
+                    # a second calculator or changing exchange safety lanes.
+                    if request_options:
+                        if "stratBlock" in request_options:
+                            book.hist_block = bool(request_options["stratBlock"])
+                        if "stratDca" in request_options:
+                            book.hist_dca = bool(request_options["stratDca"])
+                        if "trailing" in request_options:
+                            book.trail_enabled = bool(request_options["trailing"])
+                    for key, value in request_overlay.items():
+                        if key in ("histSimulateBlock", "histSimulateDca", "stratTrailing"):
+                            if key == "histSimulateBlock":
+                                book.hist_block = bool(value)
+                            elif key == "histSimulateDca":
+                                book.hist_dca = bool(value)
+                            else:
+                                book.trail_enabled = bool(value)
+                start, end = self._history_bounds(lookback)
+                catalog_generation = int(getattr(self, "_sets_generation", 0) or 0)
+                self._hist_active_request = dict(request)
+                self._hist_active_run_id = run_id
+                self._hist_latest_request_id = run_id
+                if run_id:
+                    self._hist_request_seen = run_id
+                with self.state_guard():
+                    progress = book.progress
+                    progress.phase = "initial" if mode == "initial" else "backfill"
+                    progress.pct = 0.0
+                    progress.run_id = run_id
+                    progress.generation = run_generation
+                    progress.mode = mode
+                    progress.requested_start = start
+                    progress.requested_end = end
+                    progress.valid_symbols = list(valid)
+                    progress.invalid_symbols = list(invalid)
+                    progress.missing_symbols = []
+                    progress.gapped_symbols = []
+                    progress.stale = bool(ready)
+                    progress.deferred_reason = ""
+                    progress.symbols_total = len(valid)
+                    # Keep the last published count while the book is already
+                    # live so the UI does not flash 0/25 on every hourly run.
+                    if not ready:
+                        progress.symbols_done = 0
+                    else:
+                        try:
+                            progress.symbols_done = max(int(progress.symbols_done or 0), 0)
+                        except Exception:
+                            pass
+                    progress.bars_total = len(valid) * lookback
+                    progress.bars_done = 0
+                    progress.sets_total = len(book.sets)
+                    progress.detail = f"snapshot frozen · {len(valid)} valid · {len(invalid)} invalid · {mode}"
+                self._hist_write_status(book, selectedSymbols=list(valid), validSymbols=list(valid), invalidSymbols=list(invalid))
+                self._hist_checkpoint(book, "run-start")
+
+                coverage, failures = self._hist_fetch_durable(book, catalog_generation, valid, start, end)
+                if int(getattr(self, "_sets_generation", 0) or 0) != catalog_generation:
+                    self._hist_checkpoint(book, "config-generation-changed")
+                    continue
+                if self._hist_request_changed():
+                    self._hist_checkpoint(book, "superseded-before-replay")
+                    continue
+                missing = []
+                for symbol in valid:
+                    item = coverage.get(symbol) or {}
+                    held = int(item.get("barsHeld") or item.get("present") or 0)
+                    if not (item.get("enough") or held >= 60):
+                        missing.append(symbol)
+                gapped = [symbol for symbol in missing if (coverage.get(symbol) or {}).get("gaps")]
+                completed = [symbol for symbol in valid if symbol not in missing]
+                bars_present = sum(int((coverage.get(symbol) or {}).get("present") or 0) for symbol in valid)
+                coverage_blob = {
+                    "symbols": {
+                        "requested": len(list(requested_symbols)) if isinstance(requested_symbols, list) else len(valid),
+                        "valid": len(valid),
+                        "invalid": len(invalid),
+                        "completed": len(completed),
+                        "failed": len(failures),
+                        "gapped": len(gapped),
+                        "coveragePct": round(100.0 * len(completed) / max(1, len(valid)), 2),
+                    },
+                    "bars": {
+                        "requested": len(valid) * lookback,
+                        "completed": bars_present,
+                        "missing": max(0, len(valid) * lookback - bars_present),
+                        "gapped": sum(int((coverage.get(symbol) or {}).get("missing") or 0) for symbol in gapped),
+                        "coveragePct": round(100.0 * bars_present / max(1, len(valid) * lookback), 2),
+                    },
+                    "perSymbol": coverage,
+                    "gaps": [gap for item in coverage.values() for gap in (item.get("gaps") or [])],
+                    "failures": failures,
+                    "source": "exchange",
+                }
+                with self.state_guard():
+                    progress = book.progress
+                    already_ready = bool(progress.ready)
+                    progress.missing_symbols = list(missing)
+                    progress.gapped_symbols = list(gapped)
+                    progress.symbols_done = len(completed)
+                    progress.bars_done = bars_present
+                    keep_wm = set(valid)
+                    progress.watermark = {
+                        str(sym): int(ts)
+                        for sym, ts in dict(self.history_store.watermark() or {}).items()
+                        if str(sym) in keep_wm
+                    }
+                    progress.pct = 20.0 if missing else 35.0
+                    progress.phase = "gap" if missing else "replay"
+                    progress.detail = (
+                        f"unresolved exchange gaps · {len(missing)}/{len(valid)} symbols"
+                        if missing else f"complete coverage · replaying {len(valid)} symbols × {len(book.sets)} sets"
+                    )
+                    progress.deferred_reason = "unresolved exchange gap" if missing else ""
+                self._hist_write_status(book, coverage=coverage_blob)
+                replay_names, replay_reason = self._hist_replay_selection(
+                    valid,
+                    completed,
+                    missing,
+                    already_ready=already_ready,
+                    published=list(getattr(self, "_hist_last_published_watermark", {}) or {}),
+                    changed=list(getattr(self, "_hist_fetch_changed", set()) or []),
+                )
+                if missing:
+                    retry_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
+                    self._hist_next_hourly_at = retry_at
+                    with self.state_guard():
+                        book.progress.next_run_at = retry_at
+                    self._hist_checkpoint(book, "gap")
+                    self._hist_write_status(book, nextRunAt=retry_at)
+                if replay_reason == "wait-gaps":
+                    self._hist_wake.wait(timeout=min(5.0, max(0.5, float(self._hist_next_hourly_at or time.time() + 5.0) - time.time())))
+                    continue
+                if replay_reason == "skip-unchanged":
+                    complete_at = time.time()
+                    with self.state_guard():
+                        refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+                    self._hist_next_hourly_at = complete_at + refresh_s
+                    with self.state_guard():
+                        progress = book.progress
+                        progress.phase = "ready"
+                        progress.pct = 100.0
+                        progress.ready = True
+                        progress.last_complete_run = complete_at
+                        progress.next_run_at = self._hist_next_hourly_at
+                        progress.stale = False
+                        progress.deferred_reason = ""
+                        progress.coordination_complete = True
+                        progress.detail = f"coverage unchanged · {len(valid)} symbols · skip replay"
+                    self._hist_write_status(book, coverage=coverage_blob, nextRunAt=self._hist_next_hourly_at)
+                    self._hist_checkpoint(book, "skip-unchanged")
+                    continue
+                if missing:
+                    with self.state_guard():
+                        book.progress.phase = "replay"
+                        book.progress.detail = (
+                            f"partial coverage {len(completed)}/{len(valid)} · replaying {len(replay_names)} contiguous"
+                        )
+                        book.progress.deferred_reason = ""
+
+                with self.state_guard():
+                    already = bool(book.progress.ready)
+                # Never inflate the replay denominator from a previous
+                # uncapped watermark (old 500+ symbol runs).
+                progress_total = max(len(valid), len(replay_names))
+                replayed = self._hist_replay_chunked(replay_names, already, progress_total)
+                if not replayed or self._hist_request_changed():
+                    self._hist_checkpoint(book, "superseded-or-deferred")
+                    self._hist_wake.wait(timeout=1.0)
+                    continue
+                watermark = {
+                    str(sym): int(ts)
+                    for sym, ts in dict(getattr(self, "_hist_last_published_watermark", {}) or {}).items()
+                    if str(sym) in set(valid)
+                }
+                for symbol in replay_names:
+                    watermark[symbol] = int(self.history_store.watermark(symbol, source="exchange") or 0)
+                complete_at = time.time()
+                self._hist_last_published_watermark = dict(watermark)
+                if not missing:
+                    self._hist_fetch_failures = 0
+                self._hist_last_closed_minute = max(watermark.values(), default=0)
+                with self.state_guard():
+                    refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+                if missing:
+                    self._hist_next_hourly_at = time.time() + min(60.0, 10.0 * max(1, int(self._hist_fetch_failures or 1)))
+                else:
+                    self._hist_next_hourly_at = complete_at + refresh_s
+                with self.state_guard():
+                    progress = book.progress
+                    progress.phase = "ready"
+                    progress.pct = 100.0
+                    progress.ready = True
+                    progress.last_complete_run = complete_at
+                    progress.next_run_at = self._hist_next_hourly_at
+                    progress.watermark = dict(watermark)
+                    progress.last_published_watermark = dict(watermark)
+                    if already_ready:
+                        progress.valid_symbols = list(dict.fromkeys(list(progress.valid_symbols or []) + list(replay_names)))
+                    else:
+                        progress.valid_symbols = list(replay_names)
+                    progress.missing_symbols = list(missing)
+                    progress.gapped_symbols = list(gapped)
+                    progress.stale = False
+                    progress.deferred_reason = ""
+                    progress.coordination_complete = True
+                    if missing:
+                        progress.detail = (
+                            f"published partial {mode} replay · {len(progress.valid_symbols)}/{len(valid)} symbols · {len(missing)} gaps retry"
+                        )
+                    else:
+                        progress.detail = f"published complete {mode} replay · {len(valid)} symbols · next hourly refresh"
+                    if request:
+                        self._hist_request_seen = run_id
+                self._hist_write_status(book, coverage=coverage_blob, finishedAt=complete_at, lastCompleteRun=complete_at, nextRunAt=self._hist_next_hourly_at)
+                self._hist_checkpoint(book, "published")
+            except Exception:
+                error = traceback.format_exc()[-220:]
+                self._hist_next_hourly_at = time.time() + 10.0
+                with self.state_guard():
+                    current = self.sets
+                    current.progress.phase = "error"
+                    current.progress.error = error
+                    current.progress.detail = "historic lane error"
+                    current.progress.stale = bool(current.progress.ready)
+                    current.progress.deferred_reason = error[:180]
+                    current.progress.next_run_at = self._hist_next_hourly_at
+                self._hist_write_status(self.sets, error=error, deferredReason=error[:180], nextRunAt=self._hist_next_hourly_at)
+                self._hist_checkpoint(self.sets, "error")
+                if hasattr(self.api, "err"):
+                    self.api.err.write("hist", msg=error[:200])
+            finally:
+                self._hist_active_request = {}
+                self._hist_active_run_id = ""
+                self.hist_busy = False
+            with self.state_guard():
+                next_at = float(getattr(self, "_hist_next_hourly_at", 0.0) or 0.0)
+                wait_s = min(max(next_at - time.time(), 0.25), 10.0) if next_at else 1.0
+            self._hist_wake.wait(timeout=wait_s)
+
     def _hist_loop(self) -> None:
-        while not self._hist_stop:
-            if not self._catalog_ready.wait(timeout=0.2):
+        while not self._hist_stop.is_set():
+            # Clear before inspecting state. Any catalog/config/bar wake that
+            # arrives during replay remains set and is observed by the next
+            # deadline wait, so a fresh signal cannot be lost between clear and
+            # wait.
+            self._hist_wake.clear()
+            if not self._catalog_ready.is_set():
+                self._hist_wake.wait(timeout=5.0)
                 continue
             try:
                 with self.state_guard():
@@ -9506,10 +11372,31 @@ class Pulse:
                     current.progress.error = error
                 if hasattr(self.api, "err"):
                     self.api.err.write("hist", msg=error[:200])
-            remain = 2.4
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < remain and not self._hist_stop:
-                time.sleep(0.2)
+            with self.state_guard():
+                current = self.sets
+                now = time.time()
+                refresh_in = max(
+                    0.0,
+                    float(getattr(current, "last_run", 0.0) or 0.0)
+                    + float(getattr(current, "refresh_s", 90.0) or 90.0)
+                    - now,
+                )
+                fetch_in = max(0.0, float(getattr(self, "_hist_fetch_next", 0.0) or 0.0) - now)
+                ready = bool(getattr(current.progress, "ready", False))
+                enabled = bool(getattr(current, "enabled", True))
+                budget = getattr(self.load, "last_budget", None)
+                hist_allowed = bool(getattr(budget, "hist_run", True))
+            if not enabled:
+                wait_s = 5.0
+            elif not hist_allowed:
+                wait_s = 2.0
+            elif refresh_in <= 0.0 and fetch_in > 0.0:
+                wait_s = min(fetch_in, 5.0)
+            elif not ready:
+                wait_s = 0.5
+            else:
+                wait_s = min(max(refresh_in, 0.05), 5.0)
+            self._hist_wake.wait(timeout=wait_s)
 
     def _warm_pass(self) -> None:
         # Network waits must not own the lock used by stats and coordination.
@@ -9554,7 +11441,27 @@ class Pulse:
                 pass
             time.sleep(0.15)
 
+    def _cycle_step(self, name, action):
+        """Fixed stage names, no trace history; identify stalls without growing logs."""
+        started = time.perf_counter()
+        self._active_stage_at = started
+        self._active_cycle_stage = name
+        try:
+            return action()
+        finally:
+            self._cycle_stage_ms[name] = round(self._cycle_stage_ms.get(name, 0.0) + (time.perf_counter() - started) * 1000.0, 1)
+            self._active_cycle_stage = ""
+
+    def _finish_cycle_timing(self, started, cpu_started):
+        self.last_scan_ms = (time.perf_counter() - started) * 1000.0
+        self.last_scan_cpu_ms = (time.thread_time() - cpu_started) * 1000.0
+        self.last_scan_io = bool(self.did_io)
+        self.cycle_overrun = self.last_scan_ms > SCAN_S * 1000.0 and not (self.did_io or self.hist_busy)
+        self.last_cycle_stages = dict(self._cycle_stage_ms)
+
     def _one_cycle(self) -> None:
+        self._cycle_stage_ms = {}
+        self.did_io = False
         sd_notify("WATCHDOG=1")
         paused = os.path.exists(PAUSE_PATH)
         stopped = os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
@@ -9565,8 +11472,6 @@ class Pulse:
             self.halt_reason = "stopped"
             self.priority_controls()
             self.write_stats(force=True)
-            self.wake_ev.clear()
-            self.wake_ev.wait(timeout=0.4)
             return
         if paused:
             self.halted = True
@@ -9578,8 +11483,6 @@ class Pulse:
             self.priority_controls()
             self.manage()
             self.write_stats(force=True)
-            self.wake_ev.clear()
-            self.wake_ev.wait(timeout=0.4)
             return
         if self.halt_reason in ("paused", "stopped"):
             pre = getattr(self, "_pre_pause_halt", None)
@@ -9602,40 +11505,75 @@ class Pulse:
                 self.halted = False
                 self.halt_reason = None
         self.cycle += 1
-        self.did_io = False
-        self._budget()
-        self.refresh_tickers()
-        self.seed_px_bars()
+        self._cycle_step("budget", self._budget)
+        self._cycle_step("tickers", self.refresh_tickers)
+        self._cycle_step("bars", self.seed_px_bars)
         if time.monotonic() >= float(getattr(self, "_next_fill_poll", 0.0)):
-            self.sync_own_fills()
+            self._cycle_step("fills", self.sync_own_fills)
         # Reconcile immediately after the boot snapshot, before touching old
         # local controls. Waiting for cycle 25 can take hours when a stale book
         # contains many positions and each repair encounters venue cooldowns.
         if self.cycle == 1 or self.cycle % 25 == 0:
-            self.adopt_exchange_positions()
-        unprotected = self.priority_controls()
+            self._cycle_step("reconcile", self.adopt_exchange_positions)
+        unprotected = self._cycle_step("controls", self.priority_controls)
         if self.cycle % 8 == 0:
-            self.maybe_reload_config()
+            self._cycle_step("config", self.maybe_reload_config)
         if self.cycle % 220 == 0:
             self.pool.submit(self.set_leverage)
-        self.manage()
+        self._cycle_step("manage", self.manage)
         if unprotected:
-            unprotected = self.priority_controls()
+            unprotected = self._cycle_step("controls", self.priority_controls)
         # Indications run on the warm thread so the 530-symbol scan cannot stall the watchdog.
         if not self.halted:
-            if unprotected:
-                self.maybe_block_adds()
-                self.maybe_dca_adds()
-            else:
-                self.maybe_entries()
+            self._cycle_step("entries", self.maybe_entries)
+            self._cycle_step("block", self.maybe_block_adds)
+            self._cycle_step("dca", self.maybe_dca_adds)
         if self.cycle % QA_EVERY == 0:
-            self.qa_tick()
-        if self.cycle % 12 == 0:
-            self.trim_caches(force=self.load.last_budget.level in ("overload", "critical"))
+            self._cycle_step("qa", self.qa_tick)
+        heal_trim = self._heal_trim_pending()
+        if self.cycle % 12 == 0 or heal_trim:
+            self._cycle_step("trim", lambda: self.trim_caches(force=False, keep_hist=True))
+            if heal_trim:
+                self._heal_trim_clear()
+
+    def _watchdog_loop(self) -> None:
+        """Independent systemd heartbeat.
+
+        Sleep releases the GIL so catalog bootstrap, durable 1m backfill, and
+        historic scoring cannot starve Type=notify WatchdogSec.
+        """
+        stop = getattr(self, "_watchdog_stop", None)
+        while True:
+            sd_notify("WATCHDOG=1")
+            # Never persist from this thread: json-dumping a multi-symbol tape
+            # holds the GIL long enough that systemd never sees the ping.
+            if stop is None:
+                time.sleep(5.0)
+                continue
+            if stop.is_set():
+                return
+            stop.wait(timeout=5.0)
 
     def run(self) -> None:
         log(f"pulse start {CONN_SHORT} {BASE}")
+        if getattr(self, "runtime", None):
+            self.runtime.start(self)
+        else:
+            def retry_statistics():
+                while not self._hist_stop.wait(30):
+                    try:
+                        monitor = RuntimeMonitor(DIR, CONN_SHORT, self.overlay)
+                        self.runtime = monitor
+                        monitor.start(self)
+                        return
+                    except Exception as exc:
+                        self.last_error = f"Statistics recovery: {type(exc).__name__}"
+            threading.Thread(target=retry_statistics, name="statistics-recovery", daemon=True).start()
         sd_notify("READY=1\nWATCHDOG=1")
+        # Heartbeat must start before any blocking REST/catalog work. A 566
+        # symbol kline fill or 13k-set catalog can otherwise exceed WatchdogSec
+        # before the main loop ever runs.
+        threading.Thread(target=self._watchdog_loop, name="watchdog", daemon=True).start()
         # The full configured catalog is built after READY on a worker.  This
         # keeps systemd startup bounded while preserving complete set
         # enumeration and the same atomic generation checks used by replay.
@@ -9672,7 +11610,7 @@ class Pulse:
         self.write_stats()
         warm = threading.Thread(target=self._warm_loop, name="warm-feed", daemon=True)
         warm.start()
-        hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
+        hist = threading.Thread(target=self._hist_loop_durable, name="hist-1m", daemon=True)
         hist.start()
         ctrl = threading.Thread(target=self._ctrl_watch_loop, name="ctrl-watch", daemon=True)
         ctrl.start()
@@ -9685,40 +11623,40 @@ class Pulse:
         qa = threading.Thread(target=self._background_startup_self_tests, name="startup-qa", daemon=True)
         qa.start()
         while True:
-            # Never overlap: previous cycle must finish before the next starts.
-            if self.cycle_busy:
-                time.sleep(0.001)
-                continue
-            self.cycle_busy = True
+            # One cycle at a time on this thread. cycle_busy is observability
+            # for stats; the lock is what actually serialises the work.
             t0 = time.perf_counter()
+            cpu0 = time.thread_time()
+            self.cycle_busy = True
             try:
                 # Do not hold the shared state lock across refresh/control
                 # REST calls.  A slow exchange response must not starve the
                 # stats/UI readers, history progress, or control watcher.
                 with self._cycle_lock:
                     self._one_cycle()
+                if getattr(self, "runtime", None):
+                    self.runtime.note_success()
             except Exception:
+                if getattr(self, "runtime", None):
+                    self.runtime.note_failure()
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-400:]
                 log("LOOP " + self.last_error)
                 if hasattr(self.api, "err"):
                     self.api.err.write("loop", msg=self.last_error[:300])
-            dt = time.perf_counter() - t0
-            self.last_scan_ms = dt * 1000.0
-            self.last_scan_io = bool(self.did_io or self.hist_busy or dt > SCAN_S)
-            self.cycle_overrun = dt > SCAN_S and not (self.did_io or self.hist_busy)
-            try:
-                self.write_stats()
-            except Exception:
-                pass
-            sd_notify("WATCHDOG=1")
-            wall = time.perf_counter() - t0
-            remain = SCAN_S - wall
-            self.cycle_wait_ms = max(0.0, remain) * 1000.0
-            self.cycle_busy = False
+            finally:
+                self._finish_cycle_timing(t0, cpu0)
+                try:
+                    self.write_stats()
+                except Exception:
+                    pass
+                sd_notify("WATCHDOG=1")
+                wall = time.perf_counter() - t0
+                remain = SCAN_S - wall
+                self.cycle_wait_ms = max(0.0, remain) * 1000.0
+                self.cycle_busy = False
             if remain > 0:
-                self.wake_ev.clear()
-                self.wake_ev.wait(timeout=remain)
+                self._wait_wake(remain)
             else:
                 # Yield so hist/warm/ctrl threads run instead of busy-spinning.
                 time.sleep(0.02)
@@ -9784,8 +11722,31 @@ def main() -> None:
         BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
     else:
         BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
+    if str(os.environ.get("CTS_VST_ONLY") or "").lower() in ("1", "true", "yes"):
+        endpoint = urlparse(BASE)
+        if (CONN_SHORT != "bingx-x02" or endpoint.scheme != "https" or endpoint.hostname != "open-api-vst.bingx.com"
+                or endpoint.port not in (None, 443) or endpoint.username or endpoint.password
+                or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment):
+            raise SystemExit("VST-only deployment requires the verified X02 demo endpoint")
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
-    Pulse(api, load_contracts()).run()
+    pulse = Pulse(api, load_contracts())
+    import signal
+    def stop_service(_signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_service)
+    clean = False
+    try:
+        pulse.run()
+        clean = True
+    except KeyboardInterrupt:
+        clean = True
+    except SystemExit as exc:
+        clean = exc.code in (None, 0)
+        if not clean:
+            raise
+    finally:
+        if getattr(pulse, "runtime", None):
+            pulse.runtime.finish(clean=clean)
 
 
 if __name__ == "__main__":

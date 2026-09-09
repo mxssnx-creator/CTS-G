@@ -1,4 +1,5 @@
 import type { ActivityCounts, ActivityEvent, ActivitySummary, LiveStats } from "@/lib/live-stats";
+import { enabledAxes } from "@/lib/set-overview";
 
 const EVENT_TYPES = [
   "entry_intent",
@@ -72,7 +73,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
   }
 
   return (
-    <section className="rounded-radius border border-border bg-surface p-4" data-testid="activity-panel">
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4" data-testid="activity-panel">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Committed activity ledger</h2>
@@ -89,7 +90,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
         <Metric label="Controls" value={activity.protectionEventCount ?? 0} />
         <Metric label="Closes" value={activity.closeEventCount ?? 0} />
         <Metric label="Errors" value={activity.errorCount ?? 0} tone="danger" />
-        <Metric label="Retries" value={activity.duplicateCount ?? 0} tone="warn" />
+        <Metric label="Duplicates" value={activity.duplicateCount ?? 0} tone="warn" />
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 font-mono text-xs">
@@ -103,11 +104,12 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
       <div className="mt-3 grid gap-3 lg:grid-cols-3">
         <OutcomeTable title="Indication outcomes" values={activity.byIndication} />
         <OutcomeTable title="Strategy outcomes" values={activity.byStrategy} />
-        <OutcomeTable title="Coordination outcomes" values={activity.byAxis} />
+        {enabledAxes(stats).length ? <OutcomeTable title="Coordination outcomes" values={Object.fromEntries(Object.entries(activity.byAxis ?? {}).filter(([key]) => enabledAxes(stats).includes(key.split(":")[0])))} /> : null}
       </div>
 
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs text-muted">
         <span>internal open {activity.internalOpen ?? 0}</span>
+        {activity.internalPositionGroups == null ? null : <span>symbol + direction groups {activity.internalPositionGroups}</span>}
         <span>exchange open {activity.exchangeOpen == null || activity.exchangeOpen < 0 ? "—" : activity.exchangeOpen}</span>
         <span>closed {activity.internalClosed ?? 0}</span>
         <span>pending {activity.pendingCount ?? 0}</span>
@@ -168,14 +170,14 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: "
 function OutcomeTable({ title, values }: { title: string; values?: Record<string, ActivityCounts> }) {
   const rows = Object.entries(values || {}).sort(([a], [b]) => a.localeCompare(b));
   return (
-    <div className="rounded-lg border border-border bg-bg2 p-3">
+    <div className="min-w-0 rounded-lg border border-border bg-bg2 p-3">
       <h3 className="mb-2 text-xs font-medium text-muted uppercase">{title}</h3>
       <div className="space-y-1 font-mono text-[11px]">
         {rows.length ? (
           rows.slice(0, 8).map(([key, bucket]) => (
-            <div key={key} className="flex items-center justify-between gap-2 text-muted">
-              <span>{key}</span>
-              <span className="text-fg">{outcomeTotal(bucket)} · in {bucket.entered ?? 0} · out {bucket.exited ?? 0}</span>
+            <div key={key} className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-muted">
+              <span className="min-w-0 [overflow-wrap:anywhere]">{key}</span>
+              <span className="text-fg [overflow-wrap:anywhere]">{outcomeTotal(bucket)} · in {bucket.entered ?? 0} · out {bucket.exited ?? 0}</span>
             </div>
           ))
         ) : (

@@ -65,19 +65,19 @@ Installs Node 22, Python 3, Redis, the scoped pulse engine at `/opt/cts-g-pulse`
 | `cts-g-pulse-http` | Stats/control sidecar on :3015 |
 | `cts-g-desk` | Desk UI on :3102 |
 | `cts-g-pulse@bingx-x02` | VST engine |
-| `cts-g-pulse@bingx-x01` | Live engine (stopped/disabled by default; start only with explicit `--start-live`) |
+| `cts-g-pulse@bingx-x01` | Live engine (enabled and started by default when keys exist; `--no-live` for tests) |
 
 ```bash
 sudo /opt/cts-g/deploy/update-linux.sh          # git pull, restart, keep overlays + opens
 sudo /opt/cts-g/deploy/update-linux.sh --force  # match origin/main exactly
 ```
 
-Credentials stay in the protected `/etc/cts-g/credentials.env` and the matching Redis connection hash, never in git. X01 remains stopped unless live operation has been explicitly approved:
+Credentials stay in the protected `/etc/cts-g/credentials.env` and the matching Redis connection hash, never in git. Live (X01) starts by default whenever keys are present. Pause/Stop remain available as a temporary disable; `--no-live` skips Live start for tests:
 
 ```bash
 redis-cli HSET connection:bingx-x01 api_key '…' api_secret '…'
 redis-cli HSET connection:bingx-x02 api_key '…' api_secret '…'
-sudo systemctl stop cts-g-pulse@bingx-x01
+sudo /opt/cts-g/deploy/update-linux.sh --no-live   # tests only
 ```
 
 `update-linux.sh` does not flatten exchange positions.

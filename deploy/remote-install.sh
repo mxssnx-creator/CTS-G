@@ -9,7 +9,7 @@ source "$HERE/linux-common.sh"
 REMOTE_USER="${REMOTE_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 IDENTITY="${IDENTITY:-}"
-START_LIVE=0
+START_LIVE=1
 
 usage() {
   cat <<'EOF'
@@ -25,7 +25,8 @@ Usage: ./deploy/remote-install.sh [options]
   --identity FILE   SSH private key
   --branch NAME     Git branch (default: main)
   --repo URL        Git remote
-  --start-live      Start Live engine
+  --start-live      Start Live engine (default)
+  --no-live         Do not enable/start Live (tests only)
   --yes             No-op (never prompts)
   -h, --help
 EOF
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --start-live) START_LIVE=1; shift ;;
+    --no-live) START_LIVE=0; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -55,7 +57,7 @@ ssh_cmd+=("${REMOTE_USER}@${REMOTE_HOST}")
 log "remote ${REMOTE_USER}@${REMOTE_HOST}:${SSH_PORT} → $CTS_G_ROOT  desk :$DESK_PORT  name=$CTS_G_NAME"
 
 LIVE_FLAG=""
-[[ "$START_LIVE" -eq 1 ]] && LIVE_FLAG="--start-live"
+[[ "$START_LIVE" -eq 0 ]] && LIVE_FLAG="--no-live"
 
 remote=$(cat <<EOF
 set -euo pipefail

@@ -106,6 +106,7 @@ export type HistCalcOptions = {
   stratGeneral: boolean;
   allConfigs: boolean;
   allSymbols: boolean;
+  symbolCap?: number;
   indTypeSignals: boolean;
   indTypeState: boolean;
   indTypeDirection: boolean;
@@ -142,6 +143,30 @@ export type ForcedConfigSummary = {
   connection?: string; trialMode?: boolean;
 };
 
+export type HistCalcTimings = {
+  fetchMs?: number;
+  fetchWaitMs?: number;
+  fetchRequests?: number;
+  signalMs?: number;
+  signalWallMs?: number;
+  replayMs?: number;
+  replayWallMs?: number;
+  mergeMs?: number;
+  scoreMs?: number;
+  reportMs?: number;
+  totalMs?: number;
+};
+
+export type HistCalcTaskStatus = {
+  requested?: number;
+  submitted?: number;
+  completed?: number;
+  inFlight?: number;
+  workers?: number;
+  tileSize?: number;
+  queueLimit?: number;
+};
+
 export type HistCalcJob = {
   forcedConfigs?: ForcedConfigSummary;
   ok?: boolean;
@@ -150,6 +175,15 @@ export type HistCalcJob = {
   detail: string;
   hours?: number;
   lookback?: number;
+  evaluationBars?: number;
+  warmupBars?: number;
+  requestedBars?: number;
+  requestedStart?: number;
+  requestedEnd?: number;
+  evaluationStart?: number;
+  evaluationEnd?: number;
+  fetchStart?: number;
+  fetchEnd?: number;
   symbols?: string[];
   options?: HistCalcOptions;
   coverage?: {
@@ -158,6 +192,13 @@ export type HistCalcJob = {
     activeCount?: number;
     validatedCount?: number;
     histFills?: number;
+    symbols?: { requested?: number; valid?: number; completed?: number; failed?: number; gapped?: number; invalid?: number; coveragePct?: number };
+    bars?: { requested?: number; completed?: number; missing?: number; gapped?: number; coveragePct?: number };
+    evaluationBars?: { requested?: number; completed?: number; coveragePct?: number };
+    sets?: { requested?: number; completed?: number; coveragePct?: number };
+    evaluations?: { requested?: number; completed?: number; coveragePct?: number };
+    tasks?: { requested?: number; completed?: number; coveragePct?: number };
+    gaps?: Array<{ symbol?: string; start?: number; end?: number; minutes?: number; error?: string }>;
     dims?: Record<string, number>;
     families?: { base?: number; trail?: number };
     slTpCover?: boolean;
@@ -183,7 +224,30 @@ export type HistCalcJob = {
   presets?: Array<{ id: string; name: string; hint: string }>;
   error?: string;
   elapsedMs?: number;
+  timings?: HistCalcTimings;
+  replayTasks?: HistCalcTaskStatus;
+  replayTiles?: HistCalcTaskStatus;
+  replayFailure?: { symbol?: string; kind?: string; tile?: number; error?: string };
   source?: string;
+  connection?: string;
+  runId?: string;
+  generation?: number;
+  mode?: "idle" | "initial" | "hourly" | "manual" | "gap" | string;
+  selectedSymbols?: string[];
+  validSymbols?: string[];
+  invalidSymbols?: Array<{ symbol?: string; reason?: string }>;
+  missingSymbols?: string[];
+  gappedSymbols?: string[];
+  watermark?: Record<string, number>;
+  lastPublishedWatermark?: Record<string, number>;
+  lastCompleteRun?: number;
+  nextRunAt?: number;
+  stale?: boolean;
+  deferredReason?: string;
+  coordinationComplete?: boolean;
+  requestOptions?: HistCalcOptions;
+  requestOverlay?: Record<string, unknown>;
+  shared?: boolean;
   independent?: boolean;
   ready?: boolean;
   async?: boolean;
@@ -203,9 +267,9 @@ export type HistCalcJob = {
 };
 
 export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
-  hours: 20,
+  hours: 7,
   minStep: 1,
-  stepMax: 22,
+  stepMax: 30,
   trailing: true,
   stratBlock: true,
   stratDca: false,
@@ -213,6 +277,7 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   stratGeneral: true,
   allConfigs: true,
   allSymbols: true,
+  symbolCap: 25,
   indTypeSignals: true,
   indTypeState: true,
   indTypeDirection: true,
@@ -223,12 +288,13 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   indTypeBreak: true,
   preferMinimalRange: false,
   additionalCoordination: false,
-  coordOptimizationN: 50,
+  coordOptimizationN: 150,
 };
 
-export async function fetchHistCalc(): Promise<HistCalcJob> {
+export async function fetchHistCalc(connection?: string): Promise<HistCalcJob> {
   try {
-    const r = await fetch("/hist-calc.json", { cache: "no-store" });
+    const query = connection ? `?conn=${encodeURIComponent(connection)}` : "";
+    const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store" });
     if (!r.ok) return { phase: "idle", pct: 0, detail: `status ${r.status}` };
     return (await r.json()) as HistCalcJob;
   } catch (e) {
@@ -237,7 +303,13 @@ export async function fetchHistCalc(): Promise<HistCalcJob> {
 }
 
 export async function startHistCalc(
-  body: Partial<HistCalcOptions> & { symbols?: string[]; forcedOnly?: boolean },
+  body: Partial<HistCalcOptions> & {
+    symbols?: string[];
+    selectedSymbols?: string[];
+    forcedOnly?: boolean;
+    connection?: string;
+    overlay?: Record<string, unknown>;
+  },
 ): Promise<HistCalcJob> {
   try {
     const legacy = body as Partial<HistCalcOptions> & {
@@ -249,7 +321,8 @@ export async function startHistCalc(
       preferMinimalRange: body.preferMinimalRange ?? legacy.preferMinimalPositive,
       additionalCoordination: body.additionalCoordination ?? legacy.minimalPositiveCoordination,
     };
-    const r = await fetch("/hist-calc.json", {
+    const query = body.connection ? `?conn=${encodeURIComponent(body.connection)}` : "";
+    const r = await fetch(`/hist-calc.json${query}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...DEFAULT_CALC_OPTIONS, ...migrated, allConfigs: true }),

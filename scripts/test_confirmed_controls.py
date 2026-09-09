@@ -4,6 +4,7 @@ import sys
 import unittest
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'server'/'pulse'))
 import pulse_trader as pt
@@ -99,6 +100,86 @@ class ControlFills(unittest.TestCase):
             release.set();worker.join(timeout=2)
         self.assertEqual(errors,[]);self.assertFalse(worker.is_alive())
         self.assertIn('first',self.p.klines_tf['5m'])
+
+
+class MissingPositionControls(unittest.TestCase):
+    def setUp(self):
+        self.p = p = pt.Pulse.__new__(pt.Pulse)
+        p.ctrl_skip = {}; p.open = {}; p.contracts = {}; p._oo_cache = {}
+        p.px = {'X-USDT':100., 'Y-USDT':100.}; p.last_px = {}
+        p.position_key = lambda pos: pos.set_id
+        p.per_config_controls = lambda pos: True
+        p.clamp_ctrl_price = lambda pos, kind, price: price
+        p.desired_sl_tp = lambda pos: (99.,102.,99.,102.)
+        p.cid = lambda kind, pos: f'own-{kind}-{pos.set_id}'
+        p.record_event = lambda *args, **kwargs: None
+        self.posts = []; self.batches = []
+        self.response = {'code':109420, 'msg':'position not exist'}
+        self.batch_response = {'code':109420, 'msg':'position not exist'}
+        p.api = SimpleNamespace(post=self.post, batch_place=self.batch, path_cd={})
+
+    def post(self, path, body):
+        self.posts.append(body)
+        return self.response
+
+    def batch(self, bodies):
+        self.batches.append(bodies)
+        return self.batch_response
+
+    def position(self, name, side='LONG', symbol='X-USDT'):
+        pos = pt.Position(symbol,side,3.,100.,90.,99.,102.,100.,set_id=name)
+        self.p.open[name] = pos
+        return pos
+
+    def test_one_rejection_defers_250_sibling_sets_and_recovers_after_cooldown(self):
+        with patch.object(pt.time, 'time', return_value=100.):
+            positions = [self.position(str(i)) for i in range(250)]
+            for pos in positions:
+                self.p.place_ctrl(pos,'sl',99.)
+                self.p.place_ctrl(pos,'tp',102.)
+                self.p.place_ctrl_pair(pos)
+                self.p.ensure_controls(pos)
+            self.assertEqual(len(self.posts),1)
+            self.assertEqual(self.batches,[])
+            self.assertEqual(len(self.p.open),250)
+            self.assertTrue(self.p.recon_pending)
+            # Other sides and symbols retain independent protection admission.
+            self.p.place_ctrl(self.position('short','SHORT'),'sl',101.)
+            self.p.place_ctrl(self.position('other',symbol='Y-USDT'),'sl',99.)
+            self.assertEqual(len(self.posts),3)
+        self.response={'code':0,'data':{'orderId':'restored-sl'}}
+        with patch.object(pt.time, 'time', return_value=161.):
+            self.assertEqual(self.p.place_ctrl(positions[0],'sl',99.),'restored-sl')
+            self.assertEqual(len(self.posts),4)
+
+    def test_batch_missing_position_does_not_fall_back_or_cancel_existing_controls(self):
+        pos=self.position('base')
+        self.p.place_ctrl_pair(pos)
+        self.p.place_ctrl_pair(self.position('sibling'))
+        self.assertEqual(len(self.batches),1)
+        self.assertEqual(self.posts,[])
+        pos.sl_oid='existing-sl'
+        self.assertEqual(self.p.place_ctrl(pos,'sl',99.),'existing-sl')
+        self.assertEqual(pos.sl_oid,'existing-sl')
+
+    def test_partial_batch_preserves_success_and_stops_missing_position_fallback(self):
+        self.batch_response={'code':0,'data':{'orders':[
+            {'code':0,'type':'STOP_MARKET','orderId':'accepted-sl'},
+            {'code':109420,'msg':'position not exist'}]}}
+        pos=self.position('partial')
+        self.p.place_ctrl_pair(pos)
+        self.assertEqual(pos.sl_oid,'accepted-sl')
+        self.assertFalse(pos.tp_oid)
+        self.assertFalse(pos.controls_ok)
+        self.assertEqual(self.posts,[])
+
+    def test_error_envelope_cannot_confirm_nested_order_ids(self):
+        self.batch_response={'code':109420,'data':{'orders':[
+            {'code':0,'type':'STOP_MARKET','orderId':'untrusted-sl'}]}}
+        pos=self.position('error')
+        self.p.place_ctrl_pair(pos)
+        self.assertFalse(pos.sl_oid)
+        self.assertEqual(self.posts,[])
 
 
 if __name__=='__main__':unittest.main()

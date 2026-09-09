@@ -1,0 +1,298 @@
+{
+  "source": "VST persisted open book, identities anonymized on server",
+  "rows": [
+    {
+      "symbol": "symbol-1",
+      "side": "SHORT",
+      "pack": "general",
+      "setId": "set_id-1",
+      "executionLane": "execution_lane-1"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-2",
+      "executionLane": "execution_lane-2"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-3",
+      "executionLane": "execution_lane-3"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-4",
+      "executionLane": "execution_lane-4"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-5",
+      "executionLane": "execution_lane-5"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-6",
+      "executionLane": "execution_lane-6"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-7",
+      "executionLane": "execution_lane-7"
+    },
+    {
+      "symbol": "symbol-2",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-8",
+      "executionLane": "execution_lane-8"
+    },
+    {
+      "symbol": "symbol-3",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-9",
+      "executionLane": "execution_lane-9"
+    },
+    {
+      "symbol": "symbol-3",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-8",
+      "executionLane": "execution_lane-10"
+    },
+    {
+      "symbol": "symbol-3",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-7",
+      "executionLane": "execution_lane-11"
+    },
+    {
+      "symbol": "symbol-3",
+      "side": "SHORT",
+      "pack": "indications",
+      "setId": "set_id-9",
+      "executionLane": "execution_lane-12"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-10",
+      "executionLane": "execution_lane-13"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-11",
+      "executionLane": "execution_lane-14"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-12",
+      "executionLane": "execution_lane-15"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-13",
+      "executionLane": "execution_lane-16"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-14",
+      "executionLane": "execution_lane-17"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-15",
+      "executionLane": "execution_lane-18"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-16",
+      "executionLane": "execution_lane-19"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-17",
+      "executionLane": "execution_lane-20"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-18",
+      "executionLane": "execution_lane-21"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-19",
+      "executionLane": "execution_lane-22"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-20",
+      "executionLane": "execution_lane-23"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-21",
+      "executionLane": "execution_lane-24"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-22",
+      "executionLane": "execution_lane-25"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-23",
+      "executionLane": "execution_lane-26"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-24",
+      "executionLane": "execution_lane-27"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-25",
+      "executionLane": "execution_lane-28"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-26",
+      "executionLane": "execution_lane-29"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-27",
+      "executionLane": "execution_lane-30"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-28",
+      "executionLane": "execution_lane-31"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-29",
+      "executionLane": "execution_lane-32"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-30",
+      "executionLane": "execution_lane-33"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-31",
+      "executionLane": "execution_lane-34"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-32",
+      "executionLane": "execution_lane-35"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-33",
+      "executionLane": "execution_lane-36"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-34",
+      "executionLane": "execution_lane-37"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-35",
+      "executionLane": "execution_lane-38"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-36",
+      "executionLane": "execution_lane-39"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "LONG",
+      "pack": "general",
+      "setId": "set_id-37",
+      "executionLane": "execution_lane-40"
+    },
+    {
+      "symbol": "symbol-1",
+      "side": "SHORT",
+      "pack": "general",
+      "setId": "set_id-38",
+      "executionLane": "execution_lane-41"
+    }
+  ],
+  "verification": {
+    "open": 41,
+    "legacyDuplicateSlots": 1,
+    "correctedDuplicateSlots": 0,
+    "scope": "connection+symbol+direction+set+execution-lane"
+  }
+}

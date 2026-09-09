@@ -9,19 +9,23 @@ required net % = cost% × ((ratio − 1) / 0.10)
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-POSITION_COST_PCT_DEFAULT = 0.15
+POSITION_COST_PCT_DEFAULT = 0.10
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 # User-facing PF controls share one contract across UI, overlay, and workers.
-PF_MIN = 0.80
-PF_MAX = 2.50
-PF_STEP = 0.02
+PF_MIN = 1.05
+PF_MAX = 1.35
+PF_STEP = 0.01
 RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 15
+# +1× PositionCost net. 1.00 is only break-even after cost; validated /
+# positive results must clear this floor so "PF > 1.10" is the real edge.
+POSITIVE_PF = RATIO_BASE + RATIO_SCALE
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -31,9 +35,11 @@ EVALUATION_WINDOWS = (5, 10, 15, 25, 50, 75)
 def _row_value(row: Any, *keys: str) -> Any:
     """Read the first present field from dicts, dataclasses, or API rows."""
     for key in keys:
-        if isinstance(row, dict):
-            if key in row and row.get(key) is not None:
-                return row.get(key)
+        if isinstance(row, Mapping):
+            if key in row:
+                value = row.get(key)
+                if value is not None:
+                    return value
         elif hasattr(row, key):
             value = getattr(row, key)
             if value is not None:
@@ -169,6 +175,29 @@ def row_has_measured_cost(row: Any) -> bool:
         or row_fee_usdt(row) > 0
         or _row_value(row, *_FEE_RATE_KEYS) is not None
     )
+
+
+def _is_simple_historic_row(row: Any) -> bool:
+    """Identify generated gross-move rows that cannot carry measured cost."""
+    # Historic replay may use the slots-backed CompactHistRow to keep a large
+    # independent catalog within its memory ceiling.  It exposes the same
+    # Mapping/attribute fields as the legacy dict row, so classify it by the
+    # shared row contract instead of requiring a concrete dict.
+    if _row_value(row, "pnl_pct") is None:
+        return False
+    if any(_row_value(row, key) is not None for key in (
+        "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
+        "totalFee", "totalCommission", "entry_fee", "entryFee", "exit_fee", "exitFee",
+        "fee", "fees", "commission", "commissionAmount", "fee_rate", "feeRate",
+        "commissionRate", "makerFeeRate", "takerFeeRate",
+    )):
+        return False
+    source = str(_row_value(row, "cost_source", "costSource", "source") or "").lower()
+    return not any(token in source for token in ("live", "exchange", "cost"))
+
+
+def _simple_historic_tape(rows: Sequence[Any]) -> bool:
+    return all(_is_simple_historic_row(row) for row in rows)
 
 
 def exchange_order_cost_sample(row: Any, fallback: float = POSITION_COST_PCT_DEFAULT) -> Optional[Dict[str, float]]:
@@ -327,8 +356,34 @@ def row_pnl_pct(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
 
 def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """Net fraction after subtracting one PositionCost. Always from the gross move."""
+    if _is_simple_historic_row(row):
+        return net_pnl_pct(finite(row.get("pnl_pct")), cost_pct)
     actual_cost = row_position_cost_pct(row, cost_pct)
     return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
+
+
+def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str, Any]:
+    """One bounded, persistable close accumulator per independent position."""
+    old_qty = finite(previous.get("qty"))
+    qty = old_qty + finite(leg.get("qty"))
+    old_notion = row_notional(previous)
+    notion = old_notion + row_notional(leg)
+    result = {key: value for key, value in leg.items() if key != "roundtrip_result"}
+    result.update(
+        qty=qty, entry=notion / max(qty, 1e-12),
+        exit=(finite(previous.get("exit")) * old_qty + finite(leg.get("exit")) * finite(leg.get("qty"))) / max(qty, 1e-12),
+        pnl=finite(previous.get("pnl")) + finite(leg.get("pnl")),
+        pnl_pct=(row_pnl_pct(previous) * old_notion + row_pnl_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
+        position_cost_pct=(row_position_cost_pct(previous) * old_notion + row_position_cost_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
+        fee_total=finite(previous.get("fee_total")) + finite(leg.get("fee_total")),
+        entry_fee=finite(previous.get("entry_fee")) + finite(leg.get("entry_fee")),
+        exit_fee=finite(previous.get("exit_fee")) + finite(leg.get("exit_fee")),
+        closeLegs=int(previous.get("closeLegs") or 0) + 1,
+        exchange_confirmed=bool(leg.get("exchange_confirmed")) and (not previous or bool(previous.get("exchange_confirmed"))),
+    )
+    if previous and previous.get("cost_source") != leg.get("cost_source"):
+        result["cost_source"] = "mixed-cost"
+    return result
 
 
 def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
@@ -352,6 +407,15 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
         if legs[-1].get("partial"):
             continue
         row = dict(legs[-1])
+        saved = row.get("roundtrip_result")
+        if (isinstance(saved, dict) and saved.get("exchange_confirmed")
+                and saved.get("client_id") == row.get("client_id")
+                and not saved.get("partial")
+                and finite(saved.get("qty")) >= finite(row.get("roundtrip_qty")) * (1 - 1e-8)):
+            # The persisted per-position accumulator remains complete even
+            # when interleaved partials have left the small shared UI tape.
+            out.append(dict(saved))
+            continue
         notion = sum(row_notional(leg) for leg in legs)
         if notion <= 0:
             continue
@@ -411,6 +475,11 @@ def r_from_ratio(ratio: float) -> float:
     return (finite(ratio, RATIO_BASE) - RATIO_BASE) / RATIO_SCALE
 
 
+def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
+    """True when cost-scale PF has earned at least +1× PositionCost (1.10)."""
+    return finite(ratio) + 1e-9 >= finite(floor, POSITIVE_PF)
+
+
 def net_move_pct(ratio: float, cost_pct: float) -> float:
     return finite(cost_pct) * r_from_ratio(ratio)
 
@@ -424,13 +493,46 @@ def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    *,
+    ordered: bool = False,
+    simple: Optional[bool] = None,
 ) -> Dict[str, float]:
     # API surfaces provide both chronological and newest-first tapes. A
     # timestamp-normalized tail makes every "last N" gate mean the same thing.
-    window = sorted(
-        list(rows),
-        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-    )[-max(1, int(n)) :]
+    take = max(1, int(n))
+    if ordered:
+        seq = rows if isinstance(rows, list) else list(rows)
+        window = seq[-take:] if len(seq) > take else seq
+    else:
+        window = sorted(
+            list(rows),
+            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+        )[-take:]
+    use_simple = _simple_historic_tape(window) if simple is None else bool(simple)
+    if use_simple:
+        cost = normalize_position_cost_pct(cost_pct)
+        cost_frac = cost_as_frac(cost)
+        gross_values = [finite(row.get("pnl_pct")) for row in window]
+        net_values = [value - cost_frac for value in gross_values]
+        count = len(gross_values)
+        avg_r = sum(signed_result_r(value, cost) for value in gross_values) / count if count else 0.0
+        gp_fast = sum(value for value in net_values if value > 0)
+        gl_fast = abs(sum(value for value in net_values if value < 0))
+        classic_fast = gp_fast / gl_fast if gl_fast > 0 else (99.0 if gp_fast > 0 else 0.0)
+        return {
+            "n": float(n),
+            "count": float(count),
+            "avgR": round(avg_r, 4),
+            "ratio": round(ratio_from_r(avg_r), 4) if count else RATIO_BASE,
+            "classicPf": round(classic_fast, 4),
+            "costPct": cost,
+            "netPct": round(net_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
+            "grossPct": round(gross_move_pct(ratio_from_r(avg_r), cost), 4) if count else 0.0,
+            "netAvg": round(sum(net_values) / count, 6) if count else 0.0,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0,
+        }
     rs: List[float] = []
     nets: List[float] = []
     gp = gl = 0.0
@@ -477,6 +579,9 @@ def evaluation_windows(
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     windows: Sequence[int] = EVALUATION_WINDOWS,
     required_samples: int = 8,
+    *,
+    ordered: bool = False,
+    simple: Optional[bool] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Return the shared last-position-N PF/EV view for one independent tape.
 
@@ -486,10 +591,13 @@ def evaluation_windows(
     tape; ``validated`` is a positive-PF/sample signal and is deliberately
     independent from any strategy-specific minimum PF floor.
     """
-    ordered = sorted(
-        [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
-    )
+    if ordered:
+        seq = [row for row in rows if row is not None]
+    else:
+        seq = sorted(
+            [row for row in rows if row is not None],
+            key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+        )
     out: Dict[str, Dict[str, Any]] = {}
     seen: set[int] = set()
     for raw_n in windows:
@@ -500,7 +608,7 @@ def evaluation_windows(
         if requested in seen:
             continue
         seen.add(requested)
-        metric = last_n_cost_pf(ordered, requested, cost_pct)
+        metric = last_n_cost_pf(seq, requested, cost_pct, ordered=True, simple=simple)
         count = int(metric.get("count") or 0)
         ratio = float(metric.get("ratio") or RATIO_BASE)
         required = max(1, min(requested, int(required_samples or 1)))
@@ -509,7 +617,7 @@ def evaluation_windows(
             "n": count,
             "available": count >= requested,
             "requiredSamples": required,
-            "validated": count >= required and ratio + 1e-9 >= RATIO_BASE,
+            "validated": count >= required and is_positive_pf(ratio),
             "pf": round(ratio, 4),
             "classicPf": float(metric.get("classicPf") or 0.0),
             "avgR": float(metric.get("avgR") or 0.0),
@@ -552,6 +660,30 @@ def cost_aware_metrics(
     statistical certainty; callers can show the explicit insufficient status.
     """
     cost = normalize_position_cost_pct(cost_pct)
+    if _simple_historic_tape(rows):
+        gross = [finite(row.get("pnl_pct")) for row in rows]
+        net = [value - cost_as_frac(cost) for value in gross]
+        sample = len(gross)
+        required = max(1, int(required_samples or 1))
+        gross_pf = _classic_pf(gross)
+        net_pf = _classic_pf(net)
+        return {
+            "sampleCount": sample,
+            "requiredSamples": required,
+            "grossPf": round(gross_pf, 6),
+            "netPf": round(net_pf, 6),
+            "grossEv": round(sum(gross) / sample, 8) if sample else 0.0,
+            "netEv": round(sum(net) / sample, 8) if sample else 0.0,
+            "ev": round(sum(net) / sample, 8) if sample else 0.0,
+            "confidence": round(min(1.0, sample / required), 4) if sample else 0.0,
+            "uncertainty": round(1.0 / math.sqrt(sample), 4) if sample else 1.0,
+            "insufficientSample": sample < required,
+            "status": "insufficient-sample" if sample < required else "qualified-sample",
+            "costPct": cost,
+            "costSubtracted": True,
+            "costSource": "manual-fallback",
+            "costSamples": 0,
+        }
     gross: List[float] = []
     net: List[float] = []
     measured = 0
@@ -585,7 +717,8 @@ def cost_aware_metrics(
 
 
 def clamp_pct(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+    # Zero is the persisted, JSON-safe unlimited upper bound for TP.
+    return max(lo, min(hi, value) if hi > 0 else value)
 
 
 def resolve_sl_tp(

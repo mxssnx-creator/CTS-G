@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { fetchHistCalc, startHistCalc, type ForcedConfigSummary, type HistCalcJob } from "@/lib/hist-calc";
+import { useConnection } from "@/components/connection-provider";
 
 export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
+  const { conn } = useConnection();
   const [job, setJob] = useState<HistCalcJob | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
@@ -9,20 +11,20 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
-      const next = await fetchHistCalc();
+      const next = await fetchHistCalc(conn);
       if (stopped) return;
       setJob(next);
-      const running = ["queued", "fetch", "replay", "score"].includes(next.phase);
+      const running = ["queued", "initial", "backfill", "fetch", "replay", "score", "gap"].includes(next.phase);
       timer = setTimeout(poll, running ? 1500 : 15000);
     };
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
-  }, []);
+  }, [conn]);
   const start = async () => {
     setPending(true);
     setError("");
     try {
-      const next = await startHistCalc({ forcedOnly: true, hours: 24, allSymbols: false });
+      const next = await startHistCalc({ forcedOnly: true, hours: 24, allSymbols: false, connection: conn });
       setJob(next);
       if (next.ok === false || next.phase === "error") setError(next.error || next.detail);
     } catch {
@@ -32,7 +34,7 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
   const data = job?.forcedConfigs || live;
   const rows = data?.rows ?? [];
   const liveById = new Map((live?.rows ?? []).map(row => [row.id, row]));
-  const busy = pending || ["queued", "fetch", "replay", "score"].includes(job?.phase ?? "");
+  const busy = pending || ["queued", "initial", "backfill", "fetch", "replay", "score", "gap"].includes(job?.phase ?? "");
   return (
     <section className="min-w-0 space-y-4 rounded-xl border border-border bg-bg2 p-4 sm:p-5" data-testid="forced-configs">
       <div className="flex flex-wrap items-start justify-between gap-3">

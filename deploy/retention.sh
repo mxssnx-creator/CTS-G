@@ -33,13 +33,22 @@ PYTHONPATH="$PULSE_DIR:$CTS_G_ROOT/server/pulse${PYTHONPATH:+:$PYTHONPATH}" \
 from __future__ import annotations
 
 import os
+import json
 import sys
 from pathlib import Path
 
 from storage_paths import MAX_RETAINED_FILE_BYTES, retain_last_lines
+from system_settings import normalize_system_settings
 
 data_dir, log_dir, pulse_dir = (Path(x) for x in sys.argv[1:4])
 max_lines = int(sys.argv[4])
+limits = {}
+for lane in ("bingx-x01", "bingx-x02"):
+    try:
+        raw = json.loads((data_dir / f"overlay-{lane}.json").read_text())
+    except (OSError, ValueError):
+        raw = {}
+    limits[lane] = normalize_system_settings(raw)
 roots = []
 seen = set()
 for root in (data_dir, log_dir, pulse_dir):
@@ -68,10 +77,11 @@ trimmed = 0
 for path in sorted(set(files)):
     try:
         before = path.stat().st_size
+        selected = [value for lane, value in limits.items() if lane in path.name] or list(limits.values())
         kept = retain_last_lines(
             str(path),
-            max_lines=max_lines,
-            max_bytes=MAX_RETAINED_FILE_BYTES,
+            max_lines=min(max_lines, min(value["systemLogMaxLines"] for value in selected)),
+            max_bytes=min(MAX_RETAINED_FILE_BYTES, int(min(value["systemLogMaxMb"] for value in selected)*1048576)),
         )
         after = path.stat().st_size
     except OSError:

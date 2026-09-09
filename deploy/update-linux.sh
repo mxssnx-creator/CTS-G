@@ -9,7 +9,7 @@ source "$HERE/linux-common.sh"
 FROM_DIR=""
 FORCE=0
 NO_RESTART=0
-START_LIVE=0
+START_LIVE=1
 PORT_EXPLICIT=0
 
 usage() {
@@ -26,7 +26,8 @@ Usage: sudo ./deploy/update-linux.sh [options]
   --branch NAME     Branch (default: main)
   --pulse-port N    Separate loopback API port
   --no-restart      Sync files only
-  --start-live      Ensure Live engine is started
+  --start-live      Ensure Live engine is started (default)
+  --no-live         Do not enable/start Live (tests only)
   --yes             No-op (update never prompts)
   -h, --help
 
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --force) die "--force removed: preserve and review local edits before updating" ;;
     --no-restart) NO_RESTART=1; shift ;;
     --start-live) START_LIVE=1; shift ;;
+    --no-live) START_LIVE=0; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
@@ -80,6 +82,15 @@ else
   die "no git clone at $CTS_G_ROOT and no --from-dir given"
 fi
 
+# Reload helpers after the tree moves forward so start_stack/enable_stack
+# from this release actually run (Live default, halt-flag clear, etc.).
+saved_pulse_explicit="${PULSE_PORT_EXPLICIT:-0}"
+saved_start_live="${START_LIVE:-1}"
+# shellcheck source=linux-common.sh
+source "$HERE/linux-common.sh"
+PULSE_PORT_EXPLICIT="$saved_pulse_explicit"
+START_LIVE="$saved_start_live"
+
 find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 configure_git "$CTS_G_ROOT"
 migrate_redis_scope
@@ -99,7 +110,7 @@ else
     live_was_on=1
   fi
   start_live="$START_LIVE"
-  [[ "$live_was_on" -eq 1 ]] && start_live=1
+  [[ "$live_was_on" -eq 1 && "$START_LIVE" != 0 ]] && start_live=1
   start_stack "$start_live"
   health_report
 fi

@@ -1,0 +1,46 @@
+{
+  "url": "http://127.0.0.1:8081",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "X01 Pulse Desk",
+      "hasCanvas": false,
+      "bodyTextLen": 3563,
+      "bodyTextHash": "cceb0fb549b05247c0bb7a1ed2cfc04dd1b3192386c77ba81b15f26f6ebd5906",
+      "bodyTextPrefix": "Overall ALL · R 0 Live USDT · R 0 VST demo VST · R 0 ALL DESKS ·",
+      "horizontalOverflow": false,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 ()"
+      ],
+      "pageErrors": [],
+      "screenshot": "/workspace/cts-g-qa-9fb4aac/built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "X01 Pulse Desk",
+      "hasCanvas": false,
+      "bodyTextLen": 3563,
+      "bodyTextHash": "cceb0fb549b05247c0bb7a1ed2cfc04dd1b3192386c77ba81b15f26f6ebd5906",
+      "bodyTextPrefix": "Overall ALL · R 0 Live USDT · R 0 VST demo VST · R 0 ALL DESKS ·",
+      "horizontalOverflow": false,
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 404 ()"
+      ],
+      "pageErrors": [],
+      "screenshot": "/workspace/cts-g-qa-9fb4aac/built-mobile.png"
+    }
+  },
+  "brandWarnings": [
+    "BRAND NOTE: no custom public/og.jpg — the platform will serve the og.grok.me placeholder. Custom cards are the default for games of every kind (DOM board/word games included), whimsical apps, creative tools, and brand-forward pages — only plain utilities (converters, CRUD trackers, admin dashboards) keep the placeholder. If this app is not a plain utility, finish the brand-asset pass per /workspace/.grok/skills/og/SKILL.md."
+  ],
+  "authWarnings": [],
+  "verdictFile": "/workspace/cts-g-qa-9fb4aac/built.json",
+  "divergesFromBaseline": true,
+  "baselineReasons": [
+    "baseline unreadable: ENOENT"
+  ]
+}

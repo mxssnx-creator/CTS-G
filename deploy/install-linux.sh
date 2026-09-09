@@ -3,7 +3,7 @@
 #
 #   sudo ./deploy/install-linux.sh
 #   sudo ./deploy/install-linux.sh --port 3102 --name cts-g
-#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G --start-live
+#   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G
 #
 set -euo pipefail
 
@@ -13,7 +13,7 @@ source "$HERE/linux-common.sh"
 
 FROM_DIR=""
 DO_CLONE=0
-START_LIVE=0
+START_LIVE=1
 NO_START=0
 PORT_EXPLICIT=0
 NAME_EXPLICIT=0
@@ -33,7 +33,8 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
-  --start-live      Start <name>-pulse@bingx-x01
+  --start-live      Start Live engine (default)
+  --no-live         Install units but do not enable/start Live (tests only)
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
   -h, --help
@@ -54,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --start-live) START_LIVE=1; shift ;;
+    --no-live) START_LIVE=0; shift ;;
     --no-start) NO_START=1; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;

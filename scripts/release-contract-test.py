@@ -23,6 +23,28 @@ import pulse_http
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_no_live_update_restarts_only_the_demo_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record=Path(tmp)/'calls'
+            code='''source "$1"
+systemctl() { echo "$*" >> "$CALL_RECORD"; }
+redis_has_keys() { return 0; }
+pulse_http_unit() { echo qa-http; }
+desk_unit() { echo qa-desk; }
+retention_timer_unit() { echo qa-retention; }
+pulse_instance_unit() { echo "qa-$1"; }
+skip() { :; }
+VST_SLOT=bingx-x02
+LIVE_SLOT=bingx-x01
+start_stack 0
+'''
+            result=subprocess.run(['bash','-c',code,'probe',str(ROOT/'deploy/linux-common.sh')],
+                                  env={**os.environ,'CALL_RECORD':str(record)},capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+            commands=record.read_text().splitlines()
+            self.assertIn('restart qa-bingx-x02',commands)
+            self.assertFalse(any('bingx-x01' in row for row in commands))
+
     def test_redis_readiness_retries_loading_and_requires_pong(self):
         for mode, expected, calls in (("loading",0,3),("auth",1,1),("error",1,5)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
@@ -134,25 +156,54 @@ redis_ready
         self.assertEqual(merged.close_started_qty, 3)
         self.assertAlmostEqual(merged.entry, 101)
 
-    def test_mainnet_start_and_path_inputs_fail_closed(self):
-        self.assertFalse(pulse_http._live_start_allowed("bingx-x01"))
-        self.assertFalse(pulse_http._live_heal_allowed("bingx-x01"))
+    def test_install_scripts_start_live_by_default(self):
+        install = (ROOT / "deploy/install-linux.sh").read_text()
+        update = (ROOT / "deploy/update-linux.sh").read_text()
+        remote = (ROOT / "deploy/remote-install.sh").read_text()
+        common = (ROOT / "deploy/linux-common.sh").read_text()
+        http = (ROOT / "server/pulse/pulse_http.py").read_text()
+        self.assertIn("START_LIVE=1", install)
+        self.assertIn("--no-live", install)
+        self.assertIn("START_LIVE=1", update)
+        self.assertIn("--no-live", update)
+        self.assertIn("START_LIVE=1", remote)
+        self.assertIn("--no-live", remote)
+        self.assertIn('local start_live="${1:-1}"', common)
+        self.assertIn("clear_live_halt_flags", common)
+        self.assertIn("Reload helpers after the tree moves forward", update)
+        self.assertIn("CTS_DISABLE_LIVE_START", http)
+        self.assertNotIn("CTS_ALLOW_LIVE_START", http)
+
+    def test_mainnet_start_defaults_on_and_can_be_disabled(self):
+        os.environ.pop("CTS_DISABLE_LIVE_START", None)
+        os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+        self.assertTrue(pulse_http._live_start_allowed("bingx-x01"))
+        self.assertTrue(pulse_http._live_heal_allowed("bingx-x01"))
         self.assertTrue(pulse_http._live_start_allowed("bingx-x02"))
         self.assertTrue(pulse_http._live_heal_allowed("bingx-x02"))
+        with patch.dict(os.environ, {"CTS_DISABLE_LIVE_START": "1", "CTS_DISABLE_LIVE_HEAL": "1"}):
+            self.assertFalse(pulse_http._live_start_allowed("bingx-x01"))
+            self.assertFalse(pulse_http._live_heal_allowed("bingx-x01"))
+            self.assertTrue(pulse_http._live_start_allowed("bingx-x02"))
+            self.assertTrue(pulse_http._live_heal_allowed("bingx-x02"))
         with self.assertRaises(ValueError):
             pulse_http.write_overlay("../../outside", {"setMinStep": 1})
-
     def test_storage_and_historic_range_contracts(self):
-        from hist_calc import HOURS_MAX, hours_to_bars, parse_options
-        self.assertEqual(HOURS_MAX, 72)
+        from hist_calc import HOURS_MAX, hours_to_bars, overlay_from_options, parse_options
+        self.assertEqual(HOURS_MAX, 336)
+        self.assertEqual(hours_to_bars(1), 60)
+        one_hour = overlay_from_options(parse_options({"hours": 1}))
+        self.assertEqual(one_hour["histLookbackBars"], 60)
+        self.assertEqual(one_hour["histWarmup"], 30)
+        self.assertTrue(one_hour["histExactWindow"])
         self.assertEqual(
-            {hours_to_bars(hours) for hours in (2, 4, 20, 24, 48, 72, 120)},
-            {120, 240, 1200, 1440, 2880, 4320},
+            {hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)},
+            {60, 120, 240, 1200, 1440, 2880, 4320, 7200, 20160},
         )
-        options = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
+        options = parse_options({"hours": 9999, "minStep": -3, "stepMax": 999})
         self.assertEqual(options["hours"], HOURS_MAX)
         self.assertEqual(options["minStep"], 1)
-        self.assertEqual(options["stepMax"], 22)
+        self.assertEqual(options["stepMax"], 30)
 
 
 if __name__ == "__main__":

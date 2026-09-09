@@ -11,6 +11,29 @@ import pulse_trader
 
 
 class HistoricTests(unittest.TestCase):
+    def test_dynamic_costs_charge_each_execution_at_its_observed_rate(self):
+        bars = [[100.,100.,100.,100.,1.] for _ in range(10)]
+        cfg = [dict(strategy='base', levels=0, incrementPct=0, volumeRatio=0, tpPct=5, slPct=5)]
+        rates = [.1] + [.2]*9
+        row = replay(bars, [(1,1)]+[(0,0)]*9, 1, cfg, warmup=0, cost_pct=rates)[0]
+        self.assertAlmostEqual(row['costPct'], .15)  # .05 entry + .10 exit
+        self.assertAlmostEqual(row['netPct'], -.15)
+        for costs in ([.1]*9, [float('nan')]*10, [-.1]*10):
+            with self.assertRaises(ValueError):
+                replay(bars, [(0,0)]*10, 1, cfg, warmup=0, cost_pct=costs)
+
+    def test_dd_duration_is_an_acceptance_gate(self):
+        # Alternating wins/losses yield PF 2; each chronological segment has
+        # enough closes. Only a stricter DD-time cap changes qualification.
+        bars=[];signals=[]
+        for i in range(240):
+            bars.append([100.,100.,100.,100.,1.]);signals.append((1,1) if i%3==0 else (0,0))
+            if i%3==1:bars[-1]=[100.,101. if (i//3)%2==0 else 100.,99.5 if (i//3)%2 else 100.,100.,1.]
+        cfg=[dict(strategy='base',levels=0,incrementPct=0,volumeRatio=0,tpPct=1,slPct=.5)]
+        accepted=replay(bars,signals,1,cfg,warmup=0,cost_pct=0,max_dd_s=57600)[0]
+        rejected=replay(bars,signals,1,cfg,warmup=0,cost_pct=0,max_dd_s=0)[0]
+        self.assertTrue(accepted['qualified']);self.assertFalse(rejected['qualified'])
+
     def run_lane(self, changes=None, cfg=None, cost=0, side=1):
         bars = [[100.,100.,100.,100.,1.] for _ in range(10)]
         for i, b in (changes or {}).items(): bars[i] = b
@@ -21,6 +44,27 @@ class HistoricTests(unittest.TestCase):
     def test_complete_grid(self):
         self.assertEqual(len(configs())*3*8*2,62208)
         self.assertEqual(len({tuple(x.items()) for x in configs()}),1296)
+
+    def test_trail_update_waits_until_next_bar_and_is_monotonic(self):
+        cfg=[dict(strategy='trail',levels=0,incrementPct=0,volumeRatio=0,
+                  tpPct=5,slPct=5,trailArmPct=.3,trailGivePct=.2,honorTp=False)]
+        r=self.run_lane({1:[100,104,99,101,1],2:[101,102,100,101,1]},cfg)[0]
+        self.assertAlmostEqual(r['netPct'],.798,places=6)
+        self.assertEqual(r['avgHoldS'],120)
+
+    def test_time_exit_is_not_a_boundary_close(self):
+        cfg=[dict(strategy='base',levels=0,incrementPct=0,volumeRatio=0,
+                  tpPct=5,slPct=5,maxHoldBars=2)]
+        r=self.run_lane(cfg=cfg)[0]
+        self.assertEqual(r['avgHoldS'],120);self.assertEqual(r['boundaryCloses'],0)
+
+    def test_full_catalog_cardinality_and_unique_parameters(self):
+        from replay_complete import grids
+        g=grids()
+        self.assertEqual(len(g['catalog']),30*22*26*2)
+        self.assertEqual(len(g['adjustments']),55*81)
+        for rows in g.values():
+            self.assertEqual(len({tuple(r.items()) for r in rows}),len(rows))
 
     def test_gaps_duplicates_and_nan_rejected(self):
         valid = [(0,[1,2,.5,1,2]),(60000,[1,2,.5,1,2])]

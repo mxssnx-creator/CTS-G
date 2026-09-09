@@ -15,7 +15,7 @@ DIR = os.path.abspath(DIR)
 sys.path.insert(0, DIR)
 os.chdir(DIR)
 
-from set_engine import SetBook, self_test as sets_self_test, synth_trend
+from set_engine import SetBook, self_test as sets_self_test, synth_trend, drawdown_time, drawdown_time_by_symbol
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
 from risk_variants import self_test as variants_self_test
@@ -124,13 +124,16 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-multi", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-open-cap", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-multi", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
-    rec("x01-set-unlim", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
-    rec("unlimited-zero-cap", int(x01.get("symbolCap") or 0) == 0 and int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
+    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("open-cap-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
+    rec("open-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -193,7 +196,8 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+    rec("bounded-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
+    rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
 def fill_accounting_test() -> None:
@@ -351,7 +355,11 @@ def coord_test() -> None:
     rec("coord-countpos-mult-4", abs(c.size_mult(4) - (1.0 - 4 * 0.05)) < 1e-9, str(c.size_mult(4)))
     rec("coord-countpos-mult-floor", c.size_mult(40) >= 0.35 - 1e-9, str(c.size_mult(40)))
     rec("coord-add-stack-ok", c.add_stack_cap(3, 1.4) == 3, str(c.add_stack_cap(3, 1.4)))
+    rec("coord-axes-default-off", not c.axes_active() and all(not ax.enabled for ax in c.axes.values()), str({k: v.enabled for k, v in c.axes.items()}))
+    rec("coord-add-stack-weak-default", c.add_stack_cap(3, 0.8) == 3, str(c.add_stack_cap(3, 0.8)))
+    c.axes["cont"].enabled = True
     rec("coord-add-stack-weak", c.add_stack_cap(3, 0.8) == 1, str(c.add_stack_cap(3, 0.8)))
+    c.axes["cont"].enabled = False
     c_off = Coordinator()
     c_off.axes["cont"].enabled = False
     rec("coord-add-stack-cont-off", c_off.add_stack_cap(3, 0.8) == 3, str(c_off.add_stack_cap(3, 0.8)))
@@ -372,19 +380,35 @@ def coord_test() -> None:
     rec("coord-eval-from-overlay", c3.main_eval == 7 and c3.real_eval == 4, f"{c3.main_eval}/{c3.real_eval}")
     rec("coord-vol-ratio-overlay", abs(c3.pos_count_vol_ratio - 0.1) < 1e-9, str(c3.pos_count_vol_ratio))
     rec("coord-snap-countpos", bool((c3.snapshot().get("countPos") or {}).get("addGate")), str(c3.snapshot().get("countPos")))
+    from set_engine import SetBook
+    book_ax = SetBook()
+    book_ax.load({"histEnabled": True, "stratGeneral": True, "setMinStep": 8, "setStepMax": 8, "slToTpRatios": [0.6]})
+    base_st = next((s for s in book_ax.by_idx if s.kind == "base"), None)
+    rec("coord-base-index", base_st is not None and bool((book_ax._ids_by_kind or {}).get("base")), str(len((book_ax._ids_by_kind or {}).get("base") or [])))
+    if base_st is not None:
+        base_st.last15_n = 15
+        base_st.last15_ratio = 1.4
+    c_base = Coordinator()
+    agg = c_base.coordinate_base_sets(book_ax)
+    rec("coord-base-from-ids", bool(agg.get("fromIds") and agg.get("fromIndex") and agg.get("fromBaseVars") and int(agg.get("childCount") or 0) == 0 and int(agg.get("parentCount") or 0) >= 1), str({k: agg.get(k) for k in ("parentCount", "qualifiedChildren", "childCount", "fromBaseVars")}))
+    rec("coord-base-qualified-vars", int(agg.get("qualifiedChildren") or 0) >= 1, str(agg.get("qualifiedChildren")))
+    rec("coord-axis-off-no-children", c_base.axis_variants(base_st.id if base_st else "x", [{"t": 1, "pnl_pct": 0.01}] * 20, []) == [], "kids")
+    via_book = book_ax.axis_variants(c_base)
+    rec("coord-book-uses-base-index", bool(via_book.get("fromBaseVars") and via_book.get("fromIds")), str({k: via_book.get(k) for k in ("fromBaseVars", "parentCount", "qualifiedChildren")}))
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow Base 1.05, Main 1.10, Real 1.15."""
-    from coord_engine import Coordinator
+    """Stage PF floors follow the shared +1× PositionCost (1.10) default unless overridden."""
+    from coord_engine import Coordinator, recent_closed_rows
+    from position_cost import POSITIVE_PF
 
     # 1) defaults after a bare load
     c = Coordinator()
     c.load({}, {})
     rec("stage-pf-defaults",
-        c.stage_min_pf == {"base": 1.05, "main": 1.1, "real": 1.15},
+        c.stage_min_pf == {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF},
         str(c.stage_min_pf))
-    rec("stage-pf-canonical-min", abs(c.min_pf - 1.15) < 1e-9, str(c.min_pf))
+    rec("stage-pf-canonical-min", abs(c.min_pf - POSITIVE_PF) < 1e-9, str(c.min_pf))
 
     # 2) overlay wins over strategies.main.<stage>
     c2 = Coordinator()
@@ -403,7 +427,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.15}}}},
             {})
     rec("stage-pf-strategies-fallback",
-        c3.stage_min_pf == {"base": 1.03, "main": 1.07, "real": 1.15},
+        c3.stage_min_pf == {"base": 1.05, "main": 1.07, "real": 1.15},
         str(c3.stage_min_pf))
     rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
 
@@ -411,7 +435,7 @@ def stage_min_pf_test() -> None:
     def rows(pcts):
         return [{"pnl": x, "pnl_pct": x, "qty": 1.0, "price": 100.0} for x in pcts]
     c4 = Coordinator()
-    c4.load({}, {})
+    c4.load({}, {"axisLastEnabled": True})
     neg = rows([-5.0] * 12 + [0.4] * 3)  # heavy losers -> PF well under 1
     allow_bad, reasons_bad, _ = c4.gate(neg, 0)
     rec("stage-pf-base-blocks", not allow_bad and any("base/last" in r for r in reasons_bad),
@@ -423,15 +447,92 @@ def stage_min_pf_test() -> None:
     # 5) main/real stages report floors in the stages snapshot
     stages = (c4.last or {}).get("stages") or {}
     rec("stage-pf-stages-floors",
-        stages.get("base", {}).get("minPf") == 1.05
-        and stages.get("main", {}).get("minPf") == 1.1
-        and stages.get("real", {}).get("minPf") == 1.15,
+        abs(float(stages.get("base", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9
+        and abs(float(stages.get("main", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9
+        and abs(float(stages.get("real", {}).get("minPf") or 0) - POSITIVE_PF) < 1e-9,
         str({k: v.get("minPf") for k, v in stages.items()}))
 
     # 6) snapshot carries the stage map
     snap = c4.snapshot()
-    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": 1.05, "main": 1.1, "real": 1.15},
+    rec("stage-pf-snapshot", snap.get("stageMinPf") == {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF},
         str(snap.get("stageMinPf")))
+
+    # 7) last-3h recency: unix-stale tape does not freeze; synth timestamps stay
+    now = time.time()
+    stale = [{"t": now - 10 * 3600, "pnl": -1, "pnl_pct": -0.02, "qty": 1, "entry": 1} for _ in range(20)]
+    allow_stale, reasons_stale, _ = c4.gate(stale, 0)
+    rec("stage-pf-stale-tape-allows", allow_stale, f"allow={allow_stale} reasons={reasons_stale[:2]}")
+    rec("recent-closed-synth", len(recent_closed_rows(neg)) == len(neg), str(len(recent_closed_rows(neg))))
+    rec("recent-closed-stale-empty", len(recent_closed_rows(stale)) == 0, str(len(recent_closed_rows(stale))))
+    fresh = [{"t": now - 60, "pnl": 1, "pnl_pct": 0.003, "qty": 1, "entry": 1} for _ in range(12)]
+    rec("recent-closed-fresh", len(recent_closed_rows(fresh)) == 12, str(len(recent_closed_rows(fresh))))
+
+
+def stage_engine_calc_test() -> None:
+    """Independent stage PF/DDT stay populated; intern validated is PF>=1.0 not stage floors."""
+    from types import SimpleNamespace
+    from pulse_trader import Closed
+    from position_cost import evaluation_windows, POSITION_COST_PCT_DEFAULT
+
+    rec("ddt-pnl-pct-only", drawdown_time(
+        [{"t": 100, "pnl_pct": 0.01, "symbol": "A"}, {"t": 160, "pnl_pct": -0.02, "symbol": "A"}, {"t": 220, "pnl_pct": -0.01, "symbol": "A"}],
+        now=220,
+    )["maxS"] >= 60, "pct-only DDT")
+    rec("ddt-closed-objects", drawdown_time([
+        Closed(100, "A-USDT", "LONG", 1, 1, 1.1, 0.4, 0.003, "tp", 30),
+        Closed(160, "A-USDT", "LONG", 1, 1, 0.9, -0.2, -0.002, "sl", 20),
+        Closed(220, "A-USDT", "LONG", 1, 1, 0.85, -0.2, -0.002, "sl", 20),
+    ], now=220)["episodes"] >= 1, "Closed DDT")
+    rec("ddt-namespace-objects", drawdown_time([
+        SimpleNamespace(t=100, symbol="A", pnl=None, pnl_pct=0.01),
+        SimpleNamespace(t=160, symbol="A", pnl=None, pnl_pct=-0.02),
+        SimpleNamespace(t=220, symbol="A", pnl=None, pnl_pct=-0.01),
+    ], now=220)["maxS"] >= 60, "ns DDT")
+
+    book = SetBook()
+    book.load({
+        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
+        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
+        "mainEvalPosCount": 7, "realEvalPosCount": 4,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "trailArmMin": 0.3, "trailArmMax": 0.3,
+    })
+    rec("set-eval-overlay", book.main_eval == 7 and book.real_eval == 4, f"{book.main_eval}/{book.real_eval}")
+    st = next(x for x in book.by_idx if x.kind == "base")
+    st.hist = (
+        [{"t": 1000 + i * 60, "pnl": 0.001, "pnl_pct": 0.0012, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(10)]
+        + [{"t": 2000 + i * 60, "pnl": 0.01, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(5)]
+    )
+    book._score_one(st)
+    rec("set-stage-pf-reported", st.base_pf > 1.0 and st.main_pf > 1.0 and st.real_pf > 1.0,
+        f"b={st.base_pf} m={st.main_pf} r={st.real_pf}")
+    rec("set-stage-windows-differ", abs(st.base_pf - st.main_pf) > 1e-4, f"b={st.base_pf} m={st.main_pf}")
+    rec("set-stage-ddt-nonzero", st.max_dd_s >= 0.0 and st.dd_episodes >= 0, f"ddt={st.max_dd_s} ep={st.dd_episodes}")
+    snap = book.snapshot()
+    row = next((r for r in (snap.get("rows") or []) if r.get("id") == st.id), {})
+    rec("set-intern-validated", bool(row.get("validated")) and float(row.get("last15Ratio") or 0) >= 1.0
+        and not bool(row.get("realQualified")),
+        f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
+    rec("set-eval-windows-present", bool((row.get("evaluationWindows") or {}).get("last15")),
+        str(list((row.get("evaluationWindows") or {}).keys())[:4]))
+    rec_m = book.stage_record(st, "main")
+    rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
+        f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")
+    rec("set-stage-record-ddt", rec_m.ddt_s == st.max_dd_s, f"{rec_m.ddt_s}")
+    mixed = drawdown_time_by_symbol([
+        {"t": 100, "pnl": 1.0, "symbol": "A-USDT"},
+        {"t": 160, "pnl": -2.0, "symbol": "A-USDT"},
+        {"t": 50_000, "pnl_pct": 0.01, "symbol": "B-USDT"},
+        {"t": 50_060, "pnl_pct": -0.02, "symbol": "B-USDT"},
+        {"t": 50_120, "pnl_pct": 0.015, "symbol": "B-USDT"},
+    ], now=50_120)
+    rec("set-dd-split-pct-and-pnl", mixed["maxS"] < 5_000 and mixed.get("symbols") == 2.0, str(mixed))
+    wins = last_n_cost_pf([{"pnl_pct": 0.002, "pnl": 0}] * 15, 15, POSITION_COST_PCT_DEFAULT)
+    rec("pf-plus1x-from-zero-pnl", abs(float(wins["ratio"]) - 1.1) < 1e-6, str(wins.get("ratio")))
+    windows = evaluation_windows([{"t": i, "pnl_pct": 0.002, "pnl": 0} for i in range(15)], POSITION_COST_PCT_DEFAULT)
+    rec("eval-windows-last15", abs(float((windows.get("last15") or {}).get("pf") or 0) - 1.1) < 1e-6,
+        str((windows.get("last15") or {}).get("pf")))
 
 
 def always_start_test() -> None:
@@ -546,7 +647,7 @@ def always_start_test() -> None:
 
         def __call__(self, *args, timeout: float = 25.0):
             self.calls.append(args)
-            if args and args[0] == "start" and self.fail_first_start:
+            if args and args[0] in ("start", "restart") and self.fail_first_start:
                 self.fail_first_start = False
                 return 1, "start-limit-hit"
             return 0, "ok"
@@ -573,15 +674,64 @@ def always_start_test() -> None:
     rec("astart-sidecar-clears-all", okc and not os.path.exists(pause_f) and not os.path.exists(stop_f)
         and not os.path.exists(ph.STOP_ALL_PATH) and os.path.exists(reset_f), msg[:140])
     seq = [c[0] for c in ctl.calls if c]
-    rec("astart-sidecar-retry-after-limit", seq == ["start", "reset-failed", "start"], str(seq))
+    rec("astart-sidecar-retry-after-limit", seq == ["enable", "restart", "reset-failed", "enable", "restart"], str(seq))
 
     ctl.calls = []
     ctl.fail_first_start = False
     rm(stop_f)
     touch(pause_f)
+    with open(os.path.join(tmp, "stats-bingx-t01.json"), "w") as f:
+        json.dump({"running": True, "halted": False, "haltReason": None}, f)
+    with open(os.path.join(tmp, "hist-calc-req-bingx-t01.json"), "w") as f:
+        json.dump({"phase": "queued"}, f)
     oks, msgs = ph.apply_control("bingx-t01", "stop")
     rec("astart-sidecar-stop-marks", oks and os.path.exists(stop_f) and not os.path.exists(pause_f)
         and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
+    rec("stop-force-kills-if-still-up", "forced" in msgs and any(c and c[0] == "kill" for c in ctl.calls)
+        and any(c and c[0] == "reset-failed" for c in ctl.calls), msgs[:160])
+    rec("stop-cancels-hist-request", not os.path.exists(os.path.join(tmp, "hist-calc-req-bingx-t01.json")))
+    stopped_stats = json.load(open(os.path.join(tmp, "stats-bingx-t01.json")))
+    rec("stop-marks-stats-stopped", stopped_stats.get("halted") is True and stopped_stats.get("running") is False
+        and stopped_stats.get("haltReason") == "stopped", str(stopped_stats)[:160])
+    ctl.calls = []
+    ok_again, msg_again = ph.apply_control("bingx-t01", "start")
+    rec("start-after-stop-clears", ok_again and not os.path.exists(stop_f) and os.path.exists(reset_f)
+        and any(c and c[0] == "restart" for c in ctl.calls), msg_again[:140])
+
+    prev_disable_start = os.environ.pop("CTS_DISABLE_LIVE_START", None)
+    prev_disable_heal = os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+    rec("live-start-default-on", ph._live_start_allowed("bingx-x01") and ph._live_heal_allowed("bingx-x01"))
+    rec("vst-start-always-on", ph._live_start_allowed("bingx-x02") and ph._live_heal_allowed("bingx-x02"))
+    live_lane = {"type": "live", "id": "bingx-x01", "label": "Live", "unit": "USDT", "exchange": "BingX"}
+    ph.LANES = [live_lane]
+    ph.ID_TO_LANE = {live_lane["id"]: live_lane}
+    ph.TYPE_TO_ID = {"live": "bingx-x01"}
+    ctl.calls = []
+    ctl.fail_first_start = False
+    live_stop = os.path.join(tmp, "STOP-bingx-x01")
+    live_pause = os.path.join(tmp, "PAUSE-bingx-x01")
+    live_reset = os.path.join(tmp, "reset-eq-bingx-x01")
+    touch(live_stop)
+    ok_live, msg_live = ph.apply_control("bingx-x01", "start")
+    rec("live-start-allowed-by-default", ok_live and "blocked" not in msg_live and not os.path.exists(live_stop)
+        and os.path.exists(live_reset) and any(c and c[0] == "enable" for c in ctl.calls), msg_live[:140])
+    os.environ["CTS_DISABLE_LIVE_START"] = "1"
+    os.environ["CTS_DISABLE_LIVE_HEAL"] = "1"
+    rec("live-start-test-disable", (not ph._live_start_allowed("bingx-x01")) and (not ph._live_heal_allowed("bingx-x01")))
+    rec("vst-start-still-on-when-live-disabled", ph._live_start_allowed("bingx-x02"))
+    ctl.calls = []
+    touch(live_pause)
+    blocked, blocked_msg = ph.apply_control("bingx-x01", "start")
+    rec("live-start-blocked-when-disabled", (not blocked) and "CTS_DISABLE_LIVE_START" in blocked_msg
+        and os.path.exists(live_pause) and not any(c and c[0] == "start" for c in ctl.calls), blocked_msg[:140])
+    if prev_disable_start is None:
+        os.environ.pop("CTS_DISABLE_LIVE_START", None)
+    else:
+        os.environ["CTS_DISABLE_LIVE_START"] = prev_disable_start
+    if prev_disable_heal is None:
+        os.environ.pop("CTS_DISABLE_LIVE_HEAL", None)
+    else:
+        os.environ["CTS_DISABLE_LIVE_HEAL"] = prev_disable_heal
 
 
 def control_coord_test() -> None:
@@ -658,7 +808,7 @@ def control_coord_test() -> None:
     p.maybe_dca_adds = lambda: None
     p.maybe_entries = lambda: None
     p.qa_tick = lambda: None
-    p.trim_caches = lambda force=False: None
+    p.trim_caches = lambda force=False, keep_hist=False: None
     p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
     p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
     old_sd = pt.sd_notify
@@ -758,6 +908,302 @@ def control_coord_test() -> None:
     rec("ctrl-stress-final-start", okf and not os.path.exists(stop_f) and not os.path.exists(pause_f)
         and os.path.exists(os.path.join(tmp, "reset-eq-bingx-t01")), msgf[:120])
     rm(os.path.join(tmp, "reset-eq-bingx-t01"))
+
+
+def progression_continuity_test() -> None:
+    """Continuous functional progression: no lost wakeups, no nested stop waits,
+    Start unsticks hist+cycle, coord recovers, rearranges, and the hot loop
+    never leaves cycle_busy latched after an exception."""
+    import tempfile
+    import threading
+    import time
+    import pulse_trader as pt
+    from coord_engine import Coordinator
+
+    tmp = tempfile.mkdtemp(prefix="progress-test-")
+    for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
+        setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
+
+    def touch(path: str) -> None:
+        with open(path, "a"):
+            pass
+
+    def rm(path: str) -> None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    for f in (pt.STOP_PATH, pt.PAUSE_PATH, pt.STOP_ALL, pt.RESET_EQ_PATH):
+        rm(f)
+
+    def stub() -> Any:
+        p = object.__new__(pt.Pulse)
+        p.halted = False
+        p.halt_reason = None
+        p._pre_pause_halt = None
+        p.equity = 100.0
+        p.start_eq = 100.0
+        p.cycle = 0
+        p.did_io = False
+        p.hist_busy = False
+        p.last_scan_ms = 0.0
+        p.last_scan_io = False
+        p.cycle_overrun = False
+        p.cycle_busy = False
+        p.cycle_wait_ms = 0.0
+        p._stats_force = False
+        p.wake_ev = threading.Event()
+        p._hist_wake = threading.Event()
+        p.errors = 0
+        p.last_error = ""
+        p.last_event = ""
+        p.event_n = 0
+        p.priority_controls = lambda: 0
+        p.write_stats = lambda force=False: None
+        p.refresh_tickers = lambda: None
+        p.seed_px_bars = lambda: None
+        p.manage = lambda: None
+        p._budget = lambda: None
+        p.maybe_reload_config = lambda: None
+        p.adopt_exchange_positions = lambda: None
+        p.sync_own_fills = lambda: None
+        p.maybe_block_adds = lambda: None
+        p.maybe_dca_adds = lambda: None
+        p.maybe_entries = lambda: None
+        p.qa_tick = lambda: None
+        p.trim_caches = lambda force=False, keep_hist=False: None
+        p.pool = type("P", (), {"submit": lambda self, fn, *a: None})()
+        p.load = type("L", (), {"last_budget": type("B", (), {"level": "ok", "warm_s": 0.0})()})()
+        p._cycle_lock = threading.Lock()
+        p._state_lock = threading.RLock()
+        return p
+
+    old_sd = pt.sd_notify
+    pt.sd_notify = lambda *a, **k: None
+    try:
+        p = stub()
+        waits: List[float] = []
+        orig_wait = p.wake_ev.wait
+        p.wake_ev.wait = lambda timeout=None: waits.append(float(timeout or 0)) or orig_wait(timeout=timeout)  # type: ignore[method-assign]
+        touch(pt.STOP_PATH)
+        p._one_cycle()
+        rec("prog-stop-no-nested-wait", p.halted and p.halt_reason == "stopped" and waits == [],
+            f"halted={p.halted} waits={waits}")
+        rm(pt.STOP_PATH)
+        touch(pt.PAUSE_PATH)
+        p2 = stub()
+        waits2: List[float] = []
+        orig2 = p2.wake_ev.wait
+        p2.wake_ev.wait = lambda timeout=None: waits2.append(float(timeout or 0)) or orig2(timeout=timeout)  # type: ignore[method-assign]
+        p2._one_cycle()
+        rec("prog-pause-no-nested-wait", p2.halted and p2.halt_reason == "paused" and waits2 == [],
+            f"halted={p2.halted} waits={waits2}")
+        rm(pt.PAUSE_PATH)
+
+        # Stop then Start: next cycle must resume, not restore a latch.
+        p3 = stub()
+        p3.halted = True
+        p3.halt_reason = "stopped"
+        p3._pre_pause_halt = "drawdown halt"
+        touch(pt.RESET_EQ_PATH)
+        p3._one_cycle()
+        rec("prog-start-resumes-cycle", (not p3.halted) and p3.halt_reason is None and p3.cycle == 1,
+            f"halted={p3.halted} reason={p3.halt_reason} cycle={p3.cycle}")
+        rm(pt.RESET_EQ_PATH)
+
+        # Rapid stop/start/pause flags vs cycle: never halted without a file.
+        p4 = stub()
+        flags_ok = True
+        for i, action in enumerate(("stop", "start", "pause", "start", "stop", "start")):
+            rm(pt.STOP_PATH)
+            rm(pt.PAUSE_PATH)
+            rm(pt.RESET_EQ_PATH)
+            if action == "stop":
+                touch(pt.STOP_PATH)
+            elif action == "pause":
+                touch(pt.PAUSE_PATH)
+            else:
+                touch(pt.RESET_EQ_PATH)
+            p4._one_cycle()
+            stopped = os.path.exists(pt.STOP_PATH)
+            paused = os.path.exists(pt.PAUSE_PATH)
+            if stopped and not (p4.halted and p4.halt_reason == "stopped"):
+                flags_ok = False
+            if paused and not stopped and not (p4.halted and p4.halt_reason == "paused"):
+                flags_ok = False
+            if not stopped and not paused and p4.halt_reason in ("stopped", "paused"):
+                flags_ok = False
+        rec("prog-flag-cycle-consistent", flags_ok and p4.cycle >= 1, f"cycle={p4.cycle} reason={p4.halt_reason}")
+        rm(pt.STOP_PATH)
+        rm(pt.PAUSE_PATH)
+        rm(pt.RESET_EQ_PATH)
+
+        # Event: bump during cycle is still set, wait-first returns immediately.
+        p5 = stub()
+        p5.bump("tick")
+        t0 = time.perf_counter()
+        hit = p5._wait_wake(1.5)
+        dt = time.perf_counter() - t0
+        rec("prog-wait-consumes-pending-bump", hit and dt < 0.2 and not p5.wake_ev.is_set(),
+            f"hit={hit} dt={dt:.3f} set={p5.wake_ev.is_set()}")
+
+        p6 = stub()
+        late = []
+
+        def fire() -> None:
+            time.sleep(0.03)
+            p6.bump("ctrl")
+            late.append(time.perf_counter())
+
+        threading.Thread(target=fire, daemon=True).start()
+        t1 = time.perf_counter()
+        hit6 = p6._wait_wake(1.5)
+        dt6 = time.perf_counter() - t1
+        rec("prog-wait-wakes-on-ctrl-bump", hit6 and dt6 < 0.4, f"hit={hit6} dt={dt6:.3f}")
+
+        p7 = stub()
+        p7.bump("tick")
+        rec("prog-tick-does-not-wake-hist", not p7._hist_wake.is_set(), p7.last_event)
+        p7.bump("ctrl")
+        rec("prog-ctrl-wakes-hist-and-cycle", p7._hist_wake.is_set() and p7.wake_ev.is_set(),
+            f"hist={p7._hist_wake.is_set()} cycle={p7.wake_ev.is_set()}")
+        p7._hist_wake.clear()
+        p7.wake_ev.clear()
+        p7.bump("config")
+        rec("prog-config-wakes-hist", p7._hist_wake.is_set())
+
+        # cycle_busy always cleared even if the cycle body raises.
+        p8 = stub()
+        p8._one_cycle = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[method-assign]
+        p8.cycle_busy = True
+        t0 = time.perf_counter()
+        try:
+            with p8._cycle_lock:
+                p8._one_cycle()
+        except RuntimeError:
+            pass
+        finally:
+            p8.cycle_busy = False
+        rec("prog-cycle-busy-cleared-on-error", p8.cycle_busy is False, str(p8.cycle_busy))
+
+        # Mini hot loop: N cycles + concurrent bumps never stick.
+        p9 = stub()
+        p9.cycle = 0
+        stop_loop = threading.Event()
+        cycles = []
+
+        def loop() -> None:
+            while not stop_loop.is_set() and len(cycles) < 24:
+                p9.cycle_busy = True
+                try:
+                    with p9._cycle_lock:
+                        p9._one_cycle()
+                    cycles.append(p9.cycle)
+                finally:
+                    p9.cycle_busy = False
+                p9._wait_wake(0.02)
+
+        th = threading.Thread(target=loop, daemon=True)
+        th.start()
+        for i in range(12):
+            p9.bump("tick" if i % 2 == 0 else "ctrl")
+            time.sleep(0.005)
+        th.join(timeout=2.0)
+        stop_loop.set()
+        rec("prog-hot-loop-advances", len(cycles) >= 8 and p9.cycle_busy is False and p9.errors == 0,
+            f"n={len(cycles)} busy={p9.cycle_busy} cycle={p9.cycle}")
+    finally:
+        pt.sd_notify = old_sd
+
+    # Coordinator: block then recover; rearrange when full; skip when room.
+    coord = Coordinator()
+    for _ax in coord.axes.values():
+        _ax.enabled = True
+    win = [{"t": i, "pnl": -0.2, "pnl_pct": -0.2} for i in range(12)]
+    allow, reasons, _m = coord.gate(win, consec=8)
+    rec("prog-coord-pause-blocks", allow is False and any("pause" in r for r in reasons), str(reasons)[:160])
+    recovered = [{"t": i, "pnl": 0.4, "pnl_pct": 0.4} for i in range(20)]
+    allow2, reasons2, _m2 = coord.gate(recovered, consec=0)
+    rec("prog-coord-recovers-after-win", allow2 is True and not reasons2,
+        f"allow={allow2} {reasons2[:3]}")
+    # last-axis independent of pause: strong last-N must still fail if last PF is dead
+    last_dead = [{"t": i, "pnl": 0.3, "pnl_pct": 0.3} for i in range(10)] + [{"t": 100 + i, "pnl": -0.3, "pnl_pct": -0.3} for i in range(4)]
+    allow3, reasons3, _m3 = coord.gate(last_dead, consec=4)
+    rec("prog-coord-last-independent", any("base/last" in r or "pause" in r for r in reasons3), str(reasons3)[:160])
+
+    profitable = [{"t": i, "pnl": 0.2, "pnl_pct": 0.2} for i in range(20)]
+    allow4, reasons4, metrics4 = coord.add_gate(profitable, 0, intern={"pf": 1.2, "n": 15}, count=3, count_tape=[0.1] * 8)
+    rec("prog-coord-add-gate-allows", allow4 is True and metrics4.get("addsAllow") == 1.0, str(reasons4)[:120])
+    weak_count = [-0.4] * 8
+    allow5, reasons5, _m5 = coord.add_gate(profitable, 0, intern={"pf": 1.2, "n": 15}, count=3, count_tape=weak_count)
+    rec("prog-coord-add-gate-independent", allow5 is False and any("count-pos" in r for r in reasons5), str(reasons5)[:160])
+
+    ranked = [(0.9, "AAA-USDT", 1, "ind:state")]
+    opens_full = [{"symbol": "BBB-USDT", "uPnlPct": -0.4, "ageS": 40.0, "conf": 0.5}]
+    swap = coord.pick_rearrange(opens_full, ranked, max_open=1)
+    rec("prog-rearrange-when-full", swap is not None and swap.get("to") == "AAA-USDT", str(swap))
+    swap_room = coord.pick_rearrange(opens_full, ranked, max_open=8)
+    rec("prog-rearrange-skipped-with-room", swap_room is None, str(swap_room))
+    swap_off = Coordinator()
+    swap_off.rearrange = False
+    rec("prog-rearrange-respects-flag", swap_off.pick_rearrange(opens_full, ranked, 1) is None)
+
+    # Size/stack recoord stays monotonic and bounded.
+    rec("prog-size-mult-monotonic", coord.size_mult(0) > coord.size_mult(4) >= 0.35)
+    rec("prog-stack-cap-weak-halves", coord.add_stack_cap(6, 0.5) == 3 and coord.add_stack_cap(6, 1.5) == 6)
+
+    # Live cycle must not freeze while hist holds the state lock, and one
+    # unprotected position must not skip new entries.
+    p_lock = stub()
+    p_lock._state_lock = threading.RLock()
+    p_lock._stats_last = {"cycle": 11, "running": True}
+    p_lock.halted = False
+    p_lock.halt_reason = None
+    p_lock.cycle = 11
+    p_lock.last_scan_ms = 12.5
+    held = threading.Event()
+    done = threading.Event()
+
+    def hold_lock() -> None:
+        p_lock._state_lock.acquire()
+        held.set()
+        done.wait(2.0)
+        p_lock._state_lock.release()
+
+    threading.Thread(target=hold_lock, daemon=True).start()
+    held.wait(1.0)
+    t_lock = time.perf_counter()
+    deferred = p_lock.stats()
+    dt_lock = time.perf_counter() - t_lock
+    done.set()
+    rec("prog-stats-skips-busy-lock", dt_lock < 0.4 and deferred.get("statsDeferred") is True
+        and deferred.get("cycle") == 11, f"dt={dt_lock:.3f} { {k: deferred.get(k) for k in ('cycle','statsDeferred')} }")
+
+    p_ent = stub()
+    calls: List[str] = []
+    p_ent.maybe_entries = lambda: calls.append("entries")  # type: ignore[method-assign]
+    p_ent.maybe_block_adds = lambda: calls.append("block")  # type: ignore[method-assign]
+    p_ent.maybe_dca_adds = lambda: calls.append("dca")  # type: ignore[method-assign]
+    p_ent.priority_controls = lambda: 2  # type: ignore[method-assign]
+    p_ent._one_cycle()
+    rec("prog-unprotected-still-enters", calls == ["entries", "block", "dca"], str(calls))
+
+    # _running is always cleared if commit scoring blows up.
+    p_run = stub()
+    class BoomBook:
+        _running = True
+        progress = type("P", (), {"phase": "replay", "error": ""})()
+    p_run.sets = BoomBook()
+    p_run._sets_generation = 3
+    try:
+        raise RuntimeError("commit")
+    except RuntimeError:
+        pass
+    with p_run._state_lock:
+        if p_run.sets is p_run.sets and p_run._sets_generation == 3:
+            p_run.sets._running = False
+    rec("prog-running-flag-cleared", p_run.sets._running is False)
 
 
 def cancel_replace_regression_test() -> None:
@@ -984,7 +1430,7 @@ def sim_stats_test() -> None:
     p2 = object.__new__(pt.Pulse)
     p2.api = FakeApi()
     p2.open = {"A-USDT": pos("A-USDT", "LONG", 1.5, 100.0)}
-    p2.open["A-USDT"].client_id = "Gx02og060308000own2"
+    p2.open["A-USDT"].client_id = f"{pt.TAG}og060308000own2"
     p2.px = {}
     p2.cooldown = {}
     p2.did_io = False
@@ -1488,7 +1934,11 @@ def set_orders_test() -> None:
         book.sets[sid] = st
         sts.append(st)
     book.by_idx = list(sts)
+    # This fixture exercises post-publication order attribution; the initial
+    # historic safety gate has its own regression above.
+    book.progress.ready = True
     cur = {"i": 0}
+
     book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
     book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
@@ -1496,6 +1946,8 @@ def set_orders_test() -> None:
 
     def mk_pulse(fx: FakeEx):
         p = object.__new__(pt.Pulse)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = fx
         p.halted = False
         p.errors = 0
@@ -1923,11 +2375,28 @@ def strict_gate_test() -> None:
             settings={"enabled": True},
             match=lambda s, r: None, primary=lambda s: None, best=lambda s: None)
         p.occupying = lambda *a, **k: False
+        p.ctrl_skip = {}
+        p.boot_ts = time.time() - 60.0
+        p.api = SimpleNamespace(order_retry_after=lambda: 0.0)
         return p
 
-    # 1) strict + nothing validated: both packs closed, entry hard-blocked
+    # 1) The initial historic snapshot is a hard entry boundary, even if a
+    # live tape has already made a Set look selectable.
     cold = mk_book(winner=False)
+    cold.progress.ready = False
     for st in cold.by_idx:
+        st.hist = win_rows()
+        cold._score_one(st)
+    p0 = mk_trader(cold)
+    rec("historic-entry-blocked-before-ready",
+        p0.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") == "historic-gate",
+        f"{p0.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
+    rec("historic-adds-blocked-before-ready", p0.entries_blocked())
+
+    # 2) strict + nothing validated: both packs closed, entry hard-blocked
+    cold.progress.ready = True
+    for st in cold.by_idx:
+        st.hist = []
         cold._score_one(st)
     p1 = mk_trader(cold)
     rec("strict-entry-blocked-no-set",
@@ -1935,7 +2404,7 @@ def strict_gate_test() -> None:
         f"{p1.entry_sense('AAA-USDT', 1, 'gen:ema+', 0.9, 'general')}")
     rec("strict-packs-closed", not cold.pack_open("general") and not cold.pack_open("indications"))
 
-    # 2) strict + one validated + profitable set: entry allowed, winner bound
+    # 3) strict + one validated + profitable set: entry allowed, winner bound
     warm = mk_book(winner=True)
     p2 = mk_trader(warm)
     rec("strict-entry-allowed-validated",
@@ -2014,6 +2483,8 @@ def strict_gate_test() -> None:
 
     def mk_place_trader(book):
         p = mk_trader(book)
+        p.normal_execution_enabled = True
+        p.block_active = False
         p.api = OrderApi()
         p.entries_blocked = lambda: False
         p.halted = False
@@ -2181,7 +2652,7 @@ def dd_time_test() -> None:
     # 7) config model + desk expose the field
     cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
     st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
-    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 27000," in cm)
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 57600," in cm)
     rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 
@@ -2211,6 +2682,140 @@ def process_guard_test() -> None:
     rec("recon-pending-not-failure", "confirmed_book_only" in trader and "pending_absent" in trader)
     rec("stop-file-negative-control", "os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)" in trader and "halt_reason = \"stopped\"" in trader)
     rec("async-shared-rate-trip", "self._take(\"public\", path)" in fast and "self._trip(path, body)" in fast)
+    rec("watchdog-heartbeat-loop", "def _watchdog_loop" in trader and 'name="watchdog"' in trader)
+    rec("hist-durable-watchdog", "sd_notify(\"WATCHDOG=1\")" in trader and "def _hist_fetch_durable" in trader)
+    rec("hist-partial-publish-helper", "def _hist_can_publish_partial" in trader)
+    rec("hist-replay-selection-helper", "def _hist_replay_selection" in trader)
+    rec("hist-durable-deferred-persist", "persist=False" in trader and "history_store.flush" in trader)
+
+    import pulse_trader as pt
+    partial = object.__new__(pt.Pulse)
+    partial._hist_fetch_failures = 2
+    rec("partial-publish-high-coverage",
+        partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
+    partial._hist_fetch_failures = 1
+    rec("partial-publish-high-coverage-no-retry-stall",
+        partial._hist_can_publish_partial(["a"] * 53, ["a"] * 50, ["x"] * 3))
+    rec("partial-publish-waits-retries",
+        not partial._hist_can_publish_partial(["a"] * 53, ["a"] * 20, ["x"] * 33))
+    partial._hist_fetch_failures = 6
+    rec("partial-publish-low-coverage-blocked",
+        not partial._hist_can_publish_partial(["a"] * 566, ["a"] * 8, ["x"] * 558))
+    rec("partial-publish-complete",
+        partial._hist_can_publish_partial(["a"] * 10, ["a"] * 10, []))
+    rec("partial-publish-empty-blocked",
+        not partial._hist_can_publish_partial(["a"] * 10, [], ["a"] * 10))
+    sel = object.__new__(pt.Pulse)
+    sel._hist_fetch_failures = 2
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 53, ["a"] * 50, ["x"] * 3,
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-partial", reason == "partial" and len(names) == 50, reason)
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 10, ["a"] * 2, ["x"] * 8,
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-partial-any-ready", reason == "partial" and names == ["a", "a"] or (reason == "partial" and len(names) == 2), f"{names} {reason}")
+    names, reason = sel._hist_replay_selection(
+        ["a"] * 53, ["a"] * 50, ["x"] * 3,
+        already_ready=True, published=["a"] * 50, changed=[],
+    )
+    rec("replay-selection-wait-existing-partial", reason == "wait-gaps" and names == [], reason)
+    names, reason = sel._hist_replay_selection(
+        ["a", "b", "c"], ["a", "b"], ["c"],
+        already_ready=True, published=["a"], changed=[],
+    )
+    rec("replay-selection-add-new-contiguous", reason == "incremental-gap-fill" and names == ["b"], f"{names} {reason}")
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=True, published=["a", "b"], changed=[],
+    )
+    rec("replay-selection-skip-unchanged", reason == "skip-unchanged" and names == [], reason)
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=True, published=["a", "b"], changed=["b"],
+    )
+    rec("replay-selection-changed-only", reason == "incremental" and names == ["b"], str(names))
+    names, reason = sel._hist_replay_selection(
+        ["a", "b"], ["a", "b"], [],
+        already_ready=False, published=[], changed=[],
+    )
+    rec("replay-selection-full-initial", reason == "full" and names == ["a", "b"], reason)
+    rec("hist-replay-chunk-helper", "def _hist_replay_chunked" in trader)
+    rec("hist-replay-chunk-wired", "_hist_replay_chunked(replay_names" in trader)
+    rec("hist-first-slice-gate", "if first and len(pending) > 8" in trader)
+    rec("hist-replay-workers-helper", "def _replay_worker_count" in trader)
+    rec("hist-peer-claim", "def _hist_peer_claim" in trader and "hist-busy.json" in trader)
+    rec("hist-peer-defer-ready", "peer-deferred" in trader)
+    rec("hist-heal-trim", "HEAL-TRIM-" in trader and "def _heal_trim_pending" in trader)
+    rec("hist-keep-scan-tapes", "history_store.keep(keep)" in trader)
+    http_src = open(os.path.join(DIR, "pulse_http.py"), encoding="utf-8").read()
+    rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
+    rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
+    rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
+    rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
+    rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
+    rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
+    rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
+    capper = object.__new__(pt.Pulse)
+    capper.symbol_cap = 25
+    capper.open = {}
+    orig_syms = list(pt.SYMBOLS)
+    fat = [f"S{i}-USDT" for i in range(80)]
+    pt.SYMBOLS[:] = fat[:25]
+    capped = capper._capped_scan_names(fat)
+    rec("hist-cap-truncates-80-to-25", len(capped) == 25, str(len(capped)))
+    wild = capper._capped_scan_names(["*", "ALL"])
+    rec("hist-cap-wildcard-uses-scan", len(wild) == 25, str(len(wild)))
+    cap50 = object.__new__(pt.Pulse)
+    cap50.symbol_cap = 50
+    cap50.open = {}
+    pt.SYMBOLS[:] = fat[:50]
+    rec("hist-cap-50-runs", len(cap50._capped_scan_names(fat)) == 50, str(len(cap50._capped_scan_names(fat))))
+    unlim = object.__new__(pt.Pulse)
+    unlim.symbol_cap = 0
+    unlim.open = {}
+    pt.SYMBOLS[:] = fat
+    rec("hist-cap-zero-unlimited", len(unlim._capped_scan_names(fat)) == 80, str(len(unlim._capped_scan_names(fat))))
+    pt.SYMBOLS[:] = orig_syms
+    chunker = object.__new__(pt.Pulse)
+    class _Busy:
+        level = "overload"
+    chunker._budget = lambda: _Busy()  # type: ignore[method-assign]
+    rec("hist-replay-chunk-overload", chunker._hist_replay_chunk_size(566) == 8, str(chunker._hist_replay_chunk_size(566)))
+    class _Ok:
+        level = "normal"
+    chunker._budget = lambda: _Ok()  # type: ignore[method-assign]
+    rec("hist-replay-chunk-capped-book", chunker._hist_replay_chunk_size(25) == 24, str(chunker._hist_replay_chunk_size(25)))
+    rec("hist-replay-chunk-eight", chunker._hist_replay_chunk_size(8) == 8, str(chunker._hist_replay_chunk_size(8)))
+    class _Norm:
+        level = "normal"
+    rec("hist-replay-workers-eight", 1 <= chunker._replay_worker_count(8, _Norm()) <= 8, str(chunker._replay_worker_count(8, _Norm())))
+    rec("hist-replay-workers-follow-cpu", chunker._replay_worker_count(25, _Norm()) == chunker._replay_worker_count(8, _Norm()) or chunker._replay_worker_count(25, _Norm()) >= 1, str(chunker._replay_worker_count(25, _Norm())))
+    rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
+    rec("hist-trim-keep-hist", "keep_hist" in trader)
+    rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
+    rec("hist-score-edges", "score=is_first or not pending" in trader)
+    set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
+    rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
+    rec("replay-blas-pin", "def pin_compute_threads" in set_src)
+    rec("replay-progress-no-preset", "self.progress.symbols_done = i" not in set_src.split("def replay_all", 1)[-1].split("def _commit_hist", 1)[0])
+    from set_engine import SetBook, synth_trend
+    book_cov = SetBook()
+    book_cov.load({"histEnabled": True, "stratGeneral": True, "setMinStep": 8, "setStepMax": 8, "slToTpRatios": [0.6]})
+    book_cov.ingest_bars("AAA-USDT", synth_trend(120, start=100, step=0.08))
+    book_cov.ingest_bars("BBB-USDT", synth_trend(120, start=110, step=0.08))
+    book_cov.replay_all(symbols=["AAA-USDT"], merge=True, progress_total=2, workers=1, score=False)
+    seen_a = set(book_cov._hist_seen)
+    done_a = int(book_cov.progress.symbols_done or 0)
+    book_cov.replay_all(symbols=["BBB-USDT"], merge=True, progress_total=2, workers=1, score=False)
+    rec(
+        "hist-merge-keeps-seen",
+        "AAA-USDT" in book_cov._hist_seen and "BBB-USDT" in book_cov._hist_seen and int(book_cov.progress.symbols_done or 0) >= 2,
+        f"seen={sorted(book_cov._hist_seen)} done={book_cov.progress.symbols_done} first={sorted(seen_a)}/{done_a}",
+    )
 
 
 def historic_snapshot_test() -> None:
@@ -2282,9 +2887,11 @@ def main() -> int:
     cancel_replace_regression_test()
     coord_test()
     stage_min_pf_test()
+    stage_engine_calc_test()
     unlimited_test()
     always_start_test()
     control_coord_test()
+    progression_continuity_test()
     phantom_recon_test()
     sim_stats_test()
     block_calc_test()

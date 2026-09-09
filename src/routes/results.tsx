@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { fetchLiveStats, pickView, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
+import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
@@ -13,8 +15,13 @@ import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setMetric, type SetOverviewRow } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
 
-type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests";
+type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
+
+const DimensionStats = lazy(() => import("@/components/dimension-stats"));
 
 const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "overview", label: "Overview", hint: "equity, tape and headline metrics" },
@@ -25,6 +32,7 @@ const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "tests", label: "Tests", hint: "forced baseline configurations and VST evidence" },
   { id: "controls", label: "Controls", hint: "exchange actions and protection parity" },
   { id: "errors", label: "Errors", hint: "recorded failures and rejected actions" },
+  { id: "report", label: "HTML report", hint: "standalone stats report viewer" },
 ];
 
 export const Route = createFileRoute("/results")({ component: ResultsPage });
@@ -34,22 +42,14 @@ function ResultsPage() {
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const [statsTab, setStatsTab] = useState<ResultTab>("overview");
   useEffect(() => {
-    let alive = true;
-    setStatsTab("overview");
     setRaw(null);
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const pull = async () => {
-      const s = await fetchLiveStats(conn);
-      if (!alive) return;
-      setRaw(s);
-      const hidden = typeof document !== "undefined" && document.hidden;
-      timer = setTimeout(pull, hidden ? 8000 : 4000);
-    };
-    void pull();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
+    setStatsTab("overview");
+    const poll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (signal.aborted) return;
+      if (s) setRaw(s);
+    }, () => document.hidden ? 8000 : 4000);
+    return poll.stop;
   }, [conn]);
   const stats = pickView(raw, conn);
   const d = useMemo(() => derive(stats), [stats]);
@@ -57,6 +57,8 @@ function ResultsPage() {
     () =>
       buildOverview(
         (stats?.closed ?? []).map((c) => ({ pnl: c.pnl, t: c.t, symbol: c.symbol, pnl_pct: c.pnl_pct })),
+        Date.now(),
+        stats?.pfCost?.costPct ?? stats?.positionCost?.effectivePct ?? 0.10,
       ),
     [stats],
   );
@@ -75,11 +77,26 @@ function ResultsPage() {
       </p>
       <StatsOverview data={overview} live={stats} />
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" data-testid="results-export-actions">
+        <a
+          href={`/results-export.html?conn=${encodeURIComponent(conn)}`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-bg"
+        >
+          Open HTML report
+        </a>
+        <a
+          href={`/results-export.html?conn=${encodeURIComponent(conn)}`}
+          download={`pulse-results-${conn}.html`}
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
+        >
+          Download HTML
+        </a>
         <a
           href={`/results-export.json?conn=${encodeURIComponent(conn)}`}
           download={`pulse-results-${conn}.json`}
-          className="inline-flex min-h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-bg"
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
         >
           Download JSON
         </a>
@@ -88,7 +105,7 @@ function ResultsPage() {
           download={`pulse-results-${conn}.md`}
           className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
         >
-          Download report
+          Download Markdown
         </a>
       </div>
 
@@ -108,9 +125,13 @@ function ResultsPage() {
       {statsTab === "tests" ? <div id="results-panel-tests" role="tabpanel"><ForcedConfigsPanel live={stats?.forcedConfigs} /></div> : null}
 
       {statsTab === "coverage" ? <div id="results-panel-coverage" role="tabpanel"><CoveragePanel live={stats} /></div> : null}
-      {statsTab === "indications" ? <div id="results-panel-indications" role="tabpanel"><IndicationKindsPanel stats={stats} /></div> : null}
+      {statsTab === "indications" ? <div id="results-panel-indications" className="min-w-0 grid gap-3" role="tabpanel">
+        <Suspense fallback={<p className="p-4 text-sm text-muted">Loading indication diagrams…</p>}><DimensionStats stats={stats} focus="indications" /></Suspense>
+        <IndicationKindsPanel stats={stats} />
+      </div> : null}
       {statsTab === "strategies" ? (
-        <div id="results-panel-strategies" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-strategies" className="min-w-0 grid gap-3" role="tabpanel">
+          <Suspense fallback={<p className="p-4 text-sm text-muted">Loading strategy diagrams…</p>}><DimensionStats stats={stats} focus="strategies" /></Suspense>
           <StrategyStatsPanel stats={stats} />
           <ExitResults stats={stats} />
           <BlockResults stats={stats} />
@@ -118,22 +139,23 @@ function ResultsPage() {
         </div>
       ) : null}
       {statsTab === "sets" ? (
-        <div id="results-panel-sets" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-sets" className="min-w-0 grid gap-3" role="tabpanel">
           <InternResults stats={stats} />
           <SetResults stats={stats} />
         </div>
       ) : null}
       {statsTab === "controls" ? (
-        <div id="results-panel-controls" className="grid gap-3" role="tabpanel">
+        <div id="results-panel-controls" className="min-w-0 grid gap-3" role="tabpanel">
           <ControlHealthPanel stats={stats} />
           <ActivityPanel stats={stats} />
         </div>
       ) : null}
       {statsTab === "errors" ? <ErrorsPanel stats={stats} /> : null}
+      {statsTab === "report" ? <HtmlReportPanel conn={conn} /> : null}
 
       {statsTab === "overview" ? (
-        <div id="results-panel-overview" className="grid gap-3" role="tabpanel">
-          <section className="grid gap-3 lg:grid-cols-2">
+        <div id="results-panel-overview" className="min-w-0 grid gap-3" role="tabpanel">
+          <section className="min-w-0 grid gap-3 lg:grid-cols-2">
             <Card title="Equity curve">
               <EquityArea data={d.equityCurve} />
             </Card>
@@ -142,7 +164,7 @@ function ResultsPage() {
             </Card>
           </section>
 
-          <section className="grid gap-3 lg:grid-cols-2">
+          <section className="min-w-0 grid gap-3 lg:grid-cols-2">
             <Card title="By symbol">
               <SymbolBars data={d.bySymbol} />
             </Card>
@@ -179,7 +201,39 @@ function ResultsPage() {
           <ClosedTape rows={closed} />
         </div>
       ) : null}
+      <SystemHealthFooter conn={conn} />
     </DeskShell>
+  );
+}
+
+function HtmlReportPanel({ conn }: { conn: string }) {
+  const href = `/results-export.html?conn=${encodeURIComponent(conn)}`;
+  return (
+    <section id="results-panel-report" className="rounded-radius border border-border bg-surface p-4" data-testid="html-report-panel" role="tabpanel">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Canonical HTML stats report</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            Read-only report generated from the same position-cost, PF, DDT, set, indication, strategy, and coverage snapshot as the exports.
+          </p>
+        </div>
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-3 text-sm"
+        >
+          Open in new tab
+        </a>
+      </div>
+      <iframe
+        title={`HTML stats report for ${conn}`}
+        src={href}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        className="mt-4 h-[640px] w-full rounded-lg border border-border bg-bg sm:h-[760px]"
+      />
+    </section>
   );
 }
 
@@ -275,7 +329,7 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
   const missing = Number(controls?.missing ?? Math.max(0, open - protectedCount));
   const mode = controls?.mode ?? ((stats?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
-    <section className="rounded-radius border border-border bg-surface p-4" data-testid="control-health-panel">
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4" data-testid="control-health-panel">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Exchange control health</h2>
@@ -327,7 +381,7 @@ function ErrorsPanel({ stats }: { stats: LiveStats | null }) {
       {stats?.lastError ? <div className="mb-3 rounded-lg border border-border bg-bg2 p-3 text-sm"><span className="text-muted">Latest:</span> {stats.lastError}</div> : null}
       {failedTests.length ? (
         <div className="mb-3 space-y-2">
-          {failedTests.map((test) => <div key={test.name} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs"><span className="text-warn">{test.name}</span> · {test.detail}</div>)}
+          {failedTests.map((test) => <div key={`${test.connection || stats?.connection}:${test.name}`} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs break-words"><span className="text-warn">{test.connection ? `${test.connection.replace("bingx-", "")} · ` : ""}{test.name}</span> · {test.detail}</div>)}
         </div>
       ) : null}
       {events.length ? (
@@ -415,7 +469,7 @@ function Hero({ k, v, s, good, bad }: { k: string; v: string; s: string; good?: 
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="rounded-radius border border-border bg-surface p-4">
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4">
       <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
       {children}
     </section>
@@ -425,7 +479,8 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 function InternResults({ stats }: { stats: LiveStats | null }) {
   const gate = (stats?.coord as { gate?: { allow?: boolean; reasons?: string[] } } | undefined)?.gate;
   const sets = stats?.sets;
-  const rows = [...(sets?.rows ?? [])].sort((a, b) => (b.last15Ratio || 0) - (a.last15Ratio || 0)).slice(0, 8);
+  const rows = [...(sets?.rows ?? [])].filter((row) => !row.axisKey || enabledAxes(stats).includes(row.axisKey.split(":")[0]))
+    .sort((a, b) => (b.last15Ratio || 0) - (a.last15Ratio || 0)).slice(0, 8);
   return (
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
@@ -455,7 +510,6 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
                 <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                 <td className="py-1.5 text-right">
                   {r.n}
-                  {r.liveN ? `+${r.liveN}` : ""}
                 </td>
                 <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
               </tr>
@@ -468,18 +522,29 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
 }
 
 function SetResults({ stats }: { stats: LiveStats | null }) {
-  const rows = stats?.sets?.rows ?? [];
   return (
-    <Card title="Independent Sets · last 15 PF · max DD time · last 25 R">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
+    <Card title="Sets · PF / DDT">
+      <SetGroups sets={stats?.sets} axesEnabled={enabledAxes(stats).length > 0}>{(rows, context) => (
+        <SetRows key={JSON.stringify(context.selection)} rows={rows} />
+      )}</SetGroups>
+    </Card>
+  );
+}
+
+function SetRows({ rows }: { rows: SetOverviewRow[] }) {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(rows.length / 25));
+  const current = Math.min(page, pages - 1);
+  return <div className="min-w-0 space-y-3">
+      <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Set measurements">
+        <table className="w-full min-w-[720px] table-fixed text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
-              <th className="pb-2 font-medium">Set</th>
+              <th className="w-56 pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
+              <th className="pb-2 text-right font-medium" title="Cost PF · configured evaluation window">PF</th>
+              <th className="pb-2 text-right font-medium" title="Average R · last 25 results">R25</th>
               <th className="pb-2 text-right font-medium">WR</th>
               <th className="pb-2 text-right font-medium">E</th>
               <th className="pb-2 text-right font-medium">Hold</th>
@@ -495,31 +560,33 @@ function SetResults({ stats }: { stats: LiveStats | null }) {
                 </td>
               </tr>
             ) : (
-              rows.map((r) => (
+              rows.slice(current * 25, (current + 1) * 25).map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5">
-                    {r.pack} sl{r.slRatio.toFixed(1)} st{r.step ?? "—"} {r.trailKey}
-                  </td>
+                  <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
-                    {r.liveN ? `+${r.liveN}` : ""}
                   </td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
-                  <td className="py-1.5 text-right">{Number(r.wr ?? 0).toFixed(0)}%</td>
-                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{Number(r.expectancy ?? 0).toFixed(4)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(Number(r.avgHoldS ?? 0) * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
-                  <td className="py-1.5 text-right">{formatDuration(r.avgDdS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.n ? setMetric(r.last15Ratio) : "—"}</td>
+                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.last25AvgR)}</td>
+                  <td className="py-1.5 text-right">{r.wr == null ? "—" : `${setMetric(r.wr, 0)}%`}</td>
+                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.expectancy, 4)}</td>
+                  <td className="py-1.5 text-right">{r.avgHoldS == null ? "—" : formatDuration(r.avgHoldS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</td>
+                  <td className="py-1.5 text-right">{r.avgDdS == null ? "—" : formatDuration(r.avgDdS * 1000)}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </div>
-    </Card>
-  );
+      <div className="flex flex-wrap items-center justify-end gap-2 font-mono text-xs">
+        <span className="mr-auto text-muted">{rows.length ? current * 25 + 1 : 0}–{Math.min((current + 1) * 25, rows.length)} / {rows.length}</span>
+        <button type="button" disabled={!current} onClick={() => setPage(current - 1)} className="min-h-11 rounded-lg border border-border px-3 disabled:opacity-40">Previous</button>
+        <span role="status">{current + 1}/{pages}</span>
+        <button type="button" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)} className="min-h-11 rounded-lg border border-border px-3 disabled:opacity-40">Next</button>
+      </div>
+    </div>;
 }
 
 function ExitResults({ stats }: { stats: LiveStats | null }) {
@@ -579,8 +646,8 @@ function BlockResults({ stats }: { stats: LiveStats | null }) {
         <p className="py-6 text-center text-sm text-muted">Block lanes appear when a parent is open</p>
       ) : (
         <div className="space-y-4">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3">
+          {lanes.map((lane, index) => (
+            <div key={`${lane.symbol}-${lane.side}-${index}`} className="rounded-lg border border-border p-3">
               <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm">
                 <span className="font-medium">
                   {lane.symbol.replace("-USDT", "")} {lane.side}
@@ -635,8 +702,8 @@ function DcaResults({ stats }: { stats: LiveStats | null }) {
         <p className="py-6 text-center text-sm text-muted">Lanes attach when a parent is open</p>
       ) : (
         <div className="space-y-3">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3 font-mono text-xs">
+          {lanes.map((lane, index) => (
+            <div key={`${lane.symbol}-${lane.side}-${index}`} className="rounded-lg border border-border p-3 font-mono text-xs">
               <div className="mb-2 flex justify-between gap-2">
                 <span>
                   {lane.symbol.replace("-USDT", "")} {lane.side}

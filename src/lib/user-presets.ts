@@ -33,7 +33,10 @@ export function overlayOverview(ov: Partial<PulseOverlay> | PulseOverlay): strin
   const pfS = Number.isFinite(pf) && pf > 0 ? pf.toFixed(2) : "—";
   const dd = Number(ov.setMaxDdTimeS ?? ov.maxDdTimeS);
   const ddS = Number.isFinite(dd) ? `${Math.round(dd)}s` : "—";
-  return `SL ${slS} · step ${step} · trail ${trail} · ${block} · ${dca} · PF ${pfS} · DDt ${ddS}`;
+  const cap = Math.max(0, Math.round(Number(ov.symbolCap) || 0));
+  const wild = Boolean(ov.symbolsAll || (ov.symbols || []).includes("*") || (ov.symbols || []).includes("ALL"));
+  const book = cap === 0 && wild ? "all" : `${cap || 25} ranked`;
+  return `SL ${slS} · step ${step} · trail ${trail} · ${block} · ${dca} · PF ${pfS} · DDt ${ddS} · ${book}`;
 }
 
 export function suggestPresetName(existing: UserPreset[]): string {

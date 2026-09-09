@@ -40,6 +40,10 @@ _COPY_NAMES = (
     "hist-calc.json",
     "hist-calc-req.json",
     "hist-calc-checkpoint.json",
+    "hist-calc-bingx-x01.json",
+    "hist-calc-bingx-x02.json",
+    "hist-calc-req-bingx-x01.json",
+    "hist-calc-req-bingx-x02.json",
     "overlay.json",
     "overlay-bingx-x01.json",
     "overlay-bingx-x02.json",
@@ -75,6 +79,17 @@ MAX_RETAINED_LINE_BYTES = 16 * 1024
 MAX_RETAINED_FILE_BYTES = 8 * 1024 * 1024
 _APPEND_LOCK = threading.RLock()
 _APPEND_COUNTS: Dict[str, int] = {}
+_RETENTION_LIMITS: Dict[str, Tuple[int, int]] = {}
+
+
+def configure_retention(path: str, max_lines: int, max_bytes: int) -> None:
+    with _APPEND_LOCK:
+        _RETENTION_LIMITS[str(path)] = (
+            max(32, min(MAX_RETAINED_LINES, int(max_lines))),
+            max(1024, min(MAX_RETAINED_FILE_BYTES, int(max_bytes))),
+        )
+        while len(_RETENTION_LIMITS) > 128:
+            _RETENTION_LIMITS.pop(next(iter(_RETENTION_LIMITS)))
 
 
 def _bounded_line_bytes(value: Any) -> bytes:
@@ -253,6 +268,9 @@ def retain_last_lines(
 ) -> int:
     """Keep at most the newest bounded text lines in ``path``."""
     with _APPEND_LOCK:
+        limits = _RETENTION_LIMITS.get(str(path))
+        if limits:
+            max_lines, max_bytes = min(max_lines, limits[0]), min(max_bytes, limits[1])
         return _tail_lines_locked(Path(path), max_lines=max_lines, max_bytes=max_bytes)
 
 
@@ -265,6 +283,9 @@ def append_bounded_lines(
     compact_every: int = 128,
 ) -> int:
     """Append lines and periodically compact the file to the shared tail cap."""
+    limits = _RETENTION_LIMITS.get(str(path))
+    if limits:
+        max_lines, max_bytes = min(max_lines, limits[0]), min(max_bytes, limits[1])
     line_limit = min(1000, max(1, _safe_int(max_lines, MAX_RETAINED_LINES)))
     byte_limit = min(MAX_RETAINED_FILE_BYTES, max(1024, _safe_int(max_bytes, MAX_RETAINED_FILE_BYTES)))
     values: Deque[bytes] = deque(maxlen=line_limit)
