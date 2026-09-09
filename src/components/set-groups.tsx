@@ -3,7 +3,7 @@ import type { LiveStats } from "@/lib/live-stats";
 import {
   changeSetSelection, INDICATION_GROUPS, INITIAL_SET_SELECTION, matchesSetGroup,
   readSetOverview, STRATEGY_GROUPS, tpRangeLabel,
-  type SetOverviewRow, type SetSelection,
+  type SetGroup, type SetOverviewRow, type SetSelection,
 } from "@/lib/set-overview";
 
 type Option = { value: string; label: string; count: number };
@@ -37,8 +37,11 @@ function FilterRow({ label, level, value, options, onChange, panelId }: {
   );
 }
 
-export function SetGroups({ sets, axesEnabled = false, limit, children }: {
-  sets: LiveStats["sets"]; axesEnabled?: boolean; limit?: number; children: (rows: SetOverviewRow[]) => ReactNode;
+export type SetGroupContext = { groups: SetGroup[]; selection: SetSelection; select: (selection: SetSelection) => void; version: number };
+
+export function SetGroups({ sets, axesEnabled = false, limit, children, showEmptyPanel = false }: {
+  sets: LiveStats["sets"]; axesEnabled?: boolean; limit?: number; showEmptyPanel?: boolean;
+  children: (rows: SetOverviewRow[], context: SetGroupContext) => ReactNode;
 }) {
   const [storedSelection, setSelection] = useState(INITIAL_SET_SELECTION);
   const selection = !axesEnabled && storedSelection.strategy === "axis" ? { ...storedSelection, strategy: "all" } : storedSelection;
@@ -72,7 +75,7 @@ export function SetGroups({ sets, axesEnabled = false, limit, children }: {
           {selection.scope === "system" ? "Simulated · system internal calculations" : "Exchange · confirmed completed results"}
           {` · showing ${rows.length} of ${count(selection).toLocaleString("en-US")} ${overview.version ? "configurations" : "available preview rows"}`}
         </p>
-        {rows.length ? children(rows) : <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted">No results for this selection yet.</p>}
+        {rows.length || showEmptyPanel ? children(rows, { groups: overview.groups.filter((group) => matchesSetGroup(group, selection)), selection, select: setSelection, version: overview.version }) : <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted">No results for this selection yet.</p>}
       </div>
     </div>
   );

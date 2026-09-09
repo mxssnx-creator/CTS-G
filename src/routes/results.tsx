@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
@@ -18,6 +18,8 @@ import { SetGroups } from "@/components/set-groups";
 import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
 
 type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
+
+const DimensionStats = lazy(() => import("@/components/dimension-stats"));
 
 const RESULT_TABS: Array<{ id: ResultTab; label: string; hint: string }> = [
   { id: "overview", label: "Overview", hint: "equity, tape and headline metrics" },
@@ -128,9 +130,13 @@ function ResultsPage() {
       {statsTab === "tests" ? <div id="results-panel-tests" role="tabpanel"><ForcedConfigsPanel live={stats?.forcedConfigs} /></div> : null}
 
       {statsTab === "coverage" ? <div id="results-panel-coverage" role="tabpanel"><CoveragePanel live={stats} /></div> : null}
-      {statsTab === "indications" ? <div id="results-panel-indications" role="tabpanel"><IndicationKindsPanel stats={stats} /></div> : null}
+      {statsTab === "indications" ? <div id="results-panel-indications" className="min-w-0 grid gap-3" role="tabpanel">
+        <Suspense fallback={<p className="p-4 text-sm text-muted">Loading indication diagrams…</p>}><DimensionStats stats={stats} focus="indications" /></Suspense>
+        <IndicationKindsPanel stats={stats} />
+      </div> : null}
       {statsTab === "strategies" ? (
         <div id="results-panel-strategies" className="min-w-0 grid gap-3" role="tabpanel">
+          <Suspense fallback={<p className="p-4 text-sm text-muted">Loading strategy diagrams…</p>}><DimensionStats stats={stats} focus="strategies" /></Suspense>
           <StrategyStatsPanel stats={stats} />
           <ExitResults stats={stats} />
           <BlockResults stats={stats} />
