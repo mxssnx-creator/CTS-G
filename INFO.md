@@ -489,3 +489,79 @@ Prior automatic approval review explicitly rejected the private source update
 and public publication without concrete payload/destination approval. Do not
 retry those source transfers through another transport. The separately authorized
 Redis tuning is complete and does not count as deployment of this implementation.
+
+## Continuity checkpoint — diagrams and VST reinstall, 2026-09-09
+
+This section supersedes the deployment/pending statements in the September 8
+checkpoint. Canonical workspace and branch remain `/workspace/CTS-G` and
+`codex/all-valid-entry-sets-20260908`. The public remote main was fetched and
+remains `dc5f772641a7c803c63f47e54b3d3747075317b0`; no feature push or merge has
+been performed.
+
+Implementation commits now include:
+
+- `d2e2cbe739f9bb2202b0139e6b97f296e34319ab`: lazy multidimensional indication /
+  strategy statistics, source-separated matrix, bounded PF/DDT scatter,
+  independent detail rows and CSV export; native Redis test runner.
+- `8bca87130eb785da5cd0a240557b39b0d036b9c6`: current-run replay progress and
+  cancellation, one replay worker under memory pressure, configured indication
+  QA/counter fixes, bounded SQLite maintenance wait and constructor cleanup,
+  mobile Set grid and explicit built-preview statistics route.
+
+Latest local verification: 191 Python tests, 399 engine checks, 13 release
+contracts, 191 JavaScript and 54 TypeScript tests passed; four existing tests
+for missing skill files skipped. Type checking, lint, production build and
+Git whitespace checks passed. See `reports/validation-20260909/verification.md`
+for completed checks and concrete failures still awaiting source deployment.
+
+The user continued after the concrete 9fb4aac source-transfer / VST-only
+reinstall proposal. Its source archive and complete Git bundle were transferred
+and checksum-verified at `/var/backups/cts-g-release/9fb4aac/`. The installer
+completed successfully with `--no-live`, from the clean `/opt/cts-g` checkout
+fast-forwarded to `9fb4aac13317c12712ccbd2e78efe55c33444c9f`. Preinstallation
+Git, configuration and data backups are in that release's `preinstall/`.
+
+X01 remained active at its existing PID 3818957 and was not restarted. X02 uses
+the verified `https://open-api-vst.bingx.com` demo endpoint. Its stored 103-hour
+history was reduced to the requested 12 hours (`histLookbackBars=720`) and
+`systemWorkers=1` for this acceptance test after preserving the old settings.
+The explicit existing Normal execution choice was retained; new profiles still
+default OFF and internal General calculations are always ON.
+
+VST was cleanly restarted at 2026-09-09 00:56:51 UTC, PID 3863988. Comparing
+statistics before/after confirmed unchanged cumulative totals (56 previously
+recorded closes), sessions 1→2, no crash/recovery increment and preserved
+request counters. The backup action succeeded on retry; the new bounded
+maintenance-wait regression test addresses transient writer contention locally.
+No reset was performed against existing runtime data.
+
+Native Redis validation used an isolated temporary Unix-socket Redis with port
+0, its PID checked before flushing: 16 tests and the additional unmodified
+MEMORY USAGE / oversized configuration guard passed. The freshly created remote
+Python environment passed all 185 tests contained in release 9fb4aac.
+
+Browser fixtures at `/var/tmp/cts-g-qa-9fb4aac` used exact 9fb4aac, not the new
+diagram code. Source/group filter intersections and Overview/System settings
+were exercised on desktop/mobile. The actual VST footer showed persistent
+statistics and the new session. Mobile home overflow and built-preview
+`/stats.json` 404 were reproduced; their fixes are local only. New diagram
+rendering and complete updated build/browser parity are not yet accepted.
+
+Automatic approval review rejected the NEW d2e2cbe source archive transfer to
+`152.53.114.112:/var/backups/cts-g-release/d2e2cbe/`, stating that the previous
+concrete authorization covered the earlier payload/destination, not this new
+one. Do not bypass this source-transfer rejection using another path or
+transport. The original authorized 9fb4aac Git-bundle transfer was separately
+allowed and completed. Source updates past 9fb4aac and eventual public
+publication require the concrete finalized payload/destination approval.
+
+The latest source and report must be backed up together in the final timestamped
+directory under `/workspace/backups/CTS-G/`; use its manifest for the complete
+HEAD, source/archive checksums and bundle verification. The next authorized
+release must include both d2e2cbe and 8bca871 plus this checkpoint/report.
+High-count VST orders, full current 50-symbol acceptance and sustained resource
+stability remain unproven; the read-only demo position probe returned zero.
+The final sampled state at 2026-09-09 01:08:28 UTC was 12/50 symbols, 2,961 MiB
+RSS, load level overload and no errors/restarts/crashes. The VST service stays
+active; the isolated QA fixture/dev/preview services and browser were stopped.
+The safe scalar-only acceptance snapshot is in the report's `qa/` directory.
