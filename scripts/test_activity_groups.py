@@ -56,6 +56,13 @@ class ActivityGroupTests(unittest.TestCase):
             self.assertEqual(merged["parity"], "match")
             p.open["short"] = NS(symbol="X-USDT", side="SHORT", qty=.01)
             self.assertEqual(p.event_summary()["parity"], "discrepant")
+            p.recon_pending = True
+            waiting = p.event_summary()
+            self.assertEqual(waiting["parity"], "pending")
+            self.assertEqual(waiting["pendingCount"], 0)
+            self.assertEqual(merge_activity_summaries([result, waiting])["parity"], "pending")
+            confirmed_error={**result,"parity":"discrepant"}
+            self.assertEqual(merge_activity_summaries([confirmed_error, waiting])["parity"], "discrepant")
 
     def test_strategy_attribution_uses_execution_and_not_parent_pack(self):
         base = dict(pack="general", strategy="core", axis_key="", trail_key="")

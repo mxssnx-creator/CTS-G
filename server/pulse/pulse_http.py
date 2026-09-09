@@ -1139,6 +1139,7 @@ def merge_activity_summaries(summaries: list) -> dict:
     out.update({"internalOpen": 0, "internalPositionGroups": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
     exchange_known = True
     parity_bad = False
+    parity_pending = False
 
     def add_map(target: dict, source: object) -> None:
         if not isinstance(source, dict):
@@ -1186,6 +1187,8 @@ def merge_activity_summaries(summaries: list) -> dict:
         add_map(out["byAxis"], summary.get("byAxis"))
         if summary.get("parity") == "discrepant":
             parity_bad = True
+        elif summary.get("parity") == "pending":
+            parity_pending = True
         tail = summary.get("tail")
         if isinstance(tail, list):
             out["tail"].extend(row for row in tail if isinstance(row, dict))
@@ -1198,7 +1201,7 @@ def merge_activity_summaries(summaries: list) -> dict:
     out["tail"] = sorted(out["tail"], key=lambda row: float(row.get("ts") or 0), reverse=True)[:32]
     if parity_bad:
         out["parity"] = "discrepant"
-    elif not exchange_known:
+    elif not exchange_known or parity_pending:
         out["parity"] = "pending"
     else:
         out["parity"] = "match" if out["internalPositionGroups"] == out["exchangeOpen"] else "discrepant"

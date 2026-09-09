@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
@@ -280,7 +281,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(result[0][0], 200, result)
         backups = list((store.directory / "backups").glob("*.sqlite3"))
         self.assertEqual(len(backups), 1)
-        with sqlite3.connect(backups[0]) as copied:
+        with closing(sqlite3.connect(backups[0])) as copied:
             self.assertEqual(copied.execute("PRAGMA quick_check").fetchone()[0], "ok")
             totals = json.loads(copied.execute("SELECT value FROM meta WHERE key='totals'").fetchone()[0])
         self.assertEqual(totals["n"], 1)

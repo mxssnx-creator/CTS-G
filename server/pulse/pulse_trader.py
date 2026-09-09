@@ -533,6 +533,28 @@ def sl_bounds(side: str, mark: float, last: float, entry: float, liq: float, tic
     return float(lower), float(upper)
 
 
+def valid_position_snapshot(rows: Any) -> bool:
+    """Only a complete, well-formed venue response can establish absence."""
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                return False
+            raw_amount = row.get("positionAmt")
+            if raw_amount is None or raw_amount == "":
+                raw_amount = row.get("availableAmt")
+            amount = float(raw_amount)
+            if not math.isfinite(amount):
+                return False
+            if abs(amount) > 1e-12 and (not row.get("symbol") or
+                    str(row.get("positionSide") or "").upper() not in ("", "LONG", "SHORT")):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return True
+
+
 def ctrl_err_kind(msg: str) -> str:
     m = str(msg or "").lower()
     compact = m.replace(" ", "")
@@ -2458,6 +2480,7 @@ class Pulse:
             exchange_open=exchange_open,
             internal_closed=len(getattr(self, "closed", ()) or ()),
             pending_count=len(getattr(self, "pending_orders", {}) or {}),
+            reconciliation_pending=bool(getattr(self, "recon_pending", False)),
         )
 
     def ingest_ws_px(self) -> int:
@@ -3291,11 +3314,25 @@ class Pulse:
                 price = self.round_px(c, price)
         return price
 
+    def _controls_waiting_for_position(self, pos: Position) -> bool:
+        return time.time() < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
+
+    def _defer_missing_position_controls(self, pos: Position, response: Dict[str, Any]) -> bool:
+        if str(response.get("code")) != "109420" and ctrl_err_kind(str(response.get("msg") or "")) != "flat":
+            return False
+        # One absent exchange position covers every independent set on this
+        # symbol+direction. Alternate payloads/prices cannot repair absence.
+        # Keep the book and existing protection until reconciliation confirms
+        # exchange truth; stop sibling sets from exhausting the venue budget.
+        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = time.time() + 60.0
+        self.recon_pending = True
+        return True
+
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
-        if time.time() < self.ctrl_skip.get("__order_cap__", 0):
+        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
@@ -3386,6 +3423,8 @@ class Pulse:
                 )
                 if r.get("cooled"):
                     return ""
+                if not self.ok(r) and self._defer_missing_position_controls(pos, r):
+                    return have_this
                 msg = str(r.get("msg") or "")
                 kind_err = ctrl_err_kind(msg)
                 if self.ok(r):
@@ -3466,13 +3505,7 @@ class Pulse:
                 self.errors += 1
                 self.last_error = f"{kind} {pos.symbol} {short}"[:160]
                 log(f"CTRL FAIL {kind} {pos.symbol} {pos.side} {short} px={price} mark={self.px.get(pos.symbol)}")
-            low2 = msg.lower()
-            if kind_err == "flat" or "position not exist" in low2:
-                self.ctrl_skip[scope] = time.time() + 20
-                age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
-                if age > 90.0 and self._exchange_flat(pos):
-                    self.drop_ghost(pos, "ctrl-no-position")
-            elif kind_err in ("px", "liq"):
+            if kind_err in ("px", "liq"):
                 self.ctrl_skip[scope] = time.time() + 45
             elif kind_err == "qty":
                 self.ctrl_skip[scope] = time.time() + 60
@@ -3585,7 +3618,7 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
-        if time.time() < self.ctrl_skip.get("__order_cap__", 0):
+        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
         # A range pair is quantity-matched. If the parent grew since the last
         # placement, remove only this group's old pair before creating the new
@@ -3648,7 +3681,9 @@ class Pulse:
             qty=pos.qty,
             detail="batch SL/TP protection",
         )
-        data = r.get("data") or {}
+        if r.get("cooled") or (not self.ok(r) and self._defer_missing_position_controls(pos, r)):
+            return
+        data = (r.get("data") or {}) if self.ok(r) else {}
         rows = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(rows, list):
             rows = []
@@ -3657,6 +3692,7 @@ class Pulse:
                 continue
             code = o.get("code")
             if code not in (0, None, "0", ""):
+                self._defer_missing_position_controls(pos, o)
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
             if not oid:
@@ -3669,11 +3705,11 @@ class Pulse:
             elif typ in TP_TYPES or kind in ("v", "t"):
                 pos.tp_oid = pos.sec_tp_oid = oid
                 pos.tp = want_tp
-        if not real_oid(pos.sl_oid):
+        if not real_oid(pos.sl_oid) and not self._controls_waiting_for_position(pos):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
                 pos.sl = want_sl
-        if not real_oid(pos.tp_oid):
+        if not real_oid(pos.tp_oid) and not self._controls_waiting_for_position(pos):
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
                 pos.tp = want_tp
@@ -3691,7 +3727,7 @@ class Pulse:
             # New entries attach protection before joining the local book.
             # Only a previously tracked position disappearing means retirement.
             return tracked_at_start and not any(candidate is pos for candidate in self.open.values())
-        if now < self.ctrl_skip.get("__order_cap__", 0):
+        if now < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
         scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
@@ -3703,7 +3739,7 @@ class Pulse:
         pos.sec_sl, pos.sec_tp = sec_sl, sec_tp
         if not real_oid(pos.sl_oid) and not real_oid(pos.tp_oid):
             self.place_ctrl_pair(pos)
-            if retired():
+            if retired() or self._controls_waiting_for_position(pos):
                 return
             if real_oid(pos.sl_oid) and real_oid(pos.tp_oid):
                 return
@@ -4965,7 +5001,10 @@ class Pulse:
             return False
         if not self.ok(r):
             return False
-        for p in (r.get("data") or []):
+        rows = r.get("data")
+        if not valid_position_snapshot(rows):
+            return False
+        for p in rows:
             if str(p.get("symbol") or "") != pos.symbol:
                 continue
             side = (p.get("positionSide") or "").upper() or ("LONG" if float(p.get("positionAmt") or 0) > 0 else "SHORT")
@@ -7985,25 +8024,7 @@ class Pulse:
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
         rows = r.get("data")
-        valid_rows = isinstance(rows, list)
-        if valid_rows:
-            for row in rows:
-                try:
-                    if not isinstance(row, dict):
-                        raise ValueError("position row must be an object")
-                    raw_amount = row.get("positionAmt")
-                    if raw_amount is None or raw_amount == "":
-                        raw_amount = row.get("availableAmt")
-                    amount = float(raw_amount)
-                    if not math.isfinite(amount):
-                        raise ValueError("nonfinite position quantity")
-                    if abs(amount) > 1e-12 and (not row.get("symbol") or
-                            str(row.get("positionSide") or "").upper() not in ("", "LONG", "SHORT")):
-                        raise ValueError("invalid position identity")
-                except (TypeError, ValueError, OverflowError):
-                    valid_rows = False
-                    break
-        if not valid_rows:
+        if not valid_position_snapshot(rows):
             # Unknown/malformed truth is not a confirmed empty exchange. Do
             # not advance absence counters or mutate ownership from a partial
             # payload: that could discard our still-open protected position.
@@ -9120,7 +9141,7 @@ class Pulse:
             "activity": activity,
             "events": activity.get("tail") or [],
             "maxHoldS": MAX_HOLD_S,
-            "tests": self.tests[-24:],
+            "tests": self.tests[:24],
             "block": self.block.snapshot(),
             "pulse": self.pulse_snapshot(),
             "coord": coord_snap,

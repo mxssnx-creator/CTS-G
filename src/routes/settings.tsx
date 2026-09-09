@@ -45,7 +45,8 @@ import {
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
+import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
 import { SystemSettingsPanel } from "@/components/system-settings";
 import { SystemHealthFooter } from "@/components/system-health";
 
@@ -1427,7 +1428,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="Default 50 qualified Sets · fewer when qualification fails · 0 = unlimited"
+                  hint="Default 110 qualified Sets · 0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -2604,15 +2605,15 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         </p>
       </div>
       <SetGroups sets={sets} axesEnabled={enabledAxes(stats).length > 0} limit={40}>{(rows) => (
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
+      <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Configuration set measurements">
+        <table className="w-full min-w-[720px] table-fixed text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
-              <th className="pb-2 font-medium">Set</th>
+              <th className="w-56 pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last {overlay.setPfWindow} PF</th>
-              <th className="pb-2 text-right font-medium">Last {overlay.setDeactN} R</th>
+              <th className="pb-2 text-right font-medium" title={`Cost PF · configured ${overlay.setPfWindow}-result window`}>PF</th>
+              <th className="pb-2 text-right font-medium" title="Average R · last 25 results">R25</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>
@@ -2630,9 +2631,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 const ddt = r.maxDdS;
                 return (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5">
-                    {setLabel(r)}
-                  </td>
+                  <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
@@ -2644,7 +2643,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                     {setMetric(r.last25AvgR)}
                   </td>
                   <td className="py-1.5 text-right">{ddt == null ? "—" : formatDuration(ddt * 1000)}</td>
-                  <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
+                  <td className="py-1.5 text-muted [overflow-wrap:anywhere]">{r.deactReason || "—"}</td>
                 </tr>
                 );
               })

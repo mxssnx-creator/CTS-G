@@ -317,7 +317,8 @@ class EventLedger:
         return out
 
     def summary(self, *, internal_open: int = 0, exchange_open: int = -1, internal_closed: int = 0,
-                internal_position_groups: Optional[int] = None, pending_count: int = 0) -> Dict[str, Any]:
+                internal_position_groups: Optional[int] = None, pending_count: int = 0,
+                reconciliation_pending: bool = False) -> Dict[str, Any]:
         with self._lock:
             events = list(self.events)
             by_type = {key: 0 for key in EVENT_TYPES}
@@ -333,7 +334,7 @@ class EventLedger:
             # An exchange nets all independent config orders for one
             # symbol+direction. Compare those position groups, not Set count.
             group_count = int(internal_open) if internal_position_groups is None else int(internal_position_groups)
-            parity = "pending" if not exchange_known else ("match" if group_count == int(exchange_open) else "discrepant")
+            parity = "pending" if not exchange_known or reconciliation_pending else ("match" if group_count == int(exchange_open) else "discrepant")
             # Financial totals are sourced from the authoritative close
             # events.  Exchange fill callbacks can repeat the same realized
             # result for a close order; counting every request/fill event

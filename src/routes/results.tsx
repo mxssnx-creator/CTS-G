@@ -335,7 +335,7 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
   const missing = Number(controls?.missing ?? Math.max(0, open - protectedCount));
   const mode = controls?.mode ?? ((stats?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
-    <section className="rounded-radius border border-border bg-surface p-4" data-testid="control-health-panel">
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4" data-testid="control-health-panel">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Exchange control health</h2>

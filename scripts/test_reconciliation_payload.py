@@ -30,5 +30,15 @@ class SnapshotValidation(unittest.TestCase):
                 self.assertEqual(p._empty_rest_streak,0)
                 self.assertFalse(p.recon_ok)
                 self.assertEqual(p.recon_detail,'positions payload malformed')
+                self.assertFalse(p._exchange_flat(SimpleNamespace(symbol='XRP-USDT',side='LONG')))
+
+    def test_flatness_requires_a_valid_snapshot_for_the_exact_direction(self):
+        p=Pulse.__new__(Pulse)
+        pos=SimpleNamespace(symbol='XRP-USDT',side='LONG')
+        for rows,expected in (([],True),
+                ([{'symbol':'XRP-USDT','positionSide':'LONG','positionAmt':'1'}],False),
+                ([{'symbol':'XRP-USDT','positionSide':'SHORT','positionAmt':'-1'}],True)):
+            p.api=SimpleNamespace(get=lambda *args, data=rows:{'code':0,'data':data})
+            self.assertEqual(p._exchange_flat(pos),expected)
 
 if __name__=='__main__':unittest.main()
