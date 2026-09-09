@@ -36,5 +36,14 @@ class SettingsPersistence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             with self.assertRaises(ValueError):ph.write_overlay('../../foreign',{'x':1})
             self.assertEqual(list(pathlib.Path(d).iterdir()),[])
+    def test_sqlite_modes_and_checkpoints_persist_independently_per_lane(self):
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            ph.write_overlay('vst',{'systemSqliteMemory':1,'systemSqliteCheckpointS':3})
+            ph.write_overlay('live',{'systemSqliteMemory':0,'systemSqliteCheckpointS':25})
+            for lane,mode,seconds in (('bingx-x02',1,3),('bingx-x01',0,25)):
+                value=ph.load_overlay(lane)
+                self.assertEqual(value['systemSqliteMemory'],mode)
+                self.assertEqual(value['systemSqliteCheckpointS'],seconds)
+                self.assertTrue(value['stratGeneral'])
 
 if __name__=='__main__':unittest.main()

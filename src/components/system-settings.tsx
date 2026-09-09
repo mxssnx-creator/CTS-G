@@ -17,9 +17,13 @@ const groups: { title: string; hint: string; fields: Field[] }[] = [
   ] },
   { title: "History and persistence", hint: "Per-connection files survive reinstalling code. Bar retention is raised automatically when the configured replay window needs more bars.", fields: [
     ["systemHistoryRetentionBars", "Retained 1m bars / symbol"], ["systemHistoryPersistS", "Bar checkpoint interval · seconds"],
-    ["systemDbMaxMb", "Statistics DB ceiling · MiB", "Main database; WAL adds a bounded checkpoint buffer"],
     ["systemRetentionDays", "Detail retention · days", "Lifetime financial totals are kept until an explicit statistics reset"],
     ["systemTradeMaxRows", "Recent trade rows"], ["systemEventMaxRows", "Recent event rows"], ["systemSampleMaxRows", "Resource sample rows"],
+  ] },
+  { title: "SQLite storage", hint: "Each connection owns one statistics database. Confirmed financial records are journaled durably. Event details and resource samples recover from the latest checkpoint.", fields: [
+    ["systemSqliteMemory", "SQLite storage mode", "RAM is the default. Mode changes apply at the next engine restart"],
+    ["systemSqliteCheckpointS", "SQLite checkpoint interval · seconds", "RAM → verified persistent file; also saved on clean shutdown"],
+    ["systemDbMaxMb", "Statistics DB ceiling · MiB", "RAM / main file limit; redo journal ≤ 4 MiB, rotated backups are separate"],
   ] },
   { title: "Logs and backups", hint: "All managed engine logs have both line and byte limits. Statistics backups are verified and rotated independently for each connection.", fields: [
     ["systemLogMaxLines", "Log lines / file"], ["systemLogMaxMb", "Log ceiling / file · MiB"],
@@ -83,9 +87,13 @@ export function SystemSettingsPanel({ conn, overlay, patch, navigate }: Props) {
         {group.fields.map(([key, label, hint]) => {
           const [, min, max, integer] = SYSTEM_LIMITS[key] as [number, number, number, boolean];
           return <label key={key} className="min-w-0 space-y-1 text-sm"><span>{label}</span>
-            <input aria-label={label} data-setting={key} type="number" value={overlay[key]} min={min} max={max} step={integer ? 1 : 0.1}
+            {key === "systemSqliteMemory" ? <select aria-label={label} data-setting={key} value={overlay[key]}
+              onChange={(event) => patch(key, Number(event.currentTarget.value))}
+              className="min-h-11 w-full rounded-lg border border-border bg-bg2 px-3">
+              <option value={1}>RAM + persistent checkpoints</option><option value={0}>Disk</option>
+            </select> : <input aria-label={label} data-setting={key} type="number" value={overlay[key]} min={min} max={max} step={integer ? 1 : 0.1}
               onChange={(event) => { const n = event.currentTarget.valueAsNumber; if (Number.isFinite(n)) patch(key, Math.min(max, Math.max(min, integer ? Math.trunc(n) : n))); }}
-              className="min-h-11 w-full rounded-lg border border-border bg-bg2 px-3 font-mono" />
+              className="min-h-11 w-full rounded-lg border border-border bg-bg2 px-3 font-mono" />}
             <span className="block text-xs text-muted">{hint || `Range ${min}–${max}`}</span>
           </label>;
         })}

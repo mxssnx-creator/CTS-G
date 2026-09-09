@@ -25,6 +25,7 @@ from redis_coordination import coordinator as redis_config
 from set_overview import merge_overviews
 from system_settings import calculation_overlay
 from runtime_statistics import StatisticsStore, lane_directory, read_status, redis_health
+from sqlite_memory import memory_request, owner_guard, recover_durable_journal
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
@@ -1729,21 +1730,31 @@ class Handler(SimpleHTTPRequestHandler):
                 action = body.get("action")
                 if action not in ("backup", "compact", "reset"):
                     raise ValueError("choose backup, compact or reset")
+                result = memory_request(DIR, conn, body)
+                if result is not None:
+                    self._json(result)
+                    return
                 # Maintenance may wait briefly for the telemetry writer. This
                 # does not change the short timeout on the engine's own store.
-                store = StatisticsStore(DIR, conn, load_overlay(conn), timeout=2.0)
-                if action == "reset":
-                    result = store.reset(body.get("scope"), body.get("confirmation"))
-                elif action == "backup":
-                    result = {"ok": True, "detail": "Verified statistics backup saved", "backup": store.backup()}
-                else:
-                    store.maintain()
-                    result = {"ok": True, "detail": "Expired details pruned and database compacted; totals preserved"}
+                with owner_guard(DIR, conn):
+                    recover_durable_journal(DIR, conn, guarded=True)
+                    store = StatisticsStore(DIR, conn, load_overlay(conn), timeout=2.0)
+                    try:
+                        if action == "reset":
+                            result = store.reset(body.get("scope"), body.get("confirmation"))
+                        elif action == "backup":
+                            result = {"ok": True, "detail": "Verified statistics backup saved", "backup": store.backup()}
+                        else:
+                            store.maintain()
+                            result = {"ok": True, "detail": "Expired details pruned and database compacted; totals preserved"}
+                    finally:
+                        store.close()
+                        store = None
                 self._json(result)
             except ValueError as exc:
                 self._json({"ok": False, "detail": str(exc)}, 400)
             except Exception as exc:
-                self._json({"ok": False, "detail": f"Maintenance failed: {type(exc).__name__}; retry is safe"}, 503)
+                self._json({"ok": False, "detail": f"Maintenance response unavailable: {type(exc).__name__}; check database status before retrying"}, 503)
             finally:
                 if store:
                     store.close()

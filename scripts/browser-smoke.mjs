@@ -131,7 +131,11 @@ try {
       const el = document.documentElement;
       return el.scrollWidth > el.clientWidth + 1;
     });
-    await page.screenshot({ path: vp.screenshot, fullPage: false });
+    if (process.env.BROWSER_SMOKE_CAPTURE_SELECTOR) {
+      await page.locator(process.env.BROWSER_SMOKE_CAPTURE_SELECTOR).first().screenshot({ path: vp.screenshot });
+    } else {
+      await page.screenshot({ path: vp.screenshot, fullPage: false });
+    }
     await page.close();
 
     viewports[vp.name] = {

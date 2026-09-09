@@ -3,6 +3,8 @@
   "systemMetricsIntervalS": [5, 1, 60, false],
   "systemReportIntervalS": [30, 5, 300, false],
   "systemDbMaxMb": [64, 8, 1024, true],
+  "systemSqliteMemory": [1, 0, 1, true],
+  "systemSqliteCheckpointS": [10, 1, 60, false],
   "systemRetentionDays": [35, 1, 365, true],
   "systemEventMaxRows": [4096, 128, 50000, true],
   "systemTradeMaxRows": [10000, 250, 100000, true],

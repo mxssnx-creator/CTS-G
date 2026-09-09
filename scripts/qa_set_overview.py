@@ -70,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
             import time
             data = {"connection":"overall", "lanes":[{"connection":"bingx-x02","persistent":True,
                     "snapshotAt":time.time(),"cpuPct":18.5,"memoryMb":256,"dbKeys":350,"dbBytes":1048576,
+                    "storageMode":"memory","memoryBytes":1048576,"journalBytes":8192,
+                    "checkpointAt":time.time()-2,"checkpointDurationMs":3.5,
                     "requestsPerSec":2,"sessionRunningS":3600,"counters":{"recoveries":1,"crashes":0},
                     "calculationCache":{"hits":250,"misses":50,"cachedSets":350,"accountedBytes":1048576,
                                         "entryLimit":350,"trimTargetPct":80}}]}

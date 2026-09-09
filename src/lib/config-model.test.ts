@@ -37,6 +37,20 @@ test("System settings survive save and use bounded values without disabling auto
   assert.equal(saved.blockActiveMinLevel, 3);
 });
 
+test("SQLite RAM defaults and disk selection survive the complete settings roundtrip", () => {
+  assert.equal(DEFAULT_OVERLAY.systemSqliteMemory, 1);
+  assert.equal(DEFAULT_OVERLAY.systemSqliteCheckpointS, 10);
+  for (const mode of [0, 1]) {
+    const saved = syncOverlayFlags(overlayFromCts({}, { systemSqliteMemory: mode, systemSqliteCheckpointS: 3 }));
+    assert.equal(saved.systemSqliteMemory, mode);
+    assert.equal(saved.systemSqliteCheckpointS, 3);
+    assert.equal(saved.normalExecutionEnabled, false);
+    assert.equal(saved.stratGeneral, true);
+  }
+  assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 0 }).systemSqliteCheckpointS, 1);
+  assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 1000 }).systemSqliteCheckpointS, 60);
+});
+
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)

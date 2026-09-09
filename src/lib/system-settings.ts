@@ -25,6 +25,14 @@ export type SystemStatus = {
   cpuPct?: number;
   memoryMb?: number;
   dbBytes?: number;
+  storageMode?: "memory" | "disk" | "checkpoint";
+  memoryBytes?: number;
+  checkpointAt?: number;
+  checkpointError?: string;
+  checkpointDurationMs?: number;
+  journalBytes?: number;
+  journalLimitBytes?: number;
+  memoryRestartRequired?: boolean;
   dbKeys?: number;
   dbRows?: Record<string, number>;
   requestsPerSec?: number;

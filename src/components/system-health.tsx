@@ -26,21 +26,30 @@ export function SystemHealth({ status }: { status: SystemStatus | null }) {
           ["CPU", stale ? "—" : number(lane.cpuPct, "%", 1)],
           ["Memory", stale ? "—" : number(lane.memoryMb, " MiB", 1)],
           ["DB keys / rows", number(lane.dbKeys)],
-          ["DB size", number(lane.dbBytes == null ? undefined : lane.dbBytes / 1048576, " MiB", 2)],
+          ["DB file size", number(lane.dbBytes == null ? undefined : lane.dbBytes / 1048576, " MiB", 2)],
           ["Requests / sec", stale ? "—" : number(lane.requestsPerSec, "", 2)],
           ["Recoveries", number(counters?.recoveries ?? (lane.persistent ? 0 : undefined))],
           ["Crashes / unclean stops", number(counters?.crashes ?? (lane.persistent ? 0 : undefined))],
           ["Session running time", duration(runningS)],
         ];
+        if (lane.storageMode) fields.push(
+          ["SQLite", lane.storageMode === "memory" ? "RAM" : lane.storageMode === "checkpoint" ? "Saved checkpoint" : "Disk"],
+          ["SQLite RAM", number(lane.memoryBytes == null ? undefined : lane.memoryBytes / 1048576, " MiB", 2)],
+          ["Redo journal", number(lane.journalBytes == null ? undefined : lane.journalBytes / 1024, " KiB", 1)],
+          ["Checkpoint age", duration(lane.checkpointAt ? Date.now() / 1000 - lane.checkpointAt : undefined)],
+        );
         return <div key={lane.connection} className="min-w-0 rounded-lg border border-border bg-bg2 p-3">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
             <span className="font-medium">{lane.connection === "bingx-x02" ? "VST · Simulated exchange" : lane.connection === "bingx-x01" ? "Live exchange" : lane.connection}</span>
             <span className="text-muted">{lane.error ? "Measurement unavailable" : stale ? "Waiting for current engine sample" : "Current"} · {lane.persistent ? "Persistent" : "Not initialized"}</span>
           </div>
-          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4 xl:grid-cols-8">
+          <dl className={`grid grid-cols-2 gap-4 sm:grid-cols-4 ${lane.storageMode ? "xl:grid-cols-6" : "xl:grid-cols-8"}`}>
             {fields.map(([label, value]) => <div key={label} className="min-w-0"><dt className="text-xs text-muted">{label}</dt><dd className="mt-1 break-words font-mono text-sm">{value}</dd></div>)}
           </dl>
           {(lane.error || lane.detail) && <p role="status" className="mt-3 text-xs text-muted">{lane.error || lane.detail}</p>}
+          {lane.storageMode === "checkpoint" && <p className="mt-3 text-xs text-muted">Showing the saved checkpoint; the current engine database is unavailable.</p>}
+          {lane.memoryRestartRequired && <p role="status" className="mt-3 text-xs text-muted">Saved SQLite mode takes effect at the next engine restart.</p>}
+          {lane.checkpointError && <p role="status" className="mt-3 text-xs text-muted">Checkpoint pending ({lane.checkpointError}); durable journal retained for recovery.</p>}
           {lane.calculationCache && <p className="mt-3 break-words text-xs text-muted">Redis calculations · {number(lane.calculationCache.hits)} reused · {number(lane.calculationCache.misses)} computed · {number(lane.calculationCache.cachedSets)} cached Sets · {number((lane.calculationCache.accountedBytes ?? 0) / 1048576, " MiB", 1)} budgeted · {lane.calculationCache.entryLimit} → {Math.floor((lane.calculationCache.entryLimit ?? 350) * (lane.calculationCache.trimTargetPct ?? 80) / 100)} newest entries{lane.calculationCache.error ? ` · ${lane.calculationCache.error}; local calculation continues` : ""}</p>}
           {lane.calculationCache?.bypassReason && <p className="text-xs text-muted">{lane.calculationCache.bypassReason} · {number(lane.calculationCache.bypassed)} calculated locally</p>}
         </div>;

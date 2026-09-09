@@ -76,6 +76,8 @@ def compact(value, limit=16384):
 
 
 class StatisticsStore:
+    storage_mode = "disk"
+
     def __init__(self, root, connection, settings=None, *, timeout=0.2):
         self.connection = connection
         self.directory = lane_directory(root, connection)
@@ -84,19 +86,24 @@ class StatisticsStore:
         self.lock = threading.RLock()
         self.writes = 0
         self.settings = normalize_system_settings(settings)
-        self.db = sqlite3.connect(self.path, timeout=timeout, check_same_thread=False)
+        self.db = self._connect(timeout)
         try:
             self._initialize(settings)
         except BaseException:
             self.db.close()
             raise
 
+    def _connect(self, timeout):
+        return sqlite3.connect(self.path, timeout=timeout, check_same_thread=False)
+
     def _initialize(self, settings):
-        self.path.chmod(0o600)
+        if self.path.exists():
+            self.path.chmod(0o600)
         self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA cache_size=-1024")
+        self.db.execute("PRAGMA temp_store=MEMORY")
         self.db.execute("PRAGMA wal_autocheckpoint=64")
         self.db.execute("PRAGMA journal_size_limit=262144")
         self.db.executescript("""
@@ -109,6 +116,8 @@ class StatisticsStore:
             CREATE INDEX IF NOT EXISTS samples_time ON samples(t);
         """)
         self.configure(settings)
+        with self.db:
+            self._set("sqliteStorageMode", self.storage_mode)
 
     def get(self, key, default=None):
         with self.lock:
@@ -116,7 +125,7 @@ class StatisticsStore:
             return json.loads(row[0]) if row else default
 
     def _set(self, key, value):
-        self.db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        self.db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value != excluded.value",
                         (key, compact(value)))
 
     def configure(self, settings):
@@ -300,7 +309,8 @@ class StatisticsStore:
     def status(self):
         with self.lock:
             counts = {table: self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
-            result = {"connection": self.connection, "persistent": True, "dbFile": str(self.path),
+            result = {"connection": self.connection, "persistent": True, "dbFile": str(self.path), "storageMode": self.storage_mode,
+                      "memoryRestartRequired": bool(self.settings["systemSqliteMemory"]) != (self.storage_mode == "memory"),
                       "directory": str(self.directory), "dbKeys": sum(counts.values()), "dbRows": counts,
                       "dbBytes": sum(p.stat().st_size for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")) if p.exists()),
                       "counters": self.get("counters", {}), "totals": self.get("totals", {}),
@@ -317,6 +327,13 @@ class StatisticsStore:
 
 def read_status(root, connection):
     """Read-only HTTP status; inspecting an unstarted lane never creates its DB."""
+    from sqlite_memory import memory_request
+    try:
+        current = memory_request(root, connection, {"action": "status"}, timeout=0.3)
+        if current is not None:
+            return current
+    except (OSError, ValueError):
+        pass  # Read the last verified checkpoint if the owner is briefly busy.
     directory = lane_directory(root, connection)
     path = directory / "statistics.sqlite3"
     if not path.exists():
@@ -324,11 +341,13 @@ def read_status(root, connection):
     try:
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2)) as db:
             db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
             meta = {k: json.loads(v) for k, v in db.execute("SELECT key,value FROM meta")}
             counts = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
         size = sum(p.stat().st_size for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")) if p.exists())
         latest = meta.get("latest", {})
         return {**latest, "connection": connection, "persistent": True, "dbFile": str(path), "directory": str(directory),
+                "storageMode": "checkpoint" if meta.get("sqliteStorageMode") == "memory" else "disk", "checkpointAt": meta.get("sqliteCheckpointAt", 0),
                 "dbKeys": sum(counts.values()), "dbRows": counts, "dbBytes": size, "snapshotAt": latest.get("sampledAt", 0),
                 **{k: meta.get(k, {}) for k in ("counters", "totals", "session", "limits", "lastReset")},
                 "lastBackupAt": meta.get("lastBackupAt", 0)}
@@ -339,7 +358,12 @@ def read_status(root, connection):
 class RuntimeMonitor:
     """Resource sampling on a dedicated bounded worker, never the order loop."""
     def __init__(self, root, connection, settings=None):
-        self.store = StatisticsStore(root, connection, settings)
+        from sqlite_memory import MemoryStatisticsStore, DiskStatisticsStore
+        effective = normalize_system_settings(settings)
+        if effective["systemSqliteMemory"]:
+            self.store = MemoryStatisticsStore(root, connection, settings)
+        else:
+            self.store = DiskStatisticsStore(root, connection, settings)
         self.session = self.store.begin_session()
         self.started = self.last_mono = time.monotonic()
         self.last_cpu = time.process_time()
@@ -376,6 +400,9 @@ class RuntimeMonitor:
             return False  # The bounded engine trade journal is retried on the next sample.
 
     def sample(self, pulse):
+        checkpoint = getattr(self.store, "checkpoint", None)
+        if checkpoint:
+            checkpoint()
         now = time.monotonic()
         elapsed = max(1e-9, now - self.last_mono)
         cpu = time.process_time()
@@ -412,6 +439,8 @@ class RuntimeMonitor:
         self.store.maintain()
         if time.time() - number(self.store.get("lastBackupAt")) >= self.store.settings["systemBackupIntervalHours"] * 3600:
             self.store.backup()
+        if checkpoint:
+            checkpoint()
         self.last_error = ""
         self.snapshot = self.store.status()
         return self.snapshot
