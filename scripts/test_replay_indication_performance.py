@@ -15,6 +15,7 @@ sys.path.insert(0, str(PULSE))
 os.chdir(PULSE)
 
 import indication_engine as indication  # noqa: E402
+import pulse_trader as trader  # noqa: E402
 from indication_engine import (  # noqa: E402
     Candle,
     DEFAULT_SETTINGS,
@@ -32,6 +33,7 @@ from set_engine import (  # noqa: E402
     indication_kind_votes_frame,
     synth_trend,
 )
+from pulse_trader import effective_indication_timeframes  # noqa: E402
 
 
 class _RecordingExecutor:
@@ -78,6 +80,77 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_disabled_combined_types_do_not_run_unused_tf_or_consensus_work(self):
+        bars = _fixture("rising")
+        book = IndicationBook()
+        book.settings.update(
+            typeState=False,
+            typeSignals=False,
+            tfCombined=True,
+            tf1m=True,
+            tf5m=True,
+            tf15m=True,
+        )
+        with patch.object(indication, "evaluate_signal_candles", side_effect=AssertionError("unused TF work")), \
+             patch.object(indication, "low_stop_consensus", side_effect=AssertionError("unused consensus work")):
+            rows = book.process(
+                "NO-COMBINED-OVERLOAD-USDT",
+                bars,
+                bars_by_tf={"1m": bars, "5m": bars, "15m": bars},
+            )
+        self.assertFalse(any(row.mode in ("tf_combined", "multi_source_consensus") for row in rows))
+        self.assertFalse(any(row.kind == "state" for row in rows))
+
+    def test_load_budget_sheds_cached_higher_timeframes_for_combined_lane(self):
+        from types import SimpleNamespace
+
+        configured = {"1m": True, "5m": True, "15m": True}
+        normal = SimpleNamespace(tf_5m=True, tf_15m=True, level="normal")
+        overloaded = SimpleNamespace(
+            tf_5m=False,
+            tf_15m=False,
+            level="overload",
+            extra_sources=False,
+            extra_n=0,
+            scan_chunk=1,
+        )
+        self.assertEqual(effective_indication_timeframes(configured, normal), ("1m", "5m", "15m"))
+        self.assertEqual(effective_indication_timeframes(configured, overloaded), ("1m",))
+
+        bars = _fixture("rising")
+        book = IndicationBook()
+        book.settings.update(minimumConfidence=0.4, minimumStrength=0.05, tfCombined=True, tfMinAgree=2)
+        rows = book.process(
+            "SHED-USDT",
+            bars,
+            bars_by_tf={"1m": bars},
+        )
+        self.assertFalse(any(row.mode == "tf_combined" for row in rows))
+        self.assertEqual({row.timeframe for row in rows if row.mode == "direct_tf"}, {"1m"})
+
+        pulse = trader.Pulse.__new__(trader.Pulse)
+        pulse.indications = IndicationBook()
+        pulse.indications.settings["extraSources"] = False
+        pulse.tf_on = configured
+        pulse.open = {}
+        pulse.universe = []
+        pulse.px = {"SHED-USDT": 100.0}
+        pulse.klines_tf = {tf: {"SHED-USDT": bars} for tf in ("1m", "5m", "15m")}
+        pulse.klines = pulse.klines_tf["1m"]
+        pulse._ind_fp = {}
+        pulse.load = SimpleNamespace(
+            cursor_ind=0,
+            scan_chunk=1,
+            scan_window=lambda names, open_symbols, chunk, cursor, ranked: (["SHED-USDT"], 0),
+        )
+        pulse._budget = lambda: overloaded
+        pulse.score = lambda symbol: (1, 0.0, 0.8)
+        seen = []
+        pulse.indications.process = lambda *args, **kwargs: seen.append(kwargs["bars_by_tf"])
+        with patch.object(trader, "SYMBOLS", ["SHED-USDT"]):
+            trader.Pulse.process_indications(pulse)
+        self.assertEqual([set(item) for item in seen], [{"1m"}])
+
     def test_compact_historic_rows_preserve_mapping_and_score_contract(self):
         rows = [hist_fill(1_700_000_000 + i * 60, "X-USDT", 1, .004, 60, "tp") for i in range(16)]
         self.assertIsInstance(rows[0], CompactHistRow)

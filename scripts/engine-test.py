@@ -1931,6 +1931,10 @@ def set_orders_test() -> None:
                       trail_arm=0.3, trail_give=0.1, step=stp, tp_pct=0.0045 + i * 0.001, idx=i)
         st.last15_ratio = 1.5
         st.last15_n = 12
+        # This fixture represents already scored/validated Base rows.  The
+        # live entry boundary intentionally requires the corresponding active
+        # flag as well as PF/sample values.
+        st.active = True
         book.sets[sid] = st
         sts.append(st)
     book.by_idx = list(sts)
@@ -1940,6 +1944,11 @@ def set_orders_test() -> None:
     cur = {"i": 0}
 
     book.pick_any = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
+    # Direct place() calls without an explicit selected_set use the current
+    # entry picker.  Move the fixture's cursor through that same boundary so
+    # this test exercises three independent Set lineages, not the production
+    # ranking tie-breaker.
+    book.pick_entry = lambda pack, side=None: sts[cur["i"]] if cur["i"] < len(sts) else None
     book.pick_trail = lambda pack, side=None: None
     book.adapt_from_live = lambda rows: None
     book.indication_ok = lambda kind, side=None: True
@@ -2360,8 +2369,9 @@ def strict_gate_test() -> None:
                 "trailArmMin": 0.3, "trailArmMax": 0.3})
         b.progress.ready = True
         if winner:
+            general = next(st for st in b.by_idx if st.pack == "general" and st.kind == "base")
             for st in b.by_idx:
-                st.hist = win_rows(strong) if st is b.by_idx[0] else []
+                st.hist = win_rows(strong) if st is b.by_idx[0] or st is general else []
                 b._score_one(st)
         return b
 
@@ -2541,8 +2551,9 @@ def strict_gate_test() -> None:
         p6 = mk_place_trader(warm2)
         p6.place("AAA-USDT", 1, "gen:ema+", 0.9)
         pos6 = next(iter(p6.positions_for("AAA-USDT")), None)
+        general6 = next(st for st in warm2.by_idx if st.pack == "general" and st.kind == "base")
         rec("strict-place-trades-validated",
-            len(p6.api.posts) == 1 and pos6 is not None and pos6.set_id == warm2.by_idx[0].id,
+            len(p6.api.posts) == 1 and pos6 is not None and pos6.set_id == general6.id,
             f"posts={len(p6.api.posts)} set={getattr(pos6, 'set_id', None)}")
     finally:
         pt.MAX_OPEN, pt.MAX_PER_GROUP = old_max_open, old_max_group

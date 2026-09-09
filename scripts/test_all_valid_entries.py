@@ -149,6 +149,24 @@ class AllValidEntries(unittest.TestCase):
         for _ in range(34): visited.update(p.entry_candidate_window(matrix))
         self.assertEqual(visited, set(matrix))
 
+    def test_entry_sets_cache_reuses_stable_eligibility_and_invalidates_on_score(self):
+        book = self.book(12)
+        with patch.object(book, '_validated_entry_rows', wraps=book._validated_entry_rows) as scan:
+            first = book.entry_sets('general', side='LONG')
+            second = book.entry_sets('general', side='LONG')
+            self.assertEqual([row.id for row in first], [row.id for row in second])
+            self.assertEqual(scan.call_count, 1)
+            # A score publication changes active/PF/live eligibility and must
+            # invalidate the cached row references before the next dispatch.
+            book._score_one(book.by_idx[0])
+            book.entry_sets('general', side='LONG')
+            self.assertEqual(scan.call_count, 2)
+
+            # Readiness is part of the key even when no score has changed.
+            book.progress.ready = not book.progress.ready
+            book.entry_sets('general', side='LONG')
+            self.assertEqual(scan.call_count, 3)
+
     def test_unlimited_tp_keeps_selected_range_and_sl_cap(self):
         p = self.pulse(self.book(1))
         selected = p.sets.by_idx[0]

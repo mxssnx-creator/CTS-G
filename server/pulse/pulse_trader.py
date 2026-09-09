@@ -96,6 +96,31 @@ def client_order_nonce(prefix: str, width: int) -> str:
         result = chars[digit] + result
     return result
 
+
+def effective_indication_timeframes(
+    configured: Dict[str, Any],
+    budget: Any = None,
+) -> Tuple[str, ...]:
+    """Return the timeframes allowed for the current warm-path budget.
+
+    The configured flags remain authoritative for normal operation, but the
+    load governor may temporarily shed higher timeframes.  In that case we
+    must also stop consuming already cached 5m/15m bars; otherwise the
+    combined indication lane keeps doing the expensive work that the budget
+    explicitly tried to shed.  The 1m lane is never shed here because it is
+    the minimum input for live entries and validated-set coordination.
+    """
+    configured = configured or {}
+    # ``process`` always receives the 1m bars as its primary argument, so the
+    # live entry lane remains a 1m lane even if an older overlay omitted the
+    # explicit flag.  Only higher-timeframe work is shed by this helper.
+    allowed = {"1m"}
+    if bool(configured.get("5m", True)) and bool(getattr(budget, "tf_5m", True)):
+        allowed.add("5m")
+    if bool(configured.get("15m", True)) and bool(getattr(budget, "tf_15m", True)):
+        allowed.add("15m")
+    return tuple(tf for tf in TIMEFRAMES if tf in allowed)
+
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = redis_key(f"connection:{CONN_SHORT}")
 BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
@@ -6550,6 +6575,10 @@ class Pulse:
         )
         self.coord.load(cts, calc_ov)
         self.indications.load(calc_ov)
+        # Type/TF/combined settings are part of the indication input
+        # fingerprint.  Do not let a config reload reuse a prior symbol's
+        # result merely because its latest candle has not changed.
+        self._ind_fp.clear()
         self._catalog_overlay = dict(calc_ov)
         self._catalog_cts = dict(cts)
         self.sets.load(calc_ov, cts, rebuild=not initial)
@@ -7599,21 +7628,44 @@ class Pulse:
         if not isinstance(fp_map, dict):
             fp_map = {}
             self._ind_fp = fp_map
+        effective_tfs = effective_indication_timeframes(self.tf_on, b)
         for s in window:
             bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
             if len(bars) < 20:
                 continue
             last_c = float(bars[-1][3]) if bars else 0.0
             px = self.px.get(s) or 0
-            fp = (len(bars), last_c, round(float(px or 0), 6))
+            # Include every effective TF and the current load mode.  A cached
+            # higher-TF bar may still exist after the governor sheds 15m; it
+            # must not keep the combined lane alive or prevent reprocessing
+            # when the governor later restores that lane.
+            tf_fp = tuple(
+                (
+                    tf,
+                    len(self.klines_tf.get(tf, {}).get(s) or []),
+                    tuple(
+                        round(float(value or 0.0), 6)
+                        for value in ((self.klines_tf.get(tf, {}).get(s) or [])[-1][:5] if (self.klines_tf.get(tf, {}).get(s) or []) else ())
+                    ),
+                )
+                for tf in effective_tfs
+            )
+            fp = (
+                len(bars),
+                last_c,
+                round(float(px or 0), 6),
+                effective_tfs,
+                str(getattr(b, "level", "normal") or "normal"),
+                bool(s in extra_syms),
+                tf_fp,
+            )
             if s not in extra_syms and fp_map.get(s) == fp and s in self.indications.last:
                 continue
             fp_map[s] = fp
             d, _, conf = self.score(s)
             bars_by_tf = {
                 tf: (self.klines_tf.get(tf, {}).get(s) or [])
-                for tf in TIMEFRAMES
-                if self.tf_on.get(tf, True)
+                for tf in effective_tfs
             }
             self.indications.process(
                 s,
@@ -9300,6 +9352,14 @@ class Pulse:
         cov = self._coverage_blob()
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
+        budget = getattr(self.load, "last_budget", None)
+        effective_tfs = effective_indication_timeframes(self.tf_on, budget)
+        configured_combined = bool(ind_snap.get("tfCombined", True))
+        combined_min = max(2, int(ind_snap.get("tfMinAgree") or 2))
+        ind_snap["effectiveTimeframes"] = list(effective_tfs)
+        ind_snap["combinedEffective"] = bool(configured_combined and len(effective_tfs) >= combined_min)
+        ind_snap["combinedShed"] = bool(configured_combined and not ind_snap["combinedEffective"])
+        ind_snap["loadLevel"] = str(getattr(budget, "level", "normal") or "normal")
         sets_snap = dict(self.sets.snapshot(full=False))
         if getattr(self, "_sets_overview", None) is not None:
             sets_snap["overview"] = self._sets_overview

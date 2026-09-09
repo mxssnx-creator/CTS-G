@@ -8,6 +8,7 @@ processed Sets and are the only tape that deactivates them.
 from __future__ import annotations
 
 import copy
+from functools import wraps
 import json
 import math
 import os
@@ -110,6 +111,25 @@ def _intern(value: Any, fallback: str = "") -> str:
         return sys.intern(text)
     except Exception:
         return text
+
+
+def _invalidate_entry_cache_around_score(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Publish a new entry-eligibility generation around score mutation.
+
+    Score workers update a SetState in several steps.  Invalidating before the
+    update prevents a scan that started earlier from being reused; invalidating
+    after it prevents a concurrent scan that observed the old fields from
+    surviving the final mutation.  The wrapper keeps that guarantee on the
+    early-return paths used by the historic/live gates as well.
+    """
+    @wraps(fn)
+    def wrapped(book: Any, *args: Any, **kwargs: Any) -> Any:
+        book._invalidate_entry_cache()
+        try:
+            return fn(book, *args, **kwargs)
+        finally:
+            book._invalidate_entry_cache()
+    return wrapped
 
 
 class CompactHistRow(Mapping):
@@ -1075,6 +1095,14 @@ class SetBook:
         self._live_ov_ts = 0.0
         self._pick_lock = threading.RLock()
         self._pick_cursor = 0
+        # Entry admission is read on every hot cycle, while scores and live
+        # fills change only at discrete publication points. Keep the exact
+        # validated Base rows by pack/direction and invalidate them through a
+        # cheap epoch instead of rescanning a 30k+ catalog four times per
+        # cycle. The cache stores references only; SetState remains owned by
+        # this book and no eligibility decision is copied or ranked away.
+        self._entry_rows_cache: Dict[Tuple[str, str], Tuple[Tuple[Any, ...], Tuple[SetState, ...]]] = {}
+        self._entry_cache_epoch = 0
         # IDs currently referenced by an unresolved entry/control/close intent
         # or an open local position. This is updated by Pulse without scanning
         # the complete catalogue on every order; the SetBook keeps the compact
@@ -1119,10 +1147,23 @@ class SetBook:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._pick_lock = threading.RLock()
+        if not isinstance(getattr(self, "_entry_rows_cache", None), dict):
+            self._entry_rows_cache = {}
+        if not isinstance(getattr(self, "_entry_cache_epoch", None), int):
+            self._entry_cache_epoch = 0
         if not isinstance(getattr(self, "_processing_set_ids", None), set):
             self._processing_set_ids = set(getattr(self, "_processing_set_ids", ()) or ())
         if not isinstance(getattr(self, "_processing_reasons", None), dict):
             self._processing_reasons = {}
+
+    def _invalidate_entry_cache(self) -> None:
+        """Advance the entry-read generation without racing score workers."""
+        lock = getattr(self, "_pick_lock", None)
+        if lock is None:
+            self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
+            return
+        with lock:
+            self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
 
     def sync_processing_sets(
         self,
@@ -1202,6 +1243,7 @@ class SetBook:
             "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
             "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
             "_processing_set_ids", "_processing_reasons",
+            "_entry_rows_cache", "_entry_cache_epoch",
         }
         for name, value in self.__dict__.items():
             if name in skip:
@@ -1253,6 +1295,10 @@ class SetBook:
         *,
         rebuild: bool = True,
     ) -> None:
+        # Settings can change the eligibility predicate without scoring a
+        # state. Start a new cache generation before installing them.
+        self._invalidate_entry_cache()
+        self._entry_rows_cache = {}
         cts = cts or {}
         from system_settings import normalize_system_settings
         self.system_workers = normalize_system_settings(ov)["systemWorkers"]
@@ -1806,6 +1852,10 @@ class SetBook:
             if len(tape) > hc:
                 self.strategy_hist[k] = tape[-hc:]
                 n += 1
+        if n:
+            # Trimming can change the live-window predicate even when the
+            # scalar score fields have not been recomputed yet.
+            self._invalidate_entry_cache()
         return n
 
     def trim_bars(self, keep: Sequence[str]) -> int:
@@ -3676,6 +3726,7 @@ class SetBook:
             return False, f"live DDt {dd_s:.0f}s"
         return True, ""
 
+    @_invalidate_entry_cache_around_score
     def _score_one(self, st: SetState, *, bundle: Optional[Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]] = None) -> None:
         self._selection_dirty = True
         self._snap_ts = 0.0
@@ -3968,6 +4019,7 @@ class SetBook:
         selection_key = (id(self.by_idx), len(self.by_idx), self.max_active)
         if not force and not getattr(self, "_selection_dirty", True) and getattr(self, "_selection_key", None) == selection_key:
             return
+        self._invalidate_entry_cache()
         self._selection_key = selection_key
         self._selection_dirty = False
         # Keep scoring all configs, including previously unselected candidates.
@@ -4482,6 +4534,33 @@ class SetBook:
             result.append(state)
         return result
 
+    @staticmethod
+    def _entry_side(side: Optional[str]) -> str:
+        want = str(side or "").strip().upper()
+        if want in ("L", "1", "BUY"):
+            return "LONG"
+        if want in ("S", "-1", "SELL"):
+            return "SHORT"
+        return want if want in DIRECTIONS else ""
+
+    def _entry_cache_key(self, pack: str, side: str) -> Tuple[Any, ...]:
+        """Return all non-score inputs that can change entry eligibility."""
+        return (
+            int(getattr(self, "_entry_cache_epoch", 0) or 0),
+            id(self.by_idx),
+            len(self.by_idx),
+            str(pack),
+            str(side),
+            bool(self.enabled),
+            bool(self.use_historic_gate),
+            bool(getattr(self.progress, "ready", False)),
+            bool(self.strict_gate),
+            int(self.eval_need()),
+            round(float(self.real_min_pf or 0.0), 12),
+            round(float(self.max_dd_s or 0.0), 6),
+            round(float(self.cost_pct or 0.0), 12),
+        )
+
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
         """Return every validated Base Set eligible for new entries.
 
@@ -4489,10 +4568,31 @@ class SetBook:
         performs fair lazy round-robin dispatch over this stable list; the
         helper applies the per-Set PF/DDT/sample gates before returning it.
         """
-        return sorted(
-            self._validated_entry_rows(pack, side=side),
-            key=lambda s: (s.idx, s.id),
+        # Ensure a changed active-selection cap is reflected before looking at
+        # the cache. _cap_active is normally a no-op here and is O(1) when no
+        # score/config publication marked the selection dirty.
+        self._cap_active(force=False)
+        normalized_side = self._entry_side(side)
+        key = (str(pack), normalized_side)
+        context = self._entry_cache_key(pack, normalized_side)
+        cached = getattr(self, "_entry_rows_cache", {}).get(key)
+        if cached is not None and cached[0] == context:
+            return list(cached[1])
+        rows = tuple(
+            sorted(
+                self._validated_entry_rows(pack, side=normalized_side),
+                key=lambda s: (s.idx, s.id),
+            )
         )
+        # A concurrent live fill/replay publication may have advanced the
+        # epoch while this scan ran. In that case discard the result; the next
+        # caller will rebuild against the newer state.
+        if self._entry_cache_key(pack, normalized_side) == context:
+            cache = getattr(self, "_entry_rows_cache", None)
+            if not isinstance(cache, dict):
+                cache = self._entry_rows_cache = {}
+            cache[key] = (context, rows)
+        return list(rows)
 
     def entry_pack_open(self, pack: str, side: Optional[str] = None) -> bool:
         """Return whether a validated Base Set can source a new entry.
