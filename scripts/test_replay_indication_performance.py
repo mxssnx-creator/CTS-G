@@ -22,7 +22,16 @@ from indication_engine import (  # noqa: E402
     IndicationBook,
     build_indication_frame,
 )
-from set_engine import IND_TAG_KIND, SetBook, indication_kind_votes, indication_kind_votes_frame, synth_trend  # noqa: E402
+from position_cost import row_position_cost_pct  # noqa: E402
+from set_engine import (  # noqa: E402
+    CompactHistRow,
+    IND_TAG_KIND,
+    SetBook,
+    hist_fill,
+    indication_kind_votes,
+    indication_kind_votes_frame,
+    synth_trend,
+)
 
 
 class _RecordingExecutor:
@@ -69,6 +78,24 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_compact_historic_rows_preserve_mapping_and_score_contract(self):
+        rows = [hist_fill(1_700_000_000 + i * 60, "X-USDT", 1, .004, 60, "tp") for i in range(16)]
+        self.assertIsInstance(rows[0], CompactHistRow)
+        self.assertEqual(dict(rows[0])["pnl_pct"], .004)
+        self.assertEqual({**rows[0]}["side"], "LONG")
+        self.assertTrue(all(row.get("reason") == "tp" for row in rows))
+        measured = hist_fill(1_700_000_000, "X-USDT", 1, .004, 60, "tp", cost=.12)
+        self.assertAlmostEqual(measured.get("costPct"), .12)
+        measured["cost_source"] = "exchange-measured"
+        self.assertAlmostEqual(row_position_cost_pct(measured), .12)
+
+        book = SetBook()
+        compact_metrics = book._fast_historic_metrics(rows, ordered=True)
+        dict_metrics = book._fast_historic_metrics([dict(row) for row in rows], ordered=True)
+        self.assertEqual(compact_metrics["last15_n"], dict_metrics["last15_n"])
+        self.assertAlmostEqual(compact_metrics["last15_ratio"], dict_metrics["last15_ratio"], places=6)
+        self.assertEqual(len(book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"]), 6)
+
     def test_prepared_frame_matches_public_vote_wrapper(self):
         settings = dict(DEFAULT_SETTINGS)
         tags = {"sig", "ta", "dir", "move", "act", "common", "trend", "brk", "break"}

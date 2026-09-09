@@ -9,6 +9,7 @@ required net % = cost% × ((ratio − 1) / 0.10)
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 POSITION_COST_PCT_DEFAULT = 0.10
@@ -34,9 +35,11 @@ EVALUATION_WINDOWS = (5, 10, 15, 25, 50, 75)
 def _row_value(row: Any, *keys: str) -> Any:
     """Read the first present field from dicts, dataclasses, or API rows."""
     for key in keys:
-        if isinstance(row, dict):
-            if key in row and row.get(key) is not None:
-                return row.get(key)
+        if isinstance(row, Mapping):
+            if key in row:
+                value = row.get(key)
+                if value is not None:
+                    return value
         elif hasattr(row, key):
             value = getattr(row, key)
             if value is not None:
@@ -176,16 +179,20 @@ def row_has_measured_cost(row: Any) -> bool:
 
 def _is_simple_historic_row(row: Any) -> bool:
     """Identify generated gross-move rows that cannot carry measured cost."""
-    if not isinstance(row, dict) or row.get("pnl_pct") is None:
+    # Historic replay may use the slots-backed CompactHistRow to keep a large
+    # independent catalog within its memory ceiling.  It exposes the same
+    # Mapping/attribute fields as the legacy dict row, so classify it by the
+    # shared row contract instead of requiring a concrete dict.
+    if _row_value(row, "pnl_pct") is None:
         return False
-    if any(row.get(key) is not None for key in (
+    if any(_row_value(row, key) is not None for key in (
         "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
         "totalFee", "totalCommission", "entry_fee", "entryFee", "exit_fee", "exitFee",
         "fee", "fees", "commission", "commissionAmount", "fee_rate", "feeRate",
         "commissionRate", "makerFeeRate", "takerFeeRate",
     )):
         return False
-    source = str(row.get("cost_source") or row.get("costSource") or row.get("source") or "").lower()
+    source = str(_row_value(row, "cost_source", "costSource", "source") or "").lower()
     return not any(token in source for token in ("live", "exchange", "cost"))
 
 

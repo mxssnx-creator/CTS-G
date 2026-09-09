@@ -132,7 +132,12 @@ class CalculationCache:
         # remain outside this pure-metric cache and are reapplied by _score_one.
         params = [REVISION, book.cost_pct, book.pf_n, book.deact_n, book.eval_need(),
                   book.real_min_pf, book.max_dd_s, book._stage_window_ns()]
-        raw = json.dumps([params, state.hist if rows is None else rows], separators=(',', ':'), sort_keys=True, allow_nan=False)
+        source_rows = state.hist if rows is None else rows
+        # Compact historic rows are Mapping-compatible but intentionally not
+        # JSONEncoder objects.  Convert only the small cache-signature input;
+        # the live Set tape remains slots-backed and memory bounded.
+        json_rows = [dict(row) if not isinstance(row, dict) else row for row in source_rows]
+        raw = json.dumps([params, json_rows], separators=(',', ':'), sort_keys=True, allow_nan=False)
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def _connect(self):

@@ -15,6 +15,7 @@ import sys
 import time
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -111,6 +112,100 @@ def _intern(value: Any, fallback: str = "") -> str:
         return text
 
 
+class CompactHistRow(Mapping):
+    """Small mapping-compatible historic fill.
+
+    Historic replay creates millions of short-lived rows for a large
+    independent Set catalog.  A normal ``dict`` repeats six key references
+    and a hash table for every row even though the generated row shape is
+    fixed.  Slots keep the hot representation compact while the Mapping API
+    preserves the existing PF/DDT, overview, cache, and test contracts.
+    Optional fields are allocated only for indication/strategy metadata;
+    normal vectorized fills have no per-row auxiliary dict.
+    """
+
+    __slots__ = ("t", "symbol", "side", "pnl_pct", "hold_s", "reason", "_extra")
+    _BASE_KEYS = ("t", "symbol", "side", "pnl_pct", "hold_s", "reason")
+
+    def __init__(
+        self,
+        t: float,
+        symbol: str,
+        side: str,
+        pnl_pct: float,
+        hold_s: float,
+        reason: str,
+        *,
+        cost: Optional[float] = None,
+        ind_kind: str = "",
+    ) -> None:
+        self.t = float(t)
+        self.symbol = _intern(symbol)
+        self.side = _intern(side)
+        self.pnl_pct = float(pnl_pct)
+        self.hold_s = float(hold_s)
+        self.reason = _intern(reason[:40] if reason else "x", "x")
+        self._extra = None
+        if cost not in (None, 0, 0.0) or ind_kind:
+            self._extra = {}
+            if cost not in (None, 0, 0.0):
+                self._extra["costPct"] = float(cost)
+            if ind_kind:
+                self._extra["ind_kind"] = _intern(ind_kind)
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._BASE_KEYS:
+            return getattr(self, key)
+        if self._extra is not None and key in self._extra:
+            return self._extra[key]
+        raise KeyError(key)
+
+    def __iter__(self):
+        yield from self._BASE_KEYS
+        if self._extra:
+            yield from self._extra
+
+    def __len__(self) -> int:
+        return len(self._BASE_KEYS) + (len(self._extra) if self._extra else 0)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self._BASE_KEYS:
+            setattr(self, key, value)
+            return
+        if self._extra is None:
+            self._extra = {}
+        self._extra[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._BASE_KEYS:
+            raise KeyError(f"cannot delete historic base field {key}")
+        if self._extra is None or key not in self._extra:
+            raise KeyError(key)
+        del self._extra[key]
+        if not self._extra:
+            self._extra = None
+
+    def update(self, other=(), /, **kwargs: Any) -> None:
+        if hasattr(other, "keys"):
+            for key in other.keys():
+                self[key] = other[key]
+        else:
+            for key, value in other:
+                self[key] = value
+        for key, value in kwargs.items():
+            self[key] = value
+
+
+def _is_hist_row(row: Any) -> bool:
+    return isinstance(row, (dict, CompactHistRow))
+
+
 def hist_fill(
     ts: float,
     symbol: str,
@@ -121,27 +216,18 @@ def hist_fill(
     *,
     cost: Optional[float] = None,
     ind_kind: str = "",
-) -> Dict[str, Any]:
+) -> CompactHistRow:
     """Compact historic fill. PF/DDT/side only — no per-row catalog copies."""
     side_key = _SIDE_LONG if side in (1, True, _SIDE_LONG, "long", "L", "l") or str(side)[:1] in "Ll" else _SIDE_SHORT
-    rec: Dict[str, Any] = {
-        "t": float(ts),
-        "symbol": _intern(symbol),
-        "side": side_key,
-        "pnl_pct": float(pnl_pct),
-        "hold_s": float(hold_s),
-        "reason": _intern(str(reason or "x")[:40], "x"),
-    }
-    if cost not in (None, 0, 0.0):
-        rec["costPct"] = float(cost)
-    if ind_kind:
-        rec["ind_kind"] = _intern(ind_kind)
-    return rec
+    return CompactHistRow(
+        float(ts), _intern(symbol), side_key, float(pnl_pct), float(hold_s),
+        _intern(str(reason or "x")[:40], "x"), cost=cost, ind_kind=ind_kind,
+    )
 
 
-def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
     """Drop duplicate hist payload. Live/exchange rows stay intact."""
-    if not isinstance(row, dict):
+    if not _is_hist_row(row):
         return row
     if row.get("client_id") or row.get("exchange_confirmed") or row.get("ours"):
         return row
@@ -195,23 +281,23 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     """Return observed close throughput from a timestamped live tape."""
     ordered = sorted(
         [row for row in rows if row is not None],
-        key=lambda row: finite(row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)),
+        key=lambda row: finite(row.get("t") if _is_hist_row(row) else getattr(row, "t", 0)),
     )
     if len(ordered) < 2:
         return 0.0
-    first = finite(ordered[0].get("t") if isinstance(ordered[0], dict) else getattr(ordered[0], "t", 0))
-    last = finite(ordered[-1].get("t") if isinstance(ordered[-1], dict) else getattr(ordered[-1], "t", 0))
+    first = finite(ordered[0].get("t") if _is_hist_row(ordered[0]) else getattr(ordered[0], "t", 0))
+    last = finite(ordered[-1].get("t") if _is_hist_row(ordered[-1]) else getattr(ordered[-1], "t", 0))
     # Duplicate/near-duplicate exchange timestamps must not create an
     # infinite score or make a tiny test burst look like a stable rate.
     span_h = max(1.0 / 60.0, (last - first) / 3600.0)
-    keys = {str(row.get("client_id") or row.get("fillId") or i) if isinstance(row, dict)
+    keys = {str(row.get("client_id") or row.get("fillId") or i) if _is_hist_row(row)
             else str(getattr(row, "client_id", "") or i) for i, row in enumerate(ordered)}
     return len(keys) / span_h
 
 
 def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
     """Keep recent fills from every symbol so last-N PF/DDT is not the last 1–2 names."""
-    rows = [slim_hist_row(r) for r in bucket if isinstance(r, dict)]
+    rows = [slim_hist_row(r) for r in bucket if _is_hist_row(r)]
     cap = max(8, int(cap or HIST_CAP))
     if len(rows) <= cap:
         rows.sort(key=lambda r: finite(r.get("t")))
@@ -248,14 +334,14 @@ def merge_hist_rows(
     """Merge a refreshed symbol slice into the bounded historic tape."""
     replace = {str(s) for s in (replace_symbols or ())}
     if not previous:
-        return trim_hist([row for row in incoming if isinstance(row, dict)], HIST_CAP)
+        return trim_hist([row for row in incoming if _is_hist_row(row)], HIST_CAP)
     merged: Dict[Tuple[str, float, str, str, float, float], Dict[str, Any]] = {}
     for row in previous:
-        if not isinstance(row, dict) or str(row.get("symbol") or "") in replace:
+        if not _is_hist_row(row) or str(row.get("symbol") or "") in replace:
             continue
         merged[hist_row_key(row)] = row
     for row in incoming:
-        if isinstance(row, dict):
+        if _is_hist_row(row):
             merged[hist_row_key(row)] = row
     return trim_hist(list(merged.values()), HIST_CAP)
 
@@ -266,7 +352,7 @@ def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = F
     if ordered:
         seq = rows if isinstance(rows, list) else list(rows)
     else:
-        seq = [r for r in rows if isinstance(r, dict)]
+        seq = [r for r in rows if _is_hist_row(r)]
         seq.sort(key=lambda r: finite(r.get("t")))
     if len(seq) <= n:
         return seq
@@ -311,20 +397,20 @@ def last_n_chrono(rows: Sequence[Any], n: int, *, ordered: bool = False) -> List
         seq = rows if isinstance(rows, list) else list(rows)
     else:
         seq = [r for r in rows if r is not None]
-        seq.sort(key=lambda r: finite(r.get("t") if isinstance(r, dict) else getattr(r, "t", 0)))
+        seq.sort(key=lambda r: finite(r.get("t") if _is_hist_row(r) else getattr(r, "t", 0)))
     if len(seq) <= take:
         return seq if isinstance(seq, list) else list(seq)
     return seq[-take:]
 
 
 def row_ts(row: Any) -> float:
-    if isinstance(row, dict):
+    if _is_hist_row(row):
         return finite(row.get("t"))
     return finite(getattr(row, "t", 0))
 
 
 def row_symbol(row: Any) -> str:
-    if isinstance(row, dict):
+    if _is_hist_row(row):
         return str(row.get("symbol") or "?")
     return str(getattr(row, "symbol", None) or "?")
 
@@ -340,7 +426,7 @@ def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> flo
     pct = None
     pnl = None
     cost = cost_pct
-    if isinstance(row, dict):
+    if _is_hist_row(row):
         if "pnl" in row and row.get("pnl") is not None:
             pnl = finite(row.get("pnl"))
         pct = row.get("pnl_pct")
@@ -1486,7 +1572,7 @@ class SetBook:
         that do not yet have the configured sample minimum remain explicitly
         cold and do not veto an otherwise valid candidate.
         """
-        ordered = sorted((r for r in rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        ordered = sorted((r for r in rows if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
         windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
         checked = 0
@@ -2917,10 +3003,10 @@ class SetBook:
     ) -> Dict[str, Any]:
         """Equivalent historic score using the known simulation row contract."""
         if ordered:
-            rows = [row for row in tape if isinstance(row, dict)]
+            rows = [row for row in tape if _is_hist_row(row)]
         else:
             rows = sorted(
-                (row for row in tape if isinstance(row, dict)),
+                (row for row in tape if _is_hist_row(row)),
                 key=lambda row: finite(row.get("t")),
             )
         return self._fast_historic_from_ordered(rows, hist_n=hist_n)
@@ -2934,10 +3020,10 @@ class SetBook:
     ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
         """Overall + LONG/SHORT historic metrics from one sort."""
         if ordered:
-            rows = [row for row in tape if isinstance(row, dict)]
+            rows = [row for row in tape if _is_hist_row(row)]
         else:
             rows = sorted(
-                (row for row in tape if isinstance(row, dict)),
+                (row for row in tape if _is_hist_row(row)),
                 key=lambda row: finite(row.get("t")),
             )
         overall = self._fast_historic_from_ordered(rows, hist_n=hist_n)
@@ -3105,7 +3191,7 @@ class SetBook:
     ) -> Dict[str, Any]:
         if fast_historic:
             return self._fast_historic_metrics(tape, hist_n=hist_n)
-        ordered = sorted((r for r in tape if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
+        ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
         nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
         wins = sum(1 for x in nets if x > 0)
         gp = round(sum(x for x in nets if x > 0), 6)
