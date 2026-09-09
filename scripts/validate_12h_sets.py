@@ -87,7 +87,15 @@ def main():
                 picked = book.entry_sets(pack, side)
                 assert len(picked) == len({st.id for st in picked})
                 assert all(st.kind == "base" for st in picked)
-                assert all(st.last15_n >= book.eval_need() and st.last15_ratio >= threshold for st in picked)
+                # Entry qualification is independent per direction.  The
+                # aggregate Set PF may be below the floor while the selected
+                # LONG/SHORT side is valid, so validate the same side view
+                # used by entry_sets/execution_allowed.
+                assert all(
+                    int(book._side_view(st, side).get("last15_n") or 0) >= book.eval_need()
+                    and float(book._side_view(st, side).get("last15_ratio") or 0) >= threshold
+                    for st in picked
+                )
                 assert all(book.execution_allowed(st, pack, side) for st in picked)
                 scopes[pack + ":" + side] = len(picked)
         qualification[str(threshold)] = scopes

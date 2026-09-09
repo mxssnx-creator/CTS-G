@@ -256,6 +256,18 @@ class AllValidEntries(unittest.TestCase):
         # overview/research consumers.
         self.assertIn(trailing.id, {state.id for state in book.pick_all('general', 'LONG')})
 
+    def test_entry_gate_uses_independent_direction_pf(self):
+        """A valid side must not be rejected by the aggregate Set PF."""
+        book = self.book(1)
+        state = book.by_idx[0]
+        state.last15_ratio = 0.8
+        state.by_side = {
+            'LONG': {'active': True, 'last15_n': 12, 'last15_ratio': 1.2, 'max_dd_s': 0},
+            'SHORT': {'active': False, 'last15_n': 12, 'last15_ratio': 0.8, 'max_dd_s': 0},
+        }
+        self.assertEqual([state.id], [row.id for row in book.entry_sets('general', 'LONG')])
+        self.assertEqual([], book.entry_sets('general', 'SHORT'))
+
     def test_processing_retention_survives_set_deactivation_until_pending_closes(self):
         book = self.book(2)
         p = self.pulse(book)
