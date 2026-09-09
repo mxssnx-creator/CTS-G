@@ -26,6 +26,13 @@ _REDIS_CACHE = {}
 _REDIS_LOCK = threading.Lock()
 
 
+def _redis_int(value, default=0):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def redis_health():
     """Metadata only. Never enumerate values, expire keys or alter shared Redis."""
     with _REDIS_LOCK:
@@ -39,12 +46,19 @@ def redis_health():
             fields = dict(line.strip().split(":", 1) for line in response.stdout.splitlines() if ":" in line and not line.startswith("#"))
             if "used_memory" not in fields:
                 raise RuntimeError("redis metadata unavailable")
-            databases = [dict(part.split("=", 1) for part in value.split(",") if "=" in part)
-                         for key, value in fields.items() if re.fullmatch(r"db\d+", key)]
-            result.update(available=True, keys=sum(int(row.get("keys", 0)) for row in databases),
-                          expiringKeys=sum(int(row.get("expires", 0)) for row in databases),
-                          memoryBytes=int(fields.get("used_memory", 0)), maxMemoryBytes=int(fields.get("maxmemory", 0)),
-                          operationsPerSec=int(fields.get("instantaneous_ops_per_sec", 0)),
+            databases = {}
+            for key, value in fields.items():
+                if not re.fullmatch(r"db\d+", key):
+                    continue
+                parts = dict(part.split("=", 1) for part in value.split(",") if "=" in part)
+                databases[key] = {"keys": _redis_int(parts.get("keys")),
+                                  "expiringKeys": _redis_int(parts.get("expires")),
+                                  "avgTtlMs": _redis_int(parts.get("avg_ttl"))}
+            result.update(available=True, databaseCount=len(databases), databases=databases,
+                          keys=sum(row["keys"] for row in databases.values()),
+                          expiringKeys=sum(row["expiringKeys"] for row in databases.values()),
+                          memoryBytes=_redis_int(fields.get("used_memory")), maxMemoryBytes=_redis_int(fields.get("maxmemory")),
+                          operationsPerSec=_redis_int(fields.get("instantaneous_ops_per_sec")),
                           policy=fields.get("maxmemory_policy", "unknown"),
                           appendOnly=fields.get("aof_enabled") == "1", snapshotStatus=fields.get("rdb_last_bgsave_status", "unknown"),
                           appendStatus=fields.get("aof_last_write_status", "unknown"))

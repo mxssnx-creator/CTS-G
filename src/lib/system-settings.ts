@@ -19,7 +19,7 @@ export function normalizeSystemSettings(raw: Partial<SystemSettings> = {}): Syst
 
 export type SystemStatus = {
   calculationCache?: { hits?: number; misses?: number; bypassed?: number; bypassReason?: string; errors?: number; pruned?: number; accountedBytes?: number; cachedSets?: number; entryLimit?: number; trimTargetPct?: number; error?: string };
-  sharedDatabase?: { available?: boolean; keys?: number; expiringKeys?: number; memoryBytes?: number; maxMemoryBytes?: number; operationsPerSec?: number; policy?: string; appendOnly?: boolean; snapshotStatus?: string; appendStatus?: string; detail?: string };
+  sharedDatabase?: { available?: boolean; databaseCount?: number; databases?: Record<string, { keys?: number; expiringKeys?: number; avgTtlMs?: number }>; keys?: number; expiringKeys?: number; memoryBytes?: number; maxMemoryBytes?: number; operationsPerSec?: number; policy?: string; appendOnly?: boolean; snapshotStatus?: string; appendStatus?: string; detail?: string };
   connection: string;
   persistent?: boolean;
   cpuPct?: number;
