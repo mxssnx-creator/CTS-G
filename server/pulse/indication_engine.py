@@ -1352,7 +1352,14 @@ class IndicationBook:
         evals: List[SignalEval] = []
         tf_evals: List[SignalEval] = []
         frames_by_tf: Dict[str, IndicationFrame] = {}
-        for tf in TIMEFRAMES:
+        # TF evaluations have two consumers: direct signal lanes and the
+        # state/combined lane.  Do not calculate them when both consumers are
+        # disabled; filtering the resulting rows later would still pay the
+        # full candle/indicator cost on every symbol.
+        need_tf_evals = bool(self.settings.get("typeSignals", True)) or bool(
+            self.settings.get("tfCombined", True) and self.settings.get("typeState", True)
+        )
+        for tf in TIMEFRAMES if need_tf_evals else ():
             flag = f"tf{tf}"
             if not self.settings.get(flag, True):
                 continue
@@ -1474,7 +1481,7 @@ class IndicationBook:
                         kind="state",
                     )
                 )
-        if self.settings.get("tfCombined", True):
+        if self.settings.get("tfCombined", True) and self.settings.get("typeState", True):
             comb = combine_timeframes(tf_evals, int(self.settings.get("tfMinAgree") or 2), self.settings)
             if comb:
                 direction, contrib, risk = comb
@@ -1499,7 +1506,7 @@ class IndicationBook:
                         kind="state",
                     )
                 )
-        cons = low_stop_consensus(evals, self.settings)
+        cons = low_stop_consensus(evals, self.settings) if self.settings.get("typeState", True) else None
         if cons:
             direction, contrib, risk = cons
             has_tf = any(i.mode == "tf_combined" for i in indications)
