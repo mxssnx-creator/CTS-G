@@ -9964,11 +9964,83 @@ class Pulse:
             dest_html=os.path.join(DIR, f"results-export-{CONN_SHORT}.html"),
         )
 
+    def _qa_live_control_tests(self) -> None:
+        """Refresh the cheap, state-local control probes on every hot tick.
+
+        History replay deliberately skips the heavier QA suite. It must not,
+        however, leave a stale control failure visible while recovery has
+        already restored the current open positions. These checks only walk
+        the bounded open book and never perform exchange I/O.
+        """
+        now = time.time()
+        if not bool(getattr(self, "control_orders", True)):
+            self.record_test("controls-on-open", True, "disabled")
+            self.record_test("qa-controls", True, "disabled")
+            self.record_test("qa-ctrl-overall", True, "disabled")
+            self.record_test("qa-ctrl-range", True, "disabled")
+            return
+
+        missing = sum(
+            1
+            for p in self.open.values()
+            if self.missing_controls(p)
+            and now - float(getattr(p, "opened_at", 0) or 0) > 90.0
+        )
+        cooling = (
+            self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > now
+            or now < self.ctrl_skip.get("__order_cap__", 0)
+        )
+        detail = f"missing={missing} open={len(self.open)} cool={int(cooling)}"
+        self.record_test("controls-on-open", missing == 0 or cooling, detail)
+        self.record_test("qa-controls", missing == 0 or cooling, detail)
+
+        overall_ok = True
+        for p in self.open.values():
+            if now - float(getattr(p, "opened_at", 0) or 0) <= 90.0:
+                continue
+            if not (
+                real_oid(p.sl_oid)
+                and real_oid(p.tp_oid)
+                or (
+                    real_oid(getattr(p, "sec_sl_oid", ""))
+                    and real_oid(getattr(p, "sec_tp_oid", ""))
+                )
+            ):
+                overall_ok = False
+
+        sl_bad = 0
+        tp_bad = 0
+        tp_crossed = 0
+        for p in self.open.values():
+            if now - float(getattr(p, "opened_at", 0) or 0) < 90.0:
+                continue
+            if not p.entry:
+                continue
+            sl_px = float(getattr(p, "sec_sl", 0) or p.sl or 0)
+            tp_px = float(getattr(p, "sec_tp", 0) or p.tp or 0)
+            mark = float(self.px.get(p.symbol) or 0)
+            if sl_px > 0 and mark > 0:
+                side_ok = (p.side == "LONG" and sl_px < mark) or (p.side == "SHORT" and sl_px > mark)
+                if not side_ok:
+                    sl_bad += 1
+            if tp_px > 0 and mark > 0:
+                side_ok = (p.side == "LONG" and tp_px > mark) or (p.side == "SHORT" and tp_px < mark)
+                if not side_ok:
+                    crossed = (p.side == "LONG" and tp_px > p.entry) or (p.side == "SHORT" and tp_px < p.entry)
+                    if crossed:
+                        tp_crossed += 1
+                    else:
+                        tp_bad += 1
+        range_ok = sl_bad == 0 and tp_bad == 0
+        self.record_test("qa-ctrl-overall", overall_ok or cooling, f"open={len(self.open)} overall={int(overall_ok)} miss={missing}")
+        self.record_test("qa-ctrl-range", range_ok or cooling or not self.open, f"range ok={int(range_ok)} slBad={sl_bad} tpBad={tp_bad} tpCrossed={tp_crossed}")
+
     def qa_tick(self) -> None:
         """In-process probes — no extra live orders. Runs on the hot loop."""
         if self.last_error and is_transient_api(self.last_error):
             self.last_error = ""
         if self.hist_busy:
+            self._qa_live_control_tests()
             self.record_test("qa-hot-budget", True, f"hist-slice {self.last_scan_ms:.0f}ms")
             return
         hub = getattr(self.api, "hub", None)
@@ -10005,46 +10077,7 @@ class Pulse:
         book_cap = self.max_book_notional()
         sane_cap = max(self.notional_cap() * 32.0, 64.0)
         self.record_test("qa-book-cap", book_cap <= sane_cap * 1.001, f"book={book_cap:.2f} sane={sane_cap:.2f}")
-        missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
-        cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
-        # Keep the one-time startup probe aligned with the recurring control
-        # probe. Recovery can legitimately observe a gap while controls are
-        # being recreated; once the current state is healthy, clear the old
-        # failure from the persistent QA counters and overview.
-        self.record_test("controls-on-open", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-        self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-        overall_ok = True
-        for p in self.open.values():
-            if (time.time() - p.opened_at) <= 90.0:
-                continue
-            if not (real_oid(p.sl_oid) and real_oid(p.tp_oid) or (real_oid(getattr(p, "sec_sl_oid", "")) and real_oid(getattr(p, "sec_tp_oid", "")))):
-                overall_ok = False
-        sl_bad = 0
-        tp_bad = 0
-        tp_crossed = 0
-        for p in self.open.values():
-            if time.time() - float(getattr(p, "opened_at", 0) or 0) < 90.0:
-                continue
-            if not p.entry:
-                continue
-            sl_px = float(getattr(p, "sec_sl", 0) or p.sl or 0)
-            tp_px = float(getattr(p, "sec_tp", 0) or p.tp or 0)
-            mark = float(self.px.get(p.symbol) or 0)
-            if sl_px > 0 and mark > 0:
-                side_ok = (p.side == "LONG" and sl_px < mark) or (p.side == "SHORT" and sl_px > mark)
-                if not side_ok:
-                    sl_bad += 1
-            if tp_px > 0 and mark > 0:
-                side_ok = (p.side == "LONG" and tp_px > mark) or (p.side == "SHORT" and tp_px < mark)
-                if not side_ok:
-                    crossed = (p.side == "LONG" and tp_px > p.entry) or (p.side == "SHORT" and tp_px < p.entry)
-                    if crossed:
-                        tp_crossed += 1
-                    else:
-                        tp_bad += 1
-        range_ok = sl_bad == 0 and tp_bad == 0
-        self.record_test("qa-ctrl-overall", overall_ok or cooling, f"open={len(self.open)} overall={int(overall_ok)} miss={missing}")
-        self.record_test("qa-ctrl-range", range_ok or cooling or not self.open, f"range ok={int(range_ok)} slBad={sl_bad} tpBad={tp_bad} tpCrossed={tp_crossed}")
+        self._qa_live_control_tests()
         covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)
         self.record_test("qa-px-cover", covered >= max(8, min(len(SYMBOLS) - 1, len(SYMBOLS) * 3 // 4)) or self.cycle < max(80, len(SYMBOLS)), f"{covered}/{len(SYMBOLS)}")
         btc = self.contracts.get("BTC-USDT")

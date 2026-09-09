@@ -11,6 +11,26 @@ import pulse_trader as trader
 
 
 class OverallPerformanceTests(unittest.TestCase):
+    def test_history_busy_refreshes_dynamic_control_qa(self):
+        p = trader.Pulse.__new__(trader.Pulse)
+        p.last_error = ""
+        p.hist_busy = True
+        p.last_scan_ms = 12.0
+        p.control_orders = True
+        p.open = {}
+        p.px = {}
+        p.ctrl_skip = {}
+        p.api = type("Api", (), {"path_cd": {}})()
+        p.test_map = {
+            "qa-ctrl-range": {"name": "qa-ctrl-range", "pass": False, "t": 1}
+        }
+        p.tests = list(p.test_map.values())
+        p.qa_pass = 0
+        p.qa_fail = 1
+        p.qa_tick()
+        self.assertTrue(p.test_map["qa-ctrl-range"]["pass"])
+        self.assertEqual(p.qa_fail, 0)
+
     def test_merge_reads_each_lane_once_preserves_failures_and_per_lane_progress(self):
         states = {}
         for i, lane in enumerate(http.LANES):
