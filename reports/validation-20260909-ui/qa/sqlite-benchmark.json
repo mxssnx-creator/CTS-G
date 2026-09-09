@@ -1,0 +1,57 @@
+{
+  "scope": "Local synthetic statistics benchmark; filesystem-dependent, no exchange throughput claim",
+  "disk": {
+    "confirmedSyntheticFills": 2000,
+    "retainedTradeRows": 250,
+    "writes": {
+      "medianMs": 0.045213491830509156,
+      "p95Ms": 0.10831300460267812,
+      "maxMs": 1.7262780020246282,
+      "samples": 2000
+    },
+    "ownerReads": {
+      "medianMs": 0.04499700298765674,
+      "p95Ms": 0.06066101195756346,
+      "maxMs": 0.18400698900222778,
+      "samples": 250
+    },
+    "crossProcessReads": {
+      "medianMs": 26.51397049339721,
+      "p95Ms": 28.36982400913257,
+      "maxMs": 31.515087001025677,
+      "samples": 100
+    },
+    "backupMs": 1.0450230038259178,
+    "checkpointMs": null,
+    "dbBytes": 168016,
+    "memoryBytes": null,
+    "journalBytes": null
+  },
+  "memory": {
+    "confirmedSyntheticFills": 2000,
+    "retainedTradeRows": 250,
+    "writes": {
+      "medianMs": 0.05806750414194539,
+      "p95Ms": 0.16116299957502633,
+      "maxMs": 5.385684999055229,
+      "samples": 2000
+    },
+    "ownerReads": {
+      "medianMs": 0.04807249933946878,
+      "p95Ms": 0.09832800424192101,
+      "maxMs": 0.21003599977120757,
+      "samples": 250
+    },
+    "crossProcessReads": {
+      "medianMs": 26.720351008407306,
+      "p95Ms": 30.39695399638731,
+      "maxMs": 33.228325002710335,
+      "samples": 100
+    },
+    "backupMs": 1.0928249976132065,
+    "checkpointMs": 0.6981599872233346,
+    "dbBytes": 126976,
+    "memoryBytes": 126976,
+    "journalBytes": 0
+  }
+}

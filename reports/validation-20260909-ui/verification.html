@@ -16,22 +16,59 @@
   summary{cursor:pointer;font-weight:600}@media print{body{max-width:none}.notice{border:1px solid}details{break-inside:avoid}}
 </style>
 <main>
-<p>CTS-G · Prüfstand 9. September 2026 · Performance-Messung bis 03:22 UTC</p>
-<h1>UI geprüft. Weitere Fehler lokal korrigiert.</h1>
+<p>CTS-G · Prüfstand 9. September 2026 · SQLite im RAM lokal geprüft; letzte Servermessung 03:22 UTC</p>
+<h1>SQLite im RAM implementiert und geprüft.</h1>
 <p class="notice"><strong>Die neue Version ist noch nicht auf dem Server abgenommen.</strong>
-Installiert ist <code>761a9a8</code>. Die zusätzlichen Korrekturen liegen in
-<code>0f66060</code>, <code>2d0449b</code> und <code>3cf8a80</code>, ergänzt um die Trennung der Ausführungsplätze nach Verbindung und die Performance-Korrekturen in <code>2ce4bbf</code>.
+Zuletzt auf dem Server geprüft wurde <code>761a9a8</code>. Die zusätzlichen Korrekturen liegen in
+<code>0f66060</code>, <code>2d0449b</code> und <code>3cf8a80</code>, ergänzt um die Trennung der Ausführungsplätze nach Verbindung und die Performance-Korrekturen in <code>2ce4bbf</code> und SQLite im RAM in <code>b6d01b1</code>.
 Die automatische Freigabeprüfung hat die Übertragung der neuen Quelle abgelehnt,
 weil die konkrete Zustimmung nur <code>761a9a8</code> umfasste. Push und Merge sind noch ausstehend.</p>
 
 <div class="cards">
-  <div class="card"><strong>201 / 201</strong>Python-Tests · neue Quelle</div>
+  <div class="card"><strong>226 / 226</strong>Python-Tests · inklusive 24 RAM-Tests</div>
   <div class="card"><strong>399 / 399</strong>Engine-Prüfungen · neue Quelle</div>
   <div class="card"><strong>20 + 9</strong>Einstellungsbereiche + Ergebnis-Tabs durchgegangen</div>
   <div class="card"><strong>0</strong>VST-Neustarts und Crash-Zuwachs nach Installation beobachtet</div>
 </div>
 
-<h2>Aktuelle Performance-Prüfung · 2ce4bbf</h2>
+
+<h2>SQLite im RAM · b6d01b1</h2>
+<p>Die Engine hält jetzt standardmäßig eine echte <code>:memory:</code>-Datenbank je Verbindung.
+Die HTTP-Oberfläche liest und wartet genau diesen Bestand über eine begrenzte lokale Mailbox.
+Pro Verbindung darf nur ein Prozess Eigentümer sein. Live, VST und getrennte Installationen behalten eigene Datenbanken.</p>
+<div class="table"><table>
+<tr><th>Bereich</th><th>Verhalten und Nachweis</th></tr>
+<tr><td>Dauerhafte finanzielle Statistiken</td><td>Bestätigte Trade-Abschlüsse und Metadaten werden vor Bestätigung mit Prüfsumme und fortlaufender Nummer in ein synchron gesichertes Journal geschrieben. Grenze: 4 MiB. Absturz direkt nach Journal-Sicherung, noch vor RAM-Commit: kein verlorener oder doppelt gezählter Abschluss im Test.</td></tr>
+<tr><td>Checkpoints</td><td>Standard zehn Sekunden, einstellbar 1–60 Sekunden, unabhängig vom Ressourcen-Abtastintervall. Verifizierte SQLite-Datei wird atomar ersetzt und dauerhaft synchronisiert. Erst danach wird das abgedeckte Journal geleert. Bei unveränderten Daten entfällt das erneute Schreiben.</td></tr>
+<tr><td>Neustart und Fehler</td><td>Bestehende WAL-Datenbanken werden vor dem RAM-Import abgeschlossen. Wiederherstellung verwendet eine einzige atomare SQLite-Transaktion. Fehlerhafte vollständige Journal-Daten bleiben zur Prüfung erhalten; ein unvollständiger letzter Append wird verworfen. Fehlgeschlagene RAM-Commits nach erfolgreichem fsync bleiben bestätigt, damit auch Laufzeitzähler nicht doppelt addiert werden.</td></tr>
+<tr><td>Backup und Reset</td><td>Getrennter HTTP-Prozess erreicht den aktiven Eigentümer. Reset erstellt zuerst eine geprüfte Sicherung. Exakte Verbindungsbestätigung, abgelaufene Anforderungen und alte Eigentümerkennungen geprüft. Backup bei gestoppter Engine übernimmt zuerst noch nicht checkpointierte finanzielle Daten.</td></tr>
+<tr><td>Grenzen</td><td>SQLite-Seiten und Zeilen begrenzt, neueste Details bleiben erhalten, kumulative Summen bleiben vollständig. Test: 1.800 große Datensätze, höchstens 250 erhaltene Details, acht MiB RAM-Seiten, korrekte Summen nach Neustart. Größere alte Dateien werden vor dem RAM-Import verkleinert.</td></tr>
+<tr><td>Einstellungen und Übersicht</td><td>Settings → System → SQLite storage: RAM/Disk und Checkpoint-Intervall. Der Modus wechselt beim nächsten Engine-Neustart. Übersicht zeigt RAM-Seiten, Journalgröße und Checkpoint-Alter sowie ausstehende Moduswechsel und Sicherungsfehler. Speichern/Laden je Verbindung in Python und TypeScript geprüft.</td></tr>
+</table></div>
+<p><strong>Persistenzgrenze:</strong> Finanzielle Datensätze und Metadaten sind journalisiert. Neue Event-Details und Ressourcen-Samples seit dem letzten Checkpoint können bei einem Absturz fehlen.
+Bei einem dauerhaften Speicherfehler bleibt das Journal erhalten; ist seine Grenze erreicht, werden neue Schreibvorgänge sichtbar abgelehnt und aus dem begrenzten Engine-Journal erneut versucht.
+Der Seitenhöchstwert umfasst nicht den gesamten Prozessspeicher oder rotierte Backups.</p>
+<p><strong>Messung:</strong> 2.000 synthetische Abschlüsse, 250 Statusabfragen, 100 Abfragen aus einem getrennten Prozess je Modus.
+RAM: Schreibzeit Median 0,058 ms / P95 0,161 ms; Checkpoint 0,698 ms; prozessübergreifende Abfrage P95 30,4 ms.
+Disk schreibt im selben lokalen Test schneller (P95 0,108 ms). Daraus folgt keine pauschale Beschleunigung durch RAM und keine Aussage über Exchange-Durchsatz.</p>
+<p>226 Python-Tests einschließlich 24 RAM-/Absturztests, 399 Engine-Prüfungen, 13 Release-Verträge, 191 JavaScript-Tests mit vier bestehenden Skips,
+69 TypeScript-Tests und 40 Smoke-Verträge bestanden. Typecheck, Lint und Build bestanden.</p>
+<p>Desktop-/Mobile-Ressourcenanzeige in Dev und Build visuell geprüft: HTTP 200, kein horizontaler Überlauf und keine Page-Exceptions.
+Die vollständige Browserfreigabe bleibt wegen externer <code>/css2</code>- und Preview-Erweiterungsfehler offen; die Fehler wurden nicht unterdrückt.
+Das Durchklicken der neuen System-Einstellungen bleibt im funktionierenden Agent-Browser bzw. bei der Remote-Abnahme zu prüfen.
+Diese Quelle wurde nicht auf den Server übertragen, installiert, öffentlich gepusht oder gemergt.</p>
+<p><a href="qa/sqlite-checks.json">Prüfzusammenfassung</a> · <a href="qa/sqlite-python.txt">226 Python-Tests</a> ·
+<a href="qa/sqlite-memory-tests.txt">24 RAM-Tests</a> · <a href="qa/sqlite-benchmark.json">Messwerte</a> ·
+<a href="qa/sqlite-dev.json">Dev-Browserprotokoll</a> · <a href="qa/sqlite-built.json">Build-Browserprotokoll</a></p>
+<details><summary>Ressourcenanzeige auf Desktop und Mobilgerät</summary>
+<figure><img src="qa/sqlite-dev.png" alt="Neue Ressourcenübersicht mit SQLite RAM, Journal und Checkpoint-Alter"><figcaption>Dev, isolierte synthetische Testdaten.</figcaption></figure>
+<figure><img class="mobile" src="qa/sqlite-built-mobile.png" alt="Mobile Ressourcenübersicht mit SQLite RAM und korrektem Umbruch"><figcaption>Gebaut, mobile Ansicht, isolierte Testdaten.</figcaption></figure>
+</details>
+<p>Technische Grundlage: SQLite beschreibt die Prozessgrenzen echter RAM-Datenbanken in der
+<a href="https://www.sqlite.org/inmemorydb.html">In-Memory-Dokumentation</a> und das Kopieren zwischen RAM und Datei in der
+<a href="https://www.sqlite.org/backup.html">Online Backup API</a>.</p>
+
+<h2>Vorherige Performance-Prüfung · 2ce4bbf</h2>
 <p>Die API selbst antwortete in den letzten sechs Messungen innerhalb von 22–71 ms. Bei der Oberfläche waren vermeidbare Downloads und Wartezeiten nachweisbar.
 Die neue Quelle ist lokal geprüft und noch nicht auf dem Server installiert.</p>
 <div class="table"><table>

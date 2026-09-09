@@ -666,3 +666,50 @@ The cold first dev screenshot had caught the loading state. The smoke helper
 now supports an explicit loaded-state selector; external failures are not
 filtered. BOTH final runs still exit2 for /css2 and the preview extension, so
 new-release browser acceptance remains incomplete. All captures inspected.
+
+
+### 2026-09-09 SQLite RAM continuation — source b6d01b1
+
+Latest user: "Sqlite in-memory funktionieren lassen." Implemented true
+SQLite :memory: statistics, default ON per connection, with one process owner
+and bounded file-mailbox status/backup/reset/compact coordination. AF_UNIX is
+not available in this local environment; the filesystem protocol avoids socket
+dependencies. Financial records and metadata use a <=4 MiB checksummed redo
+journal; fsync is the commit point, including acknowledgment after RAM commit
+failure so resource deltas are not doubled. Full snapshots every 10 seconds
+(configurable 1–60) and on close use SQLite backup, quick_check, atomic replace
+and file/directory fsync. Samples/event details persist at checkpoint intervals.
+Recovery is one atomic SQLite transaction. Existing WAL is finished before RAM
+migration. Idle checkpoints are skipped. Row/byte retention keeps latest details
+and lifetime totals. Disk mode also owns the lane and replays previous redo;
+mode changes apply on restart, interval changes apply in operation.
+
+Settings → System → SQLite storage and the resources footer expose mode,
+checkpoint interval, memory pages, journal bytes, checkpoint age/errors and
+pending restart. Mode/interval save-load roundtrips passed in Python and TS.
+All 226 Python tests passed, including 24 new RAM/crash/multiprocess tests.
+399 engine checks, 13 release contracts, 191 JS passes/four existing skips,
+69 TS tests, 40 smoke contracts, typecheck, lint and build passed.
+The local synthetic benchmark with 2,000 fills measured RAM write P95 .161ms,
+checkpoint .698ms, cross-process status P95 30.4ms. Disk write P95 .108ms;
+RAM is not uniformly faster here. No exchange throughput claim.
+
+Current resources screenshots at 1280 and 390 viewport widths were inspected
+for both dev and build. They render the new RAM fields without overflow or
+page exceptions; strict browser acceptance still fails on the external css2
+and preview-extension resources. No failures were filtered. Newly added System
+controls still need agent-browser click-through at remote acceptance; local
+agent-browser daemon was unavailable. Reports/validation-20260909-ui contains
+sanitized protocols and fixture-only captures. No new server observation or
+source transfer was performed during this SQLite turn; last remote observation
+remains 03:22 UTC on installed 761a9a8. Source b6d01b1 includes all earlier work.
+
+Finalize the documentation commit and full verified Git/source backup; that
+FINAL_HEAD (not b6d01b1 alone and not the prior 43ce821 package) is the next
+concrete release for review. Automatic review previously rejected new source
+transfers because consent covered only 761a9a8. The SQLite request is steering,
+not exact deployment consent. Do not bypass by another transport. Request exact
+FINAL_HEAD transfer to 152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/,
+VST-only update/restart and acceptance, then public push/merge only if all gates
+pass. No Live restart, high-count protected-order acceptance, new deploy, public
+push or merge has been done in this SQLite turn.

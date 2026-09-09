@@ -1,0 +1,18 @@
+test_canonical_keys_do_not_orphan_existing_install (__main__.ReleaseTests.test_canonical_keys_do_not_orphan_existing_install) ... ok
+test_declared_python_requirements_cover_optional_fast_adapters (__main__.ReleaseTests.test_declared_python_requirements_cover_optional_fast_adapters) ... ok
+test_group_merge_extends_started_close_quantity_without_name_error (__main__.ReleaseTests.test_group_merge_extends_started_close_quantity_without_name_error) ... ok
+test_install_scripts_start_live_by_default (__main__.ReleaseTests.test_install_scripts_start_live_by_default) ... ok
+test_mainnet_start_defaults_on_and_can_be_disabled (__main__.ReleaseTests.test_mainnet_start_defaults_on_and_can_be_disabled) ... ok
+test_named_installs_have_different_ownership_and_keys (__main__.ReleaseTests.test_named_installs_have_different_ownership_and_keys) ... ok
+test_no_live_update_restarts_only_the_demo_lane (__main__.ReleaseTests.test_no_live_update_restarts_only_the_demo_lane) ... ok
+test_port_probe_accepts_time_wait_after_http_style_close (__main__.ReleaseTests.test_port_probe_accepts_time_wait_after_http_style_close) ... ok
+test_port_probe_rejects_an_actual_listener (__main__.ReleaseTests.test_port_probe_rejects_an_actual_listener) ... ok
+test_redis_readiness_retries_loading_and_requires_pong (__main__.ReleaseTests.test_redis_readiness_retries_loading_and_requires_pong) ... ok
+test_replay_copy_independent_and_preserves_set_aliases (__main__.ReleaseTests.test_replay_copy_independent_and_preserves_set_aliases) ... ok
+test_runtime_entrypoints_import_in_clean_process (__main__.ReleaseTests.test_runtime_entrypoints_import_in_clean_process) ... ok
+test_storage_and_historic_range_contracts (__main__.ReleaseTests.test_storage_and_historic_range_contracts) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.762s
+
+OK
