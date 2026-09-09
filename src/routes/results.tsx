@@ -15,7 +15,8 @@ import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
+import { enabledAxes, setMetric, type SetOverviewRow } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
 
 type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
 
@@ -528,17 +529,28 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
 
 function SetResults({ stats }: { stats: LiveStats | null }) {
   return (
-    <Card title="Independent Sets · PF · max DD time · last 25 R">
-      <SetGroups sets={stats?.sets} axesEnabled={enabledAxes(stats).length > 0}>{(rows) => (
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
+    <Card title="Sets · PF / DDT">
+      <SetGroups sets={stats?.sets} axesEnabled={enabledAxes(stats).length > 0}>{(rows, context) => (
+        <SetRows key={JSON.stringify(context.selection)} rows={rows} />
+      )}</SetGroups>
+    </Card>
+  );
+}
+
+function SetRows({ rows }: { rows: SetOverviewRow[] }) {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(rows.length / 25));
+  const current = Math.min(page, pages - 1);
+  return <div className="min-w-0 space-y-3">
+      <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Set measurements">
+        <table className="w-full min-w-[720px] table-fixed text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
-              <th className="pb-2 font-medium">Set</th>
+              <th className="w-56 pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
+              <th className="pb-2 text-right font-medium" title="Cost PF · configured evaluation window">PF</th>
+              <th className="pb-2 text-right font-medium" title="Average R · last 25 results">R25</th>
               <th className="pb-2 text-right font-medium">WR</th>
               <th className="pb-2 text-right font-medium">E</th>
               <th className="pb-2 text-right font-medium">Hold</th>
@@ -554,11 +566,9 @@ function SetResults({ stats }: { stats: LiveStats | null }) {
                 </td>
               </tr>
             ) : (
-              rows.map((r) => (
+              rows.slice(current * 25, (current + 1) * 25).map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5">
-                    {setLabel(r)}
-                  </td>
+                  <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
@@ -576,9 +586,13 @@ function SetResults({ stats }: { stats: LiveStats | null }) {
           </tbody>
         </table>
       </div>
-      )}</SetGroups>
-    </Card>
-  );
+      <div className="flex flex-wrap items-center justify-end gap-2 font-mono text-xs">
+        <span className="mr-auto text-muted">{rows.length ? current * 25 + 1 : 0}–{Math.min((current + 1) * 25, rows.length)} / {rows.length}</span>
+        <button type="button" disabled={!current} onClick={() => setPage(current - 1)} className="min-h-11 rounded-lg border border-border px-3 disabled:opacity-40">Previous</button>
+        <span role="status">{current + 1}/{pages}</span>
+        <button type="button" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)} className="min-h-11 rounded-lg border border-border px-3 disabled:opacity-40">Next</button>
+      </div>
+    </div>;
 }
 
 function ExitResults({ stats }: { stats: LiveStats | null }) {

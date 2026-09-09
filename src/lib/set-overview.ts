@@ -93,3 +93,8 @@ export function setLabel(row: SetOverviewRow) {
     row.slRatio == null ? "" : `sl${setMetric(row.slRatio, 2)}`,
     row.step ? `st${row.step}` : "", row.trailKey ? `trail ${row.trailKey}` : "", row.axisKey, row.side, row.connection].filter(Boolean).join(" · ");
 }
+
+export function compactSetLabel(row: SetOverviewRow) {
+  const name = (value: string) => value === "dca" ? "DCA" : value.charAt(0).toUpperCase() + value.slice(1);
+  return `${name(row.indicationKind)} · ${name(row.strategyType)} · TP ${tpRangeLabel(row.tpRange)}`;
+}

@@ -27,7 +27,8 @@ import { CoverageBar } from "@/components/coverage-overview";
 import { KindStrategyStrip } from "@/components/kind-strategy-stats";
 import { ActivityPanel } from "@/components/activity-overview";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setLabel, setMetric } from "@/lib/set-overview";
+import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
 import type { ConnType } from "@/lib/connections";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
@@ -684,15 +685,15 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
       )}
       <div className="mt-3">
         <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
-        <div className="mt-2 grid min-w-0 grid-cols-1 gap-1 sm:grid-cols-2">
+        <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           {rows.map((r) => (
-            <div key={r.id} className="flex min-w-0 items-center justify-between gap-2">
-              <span className={`min-w-0 truncate ${r.active ? "text-fg" : "text-faint"}`} title={setLabel(r)}>
-                {setLabel(r)}
-              </span>
-              <span className={`shrink-0 ${r.active ? "text-primary" : "text-danger"}`}>
-                {r.n ? setMetric(r.last15Ratio) : "—"} · {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)} · R{setMetric(r.last25AvgR, 1)}
-              </span>
+            <div key={r.id} className="min-w-0 rounded-md border border-border px-2 pb-2">
+              <SetIdentity row={r} />
+              <div className={`flex min-w-0 flex-wrap gap-x-3 gap-y-1 [overflow-wrap:anywhere] ${r.active ? "text-primary" : "text-muted"}`}>
+                <span>PF {r.n ? setMetric(r.last15Ratio) : "—"}</span>
+                <span>DDT {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</span>
+                <span>R {setMetric(r.last25AvgR, 1)}</span>
+              </div>
             </div>
           ))}
         </div>

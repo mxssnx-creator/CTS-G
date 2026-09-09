@@ -72,8 +72,8 @@ export function SetGroups({ sets, axesEnabled = false, limit, children, showEmpt
       <FilterRow label="Strategy" level="strategy" value={selection.strategy} panelId={panelId} onChange={(value) => change("strategy", value)} options={options("strategy", STRATEGY_GROUPS.filter((strategy) => axesEnabled || strategy !== "axis"))} />
       <div id={panelId} role="tabpanel" aria-label="Selected set results" tabIndex={0} className="min-w-0 space-y-2 focus-visible:outline-2 focus-visible:outline-primary">
         <p className="font-mono text-[11px] text-muted" role="status">
-          {selection.scope === "system" ? "Simulated · system internal calculations" : "Exchange · confirmed completed results"}
-          {` · showing ${rows.length} of ${count(selection).toLocaleString("en-US")} ${overview.version ? "configurations" : "available preview rows"}`}
+          {selection.scope === "system" ? "System" : "Exchange"}
+          {` · ${rows.length} preview / ${count(selection).toLocaleString("en-US")} ${overview.version ? "sets" : "rows"}`}
         </p>
         {rows.length || showEmptyPanel ? children(rows, { groups: overview.groups.filter((group) => matchesSetGroup(group, selection)), selection, select: setSelection, version: overview.version }) : <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted">No results for this selection yet.</p>}
       </div>

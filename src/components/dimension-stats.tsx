@@ -6,6 +6,7 @@ import { enabledAxes, INDICATION_GROUPS, setLabel, setMetric, STRATEGY_GROUPS, t
 import { detailsCsv, dimensionMatrix, metricPoints, sortSetDetails, STRATEGY_COLORS, type DetailSort, type MetricPoint } from "@/lib/dimension-stats";
 import { SetGroups, type SetGroupContext } from "./set-groups";
 import { ClientChart } from "./visual-stats";
+import { SetIdentity } from "./set-identity";
 
 const label = (value: string) => value === "dca" ? "DCA" : value[0]?.toUpperCase() + value.slice(1);
 const duration = (seconds: number | null | undefined) => seconds == null || !Number.isFinite(seconds) ? "—" : formatDuration(seconds * 1000);
@@ -120,12 +121,12 @@ function Details({ rows }: { rows: SetOverviewRow[] }) {
         <button type="button" disabled={!rows.length} onClick={exportCsv} className="min-h-11 rounded-lg border border-border px-3 disabled:opacity-40">Export selected CSV</button>
       </div>
     </div>
-    <div className="overflow-x-auto rounded-lg border border-border">
+    <div className="max-w-full overflow-x-auto rounded-lg border border-border" tabIndex={0} role="region" aria-label="Detailed set measurements">
       <table className="w-full min-w-[1000px] text-left text-xs">
         <caption className="sr-only">Independent per-set measurements for the selected source, indication, range and strategy</caption>
         <thead className="bg-bg2 text-muted"><tr>{["Set / configuration", "Samples", "Cost PF", "Last 25 R", "Max DDT", "Avg DDT", "Win rate", "Net E %", "Avg hold", "Calculation"].map((title) => <th key={title} scope="col" className="p-2 font-normal">{title}</th>)}</tr></thead>
         <tbody>{ordered.slice(current * 25, (current + 1) * 25).map((row) => <tr key={row.id} className="border-t border-border font-mono tabular-nums">
-          <td className="max-w-80 p-2"><details><summary className="cursor-pointer break-words text-fg">{setLabel(row)}</summary><p className="mt-2 break-all text-[10px] text-muted">{row.setId || row.id}</p><p className="mt-1 text-muted">{row.scope} · {row.connection || "selected connection"} · {row.side || "combined directions"}</p></details></td>
+          <td className="w-64 max-w-64 p-2"><SetIdentity row={row} /></td>
           <td className="p-2">{row.n}</td><td className="p-2">{row.n ? setMetric(row.last15Ratio) : "—"}</td><td className="p-2">{row.n ? setMetric(row.last25AvgR) : "—"}</td>
           <td className="p-2">{row.n ? duration(row.maxDdS) : "—"}</td><td className="p-2">{row.n ? duration(row.avgDdS) : "—"}</td><td className="p-2">{row.n && row.wr != null ? `${setMetric(row.wr, 1)}%` : "—"}</td>
           <td className="p-2">{row.n && row.expectancy != null ? setMetric(row.expectancy * 100, 3) : "—"}</td><td className="p-2">{row.n ? duration(row.avgHoldS) : "—"}</td>
