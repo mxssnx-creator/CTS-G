@@ -171,7 +171,7 @@ function pfTone(pf: number, n: number) {
 
 function Card({ title, hint, testId, children }: { title: string; hint?: string; testId?: string; children: ReactNode }) {
   return (
-    <section className="rounded-radius border border-border bg-surface p-4" data-testid={testId}>
+    <section className="min-w-0 rounded-radius border border-border bg-surface p-4" data-testid={testId}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="font-mono text-[11px] text-muted">{hint}</p> : null}

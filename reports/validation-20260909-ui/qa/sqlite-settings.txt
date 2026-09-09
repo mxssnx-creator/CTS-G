@@ -1,0 +1,10 @@
+test_concurrent_partial_updates_survive_and_lanes_stay_independent (test_settings_persistence.SettingsPersistence.test_concurrent_partial_updates_survive_and_lanes_stay_independent) ... ok
+test_execution_settings_roundtrip_without_disabling_calculation (test_settings_persistence.SettingsPersistence.test_execution_settings_roundtrip_without_disabling_calculation) ... ok
+test_invalid_lane_cannot_write_a_file (test_settings_persistence.SettingsPersistence.test_invalid_lane_cannot_write_a_file) ... ok
+test_nonfinite_or_nonobject_cannot_overwrite_saved_settings (test_settings_persistence.SettingsPersistence.test_nonfinite_or_nonobject_cannot_overwrite_saved_settings) ... ok
+test_sqlite_modes_and_checkpoints_persist_independently_per_lane (test_settings_persistence.SettingsPersistence.test_sqlite_modes_and_checkpoints_persist_independently_per_lane) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.091s
+
+OK

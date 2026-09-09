@@ -23,6 +23,10 @@ if (!supportsStripTypes) {
 const files = [
   "src/lib/analytics.test.ts",
   "src/lib/config-model.test.ts",
+  "src/lib/set-overview.test.ts",
+  "src/lib/dimension-stats.test.ts",
+  "src/lib/live-stats.test.ts",
+  "src/lib/polling.test.ts",
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
 ];

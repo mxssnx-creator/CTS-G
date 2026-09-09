@@ -331,7 +331,7 @@ The Settings catalog exposes the same bounded ranges used by the engines:
 | Axis | Supported range / meaning |
 |---|---|
 | SL:TP | `0.1–3.0`, step `0.1` (30 independent ratios) |
-| TP steps | `3–22`, every integer is a separate Set |
+| TP steps | `3–30`, every integer is a separate Set; maximum defaults to 30 |
 | Trailing | arm `0.3–1.5` step `0.3` × give `0.1–0.5` step `0.1` (25 independent pairs), plus Normal |
 | Historic | `120–20160` 1m bars, `2–336h` (up to fourteen days); min bars and warmup remain bounded by the replay window |
 | Block | Historic evaluates counts `1–12`; live stack is bounded to `1–6`; `0` selects the default live stack `3` |
@@ -359,6 +359,20 @@ snapshot, so displayed counts cannot be inferred from a truncated top-N table.
 
 After merge, update `/workspace/CTS-G`, deploy with the repository scripts,
 verify all services, and create a new post-merge checkpoint.
+
+### Current verification checkpoint (2026-09-08)
+
+The integrated independent-entry and hierarchical-overview work is documented in
+`reports/validation-20260908/verification.md`. Current defaults are TP 0.3% to
+unlimited (`tpMaxPct=0`), SL 0.15–3%, maximum step 30, and PF thresholds
+1.05–1.35. Trend/Break ranges have independent identities and replay tapes.
+Existing explicitly configured live settings remain authoritative.
+
+The latest private transfer and public GitHub publication were rejected by
+automatic approval review. Do not retry via another transport. The source is
+committed and locally backed up; finish the updated browser QA and VST-only
+installation after explicit payload/destination approval. No restart or high
+exchange-order acceptance test has been completed by this work.
 
 ## Installed VPS baseline (verified 2026-09-02)
 
@@ -417,3 +431,285 @@ publication, and a concurrent configuration change invalidates a stale build.
 - Do not print secrets in CI logs, shell traces, chat responses or diagnostics.
 - Use `deploy/remote-access.env.example` only as a schema. The populated
   `deploy/remote-access.env` is ignored and must remain private.
+
+## Continuity checkpoint — System and Redis, 2026-09-08
+
+Canonical workspace: `/workspace/CTS-G`, branch
+`codex/all-valid-entry-sets-20260908`. Verified implementation commit:
+`3030de88ae57a49224c5979699398782bf696ec5`. The implementation worktree was clean when backed up.
+`origin/main` was fetched successfully at
+`dc5f772641a7c803c63f47e54b3d3747075317b0`; the feature commits have not been
+publicly pushed or merged. A subsequent checkpoint commit records these notes
+and preserves the workspace preview startup helper; use its Git HEAD and final
+backup manifest for the complete checkout.
+
+Verified implementation backup: `/workspace/backups/CTS-G/20260908T232335Z-3030de8-verified`.
+It includes the complete Git bundle, source archive, clean tracked diff and
+manifest. Both `git bundle verify` and `sha256sum -c SHA256SUMS` passed.
+
+- Bundle SHA-256: `f23dcaccaad4535872bc9de293e16e6d320573ac68e1923c4bbf2ee97bccbfac`.
+- SHA256SUMS SHA-256: `95e080631fb3926ff69a82c610e5e2b38d5a949fbd6ee9eb5252b0977381d9fc`.
+
+Normal (General) defaults OFF and controls ordinary effective simulated/live
+execution independently of Block Active. Internal General/historical evaluation
+remains ON. Block minimum level defaults to 0; effective Block entries require a
+positive adjusted increment. Cached calculation limits are 350 Sets per lane and
+350 versions per Set, retaining the newest 280 at full capacity, with additional
+per-Set/global byte ceilings. These limits never truncate the full calculation
+catalog. Low cache reuse falls back to local calculation to avoid Redis/AOF churn.
+Lifetime confirmed statistics have individual SQLite files under the persistent
+data root. System settings, scoped backup/reset and resource footers are included.
+
+Verification is documented in
+`reports/validation-20260908-system/verification.md`: 185 Python tests,
+399 engine checks, 13 release contracts, 16 forced-config tests, 191 JavaScript
+and 49 TypeScript tests passed (four pre-existing absent-skill checks skipped).
+Type checking, ESLint and production build passed. The retained 12-hour market
+replay completed all 43,680 Sets / 131,040 symbol-config evaluations in 62.89s.
+The offline load test opened 500 distinct simulated orders from 250 Sets, with
+independent Normal/Block ownership and verified volumes. Redis script tests use
+fakeredis with Lua; native VPS performance has not been benchmarked.
+
+Remote Redis configuration was backed up at
+`/var/backups/cts-g-redis/20260908T225503Z/` and its lazy expiry/server-delete/
+user-delete settings were enabled, with active expiry effort 3. Configuration
+rewrite and post-change PING/AOF/RDB checks passed. Shared eviction policy and
+memory ceiling were preserved. The 1,490,124 pre-existing keys largely sampled
+from CTS-K-N were not purged. Trading services were not restarted.
+
+Latest observed installed application remains clean at
+`f12253eb908756af0c855f6ae8d0e2496be1a596`. Desk/HTTP/X01 were active; X02/VST
+was inactive. This supersedes older notes describing X01 as stopped. No mainnet
+start/restart/order action was performed here.
+
+Still pending: exact-source private transfer, updated browser desktop/mobile
+acceptance, VST-only reinstall/restart and exchange-order acceptance, public
+push/PR/merge. Chromium was unavailable and its official download failed locally.
+Prior automatic approval review explicitly rejected the private source update
+and public publication without concrete payload/destination approval. Do not
+retry those source transfers through another transport. The separately authorized
+Redis tuning is complete and does not count as deployment of this implementation.
+
+## Continuity checkpoint — diagrams and VST reinstall, 2026-09-09
+
+This section supersedes the deployment/pending statements in the September 8
+checkpoint. Canonical workspace and branch remain `/workspace/CTS-G` and
+`codex/all-valid-entry-sets-20260908`. The public remote main was fetched and
+remains `dc5f772641a7c803c63f47e54b3d3747075317b0`; no feature push or merge has
+been performed.
+
+Implementation commits now include:
+
+- `d2e2cbe739f9bb2202b0139e6b97f296e34319ab`: lazy multidimensional indication /
+  strategy statistics, source-separated matrix, bounded PF/DDT scatter,
+  independent detail rows and CSV export; native Redis test runner.
+- `8bca87130eb785da5cd0a240557b39b0d036b9c6`: current-run replay progress and
+  cancellation, one replay worker under memory pressure, configured indication
+  QA/counter fixes, bounded SQLite maintenance wait and constructor cleanup,
+  mobile Set grid and explicit built-preview statistics route.
+
+Latest local verification: 191 Python tests, 399 engine checks, 13 release
+contracts, 191 JavaScript and 54 TypeScript tests passed; four existing tests
+for missing skill files skipped. Type checking, lint, production build and
+Git whitespace checks passed. See `reports/validation-20260909/verification.md`
+for completed checks and concrete failures still awaiting source deployment.
+
+The user continued after the concrete 9fb4aac source-transfer / VST-only
+reinstall proposal. Its source archive and complete Git bundle were transferred
+and checksum-verified at `/var/backups/cts-g-release/9fb4aac/`. The installer
+completed successfully with `--no-live`, from the clean `/opt/cts-g` checkout
+fast-forwarded to `9fb4aac13317c12712ccbd2e78efe55c33444c9f`. Preinstallation
+Git, configuration and data backups are in that release's `preinstall/`.
+
+X01 remained active at its existing PID 3818957 and was not restarted. X02 uses
+the verified `https://open-api-vst.bingx.com` demo endpoint. Its stored 103-hour
+history was reduced to the requested 12 hours (`histLookbackBars=720`) and
+`systemWorkers=1` for this acceptance test after preserving the old settings.
+The explicit existing Normal execution choice was retained; new profiles still
+default OFF and internal General calculations are always ON.
+
+VST was cleanly restarted at 2026-09-09 00:56:51 UTC, PID 3863988. Comparing
+statistics before/after confirmed unchanged cumulative totals (56 previously
+recorded closes), sessions 1→2, no crash/recovery increment and preserved
+request counters. The backup action succeeded on retry; the new bounded
+maintenance-wait regression test addresses transient writer contention locally.
+No reset was performed against existing runtime data.
+
+Native Redis validation used an isolated temporary Unix-socket Redis with port
+0, its PID checked before flushing: 16 tests and the additional unmodified
+MEMORY USAGE / oversized configuration guard passed. The freshly created remote
+Python environment passed all 185 tests contained in release 9fb4aac.
+
+Browser fixtures at `/var/tmp/cts-g-qa-9fb4aac` used exact 9fb4aac, not the new
+diagram code. Source/group filter intersections and Overview/System settings
+were exercised on desktop/mobile. The actual VST footer showed persistent
+statistics and the new session. Mobile home overflow and built-preview
+`/stats.json` 404 were reproduced; their fixes are local only. New diagram
+rendering and complete updated build/browser parity are not yet accepted.
+
+Automatic approval review rejected the NEW d2e2cbe source archive transfer to
+`152.53.114.112:/var/backups/cts-g-release/d2e2cbe/`, stating that the previous
+concrete authorization covered the earlier payload/destination, not this new
+one. Do not bypass this source-transfer rejection using another path or
+transport. The original authorized 9fb4aac Git-bundle transfer was separately
+allowed and completed. Source updates past 9fb4aac and eventual public
+publication require the concrete finalized payload/destination approval.
+
+The latest source and report must be backed up together in the final timestamped
+directory under `/workspace/backups/CTS-G/`; use its manifest for the complete
+HEAD, source/archive checksums and bundle verification. The next authorized
+release must include both d2e2cbe and 8bca871 plus this checkpoint/report.
+High-count VST orders, full current 50-symbol acceptance and sustained resource
+stability remain unproven; the read-only demo position probe returned zero.
+The final sampled state at 2026-09-09 01:08:28 UTC was 12/50 symbols, 2,961 MiB
+RSS, load level overload and no errors/restarts/crashes. The VST service stays
+active; the isolated QA fixture/dev/preview services and browser were stopped.
+The safe scalar-only acceptance snapshot is in the report's `qa/` directory.
+
+### UI and VST checkpoint (2026-09-09 02:48 UTC; supersedes the earlier checkpoint)
+
+Approved release 761a9a8 was transferred, checksum-verified, backed up and
+reinstalled from /opt/cts-g with --no-live. Remote HEAD is clean at 761a9a8;
+X02 PID 3939798 and the pre-existing X01 PID 3908430 remain active with zero
+service restarts. Temporary 761a9a8 QA services and browsers were stopped.
+
+The complete current report is reports/validation-20260909-ui/verification.html.
+All nine Results tabs and 20 Settings sections were visited on the real VST
+desk. Diagram filters, matrix selection, sorting, pagination, CSV, disabled-Axis
+visibility, synchronized Step ranges and the real statistics backup action
+were exercised. Warm dev/build screenshots match on desktop/mobile without
+console/page errors. Controls had a real 770px mobile overflow; min-width:0
+diagnosis returns the page to 390px. No runtime DB reset was performed.
+
+Local source 0f66060 adds compact set identities and bounded visible rows.
+2d0449bd82cf4f72e8224fa84a67f78c07ef9ed3 additionally fixes Controls containment,
+settings labels, missing-position control retries (109420), pending parity,
+failure-priority export, malformed flatness responses and an unclosed test DB.
+A 250-set reproduction issues only one failed control POST per symbol/side
+cooldown, keeps other symbols/sides independent and resumes after 60 seconds.
+196 Python tests, 399 engine checks, 13 release contracts, 191 JS tests
+(four existing environment skips), 54 TS tests, typecheck/lint/build pass.
+The 40 smoke-contract tests also pass; installed 761a9a8 passed 15 native Redis
+checks. The local new-source browser smoke is NOT accepted: external font and
+preview-extension requests fail in this environment. Its diagnostics are saved.
+
+Observed VST control retries caused a real multi-minute venue ban before the
+new local fix. Final state: Normal execution OFF, internal General ON, 21,840
+Sets, 34 internal positions / five exchange groups, 2,413.5 MiB RSS, persistent
+3,371,008-byte statistics DB, zero crashes/recoveries, 293 QA pass / one QA fail.
+The failed QA item was hidden by the old export slice; the local fix makes
+priority failures visible. It was subsequently identified from the retained
+server log as qa-slot-unique; see the additional occupancy correction below.
+The running manual replay still uses seven hours and full 50-symbol completion
+was not confirmed. High-count Exchange acceptance and a complete current
+50-symbol/12-hour replay remain open. Do not claim production readiness.
+
+Automatic approval review rejected transfer of the new 0f66060 delta bundle
+and its remote fast-forward, stating that authorization covered only the
+concrete 761a9a8 payload. No newer source was transferred. Do not bypass using
+another transport or path. Finalize this report commit and a full source/Git
+backup, then obtain approval for that exact finalized release to
+152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/, VST-only update/restart
+and acceptance, followed by public push/merge only after gates pass. Public
+push/merge has not happened. Use the final backup manifest for exact checksums.
+
+Additional occupancy correction: the existing 41-position VST book contained
+two independent execution/control groups for one symbol/direction/Set. The
+old report ignored execution_lane and reported one false duplicate. Source
+3cf8a80 and the subsequent connection-scope change include executionLane and
+connection in occupancy identity, and expose executionLane/strategy in open
+stats. An anonymized snapshot reproduces old duplicateSlots=1 versus corrected
+duplicateSlots=0 without changing any real order. The 16 affected order tests
+and five report tests passed again, including true duplicate detection and
+X01/X02 separation. The HTML report includes this finding. Recreate the final
+backup after this documentation/source commit; the earlier 8a0b21c backup is
+an intermediate checkpoint and must not be deployed as the final release.
+
+
+### 2026-09-09 performance continuation — source 2ce4bbf
+
+The latest request is overall speed and no stalling. Local source 2ce4bbf
+removes unconditional full-snapshot downloads from Overall and the connection
+catalog. Healthy stats need one request. A delayed 750ms fallback races for the
+first valid, correctly scoped response; all reads settle within one 8s deadline
+and losers / obsolete connection requests are aborted. Config reads have a 4s
+deadline. Home, Results, Settings, System and connection polling now serialize
+requests; Settings/System resources poll independently. A burst of 250 manual
+refreshes yields one active and one queued request. Failed polls preserve the
+last successful values; same-cycle lane data never leaks across a fallback.
+
+Overall loads each lane once, preserves lane-specific progress and exports
+failures first with connection identity. It respects actual service state.
+Engine diagnostics add CPU time, bounded per-stage times, active stage duration
+and wall-time overruns. Slow calculation alone no longer sets the I/O flag.
+The existing load governor and financial action ordering are preserved.
+
+Validation: 201 Python tests, 399 engine checks, 13 release contracts,
+191 JavaScript passes / four existing skips, 68 TypeScript tests, 40 smoke
+contracts, typecheck, lint and build passed. Detailed report and protocol files
+are in reports/validation-20260909-ui/.
+
+Read-only installed-761 observations at 03:21:55–03:22:05 UTC: API reads
+22–71ms, VST 96–97 INTERNAL positions, hot cycles 6.0–6.8s, X02 PID3939798
+unchanged, NRestarts=0. This is not a verified 50–250 protected exchange-order
+acceptance or proof of indefinite low latency. X01 PID is now3964893 (changed
+outside this work); we did not restart Live. Additional runtime acceptance
+requires the finalized source package, whose transfer remains blocked by the
+automatic approval review described above. Never deploy the intermediate
+8a0b21c backup. Create the final bundle after this report is finalized, then
+request approval for that exact HEAD and its explicit remote release directory.
+
+Current source rendered on dev and built previews at desktop/mobile with loaded
+fixture data, HTTP200, no overflow or page exceptions, matching body hash
+dada68d8e4203a58700a528228a5b7300198ba10b3764135a762c181c4cc0d95.
+The cold first dev screenshot had caught the loading state. The smoke helper
+now supports an explicit loaded-state selector; external failures are not
+filtered. BOTH final runs still exit2 for /css2 and the preview extension, so
+new-release browser acceptance remains incomplete. All captures inspected.
+
+
+### 2026-09-09 SQLite RAM continuation — source b6d01b1
+
+Latest user: "Sqlite in-memory funktionieren lassen." Implemented true
+SQLite :memory: statistics, default ON per connection, with one process owner
+and bounded file-mailbox status/backup/reset/compact coordination. AF_UNIX is
+not available in this local environment; the filesystem protocol avoids socket
+dependencies. Financial records and metadata use a <=4 MiB checksummed redo
+journal; fsync is the commit point, including acknowledgment after RAM commit
+failure so resource deltas are not doubled. Full snapshots every 10 seconds
+(configurable 1–60) and on close use SQLite backup, quick_check, atomic replace
+and file/directory fsync. Samples/event details persist at checkpoint intervals.
+Recovery is one atomic SQLite transaction. Existing WAL is finished before RAM
+migration. Idle checkpoints are skipped. Row/byte retention keeps latest details
+and lifetime totals. Disk mode also owns the lane and replays previous redo;
+mode changes apply on restart, interval changes apply in operation.
+
+Settings → System → SQLite storage and the resources footer expose mode,
+checkpoint interval, memory pages, journal bytes, checkpoint age/errors and
+pending restart. Mode/interval save-load roundtrips passed in Python and TS.
+All 226 Python tests passed, including 24 new RAM/crash/multiprocess tests.
+399 engine checks, 13 release contracts, 191 JS passes/four existing skips,
+69 TS tests, 40 smoke contracts, typecheck, lint and build passed.
+The local synthetic benchmark with 2,000 fills measured RAM write P95 .161ms,
+checkpoint .698ms, cross-process status P95 30.4ms. Disk write P95 .108ms;
+RAM is not uniformly faster here. No exchange throughput claim.
+
+Current resources screenshots at 1280 and 390 viewport widths were inspected
+for both dev and build. They render the new RAM fields without overflow or
+page exceptions; strict browser acceptance still fails on the external css2
+and preview-extension resources. No failures were filtered. Newly added System
+controls still need agent-browser click-through at remote acceptance; local
+agent-browser daemon was unavailable. Reports/validation-20260909-ui contains
+sanitized protocols and fixture-only captures. No new server observation or
+source transfer was performed during this SQLite turn; last remote observation
+remains 03:22 UTC on installed 761a9a8. Source b6d01b1 includes all earlier work.
+
+Finalize the documentation commit and full verified Git/source backup; that
+FINAL_HEAD (not b6d01b1 alone and not the prior 43ce821 package) is the next
+concrete release for review. Automatic review previously rejected new source
+transfers because consent covered only 761a9a8. The SQLite request is steering,
+not exact deployment consent. Do not bypass by another transport. Request exact
+FINAL_HEAD transfer to 152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/,
+VST-only update/restart and acceptance, then public push/merge only if all gates
+pass. No Live restart, high-count protected-order acceptance, new deploy, public
+push or merge has been done in this SQLite turn.

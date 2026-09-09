@@ -1,4 +1,6 @@
 import type { EvaluationWindow } from "./hist-calc";
+import type { SetOverview } from "./set-overview";
+import { requestPreferredJson } from "./request-json.ts";
 
 export type LiveOpen = {
   symbol: string;
@@ -41,6 +43,8 @@ export type LiveOpen = {
   slPct?: number;
   tpPct?: number;
   setId?: string;
+  executionLane?: string;
+  strategy?: string;
   parentSetId?: string;
   axisKey?: string;
   relativeCount?: number;
@@ -52,6 +56,10 @@ export type LiveOpen = {
 };
 
 export type LiveClosed = {
+  connection?: string;
+  connType?: string;
+  unit?: string;
+  clientId?: string;
   t: number;
   symbol: string;
   side: string;
@@ -200,6 +208,7 @@ export type ActivitySummary = {
   cancellationCount?: number;
   errorCount?: number;
   internalOpen?: number;
+  internalPositionGroups?: number;
   exchangeOpen?: number;
   internalClosed?: number;
   parity?: "match" | "pending" | "discrepant" | string;
@@ -214,6 +223,7 @@ export type ActivitySummary = {
 };
 
 export type LiveStats = {
+  system?: import("./system-settings").SystemStatus;
   positionCost?: {
     manualPct?: number;
     effectivePct?: number;
@@ -343,7 +353,7 @@ export type LiveStats = {
   progressCycle?: number;
   progressError?: string;
   alive?: boolean;
-  tests?: Array<{name:string;pass:boolean;detail:string}>;
+  tests?: Array<{name:string;pass:boolean;detail:string;connection?:string}>;
   open: LiveOpen[];
   closed: LiveClosed[];
   signals: Array<Record<string, unknown>>;
@@ -593,6 +603,11 @@ export type LiveStats = {
   detailConn?: string;
   detailType?: string;
   engine?: {
+    hotCpuMs?: number;
+    stagesMs?: Record<string, number>;
+    activeStage?: string;
+    activeStageMs?: number;
+    cycleWallOverrun?: boolean;
     hotMs?: number;
     warmMs?: number;
     asyncP50?: number;
@@ -700,6 +715,7 @@ export type LiveStats = {
     steps?: number[];
     activeCount?: number;
     validatedCount?: number;
+    overview?: SetOverview;
     histFills?: number;
     liveFills?: number;
     liveProcessed?: number;
@@ -770,6 +786,7 @@ export type LiveStats = {
     };
     rows?: Array<{
       id: string;
+      kind?: string;
       pack?: string;
       parentSetId?: string;
       stage?: string;
@@ -911,13 +928,6 @@ export function pickView(stats: LiveStats | null, conn: string): LiveStats | nul
   if (statsMatchesConn(stats, conn)) return stats;
   const sliced = viewFromSnapshot(stats, conn);
   if (sliced) return sliced;
-  if (conn === "overall") {
-    return {
-      ...stats,
-      connType: stats.connType || "overall",
-      connection: stats.connection || "overall",
-    };
-  }
   return null;
 }
 
@@ -936,14 +946,18 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   if (!lane) return null;
   const prefix = cidPrefix(conn);
   const unitWant = conn === "vst" ? "vst" : "usdt";
-  const open = (s.open || []).filter((p) => {
-    const cid = String(p.clientId || "");
-    if (prefix && cid.startsWith(prefix)) return true;
-    const u = String(p.unit || "").toLowerCase();
-    return Boolean(u) && u === unitWant;
-  });
+  const belongsToLane = (p: { clientId?: string; unit?: string; connection?: string; connType?: string }) => {
+    if (p.connection) return p.connection === lane.id;
+    if (p.connType) return p.connType === conn;
+    if (p.unit) return p.unit.toLowerCase() === unitWant;
+    return Boolean(prefix && String(p.clientId || "").startsWith(prefix));
+  };
+  const open = (s.open || []).filter(belongsToLane);
+  const closed = (s.closed || []).filter(belongsToLane);
+  // A lane summary cannot supply aggregate sets, events, costs, or the other
+  // desk's financial fields. Only carry measurements attributable to this lane.
   return {
-    ...s,
+    now: s.now,
     connType: conn,
     connection: lane.id || (conn === "live" ? "bingx-x01" : "bingx-x02"),
     unit: lane.unit || (conn === "vst" ? "VST" : "USDT"),
@@ -951,10 +965,10 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
     running: lane.running,
     halted: lane.halted,
-    haltReason: lane.haltReason ?? s.haltReason ?? null,
+    haltReason: lane.haltReason ?? null,
     paused: lane.paused,
     equity: lane.equity,
-    available: lane.available ?? s.available,
+    available: lane.available,
     unrealized: lane.unrealized ?? 0,
     sessionPnl: lane.sessionPnl,
     systemPnl: lane.systemPnl ?? lane.sessionPnl,
@@ -962,73 +976,45 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     systemLoss: lane.systemLoss,
     wins: lane.wins,
     losses: lane.losses,
+    errors: lane.errors,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
-    exchangeOpenCount: lane.exchangeOpenCount ?? s.exchangeOpenCount,
-    simOpenCount: lane.simOpenCount ?? s.simOpenCount,
-    simUPnl: lane.simUPnl ?? s.simUPnl,
+    exchangeOpenCount: lane.exchangeOpenCount,
+    simOpenCount: lane.simOpenCount,
+    simUPnl: lane.simUPnl,
     open,
-    symbolCount: lane.symbolCount ?? s.symbolCount,
-    scanMs: lane.scanMs ?? s.scanMs,
-    lastError: lane.lastError ?? s.lastError,
+    closed,
+    symbolCount: lane.symbolCount,
+    scanMs: lane.scanMs,
+    lastError: lane.lastError,
     pf: lane.pf,
-    progressPct: lane.progressPct ?? s.progressPct,
-    progressPhase: lane.progressPhase ?? s.progressPhase,
-    progressDetail: lane.progressDetail ?? s.progressDetail,
-    progressReady: lane.progressReady ?? s.progressReady,
-    progressSymbol: lane.progressSymbol ?? s.progressSymbol,
-    progressSetId: lane.progressSetId ?? s.progressSetId,
-    progressSymbolsDone: lane.progressSymbolsDone ?? s.progressSymbolsDone,
-    progressSymbolsTotal: lane.progressSymbolsTotal ?? s.progressSymbolsTotal,
-    progressSetsDone: lane.progressSetsDone ?? s.progressSetsDone,
-    progressSetsTotal: lane.progressSetsTotal ?? s.progressSetsTotal,
-    progressBarsDone: lane.progressBarsDone ?? s.progressBarsDone,
-    progressBarsTotal: lane.progressBarsTotal ?? s.progressBarsTotal,
-    progressElapsedMs: lane.progressElapsedMs ?? s.progressElapsedMs,
-    progressLastRunMs: lane.progressLastRunMs ?? s.progressLastRunMs,
-    progressCycle: lane.progressCycle ?? s.progressCycle,
-    progressError: lane.progressError ?? s.progressError,
-    klinesReady: lane.klinesReady ?? s.klinesReady,
-    alive: lane.alive ?? s.alive,
-    cycle: lane.cycle ?? s.cycle,
-  };
+    progressPct: lane.progressPct,
+    progressPhase: lane.progressPhase,
+    progressDetail: lane.progressDetail,
+    progressReady: lane.progressReady,
+    progressSymbol: lane.progressSymbol,
+    progressSetId: lane.progressSetId,
+    progressSymbolsDone: lane.progressSymbolsDone,
+    progressSymbolsTotal: lane.progressSymbolsTotal,
+    progressSetsDone: lane.progressSetsDone,
+    progressSetsTotal: lane.progressSetsTotal,
+    progressBarsDone: lane.progressBarsDone,
+    progressBarsTotal: lane.progressBarsTotal,
+    progressElapsedMs: lane.progressElapsedMs,
+    progressLastRunMs: lane.progressLastRunMs,
+    progressCycle: lane.progressCycle,
+    progressError: lane.progressError,
+    klinesReady: lane.klinesReady,
+    alive: lane.alive,
+    cycle: lane.cycle,
+  } as LiveStats;
 }
 
-async function fetchJson(url: string, timeoutMs = 4000): Promise<unknown | null> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { cache: "no-store", signal: ac.signal });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return j && typeof j === "object" ? j : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export async function fetchLiveStats(conn = "overall"): Promise<LiveStats | null> {
-  if (conn === "overall") {
-    const [snap, ov] = await Promise.all([
-      fetchJson("/live-stats.json", 8000) as Promise<LiveStats | null>,
-      fetchJson("/stats.json?conn=overall", 8000) as Promise<LiveStats | null>,
-    ]);
-    const best =
-      ov && (ov.running || (Array.isArray(ov.lanes) && ov.lanes.length))
-        ? ov
-        : snap;
-    if (!best) return snap || ov;
-    return viewFromSnapshot(best, conn) || pickView(best, conn);
-  }
-  const live = (await fetchJson(`/stats.json?conn=${encodeURIComponent(conn)}`, 8000)) as LiveStats | null;
-  if (live && statsMatchesConn(live, conn)) return live;
-  if (live) {
-    const fromLive = viewFromSnapshot(live, conn);
-    if (fromLive) return fromLive;
-  }
-  const snap = (await fetchJson("/live-stats.json", 8000)) as LiveStats | null;
-  if (snap) return viewFromSnapshot(snap, conn);
-  return null;
+export async function fetchLiveStats(conn = "overall", signal?: AbortSignal): Promise<LiveStats | null> {
+  return requestPreferredJson(`/stats.json?conn=${encodeURIComponent(conn)}`, "/live-stats.json", (value) => {
+    const stats = value as LiveStats;
+    // A stopped desk is valid. Error objects and another desk's snapshot are not.
+    if (typeof stats.running !== "boolean") return null;
+    return viewFromSnapshot(stats, conn);
+  }, signal);
 }

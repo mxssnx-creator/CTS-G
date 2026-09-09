@@ -342,7 +342,7 @@ ensure_python_deps() {
   [[ -x "$PYTHON_BIN" ]] || python3 -m venv "$CTS_G_ROOT/.venv"
   "$PYTHON_BIN" -m pip install --disable-pip-version-check --no-input -r "$PULSE_DIR/requirements.txt"
   "$PYTHON_BIN" -m pip check
-  "$PYTHON_BIN" -c 'import numpy, httpx, websocket, orjson'
+  "$PYTHON_BIN" -c 'import numpy, httpx, websocket, orjson, redis'
   ok "isolated Python dependencies"
 }
 
@@ -566,12 +566,8 @@ start_stack() {
     else
       skip "live engine: no credentials in this instance"
     fi
-  elif systemctl is-active --quiet "$(pulse_instance_unit "$LIVE_SLOT")"; then
-    # Preserve its PAUSE flag and management of existing positions.
-    systemctl restart "$(pulse_instance_unit "$LIVE_SLOT")"
-    ok "existing live manager restarted; entry-control flags preserved"
   else
-    skip "live engine: --no-live"
+    skip "live engine: --no-live (existing manager left running)"
   fi
 }
 

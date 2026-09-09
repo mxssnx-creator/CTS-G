@@ -1,0 +1,107 @@
+{
+  "source": "retained and public exchange-confirmed 1m candles",
+  "evaluationStartMs": 1788854820000,
+  "endMs": 1788898020000,
+  "warmupBars": 60,
+  "marketData": [
+    {
+      "symbol": "XRP-USDT",
+      "bars": 780,
+      "reusedBars": 780,
+      "sha256": "9e6039ccb0da9df30a9d252cab99b1bd72a776a10e6452ada17366819cfd0364"
+    },
+    {
+      "symbol": "BCH-USDT",
+      "bars": 780,
+      "reusedBars": 780,
+      "sha256": "e4ac347bc853d2507ea5d5df3457109972b11b68bf16cdbacef6ab23ebf785da"
+    },
+    {
+      "symbol": "SOL-USDT",
+      "bars": 780,
+      "reusedBars": 780,
+      "sha256": "f94ba5e872e58b7b4a29ed2a21da5c225018057216baf8e0082539fc783bb06e"
+    }
+  ],
+  "catalogSets": 43680,
+  "symbolConfigEvaluations": 131040,
+  "elapsedS": 65.09,
+  "peakRssMiB": 2427.3,
+  "activeSets": 43680,
+  "historySamples": 3494400,
+  "qualifiedEntryLanesByPf": {
+    "1.05": {
+      "general:LONG": 0,
+      "general:SHORT": 18651,
+      "indications:LONG": 0,
+      "indications:SHORT": 1254
+    },
+    "1.1": {
+      "general:LONG": 0,
+      "general:SHORT": 13858,
+      "indications:LONG": 0,
+      "indications:SHORT": 0
+    },
+    "1.2": {
+      "general:LONG": 0,
+      "general:SHORT": 4,
+      "indications:LONG": 0,
+      "indications:SHORT": 0
+    },
+    "1.35": {
+      "general:LONG": 0,
+      "general:SHORT": 0,
+      "indications:LONG": 0,
+      "indications:SHORT": 0
+    }
+  },
+  "activeMeaning": "calculation enabled; qualified entry counts are separate",
+  "indications": {
+    "state": 78,
+    "signals": 78,
+    "active": 30,
+    "direction": 78,
+    "move": 78,
+    "common": 78,
+    "trend": 78,
+    "break": 78
+  },
+  "indicationConfigs": {
+    "state": [],
+    "signals": [],
+    "active": [],
+    "direction": [],
+    "move": [],
+    "common": [],
+    "trend": [
+      "trend:ema13/34",
+      "trend:ema5/13",
+      "trend:ema8/21"
+    ],
+    "break": [
+      "break:16",
+      "break:32",
+      "break:8"
+    ]
+  },
+  "strategies": {
+    "block": 78,
+    "dca": 78,
+    "block:signals": 78
+  },
+  "exits": {
+    "scratch+": 2151183,
+    "sl": 435763,
+    "tp": 64328,
+    "time": 843126
+  },
+  "overviewBytes": 160684,
+  "overviewGroups": 125,
+  "progress": {
+    "ready": true,
+    "done": 3,
+    "total": 3
+  },
+  "exchangeOrdersSubmitted": 0,
+  "profitabilityClaim": false
+}

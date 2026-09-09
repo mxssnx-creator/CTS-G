@@ -169,6 +169,16 @@ class PriceHub:
             enable_multithread=True,
         )
         self.ok = True
+        try:
+            self._listen(ws)
+        finally:
+            self.ok = False
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def _listen(self, ws: Any) -> None:
         for i, s in enumerate(self.symbols):
             ws.send(dumps({"id": f"{i}-t", "reqType": "sub", "dataType": f"{s}@ticker"}))
             if i and i % 80 == 0:
@@ -189,7 +199,8 @@ class PriceHub:
                 txt = ""
             if txt.lower() in ("ping", "pong"):
                 try:
-                    ws.send("Pong")
+                    if txt.lower() == "ping":
+                        ws.send("Pong")
                 except Exception:
                     break
                 self.last_msg = time.time()
@@ -200,7 +211,10 @@ class PriceHub:
             if isinstance(data, dict) and data.get("ping") is not None:
                 try:
                     ping = data.get("ping")
-                    ws.send(dumps({"pong": ping if ping not in (True, False) else int(time.time() * 1000)}))
+                    # The swap feed sends gzip-compressed text Ping frames.
+                    # Answer with text Pong, not a JSON heartbeat from a
+                    # different feed protocol (which caused repeated drops).
+                    ws.send("Pong" if data.get("_textHeartbeat") else dumps({"pong": ping}))
                 except Exception:
                     break
                 self.last_msg = time.time()
@@ -208,21 +222,20 @@ class PriceHub:
             self.last_msg = time.time()
             self.n += 1
             _apply_px(data, self.on_px)
-        try:
-            ws.close()
-        except Exception:
-            pass
-        self.ok = False
 
 
 def _decode_ws(raw: Any) -> Optional[Any]:
     try:
-        if isinstance(raw, bytes):
+        if isinstance(raw, (bytes, bytearray)):
             if raw[:2] == b"\x1f\x8b":
                 raw = gzip.decompress(raw)
             raw = raw.decode("utf-8", "ignore")
-        if not raw or raw == "Ping" or raw == "ping":
-            return {"ping": True}
+        if not raw:
+            return None
+        if str(raw).lower() == "ping":
+            return {"ping": True, "_textHeartbeat": True}
+        if str(raw).lower() == "pong":
+            return None
         return loads(raw)
     except Exception:
         return None
@@ -302,6 +315,16 @@ class FastBingX:
 
     def start_ws(self, symbols: List[str]) -> None:
         self.hub.start(symbols)
+
+    def configure_limits(self, settings):
+        from system_settings import normalize_system_settings
+        limits = normalize_system_settings(settings)
+        for lane, key in (("public", "systemPublicRps"), ("private", "systemPrivateRps"), ("order", "systemOrderRps")):
+            bucket = self.buckets[lane]
+            with bucket.lock:
+                bucket.rate = limits[key]
+                bucket.burst = min(LIMITS[lane][1], max(1, bucket.rate * 2))
+                bucket.tokens = min(bucket.tokens, bucket.burst)
 
     def _on_px(self, symbol: str, px: float) -> None:
         self.px[symbol] = px
@@ -554,6 +577,7 @@ class AsyncBridge:
             return fut.result(timeout)
         except Exception as e:
             self.err.write("async-gather", msg=str(e)[:200])
+            fut.cancel()  # Timed-out batches must not keep consuming connections.
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 
     async def _gather(self, reqs: List[Tuple[str, Dict[str, Any]]]):

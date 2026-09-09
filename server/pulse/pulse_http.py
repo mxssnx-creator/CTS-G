@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, unquote
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import (
@@ -21,6 +21,11 @@ from storage_paths import (
     storage_info,
 )
 from runtime_scope import redis_key
+from redis_coordination import coordinator as redis_config
+from set_overview import merge_overviews
+from system_settings import calculation_overlay
+from runtime_statistics import StatisticsStore, lane_directory, read_status, redis_health
+from sqlite_memory import memory_request, owner_guard, recover_durable_journal
 
 DIR = str(DATA_DIR)
 STOP_ALL_PATH = path_for("STOP")
@@ -175,27 +180,16 @@ def resolve_conn(raw: str) -> str:
 
 def redis_hgetall(key: str) -> dict:
     try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
+        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
+        return redis_config.read_hash(key)
     except Exception:
         return {}
-    lines = (p.stdout or "").splitlines()
-    out = {}
-    for i in range(0, len(lines) - 1, 2):
-        out[lines[i]] = lines[i + 1]
-    return out
 
 
 def redis_hset(key: str, mapping: dict) -> bool:
-    args = ["redis-cli", "HSET", redis_key(key)]
-    for k, v in mapping.items():
-        if v is None:
-            continue
-        args.extend([str(k), str(v)])
-    if len(args) <= 3:
-        return False
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=6)
-        return p.returncode == 0
+        redis_config.configure(load_overlay(key.rsplit(":", 1)[-1]))
+        return redis_config.write_hash(key, mapping)
     except Exception:
         return False
 
@@ -354,6 +348,7 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     with _OVERLAY_LOCKS[cid]:
         cur = load_overlay(cid)
         cur.update(overlay)
+        cur = calculation_overlay(cur)
         atomic_write(dest, cur)
     return cur
 
@@ -801,14 +796,7 @@ def load_cts(conn: str) -> dict:
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    try:
-        p = subprocess.run(["redis-cli", "HGETALL", redis_key(key)], capture_output=True, text=True, timeout=6)
-    except Exception:
-        return {}
-    lines = (p.stdout or "").splitlines()
-    out = {}
-    for i in range(0, len(lines) - 1, 2):
-        out[lines[i]] = parse_val(lines[i + 1])
+    out = {k: parse_val(v) for k, v in redis_hgetall(key).items()}
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -1058,8 +1046,9 @@ def _lane_progress(st: dict) -> dict:
     return prog
 
 
-def lane_summary(lane: dict) -> dict:
-    st = load_stats(lane["id"])
+def lane_summary(lane: dict, st: dict | None = None) -> dict:
+    if st is None:
+        st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
@@ -1149,9 +1138,10 @@ def merge_activity_summaries(summaries: list) -> dict:
         "errorCount", "internalClosed", "pendingCount", "recoveredCount", "discrepantCount",
     )
     out = {key: 0 for key in scalar_keys}
-    out.update({"internalOpen": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
+    out.update({"internalOpen": 0, "internalPositionGroups": 0, "exchangeOpen": 0, "byType": {}, "byStatus": {}, "responseCodes": {}, "byIndication": {}, "byStrategy": {}, "byAxis": {}, "tail": [], "source": "committed-event-ledger"})
     exchange_known = True
     parity_bad = False
+    parity_pending = False
 
     def add_map(target: dict, source: object) -> None:
         if not isinstance(source, dict):
@@ -1180,6 +1170,7 @@ def merge_activity_summaries(summaries: list) -> dict:
                 continue
         try:
             out["internalOpen"] += int(summary.get("internalOpen") or 0)
+            out["internalPositionGroups"] += int(summary.get("internalPositionGroups", summary.get("internalOpen")) or 0)
         except Exception:
             pass
         try:
@@ -1198,6 +1189,8 @@ def merge_activity_summaries(summaries: list) -> dict:
         add_map(out["byAxis"], summary.get("byAxis"))
         if summary.get("parity") == "discrepant":
             parity_bad = True
+        elif summary.get("parity") == "pending":
+            parity_pending = True
         tail = summary.get("tail")
         if isinstance(tail, list):
             out["tail"].extend(row for row in tail if isinstance(row, dict))
@@ -1210,15 +1203,15 @@ def merge_activity_summaries(summaries: list) -> dict:
     out["tail"] = sorted(out["tail"], key=lambda row: float(row.get("ts") or 0), reverse=True)[:32]
     if parity_bad:
         out["parity"] = "discrepant"
-    elif not exchange_known:
+    elif not exchange_known or parity_pending:
         out["parity"] = "pending"
     else:
-        out["parity"] = "match" if out["internalOpen"] == out["exchangeOpen"] else "discrepant"
+        out["parity"] = "match" if out["internalPositionGroups"] == out["exchangeOpen"] else "discrepant"
     return out
 
 
-def _pick_detail(lane_defs: list) -> tuple:
-    loaded = [(lane, load_stats(lane["id"])) for lane in lane_defs]
+def _pick_detail(lane_defs: list, stats_by_id: dict | None = None) -> tuple:
+    loaded = [(lane, stats_by_id[lane["id"]] if stats_by_id is not None else load_stats(lane["id"])) for lane in lane_defs]
     for lane, st in loaded:
         if st and st.get("running") and not st.get("halted"):
             return lane, st
@@ -1228,25 +1221,37 @@ def _pick_detail(lane_defs: list) -> tuple:
     return lane_defs[0], {}
 
 
+def merge_axis_enablement(states) -> dict:
+    """Overall visibility follows every lane's flags, never one chosen desk."""
+    axes = {}
+    for state in states:
+        runtime = (state.get("coord") or {}).get("axes")
+        if runtime is None:
+            runtime = ((state.get("coverage") or {}).get("coord") or {}).get("axes") or {}
+        for key, value in runtime.items():
+            axes.setdefault(key, {"enabled": False})
+            axes[key]["enabled"] = axes[key]["enabled"] or value.get("enabled") is True
+    return axes
+
+
 def merge_overall() -> dict:
-    lanes = [lane_summary(l) for l in LANES]
+    # Read each desk once: counts, rows and progress belong to the same snapshot.
+    stats_by_id = {lane["id"]: load_stats(lane["id"]) for lane in LANES}
+    lanes = [lane_summary(l, stats_by_id[l["id"]]) for l in LANES]
     opens = []
     closed = []
     tests = []
     wins = losses = errors = 0
-    running_any = False
-    stats_by_id = {}
+    running_any = any(l.get("running") and not l.get("halted") for l in lanes)
     activity_summaries = []
     for lane in LANES:
-        st = load_stats(lane["id"])
-        stats_by_id[lane["id"]] = st
+        st = stats_by_id[lane["id"]]
         if not st:
             continue
         if isinstance(st.get("activity"), dict):
             activity_summaries.append(st["activity"])
         elif isinstance((st.get("coverage") or {}).get("activity"), dict):
             activity_summaries.append((st.get("coverage") or {})["activity"])
-        running_any = running_any or bool(st.get("running") and not st.get("halted"))
         wins += int(st.get("wins") or 0)
         losses += int(st.get("losses") or 0)
         errors += int(st.get("errors") or 0)
@@ -1262,7 +1267,8 @@ def merge_overall() -> dict:
             q["connType"] = lane["type"]
             q["unit"] = lane["unit"]
             closed.append(q)
-        tests.extend(st.get("tests") or [])
+        tests.extend({**test, "connection": lane["id"]} for test in (st.get("tests") or []) if isinstance(test, dict))
+    tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
     closed = closed[:40]
     live = next((x for x in lanes if x["type"] == "live"), {})
@@ -1271,11 +1277,16 @@ def merge_overall() -> dict:
     pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
     pc["minPf"] = 1.1
     pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
-    detail_lane, detail_st = _pick_detail(LANES)
+    detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
+    overview = merge_overviews([(lane["label"], (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("overview")) for lane in LANES])
+    if overview is not None:
+        sets["overview"] = overview
+        for key in ("setCount", "activeCount", "validatedCount"):
+            sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
     out = {
         "running": running_any,
         "mode": "OVERALL",
@@ -1310,7 +1321,7 @@ def merge_overall() -> dict:
         "maxOpen": 0,
         "open": opens,
         "closed": closed[:80],
-        "tests": tests[-24:],
+        "tests": tests[:24],
         "activity": activity,
         "events": activity.get("tail") or [],
         "errors": errors,
@@ -1327,6 +1338,7 @@ def merge_overall() -> dict:
         "detailConn": detail_lane.get("id"),
         "detailType": detail_lane.get("type"),
         "sets": sets,
+        "coord": {"axes": merge_axis_enablement(stats_by_id.values())},
     }
     try:
         from stats_report import merge_kind_stats, merge_strategy_stats
@@ -1402,6 +1414,7 @@ def merge_overall() -> dict:
             for l in lanes
         ],
     }
+    sets["progress"] = dict(out["progress"])
     return slim_for_ui(out)
 
 
@@ -1504,7 +1517,19 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        normalized_path = "/" + os.path.normpath(unquote(path)).lstrip("/")
+        if normalized_path == "/statistics" or normalized_path.startswith("/statistics/"):
+            self._json({"ok": False, "detail": "statistics files are private; use the status endpoint"}, 404)
+            return
         conn = resolve_conn(qs(self.path).get("conn", ""))
+        if path == "/system.json":
+            if conn == "overall":
+                self._json({"connection": "overall", "lanes": [read_status(DIR, lane["id"]) for lane in LANES], "sharedDatabase": redis_health()})
+            elif conn in ID_TO_LANE:
+                self._json({**read_status(DIR, conn), "sharedDatabase": redis_health()})
+            else:
+                self._json({"ok": False, "detail": "pick a known connection"}, 400)
+            return
         if path in ("/connections.json", "/connections"):
             self._json(connections_blob())
             return
@@ -1686,6 +1711,54 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_error(400, "invalid json")
             return
+        if path == "/system.json":
+            # The dashboard proxy is local. Reject direct cross-origin browser
+            # writes to this maintenance endpoint even though old GETs use CORS.
+            origin = self.headers.get("Origin", "")
+            host = self.headers.get("Host", "").split(":", 1)[0]
+            if origin and urlparse(origin).hostname != host:
+                self._json({"ok": False, "detail": "same-origin maintenance required"}, 403)
+                return
+            if conn not in ID_TO_LANE or not isinstance(body, dict):
+                self._json({"ok": False, "detail": "select one connection for maintenance"}, 400)
+                return
+            if not (lane_directory(DIR, conn) / "statistics.sqlite3").exists():
+                self._json({"ok": False, "detail": "statistics database has not been initialized"}, 409)
+                return
+            store = None
+            try:
+                action = body.get("action")
+                if action not in ("backup", "compact", "reset"):
+                    raise ValueError("choose backup, compact or reset")
+                result = memory_request(DIR, conn, body)
+                if result is not None:
+                    self._json(result)
+                    return
+                # Maintenance may wait briefly for the telemetry writer. This
+                # does not change the short timeout on the engine's own store.
+                with owner_guard(DIR, conn):
+                    recover_durable_journal(DIR, conn, guarded=True)
+                    store = StatisticsStore(DIR, conn, load_overlay(conn), timeout=2.0)
+                    try:
+                        if action == "reset":
+                            result = store.reset(body.get("scope"), body.get("confirmation"))
+                        elif action == "backup":
+                            result = {"ok": True, "detail": "Verified statistics backup saved", "backup": store.backup()}
+                        else:
+                            store.maintain()
+                            result = {"ok": True, "detail": "Expired details pruned and database compacted; totals preserved"}
+                    finally:
+                        store.close()
+                        store = None
+                self._json(result)
+            except ValueError as exc:
+                self._json({"ok": False, "detail": str(exc)}, 400)
+            except Exception as exc:
+                self._json({"ok": False, "detail": f"Maintenance response unavailable: {type(exc).__name__}; check database status before retrying"}, 503)
+            finally:
+                if store:
+                    store.close()
+            return
         if path in ("/control.json", "/control"):
             action = str((body or {}).get("action") or "").lower().strip()
             ok, detail = apply_control(conn or "overall", action)
@@ -1837,8 +1910,7 @@ def heal_loop() -> None:
                     env_key = str(os.environ.get(f"CTS_{suffix}_API_KEY") or os.environ.get(f"BINGX_{suffix}_API_KEY") or "").strip()
                     if not env_key:
                         try:
-                            p = subprocess.run(["redis-cli", "HGET", redis_key(f"connection:{cid}"), "api_key"], capture_output=True, text=True, timeout=6)
-                            env_key = (p.stdout or "").strip()
+                            env_key = redis_hgetall(f"connection:{cid}").get("api_key", "").strip()
                         except Exception:
                             env_key = ""
                     if not env_key:

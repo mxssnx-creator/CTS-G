@@ -224,6 +224,8 @@ class BlockBook:
             self.overall_tape = []
 
     def save(self) -> None:
+        if not self.path:
+            return
         blob = {
             "cfg": {
                 "variantBlockEnabled": self.enabled,

@@ -275,7 +275,7 @@ PRESETS: List[Dict[str, Any]] = [
             **_SHARED,
             "slToTpRatio": 0.3,
             "setMinStep": 12,
-            "setStepMax": 22,
+            "setStepMax": 30,
             "stratTrailing": True,
             "trailArmPct": 0.3,
             "trailGivePct": 0.1,
@@ -300,7 +300,7 @@ PRESETS: List[Dict[str, Any]] = [
             **_SHARED,
             "slToTpRatio": 0.6,
             "setMinStep": 8,
-            "setStepMax": 22,
+            "setStepMax": 30,
             "stratTrailing": True,
             "trailArmPct": 0.6,
             "trailGivePct": 0.2,
@@ -495,7 +495,7 @@ def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
         "minStep": 1,
-        "stepMax": 22,
+        "stepMax": 30,
         "trailing": True,
         "stratBlock": True,
         "stratDca": False,
@@ -533,7 +533,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(float(raw_hours))))
         except Exception:
             pass
-    for k, lo, hi in (("minStep", 1, 22), ("stepMax", 1, 22)):
+    for k, lo, hi in (("minStep", 1, 30), ("stepMax", 1, 30)):
         if body.get(k) is not None:
             try:
                 opt[k] = max(lo, min(hi, int(body[k])))
@@ -814,7 +814,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setMaxDdTimeS": 57600,
         "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 1),
-        "setStepMax": int(opt.get("stepMax") or 22),
+        "setStepMax": int(opt.get("stepMax") or 30),
         "stratTrailing": bool(opt.get("trailing", True)),
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
@@ -868,7 +868,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov["trailGiveMin"] = 0.1
     ov["trailGiveMax"] = 0.5
     ov["setMinStep"] = int(opt.get("minStep") or 1)
-    ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 22))
+    ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 30))
     ov["stratTrailing"] = bool(opt.get("trailing", True))
     return ov
 
@@ -1301,7 +1301,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "stratIndications": bool(opt.get("stratIndications", True)),
         "stratGeneral": bool(opt.get("stratGeneral", True)),
         "setMinStep": 1,
-        "setStepMax": 22,
+        "setStepMax": 30,
     }
     if not row:
         return patch
@@ -1311,7 +1311,7 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     step = int(row.get("step") or 0)
     if step >= 3:
         patch["setMinStep"] = 1
-        patch["setStepMax"] = 22
+        patch["setStepMax"] = 30
     arm = float(row.get("trailArm") or 0)
     give = float(row.get("trailGive") or 0)
     if arm > 0:
@@ -2508,7 +2508,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     step_grid = [int(p["patch"].get("setMinStep") or 0) for p in PRESETS]
     step_max = [int(p["patch"].get("setStepMax") or 0) for p in PRESETS]
     rec("preset-step-grid-preserved", step_grid == [12, 10, 8, 10, 10, 8, 12, 8], str(step_grid))
-    rec("preset-step-bounds", all(3 <= lo <= hi <= 22 for lo, hi in zip(step_grid, step_max)), str(list(zip(step_grid, step_max))))
+    rec("preset-step-bounds", all(3 <= lo <= hi <= 30 for lo, hi in zip(step_grid, step_max)), str(list(zip(step_grid, step_max))))
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
@@ -2521,7 +2521,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
-    rec("options-range-step-clamp", bounded["hours"] == HOURS_MAX and bounded["minStep"] == 1 and bounded["stepMax"] == 22, str(bounded))
+    rec("options-range-step-clamp", bounded["hours"] == HOURS_MAX and bounded["minStep"] == 1 and bounded["stepMax"] == 30, str(bounded))
     rec("opt-dca-default-off", parse_options({})["stratDca"] is False)
     rec("opt-block-default-on", parse_options({})["stratBlock"] is True)
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
@@ -2532,7 +2532,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
     rec("resolve-respects-cap", 1 <= len(capped) <= max(25, len(FORCED_SYMBOLS)), str(len(capped)))
-    rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 22, str(parse_options({})))
+    rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 30, str(parse_options({})))
     rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",

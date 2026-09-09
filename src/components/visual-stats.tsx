@@ -253,8 +253,8 @@ export function BlockHeat({ stats }: { stats: LiveStats }) {
   const extra = (stats.block?.lanes?.length ?? 0) - lanes.length;
   return (
     <div className="flex flex-col gap-4">
-      {lanes.map((lane) => (
-        <div key={lane.symbol + lane.side}>
+      {lanes.map((lane, index) => (
+        <div key={`${lane.symbol}-${lane.side}-${index}`}>
           <div className="mb-2 flex items-baseline justify-between gap-2">
             <span className="text-sm font-medium">
               {lane.symbol.replace("-USDT", "")} {lane.side}

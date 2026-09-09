@@ -6,6 +6,13 @@ after restart or a stale signal the continuation observation starts again.
 import math
 
 
+class ContinuationBook(dict):
+    """Expire the shared book once per second, not once per Set candidate."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sweep_at = float("-inf")
+
+
 def adjusted_quantity(reference_qty, increment, owned_qty=0, pending_qty=0):
     values = (reference_qty, increment, owned_qty, pending_qty)
     if any(not math.isfinite(float(v)) or float(v) < 0 for v in values):
@@ -18,10 +25,13 @@ def observe_continuation(anchors, key, price, direction, now):
     if not math.isfinite(price) or price <= 0 or direction not in (-1, 1):
         return False
     # Bound memory and discard abandoned signals. No state means no entry.
-    for stale in [k for k, v in anchors.items() if now - v['seen'] > 180]:
-        del anchors[stale]
+    if not isinstance(anchors, ContinuationBook) or now < anchors.sweep_at or now - anchors.sweep_at >= 1:
+        for stale in [k for k, v in anchors.items() if now - v['seen'] > 180]:
+            del anchors[stale]
+        if isinstance(anchors, ContinuationBook):
+            anchors.sweep_at = now
     prior = anchors.get(key)
-    if prior is None or prior['direction'] != direction or now < prior['at']:
+    if prior is None or prior['direction'] != direction or now < prior['at'] or now - prior['seen'] > 180:
         anchors[key] = {'price': price, 'direction': direction, 'at': now, 'seen': now}
         return False
     prior['seen'] = now

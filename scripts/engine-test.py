@@ -427,7 +427,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.15}}}},
             {})
     rec("stage-pf-strategies-fallback",
-        c3.stage_min_pf == {"base": 1.03, "main": 1.07, "real": 1.15},
+        c3.stage_min_pf == {"base": 1.05, "main": 1.07, "real": 1.15},
         str(c3.stage_min_pf))
     rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
 

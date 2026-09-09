@@ -203,6 +203,15 @@ class HistoryStore:
         }
         atomic_write(self.path, payload)
 
+    def configure(self, retention_bars, persist_s):
+        with self._lock:
+            self.retention_bars = max(120, min(43200, int(retention_bars)))
+            self._persist_interval_s = max(3, min(120, float(persist_s)))
+            for symbol, rows in self._rows.items():
+                if len(rows) > self.retention_bars:
+                    self._rows[symbol] = self._compact_rows(rows)
+                    self._dirty = True
+
     def _maybe_persist_locked(self, *, force: bool = False) -> bool:
         """Write the on-disk snapshot at most once per interval unless forced.
 

@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { startPolling } from "@/lib/polling";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Blocks, Plug, Radio, Shield } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
@@ -32,26 +33,26 @@ function SystemPage() {
   dirtyRef.current = dirty;
 
   useEffect(() => {
-    let alive = true;
     setStats(null);
-    const pull = async () => {
-      const [c, s] = await Promise.all([fetchCtsBundle(conn), fetchLiveStats(conn)]);
-      if (!alive) return;
-      setStats(pickView(s, conn));
-      if (!dirtyRef.current) {
+    setMsg(null);
+    setDirty(false);
+    dirtyRef.current = false;
+    setOverlay(overlayFromCts({}, loadLocalOverlay(conn) || {}));
+    const delay = () => document.hidden ? 8000 : 4000;
+    const statsPoll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (!signal.aborted && s) setStats(pickView(s, conn));
+    }, delay);
+    const configPoll = startPolling(async (signal) => {
+      const c = await fetchCtsBundle(conn, signal);
+      if (!signal.aborted && c.ok && !dirtyRef.current) {
         const local = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(local || {}), ...(c.overlay || {}) }));
       }
-    };
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const chain = async () => {
-      await pull();
-      if (alive) timer = setTimeout(chain, 4000);
-    };
-    void chain();
+    }, delay);
     return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
+      statsPoll.stop();
+      configPoll.stop();
     };
   }, [conn]);
 

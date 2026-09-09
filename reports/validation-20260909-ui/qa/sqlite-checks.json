@@ -1,0 +1,73 @@
+{
+  "sourceCommit": "b6d01b1aaa6592747627d2ebb379be787cd88513",
+  "tests": {
+    "python": 226,
+    "sqliteMemoryIncluded": 24,
+    "engine": 399,
+    "releaseContracts": 13,
+    "javascriptPassed": 191,
+    "javascriptSkipped": 4,
+    "typescript": 69,
+    "smokeContracts": 40,
+    "typecheck": "pass",
+    "lint": "pass",
+    "build": "pass"
+  },
+  "storage": {
+    "actualDatabase": ":memory:",
+    "defaultEnabled": true,
+    "oneOwnerPerConnection": true,
+    "defaultCheckpointSeconds": 10,
+    "checkpointRangeSeconds": [
+      1,
+      60
+    ],
+    "journalLimitBytes": 4194304,
+    "mailboxMessageLimitBytes": 131072,
+    "durable": "confirmed financial records and metadata; fsync is the commit point",
+    "sampleAndEventDetails": "periodic checkpoint, including on clean shutdown",
+    "sharedAccess": "bounded file mailbox, process lease and owner token; no private HTTP RAM copy",
+    "restartRequired": "storage mode only; checkpoint interval updates during operation"
+  },
+  "verified": [
+    "true RAM database and memory temporary store",
+    "WAL migration and existing data import",
+    "real process exit before RAM commit and checkpoint",
+    "atomic journal recovery with late corruption rollback",
+    "duplicate fill suppression across recovery and 12 writer threads",
+    "separate HTTP process status/backup/reset/compact ownership",
+    "offline backup includes uncheckpointed durable fills",
+    "checkpoint failure keeps previous file and redo journal",
+    "expired and previous-owner maintenance requests rejected",
+    "oversized old file shrinks before RAM import while retaining totals",
+    "bounded row and byte retention preserves newest records and lifetime totals",
+    "independent checkpoint timing, idle checkpoint suppression",
+    "disk switch replays existing journal, then waits for restart",
+    "mode and checkpoint settings persist per connection"
+  ],
+  "limits": [
+    "filesystem-dependent synthetic benchmark; RAM not uniformly faster than disk in this environment",
+    "SQLite page ceiling excludes process overhead and rotated backups",
+    "uncheckpointed event details/resource samples can be lost on crash; financial records are journaled",
+    "checkpoint failure retains journal; once full, new writes fail visibly for bounded engine-journal retry",
+    "strict browser gate still fails on external css2/preview-extension requests",
+    "new System settings click-through still requires the working agent-browser/remote gate",
+    "no transfer/deployment of this source; prior automatic review requires exact release consent",
+    "no 50-250 protected exchange-order acceptance or unlimited uptime claim"
+  ],
+  "browser": {
+    "devExitCode": 2,
+    "builtExitCode": 2,
+    "desktopAndMobileHttpStatus": 200,
+    "horizontalOverflow": false,
+    "pageErrors": [],
+    "bodyTextHash": "aa61a2c4dffa1caa3550315e99c7bc83e946931fbbc29ac7f35d93f7ec0f4bd4",
+    "baselineDivergence": false,
+    "externalFailures": [
+      "/css2",
+      "/grok-app-builder/extensions.js"
+    ],
+    "screenshotsVisuallyInspected": 4,
+    "fixtureOnly": true
+  }
+}

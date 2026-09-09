@@ -9,6 +9,8 @@ import {
   Wallet,
 } from "lucide-react";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
+import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
@@ -25,6 +27,9 @@ import {
 import { CoverageBar } from "@/components/coverage-overview";
 import { KindStrategyStrip } from "@/components/kind-strategy-stats";
 import { ActivityPanel } from "@/components/activity-overview";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
 import type { ConnType } from "@/lib/connections";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
@@ -34,31 +39,20 @@ function DeskPage() {
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const cacheRef = useRef<Partial<Record<string, LiveStats>>>({});
   useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
     const cached = cacheRef.current[conn];
-    if (cached) setRaw(cached);
-    const pull = async () => {
-      const s = await fetchLiveStats(conn);
-      if (!alive) return;
+    setRaw(cached ?? null);
+    const poll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (signal.aborted) return;
       if (s) {
         cacheRef.current[conn] = s;
         setRaw(s);
       }
-      const hidden = typeof document !== "undefined" && document.hidden;
-      timer = setTimeout(pull, hidden ? 8000 : 3500);
-    };
-    const kick = () => {
-      if (!alive) return;
-      if (timer) clearTimeout(timer);
-      void pull();
-    };
-    window.addEventListener("pulse:control", kick);
-    void pull();
+    }, () => document.hidden ? 8000 : 3500);
+    window.addEventListener("pulse:control", poll.refresh);
     return () => {
-      alive = false;
-      window.removeEventListener("pulse:control", kick);
-      if (timer) clearTimeout(timer);
+      window.removeEventListener("pulse:control", poll.refresh);
+      poll.stop();
     };
   }, [conn]);
   const stats = pickView(raw, conn);
@@ -92,7 +86,7 @@ function DeskPage() {
       {conn === "overall" && (stats?.lanes?.length ?? 0) > 0 ? <LaneBoard stats={stats!} /> : null}
 
       <section className="grid gap-3 lg:grid-cols-3">
-        <div className="rounded-radius border border-border bg-surface p-5 lg:col-span-2">
+        <div className="min-w-0 rounded-radius border border-border bg-surface p-5 lg:col-span-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-mono text-xs tracking-wide text-muted uppercase">Equity</p>
@@ -135,7 +129,7 @@ function DeskPage() {
             <Meter label="Drawdown" value={d.ddPct} max={18} danger={d.ddPct > 8} />
           </div>
           <CoordStrip stats={stats} />
-          {stats ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
+          {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
           <div className="mt-3">
             <CoverageBar live={stats} />
           </div>
@@ -190,8 +184,8 @@ function DeskPage() {
         ) : (
           <>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {stats!.open.slice(0, 18).map((p) => (
-              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || ""}`} className="rounded-xl border border-border bg-bg2 p-4">
+            {stats!.open.slice(0, 18).map((p, index) => (
+              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || p.axisKey || "position"}-${index}`} className="rounded-xl border border-border bg-bg2 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-lg font-medium">{p.symbol.replace("-USDT", "")}</div>
@@ -243,8 +237,8 @@ function DeskPage() {
           </div>
           {stats!.open.length > 18 ? (
             <div className="mt-3 grid grid-cols-2 gap-1 font-mono text-[11px] text-muted sm:grid-cols-3 lg:grid-cols-4">
-              {stats!.open.slice(18).map((p) => (
-                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || ""}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
+              {stats!.open.slice(18).map((p, index) => (
+                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
                   <span>{p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"}</span>
                   <span className={pnlClass(p.uPnlPct)}>{p.uPnlPct >= 0 ? "+" : ""}{fmt(p.uPnlPct, 2)}%</span>
                 </div>
@@ -262,8 +256,8 @@ function DeskPage() {
         <Panel title="Risk tape" icon={<ShieldAlert className="size-4" />}>
           {(stats?.open ?? []).length ? (
             <div className="space-y-3">
-              {stats!.open.slice(0, 12).map((p) => (
-                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}`} p={p} />
+              {stats!.open.slice(0, 12).map((p, index) => (
+                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} p={p} />
               ))}
             </div>
           ) : (
@@ -312,6 +306,7 @@ function DeskPage() {
           })()}
         </div>
       </section>
+      <SystemHealthFooter conn={conn} />
     </DeskShell>
   );
 }
@@ -530,7 +525,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
-        {(["prev", "last", "cont", "pause"] as const).map((k) => {
+        {(["prev", "last", "cont", "pause"] as const).filter((k) => axes[k]?.enabled).map((k) => {
           const a = axes[k];
           return (
             <span key={k} className={a?.enabled ? "text-fg" : "text-faint"}>
@@ -625,7 +620,6 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
 function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const s = stats?.sets;
   const p = s?.progress;
-  const rows = (s?.rows ?? []).slice(0, 8);
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
   const updating = ["fetch", "replay", "score", "partial"].includes(phase);
@@ -679,20 +673,22 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           </p>
         </>
       )}
-      {rows.length ? (
-        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+      <div className="mt-3">
+        <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
+        <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           {rows.map((r) => (
-            <div key={r.id} className="flex items-center justify-between gap-2">
-              <span className={r.active ? "text-fg" : "text-faint"}>
-                {r.pack?.slice(0, 3) || r.id.slice(0, 8)} sl{Number(r.slRatio || 0).toFixed(1)} st{r.step ?? "—"}
-              </span>
-              <span className={r.active ? "text-primary" : "text-danger"}>
-                {r.last15Ratio.toFixed(2)} · {formatDuration(r.maxDdS * 1000)} · R{r.last25AvgR.toFixed(1)}
-              </span>
+            <div key={r.id} className="min-w-0 rounded-md border border-border px-2 pb-2">
+              <SetIdentity row={r} />
+              <div className={`flex min-w-0 flex-wrap gap-x-3 gap-y-1 [overflow-wrap:anywhere] ${r.active ? "text-primary" : "text-muted"}`}>
+                <span>PF {r.n ? setMetric(r.last15Ratio) : "—"}</span>
+                <span>DDT {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</span>
+                <span>R {setMetric(r.last25AvgR, 1)}</span>
+              </div>
             </div>
           ))}
         </div>
-      ) : null}
+        )}</SetGroups>
+      </div>
       {p?.error ? <p className="mt-1 text-danger">{p.error}</p> : null}
     </div>
   );
@@ -742,7 +738,7 @@ function WorkStrip({ stats }: { stats: LiveStats | null }) {
       {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => `${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
+          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
@@ -962,6 +958,7 @@ function pnlClass(n: number) {
 }
 
 function ago(s: number) {
+  if (!Number.isFinite(s)) return "—";
   if (s < 60) return `${Math.floor(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;

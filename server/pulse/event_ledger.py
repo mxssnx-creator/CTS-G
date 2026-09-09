@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, Iterable, List, Optional
 
 from contracts import AXES, INDICATION_KINDS, STRATEGIES, stable_key
+from storage_paths import atomic_write
 
 EVENT_TYPES = (
     "evaluation",
@@ -83,8 +84,8 @@ def _metadata(value: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, item in list(value.items())[:24]:
         try:
-            json.dumps(item)
-            out[str(key)[:60]] = item
+            encoded = json.dumps(item, allow_nan=False)
+            out[str(key)[:60]] = item if len(encoded.encode()) <= 512 else "[bounded metadata]"
         except Exception:
             out[str(key)[:60]] = str(item)[:120]
     return out
@@ -93,7 +94,7 @@ def _metadata(value: Any) -> Dict[str, Any]:
 class EventLedger:
     """Keep the latest committed actions, deduped by connection + event ID."""
 
-    def __init__(self, path: str = "", connection: str = "", max_events: int = 512) -> None:
+    def __init__(self, path: str = "", connection: str = "", max_events: int = 512, flush_interval_s: float = 0) -> None:
         self.path = path
         self.connection = str(connection or "")
         self.max_events = max(32, min(4096, int(max_events or 512)))
@@ -101,6 +102,10 @@ class EventLedger:
         self._ids: set[str] = set()
         self.duplicate_count = 0
         self._lock = threading.RLock()
+        self.flush_interval_s = max(0, float(flush_interval_s))
+        self._last_save = 0.0
+        self._dirty = False
+        self.persistence_error = ""
         self._load()
 
     def _load(self) -> None:
@@ -173,13 +178,18 @@ class EventLedger:
                 "duplicateCount": int(self.duplicate_count),
                 "events": [event.as_dict() for event in self.events],
             }
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as state_file:
-                json.dump(payload, state_file, separators=(",", ":"))
-            os.replace(tmp, self.path)
-        except Exception:
+            atomic_write(self.path, payload)
+            self._dirty = False
+            self._last_save = time.monotonic()
+            self.persistence_error = ""
+        except Exception as exc:
             # Activity accounting must never stop trading when persistence is unavailable.
-            pass
+            self.persistence_error = type(exc).__name__
+
+    def flush(self):
+        with self._lock:
+            if self._dirty:
+                self._save_locked()
 
     def record(
         self,
@@ -216,6 +226,7 @@ class EventLedger:
         with self._lock:
             if key in self._ids:
                 self.duplicate_count += 1
+                self._dirty = True
                 return False
             event = LedgerEvent(
                 event_id=key,
@@ -244,9 +255,14 @@ class EventLedger:
                 detail=_text(fields.get("detail"), 240),
                 metadata=_metadata(fields.get("metadata")),
             )
+            if len(self.events) == self.max_events:
+                self._ids.discard(self.events[0].event_id)
             self.events.append(event)
-            self._ids = {item.event_id for item in self.events}
-            self._save_locked()
+            self._ids.add(event.event_id)
+            self._dirty = True
+            if (time.monotonic() - self._last_save >= self.flush_interval_s
+                    or normalized_type in ("entry_intent", "fill", "close", "position_open")):
+                self._save_locked()
             return True
 
     def tail(self, n: int = 32) -> List[Dict[str, Any]]:
@@ -263,6 +279,7 @@ class EventLedger:
 
     def _outcome_counts(self, attr: str, known: Iterable[str]) -> Dict[str, Dict[str, int]]:
         out = {key: {"evaluated": 0, "qualified": 0, "selected": 0, "entered": 0, "exited": 0, "blocked": 0, "rejected": 0, "paused": 0, "long": 0, "short": 0} for key in known}
+        rejected_orders = set()
         for event in self.events:
             key = str(getattr(event, attr, "") or "")
             if attr == "axis_key" and ":" in key:
@@ -283,9 +300,14 @@ class EventLedger:
             if event_type == "close":
                 bucket["exited"] += 1
             if event_type == "rejected" or status in ("blocked", "rejected"):
-                bucket["rejected"] += 1
-                if status == "blocked":
-                    bucket["blocked"] += 1
+                # A failed exchange response and its rejection event describe
+                # one order outcome. Retain both events without doubling it.
+                identity = (key, event.connection, event.client_id or event.order_id or event.event_id, status)
+                if identity not in rejected_orders:
+                    rejected_orders.add(identity)
+                    bucket["rejected"] += 1
+                    if status == "blocked":
+                        bucket["blocked"] += 1
             if status == "paused":
                 bucket["paused"] += 1
             if event.side.upper() == "LONG":
@@ -294,7 +316,9 @@ class EventLedger:
                 bucket["short"] += 1
         return out
 
-    def summary(self, *, internal_open: int = 0, exchange_open: int = -1, internal_closed: int = 0) -> Dict[str, Any]:
+    def summary(self, *, internal_open: int = 0, exchange_open: int = -1, internal_closed: int = 0,
+                internal_position_groups: Optional[int] = None, pending_count: int = 0,
+                reconciliation_pending: bool = False) -> Dict[str, Any]:
         with self._lock:
             events = list(self.events)
             by_type = {key: 0 for key in EVENT_TYPES}
@@ -307,7 +331,10 @@ class EventLedger:
                 if event.code:
                     codes[event.code] = codes.get(event.code, 0) + 1
             exchange_known = int(exchange_open) >= 0
-            parity = "pending" if not exchange_known else ("match" if int(internal_open) == int(exchange_open) else "discrepant")
+            # An exchange nets all independent config orders for one
+            # symbol+direction. Compare those position groups, not Set count.
+            group_count = int(internal_open) if internal_position_groups is None else int(internal_position_groups)
+            parity = "pending" if not exchange_known or reconciliation_pending else ("match" if group_count == int(exchange_open) else "discrepant")
             # Financial totals are sourced from the authoritative close
             # events.  Exchange fill callbacks can repeat the same realized
             # result for a close order; counting every request/fill event
@@ -335,10 +362,13 @@ class EventLedger:
                 "cancellationCount": by_type.get("cancellation", 0),
                 "errorCount": by_type.get("error", 0),
                 "internalOpen": int(internal_open),
+                "internalPositionGroups": group_count,
                 "exchangeOpen": int(exchange_open),
                 "internalClosed": int(internal_closed),
                 "parity": parity,
-                "pendingCount": sum(1 for event in events if event.status.lower() == "pending"),
+                # Historical request events retain their original status;
+                # they are not a queue of orders still awaiting execution.
+                "pendingCount": max(0, int(pending_count)),
                 "recoveredCount": sum(1 for event in events if event.status.lower() == "recovered"),
                 "discrepantCount": sum(1 for event in events if event.status.lower() in ("discrepant", "mismatch")),
                 "byIndication": self._outcome_counts("indication_kind", INDICATION_KINDS),
