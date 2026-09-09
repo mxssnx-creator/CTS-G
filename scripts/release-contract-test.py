@@ -23,6 +23,28 @@ import pulse_http
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_no_live_update_restarts_only_the_demo_lane(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record=Path(tmp)/'calls'
+            code='''source "$1"
+systemctl() { echo "$*" >> "$CALL_RECORD"; }
+redis_has_keys() { return 0; }
+pulse_http_unit() { echo qa-http; }
+desk_unit() { echo qa-desk; }
+retention_timer_unit() { echo qa-retention; }
+pulse_instance_unit() { echo "qa-$1"; }
+skip() { :; }
+VST_SLOT=bingx-x02
+LIVE_SLOT=bingx-x01
+start_stack 0
+'''
+            result=subprocess.run(['bash','-c',code,'probe',str(ROOT/'deploy/linux-common.sh')],
+                                  env={**os.environ,'CALL_RECORD':str(record)},capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+            commands=record.read_text().splitlines()
+            self.assertIn('restart qa-bingx-x02',commands)
+            self.assertFalse(any('bingx-x01' in row for row in commands))
+
     def test_redis_readiness_retries_loading_and_requires_pong(self):
         for mode, expected, calls in (("loading",0,3),("auth",1,1),("error",1,5)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
@@ -181,7 +203,7 @@ redis_ready
         options = parse_options({"hours": 9999, "minStep": -3, "stepMax": 999})
         self.assertEqual(options["hours"], HOURS_MAX)
         self.assertEqual(options["minStep"], 1)
-        self.assertEqual(options["stepMax"], 22)
+        self.assertEqual(options["stepMax"], 30)
 
 
 if __name__ == "__main__":

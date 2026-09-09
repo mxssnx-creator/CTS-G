@@ -21,6 +21,7 @@ import {
   type PulseOverlay,
 } from "@/lib/config-model";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
@@ -44,11 +45,17 @@ import {
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
+import { SetGroups } from "@/components/set-groups";
+import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { SetIdentity } from "@/components/set-identity";
+import { SystemSettingsPanel } from "@/components/system-settings";
+import { SystemHealthFooter } from "@/components/system-health";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
 const SECTIONS = [
   "overview",
+  "system",
   "presets",
   "connection",
   "profit",
@@ -104,7 +111,6 @@ function SettingsPage() {
   dirtyRef.current = dirty;
 
   useEffect(() => {
-    let alive = true;
     setCts(null);
     setRaw(null);
     setDirty(false);
@@ -121,39 +127,35 @@ function SettingsPage() {
     setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
-    const pull = async () => {
-      const sP = fetchLiveStats(conn);
-      const cP = fetchCtsBundle(conn);
-      const kP = fetchConnection(conn);
-      const s = await sP;
-      if (!alive) return;
-      setRaw(s);
-      const c = await cP;
-      if (!alive) return;
-      setCts(c.cts);
-      if (!dirtyRef.current) {
+    const delay = () => document.hidden ? 8000 : 4000;
+    const statsPoll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (!signal.aborted && s) setRaw(s);
+    }, delay);
+    const configPoll = startPolling(async (signal) => {
+      const c = await fetchCtsBundle(conn, signal);
+      if (signal.aborted) return;
+      if (c.ok) setCts(c.cts);
+      if (c.ok && !dirtyRef.current) {
         const stored = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
       }
-      const k = await kP;
-      if (!alive) return;
+      setReady(true);
+    }, delay);
+    const connectionPoll = startPolling(async (signal) => {
+      const k = await fetchConnection(conn, signal);
+      if (signal.aborted) return;
       if (k) {
         setCreds(k);
         setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
         setConnMethod(k.connectionMethod || "library");
         if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
       }
-      setReady(true);
-    };
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const chain = async () => {
-      await pull();
-      if (alive) timer = setTimeout(chain, 4000);
-    };
-    void chain();
+    }, delay);
     return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
+      statsPoll.stop();
+      configPoll.stop();
+      connectionPoll.stop();
     };
   }, [conn]);
 
@@ -466,6 +468,7 @@ function SettingsPage() {
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
+          {section === "system" && <SystemSettingsPanel conn={conn} overlay={overlay} patch={patch} navigate={setSection} />}
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
           {section === "overview" && (
             <Card title="Coverage · controls · live overviews" hint="Scan, packs, indication types, block counts, set families, recon and order protection — all live">
@@ -487,7 +490,7 @@ function SettingsPage() {
                       onChange={(v) => patch("maxOpen", Math.round(v))}
                     />
                     <Num
-                      label="Symbol cap"
+                      label="Symbols count"
                       value={overlay.symbolCap}
                       min={0}
                       max={10000}
@@ -495,22 +498,26 @@ function SettingsPage() {
                       hint={`Target ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = unlimited`}
                       onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
                     />
+                    <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
+                    <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
+                    <Num label="Set PF minimum" value={overlay.setMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("setMinPf", normalizePf(v, overlay.setMinPf))} />
+                    <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
+                    <Toggle label="Control orders per configuration" on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
                   </Grid>
                 </div>
               </div>
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General calculation" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Exchange execution without adjustments · disabled by default; calculation continues" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Effective simple positions in Simulated and Live · default OFF · independent of additional strategies" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
-                <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
+                <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
               <p className="text-sm text-muted">
-                These sliders write the overlay. Save on Live or VST persists every field — including DCA steps, modules and symbol universe — and the engine reloads the file.
+                General calculations remain active as the common basis. Normal (General) only controls effective simple positions. Save persists the settings for the selected connection.
               </p>
               <div className="rounded-lg border border-border bg-bg2 p-3">
                 <p className="font-mono text-xs uppercase text-muted">Best configs · low drawdown</p>
@@ -703,7 +710,7 @@ function SettingsPage() {
                     label="Minimal Step Range"
                     value={calcOpt.minStep}
                     min={1}
-                    max={22}
+                    max={30}
                     step={1}
                     hint={`Sets below step ${calcOpt.minStep} are not calculated`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, minStep: Math.round(v), stepMax: Math.max(o.stepMax, Math.round(v)) }))}
@@ -712,7 +719,7 @@ function SettingsPage() {
                     label="Step max"
                     value={calcOpt.stepMax}
                     min={2}
-                    max={22}
+                    max={30}
                     step={1}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
                   />
@@ -1226,10 +1233,10 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={0.15} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
                 <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
-                <Slider label="TP min" value={overlay.tpMinPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
-                <Slider label="TP max" value={overlay.tpMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMaxPct", v)} />
+                <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
                   value={overlay.tpCostRatio}
@@ -1258,7 +1265,7 @@ function SettingsPage() {
                       const sl = tp * r;
                       const wr = sl / (sl + tp);
                       return (
-                        <tr key={r} className="border-t border-border font-mono">
+                        <tr key={r} data-ratio={r.toFixed(1)} className="border-t border-border font-mono">
                           <td className="py-1.5">{r.toFixed(1)}</td>
                           <td className="py-1.5">{(1 / r).toFixed(2)}</td>
                           <td className="py-1.5">{sl.toFixed(2)}</td>
@@ -1280,7 +1287,7 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="General calculation" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Simple positions in Simulated and Live · default OFF · internal General basis always active" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -1298,7 +1305,7 @@ function SettingsPage() {
               hint="Settings min/max is the catalog. Every pack × SL in range × TP-step in range is its own book. Live only fires validated +EV Sets."
             >
               <Grid>
-                <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
+                <p className="text-sm text-muted">Historic 1m basis · always active</p>
                 <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
                 <Toggle label="Strict validated gate" on={overlay.setStrictGate !== false} onChange={(v) => patch("setStrictGate", v)} />
                 <Toggle label="Auto-deactivate" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
@@ -1360,19 +1367,19 @@ function SettingsPage() {
                   label="Minimal Step Range"
                   value={overlay.setMinStep}
                   min={1}
-                  max={22}
+                  max={30}
                   step={1}
                   hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed.`}
-                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(30, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
                   min={1}
-                  max={22}
+                  max={30}
                   step={1}
                   hint="Upper TP step. Every integer from min through max is its own Set."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(22, Math.round(v))))}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(30, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -1417,7 +1424,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="Default 50 qualified Sets · fewer when qualification fails · 0 = unlimited"
+                  hint="Default 110 qualified Sets · 0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -1550,6 +1557,9 @@ function SettingsPage() {
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
                 />
+                <div className="min-w-0 space-y-3 rounded-lg border border-border bg-bg2 p-3 sm:col-span-2">
+                <h3 className="text-sm font-medium">Block → Active</h3>
+                <Grid>
                 <Toggle
                   label="Active"
                   on={overlay.blockActive}
@@ -1565,8 +1575,12 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Unadjusted exchange entries · disabled by default" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <p className="text-sm text-muted">Active observes a qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; existing and pending same-side quantities reduce the order. Normal calculations remain available. Profitability is measured, never guaranteed.</p>
+                <Num label="Minimum valid Block level" value={overlay.blockActiveMinLevel} min={0} max={overlay.blockMaxStack || 6} step={1}
+                  hint="0 = normal virtual basis (default) · higher = minimum Block count · adjusted quantity only"
+                  onChange={(v) => patch("blockActiveMinLevel", Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(v))))} />
+                </Grid>
+                <p className="text-sm text-muted">Independent of Normal (General). Active observes its qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; its own existing and pending quantities reduce the order. Level 0 uses the normal virtual basis and never makes an unadjusted Block order valid.</p>
+                </div>
                 <Num
                   label="Max stack"
                   value={overlay.blockMaxStack}
@@ -1933,7 +1947,7 @@ function SettingsPage() {
                 />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={22} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(22, Math.round(v))))} />
+                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(30, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
                 <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
                 <Num
@@ -2056,6 +2070,14 @@ function SettingsPage() {
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
                 <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
                 <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
+                {(overlay.indTrendRanges ?? [13, 21, 34]).map((period, index, periods) => (
+                  <Num key={`trend-${index}`} label={`Trend EMA range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent EMA calculation · fast period = 0.38 × range" onChange={(value) => patch("indTrendRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indBreakRanges ?? [8, 16, 32]).map((period, index, periods) => (
+                  <Num key={`break-${index}`} label={`Break range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent breakout calculation in candles" onChange={(value) => patch("indBreakRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />
                 <Num label="Min agreement" value={overlay.indMinAgreement} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinAgreement", v)} />
@@ -2299,13 +2321,14 @@ function SettingsPage() {
           </div>
         </div>
       ) : null}
+      {section === "overview" && <SystemHealthFooter conn={conn} />}
     </DeskShell>
   );
 }
 
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-4 rounded-radius border border-border bg-surface p-4">
+    <section className="min-w-0 space-y-4 rounded-radius border border-border bg-surface p-4">
       <div>
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
         {hint ? <p className="mt-1 text-sm text-muted">{hint}</p> : null}
@@ -2551,7 +2574,6 @@ function LiveAxis({
 function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: PulseOverlay }) {
   const sets = stats?.sets;
   const p = sets?.progress;
-  const rows = sets?.rows ?? [];
   const liveOv = sets?.liveOverview;
   const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
   const phase = String(p?.phase ?? "idle");
@@ -2578,15 +2600,16 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
           live on-exchange {liveOv?.active ?? sets?.liveActive ?? 0}/{liveOv?.processed ?? sets?.liveProcessed ?? 0} processed · fills {liveOv?.fills ?? sets?.liveFills ?? 0} · PF {Number(liveOv?.last15Ratio ?? 0).toFixed(2)} net {(Number(liveOv?.netAvg ?? 0) * 100).toFixed(3)}% · cost subtracted · deact from live only
         </p>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] text-left text-sm">
+      <SetGroups sets={sets} axesEnabled={enabledAxes(stats).length > 0} limit={40}>{(rows) => (
+      <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label="Configuration set measurements">
+        <table className="w-full min-w-[720px] table-fixed text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
-              <th className="pb-2 font-medium">Set</th>
+              <th className="w-56 pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last {overlay.setPfWindow} PF</th>
-              <th className="pb-2 text-right font-medium">Last {overlay.setDeactN} R</th>
+              <th className="pb-2 text-right font-medium" title={`Cost PF · configured ${overlay.setPfWindow}-result window`}>PF</th>
+              <th className="pb-2 text-right font-medium" title="Average R · last 25 results">R25</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>
@@ -2599,29 +2622,24 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 </td>
               </tr>
             ) : (
-              rows.slice(0, 40).map((r) => {
-                const liveN = r.liveN || r.live?.n || 0;
-                const pf = liveN ? Number(r.live?.last15Ratio ?? r.last15Ratio) : r.last15Ratio;
-                const ddt = liveN ? Number(r.live?.maxDdS ?? r.maxDdS) : r.maxDdS;
+              rows.map((r) => {
+                const pf = r.last15Ratio;
+                const ddt = r.maxDdS;
                 return (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
-                  <td className="py-1.5">
-                    {r.pack} · sl{r.slRatio.toFixed(1)} · st{r.step ?? "—"} · {r.trailKey}
-                    {liveN ? " · live" : " · hist"}
-                  </td>
+                  <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
-                    {liveN ? `+${liveN}` : ""}
                   </td>
-                  <td className={`py-1.5 text-right ${pf + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
-                    {pf.toFixed(2)}
+                  <td className={`py-1.5 text-right ${(pf ?? 0) + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                    {r.n ? setMetric(pf) : "—"}
                   </td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>
-                    {r.last25AvgR.toFixed(2)}
+                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>
+                    {setMetric(r.last25AvgR)}
                   </td>
-                  <td className="py-1.5 text-right">{formatDuration(ddt * 1000)}</td>
-                  <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
+                  <td className="py-1.5 text-right">{ddt == null ? "—" : formatDuration(ddt * 1000)}</td>
+                  <td className="py-1.5 text-muted [overflow-wrap:anywhere]">{r.deactReason || "—"}</td>
                 </tr>
                 );
               })
@@ -2629,6 +2647,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
           </tbody>
         </table>
       </div>
+      )}</SetGroups>
     </div>
   );
 }
@@ -2811,7 +2830,7 @@ function LiveApplied({
       {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => t.name).join(", ")}
+          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}`).join(", ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>

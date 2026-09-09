@@ -239,9 +239,9 @@ class LoadGovernor:
         self.partial = bool(ov.get("loadPartial", True))
         try:
             if ov.get("rssSoftMb") is not None:
-                self.soft_mb = max(40.0, float(ov.get("rssSoftMb") or 0))
+                self.soft_mb = max(0.0, float(ov.get("rssSoftMb") or 0))
             if ov.get("rssHardMb") is not None:
-                self.hard_mb = max(60.0, float(ov.get("rssHardMb") or 0))
+                self.hard_mb = max(0.0, float(ov.get("rssHardMb") or 0))
         except Exception:
             pass
 

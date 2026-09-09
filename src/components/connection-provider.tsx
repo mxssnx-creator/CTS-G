@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { startPolling } from "@/lib/polling";
 import {
   fetchConnections,
   readStoredConn,
@@ -25,21 +26,11 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setConnState(readStoredConn());
-    let alive = true;
-    const pull = async () => {
-      const c = await fetchConnections();
-      if (alive && c) setCatalog(c);
-    };
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const chain = async () => {
-      await pull();
-      if (alive) timer = setTimeout(chain, 4000);
-    };
-    void chain();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
+    const poll = startPolling(async (signal) => {
+      const c = await fetchConnections(signal);
+      if (!signal.aborted && c) setCatalog(c);
+    }, () => document.hidden ? 8000 : 4000);
+    return poll.stop;
   }, []);
 
   const setConn = (v: ConnType) => {

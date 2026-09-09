@@ -8,12 +8,31 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server' / 'pulse'))
 import pulse_trader as pt
-from block_active import adjusted_quantity, observe_continuation
+from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from block_engine import BlockBook
 from set_engine import SetBook, SetState
 
 
 class BlockActiveTests(unittest.TestCase):
+    def test_many_configurations_share_one_expiry_sweep_and_expire_exactly(self):
+        class Counted(ContinuationBook):
+            sweeps = 0
+            def items(self):
+                self.sweeps += 1
+                return super().items()
+        anchors = Counted()
+        for i in range(1000):
+            self.assertFalse(observe_continuation(anchors, str(i), 100, 1, 0))
+        self.assertEqual(anchors.sweeps, 1)
+        for i in range(1000):
+            self.assertTrue(observe_continuation(anchors, str(i), 101, 1, 45))
+        self.assertEqual(anchors.sweeps, 2)
+        observe_continuation(anchors, 'new', 100, 1, 224.8)
+        self.assertFalse(observe_continuation(anchors, '0', 102, 1, 225.2))
+        self.assertEqual(anchors['0']['at'], 225.2)
+        observe_continuation(anchors, 'new', 100, 1, 226)
+        self.assertLessEqual(len(anchors), 2)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -24,7 +43,7 @@ class BlockActiveTests(unittest.TestCase):
         self.view = dict(last15_n=12, last15_ratio=1.8, net_avg=.1, max_dd_s=10)
         self.st = NS(id='general:sl0.6:st3', active=True, sl_ratio=.6, tp_pct=.0045,
                      idx=0, kind='base', step=3, parent_set_id='', volume_ratio=1)
-        p.sets = NS(enabled=True, progress=NS(ready=True), eval_need=lambda: 8,
+        p.sets = NS(enabled=True, use_historic_gate=True, progress=NS(ready=True), eval_need=lambda: 8,
                     real_min_pf=1.15, max_dd_s=27000, _side_view=lambda *_: self.view,
                     pick_any=lambda *a, **k: self.st)
         p.coord = NS(min_pf=1.05, gate=lambda *a, **k: (True, [], {}))
@@ -47,6 +66,28 @@ class BlockActiveTests(unittest.TestCase):
         self.assertEqual(r['normalQtyExecuted'], 0)
         self.assertEqual(r['blockCount'], 1)
 
+    def test_minimum_level_filters_only_block_counts_and_never_creates_normal_volume(self):
+        for normal in (False, True):
+            self.p.normal_execution_enabled = normal
+            for level in range(7):
+                self.p.block_active_min_level = level
+                result = self.plan()
+                self.assertEqual(result['blockCount'], max(1, level))
+                self.assertEqual(result['minimumLevel'], level)
+                self.assertEqual(result['normalQtyExecuted'], 0)
+                self.assertAlmostEqual(result['requestedQty'], 8 * min(1, max(1, level) * .25))
+        self.p.block.counts = [1, 2]
+        self.p.block_active_min_level = 3
+        self.assertIsNone(self.plan())
+
+    def test_normal_positions_do_not_cover_block_but_legacy_block_adjustments_do(self):
+        lane = 'block-active:baseline'
+        self.p._block_reference_anchors[('X-USDT','LONG',lane)] = dict(at=0, seen=50, price=100, direction=1)
+        self.p.positions_for = lambda *a: [NS(qty=8, execution_lane='baseline', strategy='core'), NS(qty=.5, execution_lane='baseline', strategy='block')]
+        with patch.object(pt.time, 'time', return_value=60):
+            result = self.p.block_active_plan('X-USDT','LONG',self.st,8,100.3,execution_lane=lane)
+        self.assertAlmostEqual(result['requestedQty'], 1.5)
+
     def test_overall_owned_and_pending_deducted(self):
         self.p.positions_for = lambda *a: [NS(qty=.5)]
         self.p.pending_orders = {'a': dict(symbol='X-USDT', side='LONG', kind='entry', requested_qty=1, filled_qty=.25)}
@@ -55,6 +96,16 @@ class BlockActiveTests(unittest.TestCase):
     def test_no_order_when_every_target_satisfied(self):
         self.p.positions_for = lambda *a: [NS(qty=8)]
         self.assertIsNone(self.plan())
+
+    def test_independent_execution_lane_deducts_only_its_own_adjustments(self):
+        self.p._block_reference_anchors[('X-USDT', 'LONG', 'this-lane')] = dict(at=0, seen=50, price=100, direction=1)
+        self.p.positions_for = lambda *a: [NS(qty=8, execution_lane='other-lane'), NS(qty=.5, execution_lane='this-lane')]
+        self.p.pending_orders = {'other': dict(symbol='X-USDT', side='LONG', kind='entry',
+            requested_qty=8, filled_qty=0, metadata={'execution_lane': 'other-lane'})}
+        with patch.object(pt.time, 'time', return_value=60):
+            result = self.p.block_active_plan('X-USDT', 'LONG', self.st, 8, 100.3, execution_lane='this-lane')
+        self.assertEqual(result['requestedQty'], 1.5)
+        self.assertEqual(result['normalQtyExecuted'], 0)
 
     def test_all_counts_and_ratios_remain_additive(self):
         for count in range(1, 7):
@@ -125,6 +176,7 @@ class BlockActiveTests(unittest.TestCase):
         p.record_event=Mock(); p._remember_pending=Mock()
         p.sl_min=.001; p.sl_max=.03; p.tp_min=.002; p.tp_max=.03
         p.position_cost_pct=.15; p.tp_cost_ratio=3
+        p.exits=NS(enabled=False, ignore_tp=False)
         p.api=NS(post=Mock(side_effect=RuntimeError('exchange boundary')))
         return p
 

@@ -9,15 +9,16 @@ required net % = cost% × ((ratio − 1) / 0.10)
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 POSITION_COST_PCT_DEFAULT = 0.10
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 # User-facing PF controls share one contract across UI, overlay, and workers.
-PF_MIN = 0.80
-PF_MAX = 2.50
-PF_STEP = 0.02
+PF_MIN = 1.05
+PF_MAX = 1.35
+PF_STEP = 0.01
 RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
@@ -34,9 +35,11 @@ EVALUATION_WINDOWS = (5, 10, 15, 25, 50, 75)
 def _row_value(row: Any, *keys: str) -> Any:
     """Read the first present field from dicts, dataclasses, or API rows."""
     for key in keys:
-        if isinstance(row, dict):
-            if key in row and row.get(key) is not None:
-                return row.get(key)
+        if isinstance(row, Mapping):
+            if key in row:
+                value = row.get(key)
+                if value is not None:
+                    return value
         elif hasattr(row, key):
             value = getattr(row, key)
             if value is not None:
@@ -176,16 +179,20 @@ def row_has_measured_cost(row: Any) -> bool:
 
 def _is_simple_historic_row(row: Any) -> bool:
     """Identify generated gross-move rows that cannot carry measured cost."""
-    if not isinstance(row, dict) or row.get("pnl_pct") is None:
+    # Historic replay may use the slots-backed CompactHistRow to keep a large
+    # independent catalog within its memory ceiling.  It exposes the same
+    # Mapping/attribute fields as the legacy dict row, so classify it by the
+    # shared row contract instead of requiring a concrete dict.
+    if _row_value(row, "pnl_pct") is None:
         return False
-    if any(row.get(key) is not None for key in (
+    if any(_row_value(row, key) is not None for key in (
         "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
         "totalFee", "totalCommission", "entry_fee", "entryFee", "exit_fee", "exitFee",
         "fee", "fees", "commission", "commissionAmount", "fee_rate", "feeRate",
         "commissionRate", "makerFeeRate", "takerFeeRate",
     )):
         return False
-    source = str(row.get("cost_source") or row.get("costSource") or row.get("source") or "").lower()
+    source = str(_row_value(row, "cost_source", "costSource", "source") or "").lower()
     return not any(token in source for token in ("live", "exchange", "cost"))
 
 
@@ -355,6 +362,30 @@ def row_net_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     return net_pnl_pct(row_pnl_pct(row, actual_cost), actual_cost)
 
 
+def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str, Any]:
+    """One bounded, persistable close accumulator per independent position."""
+    old_qty = finite(previous.get("qty"))
+    qty = old_qty + finite(leg.get("qty"))
+    old_notion = row_notional(previous)
+    notion = old_notion + row_notional(leg)
+    result = {key: value for key, value in leg.items() if key != "roundtrip_result"}
+    result.update(
+        qty=qty, entry=notion / max(qty, 1e-12),
+        exit=(finite(previous.get("exit")) * old_qty + finite(leg.get("exit")) * finite(leg.get("qty"))) / max(qty, 1e-12),
+        pnl=finite(previous.get("pnl")) + finite(leg.get("pnl")),
+        pnl_pct=(row_pnl_pct(previous) * old_notion + row_pnl_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
+        position_cost_pct=(row_position_cost_pct(previous) * old_notion + row_position_cost_pct(leg) * row_notional(leg)) / max(notion, 1e-12),
+        fee_total=finite(previous.get("fee_total")) + finite(leg.get("fee_total")),
+        entry_fee=finite(previous.get("entry_fee")) + finite(leg.get("entry_fee")),
+        exit_fee=finite(previous.get("exit_fee")) + finite(leg.get("exit_fee")),
+        closeLegs=int(previous.get("closeLegs") or 0) + 1,
+        exchange_confirmed=bool(leg.get("exchange_confirmed")) and (not previous or bool(previous.get("exchange_confirmed"))),
+    )
+    if previous and previous.get("cost_source") != leg.get("cost_source"):
+        result["cost_source"] = "mixed-cost"
+    return result
+
+
 def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
     """Aggregate confirmed close legs; partial fills are not extra samples."""
     groups: Dict[tuple, list] = {}
@@ -376,6 +407,15 @@ def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
         if legs[-1].get("partial"):
             continue
         row = dict(legs[-1])
+        saved = row.get("roundtrip_result")
+        if (isinstance(saved, dict) and saved.get("exchange_confirmed")
+                and saved.get("client_id") == row.get("client_id")
+                and not saved.get("partial")
+                and finite(saved.get("qty")) >= finite(row.get("roundtrip_qty")) * (1 - 1e-8)):
+            # The persisted per-position accumulator remains complete even
+            # when interleaved partials have left the small shared UI tape.
+            out.append(dict(saved))
+            continue
         notion = sum(row_notional(leg) for leg in legs)
         if notion <= 0:
             continue
@@ -677,7 +717,8 @@ def cost_aware_metrics(
 
 
 def clamp_pct(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, value))
+    # Zero is the persisted, JSON-safe unlimited upper bound for TP.
+    return max(lo, min(hi, value) if hi > 0 else value)
 
 
 def resolve_sl_tp(

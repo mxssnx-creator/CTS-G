@@ -1,0 +1,110 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> build
+> node scripts/with-app-env.mjs vite build && npm run db:migrate
+
+[nitro:vercel] ℹ Using nodejs24.x runtime.
+[nitro:vercel] ℹ Using web entry format.
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 2423 modules transformed.
+rendering chunks...
+computing gzip size...
+.vercel/output/static/assets/styles-CUigiWHN.css             29.34 kB │ gzip:   6.64 kB
+.vercel/output/static/assets/forced-configs-B_YQnFWM.js       6.15 kB │ gzip:   2.48 kB
+.vercel/output/static/assets/desk-shell-BdIfq_i0.js          11.30 kB │ gzip:   4.26 kB
+.vercel/output/static/assets/system-BtrbxDlE.js              12.08 kB │ gzip:   4.13 kB
+.vercel/output/static/assets/config-model-YFqPR82r.js        18.46 kB │ gzip:   6.01 kB
+.vercel/output/static/assets/dimension-stats-BhUZ4KXS.js     24.67 kB │ gzip:   8.04 kB
+.vercel/output/static/assets/coverage-overview-CPzICXHS.js   25.12 kB │ gzip:   8.26 kB
+.vercel/output/static/assets/results-Fn0pcQTl.js             28.84 kB │ gzip:   6.77 kB
+.vercel/output/static/assets/routes-B_iuB1OZ.js              34.08 kB │ gzip:   8.85 kB
+.vercel/output/static/assets/settings-D8n0Q25l.js           114.28 kB │ gzip:  29.70 kB
+.vercel/output/static/assets/index-B3lErh-k.js              389.45 kB │ gzip: 121.59 kB
+.vercel/output/static/assets/activity-overview-COpTOa4x.js  409.64 kB │ gzip: 108.51 kB
+
+✓ built in 2.31s
+vite v8.2.2 building ssr environment for production...
+transforming...
+✓ 92 modules transformed.
+rendering chunks...
+computing gzip size...
+node_modules/.nitro/vite/services/ssr/assets/styles-CUigiWHN.css                      29.34 kB │ gzip:  6.64 kB
+node_modules/.nitro/vite/services/ssr/assets/start-5Z2QO8AU.js                         0.14 kB │ gzip:  0.13 kB
+node_modules/.nitro/vite/services/ssr/assets/empty-plugin-adapters-D9UWiqvJ.js         0.22 kB │ gzip:  0.16 kB
+node_modules/.nitro/vite/services/ssr/assets/_tanstack-start-manifest_v-GhS4NBwx.js    1.50 kB │ gzip:  0.50 kB
+node_modules/.nitro/vite/services/ssr/assets/forced-configs-CvrY8ZNg.js                9.72 kB │ gzip:  3.07 kB
+node_modules/.nitro/vite/services/ssr/assets/desk-shell-BHEuqrWo.js                   15.85 kB │ gzip:  4.75 kB
+node_modules/.nitro/vite/services/ssr/assets/system-C5oym0hL.js                       16.25 kB │ gzip:  4.53 kB
+node_modules/.nitro/vite/services/ssr/assets/router-DQD2T1kh.js                       20.25 kB │ gzip:  6.31 kB
+node_modules/.nitro/vite/services/ssr/assets/dimension-stats-DwU23ykv.js              20.52 kB │ gzip:  5.66 kB
+node_modules/.nitro/vite/services/ssr/assets/config-model-D9NyyXDg.js                 26.26 kB │ gzip:  7.38 kB
+node_modules/.nitro/vite/services/ssr/assets/coverage-overview-CLzW6joE.js            41.77 kB │ gzip: 10.61 kB
+node_modules/.nitro/vite/services/ssr/assets/results-BtRc2bNa.js                      43.48 kB │ gzip:  8.47 kB
+node_modules/.nitro/vite/services/ssr/assets/activity-overview-C6qe_ZK4.js            46.95 kB │ gzip: 10.24 kB
+node_modules/.nitro/vite/services/ssr/assets/routes-Ds5ZOJrg.js                       50.74 kB │ gzip: 10.82 kB
+node_modules/.nitro/vite/services/ssr/index.js                                        62.55 kB │ gzip: 15.92 kB
+node_modules/.nitro/vite/services/ssr/assets/settings-waILmW_k.js                    190.37 kB │ gzip: 37.50 kB
+
+✓ built in 1.06s
+
+[nitro] ◐ Building [Nitro] (preset: vercel, compatibility: 2026-09-09)
+[nitro] ✔ Generated public .vercel/output/static
+vite v8.2.2 building nitro environment for production...
+transforming...
+✓ 2440 modules transformed.
+rendering chunks...
+computing gzip size...
+.vercel/output/functions/__server.func/_ssr/start-5Z2QO8AU.mjs                    0.14 kB │ gzip:   0.13 kB
+.vercel/output/functions/__server.func/_ssr/empty-plugin-adapters-D9UWiqvJ.mjs    0.23 kB │ gzip:   0.16 kB
+.vercel/output/functions/__server.func/_libs/clsx.mjs                             0.55 kB │ gzip:   0.31 kB
+.vercel/output/functions/__server.func/_chunks/ssr-renderer.mjs                   0.96 kB │ gzip:   0.49 kB
+.vercel/output/functions/__server.func/_tanstack-start-manifest_v-GhS4NBwx.mjs    1.56 kB │ gzip:   0.53 kB
+.vercel/output/functions/__server.func/_runtime.mjs                               1.58 kB │ gzip:   0.74 kB
+.vercel/output/functions/__server.func/_libs/react-is.mjs                         1.67 kB │ gzip:   0.65 kB
+.vercel/output/functions/__server.func/_libs/prop-types.mjs                       2.27 kB │ gzip:   0.84 kB
+.vercel/output/functions/__server.func/_libs/d3-path.mjs                          3.25 kB │ gzip:   1.16 kB
+.vercel/output/functions/__server.func/_libs/d3-interpolate.mjs                   5.03 kB │ gzip:   1.61 kB
+.vercel/output/functions/__server.func/_libs/d3-array.mjs                         8.06 kB │ gzip:   2.25 kB
+.vercel/output/functions/__server.func/_libs/eventemitter3.mjs                    8.31 kB │ gzip:   2.05 kB
+.vercel/output/functions/__server.func/_libs/h3-v2+rou3.mjs                       9.83 kB │ gzip:   3.05 kB
+.vercel/output/functions/__server.func/_libs/d3-color.mjs                        10.38 kB │ gzip:   3.57 kB
+.vercel/output/functions/__server.func/_libs/d3-format.mjs                       10.56 kB │ gzip:   3.02 kB
+.vercel/output/functions/__server.func/_ssr/forced-configs-CvrY8ZNg.mjs          10.87 kB │ gzip:   3.19 kB
+.vercel/output/functions/__server.func/_libs/lucide-react.mjs                    11.09 kB │ gzip:   2.70 kB
+.vercel/output/functions/__server.func/_libs/tanstack__history.mjs               12.05 kB │ gzip:   3.46 kB
+.vercel/output/functions/__server.func/_libs/fast-equals.mjs                     14.37 kB │ gzip:   3.62 kB
+.vercel/output/functions/__server.func/_ssr/desk-shell-BHEuqrWo.mjs              16.99 kB │ gzip:   4.88 kB
+.vercel/output/functions/__server.func/_ssr/system-C5oym0hL.mjs                  17.43 kB │ gzip:   4.64 kB
+.vercel/output/functions/__server.func/_ssr/router-DQD2T1kh.mjs                  20.21 kB │ gzip:   6.32 kB
+.vercel/output/functions/__server.func/_libs/h3+rou3+srvx.mjs                    22.57 kB │ gzip:   6.12 kB
+.vercel/output/functions/__server.func/_ssr/dimension-stats-DwU23ykv.mjs         23.16 kB │ gzip:   5.81 kB
+.vercel/output/functions/__server.func/_libs/decimal.js-light.mjs                23.31 kB │ gzip:   6.89 kB
+.vercel/output/functions/__server.func/_libs/d3-shape.mjs                        24.60 kB │ gzip:   5.02 kB
+.vercel/output/functions/__server.func/_ssr/config-model-D9NyyXDg.mjs            26.25 kB │ gzip:   7.39 kB
+.vercel/output/functions/__server.func/index.mjs                                 31.82 kB │ gzip:   9.98 kB
+.vercel/output/functions/__server.func/_libs/react-smooth.mjs                    37.85 kB │ gzip:   8.14 kB
+.vercel/output/functions/__server.func/_ssr/coverage-overview-CLzW6joE.mjs       44.67 kB │ gzip:  10.72 kB
+.vercel/output/functions/__server.func/_ssr/results-BtRc2bNa.mjs                 50.52 kB │ gzip:   8.70 kB
+.vercel/output/functions/__server.func/_ssr/activity-overview-C6qe_ZK4.mjs       53.21 kB │ gzip:  10.43 kB
+.vercel/output/functions/__server.func/_ssr/routes-Ds5ZOJrg.mjs                  57.80 kB │ gzip:  11.08 kB
+.vercel/output/functions/__server.func/_libs/d3-scale+[...].mjs                  58.23 kB │ gzip:  12.12 kB
+.vercel/output/functions/__server.func/_ssr/ssr.mjs                              60.83 kB │ gzip:  15.83 kB
+.vercel/output/functions/__server.func/_libs/@tanstack/router-core+[...].mjs    122.94 kB │ gzip:  25.89 kB
+.vercel/output/functions/__server.func/_libs/zod.mjs                            125.41 kB │ gzip:  24.68 kB
+.vercel/output/functions/__server.func/_libs/lodash.mjs                         161.64 kB │ gzip:  29.40 kB
+.vercel/output/functions/__server.func/_ssr/settings-waILmW_k.mjs               209.79 kB │ gzip:  38.10 kB
+.vercel/output/functions/__server.func/_libs/recharts+[...].mjs                 540.60 kB │ gzip:  99.92 kB
+.vercel/output/functions/__server.func/_libs/@tanstack/react-router+[...].mjs   676.96 kB │ gzip: 142.71 kB
+
+✓ built in 440ms
+ℹ Generated .vercel/output/nitro.json
+
+[nitro] ✔ You can preview this build using npx vite preview
+[nitro] ✔ You can deploy this build using npx nitro deploy --prebuilt
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> db:migrate
+> node scripts/migrate.mjs
+
+[migrate] DATABASE_URL not set — skipping (the PGLite fallback migrates itself).

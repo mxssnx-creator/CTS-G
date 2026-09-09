@@ -1,0 +1,80 @@
+{
+  "uptimeS": 692.6747417449951,
+  "progressPhase": "replay",
+  "progressPct": 24.2,
+  "progressDetail": "replay RABBIT-USDT 13/50",
+  "progressSymbolsDone": 12,
+  "progressSymbolsTotal": 50,
+  "progressError": "",
+  "exchangeOpenCount": 0,
+  "exchangeOwnOpenCount": 0,
+  "simOpenCount": 0,
+  "errors": 0,
+  "lastError": "",
+  "rssMb": 2961.3,
+  "loadLevel": "overload",
+  "sampledAtUTC": "2026-09-09T01:08:28.208012+00:00",
+  "installedCommit": "9fb4aac13317c12712ccbd2e78efe55c33444c9f",
+  "sets": {
+    "setCount": 28080,
+    "ready": true,
+    "activeCount": 0,
+    "validatedCount": 0,
+    "minPf": 1.3,
+    "lookback": 720,
+    "histFills": 8826821,
+    "liveFills": 0,
+    "liveProcessed": 0
+  },
+  "system": {
+    "sampledAt": 1788916105.1067634,
+    "cpuPct": 99.78364014214812,
+    "memoryMb": 2960.97265625,
+    "dbKeys": 1630,
+    "dbBytes": 1060864,
+    "counters": {
+      "sessions": 2,
+      "crashes": 0,
+      "recoveries": 0.0,
+      "totalRunS": 2176.5829602219746,
+      "requests": 3953.0,
+      "errors": 0.0
+    },
+    "calculationCache": {
+      "hits": 0,
+      "misses": 352,
+      "bypassed": 27728,
+      "errors": 0,
+      "pruned": 140,
+      "accountedBytes": 4464451,
+      "cachedSets": 295,
+      "error": "",
+      "batch": 32,
+      "bypassReason": "Low cache reuse; local calculation avoids Redis/AOF churn",
+      "entryLimit": 350,
+      "trimTargetPct": 80,
+      "memoryLimitBytes": 67108864,
+      "source": "Redis pure-metric cache; current qualification always reapplied"
+    }
+  },
+  "persistence": {
+    "totalsPreserved": true,
+    "sessionChanged": true,
+    "previouslyRecordedCloses": 56
+  },
+  "services": {
+    "bingx-x01": {
+      "MainPID": "3818957",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-09 01:58:16 CEST",
+      "ActiveState": "active"
+    },
+    "bingx-x02": {
+      "MainPID": "3863988",
+      "NRestarts": "0",
+      "ExecMainStartTimestamp": "Wed 2026-09-09 02:56:51 CEST",
+      "ActiveState": "active"
+    }
+  },
+  "isolatedQaServicesStopped": true
+}

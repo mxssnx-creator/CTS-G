@@ -7,6 +7,8 @@ lowStopConsensus) plus the indication-stage RSI/MACD/EMA pack.
 from __future__ import annotations
 
 import time
+import hashlib
+import re
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -131,6 +133,11 @@ class Indication:
     timeframe: str = ""
     kind: str = "state"
 
+    @property
+    def entry_key(self) -> str:
+        identity = repr((self.kind, self.mode, self.timeframe, self.direction))
+        return hashlib.sha256(identity.encode()).hexdigest()[:16]
+
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "enabled": True,
@@ -159,6 +166,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "typeSignals": True,
     "typeTrend": True,
     "typeBreak": True,
+    "trendRanges": [13, 21, 34],
+    "breakRanges": [8, 16, 32],
     "dirRange": 10,
     "dirMinChange": 0.001,
     "moveRange": 10,
@@ -689,13 +698,15 @@ def evaluate_trend(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """Independent trend: EMA 8 vs 21 with consecutive bar confirmation."""
+    """Independent configurable EMA pair with consecutive bar confirmation."""
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
-    if len(closes) < 30:
+    slow_period = max(8, min(55, int(settings.get("trendSlow") or 21)))
+    fast_period = max(2, min(slow_period - 1, int(settings.get("trendFast") or 8)))
+    if len(closes) < max(30, slow_period + 1):
         return None
-    fast = frame.ema_series(8)
-    slow = frame.ema_series(21)
+    fast = frame.ema_series(fast_period)
+    slow = frame.ema_series(slow_period)
     if len(fast) < 6 or len(slow) < 6:
         return None
     last = closes[-1]
@@ -725,8 +736,8 @@ def evaluate_trend(
     if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
         return None
     return _kind_indication(
-        symbol, "trend", want, strength, last, settings, [f"trend:ema8/21:{consec}"],
-        agreement=agr, mode="trend", conf=conf,
+        symbol, "trend", want, strength, last, settings, [f"trend:ema{fast_period}/{slow_period}:{consec}"],
+        agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
     )
 
 
@@ -772,6 +783,37 @@ def evaluate_break(
         symbol, "break", want, strength, last, settings, [f"break:{rng}:{brk:.3f}"],
         agreement=agr, mode=f"break:{rng}", conf=conf,
     )
+
+
+def indication_ranges(values, defaults):
+    if not isinstance(values, (list, tuple)):
+        return list(defaults)
+    parsed = []
+    for value in values[:16]:
+        try:
+            n = int(value)
+            if 8 <= n <= 55 and n not in parsed:
+                parsed.append(n)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return sorted(parsed) or list(defaults)
+
+
+def evaluate_range_configs(symbol, closes, settings, frame=None):
+    """Every enabled range has its own stable identity; share cached EMAs."""
+    frame = frame or IndicationFrame([], list(closes))
+    rows = []
+    if settings.get("typeTrend", True):
+        for slow in indication_ranges(settings.get("trendRanges"), (13, 21, 34)):
+            row = evaluate_trend(symbol, closes, {**settings, "trendSlow": slow, "trendFast": round(slow * .38)}, frame)
+            if row:
+                rows.append(row)
+    if settings.get("typeBreak", True):
+        for period in indication_ranges(settings.get("breakRanges"), (8, 16, 32)):
+            row = evaluate_break(symbol, closes, {**settings, "breakRange": period}, frame)
+            if row:
+                rows.append(row)
+    return rows
 
 
 def _avg_abs_move_pct(values: List[float]) -> float:
@@ -1278,6 +1320,8 @@ class IndicationBook:
                 s[key] = bool(overlay.get(ovk))
         s["dirRange"] = int(overlay.get("indDirRange") or s.get("dirRange") or 10)
         s["moveRange"] = int(overlay.get("indMoveRange") or s.get("moveRange") or 10)
+        s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
+        s["breakRanges"] = indication_ranges(overlay.get("indBreakRanges", s.get("breakRanges")), (8, 16, 32))
         outbreaks = overlay.get("activeOutbreakRanges") or overlay.get("indActiveOutbreak")
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
@@ -1491,14 +1535,8 @@ class IndicationBook:
                 indications.append(mrow)
         if self.settings.get("typeActive", True) and closes:
             indications.extend(evaluate_active_all(symbol, closes, self.settings, frame=frame_1m))
-        if self.settings.get("typeTrend", True) and closes:
-            trow = evaluate_trend(symbol, closes, self.settings, frame=frame_1m)
-            if trow:
-                indications.append(trow)
-        if self.settings.get("typeBreak", True) and closes:
-            brow = evaluate_break(symbol, closes, self.settings, frame=frame_1m)
-            if brow:
-                indications.append(brow)
+        if closes:
+            indications.extend(evaluate_range_configs(symbol, closes, self.settings, frame_1m))
         if self.settings.get("typeCommon", True):
             crow = evaluate_common(symbol, candles_1m, self.settings, frame=frame_1m)
             if crow:
@@ -1580,6 +1618,11 @@ class IndicationBook:
     def match(self, symbol: str, reason: str) -> Optional[Indication]:
         rows = self.last.get(symbol) or []
         low = (reason or "").lower()
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", low)
+        if exact:
+            # A disappeared/reversed configuration must not be substituted by
+            # a stronger sibling between scan and exchange submission.
+            return next((i for i in rows if i.entry_key == exact.group(1)), None)
         bits = [b for b in low.split(":") if b]
         want_kind = ""
         if bits and bits[0] == "ind" and len(bits) > 1:
@@ -1612,10 +1655,15 @@ class IndicationBook:
         min_conf: float = 0.52,
         allow: Optional[Any] = None,
     ) -> List[Tuple["Indication", float, int]]:
-        """Return every eligible kind lane without a consensus requirement."""
-        by = self.kinds_for(symbol)
+        """Return every eligible kind/mode/timeframe/direction configuration."""
+        by = {}
+        for indication in self.last.get(symbol) or []:
+            previous = by.get(indication.entry_key)
+            if previous is None or indication.confidence > previous.confidence:
+                by[indication.entry_key] = indication
         out: List[Tuple["Indication", float, int]] = []
-        for kind, indication in by.items():
+        for indication in by.values():
+            kind = indication.kind
             if callable(allow):
                 try:
                     if not bool(allow(kind, indication.direction)):

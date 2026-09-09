@@ -20,10 +20,10 @@ class DynamicCostPolicyTests(unittest.TestCase):
         self.assertEqual(effective_position_cost_pct([])['costPct'],.1)
         b=SetBook();b.load({});c=Coordinator();c.load({},{})
         self.assertEqual(b.max_dd_s,57600)
-        self.assertEqual(b.stage_min_pf,dict(base=1.02,main=1.02,real=1.02))
-        self.assertEqual(c.min_pf,1.02)
+        self.assertEqual(b.stage_min_pf,dict(base=1.10,main=1.10,real=1.10))
+        self.assertEqual(c.min_pf,1.10)
         h=overlay_from_options(parse_options({}))
-        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(1.02,57600,.1))
+        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(1.10,57600,.1))
 
     def test_measured_cost_propagates_to_all_calculators(self):
         p=pt.Pulse.__new__(pt.Pulse);p.manual_position_cost_pct=.1

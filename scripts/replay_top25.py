@@ -103,7 +103,7 @@ def causal_gates(bars,tape,equity,settings):
     """Snapshot after each shadow close; it becomes available on the next bar."""
     coord=Coordinator();coord.load(settings.get('cts',{}),settings.get('overlay',{}))
     book=SetBook();book.load(settings.get('overlay',{}))
-    parent=SimpleNamespace(id='research-parent',kind='base',parent_set_id='')
+    parent=SimpleNamespace(id='research-parent',kind='base',parent_set_id='',max_dd_s=0.)
     allowed=np.zeros((len(bars),len(AXES)),dtype=bool)
     isolated=np.zeros_like(allowed);block=np.zeros((len(bars),len(BLOCK_RATIOS)*6),dtype=bool)
     history=[];events=[];cursor=0;last_axes=np.zeros(len(AXES),bool);last_isolated=last_axes.copy();last_block=np.zeros(len(BLOCK_RATIOS)*6,bool)
@@ -117,7 +117,7 @@ def causal_gates(bars,tape,equity,settings):
             history.append(tape[cursor]);cursor+=1;changed=True
         if changed:
             metric=last_n_cost_pf(history,book.pf_n,book.cost_pct)
-            ledger=book._stage_qualification(parent,dict(last15_n=metric['count'],last15_ratio=metric['ratio'],ddOk=max_age<=book.max_dd_s))
+            ledger=book._stage_qualification(parent,dict(last15_n=metric['count'],last15_ratio=metric['ratio'],max_dd_s=max_age,ddOk=max_age<=book.max_dd_s))
             base=bool(ledger['base'])
             # A separately labelled mechanics arm evaluates Axis children even
             # when the historical Base parent is unqualified. Native Axis

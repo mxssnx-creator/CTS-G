@@ -1,0 +1,2 @@
+# Redis protocol + real Lua execution without opening a network listener.
+fakeredis[lua]==2.34.1

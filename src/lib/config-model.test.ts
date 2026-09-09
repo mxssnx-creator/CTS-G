@@ -9,15 +9,73 @@ import {
   syncOverlayFlags,
 } from "./config-model.ts";
 
+test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
+  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, false);
+  assert.equal(DEFAULT_OVERLAY.blockActiveMinLevel, 0);
+  for (const normal of [false, true]) for (const active of [false, true]) for (const level of [0, 1, 3, 6]) {
+    const loaded = overlayFromCts({}, { normalExecutionEnabled: normal, blockActive: active,
+      blockActiveMinLevel: level, stratGeneral: false, histEnabled: false });
+    const saved = syncOverlayFlags(loaded);
+    assert.equal(saved.normalExecutionEnabled, normal);
+    assert.equal(saved.blockActive, active);
+    assert.equal(saved.blockActiveMinLevel, level);
+    assert.equal(saved.stratGeneral, true);
+    assert.equal(saved.histEnabled, true);
+    assert.equal(saved.modules?.["core.historic"], true);
+  }
+});
+
+test("System settings survive save and use bounded values without disabling automatic memory", () => {
+  const saved = syncOverlayFlags(overlayFromCts({}, { systemWorkers: 99, systemDbMaxMb: 4,
+    systemStatsIntervalS: 9, systemOrderRps: 50, rssSoftMb: 0, rssHardMb: 0, blockMaxStack: 3, blockActiveMinLevel: 6 }));
+  assert.equal(saved.systemWorkers, 8);
+  assert.equal(saved.systemDbMaxMb, 8);
+  assert.equal(saved.systemOrderRps, 2.4);
+  assert.equal(saved.systemStatsIntervalS, 9);
+  assert.equal(saved.rssSoftMb, 0);
+  assert.equal(saved.rssHardMb, 0);
+  assert.equal(saved.blockActiveMinLevel, 3);
+});
+
+test("SQLite RAM defaults and disk selection survive the complete settings roundtrip", () => {
+  assert.equal(DEFAULT_OVERLAY.systemSqliteMemory, 1);
+  assert.equal(DEFAULT_OVERLAY.systemSqliteCheckpointS, 10);
+  for (const mode of [0, 1]) {
+    const saved = syncOverlayFlags(overlayFromCts({}, { systemSqliteMemory: mode, systemSqliteCheckpointS: 3 }));
+    assert.equal(saved.systemSqliteMemory, mode);
+    assert.equal(saved.systemSqliteCheckpointS, 3);
+    assert.equal(saved.normalExecutionEnabled, false);
+    assert.equal(saved.stratGeneral, true);
+  }
+  assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 0 }).systemSqliteCheckpointS, 1);
+  assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 1000 }).systemSqliteCheckpointS, 60);
+});
+
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.02, key);
+      assert.equal(value[key], 1.10, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
     assert.equal(value.useLivePositionCosts, true);
   }
+});
+
+test("risk and step limits preserve unlimited TP and the 0.15 percent SL floor", () => {
+  for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
+    assert.equal(value.tpMinPct, .3);
+    assert.equal(value.tpMaxPct, 0);
+    assert.equal(value.slMinPct, .15);
+    assert.equal(value.slMaxPct, 3);
+    assert.equal(value.setStepMax, 30);
+  }
+  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, setStepMax: 70, minPf: 2.5, setMinPf: .8 });
+  assert.equal(value.tpMaxPct, 12);
+  assert.equal(value.slMinPct, .15);
+  assert.equal(value.setStepMax, 30);
+  assert.equal(value.minPf, 1.35);
+  assert.equal(value.setMinPf, 1.05);
 });
 
 test("saving a measured cost never overwrites the explicit fallback", () => {
@@ -32,7 +90,6 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
 });
 
 test("new and legacy settings default to adjusted execution, 110 Sets, 100 orders and 50 symbols", () => {
-test("new and legacy settings default to adjusted execution, 110 Sets and 25 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, false);
     assert.equal(value.blockActive, true);
@@ -40,14 +97,12 @@ test("new and legacy settings default to adjusted execution, 110 Sets and 25 sym
     assert.equal(value.maxOpen, 100);
     assert.equal(value.stratGeneral, true);
     assert.equal(value.symbolCap, 50);
-    assert.equal(value.stratGeneral, true);
-    assert.equal(value.symbolCap, 25);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
 });
 
-test("All/* with cap 25 is the ranked default book, not unlimited", () => {
+test("an explicit All/* cap of 25 stays ranked and is not unlimited", () => {
   const ranked = syncOverlayFlags(overlayFromCts({}, { symbolsAll: true, symbols: ["*"], symbolCap: 25 }));
   assert.equal(ranked.symbolCap, 25);
   assert.equal(ranked.symbolsAll, true);
