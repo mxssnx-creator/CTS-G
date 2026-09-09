@@ -20,7 +20,7 @@
 <h1>UI geprüft. Weitere Fehler lokal korrigiert.</h1>
 <p class="notice"><strong>Die neue Version ist noch nicht auf dem Server abgenommen.</strong>
 Installiert ist <code>761a9a8</code>. Die zusätzlichen Korrekturen liegen in
-<code>0f66060</code> und <code>2d0449bd82cf4f72e8224fa84a67f78c07ef9ed3</code>.
+<code>0f66060</code>, <code>2d0449b</code> und <code>3cf8a80</code>, ergänzt um die Trennung der Ausführungsplätze nach Verbindung.
 Die automatische Freigabeprüfung hat die Übertragung der neuen Quelle abgelehnt,
 weil die konkrete Zustimmung nur <code>761a9a8</code> umfasste. Push und Merge sind noch ausstehend.</p>
 
@@ -38,7 +38,8 @@ weil die konkrete Zustimmung nur <code>761a9a8</code> umfasste. Push und Merge s
 <tr><td>Lange Set-Bezeichnungen und zu viele gleichzeitig sichtbare Zeilen.</td><td>Kurze Identität, vollständige Informationen aufklappbar; 25 Zeilen pro Seite, acht Karten auf der Startseite; Tabellen scrollen im eigenen Container.</td><td>Typecheck, Lint und Build bestanden. Vollständige Browser-Abnahme der neuen Komponenten offen.</td></tr>
 <tr><td>„position not exist“ löst zahlreiche weitere Schutzorder-Versuche aus. Beobachtet: Code 109420, danach 109429 und etwa sieben Minuten Sperre.</td><td>Nach der ersten Ablehnung keine alternativen Preis-/Payload-Versuche; 60 s Wartezeit gemeinsam für Symbol und Richtung. Andere Symbole und Richtungen bleiben unabhängig. Bestehende Schutz-IDs und das Buch bleiben bis zur Klärung erhalten.</td><td>250 gleichgerichtete Sets: ein fehlgeschlagener Einzelauftrag, keine weiteren Batch-/Fallback-Aufträge; erneute Zulassung nach Ablauf geprüft. Teilweise erfolgreiche Batches bleiben erhalten. Noch nicht auf VST abgenommen.</td></tr>
 <tr><td>Ausstehende Positionsbestätigung wird als bestätigte Abweichung angezeigt.</td><td>Pending-Status folgt der tatsächlichen Reconciliation, auch in Overall. Bestätigte Fehler behalten Vorrang.</td><td>Reproduktions- und Aggregationstest bestanden.</td></tr>
-<tr><td>Tests-Export schneidet zuerst einsortierte Fehler ab.</td><td>Export behält den Anfang der nach Fehlern priorisierten Liste.</td><td>Im installierten Stand werden 293 bestandene / ein fehlgeschlagener Engine-Test gezählt; dieser Fehler war in der exportierten Teilliste nicht sichtbar. Erneute Laufzeitprüfung nach Update erforderlich.</td></tr>
+<tr><td>Tests-Export schneidet zuerst einsortierte Fehler ab.</td><td>Export behält den Anfang der nach Fehlern priorisierten Liste.</td><td>Im installierten Stand werden 293 bestandene / ein fehlgeschlagener Engine-Test gezählt; dieser Fehler war in der exportierten Teilliste nicht sichtbar. Über das erhaltene Serverlog als <code>qa-slot-unique</code> identifiziert.</td></tr>
+<tr><td>Unabhängige Ausführungen desselben Sets werden als doppelte Orders gewertet.</td><td>Slot-Prüfung berücksichtigt die stabile Ausführungs-ID und Verbindung. Der Stats-Export liefert Ausführungs-ID und Strategie mit.</td><td>41 vorhandene VST-Positionen anonymisiert ausgewertet: alte Prüfung meldet ein Duplikat, korrigierte Prüfung keines. Betroffen waren zwei getrennte Ausführungs- und Schutzgruppen. Tests erkennen weiterhin eine echte doppelte Ausführung und halten X01/X02 unabhängig.</td></tr>
 <tr><td>Malformed Exchange-Daten könnten eine falsche Flat-Bestätigung erzeugen.</td><td>Gemeinsame strenge Snapshot-Validierung für Reconciliation und Flat-Prüfung.</td><td>Fehlende, ungültige und nicht endliche Mengen sowie genaue Symbol-/Richtungszuordnung geprüft.</td></tr>
 <tr><td>Falsche R-Fensterbeschriftung und veralteter Set-Standardhinweis.</td><td>R25 bezeichnet die tatsächlichen letzten 25 Ergebnisse; Set-Cap-Hinweis nennt korrekt 110. SQLite-Testverbindung wird explizit geschlossen.</td><td>196 Python-Tests ohne die frühere ResourceWarning; finale statische Prüfungen bestanden.</td></tr>
 </table></div>
@@ -64,11 +65,14 @@ Er besteht den strengen Smoke-Test jedoch nicht: Die Umgebung liefert <code>ERR_
 (<code>/css2</code>, <code>/grok-app-builder/extensions.js</code>). Der lokale Agent-Browser-Daemon startet ebenfalls nicht zuverlässig.
 Diese Ergebnisse gelten ausdrücklich nicht als vollständige Browser-Abnahme.</p>
 <p>Zusätzlich bestanden: 13 Release-Verträge, 191 JavaScript-Tests (vier bestehende Umgebungs-Skips), 54 TypeScript-Tests und 40 Smoke-Vertragsprüfungen.
-Native Redis-Prüfung auf installiertem 761a9a8: 15 Tests mit isolierter Redis-Instanz bestanden. Typecheck, Lint, Build und Git-Whitespace-Prüfung bestanden für die neue Quelle.</p>
+Native Redis-Prüfung auf installiertem 761a9a8: 15 Tests mit isolierter Redis-Instanz bestanden.
+Nach der zusätzlichen Slot-Korrektur wurden die 16 betroffenen Order-Tests und fünf Report-Tests erneut bestanden; die 16 sind bereits Teil der oben genannten Python-Suite.
+Typecheck, Lint, Build und Git-Whitespace-Prüfung bestanden für die neue Quelle.</p>
 <details><summary>Belegdateien öffnen</summary>
 <ul><li><a href="qa/dev-warm.json">Dev-Browserprotokoll</a> · <a href="qa/built-warm.json">Build-Browserprotokoll</a></li>
 <li><a href="qa/local-browser-diagnostic.json">Lokale Browsergrenzen mit fehlgeschlagenen Pfaden</a></li>
 <li><a href="qa/fixture-selected.csv">Exportierte Test-Messungen</a> · <a href="qa/runtime-final.json">Ressourcen- und Prozess-Snapshot</a></li></ul>
+<p><a href="qa/occupancy-anonymized.json">Anonymisierte Prüfung der 41 bestehenden VST-Positionen</a></p>
 </details>
 <figure><img class="mobile" src="qa/fixture-diagrams-mobile.png" alt="Mobile Testansicht: Break/DCA-Matrix und PF-DDT-Diagramm"><figcaption>Installierte Version, isolierte Testdaten: zwei unabhängige Sets mit identischen Messwerten überlagern sich im Diagramm.</figcaption></figure>
 <details><summary>Desktop-/Mobile-Ansichten</summary>
@@ -98,7 +102,7 @@ Das fortgesetzte manuelle Replay verwendete 420 Bars / sieben Stunden, obwohl da
 Die frühere Offline-Prüfung über zwölf Stunden ist im <a href="../validation-20260908-system/verification.md">vorherigen Bericht</a> dokumentiert;
 sie ersetzt keinen abgeschlossenen aktuellen 50-Symbol-/12-Stunden-VST-Lauf.</p>
 <p><strong>Vor einer Produktionsfreigabe erforderlich:</strong> das konkret gesicherte neue Release freigeben, auf VST installieren,
-UI und Schutzorder-Recovery mit dieser Quelle abnehmen, den sichtbaren Laufzeit-Testfehler klären sowie die vollständige historische Koordination und hohe bestätigte Orderzahl prüfen.
+UI und Schutzorder-Recovery mit dieser Quelle abnehmen, die korrigierte Slot-Prüfung im laufenden System bestätigen sowie die vollständige historische Koordination und hohe bestätigte Orderzahl prüfen.
 50–250+ Exchange-Orders und unbegrenzter störungsfreier Betrieb sind nicht nachgewiesen. Finanzielle Zulassungsgrenzen wurden dafür nicht gelockert.</p>
 </main>
 </html>

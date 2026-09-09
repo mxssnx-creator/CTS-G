@@ -293,6 +293,6 @@
     "open": 41,
     "legacyDuplicateSlots": 1,
     "correctedDuplicateSlots": 0,
-    "scope": "symbol+direction+set+execution-lane"
+    "scope": "connection+symbol+direction+set+execution-lane"
   }
 }

@@ -598,7 +598,8 @@ new local fix. Final state: Normal execution OFF, internal General ON, 21,840
 Sets, 34 internal positions / five exchange groups, 2,413.5 MiB RSS, persistent
 3,371,008-byte statistics DB, zero crashes/recoveries, 293 QA pass / one QA fail.
 The failed QA item was hidden by the old export slice; the local fix makes
-priority failures visible, but post-update runtime diagnosis remains required.
+priority failures visible. It was subsequently identified from the retained
+server log as qa-slot-unique; see the additional occupancy correction below.
 The running manual replay still uses seven hours and full 50-symbol completion
 was not confirmed. High-count Exchange acceptance and a complete current
 50-symbol/12-hour replay remain open. Do not claim production readiness.
@@ -611,3 +612,15 @@ backup, then obtain approval for that exact finalized release to
 152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/, VST-only update/restart
 and acceptance, followed by public push/merge only after gates pass. Public
 push/merge has not happened. Use the final backup manifest for exact checksums.
+
+Additional occupancy correction: the existing 41-position VST book contained
+two independent execution/control groups for one symbol/direction/Set. The
+old report ignored execution_lane and reported one false duplicate. Source
+3cf8a80 and the subsequent connection-scope change include executionLane and
+connection in occupancy identity, and expose executionLane/strategy in open
+stats. An anonymized snapshot reproduces old duplicateSlots=1 versus corrected
+duplicateSlots=0 without changing any real order. The 16 affected order tests
+and five report tests passed again, including true duplicate detection and
+X01/X02 separation. The HTML report includes this finding. Recreate the final
+backup after this documentation/source commit; the earlier 8a0b21c backup is
+an intermediate checkpoint and must not be deployed as the final release.

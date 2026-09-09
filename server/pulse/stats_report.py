@@ -460,16 +460,20 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
     dup = 0
     for p in open_pos:
         if isinstance(p, dict):
+            conn = str(p.get("connection") or p.get("connType") or "")
             sym, side = str(p.get("symbol") or ""), str(p.get("side") or "")
             pack = str(p.get("pack") or "")
             sid = str(p.get("setId") or p.get("set_id") or "")
             lane = str(p.get("executionLane") or p.get("execution_lane") or "")
         else:
+            conn = str(getattr(p, "connection", "") or "")
             sym, side = str(getattr(p, "symbol", "")), str(getattr(p, "side", ""))
             pack = str(getattr(p, "pack", ""))
             sid = str(getattr(p, "set_id", ""))
             lane = str(getattr(p, "execution_lane", "") or "")
         key = f"{sym}|{side}|{pack}|{sid}"
+        if conn:
+            key = f"{conn}|{key}"
         # One Set may execute several independent indication configurations
         # and strategies. Their stable lane identity is part of the slot;
         # repeated entries in the same lane remain genuine duplicates.
@@ -484,7 +488,7 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
         "uniqueSlots": len(seen),
         "duplicateSlots": dup,
         "maxOnePerSymbolDirSet": dup == 0,
-        "slotScope": "symbol+direction+set+execution-lane",
+        "slotScope": "connection+symbol+direction+set+execution-lane",
         "slots": keys,
     }
 

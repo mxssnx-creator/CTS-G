@@ -300,6 +300,9 @@ class AllValidEntries(unittest.TestCase):
         exported=[{'symbol':v.symbol,'side':v.side,'pack':v.pack,'setId':v.set_id,
                    'executionLane':v.execution_lane} for v in positions]
         self.assertEqual(occupancy(exported)['duplicateSlots'],0)
+        separate_connections=[{**exported[0],'connection':'bingx-x01'},
+                              {**exported[0],'connection':'bingx-x02'}]
+        self.assertEqual(occupancy(separate_connections)['duplicateSlots'],0)
         # An actual duplicate of the same execution must still fail QA.
         self.assertEqual(occupancy([*positions,positions[1]])['duplicateSlots'],1)
 
