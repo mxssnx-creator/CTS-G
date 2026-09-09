@@ -332,7 +332,11 @@ def read_status(root, connection):
         # A busy high-cardinality lane may briefly hold the statistics lock
         # while retaining its RAM database. Keep the request bounded, but give
         # the owner enough time to answer before presenting a stale checkpoint.
-        current = memory_request(root, connection, {"action": "status"}, timeout=1.0)
+        # The live lane can spend just over one second in its bounded
+        # checkpoint/maintenance lock while still processing normally. Keep
+        # the status request responsive, but do not present a stale
+        # checkpoint merely because the first mailbox window was too short.
+        current = memory_request(root, connection, {"action": "status"}, timeout=2.0)
         if current is not None:
             return current
     except (OSError, ValueError):

@@ -172,6 +172,18 @@ class StatisticsTests(unittest.TestCase):
             for _ in range(100): read_status(self.root, "bingx-x02")
             self.assertLessEqual(len(list(Path("/proc/self/fd").iterdir())), before + 1)
 
+    def test_status_reader_allows_a_busy_live_owner_to_return_ram_status(self):
+        captured = {}
+
+        def owner_status(*args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return {"connection": "bingx-x02", "storageMode": "memory", "persistent": True}
+
+        with patch("sqlite_memory.memory_request", side_effect=owner_status):
+            result = read_status(self.root, "bingx-x02")
+        self.assertEqual(captured["timeout"], 2.0)
+        self.assertEqual(result["storageMode"], "memory")
+
     def test_log_and_event_payloads_are_bounded(self):
         path = str(Path(self.root) / "engine.log")
         configure_retention(path, 32, 4096)
