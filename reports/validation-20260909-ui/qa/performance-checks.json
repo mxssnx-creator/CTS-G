@@ -1,0 +1,43 @@
+{
+  "sourceCommit": "2ce4bbf0db7296738f96ec6e905da0a64edcaec1",
+  "tests": {
+    "python": 201,
+    "engine": 399,
+    "releaseContracts": 13,
+    "javascriptPassed": 191,
+    "javascriptSkipped": 4,
+    "typescript": 68,
+    "smokeContracts": 40,
+    "typecheck": "pass",
+    "lint": "pass",
+    "build": "pass"
+  },
+  "verifiedRequestBehavior": {
+    "healthyOverallFullRequests": 1,
+    "healthyCatalogFullSnapshots": 0,
+    "fallbackDelayMs": 750,
+    "totalDeadlineMs": 8000,
+    "configDeadlineMs": 4000,
+    "manualRefreshBurst": 250,
+    "maxConcurrentPolls": 1,
+    "maxQueuedRefreshes": 1,
+    "independentConfigCycles": 251
+  },
+  "remoteSource": "761a9a8bfed47c1af1ffe1cb3e974e7286e3bd7f",
+  "remoteNewReleaseAcceptance": "pending; source transfer rejected by automatic approval review",
+  "browser": {
+    "source": "2ce4bbf",
+    "devExit": 2,
+    "builtExit": 2,
+    "status": 200,
+    "horizontalOverflow": false,
+    "pageErrors": 0,
+    "baselineDiverges": false,
+    "bodyTextHash": "dada68d8e4203a58700a528228a5b7300198ba10b3764135a762c181c4cc0d95",
+    "externalFailures": [
+      "/css2",
+      "/grok-app-builder/extensions.js"
+    ],
+    "acceptance": "NOT PASSED: external resource failures"
+  }
+}

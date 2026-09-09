@@ -16,22 +16,54 @@
   summary{cursor:pointer;font-weight:600}@media print{body{max-width:none}.notice{border:1px solid}details{break-inside:avoid}}
 </style>
 <main>
-<p>CTS-G · Prüfstand 9. September 2026, 02:48 UTC</p>
+<p>CTS-G · Prüfstand 9. September 2026 · Performance-Messung bis 03:22 UTC</p>
 <h1>UI geprüft. Weitere Fehler lokal korrigiert.</h1>
 <p class="notice"><strong>Die neue Version ist noch nicht auf dem Server abgenommen.</strong>
 Installiert ist <code>761a9a8</code>. Die zusätzlichen Korrekturen liegen in
-<code>0f66060</code>, <code>2d0449b</code> und <code>3cf8a80</code>, ergänzt um die Trennung der Ausführungsplätze nach Verbindung.
+<code>0f66060</code>, <code>2d0449b</code> und <code>3cf8a80</code>, ergänzt um die Trennung der Ausführungsplätze nach Verbindung und die Performance-Korrekturen in <code>2ce4bbf</code>.
 Die automatische Freigabeprüfung hat die Übertragung der neuen Quelle abgelehnt,
 weil die konkrete Zustimmung nur <code>761a9a8</code> umfasste. Push und Merge sind noch ausstehend.</p>
 
 <div class="cards">
-  <div class="card"><strong>196 / 196</strong>Python-Tests · neue Quelle</div>
+  <div class="card"><strong>201 / 201</strong>Python-Tests · neue Quelle</div>
   <div class="card"><strong>399 / 399</strong>Engine-Prüfungen · neue Quelle</div>
   <div class="card"><strong>20 + 9</strong>Einstellungsbereiche + Ergebnis-Tabs durchgegangen</div>
   <div class="card"><strong>0</strong>VST-Neustarts und Crash-Zuwachs nach Installation beobachtet</div>
 </div>
 
-<h2>Gefundene Fehler und Korrekturen</h2>
+<h2>Aktuelle Performance-Prüfung · 2ce4bbf</h2>
+<p>Die API selbst antwortete in den letzten sechs Messungen innerhalb von 22–71 ms. Bei der Oberfläche waren vermeidbare Downloads und Wartezeiten nachweisbar.
+Die neue Quelle ist lokal geprüft und noch nicht auf dem Server installiert.</p>
+<div class="table"><table>
+<tr><th>Befund</th><th>Änderung</th><th>Nachweis</th></tr>
+<tr><td>Overall lädt zwei große Pakete und wartet auf beide. Der Verbindungskatalog lädt zusätzlich einen Voll-Snapshot.</td><td>Ein bevorzugter Abruf; Fallback nach 750 ms bei langsamer Antwort oder sofort nach einem Fehler. Erste gültige Antwort gewinnt, verbleibende Abrufe werden abgebrochen. Gemeinsame Frist: acht Sekunden.</td><td>Ein gesunder Overall-Abruf: ein Paket; gesunder Katalog: kein Voll-Snapshot. Tests für hängende, falsche und fehlerhafte Antworten bestanden.</td></tr>
+<tr><td>Manuelle Aktualisierungen können mehrere Poll-Schleifen starten.</td><td>Eine laufende und höchstens eine vorgemerkte Aktualisierung; Abbruch beim Seiten-/Verbindungswechsel. Langsameres Polling bei verborgenem Tab.</td><td>250 Ereignisse während eines hängenden Abrufs: eine aktive Abfrage, genau eine Folgeaktualisierung. Transiente Fehler beenden die Schleife nicht.</td></tr>
+<tr><td>Settings/System warten auf Stats; Config hat keine eigene Frist.</td><td>Statistik, Konfiguration und Verbindung werden unabhängig geladen. Config-Frist vier Sekunden. Fehlgeschlagene Folgeabrufe überschreiben die zuletzt geladene Konfiguration nicht.</td><td>251 erfolgreiche Config-Poll-Zyklen während eines absichtlich hängenden Statistikaufrufs; verspätete Antworten nach Abbruch werden verworfen.</td></tr>
+<tr><td>Ein aggregierter Fallback kann Daten der anderen Verbindung übernehmen.</td><td>Nur zuordenbare Orders, Abschlüsse und Kennzahlen werden in eine Verbindungsansicht übernommen. Gemischte Sets, Events und Kostenwerte werden nicht als verbindungsspezifisch ausgegeben.</td><td>Tests mit widersprüchlichen Verbindungs-/Einheitenangaben und falscher Hauptantwort bestanden.</td></tr>
+<tr><td>Overall liest jede Verbindung mehrfach; Fortschritt und Fehlerauswahl können irreführen.</td><td>Ein Snapshot je Verbindung und Antwort; Fehler zuerst, mit Verbindungskennung. Der Fortschritt bleibt je Verbindung sichtbar, der zusätzliche geerbte Balken entfällt.</td><td>Zwei Reads für zwei Verbindungen; unveränderte Eingabe-Snapshots, beide Fehler sichtbar. Gestoppte Dienste bleiben auch bei altem Running-Snapshot gestoppt.</td></tr>
+<tr><td>Lange Engine-Zyklen wurden allein durch ihre Dauer als I/O markiert.</td><td>Getrennte CPU- und verstrichene Zeit, Zeiten je Verarbeitungsschritt, aktiver Schritt und sichtbare Zeitüberschreitung. Feste Felder ohne wachsende Trace-Historie.</td><td>Rechenlast und fünf Sekunden I/O-Wartezeit werden getrennt geprüft; Messung bleibt auch nach Exceptions konsistent. Noch keine Messung dieser neuen Felder auf VST möglich.</td></tr>
+</table></div>
+<p><strong>Grenze der Aussage:</strong> VST lief weiter. Die Prozess-ID blieb 3939798, automatische Neustarts: 0.
+Um 03:22 UTC wurden 96–97 interne Positionen beobachtet. Das bestätigt noch keine vollständige Abnahme von 50–250 gleichzeitig korrekt geschützten Exchange-Orders.
+Einige Zyklen dauerten weiterhin 6,0–6,8 Sekunden; eine dauerhaft kurze Zykluszeit ist nicht nachgewiesen. Die zuvor gemessenen 132 ms zeigen, dass die Verzögerung zeitweise auftritt.
+Die aktuelle Live-Prozess-ID ist 3964893; ihr Wechsel erfolgte außerhalb dieser Arbeit. Live wurde von uns nicht neu gestartet.</p>
+<p>Aktuelle Prüfungen: 201 Python-Tests, 399 Engine-Prüfungen, 13 Release-Verträge, 191 JavaScript-Tests mit vier bestehenden Umgebungs-Skips,
+68 TypeScript-Tests und 40 Smoke-Verträge bestanden. Typecheck, Lint und Build bestanden.</p>
+<p><a href="qa/performance-checks.json">Prüfzusammenfassung</a> · <a href="qa/performance-runtime.json">Drei zeitlich getrennte Runtime-Messungen</a> ·
+<a href="qa/performance-python.txt">Python-Protokoll</a> · <a href="qa/performance-engine.txt">Engine-Protokoll</a> · <a href="qa/performance-node.txt">Frontend-Tests</a></p>
+
+<p>Aktueller Render-Nachweis auf <code>2ce4bbf</code>: Dev und Build jeweils Desktop/Mobile mit vollständig geladener Statistik,
+HTTP 200, identischem Text-Hash <code>dada68d8e4203a58700a528228a5b7300198ba10b3764135a762c181c4cc0d95</code>,
+keinem Seitenüberlauf und keinen Page-Exceptions. Der erste kalte Dev-Lauf erfasste noch den Ladezustand;
+eine optionale Bereitschaftsbedingung wartet nun auf das tatsächliche Ende der Ladeanzeige. Alle Screenshots wurden visuell geprüft.
+Die Fehler der externen Schrift und Preview-Erweiterung bleiben sichtbar: beide Smoke-Läufe enden mit Exit 2. Eine vollständige Browser-Abnahme ist weiterhin offen.</p>
+<p><a href="qa/performance-dev.json">Aktuelles Dev-Protokoll</a> · <a href="qa/performance-built.json">Aktuelles Build-Protokoll</a></p>
+<details><summary>Aktuelle lokale Render-Prüfung</summary>
+<figure><img src="qa/performance-dev.png" alt="Aktuelle lokale Desktop-Ansicht mit geladenen Testdaten"><figcaption>Neue Quelle, Dev, isolierte Testdaten.</figcaption></figure>
+<figure><img class="mobile" src="qa/performance-built-mobile.png" alt="Aktuelle mobile Build-Ansicht mit Testdaten"><figcaption>Neue Quelle, gebaut, 390 × 844.</figcaption></figure>
+</details>
+
+<h2>Bisherige UI-Fehler und Korrekturen</h2>
 <div class="table"><table>
 <tr><th>Befund</th><th>Korrektur</th><th>Prüfung / Grenze</th></tr>
 <tr><td>Controls verbreitert die mobile Seite auf 770 statt 390 px.</td><td>Grid-Container können schrumpfen; lange Aktivitätszeilen umbrechen.</td><td>Ursache im installierten Browser isoliert: korrigierte Mindestbreite ergibt 390 px. Vollständige neue Version noch nicht dort installiert.</td></tr>

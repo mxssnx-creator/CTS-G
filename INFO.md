@@ -624,3 +624,45 @@ and five report tests passed again, including true duplicate detection and
 X01/X02 separation. The HTML report includes this finding. Recreate the final
 backup after this documentation/source commit; the earlier 8a0b21c backup is
 an intermediate checkpoint and must not be deployed as the final release.
+
+
+### 2026-09-09 performance continuation — source 2ce4bbf
+
+The latest request is overall speed and no stalling. Local source 2ce4bbf
+removes unconditional full-snapshot downloads from Overall and the connection
+catalog. Healthy stats need one request. A delayed 750ms fallback races for the
+first valid, correctly scoped response; all reads settle within one 8s deadline
+and losers / obsolete connection requests are aborted. Config reads have a 4s
+deadline. Home, Results, Settings, System and connection polling now serialize
+requests; Settings/System resources poll independently. A burst of 250 manual
+refreshes yields one active and one queued request. Failed polls preserve the
+last successful values; same-cycle lane data never leaks across a fallback.
+
+Overall loads each lane once, preserves lane-specific progress and exports
+failures first with connection identity. It respects actual service state.
+Engine diagnostics add CPU time, bounded per-stage times, active stage duration
+and wall-time overruns. Slow calculation alone no longer sets the I/O flag.
+The existing load governor and financial action ordering are preserved.
+
+Validation: 201 Python tests, 399 engine checks, 13 release contracts,
+191 JavaScript passes / four existing skips, 68 TypeScript tests, 40 smoke
+contracts, typecheck, lint and build passed. Detailed report and protocol files
+are in reports/validation-20260909-ui/.
+
+Read-only installed-761 observations at 03:21:55–03:22:05 UTC: API reads
+22–71ms, VST 96–97 INTERNAL positions, hot cycles 6.0–6.8s, X02 PID3939798
+unchanged, NRestarts=0. This is not a verified 50–250 protected exchange-order
+acceptance or proof of indefinite low latency. X01 PID is now3964893 (changed
+outside this work); we did not restart Live. Additional runtime acceptance
+requires the finalized source package, whose transfer remains blocked by the
+automatic approval review described above. Never deploy the intermediate
+8a0b21c backup. Create the final bundle after this report is finalized, then
+request approval for that exact HEAD and its explicit remote release directory.
+
+Current source rendered on dev and built previews at desktop/mobile with loaded
+fixture data, HTTP200, no overflow or page exceptions, matching body hash
+dada68d8e4203a58700a528228a5b7300198ba10b3764135a762c181c4cc0d95.
+The cold first dev screenshot had caught the loading state. The smoke helper
+now supports an explicit loaded-state selector; external failures are not
+filtered. BOTH final runs still exit2 for /css2 and the preview extension, so
+new-release browser acceptance remains incomplete. All captures inspected.
