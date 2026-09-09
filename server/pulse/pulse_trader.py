@@ -584,6 +584,19 @@ def valid_position_snapshot(rows: Any) -> bool:
     return True
 
 
+def confirmed_external_close_delta(previous_qty: Any, exchange_qty: Any, pending_close_qty: Any = 0.0) -> float:
+    """Return one exchange-confirmed quantity delta not already owned by a close intent."""
+    try:
+        previous = max(0.0, float(previous_qty or 0.0))
+        current = max(0.0, float(exchange_qty or 0.0))
+        pending = max(0.0, float(pending_close_qty or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if pending > 1e-12 or current >= previous - 1e-12:
+        return 0.0
+    return previous - current
+
+
 def ctrl_err_kind(msg: str) -> str:
     m = str(msg or "").lower()
     compact = m.replace(" ", "")
@@ -8443,6 +8456,40 @@ class Pulse:
                         if total_book_qty > 0
                         else own_qty / max(1, len(candidates))
                     )
+                    previous_qty = max(
+                        _sf(getattr(candidate, "exchange_qty", 0.0)),
+                        candidate_book_qty,
+                    )
+                    external_delta = confirmed_external_close_delta(
+                        previous_qty,
+                        allocated_qty,
+                        getattr(candidate, "pending_close_qty", 0.0),
+                    )
+                    if external_delta > 1e-12 and _sf(getattr(candidate, "pending_qty", 0.0)) <= 1e-12:
+                        external_px = _sf(
+                            p.get("markPrice") or p.get("lastPrice") or self.px.get(sym) or candidate.entry
+                        )
+                        external_cid = stable_key(
+                            CONN_SHORT,
+                            "external-close",
+                            candidate.client_id,
+                            sym,
+                            side,
+                            round(previous_qty, 12),
+                            round(allocated_qty, 12),
+                        )
+                        self._record_close_fill(
+                            candidate,
+                            external_delta,
+                            external_px,
+                            "external-close",
+                            exchange=True,
+                            close_cid=external_cid,
+                            status="recovered",
+                            cumulative_qty=external_delta,
+                        )
+                        if not any(candidate is current for current in self.open.values()):
+                            continue
                     if liq > 0:
                         candidate.liq = liq
                     if pid:

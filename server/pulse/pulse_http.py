@@ -522,10 +522,6 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["symbolCap"] = (out.get("engine") or {}).get("symbolCap") if isinstance(out.get("engine"), dict) else None
     paused = bool(out.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{conn}"))
     out["paused"] = paused
-    if paused:
-        out["halted"] = True
-        out["running"] = False
-        out["haltReason"] = out.get("haltReason") or "paused"
     # Ground truth: STOP file + systemd state beat a stale stats file, so a
     # stopped/crashed desk never keeps showing its last "running" snapshot.
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{conn}")) or os.path.exists(STOP_ALL_PATH)
@@ -536,6 +532,12 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["halted"] = True
         out["running"] = False
         out["haltReason"] = "stopped"
+        progress.update(phase="stopped", detail="engine stopped; historic snapshot retained")
+    elif paused:
+        out["halted"] = True
+        out["running"] = False
+        out["haltReason"] = out.get("haltReason") or "paused"
+        progress.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
     if state != "active":
         out["running"] = False
         out["alive"] = False
@@ -543,8 +545,14 @@ def stamp_stats(st: dict, conn: str) -> dict:
         if not out.get("halted"):
             out["halted"] = True
             out["haltReason"] = "service failed" if state == "failed" else "service inactive"
+        progress.update(phase="error" if state == "failed" else "deferred", detail=out["haltReason"])
     elif out["statsAgeS"] > 20:
         out["stale"] = True
+    out["progress"] = progress
+    out["progressPhase"] = progress["phase"]
+    out["progressDetail"] = progress["detail"]
+    out["progressReady"] = progress["ready"]
+    out["progressError"] = progress["error"]
     eng = out.get("engine") if isinstance(out.get("engine"), dict) else {}
     load = out.get("load") if isinstance(out.get("load"), dict) else None
     if not load:
@@ -646,6 +654,8 @@ def _mark_stats_stopped(cid: str) -> None:
     st["haltReason"] = "stopped"
     try:
         atomic_write(path, st)
+        with _STATS_CACHE_LOCK:
+            _STATS_CACHE.pop(path, None)
     except Exception:
         pass
 
@@ -712,6 +722,33 @@ def stats_age(conn: str) -> float:
         return 1e9
 
 
+def control_state(cid: str) -> dict:
+    """Return post-action lane truth from markers, systemd, and the last stats file."""
+    state = unit_state(cid, fresh=True)
+    paused = os.path.exists(os.path.join(DIR, f"PAUSE-{cid}"))
+    stopped = os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH)
+    stats = load_stats(cid)
+    if stopped:
+        reason = "stopped"
+    elif paused:
+        reason = "paused"
+    elif state != "active":
+        reason = "service failed" if state == "failed" else "service inactive"
+    else:
+        reason = stats.get("haltReason")
+    return {
+        "connection": cid,
+        "unit": engine_unit(cid),
+        "state": state,
+        "serviceActive": state == "active",
+        "running": state == "active" and bool(stats.get("running")) and not paused and not stopped,
+        "paused": paused,
+        "stopped": stopped,
+        "haltReason": reason,
+        "statsAgeS": round(stats_age(cid), 1),
+    }
+
+
 def apply_control(conn: str, action: str) -> tuple:
     action = (action or "").lower().strip()
     if action not in ("start", "stop", "pause", "resume"):
@@ -725,6 +762,7 @@ def apply_control(conn: str, action: str) -> tuple:
 def _apply_control_locked(conn: str, action: str) -> tuple:
     ids = [l["id"] for l in LANES] if conn in ("", "overall") else [conn]
     notes = []
+    outcomes = []
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
@@ -733,9 +771,12 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
         if action == "pause":
             _unlink(stop)
             _touch(pause)
-            notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
+            state = control_state(cid)
+            outcomes.append(bool(state["paused"]))
+            notes.append(f"{cid} pause state={state['state']} paused={int(state['paused'])}")
         elif action in ("start", "resume"):
             if not _live_start_allowed(cid):
+                outcomes.append(False)
                 notes.append(f"{cid} start blocked: CTS_DISABLE_LIVE_START")
                 continue
             _unlink(pause)
@@ -743,7 +784,8 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             _unlink(STOP_ALL_PATH)
             # Explicit Start = fresh session: engine re-baselines session equity
             # on the next balance tick, so a latched drawdown/equity halt clears.
-            _touch(reset_eq)
+            if action == "start":
+                _touch(reset_eq)
             _sysctl("enable", unit, timeout=8)
             # start is a no-op when the unit is already active, so an in-memory
             # "stopped" latch would stick. Restart always picks up cleared flags.
@@ -754,14 +796,20 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
                 _sysctl("reset-failed", unit, timeout=8)
                 _sysctl("enable", unit, timeout=8)
                 rc, out = _sysctl(verb, unit)
-            st = unit_state(cid, fresh=True)
-            notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
+            state = control_state(cid)
+            action_ok = state["state"] in ("active", "activating") and not state["stopped"]
+            outcomes.append(bool(action_ok))
+            notes.append(f"{cid} {action} rc={rc} state={state['state']} running={int(state['running'])}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
             _touch(stop)
-            notes.append(_force_stop_lane(cid, unit))
-    executed = any("start blocked" not in note for note in notes)
-    return executed, "; ".join(notes)
+            detail = _force_stop_lane(cid, unit)
+            state = control_state(cid)
+            # The marker is the safety barrier even while systemd finishes a
+            # deactivation; expose the real state in the response/detail.
+            outcomes.append(bool(state["stopped"]))
+            notes.append(detail + f" paused={int(state['paused'])}")
+    return bool(outcomes) and all(outcomes), "; ".join(notes)
 
 
 def load_json(path: str) -> dict:
@@ -1053,19 +1101,25 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
-    prog = _lane_progress(st)
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
+    paused = bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}"))
     state = unit_state(lane["id"])
-    running = bool(st.get("running")) and state == "active" and not stopped
-    halted = bool(st.get("halted")) or stopped or state != "active"
+    prog = dict(_lane_progress(st))
+    running = bool(st.get("running")) and state == "active" and not stopped and not paused
+    halted = bool(st.get("halted")) or stopped or paused or state != "active"
     halt_reason = st.get("haltReason")
     if stopped:
         halt_reason = "stopped"
+        prog.update(phase="stopped", detail="engine stopped; historic snapshot retained")
+    elif paused:
+        halt_reason = "paused"
+        prog.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
     elif state != "active" and not halt_reason:
         halt_reason = "service failed" if state == "failed" else "service inactive"
+        prog.update(phase="error" if state == "failed" else "deferred", detail=halt_reason)
     return {
         "type": lane["type"],
         "id": lane["id"],
@@ -1761,8 +1815,20 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/control.json", "/control"):
             action = str((body or {}).get("action") or "").lower().strip()
-            ok, detail = apply_control(conn or "overall", action)
-            self._json({"ok": ok, "detail": detail, "conn": conn or "overall", "action": action}, 200 if ok else 400)
+            target = conn or "overall"
+            ok, detail = apply_control(target, action)
+            ids = [l["id"] for l in LANES] if target == "overall" else ([target] if target in ID_TO_LANE else [])
+            states = [control_state(cid) for cid in ids]
+            payload = {
+                "ok": ok,
+                "detail": detail,
+                "conn": target,
+                "action": action,
+                "lanes": states,
+            }
+            if len(states) == 1:
+                payload["state"] = states[0]
+            self._json(payload, 200 if ok else 400)
             return
         if path in ("/connection.json", "/connection"):
             ok, detail, pub = save_connection(conn or "overall", body if isinstance(body, dict) else {})

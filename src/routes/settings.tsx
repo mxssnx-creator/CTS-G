@@ -152,7 +152,14 @@ function SettingsPage() {
         if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
       }
     }, delay);
+    const refreshAfterControl = () => {
+      statsPoll.refresh();
+      configPoll.refresh();
+      connectionPoll.refresh();
+    };
+    window.addEventListener("pulse:control", refreshAfterControl);
     return () => {
+      window.removeEventListener("pulse:control", refreshAfterControl);
       statsPoll.stop();
       configPoll.stop();
       connectionPoll.stop();
@@ -2835,6 +2842,87 @@ function LiveApplied({
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
       )}
+      <EffectiveSettingsSummary conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
+    </div>
+  );
+}
+
+function EffectiveSettingsSummary({
+  conn,
+  stats,
+  overlay,
+  dirty,
+}: {
+  conn: string;
+  stats: LiveStats | null;
+  overlay: PulseOverlay;
+  dirty: boolean;
+}) {
+  const pulse = stats?.pulse;
+  const remoteReady = Boolean(stats && pulse && Object.keys(pulse).length > 0);
+  const remote = (value: unknown, suffix = "") =>
+    remoteReady ? formatAppliedSetting(value, suffix) : "—";
+  const coverage = stats?.coverage;
+  const controls = coverage?.controls;
+  const setCoverage = coverage?.sets;
+  const scan = coverage?.scan;
+  const stages = coverage?.coord?.stages ?? stats?.coord?.stages;
+  const controlRanges = controls?.groups?.length
+    ? controls.groups
+        .slice(0, 3)
+        .map((group) => `${group.symbol?.replace("-USDT", "")} ${group.side === "LONG" ? "L" : "S"} ${group.range || "range"}`)
+        .join(" · ")
+    : remoteReady
+      ? "none reported"
+      : "waiting for applied snapshot";
+  return (
+    <div className="mt-3 rounded-lg border border-border bg-bg2 p-3" data-testid="effective-settings-summary">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-mono text-xs uppercase text-muted">Effective settings</span>
+        <span className={remoteReady ? "font-mono text-xs text-primary" : "font-mono text-xs text-warn"}>
+          {remoteReady ? "applied remote" : "waiting for applied snapshot"}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" data-testid="lane-status">
+        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf)} · ${remote(pulse?.pfWindow)}`} />
+        <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
+        <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
+        <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
+        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controls?.groupCount)} groups`} />
+        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
+        <AppliedKV label="Live ranges" value={controlRanges} />
+        <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />
+        <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />
+        <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
+        <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
+        <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
+        <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
+        <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
+      </div>
+      <p className="mt-2 font-mono text-[11px] text-muted">
+        {dirty
+          ? `Form values pending save · cap ${formatAppliedSetting(overlay.symbolCap)} · Set ${formatAppliedSetting(overlay.setMinStep)}–${formatAppliedSetting(overlay.setStepMax)} · SL/TP ${formatAppliedSetting(overlay.slPct)} / ${formatAppliedSetting(overlay.tpPct)}`
+          : `No unsaved form values · selected lane ${conn}`}
+      </p>
+    </div>
+  );
+}
+
+function formatAppliedSetting(value: unknown, suffix = "") {
+  if (value == null || (typeof value === "number" && !Number.isFinite(value))) return "—";
+  if (typeof value === "boolean") return value ? "ON" : "OFF";
+  if (typeof value === "number") {
+    const text = Number.isInteger(value) ? String(value) : value.toFixed(2);
+    return `${text}${suffix}`;
+  }
+  return `${String(value)}${suffix}`;
+}
+
+function AppliedKV({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md border border-border bg-surface px-2.5 py-2">
+      <div className="font-mono text-[11px] text-muted">{label}</div>
+      <div className="mt-0.5 break-words text-xs text-fg">{value}</div>
     </div>
   );
 }

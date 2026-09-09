@@ -43,6 +43,27 @@ export type ConnCatalog = {
   lanes: ConnLane[];
 };
 
+export type ControlLaneState = {
+  connection: string;
+  unit?: string;
+  state?: string;
+  serviceActive?: boolean;
+  running?: boolean;
+  paused?: boolean;
+  stopped?: boolean;
+  haltReason?: string | null;
+  statsAgeS?: number;
+};
+
+export type ControlResult = {
+  ok: boolean;
+  detail: string;
+  conn?: string;
+  action?: "start" | "stop" | "pause" | "resume" | string;
+  state?: ControlLaneState;
+  lanes?: ControlLaneState[];
+};
+
 const KEY = "pulse.connType";
 let mem: ConnType | null = null;
 
@@ -166,12 +187,27 @@ export async function saveConnection(
   }
 }
 
-export async function postControl(conn: ConnType | string, action: "start" | "stop" | "pause" | "resume") {
-  const r = await fetch(`/control.json?conn=${encodeURIComponent(conn)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
-  });
-  const j = await r.json().catch(() => ({}));
-  return { ok: r.ok && Boolean((j as { ok?: boolean }).ok), detail: String((j as { detail?: string }).detail || r.status) };
+export async function postControl(
+  conn: ConnType | string,
+  action: "start" | "stop" | "pause" | "resume",
+): Promise<ControlResult> {
+  try {
+    const r = await fetch(`/control.json?conn=${encodeURIComponent(conn)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const j = (await r.json().catch(() => ({}))) as Partial<ControlResult>;
+    const lanes = Array.isArray(j.lanes) ? j.lanes : undefined;
+    return {
+      ok: r.ok && Boolean(j.ok),
+      detail: String(j.detail || (r.ok ? `${action} accepted` : r.status)),
+      conn: j.conn,
+      action: j.action || action,
+      state: j.state,
+      lanes,
+    };
+  } catch (error) {
+    return { ok: false, detail: String(error), conn, action };
+  }
 }

@@ -236,6 +236,9 @@ export type LiveStats = {
   };
   forcedConfigs?: import("./hist-calc").ForcedConfigSummary;
   running: boolean;
+  svcActive?: boolean;
+  stale?: boolean;
+  statsAgeS?: number;
   mode: string;
   connection: string;
   exchange: string;

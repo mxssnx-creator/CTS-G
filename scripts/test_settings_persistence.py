@@ -46,4 +46,42 @@ class SettingsPersistence(unittest.TestCase):
                 self.assertEqual(value['systemSqliteCheckpointS'],seconds)
                 self.assertTrue(value['stratGeneral'])
 
+    def test_overall_start_reports_a_failed_lane(self):
+        def service_state(cid, fresh=False):
+            return 'active' if cid == 'bingx-x01' else 'failed'
+
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(ph, 'DIR', d),
+            patch.object(ph, 'STOP_ALL_PATH', str(pathlib.Path(d) / 'STOP')),
+            patch.object(ph, '_sysctl', return_value=(0, 'ok')),
+            patch.object(ph, 'unit_state', side_effect=service_state),
+            patch.object(ph, '_live_start_allowed', return_value=True),
+        ):
+            ok, detail = ph.apply_control('overall', 'start')
+            self.assertFalse(ok)
+            self.assertIn('bingx-x01', detail)
+            self.assertIn('bingx-x02', detail)
+
+    def test_crashed_service_overrides_stale_running_snapshot_and_progress(self):
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(ph, 'DIR', d),
+            patch.object(ph, 'STOP_ALL_PATH', str(pathlib.Path(d) / 'STOP')),
+            patch.object(ph, 'unit_state', return_value='failed'),
+        ):
+            path = pathlib.Path(ph.stats_path('bingx-x01'))
+            path.write_text('{}')
+            out = ph.stamp_stats({
+                'running': True,
+                'halted': False,
+                'progressPhase': 'replay',
+                'progressPct': 42,
+                'progressReady': True,
+            }, 'bingx-x01')
+            self.assertFalse(out['running'])
+            self.assertTrue(out['stale'])
+            self.assertEqual(out['progressPhase'], 'error')
+            self.assertIn('service failed', out['progressDetail'])
+
 if __name__=='__main__':unittest.main()
