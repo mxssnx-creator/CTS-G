@@ -9228,6 +9228,8 @@ class Pulse:
                     "trail": p.trail,
                     "trailPending": getattr(p, "trail_pending", None),
                     "setId": p.set_id,
+                    "executionLane": getattr(p, "execution_lane", ""),
+                    "strategy": getattr(p, "strategy", ""),
                     "parentSetId": getattr(p, "parent_set_id", "") or p.set_id,
                     "axisKey": getattr(p, "axis_key", ""),
                     "relativeCount": int(getattr(p, "relative_count", 1) or 1),

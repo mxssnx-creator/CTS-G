@@ -294,6 +294,14 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual(sum(pos.pack == 'general' for pos in p.open.values()), 1)
         self.assertEqual(sum(pos.side == 'SHORT' for pos in p.open.values()), 1)
         self.assertEqual(len({pos.execution_lane for pos in p.open.values()}), 4)
+        from stats_report import occupancy
+        positions=list(p.open.values())
+        self.assertEqual(occupancy(positions)['duplicateSlots'],0)
+        exported=[{'symbol':v.symbol,'side':v.side,'pack':v.pack,'setId':v.set_id,
+                   'executionLane':v.execution_lane} for v in positions]
+        self.assertEqual(occupancy(exported)['duplicateSlots'],0)
+        # An actual duplicate of the same execution must still fail QA.
+        self.assertEqual(occupancy([*positions,positions[1]])['duplicateSlots'],1)
 
     def test_one_failed_candidate_cannot_starve_the_others(self):
         p = self.pulse(); examined = []

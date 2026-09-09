@@ -42,6 +42,8 @@ export type LiveOpen = {
   slPct?: number;
   tpPct?: number;
   setId?: string;
+  executionLane?: string;
+  strategy?: string;
   parentSetId?: string;
   axisKey?: string;
   relativeCount?: number;
