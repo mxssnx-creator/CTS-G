@@ -221,7 +221,9 @@ def fill_accounting_test() -> None:
     class CloseApi:
         def __init__(self):
             self.rows: List[dict] = []
+            self.empty = False
             self.n = 0
+            self.paths: List[str] = []
             self.path_cd: Dict[str, float] = {}
 
         def post(self, _path: str, _body: dict) -> dict:
@@ -234,8 +236,10 @@ def fill_accounting_test() -> None:
                 "status": "PARTIALLY_FILLED",
             }}}
 
-        def get(self, _path: str, _params=None) -> dict:
-            return {"code": 0, "data": {"orders": list(self.rows)}}
+        def get(self, path: str, _params=None) -> dict:
+            self.paths.append(path)
+            rows = [] if self.empty else list(self.rows)
+            return {"code": 0, "data": {"orders": rows}}
 
     api = CloseApi()
     p = object.__new__(pt.Pulse)
@@ -313,6 +317,12 @@ def fill_accounting_test() -> None:
         not p.open and close_cid not in p.pending_orders and abs(sum(x.qty for x in p.closed) - 5.0) < 1e-12
         and p.wins == 3,
         f"open={len(p.open)} pending={close_cid in p.pending_orders} closed_qty={sum(x.qty for x in p.closed)} wins={p.wins}")
+
+    api.empty = True
+    p.sync_own_fills()
+    rec("fill-empty-no-obsolete-fallback",
+        api.paths[-1:] == ["/openApi/swap/v2/trade/allOrders"],
+        str(api.paths[-2:]))
 
 
 def unlimited_test() -> None:

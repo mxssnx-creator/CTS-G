@@ -9033,7 +9033,6 @@ class Pulse:
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
         fallback_used = False
-        fallback_attempted = False
         if not self.ok(r):
             code = str(r.get("code") or "")
             low = str(r.get("msg") or "").lower()
@@ -9043,37 +9042,11 @@ class Pulse:
                 stable_key(request_key, "primary-error"),
                 status="error",
                 code=r.get("code"),
-                detail="fill request failed; fallback pending" if retryable else "fill request failed",
+                detail="fill request failed; retry next poll" if retryable else "fill request failed",
             )
-            if not retryable:
-                return
-            fallback_attempted = True
-            fallback = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
-            self.did_io = True
-            if not self.ok(fallback):
-                self.record_event(
-                    "exchange_response",
-                    stable_key(request_key, "fallback-error"),
-                    status="error",
-                    code=fallback.get("code"),
-                    detail="fill fallback failed",
-                )
-                return
-            r = fallback
-            fallback_used = True
+            return
         data = r.get("data")
         orders = data.get("orders") if isinstance(data, dict) else data
-        if (not isinstance(orders, list) or not orders) and not fallback_attempted:
-            r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
-            self.did_io = True
-            if not self.ok(r):
-                self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill fallback failed")
-                return
-            fallback_used = True
-            data = r.get("data")
-            orders = (data.get("fill_orders") or data.get("fills") or data.get("orders") or data) if isinstance(data, dict) else data
-            if isinstance(data, dict) and isinstance(data.get("list"), list):
-                orders = data["list"]
         if not isinstance(orders, list):
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill payload malformed")
             return
