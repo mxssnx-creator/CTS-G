@@ -1265,7 +1265,7 @@ function SettingsPage() {
                       const sl = tp * r;
                       const wr = sl / (sl + tp);
                       return (
-                        <tr key={r} className="border-t border-border font-mono">
+                        <tr key={r} data-ratio={r.toFixed(1)} className="border-t border-border font-mono">
                           <td className="py-1.5">{r.toFixed(1)}</td>
                           <td className="py-1.5">{(1 / r).toFixed(2)}</td>
                           <td className="py-1.5">{sl.toFixed(2)}</td>

@@ -68,6 +68,39 @@ class AllValidEntries(unittest.TestCase):
         self.assertAlmostEqual(sum(pos.qty for pos in positions if pos.strategy!='block'),250*.05)
         self.assertEqual(len(p.api.posts),500)
 
+    def test_every_valid_set_opens_both_hedge_directions_for_one_symbol(self):
+        """A valid Set is an independent LONG and SHORT lane on the same symbol."""
+        count = 250
+        p = self.pulse(self.book(count))
+        p.normal_execution_enabled = True
+        p.control_orders = True
+        p.control_orders_per_config = True
+
+        for state in p.sets.by_idx:
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=state)
+            p.place('X-USDT', -1, 'gen:trend', .9, selected_set=state)
+
+        positions = list(p.open.values())
+        self.assertEqual(len(positions), count * 2, p.last_error)
+        self.assertEqual(sum(pos.side == 'LONG' for pos in positions), count)
+        self.assertEqual(sum(pos.side == 'SHORT' for pos in positions), count)
+        self.assertEqual(len({(pos.symbol, pos.side, pos.set_id) for pos in positions}), count * 2)
+        self.assertEqual(len({pos.control_group_key for pos in positions}), count * 2)
+        self.assertEqual(len({pos.execution_lane for pos in positions}), count)
+        self.assertEqual(len(p.api.posts), count * 2)
+        self.assertEqual(len(p.api.batches), count * 2)
+
+        for state in p.sets.by_idx:
+            lanes = [pos for pos in positions if pos.set_id == state.id]
+            self.assertEqual({pos.side for pos in lanes}, {'LONG', 'SHORT'})
+            self.assertEqual(len({pos.control_group_key for pos in lanes}), 2)
+            for pos in lanes:
+                self.assertTrue(pos.sl_oid and pos.tp_oid)
+                self.assertAlmostEqual(float(p.api.orders[pos.sl_oid]['quantity']), pos.qty)
+                self.assertAlmostEqual(float(p.api.orders[pos.tp_oid]['quantity']), pos.qty)
+                self.assertEqual(p.api.orders[pos.sl_oid]['positionSide'], pos.side)
+                self.assertEqual(p.api.orders[pos.tp_oid]['positionSide'], pos.side)
+
     def test_normal_and_block_active_execute_independently_with_separate_ownership(self):
         from block_engine import BlockBook
         for normal in (False, True):
@@ -204,6 +237,58 @@ class AllValidEntries(unittest.TestCase):
         book.by_idx[2].last15_ratio = .9
         book.by_idx[3].max_dd_s = book.max_dd_s + 1
         self.assertEqual(len(book.pick_all('general', 'LONG')), 2)
+
+    def test_new_entries_use_every_validated_base_but_never_trailing_rows(self):
+        book = self.book(4)
+        trailing = book.by_idx[1]
+        trailing.kind = 'trail'
+        trailing.trail_key = '0.3:0.1'
+        book.by_idx[2].last15_n = 7
+        book.by_idx[2].active = True
+        book.by_idx[3].last15_ratio = 1.05
+        book.by_idx[3].active = True
+        base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
+        entry_ids = {state.id for state in book.entry_sets('general', 'LONG')}
+        self.assertEqual(entry_ids, {book.by_idx[0].id})
+        self.assertNotEqual(entry_ids, base_ids)
+        self.assertNotIn(trailing.id, entry_ids)
+        # The broader catalogue API remains intentionally unchanged for
+        # overview/research consumers.
+        self.assertIn(trailing.id, {state.id for state in book.pick_all('general', 'LONG')})
+
+    def test_processing_retention_survives_set_deactivation_until_pending_closes(self):
+        book = self.book(2)
+        p = self.pulse(book)
+        state = book.by_idx[0]
+        p.pending_orders['entry-0'] = {
+            'kind': 'entry', 'requested_qty': 1.0, 'filled_qty': 0.0,
+            'metadata': {'set_id': state.id},
+        }
+        p._sync_set_processing()
+        state.active = False
+        state.deact_reason = 'live PF gate'
+        self.assertTrue(state.processing_active)
+        self.assertIn(state.id, book.processing_set_ids())
+        row = next(item for item in book.snapshot(full=True)['rows'] if item['id'] == state.id)
+        self.assertTrue(row['processingActive'])
+        self.assertEqual(row['processingReason'], 'pending-entry')
+
+        p._clear_pending('entry-0')
+        self.assertFalse(state.processing_active)
+        self.assertNotIn(state.id, book.processing_set_ids())
+
+    def test_scheduler_dispatches_only_base_set_lineages(self):
+        book = self.book(4)
+        book.by_idx[1].kind = 'trail'
+        book.by_idx[1].trail_key = '0.3:0.1'
+        p = self.pulse(book)
+        with patch.object(pt, 'SYMBOLS', ['X-USDT']):
+            for _ in range(8):
+                p.maybe_entries()
+        base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
+        self.assertTrue(p.open)
+        self.assertTrue({pos.set_id for pos in p.open.values()} <= base_ids)
+        self.assertNotIn(book.by_idx[1].id, {pos.set_id for pos in p.open.values()})
 
     def test_indication_variants_directions_and_exact_match(self):
         b = IndicationBook(); first = self.indication()

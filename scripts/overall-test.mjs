@@ -7,7 +7,10 @@ const out = [];
 const ok = (m) => out.push("OK " + m);
 const fail = (m) => out.push("FAIL " + m);
 
-const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
+const browser = await chromium.launch({
+  executablePath: process.env.CTS_CHROMIUM_PATH || undefined,
+  args: ["--no-sandbox", "--disable-dev-shm-usage"],
+});
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // The platform's deferred extensions.js hangs whole page loads where grok.com
 // is unreachable (CI, offline dev). The test checks the desk, not the platform
@@ -20,11 +23,19 @@ page.on("pageerror", (e) => errors.push(String(e)));
 async function clickConn(id) {
   const root = page.locator("[data-testid=desk-root]");
   await root.waitFor({ timeout: 10000 });
+  // A cold remote Vite/TanStack client can need several seconds to compile
+  // and hydrate all route modules over the SSH tunnel. Do not click the SSR
+  // shell before React has attached its handlers.
+  await page.waitForFunction(
+    () => !window.$_TSR || window.$_TSR.hydrated === true,
+    null,
+    { timeout: 30000 },
+  );
   await page.waitForFunction(() => {
     const el = document.querySelector("[data-testid=desk-root]");
     const stored = localStorage.getItem("pulse.connType") || "overall";
     return Boolean(el) && el.getAttribute("data-conn") === stored;
-  }, null, { timeout: 8000 }).catch(() => null);
+  }, null, { timeout: 12000 }).catch(() => null);
   await page.waitForTimeout(150);
   const cur = await root.getAttribute("data-conn");
   if (cur === id) return;
@@ -32,7 +43,7 @@ async function clickConn(id) {
   await page.waitForFunction(
     (want) => document.querySelector("[data-testid=desk-root]")?.getAttribute("data-conn") === want,
     id,
-    { timeout: 10000 },
+    { timeout: 15000 },
   );
 }
 

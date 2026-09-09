@@ -347,6 +347,8 @@ _TRANSIENT_API = (
     "parameter quantity",
     "order size must be less",
     "available amount",
+    "minimum order amount",
+    "minimum size per order",
     "stop loss price should",
     "take profit price should",
 )
@@ -367,6 +369,8 @@ def short_api_msg(msg: str) -> str:
         return "ctrl qty/stop"
     if "order size must be less" in low or "available amount" in low:
         return "order too large"
+    if "minimum order amount" in low or "minimum size per order" in low:
+        return "minimum order size"
     if "cooling" in low:
         return "cooling"
     if "109420" in low or "rate limit" in low or "rate-limit" in low or "too many request" in low or "requests within" in low or "request limit" in low:
@@ -574,9 +578,49 @@ def ctrl_err_kind(msg: str) -> str:
         return "cap"
     if "position not exist" in m or "position does not exist" in m or "no position to close" in m:
         return "flat"
-    if "order size" in m or "available amount" in m:
+    if ("order size" in m or "available amount" in m or
+            "minimum size" in m or "minimum order amount" in m):
         return "qty"
     return "other"
+
+
+def adopt_venue_minimum(contract: Any, msg: str) -> str:
+    """Learn a venue minimum without confusing base quantity and USDT size."""
+    if contract is None:
+        return ""
+    text = " ".join(str(msg or "").split())
+    # BingX uses this form for a base-asset lot minimum, e.g.:
+    # ``minimum order amount is 304.1 FONE``.
+    amount = re.search(
+        r"\bminimum\s+order\s+amount\s+is\s+([0-9]+(?:\.[0-9]+)?)\s+([A-Z][A-Z0-9_-]*)\b",
+        text,
+        re.I,
+    )
+    if amount and str(amount.group(2) or "").upper() != "USDT":
+        try:
+            value = float(amount.group(1))
+            if math.isfinite(value) and value > 0:
+                contract.min_qty = max(float(getattr(contract, "min_qty", 0) or 0), value)
+                return "qty"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    # Other venue responses express the minimum as quote currency, e.g.:
+    # ``The minimum size per order is 2.59 USDT``.
+    quote = re.search(
+        r"\bminimum\s+(?:(?:size|amount)\s+per\s+order|order\s+(?:size|amount)|size)\s+is\s+"
+        r"([0-9]+(?:\.[0-9]+)?)\s*USDT\b",
+        text,
+        re.I,
+    )
+    if quote:
+        try:
+            value = float(quote.group(1))
+            if math.isfinite(value) and value > 0:
+                contract.min_usdt = max(float(getattr(contract, "min_usdt", 0) or 0), value)
+                return "usdt"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return ""
 
 
 _LOG_N = 0
@@ -1311,6 +1355,8 @@ class Pulse:
                 if candidate is pos:
                     removed = self.open.pop(candidate_key, None)
                     break
+        if removed is not None:
+            self._sync_set_processing()
         return removed
 
     def remove_symbol_positions(self, symbol: str) -> None:
@@ -1872,6 +1918,59 @@ class Pulse:
         except Exception:
             pass
 
+    def _sync_set_processing(self) -> None:
+        """Keep unresolved Set lineages alive independently from selection.
+
+        ``SetState.active`` is a new-entry/selection flag. It is allowed to
+        turn off when a Set fails a live gate or falls outside the selection
+        budget, but an unresolved order or open position still needs its own
+        calculations, controls, exits and reconciliation. The compact
+        lineage scan below is bounded by the live book and pending intents;
+        the SetBook applies only changed IDs to the large catalog.
+        """
+        book = getattr(self, "sets", None)
+        sync = getattr(book, "sync_processing_sets", None)
+        if not callable(sync):
+            return
+        wanted = set()
+        reasons: Dict[str, str] = {}
+
+        def add(value: Any, reason: str) -> None:
+            sid = str(value or "").strip()
+            if sid:
+                wanted.add(sid)
+                reasons.setdefault(sid, reason)
+
+        for pos in (getattr(self, "open", {}) or {}).values():
+            for field_name in ("set_id", "trail_set_id", "parent_set_id"):
+                add(getattr(pos, field_name, ""), "open-position")
+            for field_name in ("lineage_set_ids", "lineage_parent_set_ids"):
+                for sid in (getattr(pos, field_name, None) or []):
+                    add(sid, "open-position-lineage")
+
+        for row in (getattr(self, "pending_orders", {}) or {}).values():
+            if not isinstance(row, dict):
+                continue
+            requested = max(0.0, _sf(row.get("requested_qty") or row.get("requestedQty")))
+            filled = max(0.0, _sf(row.get("filled_qty") or row.get("filledQty")))
+            if requested <= filled + 1e-12:
+                continue
+            kind = str(row.get("kind") or "order").strip().lower()
+            reason = f"pending-{kind}"
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            for source in (row, metadata):
+                for field_name in (
+                    "set_id", "setId", "trail_set_id", "trailSetId",
+                    "parent_set_id", "parentSetId",
+                ):
+                    add(source.get(field_name), reason)
+        try:
+            sync(wanted, reasons)
+        except Exception:
+            # Retention is an auxiliary coordination flag. Never let a
+            # malformed persisted row stop the live order/exit loop.
+            return
+
     def _remember_pending(
         self,
         *,
@@ -1918,6 +2017,7 @@ class Pulse:
             "metadata": merged_meta,
         }
         self._save_pending_orders()
+        self._sync_set_processing()
 
     def _clear_pending(self, cid: str) -> None:
         pending = getattr(self, "pending_orders", None)
@@ -1926,6 +2026,7 @@ class Pulse:
         if str(cid or "") in pending:
             pending.pop(str(cid), None)
             self._save_pending_orders()
+            self._sync_set_processing()
 
     def _pending_add_open(self, pos: Position, kind: str) -> bool:
         """Return whether an unresolved Block/DCA order already owns this group."""
@@ -3336,6 +3437,8 @@ class Pulse:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
+        if not self.exchange_position_active(pos):
+            return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
@@ -3372,6 +3475,7 @@ class Pulse:
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
+        refreshed_quote = False
         for extra in (0.0, 0.006, 0.012):
             px_try = price
             if extra:
@@ -3495,6 +3599,15 @@ class Pulse:
                     self.ctrl_skip[scope] = time.time() + 30
                     return have_this
                 if kind_err in ("px", "liq"):
+                    if kind_err == "px" and not refreshed_quote:
+                        refreshed_quote = True
+                        refresh = getattr(self, "refresh_px_one", None)
+                        if callable(refresh):
+                            try:
+                                refresh(pos.symbol)
+                                price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", price)
+                            except Exception:
+                                pass
                     self.ctrl_skip[scope] = time.time() + 45
                     break
             if oid:
@@ -3570,6 +3683,11 @@ class Pulse:
         miss = 0
         now = time.time()
         for pos in list(self.open.values()):
+            if not self.exchange_position_active(pos):
+                # System-only positions are still evaluated and reported, but
+                # their missing exchange controls are not a live protection
+                # defect because no venue position exists for this side.
+                continue
             px = self.px.get(pos.symbol) or pos.entry
             scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
             need = self.missing_controls(pos)
@@ -3622,6 +3740,8 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
+        if not self.exchange_position_active(pos):
+            return
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
         # A range pair is quantity-matched. If the parent grew since the last
@@ -3724,6 +3844,8 @@ class Pulse:
         pos.ctrl_verified = pos.controls_ok
 
     def ensure_controls(self, pos: Position) -> None:
+        if not self.exchange_position_active(pos):
+            return
         now = time.time()
         tracked_at_start = any(candidate is pos for candidate in self.open.values())
 
@@ -4090,14 +4212,32 @@ class Pulse:
             return None if self.sets.execution_allowed(selected_set, pack, side_name) else "set-gate"
         chosen = None
         try:
-            chosen = self.sets.pick_any(pack, side=side_name) if self.sets.enabled else None
-            if not chosen and self.sets.enabled:
-                chosen = self.sets.pick_any("general", side=side_name) or self.sets.pick_any("indications", side=side_name)
+            pick_entry = getattr(self.sets, "pick_entry", None)
+            if self.sets.enabled:
+                if callable(pick_entry):
+                    chosen = pick_entry(pack, side=side_name)
+                else:
+                    pick_base = getattr(self.sets, "pick", None)
+                    if callable(pick_base):
+                        chosen = pick_base(pack, kind="base", side=side_name)
+                    else:
+                        legacy_pick = getattr(self.sets, "pick_any", None)
+                        candidate = legacy_pick(pack, side=side_name) if callable(legacy_pick) else None
+                        chosen = candidate if getattr(candidate, "kind", "base") == "base" else None
         except TypeError:
             try:
-                chosen = self.sets.pick_any(pack) if self.sets.enabled else None
-                if not chosen and self.sets.enabled:
-                    chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                pick_entry = getattr(self.sets, "pick_entry", None)
+                if self.sets.enabled:
+                    if callable(pick_entry):
+                        chosen = pick_entry(pack)
+                    else:
+                        pick_base = getattr(self.sets, "pick", None)
+                        if callable(pick_base):
+                            chosen = pick_base(pack, kind="base")
+                        else:
+                            legacy_pick = getattr(self.sets, "pick_any", None)
+                            candidate = legacy_pick(pack) if callable(legacy_pick) else None
+                            chosen = candidate if getattr(candidate, "kind", "base") == "base" else None
             except Exception:
                 chosen = None
         except Exception:
@@ -4115,7 +4255,9 @@ class Pulse:
             if getattr(self.sets, "strict_gate", False):
                 # Strict: no validated + profitable set for this side -> no entry.
                 return "set-gate"
-            if not (self.sets.pack_open(pack, side=side) or self.sets.pack_open("general", side=side) or self.sets.pack_open("indications", side=side)):
+            entry_open = getattr(self.sets, "entry_pack_open", None)
+            pack_open = entry_open if callable(entry_open) else self.sets.pack_open
+            if not pack_open(pack, side=side):
                 # Positive-PF-only: gate ready and every pack closed -> no entry.
                 return "set-gate"
         return None
@@ -4550,14 +4692,30 @@ class Pulse:
         chosen = selected_set
         if chosen is None:
             try:
-                chosen = self.sets.pick_any(pack, side=side)
-                if not chosen:
-                    chosen = self.sets.pick_any("general", side=side) or self.sets.pick_any("indications", side=side)
+                pick_entry = getattr(self.sets, "pick_entry", None)
+                if callable(pick_entry):
+                    chosen = pick_entry(pack, side=side)
+                else:
+                    pick_base = getattr(self.sets, "pick", None)
+                    if callable(pick_base):
+                        chosen = pick_base(pack, kind="base", side=side)
+                    else:
+                        legacy_pick = getattr(self.sets, "pick_any", None)
+                        candidate = legacy_pick(pack, side=side) if callable(legacy_pick) else None
+                        chosen = candidate if getattr(candidate, "kind", "base") == "base" else None
             except TypeError:
                 try:
-                    chosen = self.sets.pick_any(pack)
-                    if not chosen:
-                        chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+                    pick_entry = getattr(self.sets, "pick_entry", None)
+                    if callable(pick_entry):
+                        chosen = pick_entry(pack)
+                    else:
+                        pick_base = getattr(self.sets, "pick", None)
+                        if callable(pick_base):
+                            chosen = pick_base(pack, kind="base")
+                        else:
+                            legacy_pick = getattr(self.sets, "pick_any", None)
+                            candidate = legacy_pick(pack) if callable(legacy_pick) else None
+                            chosen = candidate if getattr(candidate, "kind", "base") == "base" else None
                 except Exception:
                     chosen = None
             except Exception:
@@ -4759,19 +4917,32 @@ class Pulse:
                 )
                 self.did_io = True
                 msg = str(r.get("msg") or "")
-            m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-            if m2 and not execution_plan and not self.ok(r) and c is not None:
-                need = float(m2.group(1))
-                c.min_qty = max(float(c.min_qty or 0), need)
-                qty = self.round_qty_up(c, need)
-                if qty > 0:
-                    # Retry the same client id after correcting quantity.
-                    r = self.api.post(
-                        "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, cid),
-                    )
-                    self.did_io = True
-                    msg = str(r.get("msg") or "")
+            if not execution_plan and not self.ok(r) and c is not None:
+                minimum_kind = adopt_venue_minimum(c, msg)
+                if minimum_kind:
+                    # A venue floor is an allowed exception to the normal
+                    # target cap, but it still must fit the available margin
+                    # and the per-position book cap. Never enlarge an order
+                    # beyond the exchange's own reported minimum.
+                    max_book = max(max_book, self.min_order_qty(c, px) * px)
+                    retry_qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
+                    retry_room = self.avail_notional(c)
+                    retry_margin = retry_qty * px / max(1, lev)
+                    if (retry_qty > 0 and retry_qty * px <= max_book * 1.02
+                            and retry_qty * px <= retry_room * 1.02
+                            and retry_margin <= max(0.0, float(self.available or 0)) * 0.95):
+                        qty = retry_qty
+                        self._remember_pending(
+                            kind="entry", cid=cid, symbol=sym, side=side,
+                            requested_qty=qty, group_key=pending_group_key,
+                            metadata=pending_meta,
+                        )
+                        r = self.api.post(
+                            "/openApi/swap/v2/trade/order",
+                            _entry_body(qty, cid),
+                        )
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
@@ -5055,6 +5226,28 @@ class Pulse:
                 upnl += d * p.qty * p.entry
         return n, upnl
 
+    def exchange_position_active(self, pos: Position) -> bool:
+        """Whether exchange truth permits a live order for this position.
+
+        Internal/system positions remain valid for calculations and evaluation,
+        but must not produce a control or close request when the last complete
+        exchange snapshot confirms that their symbol+side is flat. A just-filled
+        entry is allowed a short propagation window before the next adoption
+        snapshot can include it.
+        """
+        keys = getattr(self, "live_pos_keys", None)
+        if keys is None:
+            # No complete exchange snapshot yet: preserve the existing startup
+            # behavior and let the entry path attach protection immediately.
+            return True
+        key = f"{pos.symbol}:{pos.side}"
+        if key in keys:
+            return True
+        age = time.time() - float(getattr(pos, "opened_at", 0.0) or 0.0)
+        if age < 45.0 and float(getattr(pos, "exchange_qty", 0.0) or 0.0) > 0:
+            return True
+        return False
+
     def _close_strategy_lanes(self, pos: Position, rec: Closed, pnl: float, pnl_pct: float) -> None:
         """Reset only the Block/DCA state attached to this logical group."""
         group_key = self.logical_group_key(pos)
@@ -5321,6 +5514,12 @@ class Pulse:
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
+        if exchange and not self.exchange_position_active(pos):
+            # The last complete exchange snapshot is authoritative for live
+            # routing. Close the system-only lane locally and never submit a
+            # guaranteed-to-fail quantity against a flat symbol+side.
+            self.close_pos(pos, px, reason, exchange=False)
+            return
         if exchange and float(getattr(pos, "pending_close_qty", 0.0) or 0.0) > 1e-12:
             # An accepted close is already in flight. Repeating it from the
             # max-hold/DDT/control paths would create an over-close race.
@@ -6420,6 +6619,10 @@ class Pulse:
                 dirty_lanes = True
         if dirty_lanes:
             self.block.save()
+        # Selection and live processing have different lifetimes. Rebind all
+        # unresolved persisted/open lineages after config reload so a Set that
+        # lost eligibility is still managed until its order/position closes.
+        self._sync_set_processing()
         # A history worker may have captured the previous SetBook while this
         # reload was in progress.  Increment only after the complete catalog
         # and its dependent strategy settings are installed so that stale
@@ -6467,6 +6670,8 @@ class Pulse:
 
     def pulse_snapshot(self) -> Dict[str, Any]:
         return {
+            "entrySelectionPolicy": "validated-base-only",
+            "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "leverage": LEVERAGE,
@@ -6930,11 +7135,8 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
-                m2 = re.search(r"minimum order amount is\s+([\d.]+)", msg, re.I)
-                if m2:
-                    need = float(m2.group(1))
-                    c.min_qty = max(float(c.min_qty or 0), need)
-                    qty = self.round_qty_up(c, need)
+                if adopt_venue_minimum(c, msg):
+                    qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
                     # A venue minimum must never enlarge an approved target,
                     # book cap or available-margin allocation on retry.
                     if (qty > leftover + 1e-12 or qty * px > add_cap + 1e-9
@@ -6943,6 +7145,10 @@ class Pulse:
                         self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                         self._clear_pending(cid)
                         continue
+                    self._remember_pending(
+                        kind="block", cid=cid, symbol=pos.symbol, side=pos.side,
+                        requested_qty=qty, group_key=block_group_key,
+                    )
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
                         {
@@ -7156,6 +7362,31 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
+                if adopt_venue_minimum(c, msg):
+                    retry_qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
+                    retry_margin = retry_qty * px / max(1, self.leverage_for(c))
+                    if (retry_qty > 0 and retry_qty <= seed * 2.55
+                            and retry_qty * px <= add_cap * 1.02
+                            and (pos.qty + retry_qty) * px <= self.max_book_notional() * 1.02
+                            and retry_margin <= self.available * 0.38):
+                        qty = retry_qty
+                        self._remember_pending(
+                            kind="dca", cid=cid, symbol=pos.symbol, side=pos.side,
+                            requested_qty=qty, group_key=group_key,
+                        )
+                        r = self.api.post(
+                            "/openApi/swap/v2/trade/order",
+                            {
+                                "symbol": pos.symbol,
+                                "type": "MARKET",
+                                "side": order_side,
+                                "positionSide": pos.side,
+                                "quantity": qty,
+                                "clientOrderID": cid,
+                            },
+                        )
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
                 self.dca_fail_cd[group_scope] = time.time() + (180.0 if is_transient_api(msg) else 25.0)
                 if is_transient_api(msg):
                     log(f"DCA SKIP {pos.symbol} #{row['n']} {short_api_msg(msg)}", every=20.0, key=f"dcaf:{group_scope}")
@@ -7724,9 +7955,9 @@ class Pulse:
         for pack in ("indications", "general"):
             if self.sets.enabled and self.sets.use_historic_gate and hist_ready:
                 try:
-                    intern[pack] = bool(
-                        self.sets.pack_open(pack, side="LONG") or self.sets.pack_open(pack, side="SHORT")
-                    )
+                    entry_open = getattr(self.sets, "entry_pack_open", None)
+                    pack_open = entry_open if callable(entry_open) else self.sets.pack_open
+                    intern[pack] = bool(pack_open(pack, side="LONG") or pack_open(pack, side="SHORT"))
                 except TypeError:
                     intern[pack] = bool(self.sets.pack_open(pack))
             else:
@@ -7790,7 +8021,13 @@ class Pulse:
         for pack_name in ("general", "indications"):
             for side_name in ("LONG", "SHORT"):
                 if self.sets.enabled:
-                    by_scope[(pack_name, side_name)] = self.sets.pick_all(pack_name, side=side_name)
+                    entry_sets = getattr(self.sets, "entry_sets", None)
+                    if callable(entry_sets):
+                        by_scope[(pack_name, side_name)] = entry_sets(pack_name, side=side_name)
+                    else:
+                        by_scope[(pack_name, side_name)] = (
+                            self.sets.pick(pack_name, kind="base", side=side_name, all_valid=True) or []
+                        )
                 else:
                     by_scope[(pack_name, side_name)] = [None]
         matrix = EntryMatrix(ranked, by_scope)
@@ -8696,16 +8933,44 @@ class Pulse:
         self.record_event("exchange_request", request_key, status="pending", detail="fill polling", metadata={"path": "/openApi/swap/v2/trade/allOrders"})
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
+        fallback_used = False
+        fallback_attempted = False
         if not self.ok(r):
-            self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill request failed")
-            return
+            code = str(r.get("code") or "")
+            low = str(r.get("msg") or "").lower()
+            retryable = code in ("-1", "109500", "109501") or "network issue" in low or "please retry later" in low
+            self.record_event(
+                "exchange_response",
+                stable_key(request_key, "primary-error"),
+                status="error",
+                code=r.get("code"),
+                detail="fill request failed; fallback pending" if retryable else "fill request failed",
+            )
+            if not retryable:
+                return
+            fallback_attempted = True
+            fallback = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
+            self.did_io = True
+            if not self.ok(fallback):
+                self.record_event(
+                    "exchange_response",
+                    stable_key(request_key, "fallback-error"),
+                    status="error",
+                    code=fallback.get("code"),
+                    detail="fill fallback failed",
+                )
+                return
+            r = fallback
+            fallback_used = True
         data = r.get("data")
         orders = data.get("orders") if isinstance(data, dict) else data
-        if not isinstance(orders, list) or not orders:
+        if (not isinstance(orders, list) or not orders) and not fallback_attempted:
             r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
+            self.did_io = True
             if not self.ok(r):
                 self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill fallback failed")
                 return
+            fallback_used = True
             data = r.get("data")
             orders = (data.get("fill_orders") or data.get("fills") or data.get("orders") or data) if isinstance(data, dict) else data
             if isinstance(data, dict) and isinstance(data.get("list"), list):
@@ -8714,7 +8979,15 @@ class Pulse:
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill payload malformed")
             return
         self._update_live_position_costs(orders)
-        self.record_event("exchange_response", stable_key(request_key, "response"), status="confirmed" if self.ok(r) else "error", code=r.get("code"), qty=len(orders), detail="fill polling", metadata={"rows": len(orders)})
+        self.record_event(
+            "exchange_response",
+            stable_key(request_key, "response"),
+            status="confirmed" if self.ok(r) else "error",
+            code=r.get("code"),
+            qty=len(orders),
+            detail="fill polling fallback" if fallback_used else "fill polling",
+            metadata={"rows": len(orders), "fallback": fallback_used},
+        )
         n = 0
         for o in orders:
             if not isinstance(o, dict):
@@ -11515,6 +11788,7 @@ class Pulse:
         # contains many positions and each repair encounters venue cooldowns.
         if self.cycle == 1 or self.cycle % 25 == 0:
             self._cycle_step("reconcile", self.adopt_exchange_positions)
+        self._sync_set_processing()
         unprotected = self._cycle_step("controls", self.priority_controls)
         if self.cycle % 8 == 0:
             self._cycle_step("config", self.maybe_reload_config)
@@ -11598,6 +11872,7 @@ class Pulse:
             pass
         sd_notify("WATCHDOG=1")
         self.reconcile_startup_positions()
+        self._sync_set_processing()
         sd_notify("WATCHDOG=1")
         try:
             self.list_orders()

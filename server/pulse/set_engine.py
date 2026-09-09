@@ -896,6 +896,12 @@ class SetState:
     exits: Dict[str, int] = field(default_factory=dict)
     active: bool = False
     deact_reason: str = ""
+    # Selection activity and processing activity are deliberately separate.
+    # A Set may stop accepting new entries after a live/PF gate or selection
+    # cap, while its already-open order/position lineage still has to be
+    # scored and kept available for controls, exits and reconciliation.
+    processing_active: bool = False
+    processing_reason: str = ""
     locked: bool = False
     source_n: int = 0
     by_side: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -932,6 +938,8 @@ class SetState:
             position_cost_pct=self.position_cost_pct,
             indication_kind=self.indication_kind,
             locked=self.locked,
+            processing_active=False,
+            processing_reason="",
         )
 
     def tape(self) -> List[Dict[str, Any]]:
@@ -1067,6 +1075,12 @@ class SetBook:
         self._live_ov_ts = 0.0
         self._pick_lock = threading.RLock()
         self._pick_cursor = 0
+        # IDs currently referenced by an unresolved entry/control/close intent
+        # or an open local position. This is updated by Pulse without scanning
+        # the complete catalogue on every order; the SetBook keeps the compact
+        # flags for snapshots and downstream coordination.
+        self._processing_set_ids: set[str] = set()
+        self._processing_reasons: Dict[str, str] = {}
         self.hist_block = True
         self.hist_dca = True
         self.block_vr = 0.25
@@ -1105,6 +1119,70 @@ class SetBook:
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._pick_lock = threading.RLock()
+        if not isinstance(getattr(self, "_processing_set_ids", None), set):
+            self._processing_set_ids = set(getattr(self, "_processing_set_ids", ()) or ())
+        if not isinstance(getattr(self, "_processing_reasons", None), dict):
+            self._processing_reasons = {}
+
+    def sync_processing_sets(
+        self,
+        set_ids: Sequence[str] | set[str],
+        reasons: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Retain unresolved Set lineages independently from entry eligibility.
+
+        ``active`` is a selection flag and may legitimately turn off after a
+        live loss, a PF/DDT gate, or the configured selection cap. It must not
+        stop management of a position that was already opened under that Set.
+        The caller supplies only live/pending lineage IDs; changes are applied
+        to the affected states rather than walking a 30k+ catalogue.
+        """
+        wanted = {
+            str(value).strip()
+            for value in (set_ids or ())
+            if str(value or "").strip()
+        }
+        reason_map = {
+            str(key): str(value or "unresolved order/position")
+            for key, value in (reasons or {}).items()
+            if str(key or "").strip()
+        }
+        previous = set(getattr(self, "_processing_set_ids", set()) or set())
+        previous_reasons = dict(getattr(self, "_processing_reasons", {}) or {})
+        self._processing_set_ids = wanted
+        self._processing_reasons = reason_map
+        changed = previous ^ wanted
+        changed.update(
+            key for key in wanted | previous if previous_reasons.get(key) != reason_map.get(key)
+        )
+        for sid in changed:
+            st = self.sets.get(sid)
+            if st is None:
+                continue
+            st.processing_active = sid in wanted
+            st.processing_reason = reason_map.get(sid, "") if st.processing_active else ""
+        self._snap_ts = 0.0
+        self._live_ov_ts = 0.0
+        return {
+            "active": len(wanted),
+            "added": len(wanted - previous),
+            "released": len(previous - wanted),
+            "unknown": sum(1 for sid in wanted if sid not in self.sets),
+        }
+
+    def processing_set_ids(self) -> List[str]:
+        """Stable IDs retained for unresolved live processing."""
+        return sorted(self._processing_set_ids)
+
+    def _apply_processing_flags(self) -> None:
+        """Apply retained IDs after a catalog rebuild/atomic replay publish."""
+        wanted = set(getattr(self, "_processing_set_ids", set()) or set())
+        reasons = dict(getattr(self, "_processing_reasons", {}) or {})
+        for sid in wanted:
+            st = self.sets.get(sid)
+            if st is not None:
+                st.processing_active = True
+                st.processing_reason = reasons.get(sid, "unresolved order/position")
 
     def replay_clone(self, symbols: Optional[Sequence[str]] = None) -> "SetBook":
         """Create a lean catalog clone for an isolated history slice.
@@ -1123,6 +1201,7 @@ class SetBook:
             "_hist_total", "_hist_counts", "_hist_set_signature", "_running",
             "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
             "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
+            "_processing_set_ids", "_processing_reasons",
         }
         for name, value in self.__dict__.items():
             if name in skip:
@@ -1160,6 +1239,11 @@ class SetBook:
         clone._snap_ts = 0.0
         clone._live_ov_cache = None
         clone._live_ov_ts = 0.0
+        # Live unresolved-order retention is deliberately not copied into a
+        # historic research clone. The replay evaluates its own catalog and
+        # must not report live processing flags from the source lane.
+        clone._processing_set_ids = set()
+        clone._processing_reasons = {}
         return clone
 
     def load(
@@ -1480,6 +1564,9 @@ class SetBook:
         self.sets = next_sets
         self.by_idx = by_idx
         self._reindex()
+        # Rebind unresolved live lineages to the new Set objects without
+        # changing their entry-selection gate.
+        self._apply_processing_flags()
         for st in by_idx:
             st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
             st.stage = "Base"
@@ -3476,7 +3563,7 @@ class SetBook:
                 bucket["sampleCount"] += int(evaluation.get("sampleCount") or st.last15_n or 0)
                 bucket["confidence"] += float(evaluation.get("confidence") or 0.0)
                 bucket["insufficientSample"] += int(bool(evaluation.get("insufficientSample", True)))
-                if qualified and st.active:
+                if qualified and (st.active or getattr(st, "processing_active", False)):
                     bucket["selected"] += 1
                 if st.live:
                     bucket["entered"] += 1
@@ -3999,6 +4086,8 @@ class SetBook:
             "stepI": st.step_i,
             "tpPct": round(st.tp_pct * 100, 4),
             "active": st.active,
+            "processingActive": bool(getattr(st, "processing_active", False)),
+            "processingReason": str(getattr(st, "processing_reason", "") or ""),
             "last15Ratio": round(st.last15_ratio, 4),
             "maxDdS": st.max_dd_s,
             "parentSetId": st.parent_set_id or st.id,
@@ -4095,6 +4184,8 @@ class SetBook:
             "product": len(self.by_idx),
             "setCount": len(self.sets),
             "activeCount": sum(1 for st in self.sets.values() if st.active),
+            "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
+            "processingSetIds": self.processing_set_ids()[:350],
             "validatedCount": validated_count,
             "validationNeed": need,
             "histFills": sum(st.n for st in self.sets.values()),
@@ -4306,6 +4397,107 @@ class SetBook:
     def pick_trail(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         return self.pick(pack, kind="trail", side=side)
 
+    def pick_entry(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
+        """Pick one validated Base Set for a new entry.
+
+        Trailing Set rows remain fully available to historic/live overview and
+        to the existing position lineage, but they are not an entry source.
+        This boundary prevents a trailing sibling from bypassing the Base
+        qualification gate.
+        """
+        rows = self.entry_sets(pack, side=side)
+        return rows[0] if rows else None
+
+    def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
+        """Return the exact Base rows allowed to source a new live entry.
+
+        ``pick`` intentionally remains backwards-compatible for overview and
+        research callers, including its non-strict/cold fallback.  The live
+        entry boundary is stricter: once the historic gate is ready, a row
+        needs its own sample floor, positive cost-adjusted PF, real-stage PF
+        floor, DD-time cap, and active side flag.  This prevents an unproven
+        or losing Base row from being revived merely because its sibling won a
+        ranking pass.
+        """
+        self._cap_active(force=False)
+        rows = [
+            state
+            for state in self.by_idx
+            if state.pack == pack
+            and state.kind == "base"
+            and state.deact_reason != "selection limit"
+        ]
+        if not rows:
+            return []
+        want_side = str(side or "").strip().upper()
+        if want_side in ("L", "1", "BUY"):
+            want_side = "LONG"
+        elif want_side in ("S", "-1", "SELL"):
+            want_side = "SHORT"
+        use_side = want_side in DIRECTIONS
+
+        def side_active(state: SetState) -> bool:
+            if use_side:
+                blob = (state.by_side or {}).get(want_side)
+                if isinstance(blob, dict) and "active" in blob:
+                    return bool(blob.get("active"))
+            return bool(state.active)
+
+        gated = bool(self.enabled and self.use_historic_gate and self.progress.ready)
+        if not gated:
+            return [state for state in rows if side_active(state)]
+
+        need = self.eval_need()
+        floor = max(1.0, float(self.real_min_pf or 1.0))
+        result: List[SetState] = []
+        for state in rows:
+            if not side_active(state):
+                continue
+            view = self._side_view(state, want_side if use_side else None)
+            n = int(view.get("last15_n") or 0)
+            pf = float(view.get("last15_ratio") or 0.0)
+            dd = float(view.get("max_dd_s") or 0.0)
+            if (
+                n < need
+                or not math.isfinite(pf)
+                or pf + 1e-9 < floor
+                or not math.isfinite(dd)
+                or dd < 0
+                or dd > float(self.max_dd_s or 57600.0) + 1e-9
+            ):
+                continue
+            live_rows = filter_side(state.live, want_side if use_side else None)
+            if not self._live_windows_ok(live_rows, minimum_pf=1.0)[0]:
+                continue
+            result.append(state)
+        return result
+
+    def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
+        """Return every validated Base Set eligible for new entries.
+
+        The list is intentionally not ranked down to one winner. EntryMatrix
+        performs fair lazy round-robin dispatch over this stable list; the
+        helper applies the per-Set PF/DDT/sample gates before returning it.
+        """
+        return sorted(
+            self._validated_entry_rows(pack, side=side),
+            key=lambda s: (s.idx, s.id),
+        )
+
+    def entry_pack_open(self, pack: str, side: Optional[str] = None) -> bool:
+        """Return whether a validated Base Set can source a new entry.
+
+        ``pack_open`` intentionally includes the trailing family for legacy
+        overview/research callers. The live entry gate must not do that:
+        trailing rows belong to an existing position's management lineage,
+        never to the new-entry candidate pool.
+        """
+        if not self.enabled or not self.use_historic_gate:
+            return True
+        if not getattr(self.progress, "ready", False):
+            return True
+        return self.pick_entry(pack, side=side) is not None
+
     def pick_all(self, pack: str, side: Optional[str] = None) -> List[SetState]:
         """All eligible base and trailing configurations in stable catalog order."""
         return sorted(
@@ -4481,6 +4673,8 @@ class SetBook:
                 "tradesPerHour": round(float(ev.get("tradesPerHour") or 0.0), 4),
                 "validated": bool(ev.get("validated")),
                 "active": s.active,
+                "processingActive": bool(getattr(s, "processing_active", False)),
+                "processingReason": str(getattr(s, "processing_reason", "") or ""),
                 "deactReason": s.deact_reason,
                 "costSubtracted": True,
                 "source": "live-exchange",
@@ -4501,6 +4695,7 @@ class SetBook:
         out = {
             "processed": len(processed),
             "active": sum(1 for s in processed if s.active),
+            "processingActive": sum(1 for s in processed if getattr(s, "processing_active", False)),
             "deactivated": sum(1 for s in processed if not s.active),
             "fills": len(fills),
             "last15Ratio": round(float(m["last15_ratio"]), 4),
@@ -4635,6 +4830,8 @@ class SetBook:
                         "validated": int(st.last15_n or 0) >= self.eval_need() and is_positive_pf(st.last15_ratio),
                     },
                     "active": st.active,
+                    "processingActive": bool(getattr(st, "processing_active", False)),
+                    "processingReason": str(getattr(st, "processing_reason", "") or ""),
                     "deactReason": st.deact_reason,
                     "locked": st.locked,
                 }
@@ -4677,6 +4874,7 @@ class SetBook:
         out = {
             "enabled": self.enabled,
             "ready": p.ready,
+            "entrySelectionPolicy": "validated-base-only",
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
             "mainEval": int(getattr(self, "main_eval", 5) or 5),
@@ -4708,6 +4906,8 @@ class SetBook:
             "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
+            "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
+            "processingSetIds": self.processing_set_ids()[:350],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "coverage": cover,
