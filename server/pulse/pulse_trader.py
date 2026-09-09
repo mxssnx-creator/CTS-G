@@ -917,6 +917,10 @@ class Pulse:
         self.lev_max: Dict[str, int] = {}
         self.use_max_leverage = True
         self.last_scan_ms = 0.0
+        self.last_scan_cpu_ms = 0.0
+        self.last_cycle_stages = {}
+        self._cycle_stage_ms = {}
+        self._active_cycle_stage = ""
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
         self.cycle_overrun = False
@@ -9257,6 +9261,11 @@ class Pulse:
             "prices": {s: self.px.get(s) for s in (SYMBOLS if (not hasattr(self, "load") or self.load.last_budget.stats_full or len(SYMBOLS) <= 64) else [p.symbol for p in self.open.values()][:64])},
             "engine": {
                 "hotMs": round(self.last_scan_ms, 1),
+                "hotCpuMs": round(getattr(self, "last_scan_cpu_ms", 0.0), 1),
+                "stagesMs": dict(getattr(self, "last_cycle_stages", {})),
+                "activeStage": getattr(self, "_active_cycle_stage", ""),
+                "activeStageMs": round((time.perf_counter() - self._active_stage_at) * 1000.0, 1) if getattr(self, "_active_cycle_stage", "") else 0.0,
+                "cycleWallOverrun": self.last_scan_ms > SCAN_S * 1000.0,
                 "warmMs": round(self.warm_ms, 1),
                 "asyncP50": snap.get("asyncP50"),
                 "asyncN": snap.get("asyncN"),
@@ -11432,7 +11441,27 @@ class Pulse:
                 pass
             time.sleep(0.15)
 
+    def _cycle_step(self, name, action):
+        """Fixed stage names, no trace history; identify stalls without growing logs."""
+        started = time.perf_counter()
+        self._active_stage_at = started
+        self._active_cycle_stage = name
+        try:
+            return action()
+        finally:
+            self._cycle_stage_ms[name] = round(self._cycle_stage_ms.get(name, 0.0) + (time.perf_counter() - started) * 1000.0, 1)
+            self._active_cycle_stage = ""
+
+    def _finish_cycle_timing(self, started, cpu_started):
+        self.last_scan_ms = (time.perf_counter() - started) * 1000.0
+        self.last_scan_cpu_ms = (time.thread_time() - cpu_started) * 1000.0
+        self.last_scan_io = bool(self.did_io)
+        self.cycle_overrun = self.last_scan_ms > SCAN_S * 1000.0 and not (self.did_io or self.hist_busy)
+        self.last_cycle_stages = dict(self._cycle_stage_ms)
+
     def _one_cycle(self) -> None:
+        self._cycle_stage_ms = {}
+        self.did_io = False
         sd_notify("WATCHDOG=1")
         paused = os.path.exists(PAUSE_PATH)
         stopped = os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
@@ -11476,35 +11505,34 @@ class Pulse:
                 self.halted = False
                 self.halt_reason = None
         self.cycle += 1
-        self.did_io = False
-        self._budget()
-        self.refresh_tickers()
-        self.seed_px_bars()
+        self._cycle_step("budget", self._budget)
+        self._cycle_step("tickers", self.refresh_tickers)
+        self._cycle_step("bars", self.seed_px_bars)
         if time.monotonic() >= float(getattr(self, "_next_fill_poll", 0.0)):
-            self.sync_own_fills()
+            self._cycle_step("fills", self.sync_own_fills)
         # Reconcile immediately after the boot snapshot, before touching old
         # local controls. Waiting for cycle 25 can take hours when a stale book
         # contains many positions and each repair encounters venue cooldowns.
         if self.cycle == 1 or self.cycle % 25 == 0:
-            self.adopt_exchange_positions()
-        unprotected = self.priority_controls()
+            self._cycle_step("reconcile", self.adopt_exchange_positions)
+        unprotected = self._cycle_step("controls", self.priority_controls)
         if self.cycle % 8 == 0:
-            self.maybe_reload_config()
+            self._cycle_step("config", self.maybe_reload_config)
         if self.cycle % 220 == 0:
             self.pool.submit(self.set_leverage)
-        self.manage()
+        self._cycle_step("manage", self.manage)
         if unprotected:
-            unprotected = self.priority_controls()
+            unprotected = self._cycle_step("controls", self.priority_controls)
         # Indications run on the warm thread so the 530-symbol scan cannot stall the watchdog.
         if not self.halted:
-            self.maybe_entries()
-            self.maybe_block_adds()
-            self.maybe_dca_adds()
+            self._cycle_step("entries", self.maybe_entries)
+            self._cycle_step("block", self.maybe_block_adds)
+            self._cycle_step("dca", self.maybe_dca_adds)
         if self.cycle % QA_EVERY == 0:
-            self.qa_tick()
+            self._cycle_step("qa", self.qa_tick)
         heal_trim = self._heal_trim_pending()
         if self.cycle % 12 == 0 or heal_trim:
-            self.trim_caches(force=False, keep_hist=True)
+            self._cycle_step("trim", lambda: self.trim_caches(force=False, keep_hist=True))
             if heal_trim:
                 self._heal_trim_clear()
 
@@ -11598,6 +11626,7 @@ class Pulse:
             # One cycle at a time on this thread. cycle_busy is observability
             # for stats; the lock is what actually serialises the work.
             t0 = time.perf_counter()
+            cpu0 = time.thread_time()
             self.cycle_busy = True
             try:
                 # Do not hold the shared state lock across refresh/control
@@ -11616,10 +11645,7 @@ class Pulse:
                 if hasattr(self.api, "err"):
                     self.api.err.write("loop", msg=self.last_error[:300])
             finally:
-                dt = time.perf_counter() - t0
-                self.last_scan_ms = dt * 1000.0
-                self.last_scan_io = bool(self.did_io or self.hist_busy or dt > SCAN_S)
-                self.cycle_overrun = dt > SCAN_S and not (self.did_io or self.hist_busy)
+                self._finish_cycle_timing(t0, cpu0)
                 try:
                     self.write_stats()
                 except Exception:

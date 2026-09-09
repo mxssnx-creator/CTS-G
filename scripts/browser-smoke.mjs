@@ -115,6 +115,11 @@ try {
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     const status = resp?.status() ?? 0;
     await page.waitForTimeout(1000);
+    // Data-driven views can hydrate after the cold dev module load. Callers may
+    // name an actual loaded-state element; failed requests remain in the verdict.
+    if (process.env.BROWSER_SMOKE_READY_SELECTOR) {
+      await page.locator(process.env.BROWSER_SMOKE_READY_SELECTOR).first().waitFor({ state: "visible", timeout: timeoutMs });
+    }
 
     const title = await page.title();
     const hasCanvas = (await page.locator("canvas").count()) > 0;

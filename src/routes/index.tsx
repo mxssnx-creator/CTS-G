@@ -9,6 +9,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
@@ -38,31 +39,20 @@ function DeskPage() {
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const cacheRef = useRef<Partial<Record<string, LiveStats>>>({});
   useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
     const cached = cacheRef.current[conn];
-    if (cached) setRaw(cached);
-    const pull = async () => {
-      const s = await fetchLiveStats(conn);
-      if (!alive) return;
+    setRaw(cached ?? null);
+    const poll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (signal.aborted) return;
       if (s) {
         cacheRef.current[conn] = s;
         setRaw(s);
       }
-      const hidden = typeof document !== "undefined" && document.hidden;
-      timer = setTimeout(pull, hidden ? 8000 : 3500);
-    };
-    const kick = () => {
-      if (!alive) return;
-      if (timer) clearTimeout(timer);
-      void pull();
-    };
-    window.addEventListener("pulse:control", kick);
-    void pull();
+    }, () => document.hidden ? 8000 : 3500);
+    window.addEventListener("pulse:control", poll.refresh);
     return () => {
-      alive = false;
-      window.removeEventListener("pulse:control", kick);
-      if (timer) clearTimeout(timer);
+      window.removeEventListener("pulse:control", poll.refresh);
+      poll.stop();
     };
   }, [conn]);
   const stats = pickView(raw, conn);
@@ -139,7 +129,7 @@ function DeskPage() {
             <Meter label="Drawdown" value={d.ddPct} max={18} danger={d.ddPct > 8} />
           </div>
           <CoordStrip stats={stats} />
-          {stats ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
+          {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
           <div className="mt-3">
             <CoverageBar live={stats} />
           </div>
@@ -748,7 +738,7 @@ function WorkStrip({ stats }: { stats: LiveStats | null }) {
       {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => `${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
+          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
@@ -968,6 +958,7 @@ function pnlClass(n: number) {
 }
 
 function ago(s: number) {
+  if (!Number.isFinite(s)) return "—";
   if (s < 60) return `${Math.floor(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;

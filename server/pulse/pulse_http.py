@@ -1045,8 +1045,9 @@ def _lane_progress(st: dict) -> dict:
     return prog
 
 
-def lane_summary(lane: dict) -> dict:
-    st = load_stats(lane["id"])
+def lane_summary(lane: dict, st: dict | None = None) -> dict:
+    if st is None:
+        st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
@@ -1208,8 +1209,8 @@ def merge_activity_summaries(summaries: list) -> dict:
     return out
 
 
-def _pick_detail(lane_defs: list) -> tuple:
-    loaded = [(lane, load_stats(lane["id"])) for lane in lane_defs]
+def _pick_detail(lane_defs: list, stats_by_id: dict | None = None) -> tuple:
+    loaded = [(lane, stats_by_id[lane["id"]] if stats_by_id is not None else load_stats(lane["id"])) for lane in lane_defs]
     for lane, st in loaded:
         if st and st.get("running") and not st.get("halted"):
             return lane, st
@@ -1233,24 +1234,23 @@ def merge_axis_enablement(states) -> dict:
 
 
 def merge_overall() -> dict:
-    lanes = [lane_summary(l) for l in LANES]
+    # Read each desk once: counts, rows and progress belong to the same snapshot.
+    stats_by_id = {lane["id"]: load_stats(lane["id"]) for lane in LANES}
+    lanes = [lane_summary(l, stats_by_id[l["id"]]) for l in LANES]
     opens = []
     closed = []
     tests = []
     wins = losses = errors = 0
-    running_any = False
-    stats_by_id = {}
+    running_any = any(l.get("running") and not l.get("halted") for l in lanes)
     activity_summaries = []
     for lane in LANES:
-        st = load_stats(lane["id"])
-        stats_by_id[lane["id"]] = st
+        st = stats_by_id[lane["id"]]
         if not st:
             continue
         if isinstance(st.get("activity"), dict):
             activity_summaries.append(st["activity"])
         elif isinstance((st.get("coverage") or {}).get("activity"), dict):
             activity_summaries.append((st.get("coverage") or {})["activity"])
-        running_any = running_any or bool(st.get("running") and not st.get("halted"))
         wins += int(st.get("wins") or 0)
         losses += int(st.get("losses") or 0)
         errors += int(st.get("errors") or 0)
@@ -1266,7 +1266,8 @@ def merge_overall() -> dict:
             q["connType"] = lane["type"]
             q["unit"] = lane["unit"]
             closed.append(q)
-        tests.extend(st.get("tests") or [])
+        tests.extend({**test, "connection": lane["id"]} for test in (st.get("tests") or []) if isinstance(test, dict))
+    tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
     closed = closed[:40]
     live = next((x for x in lanes if x["type"] == "live"), {})
@@ -1275,7 +1276,7 @@ def merge_overall() -> dict:
     pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
     pc["minPf"] = 1.1
     pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
-    detail_lane, detail_st = _pick_detail(LANES)
+    detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
@@ -1319,7 +1320,7 @@ def merge_overall() -> dict:
         "maxOpen": 0,
         "open": opens,
         "closed": closed[:80],
-        "tests": tests[-24:],
+        "tests": tests[:24],
         "activity": activity,
         "events": activity.get("tail") or [],
         "errors": errors,
@@ -1412,6 +1413,7 @@ def merge_overall() -> dict:
             for l in lanes
         ],
     }
+    sets["progress"] = dict(out["progress"])
     return slim_for_ui(out)
 
 

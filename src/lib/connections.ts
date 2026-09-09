@@ -1,3 +1,5 @@
+import { requestJson, requestPreferredJson } from "./request-json.ts";
+
 export type ConnType = "overall" | "live" | "vst";
 
 export type ConnLane = {
@@ -71,49 +73,35 @@ export function storeConn(v: ConnType) {
   }
 }
 
-async function fetchJson(url: string, timeoutMs: number): Promise<unknown | null> {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { cache: "no-store", signal: ac.signal });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return j && typeof j === "object" ? j : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export async function fetchConnections(): Promise<ConnCatalog | null> {
-  const snapP = fetchJson("/live-stats.json", 4000);
-  const live = (await fetchJson("/connections.json", 8000)) as ConnCatalog | null;
-  if (live && Array.isArray(live.types) && live.types.length) return live;
-  const s = (await snapP) as { lanes?: ConnLane[]; slots?: ConnCatalog["slots"]; running?: boolean; openCount?: number; equity?: number } | null;
-  if (!s) return null;
-  const lanes = Array.isArray(s.lanes) ? s.lanes : [];
-  const types: ConnLane[] = [
-    {
-      type: "overall",
-      label: "Overall",
-      unit: "MIXED",
-      running: Boolean(s.running),
-      equity: s.equity,
-      openCount: s.openCount,
-      alive: true,
-    },
-    ...lanes.map((l) => ({
-      ...l,
-      type: l.type,
-      label: l.label,
-      running: l.running,
-      equity: l.equity,
-      openCount: l.openCount,
-      alive: l.alive,
-    })),
-  ];
-  return { selectedDefault: "overall", types, slots: s.slots || [], lanes };
+export async function fetchConnections(signal?: AbortSignal): Promise<ConnCatalog | null> {
+  return requestPreferredJson("/connections.json", "/live-stats.json", (value) => {
+    const live = value as ConnCatalog;
+    if (Array.isArray(live.types) && live.types.length) return live;
+    const s = value as { lanes?: ConnLane[]; slots?: ConnCatalog["slots"]; running?: boolean; openCount?: number; equity?: number };
+    if (typeof s.running !== "boolean" || !Array.isArray(s.lanes)) return null;
+    const lanes = Array.isArray(s.lanes) ? s.lanes : [];
+    const types: ConnLane[] = [
+      {
+        type: "overall",
+        label: "Overall",
+        unit: "MIXED",
+        running: Boolean(s.running),
+        equity: s.equity,
+        openCount: s.openCount,
+        alive: true,
+      },
+      ...lanes.map((l) => ({
+        ...l,
+        type: l.type,
+        label: l.label,
+        running: l.running,
+        equity: l.equity,
+        openCount: l.openCount,
+        alive: l.alive,
+      })),
+    ];
+    return { selectedDefault: "overall", types, slots: s.slots || [], lanes };
+  }, signal);
 }
 
 export function statsUrl(conn: ConnType | string) {
@@ -146,8 +134,8 @@ export function connectionUrl(conn: ConnType | string) {
   return `/connection.json?conn=${encodeURIComponent(conn)}`;
 }
 
-export async function fetchConnection(conn: ConnType | string): Promise<ConnectionCreds | null> {
-  const j = (await fetchJson(connectionUrl(conn), 2500)) as ConnectionCreds | null;
+export async function fetchConnection(conn: ConnType | string, signal?: AbortSignal): Promise<ConnectionCreds | null> {
+  const j = (await requestJson(connectionUrl(conn), signal, 2500)) as ConnectionCreds | null;
   return j && typeof j === "object" ? j : null;
 }
 

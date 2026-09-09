@@ -1,3 +1,5 @@
+import { requestJson } from "./request-json.ts";
+
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
   "XRP-USDT",
@@ -938,17 +940,18 @@ export function blockTable(ratio: number, pfRatio: number, defaultMinPf: number,
 }
 
 export type CtsBundle = {
+  ok: boolean;
   cts: CtsSettings | null;
   overlay: Partial<PulseOverlay> | null;
   conn?: string;
 };
 
-export async function fetchCtsBundle(conn = "overall"): Promise<CtsBundle> {
-  if (conn === "overall") return { cts: null, overlay: null, conn: "overall" };
+export async function fetchCtsBundle(conn = "overall", signal?: AbortSignal): Promise<CtsBundle> {
+  if (conn === "overall") return { ok: true, cts: null, overlay: null, conn: "overall" };
   try {
-    const r = await fetch(`/config.json?conn=${encodeURIComponent(conn)}`, { cache: "no-store" });
-    if (!r.ok) return { cts: null, overlay: loadLocalOverlay(conn), conn };
-    const j = (await r.json()) as {
+    const value = await requestJson(`/config.json?conn=${encodeURIComponent(conn)}`, signal);
+    if (!value) return { ok: false, cts: null, overlay: loadLocalOverlay(conn), conn };
+    const j = value as {
       cts?: CtsSettings;
       overlay?: Partial<PulseOverlay>;
       conn?: string;
@@ -963,9 +966,9 @@ export async function fetchCtsBundle(conn = "overall"): Promise<CtsBundle> {
         : j && typeof j === "object" && ("blockMaxStack" in j || "strategies" in j) && !overlay
           ? (j as CtsSettings)
           : ((j.cts as CtsSettings) ?? null);
-    return { cts, overlay, conn: j?.conn || conn };
+    return { ok: Boolean(cts || overlay), cts, overlay, conn: j?.conn || conn };
   } catch {
-    return { cts: null, overlay: loadLocalOverlay(conn), conn };
+    return { ok: false, cts: null, overlay: loadLocalOverlay(conn), conn };
   }
 }
 

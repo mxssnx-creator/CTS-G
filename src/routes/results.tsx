@@ -4,6 +4,7 @@ import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { fetchLiveStats, pickView, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
@@ -41,21 +42,14 @@ function ResultsPage() {
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const [statsTab, setStatsTab] = useState<ResultTab>("overview");
   useEffect(() => {
-    let alive = true;
+    setRaw(null);
     setStatsTab("overview");
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const pull = async () => {
-      const s = await fetchLiveStats(conn);
-      if (!alive) return;
+    const poll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (signal.aborted) return;
       if (s) setRaw(s);
-      const hidden = typeof document !== "undefined" && document.hidden;
-      timer = setTimeout(pull, hidden ? 8000 : 4000);
-    };
-    void pull();
-    return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
-    };
+    }, () => document.hidden ? 8000 : 4000);
+    return poll.stop;
   }, [conn]);
   const stats = pickView(raw, conn);
   const d = useMemo(() => derive(stats), [stats]);
@@ -387,7 +381,7 @@ function ErrorsPanel({ stats }: { stats: LiveStats | null }) {
       {stats?.lastError ? <div className="mb-3 rounded-lg border border-border bg-bg2 p-3 text-sm"><span className="text-muted">Latest:</span> {stats.lastError}</div> : null}
       {failedTests.length ? (
         <div className="mb-3 space-y-2">
-          {failedTests.map((test) => <div key={test.name} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs"><span className="text-warn">{test.name}</span> · {test.detail}</div>)}
+          {failedTests.map((test) => <div key={`${test.connection || stats?.connection}:${test.name}`} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs break-words"><span className="text-warn">{test.connection ? `${test.connection.replace("bingx-", "")} · ` : ""}{test.name}</span> · {test.detail}</div>)}
         </div>
       ) : null}
       {events.length ? (

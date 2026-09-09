@@ -21,6 +21,7 @@ import {
   type PulseOverlay,
 } from "@/lib/config-model";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
@@ -110,7 +111,6 @@ function SettingsPage() {
   dirtyRef.current = dirty;
 
   useEffect(() => {
-    let alive = true;
     setCts(null);
     setRaw(null);
     setDirty(false);
@@ -127,39 +127,35 @@ function SettingsPage() {
     setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
-    const pull = async () => {
-      const sP = fetchLiveStats(conn);
-      const cP = fetchCtsBundle(conn);
-      const kP = fetchConnection(conn);
-      const s = await sP;
-      if (!alive) return;
-      setRaw(s);
-      const c = await cP;
-      if (!alive) return;
-      setCts(c.cts);
-      if (!dirtyRef.current) {
+    const delay = () => document.hidden ? 8000 : 4000;
+    const statsPoll = startPolling(async (signal) => {
+      const s = await fetchLiveStats(conn, signal);
+      if (!signal.aborted && s) setRaw(s);
+    }, delay);
+    const configPoll = startPolling(async (signal) => {
+      const c = await fetchCtsBundle(conn, signal);
+      if (signal.aborted) return;
+      if (c.ok) setCts(c.cts);
+      if (c.ok && !dirtyRef.current) {
         const stored = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
       }
-      const k = await kP;
-      if (!alive) return;
+      setReady(true);
+    }, delay);
+    const connectionPoll = startPolling(async (signal) => {
+      const k = await fetchConnection(conn, signal);
+      if (signal.aborted) return;
       if (k) {
         setCreds(k);
         setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
         setConnMethod(k.connectionMethod || "library");
         if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
       }
-      setReady(true);
-    };
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const chain = async () => {
-      await pull();
-      if (alive) timer = setTimeout(chain, 4000);
-    };
-    void chain();
+    }, delay);
     return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
+      statsPoll.stop();
+      configPoll.stop();
+      connectionPoll.stop();
     };
   }, [conn]);
 
@@ -2834,7 +2830,7 @@ function LiveApplied({
       {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
-          fail {fails.map((t) => t.name).join(", ")}
+          fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}`).join(", ")}
         </p>
       ) : (
         <p className="mt-1 text-muted">in-process tests holding</p>
