@@ -2020,7 +2020,13 @@ class SetBook:
                 detail=f"{len(self._hist_seen) if merge else 0}/{symbols_total} · {len(names)} symbols · {len(self.sets)} sets",
                 ready=prior_ready if merge else False,
             )
-            hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+            # Keep replay output sparse. A dense ``set_id -> []`` map for
+            # every Set was allocated once per in-flight symbol and then
+            # walked again during merge, turning a two-worker replay into a
+            # large temporary memory/CPU spike even when most Sets had no
+            # fill in that symbol. ``_commit_hist`` still visits the catalog
+            # once for a completed symbol so empty results remove old rows.
+            hist: Dict[str, List[Dict[str, Any]]] = {}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
             strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
             processed_symbols: set[str] = set()
@@ -2064,7 +2070,7 @@ class SetBook:
                 Dict[str, List[Dict[str, Any]]],
                 Dict[str, List[Dict[str, Any]]],
             ]:
-                local: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+                local: Dict[str, List[Dict[str, Any]]] = {}
                 local_ind: Dict[str, List[Dict[str, Any]]] = {}
                 local_strategy: Dict[str, List[Dict[str, Any]]] = {}
                 self._replay_symbol(
@@ -2233,11 +2239,11 @@ class SetBook:
                 k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
                 for k in keys
             }
-        states = (
-            self.by_idx
-            if not merge
-            else [self.sets[sid] for sid in hist if sid in self.sets]
-        )
+        # A merge represents a completed replacement for every Set for the
+        # named symbols, including Sets with zero fills. Use the full catalog
+        # exactly once at commit time; the replay workers themselves remain
+        # sparse and do not allocate/scan empty buckets.
+        states = self.by_idx if (not merge or names) else []
         for st in states:
             # A bounded replay may commit one configuration slice at a time.
             # Do not treat a not-yet-replayed set as an empty result or erase
@@ -2249,11 +2255,15 @@ class SetBook:
                     for row in st.hist:
                         symbol = str(row.get("symbol") or "")
                         counts[symbol] = counts.get(symbol, 0) + 1
+                full_counts: Dict[str, int] = {}
+                for row in full:
+                    symbol = str(row.get("symbol") or "")
+                    full_counts[symbol] = full_counts.get(symbol, 0) + 1
                 for symbol in names:
                     if hist_counts is not None and st.id in hist_counts:
                         counts[symbol] = max(0, int(hist_counts[st.id]))
                     else:
-                        counts[symbol] = sum(1 for row in full if str(row.get("symbol") or "") == symbol)
+                        counts[symbol] = full_counts.get(symbol, 0)
                 st.hist = merge_hist_rows(st.hist, full, names)
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
