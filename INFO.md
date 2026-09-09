@@ -565,3 +565,49 @@ The final sampled state at 2026-09-09 01:08:28 UTC was 12/50 symbols, 2,961 MiB
 RSS, load level overload and no errors/restarts/crashes. The VST service stays
 active; the isolated QA fixture/dev/preview services and browser were stopped.
 The safe scalar-only acceptance snapshot is in the report's `qa/` directory.
+
+### UI and VST checkpoint (2026-09-09 02:48 UTC; supersedes the earlier checkpoint)
+
+Approved release 761a9a8 was transferred, checksum-verified, backed up and
+reinstalled from /opt/cts-g with --no-live. Remote HEAD is clean at 761a9a8;
+X02 PID 3939798 and the pre-existing X01 PID 3908430 remain active with zero
+service restarts. Temporary 761a9a8 QA services and browsers were stopped.
+
+The complete current report is reports/validation-20260909-ui/verification.html.
+All nine Results tabs and 20 Settings sections were visited on the real VST
+desk. Diagram filters, matrix selection, sorting, pagination, CSV, disabled-Axis
+visibility, synchronized Step ranges and the real statistics backup action
+were exercised. Warm dev/build screenshots match on desktop/mobile without
+console/page errors. Controls had a real 770px mobile overflow; min-width:0
+diagnosis returns the page to 390px. No runtime DB reset was performed.
+
+Local source 0f66060 adds compact set identities and bounded visible rows.
+2d0449bd82cf4f72e8224fa84a67f78c07ef9ed3 additionally fixes Controls containment,
+settings labels, missing-position control retries (109420), pending parity,
+failure-priority export, malformed flatness responses and an unclosed test DB.
+A 250-set reproduction issues only one failed control POST per symbol/side
+cooldown, keeps other symbols/sides independent and resumes after 60 seconds.
+196 Python tests, 399 engine checks, 13 release contracts, 191 JS tests
+(four existing environment skips), 54 TS tests, typecheck/lint/build pass.
+The 40 smoke-contract tests also pass; installed 761a9a8 passed 15 native Redis
+checks. The local new-source browser smoke is NOT accepted: external font and
+preview-extension requests fail in this environment. Its diagnostics are saved.
+
+Observed VST control retries caused a real multi-minute venue ban before the
+new local fix. Final state: Normal execution OFF, internal General ON, 21,840
+Sets, 34 internal positions / five exchange groups, 2,413.5 MiB RSS, persistent
+3,371,008-byte statistics DB, zero crashes/recoveries, 293 QA pass / one QA fail.
+The failed QA item was hidden by the old export slice; the local fix makes
+priority failures visible, but post-update runtime diagnosis remains required.
+The running manual replay still uses seven hours and full 50-symbol completion
+was not confirmed. High-count Exchange acceptance and a complete current
+50-symbol/12-hour replay remain open. Do not claim production readiness.
+
+Automatic approval review rejected transfer of the new 0f66060 delta bundle
+and its remote fast-forward, stating that authorization covered only the
+concrete 761a9a8 payload. No newer source was transferred. Do not bypass using
+another transport or path. Finalize this report commit and a full source/Git
+backup, then obtain approval for that exact finalized release to
+152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/, VST-only update/restart
+and acceptance, followed by public push/merge only after gates pass. Public
+push/merge has not happened. Use the final backup manifest for exact checksums.

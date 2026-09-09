@@ -1,0 +1,3 @@
+"Source","Connection","Set ID","Indication","Indication config","Strategy","TP percent","Side","Samples","Cost PF (last window)","Max DDT seconds","Avg DDT seconds","Win rate percent","Net expectancy fraction","Avg hold seconds","Calculation qualified","Reason"
+"exchange","","indications:1m:sl0.6:st3:base","break","","dca","0.3","LONG","15","0.7","840","840","0","-0.003","120","false",""
+"exchange","","general:1m:sl0.6:st3:base","break","","dca","0.3","LONG","15","0.7","840","840","0","-0.003","120","false",""

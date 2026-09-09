@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CTS-G · UI- und VST-Prüfung · 9. September 2026</title>
+<style>
+  :root{font-family:system-ui,sans-serif;color:#152a25;background:#f3f7f5;line-height:1.55}
+  body{max-width:1040px;margin:0 auto;padding:32px 20px}h1{line-height:1.15;font-size:2rem}
+  h2{margin-top:2rem;font-size:1.25rem}a{color:#075e49}code{overflow-wrap:anywhere}
+  .notice{padding:18px;border-left:5px solid #bf7415;background:#fff4df}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .card{padding:16px;background:white;border:1px solid #cddbd5;border-radius:8px}.card strong{display:block;font-size:1.8rem}
+  .table{overflow:auto}table{border-collapse:collapse;width:100%;background:white}th,td{padding:11px;border-bottom:1px solid #d8e1dd;text-align:left;vertical-align:top}
+  th{background:#e8f0ec}figure{margin:20px 0}img{max-width:100%;height:auto;border:1px solid #cddbd5}
+  .mobile{max-width:390px}figcaption,small{color:#486259}details{padding:12px;background:white;border:1px solid #d8e1dd;margin:12px 0}
+  summary{cursor:pointer;font-weight:600}@media print{body{max-width:none}.notice{border:1px solid}details{break-inside:avoid}}
+</style>
+<main>
+<p>CTS-G · Prüfstand 9. September 2026, 02:48 UTC</p>
+<h1>UI geprüft. Weitere Fehler lokal korrigiert.</h1>
+<p class="notice"><strong>Die neue Version ist noch nicht auf dem Server abgenommen.</strong>
+Installiert ist <code>761a9a8</code>. Die zusätzlichen Korrekturen liegen in
+<code>0f66060</code> und <code>2d0449bd82cf4f72e8224fa84a67f78c07ef9ed3</code>.
+Die automatische Freigabeprüfung hat die Übertragung der neuen Quelle abgelehnt,
+weil die konkrete Zustimmung nur <code>761a9a8</code> umfasste. Push und Merge sind noch ausstehend.</p>
+
+<div class="cards">
+  <div class="card"><strong>196 / 196</strong>Python-Tests · neue Quelle</div>
+  <div class="card"><strong>399 / 399</strong>Engine-Prüfungen · neue Quelle</div>
+  <div class="card"><strong>20 + 9</strong>Einstellungsbereiche + Ergebnis-Tabs durchgegangen</div>
+  <div class="card"><strong>0</strong>VST-Neustarts und Crash-Zuwachs nach Installation beobachtet</div>
+</div>
+
+<h2>Gefundene Fehler und Korrekturen</h2>
+<div class="table"><table>
+<tr><th>Befund</th><th>Korrektur</th><th>Prüfung / Grenze</th></tr>
+<tr><td>Controls verbreitert die mobile Seite auf 770 statt 390 px.</td><td>Grid-Container können schrumpfen; lange Aktivitätszeilen umbrechen.</td><td>Ursache im installierten Browser isoliert: korrigierte Mindestbreite ergibt 390 px. Vollständige neue Version noch nicht dort installiert.</td></tr>
+<tr><td>Lange Set-Bezeichnungen und zu viele gleichzeitig sichtbare Zeilen.</td><td>Kurze Identität, vollständige Informationen aufklappbar; 25 Zeilen pro Seite, acht Karten auf der Startseite; Tabellen scrollen im eigenen Container.</td><td>Typecheck, Lint und Build bestanden. Vollständige Browser-Abnahme der neuen Komponenten offen.</td></tr>
+<tr><td>„position not exist“ löst zahlreiche weitere Schutzorder-Versuche aus. Beobachtet: Code 109420, danach 109429 und etwa sieben Minuten Sperre.</td><td>Nach der ersten Ablehnung keine alternativen Preis-/Payload-Versuche; 60 s Wartezeit gemeinsam für Symbol und Richtung. Andere Symbole und Richtungen bleiben unabhängig. Bestehende Schutz-IDs und das Buch bleiben bis zur Klärung erhalten.</td><td>250 gleichgerichtete Sets: ein fehlgeschlagener Einzelauftrag, keine weiteren Batch-/Fallback-Aufträge; erneute Zulassung nach Ablauf geprüft. Teilweise erfolgreiche Batches bleiben erhalten. Noch nicht auf VST abgenommen.</td></tr>
+<tr><td>Ausstehende Positionsbestätigung wird als bestätigte Abweichung angezeigt.</td><td>Pending-Status folgt der tatsächlichen Reconciliation, auch in Overall. Bestätigte Fehler behalten Vorrang.</td><td>Reproduktions- und Aggregationstest bestanden.</td></tr>
+<tr><td>Tests-Export schneidet zuerst einsortierte Fehler ab.</td><td>Export behält den Anfang der nach Fehlern priorisierten Liste.</td><td>Im installierten Stand werden 293 bestandene / ein fehlgeschlagener Engine-Test gezählt; dieser Fehler war in der exportierten Teilliste nicht sichtbar. Erneute Laufzeitprüfung nach Update erforderlich.</td></tr>
+<tr><td>Malformed Exchange-Daten könnten eine falsche Flat-Bestätigung erzeugen.</td><td>Gemeinsame strenge Snapshot-Validierung für Reconciliation und Flat-Prüfung.</td><td>Fehlende, ungültige und nicht endliche Mengen sowie genaue Symbol-/Richtungszuordnung geprüft.</td></tr>
+<tr><td>Falsche R-Fensterbeschriftung und veralteter Set-Standardhinweis.</td><td>R25 bezeichnet die tatsächlichen letzten 25 Ergebnisse; Set-Cap-Hinweis nennt korrekt 110. SQLite-Testverbindung wird explizit geschlossen.</td><td>196 Python-Tests ohne die frühere ResourceWarning; finale statische Prüfungen bestanden.</td></tr>
+</table></div>
+
+<h2>Durchgeführte UI-Abläufe auf 761a9a8</h2>
+<ul>
+<li>Tatsächliche VST-Ansicht: Startseite, Systemseite und alle Ergebnis-Tabs Overview, Coverage, Indications, Strategies, Sets, Controls, Errors, Tests und Report.</li>
+<li>Alle 20 Settings-Bereiche bei 390 × 844 px: Overview, System, Presets, Connection, Profit, Risk, Trailing, Timeframes, Packs, Sets, Exits, Stages, Block, DCA, Axes, Volume, Controls, Indication, Pulse und Symbols. Kein Seitenüberlauf oder sichtbares NaN/undefined; zunächst zu früh gelesene Bereiche wurden mit bestätigter Auswahl erneut geprüft.</li>
+<li>Diagramme mit tatsächlichen VST-Daten: 108 Messpunkte in der beobachteten System-Vorschau. System und Exchange behalten separate Messungen.</li>
+<li>Isolierte Testdaten: System 60 / Exchange 256 Konfigurationen. Auswahl Exchange → Break → TP 0,3 % → DCA ergibt zwei Vorschauzeilen für vier Konfigurationen und zwei Messpunkte.</li>
+<li>Matrixzelle setzt die passenden Filter; PF- und DDT-Sortierung, Vor-/Zurückblättern mit 25 Zeilen und CSV-Download geprüft. CSV erhält PF 0,70, DDT 840 s, Winrate 0 und Erwartungswert −0,003 korrekt.</li>
+<li>Bei ausgeschalteter Axis verschwinden Tab, Matrixspalte und Axis-Zeilen auch aus einer zuvor aktiven Axis-Auswahl. Testdaten anschließend wiederhergestellt.</li>
+<li>Step-Maximum zwischen Overview und Sets in beide Richtungen synchron: 30 → 29 → 30. Normal (General) ist im neuen Profil OFF. Keine Fixture-Einstellungen an eine Exchange gespeichert.</li>
+<li>„Back up now“ in der tatsächlichen VST-Oberfläche erfolgreich. Neueste SQLite-Sicherung: 3.121.152 Bytes, <code>PRAGMA quick_check = ok</code>, drei erhaltene Backups. Ungültige Reset-Bestätigung lässt den Reset deaktiviert; bestehende Daten wurden nicht zurückgesetzt.</li>
+</ul>
+
+<h2>Browser- und Build-Nachweise</h2>
+<p>Entwicklungs- und Build-Vorschau des installierten Releases wurden auf Desktop und Mobile aufgenommen und visuell geprüft.
+Nach vollständigem Laden stimmen die Text-Hashes aller vier Ansichten überein; keine Console-/Page-Fehler und kein Seitenüberlauf auf der Startseite.
+Der erste kalte Dev-Aufruf erfasste noch den Ladezustand. Die gezielte Wiederholung löste diese Abweichung auf.</p>
+<p>Der lokale Browserlauf der neuen Quelle erreicht die Anwendung mit HTTP 200 und ohne Seitenüberlauf oder JavaScript-Exception.
+Er besteht den strengen Smoke-Test jedoch nicht: Die Umgebung liefert <code>ERR_EMPTY_RESPONSE</code> für externe Schrift- und Preview-Erweiterungsressourcen
+(<code>/css2</code>, <code>/grok-app-builder/extensions.js</code>). Der lokale Agent-Browser-Daemon startet ebenfalls nicht zuverlässig.
+Diese Ergebnisse gelten ausdrücklich nicht als vollständige Browser-Abnahme.</p>
+<p>Zusätzlich bestanden: 13 Release-Verträge, 191 JavaScript-Tests (vier bestehende Umgebungs-Skips), 54 TypeScript-Tests und 40 Smoke-Vertragsprüfungen.
+Native Redis-Prüfung auf installiertem 761a9a8: 15 Tests mit isolierter Redis-Instanz bestanden. Typecheck, Lint, Build und Git-Whitespace-Prüfung bestanden für die neue Quelle.</p>
+<details><summary>Belegdateien öffnen</summary>
+<ul><li><a href="qa/dev-warm.json">Dev-Browserprotokoll</a> · <a href="qa/built-warm.json">Build-Browserprotokoll</a></li>
+<li><a href="qa/local-browser-diagnostic.json">Lokale Browsergrenzen mit fehlgeschlagenen Pfaden</a></li>
+<li><a href="qa/fixture-selected.csv">Exportierte Test-Messungen</a> · <a href="qa/runtime-final.json">Ressourcen- und Prozess-Snapshot</a></li></ul>
+</details>
+<figure><img class="mobile" src="qa/fixture-diagrams-mobile.png" alt="Mobile Testansicht: Break/DCA-Matrix und PF-DDT-Diagramm"><figcaption>Installierte Version, isolierte Testdaten: zwei unabhängige Sets mit identischen Messwerten überlagern sich im Diagramm.</figcaption></figure>
+<details><summary>Desktop-/Mobile-Ansichten</summary>
+<figure><img src="qa/dev-warm.png" alt="Dev-Startseite mit Testdaten"><figcaption>Dev, 1280 × 800.</figcaption></figure>
+<figure><img src="qa/built-warm.png" alt="Gebaute Startseite mit Testdaten"><figcaption>Build, 1280 × 800.</figcaption></figure>
+<figure><img class="mobile" src="qa/built-warm-mobile.png" alt="Mobile Build-Startseite"><figcaption>Build, 390 × 844.</figcaption></figure>
+<figure><img src="qa/fixture-settings-desktop.png" alt="Settings-Übersicht mit synchronisierten Werten"><figcaption>Settings mit isolierten Testdaten.</figcaption></figure>
+</details>
+
+<h2>VST-Laufzeit und offene Abnahme</h2>
+<p>761a9a8 wurde aus dem checksum-geprüften Archiv und Git-Bundle neu installiert, mit <code>--no-live</code>.
+VST-PID 3939798 läuft seit 02:03 UTC; X01-PID 3908430 blieb bei dieser Installation und den Prüfungen unverändert.
+Die temporären QA-Dienste und Browser wurden beendet; VST, X01 und Desk bleiben aktiv.</p>
+<div class="table"><table>
+<tr><th>Beobachtung 02:48 UTC</th><th>Wert</th></tr>
+<tr><td>Laufzeit / Zyklen</td><td>44 min 21 s / 3.027</td></tr>
+<tr><td>Interne Positionen / Exchange-Positionsgruppen</td><td>34 / 5; zuvor 32 / 9 beobachtet. Gruppen sind keine unabhängigen Orderzahlen.</td></tr>
+<tr><td>General-Basis / Normal-Ausführung</td><td>ON / OFF; 21.840 Sets und fortschreitende Replay-Verarbeitung.</td></tr>
+<tr><td>CPU / Speicher / Requests</td><td>100,4 % eines Kerns / 2.413,5 MiB / 2,45 pro Sekunde.</td></tr>
+<tr><td>Persistente Statistik-DB</td><td>3.371.008 Bytes / 5.076 Zeilen bzw. Schlüssel; Crash- und Recovery-Zähler 0.</td></tr>
+<tr><td>Konfigurationscache</td><td>287 Einträge, Grenze 350, Reduktionsziel 80 %; 2.745.510 erfasste Bytes. Keine Cachefehler.</td></tr>
+<tr><td>Gemeinsames Redis</td><td>190.921 Schlüssel, 850.476.440 Bytes; AOF und Snapshot ok. Weitere Dienste verwenden diese Instanz; Änderungen ihrer Gesamtsumme werden nicht dieser Arbeit zugeschrieben.</td></tr>
+<tr><td>Exit / API-Fehler</td><td>Letzte Exit-Auswahl „peak“. 68 erfasste API-Fehler; daher keine Behauptung eines fehlerfreien Exchange-Betriebs.</td></tr>
+</table></div>
+<p>Die vollständige aktuelle 50-Symbol-Koordination war im letzten Snapshot noch nicht abgeschlossen.
+Das fortgesetzte manuelle Replay verwendete 420 Bars / sieben Stunden, obwohl das gespeicherte Profil 720 Bars enthält.
+Die frühere Offline-Prüfung über zwölf Stunden ist im <a href="../validation-20260908-system/verification.md">vorherigen Bericht</a> dokumentiert;
+sie ersetzt keinen abgeschlossenen aktuellen 50-Symbol-/12-Stunden-VST-Lauf.</p>
+<p><strong>Vor einer Produktionsfreigabe erforderlich:</strong> das konkret gesicherte neue Release freigeben, auf VST installieren,
+UI und Schutzorder-Recovery mit dieser Quelle abnehmen, den sichtbaren Laufzeit-Testfehler klären sowie die vollständige historische Koordination und hohe bestätigte Orderzahl prüfen.
+50–250+ Exchange-Orders und unbegrenzter störungsfreier Betrieb sind nicht nachgewiesen. Finanzielle Zulassungsgrenzen wurden dafür nicht gelockert.</p>
+</main>
+</html>
