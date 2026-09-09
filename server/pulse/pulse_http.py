@@ -1724,7 +1724,9 @@ class Handler(SimpleHTTPRequestHandler):
                 action = body.get("action")
                 if action not in ("backup", "compact", "reset"):
                     raise ValueError("choose backup, compact or reset")
-                store = StatisticsStore(DIR, conn, load_overlay(conn))
+                # Maintenance may wait briefly for the telemetry writer. This
+                # does not change the short timeout on the engine's own store.
+                store = StatisticsStore(DIR, conn, load_overlay(conn), timeout=2.0)
                 if action == "reset":
                     result = store.reset(body.get("scope"), body.get("confirmation"))
                 elif action == "backup":

@@ -2207,7 +2207,10 @@ class Pulse:
         rec = {"name": name, "pass": passed, "detail": detail[:180], "t": time.time()}
         prev = self.test_map.get(name)
         self.test_map[name] = rec
-        self.tests = list(self.test_map.values())[-28:]
+        recent = sorted(self.test_map.values(), key=lambda row: float(row.get("t") or 0), reverse=True)
+        failures = [row for row in recent if not row.get("pass")]
+        successes = [row for row in recent if row.get("pass")]
+        self.tests = (failures + successes)[:28]
         if prev is not None and bool(prev.get("pass")) == bool(passed):
             return
         if passed:
@@ -2215,6 +2218,8 @@ class Pulse:
             if prev is not None and not prev.get("pass"):
                 self.qa_fail = max(0, self.qa_fail - 1)
         else:
+            if prev is not None and prev.get("pass"):
+                self.qa_pass = max(0, self.qa_pass - 1)
             self.qa_fail += 1
             log(f"TEST FAIL {name} {detail}"[:240], every=20.0, key=f"fail:{name}")
 
@@ -9786,12 +9791,7 @@ class Pulse:
             warm_ind or len(have) >= need or (rotating and len(have) >= 8),
             f"{len(have)}/{len(scored) or len(SYMBOLS)} miss={miss}",
         )
-        types = snap_ind.get("types") or {}
-        self.record_test(
-            "qa-ind-types",
-            all(types.get(k) for k in ("state", "direction", "move", "active", "common", "signals")),
-            f"types={types} hits={snap_ind.get('typeHits')}",
-        )
+        self._qa_indication_types(snap_ind)
         try:
             from indication_engine import self_test as ind_self
             fails = [n for n, ok, _ in ind_self() if not ok]
@@ -9940,6 +9940,18 @@ class Pulse:
         except Exception:
             pass
         write_hist_job(payload, CONN_SHORT)
+
+    def _qa_indication_types(self, snapshot: dict) -> None:
+        """A deliberately disabled indication is a valid configuration.
+
+        Verify all eight reported flags against the applied settings, including
+        Trend and Break. Missing flags or a real settings/report mismatch fail.
+        """
+        types = snapshot.get("types") or {}
+        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break")
+        expected = {kind: bool(self.indications.settings.get("type" + kind.title(), True)) for kind in kinds}
+        mismatches = [kind for kind in kinds if types.get(kind) is not expected[kind]]
+        self.record_test("qa-ind-types", not mismatches, f"types={types} mismatch={mismatches}")
 
     def _hist_checkpoint(self, book: Optional[SetBook] = None, reason: str = "") -> None:
         current = book or self.sets
@@ -10149,8 +10161,8 @@ class Pulse:
             return 1
         if cpu <= 1:
             return 1
-        if level == "overload":
-            return max(1, min(2, cpu, n))
+        if level in ("busy", "overload"):
+            return 1  # one transient replay tape while the retained catalog is near its ceiling
         return max(1, min(cpu, n))
 
     def _hist_replay_chunked(self, names: List[str], already: bool, progress_total: int) -> bool:
@@ -10161,6 +10173,9 @@ class Pulse:
         total = max(int(progress_total or 0), len(pending))
         published_any = False
         done: List[str] = []
+        # Coverage belongs to this frozen run; historical symbols from an old
+        # universe must never turn a new initial/hourly pass into 100%.
+        run_completed = set(self.sets.progress.valid_symbols) - set(pending) - set(self.sets.progress.missing_symbols)
         ready = bool(already)
         first = True
         claimed = self._hist_peer_claim()
@@ -10187,7 +10202,7 @@ class Pulse:
                     # Score the first slice so intern can open, and the last
                     # slice so the 50-name book is fully ranked. Middle slices
                     # only merge fills — rescoring 34k sets per slice stalled 4/50.
-                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending)
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending, completed_symbols=run_completed)
                 finally:
                     self.hist_busy = False
                 if not ok:
@@ -10197,6 +10212,7 @@ class Pulse:
                     break
                 published_any = True
                 done.extend(chunk)
+                run_completed.update(chunk)
                 ready = True
                 with self.state_guard():
                     progress = self.sets.progress
@@ -10434,7 +10450,7 @@ class Pulse:
                 book.progress.detail = f"fetch empty {stored}/{len(symbols)} · retry in {delay:.0f}s"
         return bool(stored)
 
-    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int, score: bool = True) -> bool:
+    def _replay_sets_isolated(self, names: List[str], already: bool, progress_total: int, score: bool = True, completed_symbols: Optional[set] = None) -> bool:
         """Replay a catalog snapshot and atomically publish its result.
 
         Historic scoring is CPU-heavy but read-only with respect to live
@@ -10454,12 +10470,18 @@ class Pulse:
             # history.  Keep the source book live and build only a lean,
             # metadata-equivalent replay catalog with the selected bars.
             replay_book = source.replay_clone(names)
+            run_progress = copy.deepcopy(source.progress)
+            run_completed = set(completed_symbols) if completed_symbols is not None else set(source._hist_seen)
+            if run_progress.valid_symbols:
+                run_completed.intersection_update(run_progress.valid_symbols)
+            replay_book._hist_seen = set(run_completed)
+            replay_book._hist_total = max(0, int(progress_total or 0))
             replay_book.progress.ready = bool(already)
             source._running = True
-            prior_done = len(source._hist_seen)
+            prior_done = len(run_completed)
             source.progress = copy.deepcopy(source.progress)
             source.progress.phase = "replay"
-            source.progress.pct = max(1.0, float(source.progress.pct or 0))
+            source.progress.pct = 35.0 + 60.0 * min(prior_done, progress_total) / max(1, progress_total)
             source.progress.symbol = names[0] if names else ""
             source.progress.set_id = ""
             source.progress.bars_done = 0
@@ -10471,6 +10493,22 @@ class Pulse:
             source.progress.elapsed_ms = 0.0
             source.progress.detail = f"{prior_done}/{source.progress.symbols_total} · {len(names)} this slice · {len(replay_book.sets)} sets"
             source.progress.ready = bool(already)
+
+        def merge_progress():
+            # A replay clone resets Progress internally. Preserve the run's
+            # identity, coverage/gap metadata and prior publication watermark.
+            progress = copy.deepcopy(replay_book.progress)
+            for key in ("run_id", "generation", "mode", "requested_start", "requested_end", "watermark",
+                        "last_published_watermark", "last_complete_run", "next_run_at", "valid_symbols",
+                        "invalid_symbols", "missing_symbols", "gapped_symbols", "stale", "deferred_reason"):
+                setattr(progress, key, copy.deepcopy(getattr(run_progress, key)))
+            seen = run_completed | (set(replay_book._hist_seen) & set(names))
+            progress.symbols_total = max(1, int(progress_total or 0))
+            progress.symbols_done = min(len(seen), progress.symbols_total)
+            progress.pct = 35.0 + 60.0 * progress.symbols_done / progress.symbols_total
+            progress.ready = bool(already) or bool(source.progress.ready) or bool(progress.ready)
+            progress.coordination_complete = False  # only the durable publisher completes the full run
+            return progress
         try:
             self._hist_write_status(source)
         except Exception:
@@ -10478,26 +10516,15 @@ class Pulse:
 
         def publish_progress() -> None:
             sd_notify("WATCHDOG=1")
+            if should_abort():
+                # Inner symbol callbacks must release a superseded long replay;
+                # cancelling only pending futures waits for entire symbols.
+                raise RuntimeError("Replay superseded by a newer generation")
             should_write = False
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                     keep_ready = bool(already) or bool(source.progress.ready)
-                    keep_done = max(
-                        int(source.progress.symbols_done or 0),
-                        int(replay_book.progress.symbols_done or 0),
-                        len(source._hist_seen),
-                        len(replay_book._hist_seen),
-                        prior_done,
-                    )
-                    keep_total = max(
-                        int(source.progress.symbols_total or 0),
-                        int(replay_book.progress.symbols_total or 0),
-                        int(progress_total or 0),
-                        keep_done,
-                    )
-                    source.progress = copy.deepcopy(replay_book.progress)
-                    source.progress.symbols_done = keep_done
-                    source.progress.symbols_total = keep_total
+                    source.progress = merge_progress()
                     if keep_ready:
                         source.progress.ready = True
                     source._running = True
@@ -10561,7 +10588,7 @@ class Pulse:
                 if self.sets is not source or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                     return False
                 if replay_book.progress.phase == "error":
-                    source.progress = copy.deepcopy(replay_book.progress)
+                    source.progress = merge_progress()
                     return False
                 wanted = set(names)
                 incoming = {}
@@ -10599,9 +10626,9 @@ class Pulse:
                 source._hist_seen = set(source._hist_seen) | set(replay_book._hist_seen)
                 source._hist_total = max(int(source._hist_total or 0), int(replay_book._hist_total or 0), len(source._hist_seen))
                 source.last_run = float(replay_book.last_run or time.time())
-                keep_done = len(source._hist_seen)
-                keep_total = max(int(progress_total or 0), keep_done, int(source.progress.symbols_total or 0))
-                source.progress = copy.deepcopy(replay_book.progress)
+                source.progress = merge_progress()
+                keep_done = source.progress.symbols_done
+                keep_total = source.progress.symbols_total
                 source.progress.sets_total = len(source.sets)
                 source.progress.sets_done = len(source.sets)
                 source.progress.symbols_done = keep_done
@@ -10632,8 +10659,13 @@ class Pulse:
         except Exception as exc:
             with self.state_guard():
                 if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
-                    source.progress.phase = "error"
-                    source.progress.error = str(exc)[:220]
+                    if self._hist_request_changed():
+                        source.progress.phase = "deferred"
+                        source.progress.detail = "replay superseded by newer generation"
+                        source.progress.deferred_reason = "newer manual/config generation"
+                    else:
+                        source.progress.phase = "error"
+                        source.progress.error = str(exc)[:220]
             return False
         finally:
             with self.state_guard():

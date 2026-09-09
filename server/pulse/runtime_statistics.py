@@ -76,7 +76,7 @@ def compact(value, limit=16384):
 
 
 class StatisticsStore:
-    def __init__(self, root, connection, settings=None):
+    def __init__(self, root, connection, settings=None, *, timeout=0.2):
         self.connection = connection
         self.directory = lane_directory(root, connection)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -84,7 +84,14 @@ class StatisticsStore:
         self.lock = threading.RLock()
         self.writes = 0
         self.settings = normalize_system_settings(settings)
-        self.db = sqlite3.connect(self.path, timeout=0.2, check_same_thread=False)
+        self.db = sqlite3.connect(self.path, timeout=timeout, check_same_thread=False)
+        try:
+            self._initialize(settings)
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _initialize(self, settings):
         self.path.chmod(0o600)
         self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.db.execute("PRAGMA journal_mode=WAL")

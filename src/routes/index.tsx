@@ -684,13 +684,13 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
       )}
       <div className="mt-3">
         <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
-        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+        <div className="mt-2 grid min-w-0 grid-cols-1 gap-1 sm:grid-cols-2">
           {rows.map((r) => (
-            <div key={r.id} className="flex items-center justify-between gap-2">
+            <div key={r.id} className="flex min-w-0 items-center justify-between gap-2">
               <span className={`min-w-0 truncate ${r.active ? "text-fg" : "text-faint"}`} title={setLabel(r)}>
                 {setLabel(r)}
               </span>
-              <span className={r.active ? "text-primary" : "text-danger"}>
+              <span className={`shrink-0 ${r.active ? "text-primary" : "text-danger"}`}>
                 {r.n ? setMetric(r.last15Ratio) : "—"} · {r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)} · R{setMetric(r.last25AvgR, 1)}
               </span>
             </div>

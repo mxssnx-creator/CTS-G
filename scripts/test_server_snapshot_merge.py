@@ -65,6 +65,68 @@ class ServerSnapshotMergeTests(unittest.TestCase):
         p._score_committed.assert_called_once_with(book, 1, [state.id])
         self.assertFalse(book._running)
 
+    def test_slice_progress_retains_run_identity_and_counts_only_this_run(self):
+        book = SetBook()
+        book.load({'stratGeneral': True, 'stratIndications': False, 'stratTrailing': False,
+                   'slToTpRatios': [.6], 'setMinStep': 3, 'setStepMax': 3})
+        book._hist_seen = {'X-USDT', 'Y-USDT', 'REMOVED-USDT'}
+        book.progress.run_id = 'vst-current-run'
+        book.progress.generation = 7
+        book.progress.mode = 'hourly'
+        book.progress.requested_start = 100
+        book.progress.requested_end = 819
+        book.progress.valid_symbols = ['X-USDT', 'Y-USDT', 'Z-USDT']
+        book.progress.last_published_watermark = {'X-USDT': 99}
+        replay = book.replay_clone(['Y-USDT'])
+        observed = []
+        def replay_all(**kwargs):
+            from set_engine import Progress
+            # The low-level replay resets its metadata and emits progress.
+            replay.progress = Progress(phase='replay', pct=1)
+            kwargs['on_step']()
+            observed.append((book.progress.symbols_done, book.progress.pct, book.progress.run_id))
+            replay._hist_seen.add('Y-USDT')
+            replay.progress.phase = 'partial'
+            kwargs['on_step']()
+            observed.append((book.progress.symbols_done, book.progress.pct, book.progress.run_id))
+        replay.replay_all = replay_all
+        book.replay_clone = Mock(return_value=replay)
+        p = Pulse.__new__(Pulse)
+        p.sets = book; p._sets_generation = 1; p._state_lock = threading.RLock()
+        p.load = SimpleNamespace(last_budget=None)
+        p._hist_write_status = Mock(); p.write_stats = Mock()
+        p._hist_request_changed = lambda: False
+        p._score_committed = Mock()
+        self.assertTrue(p._replay_sets_isolated(['Y-USDT'], True, 3, completed_symbols={'X-USDT'}))
+        self.assertEqual(observed, [(1, 55., 'vst-current-run'), (2, 75., 'vst-current-run')])
+        self.assertEqual((book.progress.symbols_done, book.progress.symbols_total), (2, 3))
+        self.assertEqual((book.progress.run_id, book.progress.generation, book.progress.mode), ('vst-current-run', 7, 'hourly'))
+        self.assertEqual((book.progress.requested_start, book.progress.requested_end), (100, 819))
+        self.assertEqual(book.progress.last_published_watermark, {'X-USDT': 99})
+        self.assertEqual(book.progress.valid_symbols, ['X-USDT', 'Y-USDT', 'Z-USDT'])
+        self.assertFalse(book.progress.coordination_complete)
+        self.assertTrue(book.progress.ready)
+
+    def test_new_generation_during_replay_is_not_overwritten(self):
+        book = SetBook()
+        book.load({'stratGeneral': True, 'stratIndications': False, 'stratTrailing': False,
+                   'slToTpRatios': [.6], 'setMinStep': 3, 'setStepMax': 3})
+        p = Pulse.__new__(Pulse)
+        p.sets = book; p._sets_generation = 1; p._state_lock = threading.RLock()
+        p.load = SimpleNamespace(last_budget=None)
+        p._hist_write_status = Mock(); p.write_stats = Mock()
+        p._hist_request_changed = lambda: False; p._score_committed = Mock()
+        replay = book.replay_clone(['X-USDT'])
+        replacement = SetBook(); replacement.progress.run_id = 'new-generation'
+        def change(**kwargs):
+            p.sets = replacement; p._sets_generation = 2
+            kwargs['on_step']()
+        replay.replay_all = change
+        book.replay_clone = Mock(return_value=replay)
+        self.assertFalse(p._replay_sets_isolated(['X-USDT'], False, 1, completed_symbols=set()))
+        self.assertEqual(p.sets.progress.run_id, 'new-generation')
+        p._score_committed.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

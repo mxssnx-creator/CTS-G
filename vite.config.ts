@@ -389,9 +389,23 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
+        const handled = ["/stats.json", "/stats", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
+          return;
+        }
+        if (pathOnly === "/stats.json" || pathOnly === "/stats") {
+          // Nitro's preview handler can consume these paths before Vite's
+          // generic proxy. Keep the canonical stats route ahead of that handler,
+          // just like settings and system telemetry in dev and built preview.
+          if (method !== "GET") {
+            jsonRes(res as ServerResponse, 405, { ok: false, detail: "GET only" });
+            return;
+          }
+          const result = await tryPulse("GET", rawUrl, undefined, 8000);
+          const conn = new URL(rawUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
+          jsonRes(res as ServerResponse, result?.status === 200 ? 200 : 503,
+            result?.status === 200 ? result.json : statsFallback(conn));
           return;
         }
         if (pathOnly === "/system.json") {

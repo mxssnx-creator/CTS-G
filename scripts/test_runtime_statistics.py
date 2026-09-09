@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -250,6 +251,40 @@ class StatisticsTests(unittest.TestCase):
         monitor.sample(pulse)
         self.assertEqual(monitor.snapshot["totals"]["n"], 1)
         self.assertEqual(monitor.last_error, "")
+
+    def test_http_backup_waits_for_short_engine_write_without_losing_totals(self):
+        store = self.store()
+        store.record_trade(self.trade(1))
+        store.db.execute("BEGIN IMMEDIATE")
+        handler = ph.Handler.__new__(ph.Handler)
+        handler.path = "/system.json?conn=vst"
+        blob = json.dumps({"action": "backup"}).encode()
+        handler.headers = {"Content-Length": str(len(blob)), "Host": "127.0.0.1:3015"}
+        handler.rfile = io.BytesIO(blob)
+        result, timers = [], []
+        handler._json = lambda obj, code=200: result.append((code, obj))
+
+        def open_while_engine_writes(*args, **kwargs):
+            timer = threading.Timer(.35, store.db.commit)
+            timers.append(timer)
+            timer.start()
+            return StatisticsStore(*args, **kwargs)
+
+        try:
+            with patch.object(ph, "DIR", self.root), patch.object(ph, "StatisticsStore", side_effect=open_while_engine_writes):
+                handler.do_POST()
+        finally:
+            for timer in timers:
+                timer.join()
+            store.db.rollback()
+        self.assertEqual(result[0][0], 200, result)
+        backups = list((store.directory / "backups").glob("*.sqlite3"))
+        self.assertEqual(len(backups), 1)
+        with sqlite3.connect(backups[0]) as copied:
+            self.assertEqual(copied.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            totals = json.loads(copied.execute("SELECT value FROM meta WHERE key='totals'").fetchone()[0])
+        self.assertEqual(totals["n"], 1)
+        self.assertEqual(store.status()["totals"]["n"], 1)
 
     def test_request_buckets_apply_user_ceilings_and_keep_auto_memory_available(self):
         from bingx_fast import FastBingX, TokenBucket, LIMITS
