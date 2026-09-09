@@ -220,36 +220,43 @@ async function connBusy(id: string): Promise<boolean> {
 async function applyCtsControl(conn: string, action: string): Promise<{ ok: boolean; detail: string }> {
   const ids = laneIds(conn);
   const notes: string[] = [];
+  let allOk = true;
   if (action === "start" || action === "resume") {
     const flags = await Promise.all(ids.map(async (id) => ({ id, busy: await connBusy(id) })));
     const cold = flags.filter((f) => !f.busy).map((f) => f.id);
     if (cold.length) {
       try {
-        await ctsJson("POST", "/api/trade-engine/start", {}, 8000);
+        const started = await ctsJson("POST", "/api/trade-engine/start", {}, 8000);
+        allOk = allOk && started.ok;
       } catch {
+        allOk = false;
         notes.push("coordinator start timed out");
       }
     }
     if (action === "resume" && ids.length === 2) {
-      await ctsJson("POST", "/api/trade-engine/resume", {}, 8000);
+      const resumed = await ctsJson("POST", "/api/trade-engine/resume", {}, 8000);
+      allOk = allOk && resumed.ok;
     }
     for (const id of ids) {
       if (flags.find((f) => f.id === id)?.busy) {
         notes.push(`${laneLabel(id)} already running`);
         continue;
       }
-      await ctsJson("POST", `/api/settings/connections/${id}/live-trade`, { is_live_trade: true }, 8000);
-      await ctsJson(
+      const liveFlag = await ctsJson("POST", `/api/settings/connections/${id}/live-trade`, { is_live_trade: true }, 8000);
+      const quickStart = await ctsJson(
         "POST",
         "/api/trade-engine/quick-start",
         { action: "enable", connectionId: id, liveTrade: true, is_live_trade: true },
         20000,
       );
-      await ctsJson("POST", "/api/trade-engine/resume", { connectionId: id }, 8000);
+      const resumed = await ctsJson("POST", "/api/trade-engine/resume", { connectionId: id }, 8000);
+      allOk = allOk && liveFlag.ok && quickStart.ok && resumed.ok;
       const after = await engineStates(id);
-      notes.push(`${laneLabel(id)} ${after.engineRunning ? "started" : "queued"}`);
+      const started = Boolean(after.engineRunning);
+      allOk = allOk && started;
+      notes.push(`${laneLabel(id)} ${started ? "started" : "queued"}`);
     }
-    return { ok: true, detail: notes.join(" · ") || "started" };
+    return { ok: allOk, detail: notes.join(" · ") || (allOk ? "started" : "start failed") };
   }
   if (action === "pause") {
     // Global pause stops VST too — only use it for Overall.
@@ -264,26 +271,29 @@ async function applyCtsControl(conn: string, action: string): Promise<{ ok: bool
         { is_live_trade: false },
         8000,
       );
+      allOk = allOk && r.ok;
       notes.push(`${laneLabel(id)} entries paused`);
       if (!r.ok) notes.push(String(r.json.error || r.status));
     }
-    return { ok: true, detail: notes.join(" · ") };
+    return { ok: allOk, detail: notes.join(" · ") };
   }
   if (action === "stop") {
     if (ids.length === 2) {
-      await ctsJson("POST", "/api/trade-engine/stop", {}, 12000);
+      const stopped = await ctsJson("POST", "/api/trade-engine/stop", {}, 12000);
+      allOk = allOk && stopped.ok;
     }
     for (const id of ids) {
-      await ctsJson("POST", `/api/settings/connections/${id}/live-trade`, { is_live_trade: false }, 8000);
-      await ctsJson(
+      const liveFlag = await ctsJson("POST", `/api/settings/connections/${id}/live-trade`, { is_live_trade: false }, 8000);
+      const disabled = await ctsJson(
         "POST",
         "/api/trade-engine/quick-start",
         { action: "disable", connectionId: id },
         15000,
       );
+      allOk = allOk && liveFlag.ok && disabled.ok;
       notes.push(`${laneLabel(id)} stopped`);
     }
-    return { ok: true, detail: notes.join(" · ") + " · positions stay on BingX" };
+    return { ok: allOk, detail: notes.join(" · ") + " · positions stay on BingX" };
   }
   return { ok: false, detail: "unknown action" };
 }
