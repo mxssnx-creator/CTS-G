@@ -184,8 +184,8 @@ function DeskPage() {
         ) : (
           <>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {stats!.open.slice(0, 18).map((p) => (
-              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || ""}`} className="rounded-xl border border-border bg-bg2 p-4">
+            {stats!.open.slice(0, 18).map((p, index) => (
+              <article key={`${p.connType || conn}-${p.symbol}-${p.side}-${p.setId || p.clientId || p.axisKey || "position"}-${index}`} className="rounded-xl border border-border bg-bg2 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-lg font-medium">{p.symbol.replace("-USDT", "")}</div>
@@ -237,8 +237,8 @@ function DeskPage() {
           </div>
           {stats!.open.length > 18 ? (
             <div className="mt-3 grid grid-cols-2 gap-1 font-mono text-[11px] text-muted sm:grid-cols-3 lg:grid-cols-4">
-              {stats!.open.slice(18).map((p) => (
-                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || ""}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
+              {stats!.open.slice(18).map((p, index) => (
+                <div key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} className="flex items-center justify-between rounded-md border border-border px-2 py-1">
                   <span>{p.symbol.replace("-USDT", "")} {p.side === "LONG" ? "L" : "S"}</span>
                   <span className={pnlClass(p.uPnlPct)}>{p.uPnlPct >= 0 ? "+" : ""}{fmt(p.uPnlPct, 2)}%</span>
                 </div>
@@ -256,8 +256,8 @@ function DeskPage() {
         <Panel title="Risk tape" icon={<ShieldAlert className="size-4" />}>
           {(stats?.open ?? []).length ? (
             <div className="space-y-3">
-              {stats!.open.slice(0, 12).map((p) => (
-                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}`} p={p} />
+              {stats!.open.slice(0, 12).map((p, index) => (
+                <SlTpTape key={`${p.connType || ""}-${p.symbol}-${p.side}-${p.clientId || p.setId || p.axisKey || "position"}-${index}`} p={p} />
               ))}
             </div>
           ) : (

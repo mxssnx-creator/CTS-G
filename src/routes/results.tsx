@@ -646,8 +646,8 @@ function BlockResults({ stats }: { stats: LiveStats | null }) {
         <p className="py-6 text-center text-sm text-muted">Block lanes appear when a parent is open</p>
       ) : (
         <div className="space-y-4">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3">
+          {lanes.map((lane, index) => (
+            <div key={`${lane.symbol}-${lane.side}-${index}`} className="rounded-lg border border-border p-3">
               <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm">
                 <span className="font-medium">
                   {lane.symbol.replace("-USDT", "")} {lane.side}
@@ -702,8 +702,8 @@ function DcaResults({ stats }: { stats: LiveStats | null }) {
         <p className="py-6 text-center text-sm text-muted">Lanes attach when a parent is open</p>
       ) : (
         <div className="space-y-3">
-          {lanes.map((lane) => (
-            <div key={`${lane.symbol}-${lane.side}`} className="rounded-lg border border-border p-3 font-mono text-xs">
+          {lanes.map((lane, index) => (
+            <div key={`${lane.symbol}-${lane.side}-${index}`} className="rounded-lg border border-border p-3 font-mono text-xs">
               <div className="mb-2 flex justify-between gap-2">
                 <span>
                   {lane.symbol.replace("-USDT", "")} {lane.side}

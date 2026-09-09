@@ -329,7 +329,10 @@ def read_status(root, connection):
     """Read-only HTTP status; inspecting an unstarted lane never creates its DB."""
     from sqlite_memory import memory_request
     try:
-        current = memory_request(root, connection, {"action": "status"}, timeout=0.3)
+        # A busy high-cardinality lane may briefly hold the statistics lock
+        # while retaining its RAM database. Keep the request bounded, but give
+        # the owner enough time to answer before presenting a stale checkpoint.
+        current = memory_request(root, connection, {"action": "status"}, timeout=1.0)
         if current is not None:
             return current
     except (OSError, ValueError):
