@@ -33,6 +33,8 @@ export type ConnLane = {
   pfCost?: number;
   controlsOk?: number;
   controlsMissing?: number;
+  entryPolicy?: string;
+  executionEvidence?: Record<string, unknown>;
   symbolCount?: number;
 };
 

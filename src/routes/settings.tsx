@@ -518,7 +518,7 @@ function SettingsPage() {
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Effective simple positions in Simulated and Live · default OFF · independent of additional strategies" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -1294,7 +1294,7 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Simple positions in Simulated and Live · default OFF · internal General basis always active" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -2895,9 +2895,12 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />
         <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
         <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
-        <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
-        <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
-        <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
+  <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
+  <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
+  <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
+  <AppliedKV label="System vs exchange" value={`${remote(stats?.executionEvidence?.systemPnl)} system PnL · ${remote(stats?.executionEvidence?.systemClosed)} closes · ${remote(stats?.executionEvidence?.openParity)} open parity`} />
+  <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
+  <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
       </div>
       <p className="mt-2 font-mono text-[11px] text-muted">
         {dirty

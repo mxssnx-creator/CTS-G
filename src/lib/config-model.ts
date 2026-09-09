@@ -29,6 +29,14 @@ export const SYMBOL_SORTS = [
 
 export type SymbolSortId = (typeof SYMBOL_SORTS)[number]["id"];
 
+export type EntryPolicy = "strict" | "permissive-bounded";
+
+export function coerceEntryPolicy(value: unknown): EntryPolicy {
+  return String(value || "").trim().toLowerCase() === "permissive-bounded"
+    ? "permissive-bounded"
+    : "strict";
+}
+
 export const SYMBOL_SORT_IDS: SymbolSortId[] = SYMBOL_SORTS.map((s) => s.id);
 
 export type SymbolRankRow = {
@@ -189,6 +197,9 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
   normalExecutionEnabled: boolean;
+  entryPolicy: EntryPolicy;
+  entryPolicyMaxCandidates: number;
+  entryPolicyMinLiveSamples: number;
   blockActive: boolean;
   blockActiveMinLevel: number;
   blockEnabled: boolean;
@@ -361,7 +372,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   staggerS: 0.6,
   controlOrders: true,
   controlOrdersPerConfig: true,
-  normalExecutionEnabled: false,
+  normalExecutionEnabled: true,
+  entryPolicy: "permissive-bounded",
+  entryPolicyMaxCandidates: 12,
+  entryPolicyMinLiveSamples: 8,
   blockActiveMinLevel: 0,
   blockActive: true,
   blockEnabled: true,
@@ -550,6 +564,9 @@ export type CtsSettings = {
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
   normalExecutionEnabled?: boolean;
+  entryPolicy?: EntryPolicy | string;
+  entryPolicyMaxCandidates?: number;
+  entryPolicyMinLiveSamples?: number;
   blockActiveMinLevel?: number;
   blockActive?: boolean;
   blockActiveLiveEnabled?: boolean;
@@ -739,8 +756,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
-    normalExecutionEnabled: bool(cts.normalExecutionEnabled, false),
-    blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
+  normalExecutionEnabled: bool(live?.normalExecutionEnabled ?? cts.normalExecutionEnabled, true),
+  entryPolicy: coerceEntryPolicy(live?.entryPolicy ?? cts.entryPolicy ?? DEFAULT_OVERLAY.entryPolicy),
+  entryPolicyMaxCandidates: Math.max(2, Math.min(32, Math.round(num(live?.entryPolicyMaxCandidates ?? cts.entryPolicyMaxCandidates, 12)))),
+  entryPolicyMinLiveSamples: Math.max(5, Math.min(25, Math.round(num(live?.entryPolicyMinLiveSamples ?? cts.entryPolicyMinLiveSamples, 8)))),
+  blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
     blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
@@ -1022,6 +1042,10 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
+  next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
+  next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
+  next.entryPolicyMaxCandidates = Math.max(2, Math.min(32, Math.round(num(next.entryPolicyMaxCandidates, 12))));
+  next.entryPolicyMinLiveSamples = Math.max(5, Math.min(25, Math.round(num(next.entryPolicyMinLiveSamples, 8))));
   next.symbolsDynamic = next.symbolsDynamic !== false;
 
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));

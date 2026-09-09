@@ -101,6 +101,8 @@ STEP_MAX = 30
 HIST_CAP = 80
 _SIDE_LONG = "LONG"
 _SIDE_SHORT = "SHORT"
+ENTRY_POLICY_STRICT = "strict"
+ENTRY_POLICY_PERMISSIVE = "permissive-bounded"
 
 
 def _intern(value: Any, fallback: str = "") -> str:
@@ -1117,9 +1119,13 @@ class SetBook:
         self.block_counts = list(range(1, 7))
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
-        # VST-only exploration is opt-in through the X02 overlay.  It rotates
-        # a small, historic-qualified candidate set until each candidate has
-        # enough real exchange fills; X01 never enables this by default.
+        # Bounded exploration is explicit and lane-scoped. It admits only
+        # historic-qualified candidates while live evidence is cold, then
+        # hands admission back to the live evidence gates at the sample floor.
+        self.entry_policy = ENTRY_POLICY_STRICT
+        self.entry_policy_max_candidates = 12
+        self.entry_policy_min_live_samples = 8
+        # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
         self.live_test_candidates = 12
         self.live_test_min_samples = 8
@@ -1342,11 +1348,17 @@ class SetBook:
         self.additional_coordination = bool(
             ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
         )
-        self.live_test_mode = bool(ov.get("liveTestMode", False))
+        raw_policy = str(ov.get("entryPolicy") or (ENTRY_POLICY_PERMISSIVE if ov.get("liveTestMode") else ENTRY_POLICY_STRICT)).strip().lower()
+        self.entry_policy = raw_policy if raw_policy in (ENTRY_POLICY_STRICT, ENTRY_POLICY_PERMISSIVE) else ENTRY_POLICY_STRICT
         try:
-            self.live_test_candidates = max(2, min(32, int(ov.get("liveTestCandidates") or 12)))
+            self.entry_policy_max_candidates = max(
+                2,
+                min(32, int(ov.get("entryPolicyMaxCandidates") or ov.get("liveTestCandidates") or 12)),
+            )
         except Exception:
-            self.live_test_candidates = 12
+            self.entry_policy_max_candidates = 12
+        self.live_test_mode = self.entry_policy == ENTRY_POLICY_PERMISSIVE
+        self.live_test_candidates = self.entry_policy_max_candidates
         self.prefer_minimal_positive = self.prefer_minimal_range
         self.minimal_positive_coordination = self.additional_coordination
         try:
@@ -1356,9 +1368,13 @@ class SetBook:
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 8)))
         try:
-            self.live_test_min_samples = max(5, min(25, int(ov.get("liveTestMinSamples") or self.eval_need())))
+            self.entry_policy_min_live_samples = max(
+                5,
+                min(25, int(ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples") or self.eval_need())),
+            )
         except Exception:
-            self.live_test_min_samples = self.eval_need()
+            self.entry_policy_min_live_samples = self.eval_need()
+        self.live_test_min_samples = self.entry_policy_min_live_samples
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
         # PROFITABLE (cost-adjusted PF >= 1.10 = +1× PositionCost) + DDt under
@@ -4361,9 +4377,7 @@ class SetBook:
             )
 
         def live_ok(s: SetState) -> bool:
-            scoped = live_rows(s)
-            ok, _reason, _windows = self._live_windows_ok(scoped, minimum_pf=1.0)
-            return ok
+            return self._live_entry_allowed(s, want_side if use_side else None)
         live_pass = [s for s in passing if live_ok(s)]
         if all_valid:
             # Qualification is independent of ranking and of a sibling's live
@@ -4470,6 +4484,16 @@ class SetBook:
         rows = self.entry_sets(pack, side=side)
         return rows[0] if rows else None
 
+    def _entry_policy_is_permissive(self) -> bool:
+        return str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)).strip().lower() == ENTRY_POLICY_PERMISSIVE
+
+    def _live_entry_allowed(self, state: SetState, side: Optional[str] = None) -> bool:
+        """Apply the selected live-evidence policy without bypassing risk gates."""
+        rows = filter_side(state.live, side)
+        if self._entry_policy_is_permissive() and len(rows) < int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need()):
+            return True
+        return self._live_windows_ok(rows, minimum_pf=1.0)[0]
+
     def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
         """Return the exact Base rows allowed to source a new live entry.
 
@@ -4528,8 +4552,7 @@ class SetBook:
                 or dd > float(self.max_dd_s or 57600.0) + 1e-9
             ):
                 continue
-            live_rows = filter_side(state.live, want_side if use_side else None)
-            if not self._live_windows_ok(live_rows, minimum_pf=1.0)[0]:
+            if not self._live_entry_allowed(state, want_side if use_side else None):
                 continue
             result.append(state)
         return result
@@ -4584,6 +4607,14 @@ class SetBook:
                 key=lambda s: (s.idx, s.id),
             )
         )
+        if self._entry_policy_is_permissive() and rows:
+            min_live = int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need())
+            warm = [state for state in rows if len(filter_side(state.live, normalized_side)) >= min_live]
+            warm_ids = {state.id for state in warm}
+            cold = [state for state in rows if state.id not in warm_ids]
+            if cold:
+                cold.sort(key=lambda state: (-float(state.last15_ratio or 0), float(state.max_dd_s or 0), state.idx, state.id))
+                rows = tuple(sorted(warm + cold[: int(getattr(self, "entry_policy_max_candidates", 12) or 12)], key=lambda s: (s.idx, s.id)))
         # A concurrent live fill/replay publication may have advanced the
         # epoch while this scan ran. In that case discard the result; the next
         # caller will rebuild against the newer state.
@@ -4634,7 +4665,8 @@ class SetBook:
             return False
         if int(view.get("last15_n") or 0) >= self.eval_need() and pf < 1.0:
             return False
-        return self._live_windows_ok(filter_side(st.live, side), minimum_pf=1.0)[0]
+        return self._live_entry_allowed(st, side)
+
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
@@ -4984,7 +5016,10 @@ class SetBook:
         out = {
             "enabled": self.enabled,
             "ready": p.ready,
-            "entrySelectionPolicy": "validated-base-only",
+            "entrySelectionPolicy": self.entry_policy,
+            "entryPolicy": self.entry_policy,
+            "entryPolicyMaxCandidates": int(self.entry_policy_max_candidates),
+            "entryPolicyMinLiveSamples": int(self.entry_policy_min_live_samples),
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
             "mainEval": int(getattr(self, "main_eval", 5) or 5),

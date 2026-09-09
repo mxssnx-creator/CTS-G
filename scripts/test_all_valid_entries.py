@@ -286,6 +286,21 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual([state.id], [row.id for row in book.entry_sets('general', 'LONG')])
         self.assertEqual([], book.entry_sets('general', 'SHORT'))
 
+    def test_permissive_policy_allows_cold_historic_set_then_honors_live_negative_gate(self):
+        book = self.book(1)
+        book.entry_policy = "permissive-bounded"
+        book.entry_policy_min_live_samples = 8
+        state = book.by_idx[0]
+        self.assertEqual([state.id], [row.id for row in book.entry_sets("general", "LONG")])
+        self.assertTrue(book.execution_allowed(state, "general", "LONG"))
+        state.live = [
+            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0}
+            for i in range(8)
+        ]
+        book._invalidate_entry_cache()
+        self.assertEqual([], book.entry_sets("general", "LONG"))
+        self.assertFalse(book.execution_allowed(state, "general", "LONG"))
+
     def test_processing_retention_survives_set_deactivation_until_pending_closes(self):
         book = self.book(2)
         p = self.pulse(book)

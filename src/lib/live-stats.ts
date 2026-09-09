@@ -257,6 +257,26 @@ export type LiveStats = {
   systemLoss?: number;
   systemRealized?: number;
   systemUnrealized?: number;
+  executionEvidence?: {
+    connection?: string;
+    systemSource?: string;
+    systemClosed?: number;
+    systemPnl?: number;
+    systemRealized?: number;
+    systemUnrealized?: number;
+    internalOpen?: number;
+    exchangeOpen?: number;
+    exchangeOwnOpen?: number;
+    openParity?: "match" | "pending" | "discrepant" | string;
+    realStage?: Record<string, unknown>;
+    setCount?: number;
+    validatedSetCount?: number;
+    activeSetCount?: number;
+    progressPhase?: string;
+    progressPct?: number;
+    progressReady?: boolean;
+    snapshotAt?: number;
+  };
   walletEquity?: number;
   walletUnrealized?: number;
   pnlPct: number;
@@ -355,6 +375,7 @@ export type LiveStats = {
   progressLastRunMs?: number;
   progressCycle?: number;
   progressError?: string;
+  entryPolicy?: string;
   alive?: boolean;
   tests?: Array<{name:string;pass:boolean;detail:string;connection?:string}>;
   open: LiveOpen[];
@@ -589,7 +610,8 @@ export type LiveStats = {
     controlsOk?: number;
     controlsMissing?: number;
     controlsSecurity?: number;
-    validatedSetCount?: number;
+    entryPolicy?: string;
+    executionEvidence?: LiveStats["executionEvidence"];
     symbolCount?: number;
     lastError?: string;
     trackPrefix?: string;
@@ -702,6 +724,9 @@ export type LiveStats = {
   sets?: {
     enabled?: boolean;
     ready?: boolean;
+    entryPolicy?: string;
+    entryPolicyMaxCandidates?: number;
+    entryPolicyMinLiveSamples?: number;
     lookback?: number;
     pfWindow?: number;
     deactN?: number;

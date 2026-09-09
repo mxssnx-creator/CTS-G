@@ -251,7 +251,7 @@ def connection_public(cid: str) -> dict:
         "exchange": "BingX",
         "baseUrl": (raw.get("base_url") or default_url).rstrip("/"),
         "isTestnet": ctype == "vst",
-        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype == "mainnet",
+        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype in ("mainnet", "vst"),
         "apiKeyMasked": mask_key(raw.get("api_key") or ""),
         "apiKeySet": bool((raw.get("api_key") or "").strip()),
         "apiSecretSet": bool((raw.get("api_secret") or "").strip()),
@@ -298,7 +298,7 @@ def save_connection(cid: str, body: dict) -> tuple:
             "api_secret": secret,
             "is_testnet": "1",
             "base_url": "https://open-api-vst.bingx.com",
-            "live_trade_enabled": "0",
+            "live_trade_enabled": "1",
             "connection_method": method,
             "connection_type": "vst",
             "last_test_status": "saved",
@@ -1168,6 +1168,8 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "progressCycle": prog.get("cycle"),
         "validatedSetCount": sets.get("validatedCount") or 0,
         "setCount": sets.get("setCount") or 0,
+        "entryPolicy": (st.get("pulse") or {}).get("entryPolicy") or sets.get("entryPolicy"),
+        "executionEvidence": st.get("executionEvidence") or {},
         "progressError": prog.get("error") or "",
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
@@ -1516,6 +1518,8 @@ def connections_blob() -> dict:
                     "pfCost": l.get("pfCost"),
                     "controlsOk": l.get("controlsOk"),
                     "controlsMissing": l.get("controlsMissing"),
+                    "entryPolicy": l.get("entryPolicy"),
+                    "executionEvidence": l.get("executionEvidence"),
                     "symbolCount": l.get("symbolCount"),
                     "haltReason": l.get("haltReason"),
                 }
@@ -1706,6 +1710,44 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
             return
+        if path in ("/progress.json", "/progress"):
+            if conn == "overall":
+                progress_lanes = []
+                for lane in LANES:
+                    lane_stats = stamp_stats(load_stats(lane["id"]), lane["id"])
+                    progress_lanes.append(lane_stats.get("progress") or {})
+                self._json({
+                    "ok": True,
+                    "connection": "overall",
+                    "phase": "aggregate",
+                    "ready": bool(progress_lanes) and all(bool(item.get("ready")) for item in progress_lanes),
+                    "lanes": progress_lanes,
+                })
+                return
+            if conn not in ID_TO_LANE:
+                self._json({"ok": False, "detail": "pick a known connection"}, 400)
+                return
+            raw_progress_stats = load_stats(conn)
+            if not raw_progress_stats:
+                self._json({"ok": False, "connection": conn, "phase": "offline", "ready": False}, 404)
+                return
+            progress_stats = stamp_stats(raw_progress_stats, conn)
+            progress = dict(progress_stats.get("progress") or {})
+            sets = progress_stats.get("sets") if isinstance(progress_stats.get("sets"), dict) else {}
+            pulse = progress_stats.get("pulse") if isinstance(progress_stats.get("pulse"), dict) else {}
+            progress.update({
+                "connection": conn,
+                "setCount": sets.get("setCount"),
+                "activeSetCount": sets.get("activeCount"),
+                "validatedSetCount": sets.get("validatedCount"),
+                "histFills": sets.get("histFills"),
+                "entryPolicy": pulse.get("entryPolicy") or sets.get("entryPolicy"),
+                "entryPolicyMinLiveSamples": pulse.get("entryPolicyMinLiveSamples") or sets.get("entryPolicyMinLiveSamples"),
+                "statsAgeS": progress_stats.get("statsAgeS"),
+                "stale": bool(progress_stats.get("stale")),
+            })
+            self._json(progress)
+            return
         if path in ("/config.json", "/config"):
             if conn == "overall":
                 self._json({
@@ -1729,6 +1771,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "histLookbackBars": ov.get("histLookbackBars"),
                 "maxOpen": ov.get("maxOpen"),
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
+                "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
+                "entryPolicyMaxCandidates": ov.get("entryPolicyMaxCandidates") or ov.get("liveTestCandidates"),
+                "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
                 "dcaEnabled": ov.get("dcaEnabled"),

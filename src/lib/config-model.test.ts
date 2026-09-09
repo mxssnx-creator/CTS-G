@@ -10,7 +10,7 @@ import {
 } from "./config-model.ts";
 
 test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
-  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, false);
+  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, true);
   assert.equal(DEFAULT_OVERLAY.blockActiveMinLevel, 0);
   for (const normal of [false, true]) for (const active of [false, true]) for (const level of [0, 1, 3, 6]) {
     const loaded = overlayFromCts({}, { normalExecutionEnabled: normal, blockActive: active,
@@ -44,7 +44,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
     const saved = syncOverlayFlags(overlayFromCts({}, { systemSqliteMemory: mode, systemSqliteCheckpointS: 3 }));
     assert.equal(saved.systemSqliteMemory, mode);
     assert.equal(saved.systemSqliteCheckpointS, 3);
-    assert.equal(saved.normalExecutionEnabled, false);
+    assert.equal(saved.normalExecutionEnabled, true);
     assert.equal(saved.stratGeneral, true);
   }
   assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 0 }).systemSqliteCheckpointS, 1);
@@ -91,7 +91,7 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
 
 test("new and legacy settings default to adjusted execution, 110 Sets, 100 orders and 50 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
-    assert.equal(value.normalExecutionEnabled, false);
+    assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
     assert.equal(value.setMaxActive, 110);
     assert.equal(value.maxOpen, 100);

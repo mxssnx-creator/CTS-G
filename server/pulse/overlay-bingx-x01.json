@@ -19,6 +19,9 @@
   "blockVolumeRatio": 1,
   "controlOrders": true,
   "controlOrdersPerConfig": true,
+  "entryPolicy": "permissive-bounded",
+  "entryPolicyMaxCandidates": 12,
+  "entryPolicyMinLiveSamples": 8,
   "cooldownS": 9,
   "coordOptimizationN": 150,
   "dcaAutoDeact": true,
@@ -112,7 +115,7 @@
     "strategy.trailing": true
   },
   "noise": 0.05,
-  "normalExecutionEnabled": false,
+  "normalExecutionEnabled": true,
   "blockActiveMinLevel": 0,
   "pfWindow": 15,
   "posCountsVolumeRatio": 0.05,

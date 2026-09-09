@@ -6712,7 +6712,7 @@ class Pulse:
 
     def pulse_snapshot(self) -> Dict[str, Any]:
         return {
-            "entrySelectionPolicy": "validated-base-only",
+            "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -6786,6 +6786,9 @@ class Pulse:
             "stratBlock": self.strat_block,
             "stratTrailing": self.strat_trail,
             "normalExecutionEnabled": self.normal_execution_enabled,
+            "entryPolicy": str(getattr(self.sets, "entry_policy", "strict")),
+            "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 12) or 12),
+            "entryPolicyMinLiveSamples": int(getattr(self.sets, "entry_policy_min_live_samples", self.sets.eval_need()) or self.sets.eval_need()),
             "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
@@ -9406,6 +9409,39 @@ class Pulse:
                 "complete": bool(historic_snap.get("coordinationComplete")),
             }
         config_evidence = self._config_evidence_snapshot()
+        exchange_own_raw = getattr(self, "exchange_own_open_count", -1)
+        exchange_total_raw = getattr(self, "exchange_open_count", -1)
+        exchange_own_open = int(exchange_own_raw) if exchange_own_raw is not None else -1
+        exchange_total_open = int(exchange_total_raw) if exchange_total_raw is not None else -1
+        internal_open = int(len(self.open))
+        if exchange_own_open < 0:
+            open_parity = "pending"
+        elif exchange_own_open == internal_open:
+            open_parity = "match"
+        else:
+            open_parity = "discrepant"
+        stage_flow = sets_snap.get("stageFlow") if isinstance(sets_snap, dict) else {}
+        stage_rows = stage_flow.get("stages") if isinstance(stage_flow, dict) else {}
+        execution_evidence = {
+            "connection": CONN_SHORT,
+            "systemSource": act.get("source", "system-orders"),
+            "systemClosed": int(act.get("n") or 0),
+            "systemPnl": round(float(act.get("pnl") or 0), 4),
+            "systemRealized": round(realized, 4),
+            "systemUnrealized": round(float(act.get("unrealized") or 0), 4),
+            "internalOpen": internal_open,
+            "exchangeOpen": exchange_total_open,
+            "exchangeOwnOpen": exchange_own_open,
+            "openParity": open_parity,
+            "realStage": dict(stage_rows.get("real") or {}) if isinstance(stage_rows, dict) else {},
+            "setCount": int(sets_snap.get("setCount") or 0),
+            "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
+            "activeSetCount": int(sets_snap.get("activeCount") or 0),
+            "progressPhase": phase,
+            "progressPct": pct_val,
+            "progressReady": ready_flag,
+            "snapshotAt": time.time(),
+        }
         try:
             from stats_report import merge_kind_stats, merge_strategy_stats
             now_m = time.monotonic()
@@ -9464,6 +9500,7 @@ class Pulse:
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act["unrealized"]), 4),
             "systemSource": act.get("source", "system-orders"),
+            "executionEvidence": execution_evidence,
             "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
             "drawdownAmount": act["drawdownAmount"],

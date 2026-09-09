@@ -389,7 +389,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/stats.json", "/stats", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
+        const handled = ["/stats.json", "/stats", "/progress.json", "/progress", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -406,6 +406,30 @@ function pulseControlPlugin(): Plugin {
           const conn = new URL(rawUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
           jsonRes(res as ServerResponse, result?.status === 200 ? 200 : 503,
             result?.status === 200 ? result.json : statsFallback(conn));
+          return;
+        }
+        if (pathOnly === "/progress.json" || pathOnly === "/progress") {
+          if (method !== "GET") {
+            jsonRes(res as ServerResponse, 405, { ok: false, detail: "GET only" });
+            return;
+          }
+          const pulse = await tryPulse("GET", rawUrl, undefined, 8000);
+          if (pulse && pulse.status < 400) {
+            jsonRes(res as ServerResponse, pulse.status, pulse.json);
+            return;
+          }
+          const conn = new URL(rawUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
+          const fallback = statsFallback(conn);
+          const lanes = Array.isArray(fallback.lanes) ? fallback.lanes : [];
+          jsonRes(res as ServerResponse, 200, {
+            ok: false,
+            connection: conn,
+            phase: conn === "overall" ? "offline" : String(fallback.progressPhase || "offline"),
+            ready: false,
+            detail: "pulse sidecar unavailable",
+            stale: true,
+            lanes,
+          });
           return;
         }
         if (pathOnly === "/system.json") {
