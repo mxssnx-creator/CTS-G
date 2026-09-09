@@ -10896,6 +10896,10 @@ class Pulse:
                     source.progress = merge_progress()
                     return False
                 wanted = set(names)
+                # The replay clone publishes only non-empty tapes. The
+                # SetBook merge receives the completed symbol names and
+                # clears stale rows for every omitted Set without retaining a
+                # second full ``set_id -> []`` map under the live lock.
                 incoming = {}
                 affected = set()
                 # An empty replacement still removes prior evidence. Score
@@ -10905,10 +10909,9 @@ class Pulse:
                         affected.add(sid)
                 for sid, target in replay_book.sets.items():
                     tape = target.hist
-                    # Empty is a completed result, not an omitted config.
-                    incoming[sid] = list(tape)
                     if not tape:
                         continue
+                    incoming[sid] = list(tape)
                     if any(str(row.get("symbol") or "") in wanted for row in tape):
                         affected.add(sid)
                 source._commit_hist(

@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server/pulse"))
 from runtime_statistics import StatisticsStore, RuntimeMonitor, lane_directory, read_status, persistent_activity
+import runtime_statistics as runtime_stats
 from system_settings import calculation_overlay, normalize_system_settings
 from set_engine import SetBook
 from storage_paths import append_bounded_line, configure_retention
@@ -313,6 +314,31 @@ class StatisticsTests(unittest.TestCase):
         governor.configure({"rssSoftMb":1000, "rssHardMb":2000})
         governor.configure({"rssSoftMb":0, "rssHardMb":0})
         self.assertEqual((governor.soft_mb, governor.hard_mb), (0,0))
+
+    def test_redis_health_reports_bounded_database_breakdown_and_ops_rate(self):
+        raw = "\n".join([
+            "used_memory:1048576",
+            "maxmemory:67108864",
+            "instantaneous_ops_per_sec:17",
+            "aof_enabled:1",
+            "aof_last_write_status:ok",
+            "rdb_last_bgsave_status:ok",
+            "db0:keys=12,expires=3,avg_ttl=9000",
+            "db2:keys=4,expires=1,avg_ttl=1200",
+        ])
+        result = NS(returncode=0, stdout=raw)
+        runtime_stats._REDIS_CACHE.clear()
+        try:
+            with patch.object(runtime_stats.subprocess, "run", return_value=result):
+                health = runtime_stats.redis_health()
+        finally:
+            runtime_stats._REDIS_CACHE.clear()
+        self.assertTrue(health["available"])
+        self.assertEqual(health["databaseCount"], 2)
+        self.assertEqual(health["keys"], 16)
+        self.assertEqual(health["expiringKeys"], 4)
+        self.assertEqual(health["operationsPerSec"], 17)
+        self.assertEqual(health["databases"]["db0"]["avgTtlMs"], 9000)
 
 
 if __name__ == "__main__": unittest.main()
