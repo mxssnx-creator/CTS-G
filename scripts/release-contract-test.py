@@ -188,6 +188,21 @@ redis_ready
             self.assertTrue(pulse_http._live_heal_allowed("bingx-x02"))
         with self.assertRaises(ValueError):
             pulse_http.write_overlay("../../outside", {"setMinStep": 1})
+    def test_pulse_units_run_within_project_tree(self):
+        engine = (ROOT / "deploy/grok-pulse@.service").read_text()
+        http = (ROOT / "deploy/grok-pulse-http.service").read_text()
+        common = (ROOT / "deploy/linux-common.sh").read_text()
+        # The shipped pulse units must run from the in-project server/pulse
+        # tree, never the former standalone /opt/grok-x01-pulse path.
+        for unit in (engine, http):
+            self.assertIn("WorkingDirectory=/opt/cts-g/server/pulse", unit)
+            self.assertNotIn("/opt/grok-x01-pulse", unit)
+        self.assertIn("/opt/cts-g/server/pulse/pulse_trader.py", engine)
+        self.assertIn("/opt/cts-g/server/pulse/pulse_http.py", http)
+        # render_unit scopes the project-relative pulse path to ${PULSE_DIR}.
+        self.assertIn("s|/opt/cts-g/server/pulse|${PULSE_DIR}|g", common)
+        self.assertIn('PULSE_DIR="$CTS_G_ROOT/server/pulse"', common)
+
     def test_storage_and_historic_range_contracts(self):
         from hist_calc import HOURS_MAX, hours_to_bars, overlay_from_options, parse_options
         self.assertEqual(HOURS_MAX, 336)
