@@ -998,6 +998,20 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     historic_completed_bars = sum(int(_report_number(bars.get("completed"))) for bars in historic_bars if isinstance(bars, dict))
     historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
     has_historic = any(bool(historic) for historic in historic_states)
+    logical_position_count = sum(
+        int(_report_number(state.get("logicalPositionCount", state.get("openCount"))))
+        for state in states
+    )
+    exchange_group_values = [
+        int(_report_number(state.get("exchangePositionGroupCount", state.get("exchangeOwnOpenCount", state.get("exchangeOpenCount", -1)))))
+        for state in states
+    ]
+    exchange_position_group_count = sum(exchange_group_values) if all(value >= 0 for value in exchange_group_values) else -1
+    entry_candidate_count = sum(
+        int(_report_number((state.get("pulse") or {}).get("entryCandidateCount")))
+        for state in states
+        if isinstance(state.get("pulse") or {}, dict)
+    )
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
@@ -1024,7 +1038,9 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
-        "openCount": len(open_positions),
+        "openCount": logical_position_count,
+        "logicalPositionCount": logical_position_count,
+        "exchangePositionGroupCount": exchange_position_group_count,
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
@@ -1048,6 +1064,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "setCount": set_count,
             "activeCount": active_count,
             "validatedCount": validated_count,
+            "entryCandidateCount": entry_candidate_count,
             "histFills": hist_fills,
         },
         "coverage": {
@@ -1059,7 +1076,16 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "qaFail": sum(int(_report_number(coverage.get("qaFail"))) for coverage in coverages),
             "strategies": strategies,
             "indicationTypes": indication_types,
-            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "histFills": hist_fills},
+            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "entryCandidateCount": entry_candidate_count, "histFills": hist_fills},
+            "controls": {
+                "mode": "per-config",
+                "open": logical_position_count,
+                "logicalOpen": logical_position_count,
+                "exchangePositionGroups": exchange_position_group_count,
+                "groupCount": logical_position_count,
+                "pairCount": logical_position_count,
+                "expectedPairs": logical_position_count,
+            },
         },
         "coord": {"gate": {"allow": all(bool((state.get("coord") or {}).get("gate", {}).get("allow")) for state in states)}},
     }

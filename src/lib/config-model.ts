@@ -375,10 +375,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   drawdownHaltPct: 18,
   minimumEquity: 0.2,
   controlOrders: true,
-  controlOrdersPerConfig: false,
+  controlOrdersPerConfig: true,
   normalExecutionEnabled: true,
   entryPolicy: "permissive-bounded",
-  entryPolicyMaxCandidates: 12,
+  entryPolicyMaxCandidates: 0,
   entryPolicyMinLiveSamples: 8,
   blockActiveMinLevel: 0,
   blockActive: true,
@@ -511,7 +511,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setStrictGate: true,
   setMinSamples: 8,
   setReactivate: true,
-  setMaxActive: 110,
+  setMaxActive: 0,
   setMinStep: 1,
   setStepMax: 30,
   setStepAdapt: true,
@@ -756,7 +756,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     controlOrders: bool(cts.control_orders, true),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
-      false,
+      true,
     ),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
@@ -767,7 +767,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
   normalExecutionEnabled: bool(live?.normalExecutionEnabled ?? cts.normalExecutionEnabled, true),
   entryPolicy: coerceEntryPolicy(live?.entryPolicy ?? cts.entryPolicy ?? DEFAULT_OVERLAY.entryPolicy),
-  entryPolicyMaxCandidates: Math.max(2, Math.min(32, Math.round(num(live?.entryPolicyMaxCandidates ?? cts.entryPolicyMaxCandidates, 12)))),
+  entryPolicyMaxCandidates: (() => {
+    const candidateCap = Math.round(num(live?.entryPolicyMaxCandidates ?? cts.entryPolicyMaxCandidates, 0));
+    return candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
+  })(),
   entryPolicyMinLiveSamples: Math.max(5, Math.min(25, Math.round(num(live?.entryPolicyMinLiveSamples ?? cts.entryPolicyMinLiveSamples, 8)))),
   blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
     blockActive: bool(cts.blockActive, true),
@@ -885,7 +888,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setStrictGate: bool(cts.setStrictGate, true),
     setMinSamples: num(cts.setMinSamples, 8),
     setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 110),
+    setMaxActive: num(cts.setMaxActive, 0),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
     setStepMax: num(cts.setStepMax, 30),
     setStepAdapt: bool(cts.setStepAdapt, true),
@@ -1061,10 +1064,11 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.preferMinimalPositive;
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
-  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, false);
+  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
-  next.entryPolicyMaxCandidates = Math.max(2, Math.min(32, Math.round(num(next.entryPolicyMaxCandidates, 12))));
+  const candidateCap = Math.round(num(next.entryPolicyMaxCandidates, 0));
+  next.entryPolicyMaxCandidates = candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
   next.entryPolicyMinLiveSamples = Math.max(5, Math.min(25, Math.round(num(next.entryPolicyMinLiveSamples, 8))));
   next.symbolsDynamic = next.symbolsDynamic !== false;
 

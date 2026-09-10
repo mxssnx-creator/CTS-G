@@ -1030,9 +1030,9 @@ class SetBook:
         self.min_samples = 8
         self.reactivate = True
         self.strict_gate = True
-        # Keep the default active catalogue near the requested 80-set live
-        # budget.  A zero value remains the explicit unlimited choice.
-        self.max_active = 80
+        # Keep every quality-qualified Set available by default. Positive values
+        # remain an explicit bounded selection policy; zero means unlimited.
+        self.max_active = 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.cost_source = "manual-fallback"
         # Optional live-selection policy: prefer the smallest stable
@@ -1123,11 +1123,11 @@ class SetBook:
         # historic-qualified candidates while live evidence is cold, then
         # hands admission back to the live evidence gates at the sample floor.
         self.entry_policy = ENTRY_POLICY_STRICT
-        self.entry_policy_max_candidates = 12
+        self.entry_policy_max_candidates = 0
         self.entry_policy_min_live_samples = 8
         # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
-        self.live_test_candidates = 12
+        self.live_test_candidates = 0
         self.live_test_min_samples = 8
 
     def __getstate__(self) -> Dict[str, Any]:
@@ -1351,12 +1351,13 @@ class SetBook:
         raw_policy = str(ov.get("entryPolicy") or (ENTRY_POLICY_PERMISSIVE if ov.get("liveTestMode") else ENTRY_POLICY_STRICT)).strip().lower()
         self.entry_policy = raw_policy if raw_policy in (ENTRY_POLICY_STRICT, ENTRY_POLICY_PERMISSIVE) else ENTRY_POLICY_STRICT
         try:
-            self.entry_policy_max_candidates = max(
-                2,
-                min(32, int(ov.get("entryPolicyMaxCandidates") or ov.get("liveTestCandidates") or 12)),
-            )
+            raw_candidates = ov.get("entryPolicyMaxCandidates")
+            if raw_candidates is None:
+                raw_candidates = ov.get("liveTestCandidates")
+            raw_candidates = 0 if raw_candidates is None else int(raw_candidates)
+            self.entry_policy_max_candidates = 0 if raw_candidates <= 0 else max(2, min(32, raw_candidates))
         except Exception:
-            self.entry_policy_max_candidates = 12
+            self.entry_policy_max_candidates = 0
         self.live_test_mode = self.entry_policy == ENTRY_POLICY_PERMISSIVE
         self.live_test_candidates = self.entry_policy_max_candidates
         self.prefer_minimal_positive = self.prefer_minimal_range
@@ -1381,9 +1382,9 @@ class SetBook:
         # the cap may drive live orders. Cold/unproven sets keep collecting.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 110)
+            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
         except Exception:
-            raw_active = 110
+            raw_active = 0
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
@@ -4582,6 +4583,9 @@ class SetBook:
             round(float(self.real_min_pf or 0.0), 12),
             round(float(self.max_dd_s or 0.0), 6),
             round(float(self.cost_pct or 0.0), 12),
+            str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
+            int(getattr(self, "entry_policy_max_candidates", 0) or 0),
+            int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need()),
         )
 
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
@@ -4614,7 +4618,9 @@ class SetBook:
             cold = [state for state in rows if state.id not in warm_ids]
             if cold:
                 cold.sort(key=lambda state: (-float(state.last15_ratio or 0), float(state.max_dd_s or 0), state.idx, state.id))
-                rows = tuple(sorted(warm + cold[: int(getattr(self, "entry_policy_max_candidates", 12) or 12)], key=lambda s: (s.idx, s.id)))
+                candidate_cap = int(getattr(self, "entry_policy_max_candidates", 0) or 0)
+                admitted_cold = cold if candidate_cap <= 0 else cold[:candidate_cap]
+                rows = tuple(sorted(warm + admitted_cold, key=lambda s: (s.idx, s.id)))
         # A concurrent live fill/replay publication may have advanced the
         # epoch while this scan ran. In that case discard the result; the next
         # caller will rebuild against the newer state.

@@ -93,9 +93,10 @@ test("new and legacy settings default to unlimited logical positions, independen
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
-    assert.equal(value.setMaxActive, 110);
+    assert.equal(value.setMaxActive, 0);
     assert.equal(value.maxOpen, 0);
-    assert.equal(value.controlOrdersPerConfig, false);
+    assert.equal(value.controlOrdersPerConfig, true);
+    assert.equal(value.entryPolicyMaxCandidates, 0);
     assert.equal(value.dcaEnabled, true);
     assert.equal(value.stratDca, true);
     assert.equal(value.modules?.["strategy.dca"], true);
@@ -115,9 +116,9 @@ test("new and legacy settings default to unlimited logical positions, independen
   }
 });
 
-test("missing control mode fields default to one aggregate pair", () => {
+test("missing control mode fields default to independent per-config pairs", () => {
   const value = syncOverlayFlags(overlayFromCts({}, { controlOrdersPerConfig: undefined }));
-  assert.equal(value.controlOrdersPerConfig, false);
+  assert.equal(value.controlOrdersPerConfig, true);
 });
 
 test("an explicit All/* cap of 25 stays ranked and is not unlimited", () => {

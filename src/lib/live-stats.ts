@@ -288,8 +288,13 @@ export type LiveStats = {
     systemRealized?: number;
     systemUnrealized?: number;
     internalOpen?: number;
+    internalPositionGroups?: number;
     exchangeOpen?: number;
     exchangeOwnOpen?: number;
+    exchangePositionGroups?: number;
+    entryCandidateCount?: number;
+    activeSetCap?: number;
+    activeSetUnlimited?: boolean;
     foreignPositionCount?: number;
     foreignOpenOrderCount?: number;
     foreignUnrealized?: number;
@@ -311,7 +316,9 @@ export type LiveStats = {
   losses: number;
   winRate: number;
   openCount: number;
+  logicalPositionCount?: number;
   exchangeOpenCount?: number;
+  exchangePositionGroupCount?: number;
   simOpenCount?: number;
   simUPnl?: number;
   maxOpen: number;
@@ -511,6 +518,8 @@ export type LiveStats = {
       setCount?: number;
       activeCount?: number;
       validatedCount?: number;
+      entryCandidateCount?: number;
+      entryCandidateCap?: number;
       histFills?: number;
       liveFills?: number;
       liveProcessed?: number;
@@ -535,8 +544,13 @@ export type LiveStats = {
     security?: number;
     mode?: string;
     pairCount?: number;
+    expectedPairs?: number;
+    protectedPairs?: number;
+    pairGaps?: number;
     aggregatePairCount?: number;
     logicalPositionCap?: number;
+    logicalOpen?: number;
+    exchangePositionGroups?: number;
     groupCount?: number;
     protectedGroups?: number;
       mergedMembers?: number;
@@ -562,7 +576,7 @@ export type LiveStats = {
         lineageSetIds?: string[];
       }>;
     };
-    recon?: { ok?: boolean; pending?: boolean; detail?: string };
+    recon?: { ok?: boolean; pending?: boolean; detail?: string; logicalOpen?: number; exchangePositionGroups?: number };
     activity?: ActivitySummary;
     events?: ActivityEvent[];
     px?: number;

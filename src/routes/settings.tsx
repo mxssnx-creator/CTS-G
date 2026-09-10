@@ -1593,7 +1593,7 @@ function SettingsPage() {
                   min={0}
                   max={10000}
                   step={1}
-                  hint="Default 110 qualified Sets · 0 = unlimited"
+                  hint="All validated Sets by default · 0 = unlimited"
                   onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
@@ -2196,7 +2196,7 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Hedge-safe TP/SL protection · aggregate common pair by symbol + direction by default">
+            <Card title="Control orders" hint="Hedge-safe TP/SL protection · independent quantity-matched pair per logical configuration by default">
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
@@ -2205,7 +2205,7 @@ function SettingsPage() {
                 />
                 <Toggle
                   label="Individual controls per configuration/order"
-                  hint="OFF = one common close-position SL + TP per symbol/direction; ON = quantity-matched pair per config/range"
+                  hint="ON = quantity-matched pair per logical config/range; OFF = one common close-position pair per symbol/direction"
                   on={overlay.controlOrdersPerConfig}
                   onChange={(v) => patch("controlOrdersPerConfig", v)}
                 />
