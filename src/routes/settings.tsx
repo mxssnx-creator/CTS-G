@@ -488,28 +488,28 @@ function SettingsPage() {
                 <div className="mt-3">
                   <Grid>
                     <Num
-                      label="Open-order cap"
+                      label="Logical-position cap"
                       value={overlay.maxOpen}
                       min={0}
                       max={10000}
                       step={1}
-                      hint="Target 100 open orders · 0 = unlimited"
+                      hint="0 = unlimited logical positions · margin, API and exchange limits still apply"
                       onChange={(v) => patch("maxOpen", Math.round(v))}
                     />
                     <Num
-                      label="Symbols count"
+                      label="Ranked symbol cap"
                       value={overlay.symbolCap}
                       min={0}
                       max={10000}
                       step={1}
-                      hint={`Target ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = unlimited`}
+                      hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = all-unlimited universe`}
                       onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
                     />
                     <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
                     <Num label="Set PF minimum" value={overlay.setMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("setMinPf", normalizePf(v, overlay.setMinPf))} />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
-                    <Toggle label="Control orders per configuration" on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
+                    <Toggle label="Individual SL/TP per configuration" hint={overlay.controlOrdersPerConfig ? "ON · quantity-matched pair per config/range" : "OFF · one common close-position pair per symbol + direction"} on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
                   </Grid>
                 </div>
               </div>
@@ -2034,7 +2034,7 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Hedge-safe TP/SL protection · quantity-matched by symbol, direction and range">
+            <Card title="Control orders" hint="Hedge-safe TP/SL protection · aggregate common pair by symbol + direction by default">
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
@@ -2042,7 +2042,8 @@ function SettingsPage() {
                   onChange={(v) => patch("controlOrders", v)}
                 />
                 <Toggle
-                  label="Separate controls by symbol + direction + range"
+                  label="Individual controls per configuration/order"
+                  hint="OFF = one common close-position SL + TP per symbol/direction; ON = quantity-matched pair per config/range"
                   on={overlay.controlOrdersPerConfig}
                   onChange={(v) => patch("controlOrdersPerConfig", v)}
                 />
@@ -2060,7 +2061,7 @@ function SettingsPage() {
               <p className="text-sm text-muted">
                 {overlay.controlOrdersPerConfig
                   ? "Each symbol + direction + normalized SL/TP range receives its own quantity-matched TP/SL pair. Identical ranges merge by quantity and weighted entry, while Set lineage stays attached."
-                  : "Controls use the legacy aggregate symbol + direction pair and widest range. Turn on per-config mode to isolate independent ranges without closePosition fallback."}
+                  : "Controls use one common close-position SL + TP per symbol and hedge direction. The pair widens to the highest effective merged member range; turn on individual mode for quantity-matched pairs per config/range."}
               </p>
             </Card>
           )}
@@ -2784,7 +2785,7 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">Every logical group has quantity-matched SL + TP protection</p>
+        <p className="mt-2 text-muted">{mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
       )}
     </div>
   );
@@ -2888,7 +2889,9 @@ function EffectiveSettingsSummary({
         <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
-        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controls?.groupCount)} groups`} />
+        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controls?.groupCount)} pairs`} />
+        <AppliedKV label="Logical cap · members" value={`${remote(pulse?.maxOpen)} · ${remote(controls?.mergedMembers)} merged`} />
+        <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
         <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
         <AppliedKV label="Live ranges" value={controlRanges} />
         <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />

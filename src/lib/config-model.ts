@@ -353,7 +353,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   volumeFactor: 1,
   leverage: 150,
   useMaxLeverage: true,
-  maxOpen: 100,
+  maxOpen: 0,
   maxPerGroup: 0,
   symbolsAll: true,
   symbolsDynamic: true,
@@ -371,7 +371,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   cooldownS: 9,
   staggerS: 0.6,
   controlOrders: true,
-  controlOrdersPerConfig: true,
+  controlOrdersPerConfig: false,
   normalExecutionEnabled: true,
   entryPolicy: "permissive-bounded",
   entryPolicyMaxCandidates: 12,
@@ -387,7 +387,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
-  dcaEnabled: false,
+  dcaEnabled: true,
   dcaMaxSteps: 4,
   dcaCooldownSeconds: 30,
   dcaBreakevenProfitPct: 0.2,
@@ -461,7 +461,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   stratBlock: true,
   stratTrailing: true,
   stratGeneral: true,
-  stratDca: false,
+  stratDca: true,
   indTypeState: true,
   indTypeDirection: true,
   indTypeMove: true,
@@ -534,7 +534,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
     "strategy.sets": true,
     "core.historic": true,
     "strategy.block": true,
-    "strategy.dca": false,
+    "strategy.dca": true,
     "strategy.coord": true,
     "strategy.indications": true,
     "strategy.rearrange": true,
@@ -747,7 +747,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     controlOrders: bool(cts.control_orders, true),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
-      true,
+      false,
     ),
     blockEnabled: bool(cts.variantBlockEnabled ?? cts.variant_block, true),
     blockMaxStack: num(cts.blockMaxStack ?? coord.blockMaxStack, 6),
@@ -764,7 +764,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
-    dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, false),
+    dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, true),
     dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 4),
     dcaCooldownSeconds: num(cts.dcaCooldownSeconds ?? coord.dcaCooldownSeconds, 30),
     dcaBreakevenProfitPct: num(cts.dcaBreakevenProfitPct ?? coord.dcaBreakevenProfitPct, 0.2),
@@ -837,7 +837,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     stratBlock: bool(cts.stratBlock, true),
     stratTrailing: bool(cts.stratTrailing, true),
     stratGeneral: bool(cts.stratGeneral, true),
-    stratDca: bool(cts.stratDca ?? cts.dcaEnabled, false),
+    stratDca: bool(cts.stratDca ?? cts.dcaEnabled, true),
     indTypeState: bool(cts.indTypeState, true),
     indTypeDirection: bool(cts.indTypeDirection, true),
     indTypeMove: bool(cts.indTypeMove, true),
@@ -1041,7 +1041,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.preferMinimalPositive;
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
-  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
+  next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, false);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
   next.entryPolicyMaxCandidates = Math.max(2, Math.min(32, Math.round(num(next.entryPolicyMaxCandidates, 12))));

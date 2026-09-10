@@ -893,6 +893,10 @@ class Position:
     control_sl_bp: int = 0
     control_tp_bp: int = 0
     legacy_aggregate: bool = False
+    # Aggregate mode keeps the widest effective member ranges so one common
+    # close-position SL/TP pair never becomes narrower after a merge.
+    aggregate_sl_pct: float = 0.0
+    aggregate_tp_pct: float = 0.0
     member_count: int = 1
     lineage_set_ids: List[str] = field(default_factory=list)
     lineage_parent_set_ids: List[str] = field(default_factory=list)
@@ -983,7 +987,7 @@ class Pulse:
         self.exchange_order_own_count = -1
         self.exchange_order_total_count = -1
         self.exchange_order_foreign_count = -1
-        self.control_orders_per_config = True
+        self.control_orders_per_config = False
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
@@ -1353,7 +1357,7 @@ class Pulse:
 
     def per_config_controls(self, pos: Optional[Position] = None) -> bool:
         """Whether a position participates in quantity-matched range controls."""
-        if not bool(getattr(self, "control_orders_per_config", True)):
+        if not bool(getattr(self, "control_orders_per_config", False)):
             return False
         if pos is None:
             return True
@@ -1365,6 +1369,32 @@ class Pulse:
         return bool(getattr(pos, "control_group_key", "")) or (
             _sf(getattr(pos, "sl_pct", 0)) > 0 and _sf(getattr(pos, "tp_pct", 0)) > 0
         )
+
+    def aggregate_member_ranges(self, pos: Position) -> Tuple[float, float]:
+        """Return the widest effective member SL/TP fractions for an aggregate."""
+        sl = max(
+            0.0,
+            _sf(getattr(pos, "aggregate_sl_pct", 0.0)),
+            _sf(getattr(pos, "sl_pct", 0.0)),
+        )
+        tp = max(
+            0.0,
+            _sf(getattr(pos, "aggregate_tp_pct", 0.0)),
+            _sf(getattr(pos, "tp_pct", 0.0)),
+        )
+        return sl, tp
+
+    def widen_aggregate_range(self, pos: Position, sl_pct: Any = 0.0, tp_pct: Any = 0.0) -> None:
+        """Persist a monotonic aggregate range without changing per-config keys."""
+        current_sl, current_tp = self.aggregate_member_ranges(pos)
+        widened_sl = max(current_sl, _sf(sl_pct))
+        widened_tp = max(current_tp, _sf(tp_pct))
+        pos.aggregate_sl_pct = widened_sl
+        pos.aggregate_tp_pct = widened_tp
+        if widened_sl > 0:
+            pos.sl_pct = widened_sl
+        if widened_tp > 0:
+            pos.tp_pct = widened_tp
 
     def prepare_position_group(self, pos: Position, legacy: Optional[bool] = None) -> Position:
         """Attach a restart-safe control identity and bounded lineage metadata."""
@@ -1411,6 +1441,7 @@ class Pulse:
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
             # range key make the disabled mode look like per-config controls.
+            self.widen_aggregate_range(pos, sl_value, tp_value)
             pos.control_group_key = ""
             pos.control_range_key = "aggregate"
             pos.control_sl_bp = 0
@@ -1499,6 +1530,17 @@ class Pulse:
             pos for pos in self.open.values()
             if pos.symbol == symbol and (not side_u or str(pos.side).upper() == side_u)
         ]
+
+    def execution_lane_key(self, pack: str, reason: str, selected_set: Any = None, strategy: str = "") -> str:
+        """Build the durable duplicate key for one strategy/config lane."""
+        if selected_set is None:
+            return ""
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", str(reason or ""))
+        signal_key = exact.group(1) if exact else (
+            str(reason or "").split(":")[1] if pack == "indications" and ":" in str(reason or "") else "general"
+        )
+        lane = stable_key(pack, getattr(selected_set, "id", ""), signal_key)
+        return f"{strategy}:{lane}" if strategy == "block-active" and lane else lane
 
     def entry_slot_count(self) -> int:
         """Confirmed and pending lanes share the configured open-slot budget."""
@@ -1613,9 +1655,17 @@ class Pulse:
             float(getattr(incoming, "pending_close_qty", 0) or 0),
         )
         # Same-range fills may originate from independent orders with slightly
-        # different sub-basis-point inputs. Keep their weighted effective
-        # fractions for pricing while the canonical range key remains stable.
-        if not bool(getattr(target, "legacy_aggregate", False)) and not bool(getattr(incoming, "legacy_aggregate", False)):
+        # different sub-basis-point inputs. Per-config groups keep a weighted
+        # effective range; aggregate mode keeps the widest member range so a
+        # later merge can never narrow the common symbol/direction controls.
+        aggregate_mode = not self.per_config_controls(target)
+        if aggregate_mode or bool(getattr(target, "legacy_aggregate", False)) or bool(getattr(incoming, "legacy_aggregate", False)):
+            self.widen_aggregate_range(
+                target,
+                max(float(getattr(incoming, "aggregate_sl_pct", 0) or 0), float(getattr(incoming, "sl_pct", 0) or 0)),
+                max(float(getattr(incoming, "aggregate_tp_pct", 0) or 0), float(getattr(incoming, "tp_pct", 0) or 0)),
+            )
+        else:
             if float(getattr(incoming, "sl_pct", 0) or 0) > 0:
                 target.sl_pct = (
                     float(getattr(target, "sl_pct", 0) or 0) * old_qty
@@ -2367,6 +2417,13 @@ class Pulse:
                 idx = -1
         ix = f"{max(0, idx):03d}"
         group_token = ""
+        if pos is not None and not self.per_config_controls(pos) and kind in ("u", "v", "s", "t"):
+            # Aggregate controls intentionally omit set/config/range tokens.
+            # The symbol+hedge-side digest scopes the common pair while the
+            # nonce keeps replacement requests unique across restarts.
+            scope = stable_key("aggregate-control", pos.symbol, pos.side)[:8]
+            prefix = f"{TAG}{kind}a{scope}"
+            return prefix + client_order_nonce(prefix, 32 - len(prefix))
         if pos is not None and self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
             group_token = control_group_token(
                 pos.control_group_key,
@@ -3481,6 +3538,7 @@ class Pulse:
         if pos is not None and not self.position_is_ours(pos):
             return
         keep = keep or set()
+        seen: set[str] = set()
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
                 continue
@@ -3489,8 +3547,23 @@ class Pulse:
             oid = real_oid(o.get("orderId") or o.get("orderID"))
             typ = str(o.get("type") or "")
             if typ in SL_TYPES | TP_TYPES or o.get("stopPrice"):
+                if oid:
+                    seen.add(oid)
                 if oid and oid not in keep:
                     self.cancel_order(symbol, oid, self.order_cid(o))
+        # REST can lag or return an empty cached page immediately after a
+        # partial fill. Known local control IDs are ours, so cancel them too;
+        # this prevents a common aggregate pair from being duplicated on the
+        # next reconciliation pass.
+        if pos is not None:
+            known = {
+                real_oid(getattr(pos, "sl_oid", "")),
+                real_oid(getattr(pos, "tp_oid", "")),
+                real_oid(getattr(pos, "sec_sl_oid", "")),
+                real_oid(getattr(pos, "sec_tp_oid", "")),
+            }
+            for oid in sorted(x for x in known if x and x not in keep and x not in seen):
+                self.cancel_order(symbol, oid)
 
     def opt_fracs(self, pos: Optional[Position] = None) -> Tuple[float, float, float, float]:
         """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges."""
@@ -3542,10 +3615,19 @@ class Pulse:
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
     def max_range_prices(self, pos: Position) -> Tuple[float, float]:
-        """Overall security SL/TP: widest of the order range and overlay max."""
+        """Return the widest safe member range for the effective control mode."""
         sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
-        sl_w = max(sl_f, sl_hi, float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
-        tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
+        if self.per_config_controls(pos):
+            sl_w = max(sl_f, sl_hi, float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
+            tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
+        else:
+            member_sl, member_tp = self.aggregate_member_ranges(pos)
+            # Aggregate protection is widened from the actual merged members,
+            # then bounded by the configured risk maxima. It must not silently
+            # fall back to the narrower first member after a partial fill.
+            sl_w = max(sl_lo, min(sl_hi, member_sl or sl_f))
+            tp_cap = float(self.tp_max) if float(self.tp_max) > 0 else float("inf")
+            tp_w = max(float(self.tp_min), min(tp_cap, member_tp or tp_f))
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
@@ -3586,10 +3668,15 @@ class Pulse:
     def desired_sl_tp(self, pos: Position) -> Tuple[float, float, float, float]:
         sl, tp = self.security_prices(pos)
         sec_sl, sec_tp = self.max_range_prices(pos)
-        pick_sl = next((p for p in (sl, sec_sl) if self.sl_legal(pos, p)), 0.0)
+        # Aggregate mode has one common pair for the whole symbol/direction;
+        # always prefer its widened range. Per-config mode preserves the
+        # quantity-matched member range and only falls back to security prices
+        # when the exchange rejects the preferred trigger side.
+        aggregate = not self.per_config_controls(pos)
+        pick_sl = next((p for p in ((sec_sl, sl) if aggregate else (sl, sec_sl)) if self.sl_legal(pos, p)), 0.0)
         if not pick_sl:
             pick_sl = self.clamp_ctrl_price(pos, "sl", sec_sl or sl or 0)
-        pick_tp = next((p for p in (tp, sec_tp) if self.tp_legal(pos, p)), 0.0)
+        pick_tp = next((p for p in ((sec_tp, tp) if aggregate else (tp, sec_tp)) if self.tp_legal(pos, p)), 0.0)
         if not pick_tp:
             pick_tp = self.clamp_ctrl_price(pos, "tp", sec_tp or tp or 0)
         return pick_sl, pick_tp, sec_sl, sec_tp
@@ -3671,7 +3758,7 @@ class Pulse:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
@@ -3918,7 +4005,7 @@ class Pulse:
                 # defect because no venue position exists for this side.
                 continue
             px = self.px.get(pos.symbol) or pos.entry
-            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             need = self.missing_controls(pos)
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{scope}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
@@ -3984,7 +4071,7 @@ class Pulse:
                 except Exception:
                     pass
                 self.clear_position_controls(pos)
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
@@ -3994,7 +4081,7 @@ class Pulse:
             b["clientOrderID"] = self.cid(ch, pos=pos)
             if not self.per_config_controls(pos):
                 b["closePosition"] = "true"
-        batch_scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        batch_scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         batch_key = stable_key(
             CONN_SHORT,
             "control-batch",
@@ -4086,7 +4173,7 @@ class Pulse:
             return tracked_at_start and not any(candidate is pos for candidate in self.open.values())
         if now < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
         if have_both and now < self.ctrl_skip.get(scope, 0) and getattr(pos, "ctrl_verified", False):
             return
@@ -4203,7 +4290,11 @@ class Pulse:
                     trail = True
                 if pos.side == "SHORT" and want < have_px * 0.9992 and want > mark:
                     trail = True
-            if have_oid and live_have and side_ok and not trail:
+            range_changed = bool(
+                have_px <= 0
+                or abs(float(want or 0) - have_px) / max(float(pos.entry or 0), 1e-9) > 0.00035
+            )
+            if have_oid and live_have and side_ok and not trail and not range_changed:
                 return have_oid
             if have_oid and live_have and not can_replace:
                 return have_oid
@@ -4252,7 +4343,7 @@ class Pulse:
         A failed update preserves the old stop; the event loop can retry it.
         """
         now = time.time()
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if now < self.ctrl_skip.get(f"sync:{scope}", 0):
             return False
         old_sl = float(pos.sl or 0.0)
@@ -4382,8 +4473,15 @@ class Pulse:
         self._last_close_result["status"] = "REJECTED"
         return False, self.px.get(pos.symbol) or pos.entry
 
-    def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
-        """Return whether a candidate conflicts with the configured book mode."""
+    def occupying(
+        self,
+        sym: str,
+        side: str = "",
+        pack: str = "",
+        set_id: str = "",
+        execution_lane: str = "",
+    ) -> bool:
+        """Return whether the exact strategy/config lane already occupies a slot."""
         side_u = (side or "").upper()
         positions = self.positions_for(sym, side_u)
         if self.per_config_controls():
@@ -4391,13 +4489,16 @@ class Pulse:
             # quantity-matched range group. New groups otherwise merge on the
             # normalized range after the exchange fill is confirmed.
             return any(bool(getattr(p, "legacy_aggregate", False)) for p in positions)
-        if self.positions_for(sym):
-            return True
-        for p in self.positions_for(sym):
-            if pack and p.pack == pack:
-                return True
-            if set_id and p.set_id == set_id and (not side_u or p.side == side_u):
-                return True
+        if execution_lane:
+            return any(getattr(p, "execution_lane", "") == execution_lane for p in positions)
+        if set_id:
+            return any(
+                getattr(p, "pack", "") == pack
+                and getattr(p, "set_id", "") == set_id
+                for p in positions
+            )
+        # Aggregate mode deliberately permits independent lanes and both hedge
+        # directions. place() still deduplicates an empty-lane pending intent.
         return False
 
     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str, selected_set=None) -> Optional[str]:
@@ -4407,7 +4508,8 @@ class Pulse:
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
         side = "LONG" if direction > 0 else "SHORT"
-        if self.occupying(sym, side, pack):
+        lane = self.execution_lane_key(pack, reason, selected_set)
+        if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
                 getattr(self.sets, "progress", None), "ready", False):
@@ -4477,7 +4579,8 @@ class Pulse:
         except Exception:
             chosen = None
         if chosen:
-            if self.occupying(sym, side, pack, chosen.id):
+            chosen_lane = self.execution_lane_key(pack, reason, chosen)
+            if self.occupying(sym, side, pack, chosen.id, execution_lane=chosen_lane):
                 return "set-slot"
             # pick() already enforces the validation gate: under the strict
             # gate only validated + profitable sets are returned at all.
@@ -4675,7 +4778,7 @@ class Pulse:
             entry_fee=max(0.0, _sf(row.get("fee_total") or row.get("feeTotal"))),
             entry_notional=fill_qty * entry,
         )
-        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
+        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", False)))
         return pos
 
     def _upsert_pending_entry(
@@ -4878,11 +4981,7 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         pack = "indications" if str(reason).startswith("ind:") else "general"
-        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", reason)
-        signal_key = exact.group(1) if exact else (reason.split(":")[1] if pack == "indications" else "general")
-        execution_lane = stable_key(pack, selected_set.id, signal_key) if selected_set is not None else ""
-        if execution_strategy == "block-active" and execution_lane:
-            execution_lane = "block-active:" + execution_lane
+        execution_lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
         if execution_lane and normal_allowed and any(
                 getattr(p, "execution_lane", "") == execution_lane and getattr(p, "strategy", "") != "block"
                 for p in self.positions_for(sym, side)):
@@ -4897,8 +4996,6 @@ class Pulse:
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
-        if not self.per_config_controls() and self.positions_for(sym):
-            return
         if time.time() < self.cooldown.get(sym, 0):
             return
         if self.ignore_syms.get(sym, 0) > time.time():
@@ -5317,7 +5414,8 @@ class Pulse:
             pos.sl_oid = pos.sec_sl_oid = attached_sl
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
-        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
+        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", False)))
+
         pending_meta.update({
             "sl_pct": sl_pct,
             "tp_pct": tp_pct,
@@ -5923,7 +6021,7 @@ class Pulse:
             px = self.px.get(pos.symbol) or 0
             if px <= 0:
                 continue
-            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             age = now - pos.opened_at
             if age >= MAX_HOLD_S:
                 self.close_pos(pos, px, "max-hold-6h")
@@ -6369,7 +6467,7 @@ class Pulse:
     def _set_control_mode(self, enabled: bool) -> None:
         """Switch control grouping without losing position ownership."""
         enabled = bool(enabled)
-        previous = bool(getattr(self, "control_orders_per_config", True))
+        previous = bool(getattr(self, "control_orders_per_config", False))
         self.control_orders_per_config = enabled
         if previous == enabled:
             return
@@ -6697,7 +6795,7 @@ class Pulse:
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.strat_general = True
-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
@@ -6784,10 +6882,10 @@ class Pulse:
                 "controlOrdersPerConfig",
                 ov.get(
                     "control_orders_per_config",
-                    cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", True)),
+                    cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", False)),
                 ),
             ),
-            True,
+            False,
         )
         self.coord.load(cts, calc_ov)
         self.indications.load(calc_ov)
@@ -6839,7 +6937,7 @@ class Pulse:
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
             self.strat_ind = True
-        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
@@ -6941,7 +7039,7 @@ class Pulse:
             "cooldownS": COOLDOWN_S,
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
-            "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
+            "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", False)),
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
@@ -7263,13 +7361,6 @@ class Pulse:
                     same = True
             if not same:
                 continue
-            # One add-strategy per parent: DCA already filled → skip Block.
-            try:
-                dca_lane = (getattr(self.dca, "lanes", {}) or {}).get(self.dca_lane_key(pos))
-                if dca_lane and int(getattr(dca_lane, "filled_n", 0) or 0) > 0:
-                    continue
-            except Exception:
-                pass
             # Don't pyramid the same second as the entry (that's just 2× size).
             age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
             if age < 45.0:
@@ -7509,7 +7600,7 @@ class Pulse:
                 break
             if str(pos.set_id).startswith("forced:"):
                 continue
-            group_scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            group_scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             if self._pending_add_open(pos, "dca"):
                 continue
             if time.time() < self.dca_fail_cd.get(group_scope, 0):
@@ -7528,14 +7619,8 @@ class Pulse:
             if pos.qty * px >= self.max_book_notional():
                 self.dca.skips += 1
                 continue
-            # Independent of Block, but never stack both onto the same parent.
-            try:
-                blk = self.block.lanes.get(self.block_lane_key(pos))
-                if blk and float(getattr(blk, "confirmed_add", 0) or 0) > 0:
-                    self.dca.skips += 1
-                    continue
-            except Exception:
-                pass
+            # Block and DCA are independent add-on lanes. Their own PF,
+            # cooldown, step and pending gates still apply below.
             sl_pct = float(pos.sl_pct or SL_PCT or 0.0048)
             adv = abs(px - pos.entry) / pos.entry
             against = (pos.side == "LONG" and px < pos.entry) or (pos.side == "SHORT" and px > pos.entry)
@@ -8879,7 +8964,7 @@ class Pulse:
         for pos in self.open.values():
             exchange_key = f"{pos.symbol}:{pos.side}"
             if exchange_key not in live:
-                group_key = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+                group_key = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
                 if group_key in pending_absent:
                     continue
                 confirmed_book_only.append(group_key)
@@ -9466,7 +9551,7 @@ class Pulse:
             self.record_test(name, ok, detail)
         dca_ms = (time.perf_counter() - t_dca) * 1000
         self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
-        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
         sl, tp, src = resolve_sl_tp(
@@ -9870,6 +9955,8 @@ class Pulse:
                     "trailKey": p.trail_key,
                     "slPct": round(p.sl_pct * 100, 3),
                     "tpPct": round(p.tp_pct * 100, 3),
+                    "aggregateSlPct": round(float(getattr(p, "aggregate_sl_pct", 0.0) or 0.0) * 100, 3),
+                    "aggregateTpPct": round(float(getattr(p, "aggregate_tp_pct", 0.0) or 0.0) * 100, 3),
                     "trail": p.trail,
                     "trailPending": getattr(p, "trail_pending", None),
                     "setId": p.set_id,
@@ -10177,7 +10264,7 @@ class Pulse:
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
-                "mode": "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate",
+                "mode": "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate",
                 "groupCount": len(self.open),
                 "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
@@ -10188,6 +10275,8 @@ class Pulse:
                         "side": p.side,
                         "range": getattr(p, "control_range_key", "") or "aggregate",
                         "rangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
+                        "slPct": round(float(getattr(p, "aggregate_sl_pct", getattr(p, "sl_pct", 0.0)) or 0.0) * 100, 3),
+                        "tpPct": round(float(getattr(p, "aggregate_tp_pct", getattr(p, "tp_pct", 0.0)) or 0.0) * 100, 3),
                         "qty": float(p.qty or 0),
                         "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
@@ -10516,7 +10605,7 @@ class Pulse:
             self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
         except Exception as e:
             self.record_test("qa-ind-self", False, str(e)[:80])
-        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
         try:
             rows_g = self.strategy_closes()

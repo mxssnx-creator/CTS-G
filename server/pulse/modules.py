@@ -16,7 +16,7 @@ DEFAULT_FLAGS = {
     "exchange.bingx": True,
     "strategy.block": True,
     "strategy.trailing": True,
-    "strategy.dca": False,  # overlay dcaEnabled=true enables; default off
+    "strategy.dca": True,
     "strategy.indications": True,
     "strategy.coord": True,
     "feed.signals": True,
@@ -41,8 +41,8 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags[str(k)] = bool(v)
     if "blockEnabled" in overlay:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
-    if "dcaEnabled" in overlay:
-        flags["strategy.dca"] = bool(overlay["dcaEnabled"])
+    if "dcaEnabled" in overlay or "stratDca" in overlay:
+        flags["strategy.dca"] = bool(overlay.get("dcaEnabled", overlay.get("stratDca", True)))
     if "controlOrders" in overlay:
         flags["exec.controls"] = bool(overlay["controlOrders"])
     if "rearrange" in overlay:

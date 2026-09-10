@@ -44,6 +44,8 @@ export type LiveOpen = {
   trailPending?: number | null;
   slPct?: number;
   tpPct?: number;
+  aggregateSlPct?: number;
+  aggregateTpPct?: number;
   setId?: string;
   executionLane?: string;
   strategy?: string;
@@ -539,8 +541,11 @@ export type LiveStats = {
         symbol?: string;
         side?: string;
         range?: string;
-        rangeBp?: { sl?: number; tp?: number };
-        qty?: number;
+  rangeBp?: { sl?: number; tp?: number };
+  slPct?: number;
+  tpPct?: number;
+  qty?: number;
+
         exchangeQty?: number | null;
         pendingQty?: number;
         memberCount?: number;

@@ -89,17 +89,29 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to adjusted execution, 110 Sets, 100 orders and 50 symbols", () => {
+test("new and legacy settings default to unlimited logical positions, independent lanes and 50 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
     assert.equal(value.setMaxActive, 110);
-    assert.equal(value.maxOpen, 100);
+    assert.equal(value.maxOpen, 0);
+    assert.equal(value.controlOrdersPerConfig, false);
+    assert.equal(value.dcaEnabled, true);
+    assert.equal(value.stratDca, true);
+    assert.equal(value.modules?.["strategy.dca"], true);
     assert.equal(value.stratGeneral, true);
+    assert.equal(value.stratIndications, true);
+    assert.equal(value.stratTrailing, true);
+    assert.equal(value.stratBlock, true);
     assert.equal(value.symbolCap, 50);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
+});
+
+test("missing control mode fields default to one aggregate pair", () => {
+  const value = syncOverlayFlags(overlayFromCts({}, { controlOrdersPerConfig: undefined }));
+  assert.equal(value.controlOrdersPerConfig, false);
 });
 
 test("an explicit All/* cap of 25 stays ranked and is not unlimited", () => {
