@@ -345,6 +345,144 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
         time.sleep(0.6)
 
 
+def _foreign_order_ids(api: FastBingX) -> set:
+    """Open order ids that are NOT ours, so a burst can prove it never touched them."""
+    oo = api.get("/openApi/swap/v2/trade/openOrders")
+    orders = (oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else oo.get("data")
+    orders = orders if isinstance(orders, list) else []
+    p = Dummy()
+    p.cid_ours = lambda c: Pulse.cid_ours(p, c)
+    ids = set()
+    for o in orders:
+        cid = str(o.get("clientOrderID") or o.get("clientOrderId") or "")
+        if not p.cid_ours(cid):
+            ids.add(str(o.get("orderId") or cid))
+    return ids
+
+
+def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
+    """Bounded high-count VST acceptance: hundreds of CTS-owned orders across the
+    50-symbol universe, verifying live evaluation, opening, aggregate controls,
+    bounded rejections, and that foreign orders are never touched.
+
+    Opt-in via VST_HIGH_COUNT=1; VST_HIGH_COUNT_N (default 100) and
+    VST_HIGH_COUNT_SYMBOLS (default 50) bound the burst."""
+    n_target = max(1, int(os.environ.get("VST_HIGH_COUNT_N", "100")))
+    sym_target = max(1, int(os.environ.get("VST_HIGH_COUNT_SYMBOLS", "50")))
+    set_id = "general:1m:sl0.6:tr0.3:0.1:hc"
+    p = Dummy()
+    p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
+    p.cid_ours = lambda c: Pulse.cid_ours(p, c)
+
+    st = {}
+    try:
+        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+    except Exception as e:
+        rec("hc-stats", False, str(e), out)
+        return
+    syms = [s for s in (st.get("symbols") or []) if isinstance(s, str)]
+    rec("hc-universe", len(syms) >= min(sym_target, 40), f"evaluated={len(syms)} target={sym_target}", out)
+    rec("hc-running", bool(st.get("running")) and int(st.get("cycle") or 0) > 0, f"cyc={st.get('cycle')} open={st.get('openCount')}", out)
+
+    tick = api.public("/openApi/swap/v2/quote/ticker")
+    px: Dict[str, float] = {}
+    for row in tick.get("data") or []:
+        try:
+            px[str(row.get("symbol"))] = float(row.get("lastPrice") or 0)
+        except Exception:
+            continue
+    pool = [s for s in syms if px.get(s, 0) > 0][:sym_target]
+    if len(pool) < min(sym_target, 10):
+        pool = [s for s in px if px[s] > 0][:sym_target]
+    rec("hc-pool", len(pool) >= min(sym_target, 10), f"pool={len(pool)}", out)
+    if not pool:
+        return
+
+    foreign_before = _foreign_order_ids(api)
+    opened: List[Tuple[str, str, float]] = []
+    attempts = 0
+    rejects = 0
+    cooldowns = 0
+    max_attempts = n_target * 3
+    i = 0
+    while len(opened) < n_target and attempts < max_attempts:
+        sym = pool[i % len(pool)]
+        i += 1
+        attempts += 1
+        price = px.get(sym, 0.0)
+        if price <= 0:
+            continue
+        qty = _min_qty(api, sym, price)
+        if qty * price > 18:
+            qty = float(f"{12.0 / price:.4g}")
+        cid = Pulse.cid(p, "o", set_id=set_id, pack="general")
+        r = api.post(
+            "/openApi/swap/v2/trade/order",
+            {"symbol": sym, "type": "MARKET", "side": "BUY", "positionSide": "LONG", "quantity": qty, "clientOrderID": cid},
+        )
+        msg = str(r.get("msg") or "")
+        if r.get("code") in (0, None) and not r.get("error"):
+            opened.append((sym, cid, qty))
+            continue
+        if r.get("code") in (101209, 100410, 100421, 109429, 109400) or "cool" in msg.lower() or "over 20" in msg.lower():
+            cooldowns += 1
+            time.sleep(2.0)
+            continue
+        rejects += 1
+    rec("hc-opened", len(opened) >= max(1, int(n_target * 0.6)), f"opened={len(opened)}/{n_target} attempts={attempts}", out)
+    rec("hc-reject-bounded", rejects <= max(5, len(opened)), f"rejects={rejects} cooldowns={cooldowns} opened={len(opened)}", out)
+
+    ctrl_ok = 0
+    for sym, _cid, _qty in opened:
+        price = px.get(sym, 0.0)
+        if price <= 0:
+            continue
+        sl = api.post(
+            "/openApi/swap/v2/trade/order",
+            {
+                "symbol": sym, "type": "STOP_MARKET", "side": "SELL", "positionSide": "LONG",
+                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "clientOrderID": Pulse.cid(p, "s", set_id=set_id, pack="general"),
+            },
+        )
+        tp = api.post(
+            "/openApi/swap/v2/trade/order",
+            {
+                "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": "SELL", "positionSide": "LONG",
+                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "clientOrderID": Pulse.cid(p, "t", set_id=set_id, pack="general"),
+            },
+        )
+        if sl.get("code") in (0, None) and tp.get("code") in (0, None):
+            ctrl_ok += 1
+    rec("hc-controls", ctrl_ok >= max(1, int(len(opened) * 0.6)), f"sl+tp={ctrl_ok}/{len(opened)}", out)
+
+    closed = 0
+    for sym, _cid, qty in opened:
+        cl = api.post(
+            "/openApi/swap/v2/trade/order",
+            {
+                "symbol": sym, "type": "MARKET", "side": "SELL", "positionSide": "LONG", "quantity": qty,
+                "clientOrderID": Pulse.cid(p, "c", set_id=set_id, pack="general"),
+            },
+        )
+        if cl.get("code") in (0, None):
+            closed += 1
+    rec("hc-closed", closed >= max(1, int(len(opened) * 0.6)), f"closed={closed}/{len(opened)}", out)
+
+    foreign_after = _foreign_order_ids(api)
+    lost = foreign_before - foreign_after
+    rec("hc-foreign-untouched", not lost, f"before={len(foreign_before)} after={len(foreign_after)} lost={len(lost)}", out)
+
+    try:
+        st2 = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        logical = int(st2.get("logicalPositionCount") or st2.get("openCount") or 0)
+        exch = int(st2.get("exchangePositionGroupCount") or -1)
+        rec("hc-recon", exch < 0 or logical >= exch, f"logical={logical} exch={exch}", out)
+    except Exception as e:
+        rec("hc-recon", False, str(e)[:160], out)
+
+
 def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     """Engine book vs live BingX positions and control orders. Not simulated."""
     st = {}
@@ -448,6 +586,11 @@ def main() -> int:
             ctrl_both_sides(api, out)
         except Exception:
             rec("ctrl-exc", False, traceback.format_exc()[-220:], out)
+        if os.environ.get("VST_HIGH_COUNT"):
+            try:
+                high_count_acceptance(api, out)
+            except Exception:
+                rec("hc-exc", False, traceback.format_exc()[-220:], out)
     try:
         http_tests(out)
     except Exception:
