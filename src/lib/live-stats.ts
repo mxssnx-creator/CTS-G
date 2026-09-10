@@ -33,6 +33,8 @@ export type LiveOpen = {
   lineageParentSetIds?: string[];
   lineageAxisKeys?: string[];
   lineagePacks?: string[];
+  systemId?: string;
+  trackingScope?: string;
   connection?: string;
   connType?: string;
   unit?: string;
@@ -56,6 +58,8 @@ export type LiveOpen = {
 };
 
 export type LiveClosed = {
+  systemId?: string;
+  trackingScope?: string;
   connection?: string;
   connType?: string;
   unit?: string;
@@ -154,6 +158,9 @@ export type ActivityEvent = {
   event_id?: string;
   event_type?: string;
   ts?: number;
+  system_id?: string;
+  tracking_scope?: string;
+  track_prefix?: string;
   connection?: string;
   status?: string;
   symbol?: string;
@@ -240,16 +247,26 @@ export type LiveStats = {
   stale?: boolean;
   statsAgeS?: number;
   mode: string;
+  systemId?: string;
+  trackingScope?: string;
+  trackPrefix?: string;
   connection: string;
   exchange: string;
   startedAt: number;
   now: number;
   uptimeS: number;
   equity: number;
+  systemEquity?: number;
+  systemStartEquity?: number;
+  walletEquity?: number;
   startEquity: number;
   available: number;
   usedMargin: number;
   unrealized: number;
+  foreignUnrealized?: number;
+  foreignExposure?: number;
+  foreignPositionCount?: number;
+  foreignOpenOrderCount?: number;
   realizedPnl: number;
   sessionPnl: number;
   systemPnl?: number;
@@ -258,16 +275,24 @@ export type LiveStats = {
   systemRealized?: number;
   systemUnrealized?: number;
   executionEvidence?: {
-    connection?: string;
-    systemSource?: string;
+  systemId?: string;
+  trackingScope?: string;
+  trackPrefix?: string;
+  connection?: string;
+  systemSource?: string;
+
     systemClosed?: number;
     systemPnl?: number;
     systemRealized?: number;
     systemUnrealized?: number;
     internalOpen?: number;
     exchangeOpen?: number;
-    exchangeOwnOpen?: number;
-    openParity?: "match" | "pending" | "discrepant" | string;
+  exchangeOwnOpen?: number;
+  foreignPositionCount?: number;
+  foreignOpenOrderCount?: number;
+  foreignUnrealized?: number;
+  openParity?: "match" | "pending" | "discrepant" | string;
+
     realStage?: Record<string, unknown>;
     setCount?: number;
     validatedSetCount?: number;
@@ -563,6 +588,9 @@ export type LiveStats = {
     type: string;
     id: string;
     label: string;
+    systemId?: string;
+    trackingScope?: string;
+    trackPrefix?: string;
     unit: string;
     exchange: string;
     mode?: string;
@@ -570,8 +598,15 @@ export type LiveStats = {
     halted: boolean;
     haltReason?: string;
     equity: number;
+    systemEquity?: number;
+    systemStartEquity?: number;
+    walletEquity?: number;
     available: number;
     unrealized: number;
+    foreignUnrealized?: number;
+    foreignExposure?: number;
+    foreignPositionCount?: number;
+    foreignOpenOrderCount?: number;
     openCount: number;
     exchangeOpenCount?: number;
     simOpenCount?: number;

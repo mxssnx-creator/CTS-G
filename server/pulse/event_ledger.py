@@ -40,6 +40,9 @@ class LedgerEvent:
     event_type: str
     ts: float
     connection: str
+    system_id: str = ""
+    tracking_scope: str = ""
+    track_prefix: str = ""
     status: str = ""
     symbol: str = ""
     side: str = ""
@@ -141,6 +144,9 @@ class EventLedger:
             event_type=event_type,
             ts=_number(row.get("ts")) or time.time(),
             connection=_text(row.get("connection") or self.connection, 64),
+            system_id=_text(row.get("system_id") or row.get("systemId"), 64),
+            tracking_scope=_text(row.get("tracking_scope") or row.get("trackingScope"), 128),
+            track_prefix=_text(row.get("track_prefix") or row.get("trackPrefix"), 64),
             status=_text(row.get("status"), 32),
             symbol=_text(row.get("symbol"), 48),
             side=_text(row.get("side"), 16),
@@ -233,6 +239,9 @@ class EventLedger:
                 event_type=normalized_type,
                 ts=round(stamp, 3),
                 connection=_text(fields.get("connection") or self.connection, 64),
+                system_id=_text(fields.get("system_id") or fields.get("systemId"), 64),
+                tracking_scope=_text(fields.get("tracking_scope") or fields.get("trackingScope"), 128),
+                track_prefix=_text(fields.get("track_prefix") or fields.get("trackPrefix"), 64),
                 status=_text(status or fields.get("state"), 32),
                 symbol=symbol,
                 side=side,

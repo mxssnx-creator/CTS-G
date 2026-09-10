@@ -22,6 +22,7 @@ from system_settings import calculation_overlay, normalize_system_settings
 from set_engine import SetBook
 from storage_paths import append_bounded_line, configure_retention
 from event_ledger import EventLedger
+from runtime_scope import tracking_scope
 import pulse_http as ph
 
 
@@ -38,8 +39,10 @@ class StatisticsTests(unittest.TestCase):
         return store
 
     def trade(self, i, **kwargs):
-        return dict(t=self.now + i / 10000, conn="bingx-x02", symbol="TEST-USDT", side="LONG",
-                    qty=1, entry=100, pnl=2 if i % 2 else -1, pnl_pct=.002, fee_total=.1,
+        return dict(t=self.now + i / 10000, conn="bingx-x02", connection="bingx-x02",
+                    system_id="cts-g", tracking_scope=tracking_scope("bingx-x02"),
+                    symbol="TEST-USDT", side="LONG", qty=1, entry=100,
+                    pnl=2 if i % 2 else -1, pnl_pct=.002, fee_total=.1,
                     exchange_confirmed=True, ours=True, close_fill_id=f"close-{i}", **kwargs)
 
     def test_thousands_of_trades_survive_retention_and_restart_without_double_count(self):
@@ -77,6 +80,13 @@ class StatisticsTests(unittest.TestCase):
         store.record_trade(row)
         self.assertEqual(self.store("bingx-x01").status()["totals"], {})
 
+    def test_scope_mismatch_never_changes_totals(self):
+        store = self.store()
+        row = self.trade(1)
+        self.assertFalse(store.record_trade({**row, "tracking_scope": tracking_scope("bingx-x01")}))
+        self.assertFalse(store.record_trade({**row, "system_id": "other-system", "tracking_scope": "other-system:bingx-x02"}))
+        self.assertEqual(store.status()["totals"], {})
+
     def test_partial_fill_identity_and_reporting_are_not_limited_to_recent_tape(self):
         store = self.store(systemTradeMaxRows=250)
         for i in range(500):
@@ -105,7 +115,7 @@ class StatisticsTests(unittest.TestCase):
     def test_reset_is_scoped_backed_up_and_does_not_reimport_the_old_tape(self):
         store = self.store()
         other = self.store("bingx-x01")
-        other.record_trade({**self.trade(1), "conn": "bingx-x01"})
+        other.record_trade({**self.trade(1), "conn": "bingx-x01", "connection": "bingx-x01", "tracking_scope": tracking_scope("bingx-x01")})
         sentinels = {}
         for name in ("open-bingx-x02.json", "pending-bingx-x02.json", "history-1m-bingx-x02.json", "overlay-bingx-x02.json"):
             path = Path(self.root) / name

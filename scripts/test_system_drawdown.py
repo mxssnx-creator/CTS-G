@@ -20,11 +20,37 @@ class SystemDrawdown(unittest.TestCase):
         self.assertEqual(self.measure([],upnl=-5)['drawdownPct'],5)
     def test_missing_capital_is_explicitly_unavailable(self):
         self.assertFalse(self.measure([-5],capital=0)['drawdownAvailable'])
+
+    def test_foreign_trade_and_mark_do_not_enter_system_activity(self):
+        from pulse_trader import CONN_SHORT, TAG
+        from runtime_scope import tracking_scope
+        p=Pulse.__new__(Pulse); p.start_eq=100; p.open={}; p.px={'EXT-USDT': 90}
+        p.max_book_notional=lambda:1000
+        p.cid_ours=lambda cid: str(cid).startswith(TAG)
+        p.closed=[
+            SimpleNamespace(ours=True,client_id=f'{TAG}own',conn=CONN_SHORT,
+                system_id='cts-g',tracking_scope=tracking_scope(CONN_SHORT),
+                qty=1,entry=100,pnl=-2,reason='sl',exchange_confirmed=True),
+            SimpleNamespace(ours=True,client_id='manual-bot',conn=CONN_SHORT,
+                system_id='other-system',tracking_scope='other-system:bingx-x02',
+                qty=1,entry=100,pnl=-40,reason='manual',exchange_confirmed=True),
+        ]
+        p.open['foreign']=SimpleNamespace(ours=True,client_id='manual-bot',connection=CONN_SHORT,
+            system_id='other-system',tracking_scope='other-system:bingx-x02',symbol='EXT-USDT',
+            side='LONG',qty=1,entry=100)
+        activity=p.system_activity()
+        self.assertEqual(activity['realized'], -2)
+        self.assertEqual(activity['unrealized'], 0)
+        self.assertEqual(activity['drawdownPct'], 2)
+
     def test_exchange_confirmed_oversized_loss_is_never_hidden(self):
+
         p=Pulse.__new__(Pulse);p.max_book_notional=lambda:10
         p.cid_ours=lambda cid:cid=='own'
         from pulse_trader import CONN_SHORT
+        from runtime_scope import tracking_scope
         p.closed=[SimpleNamespace(ours=True,client_id='own',conn=CONN_SHORT,
+            system_id='cts-g',tracking_scope=tracking_scope(CONN_SHORT),
             qty=100,entry=10,pnl=-500,reason='oversized',set_id='s',exchange_confirmed=True)]
         self.assertEqual(p.strategy_closes(),p.closed)
         p.closed[0].ours=False

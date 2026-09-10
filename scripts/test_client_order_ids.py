@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server/pulse'))
 import pulse_trader as pt
+from runtime_scope import row_scope_matches, tracking_scope
 
 class ClientOrderIds(unittest.TestCase):
     def pulse(self):
@@ -22,6 +23,14 @@ class ClientOrderIds(unittest.TestCase):
                 self.assertEqual(len(set(ids)), 5000)
                 self.assertTrue(all(len(cid) == 32 for cid in ids))
                 self.assertTrue(all(p.parse_track(cid)['group_token'] == 'r048075' for cid in ids))
+
+    def test_scope_identity_rejects_cross_lane_and_symbol_inference(self):
+        own = {"system_id": "cts-g", "connection": "bingx-x01", "tracking_scope": tracking_scope("bingx-x01"), "client_id": "Gx01oabc"}
+        foreign = {**own, "tracking_scope": tracking_scope("bingx-x02"), "client_id": "Gx02oabc"}
+        untagged = {"symbol": "SOL-USDT", "qty": 1}
+        self.assertTrue(row_scope_matches(own, "bingx-x01"))
+        self.assertFalse(row_scope_matches(foreign, "bingx-x01"))
+        self.assertFalse(row_scope_matches(untagged, "bingx-x01"))
 
     def test_exhaustion_fails_before_reuse(self):
         prefix = 'unit-exhaustion'

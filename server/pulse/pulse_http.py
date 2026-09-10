@@ -892,6 +892,27 @@ def _report_number(value, default=0.0) -> float:
         return default
 
 
+def _report_row_in_scope(row: dict, state: dict) -> bool:
+    """Keep overall reports limited to the lane's proven system ownership."""
+    if not isinstance(row, dict) or row.get("ours") is False:
+        return False
+    expected = str(state.get("trackingScope") or "").strip().lower()
+    actual = str(row.get("trackingScope") or row.get("tracking_scope") or "").strip().lower()
+    if expected and actual:
+        return actual == expected
+    system_id = str(state.get("systemId") or "").strip().lower()
+    connection = str(state.get("connection") or "").strip().lower()
+    row_system = str(row.get("systemId") or row.get("system_id") or "").strip().lower()
+    row_connection = str(row.get("connection") or row.get("conn") or "").strip().lower()
+    if expected and row_system and row_connection:
+        return row_system == system_id and row_connection == connection
+    prefix = str(state.get("trackPrefix") or "").strip().lower()
+    client_id = str(row.get("clientId") or row.get("client_id") or "").strip().lower()
+    if prefix and client_id:
+        return client_id.startswith(prefix)
+    return bool(row_connection and row_connection == connection and not expected)
+
+
 def overall_report_state(live: dict, vst: dict) -> dict:
     """Build a safe combined input for the canonical stats report renderer."""
     states = (live, vst)
@@ -899,13 +920,13 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         row
         for state in states
         for row in (state.get("closed") or [])
-        if isinstance(row, dict)
+        if _report_row_in_scope(row, state)
     ]
     open_positions = [
         row
         for state in states
         for row in (state.get("open") or [])
-        if isinstance(row, dict)
+        if _report_row_in_scope(row, state)
     ]
     set_rows = []
     set_count = active_count = validated_count = hist_fills = 0
@@ -974,15 +995,26 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
+        "systemId": CTS_G_NAME,
         "connection": "overall",
+        "trackingScope": "overall",
+        "trackPrefix": "mixed",
         "unit": "MIXED",
-        "equity": sum(_report_number(state.get("equity")) for state in states),
-        "startEquity": sum(_report_number(state.get("startEquity")) for state in states),
+        "equity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
+        "systemEquity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
+        "systemStartEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
+        "startEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
+        "walletEquity": sum(_report_number(state.get("walletEquity", state.get("equity"))) for state in states),
         "available": sum(_report_number(state.get("available")) for state in states),
         "usedMargin": sum(_report_number(state.get("usedMargin")) for state in states),
-        "sessionPnl": sum(_report_number(state.get("sessionPnl")) for state in states),
-        "realizedPnl": sum(_report_number(state.get("realizedPnl")) for state in states),
-        "unrealized": sum(_report_number(state.get("unrealized")) for state in states),
+        "sessionPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
+        "systemPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
+        "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in states),
+        "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in states),
+        "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in states),
+        "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in states),
+        "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in states),
+        "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
         "openCount": len(open_positions),
@@ -1097,8 +1129,8 @@ def _lane_progress(st: dict) -> dict:
 def lane_summary(lane: dict, st: dict | None = None) -> dict:
     if st is None:
         st = load_stats(lane["id"])
-    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
-    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
+    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) > 0)
+    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
     eng = st.get("engine") or {}
@@ -1124,6 +1156,10 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "type": lane["type"],
         "id": lane["id"],
         "label": lane["label"],
+        "systemId": st.get("systemId") or CTS_G_NAME,
+        "connection": lane["id"],
+        "trackingScope": st.get("trackingScope") or f"{CTS_G_NAME}:{lane['id']}",
+        "trackPrefix": st.get("trackPrefix") or (st.get("engine") or {}).get("trackPrefix") or "",
         "unit": lane["unit"],
         "exchange": st.get("exchange") or lane["exchange"],
         "mode": st.get("mode"),
@@ -1132,9 +1168,16 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "haltReason": halt_reason,
         "svcActive": state == "active",
         "statsAgeS": round(stats_age(lane["id"]), 1),
-        "equity": st.get("equity") or 0,
+        "equity": st.get("systemEquity", st.get("equity")) or 0,
+        "systemEquity": st.get("systemEquity", st.get("equity")) or 0,
+        "systemStartEquity": st.get("systemStartEquity", st.get("startEquity")) or 0,
+        "walletEquity": st.get("walletEquity", st.get("equity")) or 0,
         "available": st.get("available") or 0,
-        "unrealized": st.get("unrealized") or 0,
+        "unrealized": st.get("systemUnrealized", st.get("unrealized")) or 0,
+        "foreignUnrealized": st.get("foreignUnrealized") or 0,
+        "foreignExposure": st.get("foreignExposure") or 0,
+        "foreignPositionCount": st.get("foreignPositionCount") or 0,
+        "foreignOpenOrderCount": st.get("foreignOpenOrderCount") or 0,
         "openCount": st.get("openCount") or 0,
         "exchangeOpenCount": st.get("exchangeOpenCount", -1),
         "simOpenCount": st.get("simOpenCount", -1),
