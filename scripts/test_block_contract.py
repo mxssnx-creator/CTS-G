@@ -122,7 +122,9 @@ class BlockContractTests(unittest.TestCase):
     def test_control_repair_stops_immediately_when_parent_is_retired(self):
         for phase in ["pair", "banned", "normal"]:
             p = trader.Pulse.__new__(trader.Pulse)
-            pos = trader.Position("SOL-USDT", "LONG", 1, 100, 1, 99, 101, 100)
+            pos = trader.Position("SOL-USDT", "LONG", 1, 100, 1, 99, 101, 100,
+                                  client_id=f"{trader.TAG}contract", system_id=trader.SYSTEM_ID,
+                                  connection=trader.CONN_SHORT, tracking_scope=trader.TRACKING_SCOPE)
             p.open = {"SOL-USDT": pos}
             p.ctrl_skip = {}
             p.px = {"SOL-USDT": 100}

@@ -1322,7 +1322,9 @@ def phantom_recon_test() -> None:
         return pt.Position(
             symbol=sym, side="LONG", qty=1.0, entry=100.0,
             opened_at=time.time() - age, sl=99.0, tp=101.0, peak=100.0,
-            sl_oid=sl_oid,
+            sl_oid=sl_oid, client_id=f"{pt.TAG}test{sym[:4].lower()}",
+            system_id=pt.SYSTEM_ID, connection=pt.CONN_SHORT,
+            tracking_scope=pt.TRACKING_SCOPE,
         )
 
     # 1) first empty read: glitch guard arms, book untouched, exchange count visible
@@ -1404,7 +1406,9 @@ def sim_stats_test() -> None:
 
     def pos(sym, side, qty, entry):
         return pt.Position(symbol=sym, side=side, qty=qty, entry=entry,
-                           opened_at=time.time() - 60, sl=entry * 0.99, tp=entry * 1.01, peak=entry)
+                           opened_at=time.time() - 60, sl=entry * 0.99, tp=entry * 1.01, peak=entry,
+                           client_id=f"{pt.TAG}sim{sym[:4].lower()}", system_id=pt.SYSTEM_ID,
+                           connection=pt.CONN_SHORT, tracking_scope=pt.TRACKING_SCOPE)
 
     # 1) exchange truth unknown -> sim count -1 (UI shows dash, not a lie)
     p = mk()
@@ -2253,6 +2257,8 @@ def grouped_control_test() -> None:
             client_id=cid,
             set_id=cid,
             pack="general",
+            system_id=pt.SYSTEM_ID, connection=pt.CONN_SHORT,
+            tracking_scope=pt.TRACKING_SCOPE,
         )
         p.prepare_position_group(pos)
         return pos

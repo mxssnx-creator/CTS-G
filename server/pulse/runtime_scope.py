@@ -48,10 +48,16 @@ def row_scope_matches(row: object, connection: str, *, allow_legacy_client: bool
     expected_connection = normalize_connection_id(connection)
     expected_scope = tracking_scope(expected_connection, expected_system)
     actual_scope = str(row.get("tracking_scope") or row.get("trackingScope") or "").strip().lower()
-    if actual_scope:
-        return actual_scope == expected_scope
     row_system = str(row.get("system_id") or row.get("systemId") or "").strip().lower()
     row_connection = str(row.get("connection") or row.get("conn") or "").strip().lower().removeprefix("connection:")
+    if actual_scope:
+        if actual_scope != expected_scope:
+            return False
+        if row_system and row_system != expected_system:
+            return False
+        if row_connection and row_connection != expected_connection:
+            return False
+        return True
     if row_system or row_connection:
         return row_system == expected_system and row_connection == expected_connection
     if allow_legacy_client:

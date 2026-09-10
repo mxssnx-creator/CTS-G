@@ -2898,7 +2898,7 @@ function EffectiveSettingsSummary({
   <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
   <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
   <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
-  <AppliedKV label="System vs exchange" value={`${remote(stats?.executionEvidence?.systemPnl)} system PnL · ${remote(stats?.executionEvidence?.systemClosed)} closes · ${remote(stats?.executionEvidence?.openParity)} open parity`} />
+  <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
   <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
   <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
       </div>

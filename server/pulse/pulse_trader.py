@@ -988,12 +988,14 @@ class Pulse:
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
+        self.foreign_activity_seen = False
         try:
             if os.path.exists(START_EQ_PATH):
                 baseline = json.load(open(START_EQ_PATH)) or {}
                 stored_scope = str(baseline.get("trackingScope") or baseline.get("tracking_scope") or "").strip().lower()
                 if not stored_scope or stored_scope == TRACKING_SCOPE:
                     self.start_eq = float(baseline.get("systemStartEquity") or baseline.get("startEquity") or 0)
+                    self.foreign_activity_seen = bool(baseline.get("foreignActivitySeen") or baseline.get("foreign_activity_seen"))
         except Exception:
             self.start_eq = 0.0
         self.system_start_eq = self.start_eq
@@ -1005,6 +1007,7 @@ class Pulse:
         self.upnl = 0.0
         self.system_upnl = 0.0
         self.foreign_upnl = 0.0
+        self.foreign_realized = 0.0
         self.foreign_exposure = 0.0
         self.foreign_position_count = 0
         self.foreign_open_order_count = 0
@@ -1233,16 +1236,17 @@ class Pulse:
         if getattr(pos, "ours", True) is False:
             return False
         stored_scope = str(getattr(pos, "tracking_scope", "") or "").strip().lower()
-        if stored_scope and stored_scope != TRACKING_SCOPE:
-            return False
         stored_system = str(getattr(pos, "system_id", "") or "").strip().lower()
         stored_connection = str(getattr(pos, "connection", "") or "").strip().lower()
+        has_scope_proof = bool(stored_scope or stored_system or stored_connection)
+        if stored_scope and stored_scope != TRACKING_SCOPE:
+            return False
         if stored_system and stored_system != SYSTEM_ID:
             return False
         if stored_connection and stored_connection != CONN_SHORT:
             return False
         client_id = str(getattr(pos, "client_id", "") or "")
-        if client_id and not self.cid_ours(client_id):
+        if not has_scope_proof and not self.cid_ours(client_id):
             return False
         pos.system_id = SYSTEM_ID
         pos.connection = CONN_SHORT
@@ -1253,18 +1257,14 @@ class Pulse:
     def position_is_ours(self, pos: Optional[Position]) -> bool:
         if pos is None or getattr(pos, "ours", True) is False:
             return False
-        if not self._bind_position_scope(pos):
-            return False
-        client_id = str(getattr(pos, "client_id", "") or "")
-        return not client_id or self.cid_ours(client_id)
+        return self._bind_position_scope(pos)
 
     def row_is_ours(self, row: Any) -> bool:
         if not isinstance(row, dict) or row.get("ours") is False:
             return False
         if not row_scope_matches(row, CONN_SHORT):
             return False
-        client_id = str(row.get("client_id") or row.get("clientId") or "")
-        return not client_id or self.cid_ours(client_id)
+        return True
 
     def _persist_start_equity(self) -> None:
         try:
@@ -1273,6 +1273,7 @@ class Pulse:
                 json.dump({
                     "systemStartEquity": float(self.start_eq),
                     "startEquity": float(self.start_eq),
+                    "foreignActivitySeen": bool(getattr(self, "foreign_activity_seen", False)),
                     **SCOPE_METADATA,
                     "t": time.time(),
                 }, f)
@@ -1280,15 +1281,75 @@ class Pulse:
         except Exception:
             pass
 
+    def _note_foreign_activity(self) -> None:
+        if getattr(self, "foreign_activity_seen", False):
+            return
+        self.foreign_activity_seen = True
+        self._persist_start_equity()
+
     def _persistent_system_realized(self) -> float:
         status = getattr(getattr(self, "runtime", None), "snapshot", {}) or {}
         totals = status.get("totals") if isinstance(status, dict) else {}
         if isinstance(totals, dict) and "realized" in totals:
             return _sf(totals.get("realized"))
-        return sum(_sf(getattr(row, "pnl", 0.0)) for row in self.strategy_closes())
+        # Startup/unit-test objects can refresh the balance before optional
+        # strategy modules are attached. Keep the fallback scope-safe without
+        # routing through max_book_notional()/DCA configuration.
+        total = 0.0
+        for row in getattr(self, "closed", ()) or ():
+            if isinstance(row, dict):
+                record = row
+            elif hasattr(row, "__dataclass_fields__"):
+                record = asdict(row)
+            else:
+                try:
+                    record = vars(row)
+                except TypeError:
+                    continue
+            if self.row_is_ours(record):
+                total += _sf(record.get("pnl"))
+        return total
 
     def _system_marked_equity(self) -> float:
         return _sf(getattr(self, "start_eq", 0.0)) + self._persistent_system_realized() + self.system_open_upnl()
+
+    def _has_scoped_activity(self) -> bool:
+        open_book = getattr(self, "open", {})
+        for pos in open_book.values() if isinstance(open_book, dict) else ():
+            if self.position_is_ours(pos):
+                return True
+        for row in getattr(self, "closed", ()) or ():
+            if isinstance(row, dict):
+                record = row
+            elif hasattr(row, "__dataclass_fields__"):
+                record = asdict(row)
+            else:
+                try:
+                    record = vars(row)
+                except TypeError:
+                    continue
+            if self.row_is_ours(record):
+                return True
+        return False
+
+    def _foreign_activity_present(self) -> bool:
+        return bool(
+            abs(_sf(getattr(self, "foreign_upnl", 0.0))) > 1e-12
+            or abs(_sf(getattr(self, "foreign_realized", 0.0))) > 1e-12
+            or int(getattr(self, "foreign_position_count", 0) or 0) > 0
+            or int(getattr(self, "foreign_open_order_count", 0) or 0) > 0
+        )
+
+    def _balance_system_equity(self, wallet_system_equity: float) -> float:
+        # Before the first scoped fill, retain the legacy account baseline so
+        # deposits/losses still drive the guard. Once foreign activity has ever
+        # been observed, wallet movement can no longer become system PnL after
+        # that position/order disappears from the next exchange snapshot.
+        if getattr(self, "foreign_activity_seen", False):
+            return self._system_marked_equity()
+        if not self._has_scoped_activity() and not self._foreign_activity_present():
+            return max(0.0, _sf(wallet_system_equity))
+        return self._system_marked_equity()
 
     def per_config_controls(self, pos: Optional[Position] = None) -> bool:
         """Whether a position participates in quantity-matched range controls."""
@@ -2569,7 +2630,13 @@ class Pulse:
         self.available = _sf(row.get("availableMargin") or row.get("available") or row.get("availableBalance"))
         self.used = _sf(row.get("usedMargin") or row.get("used"))
         self.upnl = _sf(row.get("unrealizedProfit") or row.get("unrealized"))
-        wallet_system_equity = self.wallet_equity - _sf(getattr(self, "foreign_upnl", 0.0))
+        if self._foreign_activity_present():
+            self._note_foreign_activity()
+        wallet_system_equity = (
+            self.wallet_equity
+            - _sf(getattr(self, "foreign_upnl", 0.0))
+            - _sf(getattr(self, "foreign_realized", 0.0))
+        )
 
         if self.start_eq <= 0 and wallet_system_equity > 0:
             self.start_eq = max(0.0, wallet_system_equity - self.system_open_upnl())
@@ -2584,10 +2651,9 @@ class Pulse:
         except Exception:
             reset_requested = False
         if reset_requested:
-            # Start/reset is lane-scoped. Foreign mark-to-market is removed
-            # from the wallet before establishing the new system baseline.
-            current_system = self._system_marked_equity() if self.start_eq > 0 else wallet_system_equity
-            self.start_eq = max(0.0, current_system)
+            # Start/reset is lane-scoped. Foreign mark-to-market and realized
+            # telemetry are removed before establishing the new baseline.
+            self.start_eq = max(0.0, wallet_system_equity)
             self.system_start_eq = self.start_eq
             self._persist_start_equity()
             if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
@@ -2595,7 +2661,7 @@ class Pulse:
             self._halt_eq = 0.0
 
         self.system_upnl = self.system_open_upnl()
-        self.system_equity = self._system_marked_equity()
+        self.system_equity = self._balance_system_equity(wallet_system_equity)
         self.equity = self.system_equity
         self.system_start_eq = self.start_eq
         self.last_bal = time.time()
@@ -3310,6 +3376,8 @@ class Pulse:
         self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
         self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
         self.foreign_open_order_count = self.exchange_order_foreign_count
+        if self.exchange_order_foreign_count > 0:
+            self._note_foreign_activity()
         if symbol:
             return [o for o in rows if str(o.get("symbol") or "") == symbol]
 
@@ -7858,7 +7926,8 @@ class Pulse:
     def system_open_upnl(self) -> float:
         """Mark-to-market of this connection's system book only. Cost-net."""
         tot = 0.0
-        for p in self.open.values():
+        open_book = getattr(self, "open", {})
+        for p in open_book.values() if isinstance(open_book, dict) else ():
             if not self.position_is_ours(p):
                 continue
             px = float(self.px.get(p.symbol) or 0)
@@ -7906,7 +7975,8 @@ class Pulse:
         if capital > 0 and peak > 1e-12:
             dd_pct = max(dd_pct, (peak - (eq + upnl)) / peak * 100.0)
         traded = sum(abs(float(c.qty) * float(c.entry or 0)) for c in closes)
-        for p in self.open.values():
+        open_book = getattr(self, "open", {})
+        for p in open_book.values() if isinstance(open_book, dict) else ():
             if not self.position_is_ours(p):
                 continue
             traded += abs(float(p.qty) * float(p.entry or 0))
@@ -8531,6 +8601,7 @@ class Pulse:
         self.exchange_own_qty = {}
         self.exchange_foreign_qty = {}
         self.foreign_upnl = 0.0
+        self.foreign_realized = 0.0
         self.foreign_position_count = 0
         self.foreign_exposure = 0.0
         for p in rows:
@@ -8572,6 +8643,13 @@ class Pulse:
                 self.exchange_foreign_qty[exchange_key] = qty
                 foreign.add(exchange_key)
                 self.foreign_upnl += _sf(p.get("unrealizedProfit") or p.get("unrealized") or 0.0)
+                self.foreign_realized += _sf(
+                    p.get("realizedProfit")
+                    or p.get("realisedProfit")
+                    or p.get("realizedPnl")
+                    or p.get("realisedPnl")
+                    or 0.0
+                )
                 self.foreign_exposure += qty * max(px, 0.0)
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
@@ -8790,6 +8868,8 @@ class Pulse:
             self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
         self.foreign_position_count = len(foreign)
+        if foreign:
+            self._note_foreign_activity()
         ours_live = live - set(foreign)
         self.exchange_open_count = len(ours_live)
         self.exchange_own_open_count = len(ours_live)
@@ -9585,6 +9665,7 @@ class Pulse:
             "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
             "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
             "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
+            "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
             "openParity": open_parity,
             "realStage": dict(stage_rows.get("real") or {}) if isinstance(stage_rows, dict) else {},
             "setCount": int(sets_snap.get("setCount") or 0),
@@ -9650,6 +9731,7 @@ class Pulse:
             "usedMargin": round(self.used, 4),
             "walletUnrealized": round(self.upnl, 4),
             "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
+            "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
             "foreignExposure": round(float(getattr(self, "foreign_exposure", 0.0) or 0.0), 4),
             "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
             "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),

@@ -87,6 +87,34 @@ class StatisticsTests(unittest.TestCase):
         self.assertFalse(store.record_trade({**row, "system_id": "other-system", "tracking_scope": "other-system:bingx-x02"}))
         self.assertEqual(store.status()["totals"], {})
 
+    def test_overall_report_separates_system_and_wallet_diagnostics(self):
+        def lane(connection, system_equity, wallet_equity):
+            scope = tracking_scope(connection)
+            own = {"ours": True, "trackingScope": scope, "clientId": f"G{connection[-2:]}owned",
+                   "pnl": 2, "symbol": "OWN-USDT", "side": "LONG"}
+            foreign = {"ours": True, "trackingScope": f"other-system:{connection}",
+                       "clientId": "manual-bot", "pnl": -50, "symbol": "FOREIGN-USDT", "side": "SHORT"}
+            return {
+                "systemId": "cts-g", "connection": connection, "trackingScope": scope,
+                "trackPrefix": f"G{connection[-2:]}", "systemEquity": system_equity,
+                "systemStartEquity": system_equity, "walletEquity": wallet_equity,
+                "systemPnl": 2, "systemRealized": 2, "systemUnrealized": 0,
+                "foreignUnrealized": -3, "foreignRealized": 4, "foreignExposure": 80,
+                "foreignPositionCount": 1, "foreignOpenOrderCount": 1,
+                "closed": [own, foreign], "open": [own, foreign],
+                "symbols": ["OWN-USDT", "FOREIGN-USDT"], "sets": {},
+                "coverage": {}, "historic": {},
+            }
+
+        report = ph.overall_report_state(lane("bingx-x01", 100, 130), lane("bingx-x02", 200, 240))
+        self.assertEqual(report["systemEquity"], 300)
+        self.assertEqual(report["walletEquity"], 370)
+        self.assertEqual(report["openCount"], 2)
+        self.assertEqual(len(report["closed"]), 2)
+        self.assertEqual(report["foreignPositionCount"], 2)
+        self.assertEqual(report["foreignRealized"], 8)
+        self.assertEqual({row["symbol"] for row in report["open"]}, {"OWN-USDT"})
+
     def test_partial_fill_identity_and_reporting_are_not_limited_to_recent_tape(self):
         store = self.store(systemTradeMaxRows=250)
         for i in range(500):

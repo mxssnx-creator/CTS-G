@@ -264,6 +264,7 @@ export type LiveStats = {
   usedMargin: number;
   unrealized: number;
   foreignUnrealized?: number;
+  foreignRealized?: number;
   foreignExposure?: number;
   foreignPositionCount?: number;
   foreignOpenOrderCount?: number;
@@ -275,24 +276,23 @@ export type LiveStats = {
   systemRealized?: number;
   systemUnrealized?: number;
   executionEvidence?: {
-  systemId?: string;
-  trackingScope?: string;
-  trackPrefix?: string;
-  connection?: string;
-  systemSource?: string;
-
+    systemId?: string;
+    trackingScope?: string;
+    trackPrefix?: string;
+    connection?: string;
+    systemSource?: string;
     systemClosed?: number;
     systemPnl?: number;
     systemRealized?: number;
     systemUnrealized?: number;
     internalOpen?: number;
     exchangeOpen?: number;
-  exchangeOwnOpen?: number;
-  foreignPositionCount?: number;
-  foreignOpenOrderCount?: number;
-  foreignUnrealized?: number;
-  openParity?: "match" | "pending" | "discrepant" | string;
-
+    exchangeOwnOpen?: number;
+    foreignPositionCount?: number;
+    foreignOpenOrderCount?: number;
+    foreignUnrealized?: number;
+    foreignRealized?: number;
+    openParity?: "match" | "pending" | "discrepant" | string;
     realStage?: Record<string, unknown>;
     setCount?: number;
     validatedSetCount?: number;
@@ -302,7 +302,6 @@ export type LiveStats = {
     progressReady?: boolean;
     snapshotAt?: number;
   };
-  walletEquity?: number;
   walletUnrealized?: number;
   pnlPct: number;
   drawdownPct: number;
@@ -602,11 +601,19 @@ export type LiveStats = {
     systemStartEquity?: number;
     walletEquity?: number;
     available: number;
+    usedMargin?: number;
     unrealized: number;
+    walletUnrealized?: number;
     foreignUnrealized?: number;
+    foreignRealized?: number;
     foreignExposure?: number;
     foreignPositionCount?: number;
     foreignOpenOrderCount?: number;
+    realizedPnl?: number;
+    systemRealized?: number;
+    systemUnrealized?: number;
+    drawdownPct?: number;
+    pnlPct?: number;
     openCount: number;
     exchangeOpenCount?: number;
     simOpenCount?: number;
@@ -649,7 +656,6 @@ export type LiveStats = {
     executionEvidence?: LiveStats["executionEvidence"];
     symbolCount?: number;
     lastError?: string;
-    trackPrefix?: string;
     cycle?: number;
   }>;
   equityLive?: number;
@@ -1009,12 +1015,21 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   if (!lane) return null;
   const prefix = cidPrefix(conn);
   const unitWant = conn === "vst" ? "vst" : "usdt";
-  const belongsToLane = (p: { clientId?: string; unit?: string; connection?: string; connType?: string }) => {
-    if (p.connection) return p.connection === lane.id;
-    if (p.connType) return p.connType === conn;
-    if (p.unit) return p.unit.toLowerCase() === unitWant;
-    return Boolean(prefix && String(p.clientId || "").startsWith(prefix));
+  const belongsToLane = (p: {
+  clientId?: string;
+  unit?: string;
+  connection?: string;
+  connType?: string;
+  trackingScope?: string;
+  }) => {
+  const expectedScope = lane.trackingScope || (lane.systemId && lane.id ? `${lane.systemId}:${lane.id}` : "");
+  if (p.trackingScope) return Boolean(expectedScope && p.trackingScope === expectedScope);
+  if (p.connection) return p.connection === lane.id;
+  if (p.connType) return p.connType === conn;
+  if (p.unit) return p.unit.toLowerCase() === unitWant;
+  return Boolean(prefix && String(p.clientId || "").startsWith(prefix));
   };
+
   const open = (s.open || []).filter(belongsToLane);
   const closed = (s.closed || []).filter(belongsToLane);
   // A lane summary cannot supply aggregate sets, events, costs, or the other
@@ -1024,20 +1039,40 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     connType: conn,
     connection: lane.id || (conn === "live" ? "bingx-x01" : "bingx-x02"),
     unit: lane.unit || (conn === "vst" ? "VST" : "USDT"),
-    mode: lane.mode || (conn === "vst" ? "VST_DEMO" : "LIVE_MAINNET"),
-    exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
-    running: lane.running,
-    halted: lane.halted,
-    haltReason: lane.haltReason ?? null,
-    paused: lane.paused,
-    equity: lane.equity,
-    available: lane.available,
-    unrealized: lane.unrealized ?? 0,
-    sessionPnl: lane.sessionPnl,
-    systemPnl: lane.systemPnl ?? lane.sessionPnl,
-    systemGrow: lane.systemGrow,
-    systemLoss: lane.systemLoss,
-    wins: lane.wins,
+  mode: lane.mode || (conn === "vst" ? "VST_DEMO" : "LIVE_MAINNET"),
+  exchange: lane.exchange || (conn === "vst" ? "BingX VST" : "BingX"),
+  running: lane.running,
+  halted: lane.halted,
+  haltReason: lane.haltReason ?? null,
+  paused: lane.paused,
+  systemId: lane.systemId,
+  trackingScope: lane.trackingScope,
+  trackPrefix: lane.trackPrefix,
+  equity: lane.systemEquity ?? lane.equity,
+  systemEquity: lane.systemEquity ?? lane.equity,
+  systemStartEquity: lane.systemStartEquity,
+  walletEquity: lane.walletEquity ?? lane.equity,
+  startEquity: lane.systemStartEquity ?? lane.equity,
+  available: lane.available,
+  usedMargin: lane.usedMargin ?? 0,
+  walletUnrealized: lane.walletUnrealized,
+  unrealized: lane.systemUnrealized ?? lane.unrealized ?? 0,
+  foreignUnrealized: lane.foreignUnrealized,
+  foreignRealized: lane.foreignRealized,
+  foreignExposure: lane.foreignExposure,
+  foreignPositionCount: lane.foreignPositionCount,
+  foreignOpenOrderCount: lane.foreignOpenOrderCount,
+  realizedPnl: lane.realizedPnl ?? lane.systemRealized ?? 0,
+  systemPnl: lane.systemPnl ?? lane.sessionPnl,
+  systemGrow: lane.systemGrow,
+  systemLoss: lane.systemLoss,
+  systemRealized: lane.systemRealized,
+  systemUnrealized: lane.systemUnrealized,
+  pnlPct: lane.pnlPct ?? 0,
+  drawdownPct: lane.drawdownPct ?? 0,
+  executionEvidence: lane.executionEvidence,
+  wins: lane.wins,
+
     losses: lane.losses,
     errors: lane.errors,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,

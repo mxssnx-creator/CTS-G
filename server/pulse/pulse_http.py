@@ -898,14 +898,20 @@ def _report_row_in_scope(row: dict, state: dict) -> bool:
         return False
     expected = str(state.get("trackingScope") or "").strip().lower()
     actual = str(row.get("trackingScope") or row.get("tracking_scope") or "").strip().lower()
-    if expected and actual:
-        return actual == expected
     system_id = str(state.get("systemId") or "").strip().lower()
     connection = str(state.get("connection") or "").strip().lower()
     row_system = str(row.get("systemId") or row.get("system_id") or "").strip().lower()
     row_connection = str(row.get("connection") or row.get("conn") or "").strip().lower()
-    if expected and row_system and row_connection:
-        return row_system == system_id and row_connection == connection
+    if expected and actual:
+        if actual != expected:
+            return False
+        if row_system and system_id and row_system != system_id:
+            return False
+        if row_connection and connection and row_connection != connection:
+            return False
+        return True
+    if expected and (row_system or row_connection):
+        return bool(system_id and connection and row_system == system_id and row_connection == connection)
     prefix = str(state.get("trackPrefix") or "").strip().lower()
     client_id = str(row.get("clientId") or row.get("client_id") or "").strip().lower()
     if prefix and client_id:
@@ -1012,6 +1018,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in states),
         "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in states),
         "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in states),
+        "foreignRealized": sum(_report_number(state.get("foreignRealized")) for state in states),
         "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in states),
         "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in states),
         "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
