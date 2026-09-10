@@ -502,7 +502,7 @@ function SettingsPage() {
                       min={0}
                       max={10000}
                       step={1}
-                      hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked symbols · 0 = all-unlimited universe`}
+                      hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked symbols · All/unlimited is a separate opt-in universe`}
                       onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
                     />
                     <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
@@ -754,7 +754,7 @@ function SettingsPage() {
                   <EnableSlider
                     label="DCA"
                     on={calcOpt.stratDca}
-                    hint="disabled by default"
+                    hint="enabled by default · independent add-on lane"
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stratDca: v }))}
                   />
                   <EnableSlider
@@ -2807,6 +2807,7 @@ function LiveApplied({
   const controls = stats?.coverage?.controls;
   const controlMode = controls?.mode ?? (overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
   const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
+  const controlPairs = controls?.pairCount ?? (overlay.controlOrders ? controlGroups : 0);
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
   const trail = v?.trailKey ?? `${Number(p.trailArmPct ?? overlay.trailArmPct).toFixed(1)}:${Number(p.trailGivePct ?? overlay.trailGivePct).toFixed(1)}`;
   const tf = [
@@ -2828,7 +2829,7 @@ function LiveApplied({
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
-        <span>controls {controlMode} · {controlGroups} groups</span>
+        <span>controls {controlMode} · {controlPairs} SL+TP pairs · {controlGroups} groups</span>
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F
@@ -2868,6 +2869,8 @@ function EffectiveSettingsSummary({
   const setCoverage = coverage?.sets;
   const scan = coverage?.scan;
   const stages = coverage?.coord?.stages ?? stats?.coord?.stages;
+  const logicalCap = pulse?.logicalPositionCap ?? pulse?.maxOpen;
+  const controlPairs = controls?.pairCount ?? controls?.groupCount;
   const controlRanges = controls?.groups?.length
     ? controls.groups
         .slice(0, 3)
@@ -2889,16 +2892,16 @@ function EffectiveSettingsSummary({
         <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
-        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controls?.groupCount)} pairs`} />
-        <AppliedKV label="Logical cap · members" value={`${remote(pulse?.maxOpen)} · ${remote(controls?.mergedMembers)} merged`} />
-        <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
+        <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controlPairs)} SL+TP pairs`} />
+        <AppliedKV label="Logical cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
+        <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
         <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
         <AppliedKV label="Live ranges" value={controlRanges} />
         <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />
         <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />
         <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
         <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
-  <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
+  <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} �� ready ${remote(stats?.progressReady)}`} />
   <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
   <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
   <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
@@ -2912,6 +2915,11 @@ function EffectiveSettingsSummary({
       </p>
     </div>
   );
+}
+
+function formatLogicalCap(value: unknown) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number === 0 ? "unlimited" : formatAppliedSetting(value);
 }
 
 function formatAppliedSetting(value: unknown, suffix = "") {

@@ -84,8 +84,11 @@ class DcaLane:
 
 class DcaBook:
     def __init__(self) -> None:
-        self.enabled = False  # DCA off by default — desk overlay can enable it
-        self.max_steps = 0
+        # The baseline enables DCA as an independent lane. An overlay may still
+        # disable it explicitly, while an empty step cap uses the finite
+        # configured distance list rather than creating an unbounded book.
+        self.enabled = True
+        self.max_steps = len(DEFAULT_DIST)
         self.distances = [d / 100.0 for d in DEFAULT_DIST]
         self.mults = list(DEFAULT_MULT)
         self.tp_mode = "average"
@@ -112,7 +115,15 @@ class DcaBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        self.enabled = bool(ov.get("dcaEnabled", False))
+        self.enabled = bool(
+            ov.get(
+                "dcaEnabled",
+                ov.get(
+                    "stratDca",
+                    cts.get("dcaEnabled", cts.get("variantDcaEnabled", True)),
+                ),
+            )
+        )
         try:
             raw_steps = ov.get("dcaMaxSteps")
             if raw_steps is None:
@@ -124,7 +135,6 @@ class DcaBook:
             step_n = 0
         dist = ov.get("dcaStepDistancesPct") or coord.get("dcaStepDistancesPct") or cts.get("dcaStepDistancesPct") or DEFAULT_DIST
         self.distances = _pct_list(dist, [d / 100.0 for d in DEFAULT_DIST])
-        # 0 = use the configured distance list (never unbounded grow).
         # Zero means the configured distance list, never an unbounded book.
         # A hard ceiling prevents malformed settings from allocating huge lanes.
         self.max_steps = max(1, min(DCA_STEPS_MAX, step_n if step_n > 0 else len(self.distances) or 4))

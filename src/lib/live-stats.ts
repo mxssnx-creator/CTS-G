@@ -315,6 +315,7 @@ export type LiveStats = {
   simOpenCount?: number;
   simUPnl?: number;
   maxOpen: number;
+  logicalPositionCap?: number;
   symbols: string[];
   symbolCount?: number;
   symbolMax?: number;
@@ -527,14 +528,17 @@ export type LiveStats = {
       steps?: number[];
       dims?: { pack?: number; sl?: number; trail?: number; step?: number };
     };
-    controls?: {
-      open?: number;
-      ok?: number;
-      missing?: number;
-      security?: number;
-      mode?: string;
-      groupCount?: number;
-      protectedGroups?: number;
+  controls?: {
+    open?: number;
+    ok?: number;
+    missing?: number;
+    security?: number;
+    mode?: string;
+    pairCount?: number;
+    aggregatePairCount?: number;
+    logicalPositionCap?: number;
+    groupCount?: number;
+    protectedGroups?: number;
       mergedMembers?: number;
       groups?: Array<{
         key?: string;

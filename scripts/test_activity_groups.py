@@ -8,6 +8,7 @@ from types import SimpleNamespace as NS
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server/pulse"))
 from event_ledger import EventLedger
 from pulse_http import merge_activity_summaries, merge_axis_enablement
+import pulse_trader as pt
 from pulse_trader import Pulse
 
 
@@ -44,7 +45,18 @@ class ActivityGroupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Pulse.__new__(Pulse)
             p.event_ledger = EventLedger(str(pathlib.Path(tmp) / "events.json"), "test")
-            p.open = {str(i): NS(symbol="X-USDT", side="LONG", qty=.01) for i in range(250)}
+            p.open = {
+                str(i): NS(
+                    symbol="X-USDT",
+                    side="LONG",
+                    qty=.01,
+                    ours=True,
+                    system_id=pt.SYSTEM_ID,
+                    connection=pt.CONN_SHORT,
+                    tracking_scope=pt.TRACKING_SCOPE,
+                )
+                for i in range(250)
+            }
             p.closed = []; p.pending_orders = {}; p.exchange_open_count = 1
             result = p.event_summary()
             self.assertEqual(result["internalOpen"], 250)
@@ -54,7 +66,15 @@ class ActivityGroupTests(unittest.TestCase):
             self.assertEqual(merged["internalOpen"], 500)
             self.assertEqual(merged["internalPositionGroups"], 2)
             self.assertEqual(merged["parity"], "match")
-            p.open["short"] = NS(symbol="X-USDT", side="SHORT", qty=.01)
+            p.open["short"] = NS(
+                symbol="X-USDT",
+                side="SHORT",
+                qty=.01,
+                ours=True,
+                system_id=pt.SYSTEM_ID,
+                connection=pt.CONN_SHORT,
+                tracking_scope=pt.TRACKING_SCOPE,
+            )
             self.assertEqual(p.event_summary()["parity"], "discrepant")
             p.recon_pending = True
             waiting = p.event_summary()

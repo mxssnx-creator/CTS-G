@@ -115,8 +115,11 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
-        rec(f"{name}-per-config-controls", ov.get("controlOrdersPerConfig", True) is True)
+        rec(f"{name}-per-config-controls-off", ov.get("controlOrdersPerConfig", False) is False)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
+        rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
+        rec(f"{name}-modules", all((ov.get("modules") or {}).get(k, True) is True for k in ("strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls")))
+        rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
@@ -125,15 +128,15 @@ def overlay_test() -> None:
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-open-cap", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
-    rec("x01-multi", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
     rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
-    rec("open-cap-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
-    rec("open-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
+    rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -196,7 +199,7 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("bounded-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
+    rec("unlimited-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
     rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
@@ -1806,7 +1809,10 @@ def block_calc_test() -> None:
     pMx = mk_trader(1.2, 1.5, 12)
     pMx.dca = SimpleNamespace(enabled=True, lanes={"TST-USDT:LONG": SimpleNamespace(filled_n=1)}, key=lambda s, d: f"{s}:{d}")
     pMx.maybe_block_adds()
-    rec("block-skip-if-dca-filled", pMx.api.posts == [], f"posts={pMx.api.posts}")
+    rec("block-independent-from-dca",
+        len(pMx.api.posts) == 1
+        and pMx.block.lanes["TST-USDT:LONG"].confirmed_add > 0,
+        f"posts={pMx.api.posts}")
     from dca_engine import DcaBook as _Dca
     dclamp = _Dca()
     dclamp.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
@@ -1861,8 +1867,8 @@ def set_orders_test() -> None:
     paths against a recording fake exchange. Covers: unique parseable
     clientOrderIDs per set, per-position control pairs with per-set SL
     distances, exchange-side cancel isolation, per-set win/loss attribution,
-    snapshot/sim stats coordination, and negative controls (occupied symbol
-    refused; entry without controls scratches, never unprotected)."""
+    snapshot/sim stats coordination, aggregate-mode independent lanes with
+    same-lane deduplication, and the no-controls scratch path."""
     import tempfile
     from types import SimpleNamespace
     import pulse_trader as pt
@@ -2142,12 +2148,17 @@ def set_orders_test() -> None:
     sim_n2, _sim_u2 = p.sim_stats()
     rec("setord-real-live-sim-coordination", sim_n == 0 and sim_n2 == 1, f"sim={sim_n}/{sim_n2}")
 
-    # === 4) negative controls ===
+    # === 4) aggregate lanes: distinct lane allowed, exact lane deduplicated ===
     p.control_orders_per_config = False
     before = len(fx.posts)
-    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # legacy aggregate occupied symbol -> refused
-    rec("setord-occupied-symbol-refused", len(fx.posts) == before and pos_for(p, "CCC-USDT").set_id == stC.id,
-        f"posts={len(fx.posts) - before}")
+    cur["i"] = 2
+    p.place("CCC-USDT", 1, "gen:independent", 0.9)
+    after_independent = len(fx.posts)
+    p.place("CCC-USDT", 1, reasons[2], 0.9)  # exact indication lane is already open
+    rec("setord-independent-lane-and-dedup",
+        after_independent == before + 1 and len(fx.posts) == after_independent
+        and pos_for(p, "CCC-USDT").set_id == stC.id,
+        f"independent={after_independent - before} duplicate={len(fx.posts) - after_independent}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)
     p2 = mk_pulse(fx2)

@@ -103,6 +103,12 @@ test("new and legacy settings default to unlimited logical positions, independen
     assert.equal(value.stratIndications, true);
     assert.equal(value.stratTrailing, true);
     assert.equal(value.stratBlock, true);
+    for (const key of ["indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak"] as const) {
+      assert.equal(value[key], true, key);
+    }
+    for (const key of ["strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls"] as const) {
+      assert.equal(value.modules?.[key], true, key);
+    }
     assert.equal(value.symbolCap, 50);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);

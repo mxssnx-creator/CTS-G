@@ -1211,7 +1211,8 @@ class Pulse:
         self.strat_ind = True
         self.strat_block = True
         self.strat_trail = True
-        self.normal_execution_enabled = False
+        self.strat_dca = True
+        self.normal_execution_enabled = True
         self.block_active = True
         self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
@@ -1540,7 +1541,24 @@ class Pulse:
             str(reason or "").split(":")[1] if pack == "indications" and ":" in str(reason or "") else "general"
         )
         lane = stable_key(pack, getattr(selected_set, "id", ""), signal_key)
-        return f"{strategy}:{lane}" if strategy == "block-active" and lane else lane
+        strategy_key = str(strategy or "").strip().lower()
+        if strategy_key == "core":
+            strategy_key = "normal"
+        return f"{strategy_key}:{lane}" if strategy_key and lane else lane
+
+    def execution_lane_matches(self, stored_lane: Any, requested_lane: Any) -> bool:
+        """Match a new lane while retaining pre-strategy-prefix normal rows."""
+        stored = str(stored_lane or "")
+        requested = str(requested_lane or "")
+        if not stored or not requested:
+            return False
+        if stored == requested:
+            return True
+        if requested.startswith("normal:") and stored == requested.removeprefix("normal:"):
+            return True
+        if stored.startswith("normal:") and requested == stored.removeprefix("normal:"):
+            return True
+        return False
 
     def entry_slot_count(self) -> int:
         """Confirmed and pending lanes share the configured open-slot budget."""
@@ -4488,9 +4506,13 @@ class Pulse:
             # A legacy symbol aggregate cannot safely coexist with a new
             # quantity-matched range group. New groups otherwise merge on the
             # normalized range after the exchange fill is confirmed.
-            return any(bool(getattr(p, "legacy_aggregate", False)) for p in positions)
+            if any(bool(getattr(p, "legacy_aggregate", False)) for p in positions):
+                return True
         if execution_lane:
-            return any(getattr(p, "execution_lane", "") == execution_lane for p in positions)
+            return any(
+                self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
+                for p in positions
+            )
         if set_id:
             return any(
                 getattr(p, "pack", "") == pack
@@ -4501,14 +4523,23 @@ class Pulse:
         # directions. place() still deduplicates an empty-lane pending intent.
         return False
 
-    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str, selected_set=None) -> Optional[str]:
+    def entry_sense(
+        self,
+        sym: str,
+        direction: int,
+        reason: str,
+        conf: float,
+        pack: str,
+        selected_set=None,
+        execution_strategy: str = "",
+    ) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
         if conf < 0.50:
             return "low-conf"
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
         side = "LONG" if direction > 0 else "SHORT"
-        lane = self.execution_lane_key(pack, reason, selected_set)
+        lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
         if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
@@ -4579,7 +4610,7 @@ class Pulse:
         except Exception:
             chosen = None
         if chosen:
-            chosen_lane = self.execution_lane_key(pack, reason, chosen)
+            chosen_lane = self.execution_lane_key(pack, reason, chosen, execution_strategy)
             if self.occupying(sym, side, pack, chosen.id, execution_lane=chosen_lane):
                 return "set-slot"
             # pick() already enforces the validation gate: under the strict
@@ -4892,6 +4923,12 @@ class Pulse:
         if anchors is None:
             anchors = self._block_reference_anchors = ContinuationBook()
         key = (sym, side, execution_lane or chosen.id)
+        # Older persisted anchors used the Set id before Block Active lanes
+        # became strategy-scoped. Reuse that observation when the new key has
+        # not been seen yet so a restart does not discard a qualified parent.
+        legacy_key = (sym, side, chosen.id)
+        if execution_lane and key not in anchors and legacy_key in anchors:
+            key = legacy_key
         if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
             return reject("reference needs 45 seconds and 0.2% continuation")
         def same_lane(lane, strategy):
@@ -4983,7 +5020,8 @@ class Pulse:
         pack = "indications" if str(reason).startswith("ind:") else "general"
         execution_lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
         if execution_lane and normal_allowed and any(
-                getattr(p, "execution_lane", "") == execution_lane and getattr(p, "strategy", "") != "block"
+                self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
+                and getattr(p, "strategy", "") != "block"
                 for p in self.positions_for(sym, side)):
             return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
@@ -4991,7 +5029,12 @@ class Pulse:
                 str(pending.get("kind") or "entry") == "entry"
                 and str(pending.get("symbol") or "") == sym
                 and str(pending.get("side") or "").upper() == side
-                and (not execution_lane or (pending.get("metadata") or {}).get("execution_lane") == execution_lane)
+                and (
+                    not execution_lane
+                    or self.execution_lane_matches(
+                        (pending.get("metadata") or {}).get("execution_lane"), execution_lane
+                    )
+                )
                 and not (normal_allowed and (pending.get("metadata") or {}).get("strategy") == "block")
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
@@ -5008,8 +5051,15 @@ class Pulse:
                 return
             skip = None
         else:
-            skip = (self.entry_sense(sym, direction, reason, conf, pack, selected_set)
-                    if selected_set is not None else self.entry_sense(sym, direction, reason, conf, pack))
+            skip = self.entry_sense(
+                sym,
+                direction,
+                reason,
+                conf,
+                pack,
+                selected_set,
+                execution_strategy,
+            )
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
                 log(f"SKIP {sym} {skip}", every=40.0, key="sense", quiet=True)
@@ -5072,6 +5122,24 @@ class Pulse:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
+        # Direct callers may omit selected_set; entry_sense resolves the same
+        # ranked Set before reaching this point. Persist that resolved lane so
+        # later fills and restarts can deduplicate the exact lane as well.
+        if not execution_lane and chosen is not None:
+            execution_lane = self.execution_lane_key(pack, reason, chosen, execution_strategy)
+        if execution_lane and self.occupying(sym, side, pack, set_id, execution_lane=execution_lane):
+            return
+        for pending in (getattr(self, "pending_orders", {}) or {}).values():
+            if (
+                str(pending.get("kind") or "entry") == "entry"
+                and str(pending.get("symbol") or "") == sym
+                and str(pending.get("side") or "").upper() == side
+                and self.execution_lane_matches(
+                    (pending.get("metadata") or {}).get("execution_lane"), execution_lane
+                )
+                and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
+            ):
+                return
         try:
             position_ratio = max(0.2, min(3.0, float(getattr(chosen, "volume_ratio", 1.0) or 1.0)))
         except Exception:
@@ -6791,7 +6859,7 @@ class Pulse:
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
         self.strat_trail = bool(ov.get("stratTrailing", True))
-        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", False)) is True
+        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", True)) is True
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.strat_general = True
@@ -7012,6 +7080,14 @@ class Pulse:
                 self.api.hub.set_symbols(list(SYMBOLS))
 
     def pulse_snapshot(self) -> Dict[str, Any]:
+        strategy_lanes = {
+            "general": bool(getattr(self, "strat_general", True)),
+            "normal": bool(getattr(self, "normal_execution_enabled", True)),
+            "indications": bool(getattr(self, "strat_ind", True) and getattr(self.indications, "settings", {}).get("enabled", True)),
+            "trailing": bool(getattr(self, "strat_trail", True) and getattr(self, "mods", {}).get("strategy.trailing", True)),
+            "block": bool(getattr(self, "strat_block", True) and getattr(self.block, "enabled", True)),
+            "dca": bool(getattr(self, "strat_dca", True) and getattr(self.dca, "enabled", True)),
+        }
         return {
             "systemId": SYSTEM_ID,
             "connection": CONN_SHORT,
@@ -7026,6 +7102,7 @@ class Pulse:
             "leverageMap": dict(getattr(self, "lev_map", {})),
             "leverageMax": dict(getattr(self, "lev_max", {})),
             "maxOpen": MAX_OPEN,
+            "logicalPositionCap": MAX_OPEN,
             "maxPerGroup": MAX_PER_GROUP,
             "slPct": SL_PCT * 100,
             "tpPct": TP_PCT * 100,
@@ -7098,6 +7175,8 @@ class Pulse:
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
             "stratDca": getattr(self, "strat_dca", True),
+            "strategyLanes": strategy_lanes,
+            "enabledStrategyLanes": [name for name, enabled in strategy_lanes.items() if enabled],
             "dcaEnabled": bool(self.dca.enabled),
             "indEnabled": bool(self.indications.settings.get("enabled", True)),
             "indTypeState": bool(self.indications.settings.get("typeState", True)),
@@ -7576,7 +7655,7 @@ class Pulse:
 
     def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
-        if not getattr(self.dca, "enabled", False) or self.halted:
+        if not getattr(self.dca, "enabled", False) or not getattr(self, "strat_dca", True) or self.halted:
             return
         if self.entries_blocked():
             return
@@ -9793,6 +9872,9 @@ class Pulse:
         except Exception:
             by_ind = getattr(self, "_by_ind_cache", {}) or {}
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
+        pulse_view = self.pulse_snapshot()
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate"
+        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -9845,6 +9927,7 @@ class Pulse:
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
+            "logicalPositionCap": MAX_OPEN,
             "symbols": SYMBOLS,
             "symbolCount": len(SYMBOLS),
             "symbolCap": int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0),
@@ -9873,7 +9956,7 @@ class Pulse:
             "maxHoldS": MAX_HOLD_S,
             "tests": self.tests[:24],
             "block": self.block.snapshot(),
-            "pulse": self.pulse_snapshot(),
+            "pulse": pulse_view,
             "coord": coord_snap,
             "historic": historic_snap,
             "progressPct": pct_val,
@@ -10024,6 +10107,8 @@ class Pulse:
         }
 
     def _coverage_blob(self) -> Dict[str, Any]:
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate"
+        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
@@ -10264,7 +10349,10 @@ class Pulse:
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
-                "mode": "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate",
+                "mode": control_mode,
+                "pairCount": expected_control_pairs,
+                "aggregatePairCount": expected_control_pairs if control_mode == "aggregate" else 0,
+                "logicalPositionCap": MAX_OPEN,
                 "groupCount": len(self.open),
                 "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),

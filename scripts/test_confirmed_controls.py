@@ -235,6 +235,20 @@ class AggregateLaneControls(unittest.TestCase):
         self.assertNotIn('quantity', body)
         self.assertTrue(self.p.cid('u', pos=first).startswith(pt.TAG + 'ua'))
 
+    def test_strategy_prefixes_keep_general_trailing_and_block_lanes_independent(self):
+        selected = SimpleNamespace(id='set-1')
+        normal = self.p.execution_lane_key('general', 'signal', selected, 'normal')
+        trailing = self.p.execution_lane_key('general', 'signal', selected, 'trailing')
+        block = self.p.execution_lane_key('general', 'signal', selected, 'block-active')
+        self.assertNotEqual(normal, trailing)
+        self.assertNotEqual(normal, block)
+        self.assertTrue(normal.startswith('normal:'))
+        self.assertTrue(block.startswith('block-active:'))
+        legacy = self.position(lane=normal.removeprefix('normal:'))
+        self.p.open['legacy'] = legacy
+        self.assertTrue(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane=normal))
+        self.assertFalse(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane=trailing))
+
     def test_per_config_opt_in_keeps_quantity_matched_controls(self):
         self.p.control_orders_per_config = True
         pos = self.position(lane='lane-a')
