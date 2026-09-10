@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server/pulse"))
 from event_ledger import EventLedger
 from entry_dispatch import EntryMatrix
-from pulse_http import merge_activity_summaries, merge_axis_enablement
+from pulse_http import merge_activity_summaries, merge_axis_enablement, overall_report_state
 import pulse_trader as pt
 from pulse_trader import Pulse
 
@@ -30,6 +30,23 @@ class ActivityGroupTests(unittest.TestCase):
         self.assertEqual(matrix[0][-1].id, "cfg-000")
         self.assertEqual(matrix[1][-1].id, "cfg-001")
         self.assertEqual(matrix[2][-1].id, "cfg-001")
+
+    def test_overall_report_preserves_aggregate_control_mode(self):
+        def lane(mode):
+            return {
+                "trackingScope": "x01",
+                "systemId": "cts-g",
+                "connection": "x01",
+                "open": [],
+                "closed": [],
+                "logicalPositionCount": 0,
+                "exchangePositionGroupCount": 0,
+                "coverage": {"controls": {"mode": mode}},
+            }
+
+        aggregate = lane("aggregate")
+        self.assertEqual(overall_report_state(aggregate, aggregate)["coverage"]["controls"]["mode"], "aggregate")
+        self.assertEqual(overall_report_state(aggregate, lane("per-config"))["coverage"]["controls"]["mode"], "mixed")
 
     def test_response_and_rejection_are_one_order_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:

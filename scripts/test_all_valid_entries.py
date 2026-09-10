@@ -149,6 +149,15 @@ class AllValidEntries(unittest.TestCase):
         for _ in range(34): visited.update(p.entry_candidate_window(matrix))
         self.assertEqual(visited, set(matrix))
 
+    def test_zero_live_candidate_cap_rotates_the_full_permissive_pool(self):
+        book = self.book(40)
+        book.entry_policy = 'permissive-bounded'
+        book.live_test_mode = True
+        book.live_test_candidates = 0
+        book.live_test_min_samples = 8
+        seen = {book.pick('general', 'base', 'LONG').id for _ in range(40)}
+        self.assertEqual(len(seen), 40)
+
     def test_entry_sets_cache_reuses_stable_eligibility_and_invalidates_on_score(self):
         book = self.book(12)
         with patch.object(book, '_validated_entry_rows', wraps=book._validated_entry_rows) as scan:

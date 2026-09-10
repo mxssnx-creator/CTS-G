@@ -4410,7 +4410,10 @@ class SetBook:
                     float(s.trail_arm or 0),
                     float(s.trail_give or 0),
                 ),
-            )[: self.live_test_candidates]
+            )
+            candidate_cap = int(getattr(self, "live_test_candidates", 0) or 0)
+            if candidate_cap > 0:
+                exploratory = exploratory[:candidate_cap]
             if self.prefer_minimal_range and self.additional_coordination:
                 floor_rows = [s for s in exploratory if int(s.step or 0) >= int(self.min_step or self.min_step_cfg)]
                 if floor_rows:

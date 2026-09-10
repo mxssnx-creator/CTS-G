@@ -1012,6 +1012,17 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         for state in states
         if isinstance(state.get("pulse") or {}, dict)
     )
+    control_modes = set()
+    for state in states:
+        coverage = state.get("coverage") or {}
+        controls = coverage.get("controls") if isinstance(coverage, dict) else None
+        controls = controls if isinstance(controls, dict) else {}
+        pulse = state.get("pulse") or {}
+        mode = controls.get("mode")
+        if mode not in ("per-config", "aggregate"):
+            mode = "aggregate" if isinstance(pulse, dict) and pulse.get("controlOrdersPerConfig") is False else "per-config"
+        control_modes.add(mode)
+    control_mode = next(iter(control_modes)) if len(control_modes) == 1 else "mixed"
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
@@ -1078,7 +1089,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "indicationTypes": indication_types,
             "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "entryCandidateCount": entry_candidate_count, "histFills": hist_fills},
             "controls": {
-                "mode": "per-config",
+                "mode": control_mode,
                 "open": logical_position_count,
                 "logicalOpen": logical_position_count,
                 "exchangePositionGroups": exchange_position_group_count,
@@ -1837,6 +1848,9 @@ class Handler(SimpleHTTPRequestHandler):
                 })
                 return
             ov = load_overlay(conn)
+            entry_candidate_cap = ov.get("entryPolicyMaxCandidates")
+            if entry_candidate_cap is None:
+                entry_candidate_cap = ov.get("liveTestCandidates")
             self._json({
                 "cts": load_cts(conn),
                 "overlay": ov,
@@ -1848,7 +1862,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "maxOpen": ov.get("maxOpen"),
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
                 "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
-                "entryPolicyMaxCandidates": ov.get("entryPolicyMaxCandidates") or ov.get("liveTestCandidates"),
+                "entryPolicyMaxCandidates": entry_candidate_cap,
                 "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
