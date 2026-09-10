@@ -194,6 +194,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   scanS: number;
   cooldownS: number;
   staggerS: number;
+  drawdownHaltPct: number;
+  minimumEquity: number;
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
   normalExecutionEnabled: boolean;
@@ -370,6 +372,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   scanS: 0.2,
   cooldownS: 9,
   staggerS: 0.6,
+  drawdownHaltPct: 18,
+  minimumEquity: 0.2,
   controlOrders: true,
   controlOrdersPerConfig: false,
   normalExecutionEnabled: true,
@@ -686,6 +690,11 @@ export type CtsSettings = {
   margin_mode?: string;
   leveragePercentage?: number;
   useMaximalLeverage?: boolean;
+  maxDdTimeS?: number;
+  cooldownS?: number;
+  staggerS?: number;
+  drawdownHaltPct?: number;
+  minimumEquity?: number;
   live_trade_requested?: boolean;
   live_trading_enabled?: boolean;
   useSystemCloseOnly?: boolean;
@@ -806,6 +815,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       false,
     ),
     coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
+    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 57600),
+    cooldownS: num(live?.cooldownS ?? cts.cooldownS, 9),
+    staggerS: num(live?.staggerS ?? cts.staggerS, 0.6),
+    drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 18),
+    minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.15),
     slMaxPct: num(cts.slMaxPct, 3.0),
@@ -1021,6 +1035,12 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.tpMaxPct = num(next.tpMaxPct, 0) <= 0 ? 0 : Math.max(next.tpMinPct, next.tpMaxPct);
   next.setMinStep = Math.max(1, Math.min(30, Math.round(num(next.setMinStep, 1))));
   next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
+  next.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.maxDdTimeS, 57600) / 600) * 600));
+  next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
+  next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));
+  next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
+  next.drawdownHaltPct = Math.max(1, Math.min(80, num(next.drawdownHaltPct, 18)));
+  next.minimumEquity = Math.max(0, num(next.minimumEquity, 0.2));
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
     next.symbolsAll = true;

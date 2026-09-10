@@ -6749,7 +6749,7 @@ class Pulse:
 
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
-        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
+        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
@@ -6817,9 +6817,18 @@ class Pulse:
         if ov.get("scanS"):
             SCAN_S = max(0.20, min(8.0, float(ov["scanS"])))
         if ov.get("cooldownS") is not None:
-            COOLDOWN_S = float(ov["cooldownS"])
-        if ov.get("staggerS"):
-            STAGGER_S = float(ov["staggerS"])
+            COOLDOWN_S = max(0.0, min(120.0, float(ov["cooldownS"])))
+        if ov.get("staggerS") is not None:
+            STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
+        if ov.get("drawdownHaltPct") is not None:
+            raw_dd = float(ov["drawdownHaltPct"])
+            DD_HALT = max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+        else:
+            DD_HALT = 0.18
+        if ov.get("minimumEquity") is not None:
+            EQ_MIN = max(0.0, min(1_000_000_000.0, float(ov["minimumEquity"])))
+        else:
+            EQ_MIN = 0.20
         manual_cost, use_live_costs = self._position_cost_config(ov, cts)
         self.manual_position_cost_pct = manual_cost
         self.use_live_position_costs = use_live_costs

@@ -43,7 +43,8 @@ import {
   overlayOverview,
   type UserPreset,
 } from "@/lib/user-presets";
-import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
 import { enabledAxes, setMetric } from "@/lib/set-overview";
@@ -75,6 +76,25 @@ const SECTIONS = [
   "pulse",
   "symbols",
 ] as const;
+
+const CALC_RANGE_PRESETS = [
+  { label: "2h", hours: 2 },
+  { label: "7h", hours: 7 },
+  { label: "24h", hours: 24 },
+  { label: "72h", hours: 72 },
+  { label: "7d", hours: 168 },
+  { label: "14d", hours: 336 },
+] as const;
+
+const CALC_RUNNING_PHASES = new Set(["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"]);
+
+function calcIsRunning(phase?: string) {
+  return Boolean(phase && CALC_RUNNING_PHASES.has(phase));
+}
+
+function hasCalcSnapshot(job: HistCalcJob | null) {
+  return Boolean(job && (job.phase !== "idle" || job.ready || job.lastCompleteRun || (job.rows?.length ?? 0) > 0));
+}
 
 function SettingsPage() {
   const { conn } = useConnection();
@@ -113,6 +133,8 @@ function SettingsPage() {
   useEffect(() => {
     setCts(null);
     setRaw(null);
+    setCalcJob(null);
+    setCalcBusy(false);
     setDirty(false);
     dirtyRef.current = false;
     setSaveMsg(null);
@@ -199,13 +221,11 @@ function SettingsPage() {
       const j = await fetchHistCalc(histConn);
       if (!alive) return;
       setCalcJob(j);
-      const running = ["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"].includes(j.phase);
+      const running = calcIsRunning(j.phase);
       if (running) timer = setTimeout(() => void pull(), 1200);
       else setCalcBusy(false);
     };
-    if (calcBusy || (calcPhase && ["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"].includes(calcPhase))) {
-      void pull();
-    }
+    void pull();
     return () => {
       alive = false;
       if (timer) clearTimeout(timer);
@@ -292,8 +312,7 @@ function SettingsPage() {
     const vst = await saveOverlay(next, "vst");
     setUserBusy(false);
     const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
-    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · recalculating/coordinating`);
-    if (next.histEnabled) void onCalcAll(next, nextCalcOpt);
+    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · historic calculation remains manual`);
   };
 
   const onRenameSystemPreset = async () => {
@@ -341,6 +360,15 @@ function SettingsPage() {
     if (j.phase === "error") setCalcBusy(false);
   };
 
+  const onStopCalc = async () => {
+    if (!calcIsRunning(calcJob?.phase) && !calcBusy) return;
+    setCalcBusy(true);
+    const j = await stopHistCalc(histConn);
+    setCalcJob(j);
+    setCalcBusy(false);
+    setSaveMsg(j.error || j.detail || "Historic calculation stopped");
+  };
+
   const onApplyWinner = () => {
     const apply = calcJob?.apply;
     if (!apply || typeof apply !== "object") return;
@@ -377,11 +405,7 @@ function SettingsPage() {
       dirtyRef.current = false;
       setDirty(false);
       if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
-      setSaveMsg(`${r.detail} · recalculating/coordinating`);
-      // The sidecar reloads and schedules its next coordination tick after an
-      // atomic overlay write. Trigger the independent historic worker too so
-      // the UI never shows a stale Set matrix after a settings change.
-      if (overlay.histEnabled) void onCalcAll(overlay);
+      setSaveMsg(`${r.detail} · historic calculation remains manual`);
     }
   };
 
@@ -709,8 +733,8 @@ function SettingsPage() {
                 )}
               </Card>
               <Card
-                title="Historic replay · rolling 7 hours"
-                hint="Runs on the active connection lane. Durable 1m bars, every selected pack × SL:TP × trail × step × symbol, then a complete hourly refresh."
+                title="Historic calculations · manual replay"
+                hint="Settings runs only when started below. The internal Set and coordination calculations remain independent on their own lane."
               >
                 <Grid>
                   <Slider
@@ -731,12 +755,12 @@ function SettingsPage() {
                     onChange={(v) => setCalcOpt((o) => ({ ...o, stepMax: Math.max(o.minStep, Math.round(v)) }))}
                   />
                   <Slider
-                    label="Rolling range (hours)"
+                    label="Evaluation range (hours)"
                     value={calcOpt.hours}
                     min={2}
                     max={336}
                     step={1}
-                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · complete refresh hourly`}
+                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · applied on Start`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
                   />
                   <EnableSlider
@@ -818,15 +842,39 @@ function SettingsPage() {
                     onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeBreak: v }))}
                   />
                 </Grid>
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg2 px-3 py-3" data-testid="calc-range-presets">
+                  <span className="font-mono text-xs uppercase text-muted">Quick range</span>
+                  {CALC_RANGE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.hours}
+                      type="button"
+                      aria-pressed={calcOpt.hours === preset.hours}
+                      onClick={() => setCalcOpt((o) => ({ ...o, hours: preset.hours }))}
+                      className={`min-h-9 rounded-md border px-3 font-mono text-xs ${calcOpt.hours === preset.hours ? "border-primary bg-primary-dim/40 text-primary" : "border-border text-muted"}`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  <span className="ml-auto text-xs text-muted">Manual only · no settings auto replay</span>
+                </div>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
                     type="button"
-                    data-testid="hist-calc-all"
-                    disabled={calcBusy}
+                    data-testid="hist-calc-start"
+                    disabled={calcBusy || calcIsRunning(calcJob?.phase)}
                     onClick={() => void onCalcAll()}
                     className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
                   >
-                    {calcBusy ? "Calculating…" : "Calculate all configs"}
+                    {calcIsRunning(calcJob?.phase) ? "Calculating…" : "Start calculation"}
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="hist-calc-stop"
+                    disabled={!calcBusy && !calcIsRunning(calcJob?.phase)}
+                    onClick={() => void onStopCalc()}
+                    className="min-h-11 rounded-lg border border-danger/50 px-4 text-sm text-danger disabled:opacity-40"
+                  >
+                    Stop
                   </button>
                   {calcJob?.winner ? (
                     <button
@@ -841,11 +889,12 @@ function SettingsPage() {
                   <span className="text-sm text-muted">
                     {calcJob?.phase && calcJob.phase !== "idle"
                       ? `${calcJob.phase} ${Math.round(calcJob.pct || 0)}% · ${calcJob.detail || ""}`
-                      : "Queues the shared lane · rolling 7 hours · complete refresh every hour"}
+                      : "Ready · choose a range, then start a manual calculation"}
                   </span>
                 </div>
-                {calcJob && calcJob.phase !== "idle" ? (
+                {calcJob && hasCalcSnapshot(calcJob) ? (
                   <div className="space-y-3">
+                    <HistoricCalcResults job={calcJob} />
                     <div className="h-1.5 overflow-hidden rounded-full bg-border">
                       <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, calcJob.pct || 0))}%` }} />
                     </div>
@@ -892,7 +941,7 @@ function SettingsPage() {
                       />
                       <KV k="Backfill gaps" v={String(calcJob.coverage?.bars?.missing ?? calcJob.missingSymbols?.length ?? 0)} />
                       <KV
-                        k="Next complete refresh"
+                        k="Internal lane next refresh"
                         v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : "pending"}
                       />
                       <KV
@@ -1003,7 +1052,7 @@ function SettingsPage() {
                   </div>
                 ) : null}
                 <p className="text-sm text-muted">
-                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Does not start the live engine.
+                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Settings calculations are manual; the internal Set calculation lane remains independent and the live engine is never started here.
                 </p>
               </Card>
             </>
@@ -1216,7 +1265,119 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss vs take profit" hint="All 30 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
+            <>
+              <Card title="Risk thresholds & gates" hint="The live halt, position protection, Set validation and entry pacing thresholds are saved with this connection.">
+                <Grid>
+                  <Num
+                    label="Equity drawdown halt"
+                    value={overlay.drawdownHaltPct}
+                    min={1}
+                    max={80}
+                    step={1}
+                    unit="%"
+                    hint="Stops new entries at this session equity drawdown; recovery requires a real capital increase."
+                    onChange={(v) => patch("drawdownHaltPct", Math.round(v))}
+                  />
+                  <Num
+                    label="Minimum equity floor"
+                    value={overlay.minimumEquity}
+                    min={0}
+                    max={1000000}
+                    step={0.01}
+                    unit="USDT"
+                    hint="0 = disabled; protects very small or depleted account equity."
+                    onChange={(v) => patch("minimumEquity", Math.max(0, v))}
+                  />
+                  <Num
+                    label="Position max DD time"
+                    value={overlay.maxDdTimeS / 60}
+                    min={10}
+                    max={960}
+                    step={10}
+                    unit="min"
+                    hint="Underwater positions close after this continuous drawdown time."
+                    onChange={(v) => patch("maxDdTimeS", Math.round(v / 10) * 600)}
+                  />
+                  <Num
+                    label="Set max DD time"
+                    value={overlay.setMaxDdTimeS / 60}
+                    min={10}
+                    max={960}
+                    step={10}
+                    unit="min"
+                    hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
+                    onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)}
+                  />
+                  <Slider
+                    label="Set minimum PF"
+                    value={overlay.setMinPf}
+                    min={0.8}
+                    max={2.5}
+                    step={0.02}
+                    hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
+                    onChange={(v) => patch("setMinPf", v)}
+                  />
+                  <Slider
+                    label="Real minimum PF"
+                    value={overlay.realMinPf}
+                    min={0.8}
+                    max={2.5}
+                    step={0.02}
+                    hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
+                    onChange={(v) => {
+                      patch("realMinPf", v);
+                      patch("minPf", v);
+                    }}
+                  />
+                  <Num
+                    label="Validation samples"
+                    value={overlay.setMinSamples}
+                    min={5}
+                    max={40}
+                    step={1}
+                    hint="Minimum historic closes before a Set can qualify."
+                    onChange={(v) => patch("setMinSamples", Math.round(v))}
+                  />
+                  <Num
+                    label="Deactivation window"
+                    value={overlay.setDeactN}
+                    min={10}
+                    max={80}
+                    step={1}
+                    hint="Latest live fills used by the negative-result deactivation gate."
+                    onChange={(v) => patch("setDeactN", Math.round(v))}
+                  />
+                  <Num
+                    label="Entry cooldown"
+                    value={overlay.cooldownS}
+                    min={0}
+                    max={120}
+                    step={0.5}
+                    unit="s"
+                    hint="Per-symbol cooldown between admitted entries."
+                    onChange={(v) => patch("cooldownS", v)}
+                  />
+                  <Num
+                    label="Entry stagger"
+                    value={overlay.staggerS}
+                    min={0}
+                    max={30}
+                    step={0.1}
+                    unit="s"
+                    hint="Global pacing guard; 0 disables the stagger delay."
+                    onChange={(v) => patch("staggerS", v)}
+                  />
+                  <Toggle label="Automatic Set deactivation" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
+                  <Toggle label="Reactivate after recovery" on={overlay.setReactivate} onChange={(v) => patch("setReactivate", v)} />
+                  <Toggle label="Live negative-result deactivation" on={overlay.setLiveNegativeDeact} onChange={(v) => patch("setLiveNegativeDeact", v)} />
+                </Grid>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <ThresholdReadout label="Equity halt" value={`${overlay.drawdownHaltPct.toFixed(0)}%`} tone="text-danger" />
+                  <ThresholdReadout label="Set PF gate" value={overlay.setMinPf.toFixed(2)} tone="text-primary" />
+                  <ThresholdReadout label="Pacing" value={`${overlay.cooldownS.toFixed(1)}s + ${overlay.staggerS.toFixed(1)}s`} />
+                </div>
+              </Card>
+              <Card title="Stop loss vs take profit" hint="All 30 SL:TP ratios × every TP step always run as independent Sets · no ratio picker">
               <p className="text-sm text-muted">
                 Catalog is fixed system-wide: SL:TP 0.1–3.0 step 0.1 ({slTpGrid().length} books) × TP steps {overlay.setMinStep}–{overlay.setStepMax}.
                 Every combo is historic-scored and live-gated on its own tape. Nothing in Settings turns a ratio off.
@@ -1288,6 +1449,7 @@ function SettingsPage() {
                 All {slTpGrid().length} ratios stay in eval. Auto-recalc only chooses the live attach for a new fill from the scored set — it does not disable the others.
               </p>
             </Card>
+            </>
           )}
 
           {section === "packs" && (
@@ -2355,6 +2517,15 @@ function KV({ k, v }: { k: string; v: string }) {
     <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
       <div className="font-mono text-xs text-muted">{k}</div>
       <div className="mt-0.5 break-all text-sm">{v || "—"}</div>
+    </div>
+  );
+}
+
+function ThresholdReadout({ label, value, tone = "text-fg" }: { label: string; value: string; tone?: "text-fg" | "text-primary" | "text-danger" | "text-warn" }) {
+  return (
+    <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+      <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">{label}</p>
+      <p className={`mt-1 font-mono text-sm tabular-nums ${tone}`}>{value}</p>
     </div>
   );
 }

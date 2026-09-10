@@ -1990,7 +1990,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import start_job
+                from hist_calc import read_job, start_job, stop_job
+                action = str((body or {}).get("action") or "start").lower().strip()
+                if action == "stop":
+                    stop_result = stop_job(connection=conn)
+                    job = read_job(conn)
+                    job["ok"] = True
+                    job["running"] = False
+                    job["detail"] = "historic calculation stopped" if stop_result.get("killed") else "historic calculation stop requested"
+                    self._json(job)
+                    return
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
                 job["running"] = job.get("phase") in (
