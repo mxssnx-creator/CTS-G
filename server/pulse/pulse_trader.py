@@ -9671,9 +9671,11 @@ class Pulse:
         held_px = dict(self.px)
         try:
             ours_cid = f"{TAG}cigen0600000abcd"
+            # Rows must carry the same scope metadata production writes
+            # (system_id/tracking_scope); a bare conn is not ownership proof.
             self.closed = [
-                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
-                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
+                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
+                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.2, 9.99, 0.2, "manual", 10.0, client_id="manual-bot", ours=False, conn=CONN_SHORT),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.1, 0.50, 0.1, "tp", 10.0, client_id="", ours=True, conn=CONN_SHORT),
             ]
