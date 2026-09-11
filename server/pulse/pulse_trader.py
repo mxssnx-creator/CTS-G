@@ -993,6 +993,7 @@ class Pulse:
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
         self.realized_baseline = 0.0
+        self.dust_retired: set = set()
         self.foreign_activity_seen = False
         try:
             if os.path.exists(START_EQ_PATH):
@@ -4487,7 +4488,21 @@ class Pulse:
                 if requested_qty * max(px_now, 0.0) < 0.02:
                     # Economically dust: below the venue close floor forever.
                     # Retire it locally (write-off) instead of looping the
-                    # flatten path against an uncloseable remainder.
+                    # flatten path against an uncloseable remainder. Also
+                    # untag our orders on the symbol: adopt re-imports any
+                    # exchange position our tagged orders still claim, which
+                    # would resurrect the dust and loop the close forever.
+                    self.dust_retired.add(f"{pos.symbol}:{pos.side}")
+                    try:
+                        for o in self.our_orders(pos.symbol):
+                            oid = real_oid(o.get("orderId") or o.get("orderID"))
+                            if oid:
+                                try:
+                                    self.cancel_order(pos.symbol, oid)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                     self._last_close_result.update({
                         "avg_price": px_now,
                         "filled_qty": requested_qty,
@@ -8861,6 +8876,17 @@ class Pulse:
             if not sym:
                 continue
             side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
+            # Dust write-off: this key was retired locally because the venue
+            # can never close it (below min close size). Treat it as foreign
+            # so recovery cannot resurrect it into the book.
+            if f"{sym}:{side}" in getattr(self, "dust_retired", set()):
+                exchange_key = f"{sym}:{side}"
+                self.exchange_qty[exchange_key] = abs(amt)
+                self.exchange_own_qty[exchange_key] = 0.0
+                self.exchange_foreign_qty[exchange_key] = abs(amt)
+                foreign.add(exchange_key)
+                log(f"SKIP dust-retired {sym} {side} q={abs(amt)}", every=60.0, key=f"dust-retired:{sym}:{side}", quiet=True)
+                continue
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
