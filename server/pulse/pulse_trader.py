@@ -4483,6 +4483,19 @@ class Pulse:
                 # Unlearnable venue floor (BingX VST reports "0 USDT"): the
                 # remainder cannot be closed at this size, so cool the symbol
                 # down instead of retrying every fallback form.
+                px_now = self.px.get(pos.symbol) or pos.entry
+                if requested_qty * max(px_now, 0.0) < 0.02:
+                    # Economically dust: below the venue close floor forever.
+                    # Retire it locally (write-off) instead of looping the
+                    # flatten path against an uncloseable remainder.
+                    self._last_close_result.update({
+                        "avg_price": px_now,
+                        "filled_qty": requested_qty,
+                        "status": "FLAT",
+                        "message": "dust write-off (below venue min close size)",
+                    })
+                    log(f"CLOSE DUST-WRITEOFF {pos.symbol} qty={requested_qty} px={px_now}", key=f"dust:{pos.symbol}")
+                    return True, px_now
                 self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 120.0)
                 self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
                 log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=30.0, key=f"close-skip:{pos.symbol}")
