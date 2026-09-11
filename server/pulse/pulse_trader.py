@@ -4469,6 +4469,14 @@ class Pulse:
             kind = ctrl_err_kind(msg)
             if kind == "qty_close":
                 continue
+            if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                # Unlearnable venue floor (BingX VST reports "0 USDT"): the
+                # remainder cannot be closed at this size, so cool the symbol
+                # down instead of retrying every fallback form.
+                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 120.0)
+                self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
+                log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=30.0, key=f"close-skip:{pos.symbol}")
+                return False, self.px.get(pos.symbol) or pos.entry
             if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
@@ -5353,6 +5361,16 @@ class Pulse:
                 if "order size" in low or "available amount" in low:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
+                if "minimum size" in low or "minimum order amount" in low:
+                    # The venue rejected the size as below its floor and the
+                    # floor could not be learned (BingX VST reports "0 USDT").
+                    # Retrying the same size only burns the request budget, so
+                    # cool the symbol down instead of treating it as transient.
+                    self.cooldown[sym] = time.time() + 120.0
+                    self.cooldown["__book__"] = time.time() + 20.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     # No exchange order was accepted. Release the local
@@ -7597,6 +7615,13 @@ class Pulse:
                     self.did_io = True
                 msg = str(r.get("msg") or "")
                 if not self.ok(r):
+                    if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                        # Unlearnable venue floor (BingX VST reports "0 USDT"):
+                        # retrying the same size only burns the request budget.
+                        self.cooldown["__book__"] = time.time() + 60.0
+                        self.block_last_emit = time.time()
+                        self._clear_pending(cid)
+                        continue
                     if is_transient_api(msg):
                         log(f"BLOCK SKIP {pos.symbol} #{row['blockCount']} {short_api_msg(msg)}", every=20.0, key=f"block-skip:{pos.symbol}")
                         self.block_last_emit = time.time()
