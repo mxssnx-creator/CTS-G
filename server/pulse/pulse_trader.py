@@ -5371,6 +5371,15 @@ class Pulse:
                     self._clear_pending(cid)
                     log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
                     return
+                if "maximum open amount" in low or "exceeds the maximum" in low:
+                    # Venue aggregate cap on market-order notional for the
+                    # account (101487). It is not a per-symbol fault, so cool
+                    # the whole book briefly instead of hammering the venue.
+                    self.cooldown["__book__"] = time.time() + 30.0
+                    self.cooldown[sym] = time.time() + 30.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     # No exchange order was accepted. Release the local
