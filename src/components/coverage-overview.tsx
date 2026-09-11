@@ -21,6 +21,8 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     liveActive?: number;
     livePf?: number;
     liveNetAvg?: number;
+    entryCandidateCount?: number;
+    entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;
@@ -55,6 +57,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
+          {sets.entryCandidateCount != null ? ` · candidates ${sets.entryCandidateCount}${sets.entryCandidateCap === 0 ? " (unlimited)" : ""}` : ""}
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2">
@@ -79,7 +82,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span className={miss ? "text-danger" : "text-primary"}>
-          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {pairCount} pairs · {ctrl?.security ?? 0} sec · {groupCount} groups
+          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} logical SL+TP · {ctrl?.exchangePositionGroups ?? recon?.exchangePositionGroups ?? "—"} exchange groups · {pairCount} pairs · {ctrl?.security ?? 0} sec
           {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
           {Object.keys(laneFlags).length ? ` · lanes ${Object.entries(laneFlags).filter(([, enabled]) => enabled).map(([name]) => name).join(",") || "none"}` : ""}
         </span>
@@ -134,6 +137,8 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
     liveActive?: number;
     livePf?: number;
     liveNetAvg?: number;
+    entryCandidateCount?: number;
+    entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;

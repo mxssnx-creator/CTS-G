@@ -343,7 +343,7 @@ BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
 STAGGER_S = 0.6
-DD_HALT = 0.18
+DD_HALT = 0.0
 EQ_MIN = 0.20
 RECV = 5000
 TAG = order_tag(CONN_SHORT)
@@ -987,11 +987,13 @@ class Pulse:
         self.exchange_order_own_count = -1
         self.exchange_order_total_count = -1
         self.exchange_order_foreign_count = -1
-        self.control_orders_per_config = False
+        self.control_orders_per_config = True
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
+        self.realized_baseline = 0.0
+        self.dust_retired: set = set()
         self.foreign_activity_seen = False
         try:
             if os.path.exists(START_EQ_PATH):
@@ -999,9 +1001,11 @@ class Pulse:
                 stored_scope = str(baseline.get("trackingScope") or baseline.get("tracking_scope") or "").strip().lower()
                 if not stored_scope or stored_scope == TRACKING_SCOPE:
                     self.start_eq = float(baseline.get("systemStartEquity") or baseline.get("startEquity") or 0)
+                    self.realized_baseline = float(baseline.get("realizedBaseline") or 0.0)
                     self.foreign_activity_seen = bool(baseline.get("foreignActivitySeen") or baseline.get("foreign_activity_seen"))
         except Exception:
             self.start_eq = 0.0
+            self.realized_baseline = 0.0
         self.system_start_eq = self.start_eq
         self.wallet_equity = 0.0
         self.system_equity = 0.0
@@ -1278,6 +1282,7 @@ class Pulse:
                 json.dump({
                     "systemStartEquity": float(self.start_eq),
                     "startEquity": float(self.start_eq),
+                    "realizedBaseline": float(getattr(self, "realized_baseline", 0.0)),
                     "foreignActivitySeen": bool(getattr(self, "foreign_activity_seen", False)),
                     **SCOPE_METADATA,
                     "t": time.time(),
@@ -1316,7 +1321,12 @@ class Pulse:
         return total
 
     def _system_marked_equity(self) -> float:
-        return _sf(getattr(self, "start_eq", 0.0)) + self._persistent_system_realized() + self.system_open_upnl()
+        # An explicit Start/reset re-baselines start_eq to the wallet, but the
+        # runtime realized counter is cumulative and would otherwise keep the
+        # marked equity negative forever. Subtract the baseline captured at the
+        # last reset so a fresh session starts from the real wallet equity.
+        realized = self._persistent_system_realized() - _sf(getattr(self, "realized_baseline", 0.0))
+        return _sf(getattr(self, "start_eq", 0.0)) + realized + self.system_open_upnl()
 
     def _has_scoped_activity(self) -> bool:
         open_book = getattr(self, "open", {})
@@ -1358,7 +1368,7 @@ class Pulse:
 
     def per_config_controls(self, pos: Optional[Position] = None) -> bool:
         """Whether a position participates in quantity-matched range controls."""
-        if not bool(getattr(self, "control_orders_per_config", False)):
+        if not bool(getattr(self, "control_orders_per_config", True)):
             return False
         if pos is None:
             return True
@@ -2728,7 +2738,8 @@ class Pulse:
         if reset_requested:
             # Start/reset is lane-scoped. Foreign mark-to-market and realized
             # telemetry are removed before establishing the new baseline.
-            self.start_eq = max(0.0, wallet_system_equity)
+            self.start_eq = max(0.0, wallet_system_equity - self.system_open_upnl())
+            self.realized_baseline = self._persistent_system_realized()
             self.system_start_eq = self.start_eq
             self._persist_start_equity()
             if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
@@ -2770,7 +2781,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.start_eq > 0 and self.system_equity > 0 and (self.start_eq - self.system_equity) / self.start_eq >= DD_HALT:
+        elif DD_HALT > 0 and self.start_eq > 0 and self.system_equity > 0 and (self.start_eq - self.system_equity) / self.start_eq >= DD_HALT:
             if not self.halted:
                 self._halt_eq = self.system_equity
             self.halted = True
@@ -2782,7 +2793,7 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.system_equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.system_equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.system_equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
+        elif self.system_equity >= EQ_MIN and (DD_HALT <= 0 or (self.start_eq > 0 and (self.start_eq - self.system_equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6)):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -4469,6 +4480,41 @@ class Pulse:
             kind = ctrl_err_kind(msg)
             if kind == "qty_close":
                 continue
+            if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                # Unlearnable venue floor (BingX VST reports "0 USDT"): the
+                # remainder cannot be closed at this size, so cool the symbol
+                # down instead of retrying every fallback form.
+                px_now = self.px.get(pos.symbol) or pos.entry
+                if requested_qty * max(px_now, 0.0) < 0.02:
+                    # Economically dust: below the venue close floor forever.
+                    # Retire it locally (write-off) instead of looping the
+                    # flatten path against an uncloseable remainder. Also
+                    # untag our orders on the symbol: adopt re-imports any
+                    # exchange position our tagged orders still claim, which
+                    # would resurrect the dust and loop the close forever.
+                    self.dust_retired.add(f"{pos.symbol}:{pos.side}")
+                    try:
+                        for o in self.our_orders(pos.symbol):
+                            oid = real_oid(o.get("orderId") or o.get("orderID"))
+                            if oid:
+                                try:
+                                    self.cancel_order(pos.symbol, oid)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    self._last_close_result.update({
+                        "avg_price": px_now,
+                        "filled_qty": requested_qty,
+                        "status": "FLAT",
+                        "message": "dust write-off (below venue min close size)",
+                    })
+                    log(f"CLOSE DUST-WRITEOFF {pos.symbol} qty={requested_qty} px={px_now}", key=f"dust:{pos.symbol}")
+                    return True, px_now
+                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 120.0)
+                self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
+                log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=30.0, key=f"close-skip:{pos.symbol}")
+                return False, self.px.get(pos.symbol) or pos.entry
             if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
@@ -4809,7 +4855,7 @@ class Pulse:
             entry_fee=max(0.0, _sf(row.get("fee_total") or row.get("feeTotal"))),
             entry_notional=fill_qty * entry,
         )
-        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", False)))
+        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
         return pos
 
     def _upsert_pending_entry(
@@ -5353,6 +5399,25 @@ class Pulse:
                 if "order size" in low or "available amount" in low:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
+                if "minimum size" in low or "minimum order amount" in low:
+                    # The venue rejected the size as below its floor and the
+                    # floor could not be learned (BingX VST reports "0 USDT").
+                    # Retrying the same size only burns the request budget, so
+                    # cool the symbol down instead of treating it as transient.
+                    self.cooldown[sym] = time.time() + 120.0
+                    self.cooldown["__book__"] = time.time() + 20.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
+                if "maximum open amount" in low or "exceeds the maximum" in low:
+                    # Venue aggregate cap on market-order notional for the
+                    # account (101487). It is not a per-symbol fault, so cool
+                    # the whole book briefly instead of hammering the venue.
+                    self.cooldown["__book__"] = time.time() + 30.0
+                    self.cooldown[sym] = time.time() + 30.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     # No exchange order was accepted. Release the local
@@ -5482,7 +5547,7 @@ class Pulse:
             pos.sl_oid = pos.sec_sl_oid = attached_sl
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
-        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", False)))
+        self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
 
         pending_meta.update({
             "sl_pct": sl_pct,
@@ -6535,7 +6600,7 @@ class Pulse:
     def _set_control_mode(self, enabled: bool) -> None:
         """Switch control grouping without losing position ownership."""
         enabled = bool(enabled)
-        previous = bool(getattr(self, "control_orders_per_config", False))
+        previous = bool(getattr(self, "control_orders_per_config", True))
         self.control_orders_per_config = enabled
         if previous == enabled:
             return
@@ -6749,7 +6814,7 @@ class Pulse:
 
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
-        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
+        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
@@ -6817,9 +6882,19 @@ class Pulse:
         if ov.get("scanS"):
             SCAN_S = max(0.20, min(8.0, float(ov["scanS"])))
         if ov.get("cooldownS") is not None:
-            COOLDOWN_S = float(ov["cooldownS"])
-        if ov.get("staggerS"):
-            STAGGER_S = float(ov["staggerS"])
+            COOLDOWN_S = max(0.0, min(120.0, float(ov["cooldownS"])))
+        if ov.get("staggerS") is not None:
+            STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
+        if ov.get("drawdownHaltPct") is not None:
+            raw_dd = float(ov["drawdownHaltPct"])
+            # 0 (or negative) disables the drawdown halt entirely.
+            DD_HALT = 0.0 if raw_dd <= 0 else max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+        else:
+            DD_HALT = 0.0
+        if ov.get("minimumEquity") is not None:
+            EQ_MIN = max(0.0, min(1_000_000_000.0, float(ov["minimumEquity"])))
+        else:
+            EQ_MIN = 0.20
         manual_cost, use_live_costs = self._position_cost_config(ov, cts)
         self.manual_position_cost_pct = manual_cost
         self.use_live_position_costs = use_live_costs
@@ -6950,10 +7025,10 @@ class Pulse:
                 "controlOrdersPerConfig",
                 ov.get(
                     "control_orders_per_config",
-                    cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", False)),
+                    cts.get("controlOrdersPerConfig", cts.get("control_orders_per_config", True)),
                 ),
             ),
-            False,
+            True,
         )
         self.coord.load(cts, calc_ov)
         self.indications.load(calc_ov)
@@ -7094,6 +7169,7 @@ class Pulse:
             "trackingScope": TRACKING_SCOPE,
             "trackPrefix": TAG,
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
+            "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -7116,7 +7192,7 @@ class Pulse:
             "cooldownS": COOLDOWN_S,
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
-            "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", False)),
+            "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
@@ -7169,7 +7245,7 @@ class Pulse:
             "stratTrailing": self.strat_trail,
             "normalExecutionEnabled": self.normal_execution_enabled,
             "entryPolicy": str(getattr(self.sets, "entry_policy", "strict")),
-            "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 12) or 12),
+            "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
             "entryPolicyMinLiveSamples": int(getattr(self.sets, "entry_policy_min_live_samples", self.sets.eval_need()) or self.sets.eval_need()),
             "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
@@ -7201,7 +7277,7 @@ class Pulse:
             "setAutoDeact": self.sets.auto_deact,
             "setLiveNegativeDeact": bool(getattr(self.sets, "live_negative_deact", False)),
             "liveTestMode": bool(getattr(self.sets, "live_test_mode", False)),
-            "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 12) or 12),
+            "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 0) or 0),
             "liveTestMinSamples": int(getattr(self.sets, "live_test_min_samples", self.sets.eval_need()) or self.sets.eval_need()),
             "effectiveMinStep": int(getattr(self.sets, "min_step", 1) or 1),
             "configuredMinStep": int(getattr(self.sets, "min_step_cfg", 1) or 1),
@@ -7224,6 +7300,8 @@ class Pulse:
             "setMinSamples": self.sets.min_samples,
             "setReactivate": self.sets.reactivate,
             "setMaxActive": self.sets.max_active,
+            "activeSetCap": self.sets.max_active,
+            "activeSetUnlimited": self.sets.max_active <= 0,
             "exitEnabled": self.exits.enabled,
             "exitIgnoreTp": self.exits.ignore_tp,
             "exitBestOf": self.exits.best_of,
@@ -7585,6 +7663,13 @@ class Pulse:
                     self.did_io = True
                 msg = str(r.get("msg") or "")
                 if not self.ok(r):
+                    if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                        # Unlearnable venue floor (BingX VST reports "0 USDT"):
+                        # retrying the same size only burns the request budget.
+                        self.cooldown["__book__"] = time.time() + 60.0
+                        self.block_last_emit = time.time()
+                        self._clear_pending(cid)
+                        continue
                     if is_transient_api(msg):
                         log(f"BLOCK SKIP {pos.symbol} #{row['blockCount']} {short_api_msg(msg)}", every=20.0, key=f"block-skip:{pos.symbol}")
                         self.block_last_emit = time.time()
@@ -8494,6 +8579,18 @@ class Pulse:
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
             self.skip_log["entry0"] = time.time()
+        if placed == 0 and not ranked and (time.time() - self.skip_log.get("entry-idle", 0) > 60):
+            # Empty signal lanes are invisible in "ENTRY none" (that path
+            # requires ranked). Surface why the book is idle instead.
+            ind_on = bool(self.strat_ind and self.indications.settings.get("enabled"))
+            gen_on = bool(self.strat_general)
+            log(
+                f"ENTRY idle ranked=0 ind={ind_on} gen={gen_on} intern={intern} "
+                f"open={len(self.open)} avail={self.available:.4f} replay={getattr(self.sets.progress, 'pct', 0)}%",
+                every=60.0,
+                key="entry-idle",
+            )
+            self.skip_log["entry-idle"] = time.time()
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
@@ -8779,6 +8876,17 @@ class Pulse:
             if not sym:
                 continue
             side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
+            # Dust write-off: this key was retired locally because the venue
+            # can never close it (below min close size). Treat it as foreign
+            # so recovery cannot resurrect it into the book.
+            if f"{sym}:{side}" in getattr(self, "dust_retired", set()):
+                exchange_key = f"{sym}:{side}"
+                self.exchange_qty[exchange_key] = abs(amt)
+                self.exchange_own_qty[exchange_key] = 0.0
+                self.exchange_foreign_qty[exchange_key] = abs(amt)
+                foreign.add(exchange_key)
+                log(f"SKIP dust-retired {sym} {side} q={abs(amt)}", every=60.0, key=f"dust-retired:{sym}:{side}", quiet=True)
+                continue
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
@@ -9659,9 +9767,11 @@ class Pulse:
         held_px = dict(self.px)
         try:
             ours_cid = f"{TAG}cigen0600000abcd"
+            # Rows must carry the same scope metadata production writes
+            # (system_id/tracking_scope); a bare conn is not ownership proof.
             self.closed = [
-                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
-                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
+                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
+                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.2, 9.99, 0.2, "manual", 10.0, client_id="manual-bot", ours=False, conn=CONN_SHORT),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.1, 0.50, 0.1, "tp", 10.0, client_id="", ours=True, conn=CONN_SHORT),
             ]
@@ -9805,9 +9915,14 @@ class Pulse:
         exchange_own_open = int(exchange_own_raw) if exchange_own_raw is not None else -1
         exchange_total_open = int(exchange_total_raw) if exchange_total_raw is not None else -1
         internal_open = int(len(self.open))
+        internal_position_groups = len({
+            (p.symbol, p.side)
+            for p in self.open.values()
+            if self.position_is_ours(p) and float(p.qty or 0) > 0
+        })
         if exchange_own_open < 0:
             open_parity = "pending"
-        elif exchange_own_open == internal_open:
+        elif exchange_own_open == internal_position_groups:
             open_parity = "match"
         else:
             open_parity = "discrepant"
@@ -9824,8 +9939,10 @@ class Pulse:
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act.get("unrealized") or 0), 4),
             "internalOpen": internal_open,
+            "internalPositionGroups": internal_position_groups,
             "exchangeOpen": exchange_total_open,
             "exchangeOwnOpen": exchange_own_open,
+            "exchangePositionGroups": exchange_own_open,
             "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
             "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
             "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
@@ -9835,6 +9952,9 @@ class Pulse:
             "setCount": int(sets_snap.get("setCount") or 0),
             "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
             "activeSetCount": int(sets_snap.get("activeCount") or 0),
+            "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
+            "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
             "progressPhase": phase,
             "progressPct": pct_val,
             "progressReady": ready_flag,
@@ -9873,7 +9993,7 @@ class Pulse:
             by_ind = getattr(self, "_by_ind_cache", {}) or {}
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
         pulse_view = self.pulse_snapshot()
-        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate"
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
         expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         return {
             "running": not self.halted,
@@ -9921,7 +10041,9 @@ class Pulse:
             "losses": int(act["losses"]),
             "winRate": round(wr, 1),
             "openCount": len(self.open),
+            "logicalPositionCount": len(self.open),
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
+            "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
             "simOpenCount": sim_n,
@@ -10107,7 +10229,7 @@ class Pulse:
         }
 
     def _coverage_blob(self) -> Dict[str, Any]:
-        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", False)) else "aggregate"
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
         expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
@@ -10229,7 +10351,7 @@ class Pulse:
             "executionPolicy": {
                 "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
                 "blockActive": bool(getattr(self, "block_active", True)),
-            "targetActiveSets": int(getattr(self.sets, "max_active", 80)),
+            "targetActiveSets": int(getattr(self.sets, "max_active", 0)),
                 "decision": dict(getattr(self, "_execution_decision", {}) or {}),
             },
             "stageFlow": scov.get("stageFlow") or stage_flow,
@@ -10319,6 +10441,9 @@ class Pulse:
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
                 "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
+                "validatedCount": int(scov.get("validatedCount") or 0),
+                "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+                "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),
                 "liveProcessed": int(live_ov.get("processed") or 0),
@@ -10346,11 +10471,16 @@ class Pulse:
             },
             "controls": {
                 "open": len(self.open),
+                "logicalOpen": len(self.open),
+                "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
                 "mode": control_mode,
                 "pairCount": expected_control_pairs,
+                "expectedPairs": expected_control_pairs,
+                "protectedPairs": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "pairGaps": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "aggregatePairCount": expected_control_pairs if control_mode == "aggregate" else 0,
                 "logicalPositionCap": MAX_OPEN,
                 "groupCount": len(self.open),
@@ -10381,7 +10511,7 @@ class Pulse:
                     for p in self.open.values()
                 ],
             },
-            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
+            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "logicalOpen": len(self.open), "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))), "simOpen": sim_n},
             "activity": activity,
             "events": activity.get("tail") or [],
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
@@ -12364,7 +12494,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+            elif DD_HALT > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:

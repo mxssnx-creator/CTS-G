@@ -336,3 +336,21 @@ export async function startHistCalc(
     return { phase: "error", pct: 0, detail: String(e), error: String(e) };
   }
 }
+
+export async function stopHistCalc(connection?: string): Promise<HistCalcJob> {
+  try {
+    const query = connection ? `?conn=${encodeURIComponent(connection)}` : "";
+    const r = await fetch(`/hist-calc.json${query}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "stop" }),
+    });
+    const j = (await r.json().catch(() => ({}))) as HistCalcJob;
+    if (!r.ok) {
+      return { phase: "error", pct: 0, detail: j.detail || `stop rejected ${r.status}`, error: j.error };
+    }
+    return j;
+  } catch (e) {
+    return { phase: "error", pct: 0, detail: String(e), error: String(e) };
+  }
+}

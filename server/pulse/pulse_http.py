@@ -998,6 +998,31 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     historic_completed_bars = sum(int(_report_number(bars.get("completed"))) for bars in historic_bars if isinstance(bars, dict))
     historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
     has_historic = any(bool(historic) for historic in historic_states)
+    logical_position_count = sum(
+        int(_report_number(state.get("logicalPositionCount", state.get("openCount"))))
+        for state in states
+    )
+    exchange_group_values = [
+        int(_report_number(state.get("exchangePositionGroupCount", state.get("exchangeOwnOpenCount", state.get("exchangeOpenCount", -1)))))
+        for state in states
+    ]
+    exchange_position_group_count = sum(exchange_group_values) if all(value >= 0 for value in exchange_group_values) else -1
+    entry_candidate_count = sum(
+        int(_report_number((state.get("pulse") or {}).get("entryCandidateCount")))
+        for state in states
+        if isinstance(state.get("pulse") or {}, dict)
+    )
+    control_modes = set()
+    for state in states:
+        coverage = state.get("coverage") or {}
+        controls = coverage.get("controls") if isinstance(coverage, dict) else None
+        controls = controls if isinstance(controls, dict) else {}
+        pulse = state.get("pulse") or {}
+        mode = controls.get("mode")
+        if mode not in ("per-config", "aggregate"):
+            mode = "aggregate" if isinstance(pulse, dict) and pulse.get("controlOrdersPerConfig") is False else "per-config"
+        control_modes.add(mode)
+    control_mode = next(iter(control_modes)) if len(control_modes) == 1 else "mixed"
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
@@ -1024,7 +1049,9 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
-        "openCount": len(open_positions),
+        "openCount": logical_position_count,
+        "logicalPositionCount": logical_position_count,
+        "exchangePositionGroupCount": exchange_position_group_count,
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
@@ -1048,6 +1075,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "setCount": set_count,
             "activeCount": active_count,
             "validatedCount": validated_count,
+            "entryCandidateCount": entry_candidate_count,
             "histFills": hist_fills,
         },
         "coverage": {
@@ -1059,7 +1087,16 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "qaFail": sum(int(_report_number(coverage.get("qaFail"))) for coverage in coverages),
             "strategies": strategies,
             "indicationTypes": indication_types,
-            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "histFills": hist_fills},
+            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "entryCandidateCount": entry_candidate_count, "histFills": hist_fills},
+            "controls": {
+                "mode": control_mode,
+                "open": logical_position_count,
+                "logicalOpen": logical_position_count,
+                "exchangePositionGroups": exchange_position_group_count,
+                "groupCount": logical_position_count,
+                "pairCount": logical_position_count,
+                "expectedPairs": logical_position_count,
+            },
         },
         "coord": {"gate": {"allow": all(bool((state.get("coord") or {}).get("gate", {}).get("allow")) for state in states)}},
     }
@@ -1811,6 +1848,9 @@ class Handler(SimpleHTTPRequestHandler):
                 })
                 return
             ov = load_overlay(conn)
+            entry_candidate_cap = ov.get("entryPolicyMaxCandidates")
+            if entry_candidate_cap is None:
+                entry_candidate_cap = ov.get("liveTestCandidates")
             self._json({
                 "cts": load_cts(conn),
                 "overlay": ov,
@@ -1822,7 +1862,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "maxOpen": ov.get("maxOpen"),
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
                 "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
-                "entryPolicyMaxCandidates": ov.get("entryPolicyMaxCandidates") or ov.get("liveTestCandidates"),
+                "entryPolicyMaxCandidates": entry_candidate_cap,
                 "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
@@ -1990,7 +2030,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import start_job
+                from hist_calc import read_job, start_job, stop_job
+                action = str((body or {}).get("action") or "start").lower().strip()
+                if action == "stop":
+                    stop_result = stop_job(connection=conn)
+                    job = read_job(conn)
+                    job["ok"] = True
+                    job["running"] = False
+                    job["detail"] = "historic calculation stopped" if stop_result.get("killed") else "historic calculation stop requested"
+                    self._json(job)
+                    return
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
                 job["running"] = job.get("phase") in (

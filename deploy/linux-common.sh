@@ -462,14 +462,17 @@ sync_app_tree() {
 
 render_unit() {
   local src="$1" dest="$2"
-  # Units ship rooted at the in-project tree (/opt/cts-g and its
-  # server/pulse). Rewriting /opt/cts-g first also scopes the pulse
-  # WorkingDirectory/ExecStart to ${CTS_G_ROOT}/server/pulse == ${PULSE_DIR}.
+  # Units ship rooted at the canonical in-project tree (/opt/cts-g and its
+  # server/pulse). The pulse path is parked on a placeholder before the generic
+  # root rewrite so that rewrite cannot re-match it: an install name extending
+  # the default (e.g. cts-gx) would otherwise expand /opt/cts-g/server/pulse to
+  # /opt/cts-gxx/server/pulse and the unit would fail to start.
   # The /opt/grok-x01-pulse rule is retained only to migrate any older unit
   # that still names the former standalone pulse tree.
   sed \
-    -e "s|/opt/cts-g/server/pulse|${PULSE_DIR}|g" \
+    -e "s|/opt/cts-g/server/pulse|__CTS_PULSE_DIR__|g" \
     -e "s|/opt/cts-g|${CTS_G_ROOT}|g" \
+    -e "s|__CTS_PULSE_DIR__|${PULSE_DIR}|g" \
     -e "s|/opt/grok-x01-pulse|${PULSE_DIR}|g" \
     -e "s|/etc/cts-g|${ETC_DIR}|g" \
     -e "s|/var/log/cts-g|${LOG_DIR}|g" \

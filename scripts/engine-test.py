@@ -115,7 +115,7 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
-        rec(f"{name}-per-config-controls-off", ov.get("controlOrdersPerConfig", False) is False)
+        rec(f"{name}-per-config-controls-on", ov.get("controlOrdersPerConfig", False) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
         rec(f"{name}-modules", all((ov.get("modules") or {}).get(k, True) is True for k in ("strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls")))
@@ -132,7 +132,9 @@ def overlay_test() -> None:
     rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
-    rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
+    rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
+    rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
+    rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
     rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
     rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
@@ -625,15 +627,23 @@ def always_start_test() -> None:
     p2.refresh_balance()
     rec("astart-stop-start-resumes", (not p2.halted) and p2.halt_reason is None, f"{p2.halted} {p2.halt_reason}")
 
-    # 4) real drawdown without explicit start still halts (negative control)
+    # 4) drawdown halt is disabled by default: a 20% drawdown does not latch
     p4 = mk(equity=80.0, start_eq=100.0)
     p4.refresh_balance()
-    rec("astart-drawdown-latches", p4.halted and p4.halt_reason == "drawdown halt", f"{p4.halted} {p4.halt_reason}")
+    rec("astart-drawdown-disabled-default", (not p4.halted) and p4.halt_reason is None,
+        f"{p4.halted} {p4.halt_reason}")
+
+    # 4b) with an explicit threshold, a real drawdown without explicit start still halts
+    pt.DD_HALT = 0.18
+    p4b = mk(equity=80.0, start_eq=100.0)
+    p4b.refresh_balance()
+    rec("astart-drawdown-latches", p4b.halted and p4b.halt_reason == "drawdown halt", f"{p4b.halted} {p4b.halt_reason}")
 
     # 5) auto-resume once drawdown recovers below DD_HALT*0.6
-    p4.api.equity = 95.0
-    p4.refresh_balance()
-    rec("astart-auto-resume", (not p4.halted) and p4.halt_reason is None, f"{p4.halted} {p4.halt_reason}")
+    p4b.api.equity = 95.0
+    p4b.refresh_balance()
+    rec("astart-auto-resume", (not p4b.halted) and p4b.halt_reason is None, f"{p4b.halted} {p4b.halt_reason}")
+    pt.DD_HALT = 0.0
 
     # 6) deposit rescue re-baselines a latched economic halt
     p6 = mk(equity=200.0, start_eq=100.0, halted=True, reason="drawdown halt")

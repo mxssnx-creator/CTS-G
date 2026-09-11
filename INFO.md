@@ -713,3 +713,35 @@ FINAL_HEAD transfer to 152.53.114.112:/var/backups/cts-g-release/<FINAL_HEAD>/,
 VST-only update/restart and acceptance, then public push/merge only if all gates
 pass. No Live restart, high-count protected-order acceptance, new deploy, public
 push or merge has been done in this SQLite turn.
+
+## High-count VST acceptance (50 symbols, hundreds of orders)
+
+`server/pulse/vst_live_qa.py` carries the standard X02 VST QA (units, CID,
+API, reconciliation, one round-trip, one control pair, HTTP). It now also
+carries an opt-in high-count section that exercises the 50-symbol universe
+with a bounded burst of CTS-owned demo orders and proves the engine keeps
+evaluating and opening correctly under load.
+
+Run it on the VPS after the managed Chisel tunnel is up and the X02 lane is
+active (never against X01):
+
+```bash
+VST_HIGH_COUNT=1 VST_HIGH_COUNT_N=200 VST_HIGH_COUNT_SYMBOLS=50 \
+  python3 /opt/cts-g-pulse/server/pulse/vst_live_qa.py
+```
+
+Bounds: `VST_HIGH_COUNT_N` (default 100) orders, `VST_HIGH_COUNT_SYMBOLS`
+(default 50) symbols. The section asserts live evaluation across the universe
+(`hc-universe`, `hc-running`), opening (`hc-opened`), bounded rejections with
+no storm (`hc-reject-bounded`), aggregate SL+TP coverage (`hc-controls`),
+clean close (`hc-closed`), that foreign orders are never touched
+(`hc-foreign-untouched`), and logical-vs-exchange reconciliation
+(`hc-recon`). It only ever writes and cleans up orders tagged with the `Gx02`
+CID prefix; foreign positions and orders are left untouched. Results land in
+`/tmp/vst-live-qa.json`.
+
+The X02 and X01 overlays already carry the high-count contract
+(`symbolCap: 50`, `symbolsAll: true`, `maxOpen/maxPerGroup/setMaxActive/
+entryPolicyMaxCandidates: 0`, `controlOrders`/`controlOrdersPerConfig: true`,
+`dcaEnabled: true`, `blockActive*: true`), so no overlay change is required
+before the run.
