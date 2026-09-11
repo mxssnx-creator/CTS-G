@@ -343,7 +343,7 @@ BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
 STAGGER_S = 0.6
-DD_HALT = 0.18
+DD_HALT = 0.0
 EQ_MIN = 0.20
 RECV = 5000
 TAG = order_tag(CONN_SHORT)
@@ -2770,7 +2770,7 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.start_eq > 0 and self.system_equity > 0 and (self.start_eq - self.system_equity) / self.start_eq >= DD_HALT:
+        elif DD_HALT > 0 and self.start_eq > 0 and self.system_equity > 0 and (self.start_eq - self.system_equity) / self.start_eq >= DD_HALT:
             if not self.halted:
                 self._halt_eq = self.system_equity
             self.halted = True
@@ -2782,7 +2782,7 @@ class Pulse:
             self.halted = True
             self.halt_reason = f"equity {self.system_equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.system_equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.system_equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
+        elif self.system_equity >= EQ_MIN and (DD_HALT <= 0 or (self.start_eq > 0 and (self.start_eq - self.system_equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6)):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -6840,9 +6840,10 @@ class Pulse:
             STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
         if ov.get("drawdownHaltPct") is not None:
             raw_dd = float(ov["drawdownHaltPct"])
-            DD_HALT = max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+            # 0 (or negative) disables the drawdown halt entirely.
+            DD_HALT = 0.0 if raw_dd <= 0 else max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
         else:
-            DD_HALT = 0.18
+            DD_HALT = 0.0
         if ov.get("minimumEquity") is not None:
             EQ_MIN = max(0.0, min(1_000_000_000.0, float(ov["minimumEquity"])))
         else:
@@ -12423,7 +12424,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+            elif DD_HALT > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:

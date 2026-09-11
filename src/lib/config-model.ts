@@ -372,7 +372,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   scanS: 0.2,
   cooldownS: 9,
   staggerS: 0.6,
-  drawdownHaltPct: 18,
+  drawdownHaltPct: 0,
   minimumEquity: 0.2,
   controlOrders: true,
   controlOrdersPerConfig: true,
@@ -821,7 +821,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 57600),
     cooldownS: num(live?.cooldownS ?? cts.cooldownS, 9),
     staggerS: num(live?.staggerS ?? cts.staggerS, 0.6),
-    drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 18),
+    drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.15),
@@ -1042,7 +1042,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
   next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));
   next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
-  next.drawdownHaltPct = Math.max(1, Math.min(80, num(next.drawdownHaltPct, 18)));
+  next.drawdownHaltPct = Math.max(0, Math.min(80, num(next.drawdownHaltPct, 0)));
   next.minimumEquity = Math.max(0, num(next.minimumEquity, 0.2));
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];

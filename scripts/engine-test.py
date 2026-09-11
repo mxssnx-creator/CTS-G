@@ -627,15 +627,23 @@ def always_start_test() -> None:
     p2.refresh_balance()
     rec("astart-stop-start-resumes", (not p2.halted) and p2.halt_reason is None, f"{p2.halted} {p2.halt_reason}")
 
-    # 4) real drawdown without explicit start still halts (negative control)
+    # 4) drawdown halt is disabled by default: a 20% drawdown does not latch
     p4 = mk(equity=80.0, start_eq=100.0)
     p4.refresh_balance()
-    rec("astart-drawdown-latches", p4.halted and p4.halt_reason == "drawdown halt", f"{p4.halted} {p4.halt_reason}")
+    rec("astart-drawdown-disabled-default", (not p4.halted) and p4.halt_reason is None,
+        f"{p4.halted} {p4.halt_reason}")
+
+    # 4b) with an explicit threshold, a real drawdown without explicit start still halts
+    pt.DD_HALT = 0.18
+    p4b = mk(equity=80.0, start_eq=100.0)
+    p4b.refresh_balance()
+    rec("astart-drawdown-latches", p4b.halted and p4b.halt_reason == "drawdown halt", f"{p4b.halted} {p4b.halt_reason}")
 
     # 5) auto-resume once drawdown recovers below DD_HALT*0.6
-    p4.api.equity = 95.0
-    p4.refresh_balance()
-    rec("astart-auto-resume", (not p4.halted) and p4.halt_reason is None, f"{p4.halted} {p4.halt_reason}")
+    p4b.api.equity = 95.0
+    p4b.refresh_balance()
+    rec("astart-auto-resume", (not p4b.halted) and p4b.halt_reason is None, f"{p4b.halted} {p4b.halt_reason}")
+    pt.DD_HALT = 0.0
 
     # 6) deposit rescue re-baselines a latched economic halt
     p6 = mk(equity=200.0, start_eq=100.0, halted=True, reason="drawdown halt")

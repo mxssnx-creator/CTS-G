@@ -45,6 +45,7 @@
     2.5
   ],
   "dcaTakeProfitMode": "average",
+  "drawdownHaltPct": 0,
   "exitAutoDeact": true,
   "exitBeBuffer": 0.04,
   "exitBestOf": true,

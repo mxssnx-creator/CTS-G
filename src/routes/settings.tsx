@@ -537,6 +537,36 @@ function SettingsPage() {
                   </Grid>
                 </div>
               </div>
+              <div data-testid="risk-volume" className="rounded-lg border border-border bg-bg2 p-3">
+                <div>
+                  <p className="font-mono text-xs uppercase text-muted">Risk · volume</p>
+                  <p className="mt-1 text-sm text-muted">Drawdown halt and pulse volume factor for this connection.</p>
+                </div>
+                <div className="mt-3">
+                  <Grid>
+                    <Num
+                      label="Equity drawdown halt"
+                      value={overlay.drawdownHaltPct}
+                      min={0}
+                      max={80}
+                      step={1}
+                      unit="%"
+                      hint="0 = disabled · stops new entries at this session equity drawdown"
+                      onChange={(v) => patch("drawdownHaltPct", Math.round(v))}
+                    />
+                    <Slider
+                      label="Volume factor"
+                      value={overlay.volumeFactor ?? 1}
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                      onChange={(v) => patch("volumeFactor", v)}
+                    />
+                    <KV k="Effective notional" v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)} />
+                  </Grid>
+                </div>
+              </div>
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} onChange={(v) => patch("stratIndications", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
@@ -1271,11 +1301,11 @@ function SettingsPage() {
                   <Num
                     label="Equity drawdown halt"
                     value={overlay.drawdownHaltPct}
-                    min={1}
+                    min={0}
                     max={80}
                     step={1}
                     unit="%"
-                    hint="Stops new entries at this session equity drawdown; recovery requires a real capital increase."
+                    hint="0 = disabled · stops new entries at this session equity drawdown; recovery requires a real capital increase."
                     onChange={(v) => patch("drawdownHaltPct", Math.round(v))}
                   />
                   <Num
