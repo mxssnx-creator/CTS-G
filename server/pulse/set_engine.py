@@ -4564,10 +4564,12 @@ class SetBook:
                 continue
             result.append(state)
         # Observability for the live entry boundary: which gate starves the
-        # book. Published with the sets snapshot; the last scope wins.
-        self.entry_gate_stats = {
-            "pack": str(pack),
-            "side": want_side if use_side else "",
+        # book. Published with the sets snapshot, keyed per scope so all four
+        # dispatch lanes stay visible (the dispatch queries every scope each
+        # cycle, so stale keys self-correct within one cycle).
+        if not isinstance(getattr(self, "entry_gate_stats", None), dict):
+            self.entry_gate_stats = {}
+        self.entry_gate_stats[f"{pack}/{want_side if use_side else 'any'}"] = {
             "rows": len(rows),
             "passed": len(result),
             "need": int(need),

@@ -8577,7 +8577,20 @@ class Pulse:
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
-            log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
+            # Per-scope signal counts: when every ranked signal maps to a
+            # scope whose entry_sets() is empty (e.g. indications mid-replay),
+            # the matrix is 0 and the loop below never runs — skip=0 is the
+            # tell. This line makes that case self-evident.
+            sig_scopes = {}
+            for _, _, d, why in ranked:
+                k = ("ind" if why.startswith("ind:") else "gen") + ("/L" if d > 0 else "/S")
+                sig_scopes[k] = sig_scopes.get(k, 0) + 1
+            log(
+                f"ENTRY none n={len(ranked)} skip={skipped} matrix={len(matrix)} sig={sig_scopes} "
+                f"intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}",
+                every=30.0,
+                key="entry0",
+            )
             self.skip_log["entry0"] = time.time()
         if placed == 0 and not ranked and (time.time() - self.skip_log.get("entry-idle", 0) > 60):
             # Empty signal lanes are invisible in "ENTRY none" (that path
