@@ -8564,6 +8564,18 @@ class Pulse:
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
             self.skip_log["entry0"] = time.time()
+        if placed == 0 and not ranked and (time.time() - self.skip_log.get("entry-idle", 0) > 60):
+            # Empty signal lanes are invisible in "ENTRY none" (that path
+            # requires ranked). Surface why the book is idle instead.
+            ind_on = bool(self.strat_ind and self.indications.settings.get("enabled"))
+            gen_on = bool(self.strat_general)
+            log(
+                f"ENTRY idle ranked=0 ind={ind_on} gen={gen_on} intern={intern} "
+                f"open={len(self.open)} avail={self.available:.4f} replay={getattr(self.sets.progress, 'pct', 0)}%",
+                every=60.0,
+                key="entry-idle",
+            )
+            self.skip_log["entry-idle"] = time.time()
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
