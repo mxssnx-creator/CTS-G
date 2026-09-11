@@ -4267,6 +4267,7 @@ class SetBook:
             "processingSetIds": self.processing_set_ids()[:350],
             "validatedCount": validated_count,
             "validationNeed": need,
+            "entryGate": getattr(self, "entry_gate_stats", None),
             "histFills": sum(st.n for st in self.sets.values()),
             "replaySymbols": len(self._hist_seen),
             "replayFills": sum(int(st.n or 0) for st in self.sets.values()),
@@ -4540,25 +4541,41 @@ class SetBook:
         need = self.eval_need()
         floor = max(1.0, float(self.real_min_pf or 1.0))
         result: List[SetState] = []
+        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0}
         for state in rows:
             if not side_active(state):
+                rejected["side_inactive"] += 1
                 continue
             view = self._side_view(state, want_side if use_side else None)
             n = int(view.get("last15_n") or 0)
             pf = float(view.get("last15_ratio") or 0.0)
             dd = float(view.get("max_dd_s") or 0.0)
-            if (
-                n < need
-                or not math.isfinite(pf)
-                or pf + 1e-9 < floor
-                or not math.isfinite(dd)
-                or dd < 0
-                or dd > float(self.max_dd_s or 57600.0) + 1e-9
-            ):
+            if n < need:
+                rejected["low_n"] += 1
+                continue
+            if not math.isfinite(pf) or pf + 1e-9 < floor:
+                rejected["low_pf"] += 1
+                continue
+            if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
+                rejected["dd_cap"] += 1
                 continue
             if not self._live_entry_allowed(state, want_side if use_side else None):
+                rejected["live"] += 1
                 continue
             result.append(state)
+        # Observability for the live entry boundary: which gate starves the
+        # book. Published with the sets snapshot; the last scope wins.
+        self.entry_gate_stats = {
+            "pack": str(pack),
+            "side": want_side if use_side else "",
+            "rows": len(rows),
+            "passed": len(result),
+            "need": int(need),
+            "pfFloor": round(float(floor), 6),
+            "maxDdS": round(float(self.max_dd_s or 0.0), 1),
+            **rejected,
+            "t": round(time.time(), 3),
+        }
         return result
 
     @staticmethod
@@ -5064,6 +5081,7 @@ class SetBook:
             "processingSetIds": self.processing_set_ids()[:350],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
+            "entryGate": getattr(self, "entry_gate_stats", None),
             "coverage": cover,
             "stageFlow": self.stage_flow(),
             "liveOverview": live_ov,
