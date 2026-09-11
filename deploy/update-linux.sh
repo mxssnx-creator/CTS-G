@@ -26,7 +26,8 @@ Usage: sudo ./deploy/update-linux.sh [options]
   --branch NAME     Branch (default: main)
   --pulse-port N    Separate loopback API port
   --no-restart      Sync files only
-  --start-live      Ensure Live engine is started (default)
+  --enable-live     Ensure Live engine is enabled and started (default)
+  --start-live      Alias for --enable-live
   --no-live         Do not enable/start Live (tests only)
   --yes             No-op (update never prompts)
   -h, --help
@@ -46,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --force) die "--force removed: preserve and review local edits before updating" ;;
     --no-restart) NO_RESTART=1; shift ;;
-    --start-live) START_LIVE=1; shift ;;
+    --enable-live|--start-live) START_LIVE=1; shift ;;
     --no-live) START_LIVE=0; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # CTS-G Linux install — unattended, skip software already present, run to the end.
 #
-#   sudo ./deploy/install-linux.sh
-#   sudo ./deploy/install-linux.sh --port 3102 --name cts-g
+#   sudo ./deploy/install-linux.sh --enable-live
+#   sudo ./deploy/install-linux.sh --enable-live --port 3102 --name cts-g
 #   sudo ./deploy/install-linux.sh --from-dir /path/to/CTS-G
 #
 set -euo pipefail
@@ -33,7 +33,8 @@ Usage: sudo ./deploy/install-linux.sh [options]
   --clone           git clone REPO_URL into /opt/NAME
   --repo URL        Git remote (default: https://github.com/mxssnx-creator/CTS-G.git)
   --branch NAME     Branch (default: main)
-  --start-live      Start Live engine (default)
+  --enable-live     Enable and start Live engine (default; explicit in install string)
+  --start-live      Alias for --enable-live
   --no-live         Install units but do not enable/start Live (tests only)
   --no-start        Install units but do not start services
   --yes             No-op (install never prompts)
@@ -54,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     --clone) DO_CLONE=1; shift ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
-    --start-live) START_LIVE=1; shift ;;
+    --enable-live|--start-live) START_LIVE=1; shift ;;
     --no-live) START_LIVE=0; shift ;;
     --no-start) NO_START=1; shift ;;
     --yes|-y) shift ;;

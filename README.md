@@ -39,8 +39,8 @@ Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They 
 On the VPS (`/opt/cts-g`, desk **:3102**). Unattended — no prompts. `--port` and `--name` are optional. Packages are installed only if missing.
 
 ```bash
-sudo /opt/cts-g/deploy/install-linux.sh
-sudo /opt/cts-g/deploy/install-linux.sh --port 3102 --name cts-g
+sudo /opt/cts-g/deploy/install-linux.sh --enable-live
+sudo /opt/cts-g/deploy/install-linux.sh --enable-live --port 3102 --name cts-g
 ```
 
 ```bash
@@ -51,7 +51,7 @@ sudo /opt/cts-g/deploy/install-linux.sh --from-dir /opt/cts-g
 From this tree, if SSH works:
 
 ```bash
-./deploy/remote-install.sh --host 152.53.114.112 --user root
+./deploy/remote-install.sh --enable-live --host 152.53.114.112 --user root
 ```
 
 If direct SSH is unavailable, establish the documented Chisel tunnel first;

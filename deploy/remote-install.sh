@@ -25,7 +25,8 @@ Usage: ./deploy/remote-install.sh [options]
   --identity FILE   SSH private key
   --branch NAME     Git branch (default: main)
   --repo URL        Git remote
-  --start-live      Start Live engine (default)
+  --enable-live     Enable and start Live engine (default; included in install string)
+  --start-live      Alias for --enable-live
   --no-live         Do not enable/start Live (tests only)
   --yes             No-op (never prompts)
   -h, --help
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --identity) IDENTITY="${2:-}"; shift 2 ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
-    --start-live) START_LIVE=1; shift ;;
+    --enable-live|--start-live) START_LIVE=1; shift ;;
     --no-live) START_LIVE=0; shift ;;
     --yes|-y) shift ;;
     -h|--help) usage; exit 0 ;;
@@ -56,7 +57,7 @@ ssh_cmd+=("${REMOTE_USER}@${REMOTE_HOST}")
 
 log "remote ${REMOTE_USER}@${REMOTE_HOST}:${SSH_PORT} → $CTS_G_ROOT  desk :$DESK_PORT  name=$CTS_G_NAME"
 
-LIVE_FLAG=""
+LIVE_FLAG="--enable-live"
 [[ "$START_LIVE" -eq 0 ]] && LIVE_FLAG="--no-live"
 
 remote=$(cat <<EOF
