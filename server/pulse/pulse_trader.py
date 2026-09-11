@@ -992,6 +992,7 @@ class Pulse:
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
+        self.realized_baseline = 0.0
         self.foreign_activity_seen = False
         try:
             if os.path.exists(START_EQ_PATH):
@@ -999,9 +1000,11 @@ class Pulse:
                 stored_scope = str(baseline.get("trackingScope") or baseline.get("tracking_scope") or "").strip().lower()
                 if not stored_scope or stored_scope == TRACKING_SCOPE:
                     self.start_eq = float(baseline.get("systemStartEquity") or baseline.get("startEquity") or 0)
+                    self.realized_baseline = float(baseline.get("realizedBaseline") or 0.0)
                     self.foreign_activity_seen = bool(baseline.get("foreignActivitySeen") or baseline.get("foreign_activity_seen"))
         except Exception:
             self.start_eq = 0.0
+            self.realized_baseline = 0.0
         self.system_start_eq = self.start_eq
         self.wallet_equity = 0.0
         self.system_equity = 0.0
@@ -1278,6 +1281,7 @@ class Pulse:
                 json.dump({
                     "systemStartEquity": float(self.start_eq),
                     "startEquity": float(self.start_eq),
+                    "realizedBaseline": float(getattr(self, "realized_baseline", 0.0)),
                     "foreignActivitySeen": bool(getattr(self, "foreign_activity_seen", False)),
                     **SCOPE_METADATA,
                     "t": time.time(),
@@ -1316,7 +1320,12 @@ class Pulse:
         return total
 
     def _system_marked_equity(self) -> float:
-        return _sf(getattr(self, "start_eq", 0.0)) + self._persistent_system_realized() + self.system_open_upnl()
+        # An explicit Start/reset re-baselines start_eq to the wallet, but the
+        # runtime realized counter is cumulative and would otherwise keep the
+        # marked equity negative forever. Subtract the baseline captured at the
+        # last reset so a fresh session starts from the real wallet equity.
+        realized = self._persistent_system_realized() - _sf(getattr(self, "realized_baseline", 0.0))
+        return _sf(getattr(self, "start_eq", 0.0)) + realized + self.system_open_upnl()
 
     def _has_scoped_activity(self) -> bool:
         open_book = getattr(self, "open", {})
@@ -2728,7 +2737,8 @@ class Pulse:
         if reset_requested:
             # Start/reset is lane-scoped. Foreign mark-to-market and realized
             # telemetry are removed before establishing the new baseline.
-            self.start_eq = max(0.0, wallet_system_equity)
+            self.start_eq = max(0.0, wallet_system_equity - self.system_open_upnl())
+            self.realized_baseline = self._persistent_system_realized()
             self.system_start_eq = self.start_eq
             self._persist_start_equity()
             if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
