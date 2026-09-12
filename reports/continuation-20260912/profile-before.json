@@ -1,0 +1,35 @@
+{
+  "kind": "20-second py-spy sample; thread weights are not exclusive CPU timings",
+  "samples": [
+    {
+      "thread": "main",
+      "sampledSeconds": 11.633,
+      "functions": {
+        "recent_direction_rows": 0,
+        "_replay_core_vectorized": 0,
+        "ind_stats": 5.837,
+        "indication_ok": 8.755,
+        "stats": 5.939,
+        "snapshot": 2.612,
+        "coverage": 1.388,
+        "stage_flow": 1.265,
+        "relative_listings": 0.204
+      }
+    },
+    {
+      "thread": "history",
+      "sampledSeconds": 7.327,
+      "functions": {
+        "recent_direction_rows": 6.653,
+        "_replay_core_vectorized": 7.327,
+        "ind_stats": 0,
+        "indication_ok": 0,
+        "stats": 0,
+        "snapshot": 0,
+        "coverage": 0,
+        "stage_flow": 0,
+        "relative_listings": 0
+      }
+    }
+  ]
+}

@@ -1156,6 +1156,7 @@ class SetBook:
         state["_snap_ts"] = 0.0
         state["_live_ov_cache"] = None
         state["_live_ov_ts"] = 0.0
+        state["_ind_stats_cache"] = {}
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
@@ -1216,8 +1217,9 @@ class SetBook:
                 continue
             st.processing_active = sid in wanted
             st.processing_reason = reason_map.get(sid, "") if st.processing_active else ""
-        self._snap_ts = 0.0
-        self._live_ov_ts = 0.0
+        if changed:
+            self._snap_ts = 0.0
+            self._live_ov_ts = 0.0
         return {
             "active": len(wanted),
             "added": len(wanted - previous),
@@ -1252,7 +1254,7 @@ class SetBook:
         clone = SetBook()
         skip = {
             "sets", "by_idx", "bars", "progress", "last_run",
-            "ind_hist", "ind_live", "strategy_hist", "_hist_seen",
+            "ind_hist", "ind_live", "strategy_hist", "_hist_seen", "_ind_stats_cache",
             "_hist_total", "_hist_counts", "_hist_set_signature", "_running",
             "_snap_cache", "_snap_ts", "_live_ov_cache", "_live_ov_ts",
             "_pick_lock", "_by_pack", "_ids_by_pack", "_ids_by_kind",
@@ -2669,6 +2671,7 @@ class SetBook:
         honor_tp: bool,
         hist: Dict[str, List[Dict[str, Any]]],
         hist_counts: Optional[Dict[str, int]] = None,
+        on_step: Optional[Callable[[], None]] = None,
     ) -> None:
         """Replay core configs with columnar state, preserving scalar rules.
 
@@ -2704,8 +2707,19 @@ class SetBook:
         base_ts = now - (n - 1) * BAR_S
         cooldown_n = max(0, int(self.cooldown_bars or 0))
         scratch_min = float(self.scratch_min or 0.0)
+        started = time.monotonic()
+        # Columnar rings retain the exact last HIST_CAP closes per direction.
+        # Constructing and sorting Python rows after *every* close consumed
+        # most replay CPU on the unrestricted catalog. Full counts remain
+        # independent of these bounded evaluation buffers.
+        close_bar = np.empty((m, HIST_CAP), dtype=np.int32)
+        close_move = np.empty((m, HIST_CAP), dtype=float)
+        close_held = np.empty((m, HIST_CAP), dtype=np.int32)
+        close_reason = np.empty((m, HIST_CAP), dtype=np.uint8)
+        reasons = ("sl", "tp", "time", "scratch+")
 
         for want_side in side_values:
+            close_count = np.zeros(m, dtype=np.int64)
             active = np.zeros(m, dtype=bool)
             cooldown = np.zeros(m, dtype=np.int32)
             entry = np.zeros(m, dtype=float)
@@ -2716,6 +2730,13 @@ class SetBook:
             entry_i = np.zeros(m, dtype=np.int32)
 
             for i in range(warmup, n):
+                if on_step and i % 80 == 0:
+                    self.progress.detail = (
+                        f"replay {symbol} · {pack_sets[0].pack} "
+                        f"{'LONG' if want_side > 0 else 'SHORT'} · bar {i + 1}/{n}"
+                    )
+                    self.progress.elapsed_ms = (time.monotonic() - started) * 1000.0
+                    on_step()
                 if cooldown_n:
                     cooldown = np.where((~active) & (cooldown > 0), cooldown - 1, cooldown)
                 bar = bars[i]
@@ -2765,9 +2786,9 @@ class SetBook:
                     # Scalar _advance_pos applies time/scratch exits only
                     # after the stop/TP decision on the same bar.
                     held = i - entry_i
-                    close_move = (close - entry) / np.maximum(entry, 1e-12) * want_side
+                    current_move = (close - entry) / np.maximum(entry, 1e-12) * want_side
                     time_exit = live & ~exited & (held >= time_bars)
-                    scratch_exit = live & ~exited & ~time_exit & (close_move >= scratch_min) & (held >= scratch_bars)
+                    scratch_exit = live & ~exited & ~time_exit & (current_move >= scratch_min) & (held >= scratch_bars)
                     if time_exit.any():
                         exited |= time_exit
                         exit_px[time_exit] = close
@@ -2778,25 +2799,15 @@ class SetBook:
                         raw[scratch_exit] = (close - entry[scratch_exit]) / np.maximum(entry[scratch_exit], 1e-12) * want_side
 
                     exit_indices = np.flatnonzero(exited)
-                    ts = base_ts + i * BAR_S
-                    for j in exit_indices.tolist():
-                        why = "sl" if bool(sl_hit[j]) else ("tp" if bool(tp_hit[j]) else ("time" if bool(time_exit[j]) else "scratch+"))
-                        qty = 1.0
-                        move = float(raw[j])
-                        bucket = hist.setdefault(pack_sets[j].id, [])
-                        bucket.append(hist_fill(
-                            ts, symbol, want_side, move, int(held[j]) * BAR_S, why,
-                        ))
-                        if hist_counts is not None:
-                            sid = pack_sets[j].id
-                            hist_counts[sid] = int(hist_counts.get(sid, 0)) + 1
-                        # The scorer only needs the newest bounded evaluation
-                        # tape. Trim at append time so a full matrix cannot
-                        # retain millions of raw fills before the chunk
-                        # boundary gets a chance to compact it.
-                        if len(bucket) > HIST_CAP:
-                            bucket[:] = recent_direction_rows(bucket, HIST_CAP)
                     if exit_indices.size:
+                        slots = close_count[exit_indices] % HIST_CAP
+                        close_bar[exit_indices, slots] = i
+                        close_move[exit_indices, slots] = raw[exit_indices]
+                        close_held[exit_indices, slots] = held[exit_indices]
+                        close_reason[exit_indices, slots] = np.where(
+                            sl_hit[exit_indices], 0, np.where(
+                                tp_hit[exit_indices], 1, np.where(time_exit[exit_indices], 2, 3)))
+                        close_count[exit_indices] += 1
                         active[exited] = False
                         cooldown[exited] = cooldown_n
 
@@ -2815,6 +2826,21 @@ class SetBook:
                             stop_loss[seed] = close * (1.0 + sl_frac[seed])
                             take_profit[seed] = close * (1.0 - tp_frac[seed])
                         active[seed] = True
+
+            for j in np.flatnonzero(close_count).tolist():
+                sid = pack_sets[j].id
+                count = int(close_count[j])
+                if hist_counts is not None:
+                    hist_counts[sid] = int(hist_counts.get(sid, 0)) + count
+                rows = list(hist.get(sid) or [])
+                for serial in range(max(0, count - HIST_CAP), count):
+                    slot = serial % HIST_CAP
+                    rows.append(hist_fill(
+                        base_ts + int(close_bar[j, slot]) * BAR_S, symbol, want_side,
+                        float(close_move[j, slot]), int(close_held[j, slot]) * BAR_S,
+                        reasons[int(close_reason[j, slot])],
+                    ))
+                hist[sid] = recent_direction_rows(rows, HIST_CAP)
 
     def _replay_symbol(
         self,
@@ -2865,7 +2891,11 @@ class SetBook:
                 self._replay_core_vectorized(
                     symbol, bars, pack_sets, pack_sig, now, warmup,
                     time_bars, scratch_bars, honor_tp, hist, hist_counts,
+                    on_step=on_step,
                 )
+                if not (do_block or do_dca):
+                    continue
+            scalar_sets = (strat_seed,) if vector_core else pack_sets
             for want_side in (1, -1):
                 opens: Dict[str, Dict[str, Any]] = {}
                 cools: Dict[str, int] = {}
@@ -2952,9 +2982,7 @@ class SetBook:
                     close = float(bar[3])
                     if close <= 0:
                         continue
-                    for st in pack_sets:
-                        if vector_core and st is not strat_seed:
-                            continue
+                    for st in scalar_sets:
                         if st.id in opens or cools.get(st.id, 0) > 0:
                             continue
                         if vector_core and st is strat_seed and (representative is not None or representative_cool > 0):
@@ -4655,8 +4683,23 @@ class SetBook:
         """Cost-adjusted PF evidence for one indication kind. Live tape wins once it has samples."""
         live = list(self.ind_live.get(kind) or [])
         hist = list(self.ind_hist.get(kind) or [])
-        live_side = filter_side(live, side)
         need = self.eval_need()
+        # Signals for hundreds of symbols share this indication evidence.
+        # Cache by contents, not TTL or count: a corrected/rolling close or a
+        # changed cost/window/PF setting must invalidate immediately.
+        signature = json.dumps(
+            [self.pf_n, need, self.cost_pct, self.min_pf,
+             [dict(row) for row in hist], [dict(row) for row in live]],
+            sort_keys=True, separators=(",", ":"), default=str,
+        )
+        cache = getattr(self, "_ind_stats_cache", None)
+        if cache is None:
+            cache = self._ind_stats_cache = {}
+        key = (kind, str(side or "").upper())
+        cached = cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return copy.deepcopy(cached[1])
+        live_side = filter_side(live, side)
         if len(live_side) >= need:
             tape = live_side
             source = "live-exchange"
@@ -4679,7 +4722,7 @@ class SetBook:
         if not side:
             for d in DIRECTIONS:
                 by_side[d] = self.ind_stats(kind, d)
-        return {
+        out = {
             "kind": kind,
             "side": (str(side).upper() if side else "BOTH"),
             "n": n,
@@ -4689,7 +4732,7 @@ class SetBook:
             "netAvg": round(net_avg, 6),
             "costSubtracted": True,
             "validated": n >= need,
-            "profitable": is_positive_pf(pf),
+            "profitable": clears_pf(pf, self.min_pf),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "ddEpisodes": int(dd.get("episodes") or 0),
@@ -4697,6 +4740,8 @@ class SetBook:
             "source": source,
             "liveN": len(live_side),
         }
+        cache[key] = (signature, copy.deepcopy(out))
+        return out
 
     def indication_ok(self, kind: str, side: Optional[str] = None) -> bool:
         if not (self.enabled and self.use_historic_gate and self.strict_gate):
@@ -5012,7 +5057,7 @@ class SetBook:
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),
             "coverage": cover,
-            "stageFlow": self.stage_flow(),
+            "stageFlow": cover["stageFlow"],
             "liveOverview": live_ov,
             "strategyHistory": strategy_history,
             "liveFills": int(live_ov.get("fills") or 0),
