@@ -3,7 +3,7 @@
 Source checkpoint: `15d50a4`, merged with GitHub main without discarding its commits.
 Runtime changes are deployed to the isolated CTS-GX VST lane. Deployment records identify immutable revisions; no monetary X01 orders are initiated by this verification.
 
-Continuation at engine revision `e4969b8444b65daa6d078879d6491d7b2d72fbc6`: all 48 groups were regenerated and their signatures match the current source. Aggregate research results are unchanged. The additional replay/indication regressions bring full discovery to 324/324, with the engine suite still 409/409. See [runtime and benchmark follow-up](../continuation-20260912/README.md).
+Continuation at pricing-engine revision `e4969b8444b65daa6d078879d6491d7b2d72fbc6`: all 48 groups were regenerated and their signatures match the current source. Aggregate research results are unchanged. Additional replay, indication and scoring-publication regressions bring full discovery to 326/326, with the engine suite still 409/409. The subsequent pipeline change does not alter the pricing/research source signature. See [runtime and benchmark follow-up](../continuation-20260912/README.md).
 
 Open [cts-g-seven-days.html](cts-g-seven-days.html) for the full parameter matrix, 50 leading observed variants, best result in each symbol/indication/direction group, and training-only choices with their independent holdout results.
 

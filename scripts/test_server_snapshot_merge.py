@@ -4,7 +4,7 @@ import sys
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server' / 'pulse'))
 from pulse_trader import Pulse, ctrl_err_kind
@@ -12,6 +12,46 @@ from set_engine import SetBook, synth_trend
 
 
 class ServerSnapshotMergeTests(unittest.TestCase):
+    def test_first_scored_batch_admits_only_qualified_rows_and_reports_remaining(self):
+        for workers in (1, 2):
+            with self.subTest(workers=workers):
+                book = SetBook()
+                book.load({'stratGeneral':True, 'stratIndications':False, 'stratTrailing':False,
+                           'slToTpRatios':[.2,.4,.6], 'setMinStep':1, 'setStepMax':30,
+                           'baseEvalPosCount':30})
+                for st in book.by_idx:
+                    st.hist = [dict(t=1000+i*60, symbol='X-USDT', side='LONG',
+                                    pnl_pct=.004, hold_s=60) for i in range(30)]
+                p = Pulse.__new__(Pulse)
+                p.sets = book; p._sets_generation = 1; p._state_lock = threading.RLock()
+                p.system_settings = {'systemWorkers':workers}
+                observed = []
+                def observe(_book, **kwargs):
+                    progress = book.progress
+                    admitted = book.entry_sets('general', 'LONG')
+                    observed.append((progress.phase, progress.sets_done, progress.sets_total,
+                                     progress.ready, len(admitted), progress.detail))
+                    self.assertTrue(all(s.stage_ledger.get('real') for s in admitted))
+                    self.assertFalse(book.entry_sets('general', 'SHORT'))
+                p._hist_write_status = observe
+                p._score_committed(book, 1, [s.id for s in book.by_idx])
+                self.assertEqual(observed[0][:5], ('score',32,90,True,32))
+                self.assertIn('remaining 58',observed[0][-1])
+                self.assertEqual(observed[-1][:5], ('score',90,90,True,90))
+                self.assertIn('remaining 0',observed[-1][-1])
+
+    def test_scoring_status_keeps_live_progress_without_rebuilding_catalog(self):
+        book = SetBook(); book.progress.phase = 'score'; book.progress.ready = True
+        book.progress.sets_done = 32; book.progress.sets_total = 90
+        book.snapshot = Mock(side_effect=AssertionError('progress rebuilt catalog'))
+        p = Pulse.__new__(Pulse); p.sets = book; p._state_lock = threading.RLock()
+        with patch('pulse_trader.write_hist_job') as write:
+            p._hist_write_status(book, progress_only=True)
+        book.snapshot.assert_not_called()
+        self.assertEqual(write.call_args.args[0]['progress']['setsDone'], 32)
+        self.assertEqual(write.call_args.args[0]['progress']['setsTotal'], 90)
+        self.assertTrue(write.call_args.args[0]['progress']['ready'])
+
     def test_incremental_progress_counts_current_universe_and_missing_watermarks(self):
         book = SetBook()
         book.progress.ready = True

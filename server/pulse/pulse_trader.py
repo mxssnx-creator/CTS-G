@@ -9930,7 +9930,10 @@ class Pulse:
             d["clientId"] = d.get("client_id") or ""
             all_closed_rows.append(d)
         closed_out = all_closed_rows[-closed_n:][::-1]
-        cov = self._coverage_blob()
+        # Reuse the same catalog census for the report and coverage panels.
+        # Independently scanning 37k states in both consumed the live loop.
+        sets_snap = dict(self.sets.snapshot(full=False))
+        cov = self._coverage_blob(set_snapshot=sets_snap)
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
         budget = getattr(self.load, "last_budget", None)
@@ -9941,7 +9944,6 @@ class Pulse:
         ind_snap["combinedEffective"] = bool(configured_combined and len(effective_tfs) >= combined_min)
         ind_snap["combinedShed"] = bool(configured_combined and not ind_snap["combinedEffective"])
         ind_snap["loadLevel"] = str(getattr(budget, "level", "normal") or "normal")
-        sets_snap = dict(self.sets.snapshot(full=False))
         if getattr(self, "_sets_overview", None) is not None:
             sets_snap["overview"] = self._sets_overview
         historic_snap = dict(getattr(self, "_hist_status", {}) or {})
@@ -10286,7 +10288,7 @@ class Pulse:
             "byStrategy": by_strat,
         }
 
-    def _coverage_blob(self) -> Dict[str, Any]:
+    def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
         expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         catalog = []
@@ -10310,8 +10312,10 @@ class Pulse:
         for rows in list(self.indications.last.values()):
             for i in rows:
                 hits[i.kind] = hits.get(i.kind, 0) + 1
-        scov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
-        live_ov = self.sets.live_overview() if hasattr(self.sets, "live_overview") else {}
+        scov = (set_snapshot.get("coverage") or {}) if set_snapshot is not None else (
+            self.sets.coverage() if hasattr(self.sets, "coverage") else {})
+        live_ov = (set_snapshot.get("liveOverview") or {}) if set_snapshot is not None else (
+            self.sets.live_overview() if hasattr(self.sets, "live_overview") else {})
         progress = getattr(self.sets, "progress", None)
         coord_last = getattr(self.coord, "last", {}) if hasattr(self, "coord") else {}
         if not isinstance(coord_last, dict):
@@ -10321,7 +10325,9 @@ class Pulse:
         coord_size_mult = getattr(self.coord, "size_mult", None)
         stages = (coord_last.get("stages") or {})
         stage_flow_fn = getattr(self.sets, "stage_flow", None)
-        stage_flow = stage_flow_fn() if callable(stage_flow_fn) else {}
+        stage_flow = scov.get("stageFlow")
+        if stage_flow is None:
+            stage_flow = stage_flow_fn() if callable(stage_flow_fn) else {}
         axis_aggregate: Dict[str, Any] = {
             "parentCount": 0,
             "childCount": 0,
@@ -10981,11 +10987,11 @@ class Pulse:
             self._hist_request_seen = run_id
         return request
 
-    def _hist_write_status(self, book: Optional[SetBook] = None, **values: Any) -> None:
+    def _hist_write_status(self, book: Optional[SetBook] = None, *, progress_only: bool = False, **values: Any) -> None:
         current = book or self.sets
         with self.state_guard():
             progress = current.progress
-            payload = dict(self._hist_status or {})
+            payload = dict(getattr(self, "_hist_status", {}) or {})
             payload.update(values)
             payload.update({
                 "ok": True,
@@ -11002,9 +11008,9 @@ class Pulse:
                 "requestedStart": int(progress.requested_start or payload.get("requestedStart") or 0),
                 "requestedEnd": int(progress.requested_end or payload.get("requestedEnd") or 0),
                 "watermark": dict(progress.watermark or payload.get("watermark") or {}),
-                "lastPublishedWatermark": dict(progress.last_published_watermark or self._hist_last_published_watermark or {}),
+                "lastPublishedWatermark": dict(progress.last_published_watermark or getattr(self, "_hist_last_published_watermark", {}) or {}),
                 "lastCompleteRun": float(progress.last_complete_run or payload.get("lastCompleteRun") or 0.0),
-                "nextRunAt": float(progress.next_run_at or self._hist_next_hourly_at or 0.0),
+                "nextRunAt": float(progress.next_run_at or getattr(self, "_hist_next_hourly_at", 0.0) or 0.0),
                 "validSymbols": list(progress.valid_symbols),
                 "invalidSymbols": list(progress.invalid_symbols),
                 "missingSymbols": list(progress.missing_symbols),
@@ -11015,17 +11021,23 @@ class Pulse:
                 "shared": True,
                 "independent": False,
             })
+            payload["progress"] = dict(payload.get("progress") or {},
+                phase=progress.phase, pct=round(float(progress.pct or 0.0), 1),
+                ready=bool(progress.ready), detail=progress.detail,
+                setsDone=progress.sets_done, setsTotal=progress.sets_total,
+                elapsedMs=round(progress.elapsed_ms, 1))
             self._hist_status = payload
-        try:
-            snapshot = current.snapshot(full=False)
-            payload["rows"] = snapshot.get("rows") or []
-            payload["rowCount"] = len(snapshot.get("rows") or [])
-            payload["validatedCount"] = snapshot.get("validatedCount") or 0
-            if not payload.get("coverage"):
-                payload["coverage"] = snapshot.get("coverage") or {}
-            payload["progress"] = snapshot.get("progress") or {}
-        except Exception:
-            pass
+        if not progress_only:
+            try:
+                snapshot = current.snapshot(full=False)
+                payload["rows"] = snapshot.get("rows") or []
+                payload["rowCount"] = len(snapshot.get("rows") or [])
+                payload["validatedCount"] = snapshot.get("validatedCount") or 0
+                if not payload.get("coverage"):
+                    payload["coverage"] = snapshot.get("coverage") or {}
+                payload["progress"] = snapshot.get("progress") or {}
+            except Exception:
+                pass
         write_hist_job(payload, CONN_SHORT)
 
     def _qa_indication_types(self, snapshot: dict) -> None:
@@ -11769,6 +11781,48 @@ class Pulse:
         if not todo:
             return
 
+        total = len(todo)
+        started = time.monotonic()
+        last_status = 0.0
+        with self.state_guard():
+            if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                return
+            book.progress.phase = "score"
+            book.progress.sets_done = 0
+            book.progress.sets_total = total
+            book.progress.detail = f"score 0/{total} · remaining {total}"
+
+        def publish_scored(done: int) -> bool:
+            nonlocal last_status
+            with self.state_guard():
+                if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
+                    return False
+                first_ready = not book.progress.ready
+                # A completed batch has fully scored evidence. Admission
+                # still checks each exact config's Base/Main/Real gates;
+                # unscored configs remain inactive. Do not hold the first
+                # qualified lanes behind the rest of the entire catalog.
+                book.progress.ready = True
+                book.progress.phase = "score"
+                book.progress.sets_done = done
+                book.progress.sets_total = total
+                book.progress.elapsed_ms = (time.monotonic() - started) * 1000.0
+                book.progress.detail = f"score {done}/{total} · remaining {total - done}"
+                book._snap_cache = None
+                if first_ready:
+                    self._stats_force = True
+            now = time.monotonic()
+            if first_ready or done == total or now - last_status >= 1.5:
+                last_status = now
+                try:
+                    # Progress publication must not rebuild the full catalog
+                    # or stop scoring on a transient status-file failure.
+                    self._hist_write_status(book, progress_only=True)
+                except Exception:
+                    pass
+            sd_notify("WATCHDOG=1")
+            return True
+
         try:
             cpu = max(1, int(os.cpu_count() or 1))
         except Exception:
@@ -11782,7 +11836,8 @@ class Pulse:
                 states = [book.sets[sid] for sid in todo[i:i+32] if sid in book.sets]
                 for pair in book.score_pairs(states):
                     book._score_pair(pair)
-                sd_notify("WATCHDOG=1")
+                if not publish_scored(min(i + 32, total)):
+                    return
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
                 for start in range(0, len(todo), 32):
@@ -11791,7 +11846,8 @@ class Pulse:
                             return
                     states = [book.sets[sid] for sid in todo[start:start+32] if sid in book.sets]
                     list(pool.map(book._score_pair, book.score_pairs(states)))
-                    sd_notify("WATCHDOG=1")
+                    if not publish_scored(min(start + 32, total)):
+                        return
         with self.state_guard():
             if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                 book._cap_active()

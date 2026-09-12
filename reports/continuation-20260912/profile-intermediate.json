@@ -1,0 +1,134 @@
+{
+  "kind": "20-second py-spy sample; thread weights are not exclusive CPU timings",
+  "samples": [
+    {
+      "thread": "main",
+      "sampledSeconds": 10.714,
+      "functions": {
+        "recent_direction_rows": 0,
+        "_replay_core_vectorized": 0,
+        "ind_stats": 0.041,
+        "indication_ok": 0,
+        "stats": 9.041,
+        "snapshot": 4.571,
+        "coverage": 5.327,
+        "stage_flow": 3.592,
+        "relative_listings": 1.184,
+        "_score_one": 0,
+        "_score_pair": 0,
+        "_fast_historic_bundle": 0,
+        "merge_hist_rows": 0
+      },
+      "self": [
+        {
+          "name": "stage_flow",
+          "file": "set_engine.py",
+          "line": 3709,
+          "seconds": 1.163
+        },
+        {
+          "name": "qualified_stage_ids",
+          "file": "set_engine.py",
+          "line": 3772,
+          "seconds": 1.02
+        },
+        {
+          "name": "stage_flow",
+          "file": "set_engine.py",
+          "line": 3706,
+          "seconds": 0.633
+        },
+        {
+          "name": "stage_flow",
+          "file": "set_engine.py",
+          "line": 3725,
+          "seconds": 0.51
+        },
+        {
+          "name": "dump",
+          "file": "__init__.py",
+          "line": 180,
+          "seconds": 0.449
+        }
+      ]
+    },
+    {
+      "thread": "helper",
+      "sampledSeconds": 0.939,
+      "functions": {
+        "recent_direction_rows": 0,
+        "_replay_core_vectorized": 0,
+        "ind_stats": 0,
+        "indication_ok": 0,
+        "stats": 0,
+        "snapshot": 0,
+        "coverage": 0,
+        "stage_flow": 0,
+        "relative_listings": 0,
+        "_score_one": 0,
+        "_score_pair": 0,
+        "_fast_historic_bundle": 0,
+        "merge_hist_rows": 0
+      },
+      "self": [
+        {
+          "name": "_worker",
+          "file": "thread.py",
+          "line": 90,
+          "seconds": 0.939
+        }
+      ]
+    },
+    {
+      "thread": "history",
+      "sampledSeconds": 8.184,
+      "functions": {
+        "recent_direction_rows": 0,
+        "_replay_core_vectorized": 0,
+        "ind_stats": 0,
+        "indication_ok": 0,
+        "stats": 0,
+        "snapshot": 0,
+        "coverage": 0,
+        "stage_flow": 0,
+        "relative_listings": 0,
+        "_score_one": 6.02,
+        "_score_pair": 8.041,
+        "_fast_historic_bundle": 5.735,
+        "merge_hist_rows": 0
+      },
+      "self": [
+        {
+          "name": "iterencode",
+          "file": "encoder.py",
+          "line": 261,
+          "seconds": 0.796
+        },
+        {
+          "name": "__getitem__",
+          "file": "set_engine.py",
+          "line": 180,
+          "seconds": 0.469
+        },
+        {
+          "name": "finite",
+          "file": "set_engine.py",
+          "line": 300,
+          "seconds": 0.469
+        },
+        {
+          "name": "signature",
+          "file": "calculation_cache.py",
+          "line": 141,
+          "seconds": 0.388
+        },
+        {
+          "name": "__getitem__",
+          "file": "set_engine.py",
+          "line": 184,
+          "seconds": 0.347
+        }
+      ]
+    }
+  ]
+}

@@ -12,9 +12,13 @@ The replay now accumulates close columns in bounded rings and materializes retai
 
 Indication metrics reuse a cache keyed by full input contents, evaluation window, cost and PF floor. Same-length corrections invalidate immediately. Returned views cannot mutate the cached evidence. The configured overall PF also applies to the indication gate. Unchanged processing lineages preserve the existing snapshot, and the snapshot reuses its already-calculated stage-flow counts.
 
+A second runtime profile reduced sampled indication-metric time from 5.837 to 0.041 seconds, while exposing duplicate catalog scans in statistics. The final pipeline change shares one catalog snapshot between statistics/coverage and publishes score progress without rebuilding that snapshot. Completed score batches expose accurate done/total/remaining counts. The first completed batch makes fully qualified configs available for admission while the rest continues; exact per-config Base/Main/Real, sample, PF and direction gates still apply. A 32-of-90 regression admits exactly those 32 LONG configs, no SHORTs, and reports 58 remaining; both one-worker and two-worker paths pass.
+
+Before this final pipeline update, the running optimized replay had opened 24 logical config positions with 24 recorded protective pairs; the exchange confirmed 18 owned symbol/side groups. Three local absences were still pending reconciliation. `vst-confirmed-intermediate.json` preserves that distinction and its timestamp. The full 574-symbol initial pass was still in progress.
+
 ## Verification
 
-- Complete Python discovery: 324/324; engine suite: 409/409.
+- Complete Python discovery: 326/326; engine suite: 409/409. This includes progress-only publication without a catalog rebuild and early admission from completed scoring batches.
 - All 48 seven-day groups were regenerated with the current source signature. The 1,283,040,000 alternatives retain exactly the previous aggregate results: 32,704,402 positive and 4,798 meeting the report's two-period sufficient-sample/PF qualification. No training-selected winner passes holdout; the requested defaults are retained. See [the full HTML report](../continuous-7d-20260912/cts-g-seven-days.html).
 - Scalar oracle: exact retained close values/counts for both independent directions, TP on/off, overflowing tapes and Block/DCA representative histories.
 - Four isolated old/new replay comparisons have identical SHA256 hashes across all retained rows, complete close counts and auxiliary histories.
