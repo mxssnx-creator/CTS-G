@@ -7,6 +7,7 @@ Runtime state stays in /var/lib/cts-gx; X01 keeps its existing service and code.
 import json
 import pathlib
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -64,12 +65,8 @@ def main():
                           + ('Environment=CTS_VST_ONLY=1\n' if demo else ''))
     overlay = data/'overlay-bingx-x02.json'
     settings = json.loads(overlay.read_text()) if overlay.exists() else {}
-    settings.update(dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30,
-                         maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, symbolCap=20,
-                         axisPrevEnabled=False, axisLastEnabled=False, axisContEnabled=False, axisPauseEnabled=False,
-                         normalExecutionEnabled=True, stratTrailing=True, setUseHistoricGate=True, setStrictGate=True))
-    for key in ('minPf', 'baseMinPf', 'mainMinPf', 'realMinPf', 'setMinPf', 'dcaMinPf', 'exitMinPf'):
-        settings[key] = 1.05
+    profile = runpy.run_path(str(release/'server/pulse/connection_profile.py'))
+    settings.update(profile['processing_profile']())
     temporary = overlay.with_suffix('.continuous.tmp')
     temporary.write_text(json.dumps(settings, indent=2) + '\n')
     temporary.replace(overlay)
