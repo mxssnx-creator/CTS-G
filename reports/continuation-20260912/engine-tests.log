@@ -1,0 +1,450 @@
+OK  unit-set  n=141 fail=0 []
+OK  unit-ex  n=11 fail=0 []
+OK  unit-ind  n=36 fail=0 []
+OK  unit-var  n=11 fail=0 []
+OK  unit-dca  n=21 fail=0 []
+OK  unit-block  n=57 fail=0 []
+OK  unit-stats  n=26 fail=0 []
+OK  unit-load  n=25 fail=0 []
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.017s
+
+OK
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.004s
+
+OK
+OK  unit-histcalc  n=115 fail=0 []
+OK  unit-upreset  n=19 fail=0 []
+OK  unit-storage  n=7 fail=0 []
+OK  unit-block-contract  n=11
+OK  unit-vst-scheduling  n=11
+OK  rank-lev-then-vol1h  got=['C-USDT', 'B-USDT', 'A-USDT']
+OK  sort-default  vol1h
+OK  sort-coerce
+OK  sort-volume
+OK  rank-high-lev-wins  ['HOT2-USDT', 'HOT-USDT', 'LOW-USDT']
+OK  rank-lev-then-quote  ['HOT2-USDT', 'HOT-USDT', 'LOW-USDT']
+OK  metric-vol-fallback
+OK  metric-abs
+OK  overlay-bingx-x01.json-sort  vol1h
+OK  overlay-bingx-x01.json-dynamic
+OK  overlay-bingx-x01.json-maxlev
+OK  overlay-bingx-x01.json-controls
+OK  overlay-bingx-x01.json-per-config-controls-on
+OK  overlay-bingx-x01.json-ind
+OK  overlay-bingx-x01.json-strategy-lanes
+OK  overlay-bingx-x01.json-modules
+OK  overlay-bingx-x01.json-indication-types
+OK  overlay-bingx-x01.json-tf
+OK  overlay-bingx-x01.json-min-step
+OK  overlay-bingx-x01.json-full-risk-grid
+OK  overlay-bingx-x01.json-direct-risk-range
+OK  overlay-bingx-x02.json-sort  vol1h
+OK  overlay-bingx-x02.json-dynamic
+OK  overlay-bingx-x02.json-maxlev
+OK  overlay-bingx-x02.json-controls
+OK  overlay-bingx-x02.json-per-config-controls-on
+OK  overlay-bingx-x02.json-ind
+OK  overlay-bingx-x02.json-strategy-lanes
+OK  overlay-bingx-x02.json-modules
+OK  overlay-bingx-x02.json-indication-types
+OK  overlay-bingx-x02.json-tf
+OK  overlay-bingx-x02.json-min-step
+OK  overlay-bingx-x02.json-full-risk-grid
+OK  overlay-bingx-x02.json-direct-risk-range
+OK  isolation-lanes  Gx01 vs Gx02 CID
+OK  x01-max-book  all=True cap=0
+OK  x01-open-unlimited  maxOpen=0 perGroup=0
+OK  x01-multi-unlimited  maxOpen=0 perGroup=0
+OK  x01-block-multi  3
+OK  x01-dca-unlim  4
+OK  x01-set-unlimited  0
+OK  x01-entry-candidates-unlimited  0
+OK  x02-entry-candidates-unlimited  0
+OK  x02-all
+OK  default-unlimited-symbols
+OK  open-cap-unlimited
+OK  open-unlimited
+OK  x02-unlim-stack
+OK  x01-not-x02-lane  Gx01 vs Gx02 CID isolation
+OK  pf-1R  1.1
+OK  sltp-0.6  overlay:r0.6 sl=0.0045 tp=0.0075
+OK  sltp-1.5  overlay:r1.5 sl=0.0112 tp=0.0075
+OK  net-pnl-long  0.0015
+OK  contract-max-lev  300
+OK  contract-min-usdt
+OK  oid-reject-exists
+OK  oid-keep
+OK  oid-extract
+OK  oid-extract-nested-sl
+OK  sl-no-qty-with-close  {'symbol': 'SOL-USDT', 'type': 'STOP_MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'stopPrice': '140.0', 'workingType': 'MARK_PRICE', 'clientOrderID': 'Gx01u
+OK  sl-type-stop-mkt
+OK  sl-close-side
+OK  sl-qty-no-close  {'symbol': 'SOL-USDT', 'type': 'STOP_MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'stopPrice': '140.0', 'workingType': 'MARK_PRICE', 'clientOrderID': 'Gx01u
+OK  sl-stop-has-price  {'symbol': 'SOL-USDT', 'type': 'STOP', 'side': 'SELL', 'positionSide': 'LONG', 'stopPrice': '140.0', 'workingType': 'MARK_PRICE', 'clientOrderID': 'Gx01uabc', '
+OK  tp-close-no-qty
+OK  short-sl-buy
+OK  attach-both
+OK  attach-price
+OK  sl-types-cover
+OK  tp-types-cover
+OK  sl-long-window  lo=99.4994 hi=99.76
+OK  sl-long-inside-liq  lo=99.4994
+OK  sl-long-no-liq-cap  lo=99.45 hi=99.5
+OK  err-liq
+OK  err-px
+OK  err-exists
+OK  err-qty-close
+OK  no-reduce-only
+OK  sl-short-window  lo=100.24 hi=100.4994
+OK  sl-lock-room  lo=100.5004 hi=100.76
+OK  x01-dca-multi
+OK  payload-never-mix
+OK  attach-keys
+OK  oid-reject-empty
+OK  oid-reject-exists-case
+OK  ctrl-short-tp-side
+OK  unlimited-open-overlay
+OK  zero-means-unlimited-code
+OK  fill-executed-priority
+OK  fill-explicit-zero-stays-zero
+OK  fill-capped-to-request
+OK  fill-fallback-requested
+OK  fill-malformed-fallback
+OK  fill-control-half-up  50
+OK  close-partial-direct  qty=3.0 pending=3.0 closed=1
+OK  close-partial-cumulative-delta  qty=1.0 pending=1.0 closed=2
+OK  close-partial-repeat-idempotent  qty=1.0 closed=2
+2026-09-12T08:52:13 CLOSE AAA-USDT LONG pnl=1.8500 (2.000%) test-partial hold=60s
+OK  close-partial-final-reconciles  open=0 pending=False closed_qty=5.0 wins=3
+OK  fill-empty-no-obsolete-fallback  ['/openApi/swap/v2/trade/allOrders', '/openApi/swap/v2/trade/allOrders']
+OK  ctrl-replace-bingx-safe  calls=['place', 'cancel'] sl=new-sl
+OK  ctrl-replace-failure-keeps-old  ok=False calls=['place'] sl=99.5 oid=new-sl
+OK  ctrl-replace-monotonic  ok=True calls=[] sl=99.5
+OK  coord-unlimited-slot  1000000000
+OK  coord-limited-slot  6
+OK  coord-countpos-mult-0  1.0
+OK  coord-countpos-mult-4  0.8
+OK  coord-countpos-mult-floor  0.35
+OK  coord-add-stack-ok  3
+OK  coord-axes-default-off  {'prev': False, 'last': False, 'cont': False, 'pause': False}
+OK  coord-add-stack-weak-default  3
+OK  coord-add-stack-weak  1
+OK  coord-add-stack-cont-off  3
+OK  coord-add-gate-pause  ['base/last 4 PF -1.10<1.05 (1.00=neutral 1.10=+1×cost)', 'pause 8/2', 'main 5 PF -1.10<1.05']
+OK  coord-add-gate-countpos  ['count-pos n=3 last4 PF 0.00<1.05', 'count-pos pause n=3 4/2']
+OK  coord-add-gate-count-n  3.0
+OK  coord-add-gate-ok  []
+OK  coord-eval-from-overlay  7/4
+OK  coord-vol-ratio-overlay  0.1
+OK  coord-snap-countpos  {'openMult': True, 'addGate': True, 'prevMinCount': 5, 'prevWindow': 25, 'mainEval': 7, 'realEval': 4}
+OK  coord-base-index  2
+OK  coord-base-from-ids  {'parentCount': 2, 'qualifiedChildren': 1, 'childCount': 0, 'fromBaseVars': True}
+OK  coord-base-qualified-vars  1
+OK  coord-axis-off-no-children  kids
+OK  coord-book-uses-base-index  {'fromBaseVars': True, 'parentCount': 2, 'qualifiedChildren': 1}
+OK  stage-pf-defaults  {'base': 1.05, 'main': 1.05, 'real': 1.05}
+OK  stage-pf-canonical-min  1.05
+OK  stage-pf-overlay-wins  {'base': 1.05, 'main': 1.05, 'real': 1.05}
+OK  stage-pf-strategies-fallback  {'base': 1.15, 'main': 1.15, 'real': 1.15}
+OK  stage-pf-real-canonical  1.15
+OK  stage-pf-base-blocks  allow=False reasons=['base/last 4 PF -94.10<1.05 (1.00=neutral 1.10=+1×cost)', 'main 5 PF -175.10<1.05']
+OK  stage-pf-base-allows  reasons=[]
+OK  stage-pf-stages-floors  {'intern': None, 'base': 1.05, 'main': 1.05, 'real': 1.05, 'last': 1.05, 'prev': None}
+OK  stage-pf-snapshot  {'base': 1.05, 'main': 1.05, 'real': 1.05}
+OK  stage-pf-stale-tape-allows  allow=True reasons=[]
+OK  recent-closed-synth  15
+OK  recent-closed-stale-empty  0
+OK  recent-closed-fresh  12
+OK  ddt-pnl-pct-only  pct-only DDT
+OK  ddt-closed-objects  Closed DDT
+OK  ddt-namespace-objects  ns DDT
+OK  set-eval-overlay  7/4
+OK  set-stage-pf-reported  b=1.1133 m=1.22 r=1.3
+OK  set-stage-windows-differ  b=1.1133 m=1.22
+OK  set-stage-ddt-nonzero  ddt=0.0 ep=0
+OK  set-intern-shared-floor  val=False realQ=False pf=1.1133
+OK  set-eval-windows-present  ['last5', 'last10', 'last15', 'last25']
+OK  set-stage-record-scale  net=1.22 main=1.22 classicNet=99.0
+OK  set-stage-record-ddt  0.0
+OK  set-dd-split-pct-and-pnl  {'episodes': 2.0, 'maxS': 60.0, 'avgS': 30.0, 'currentS': 60.0, 'maxDepth': 2.0, 'inDd': 1.0, 'n': 5.0, 'symbols': 2.0}
+OK  pf-plus1x-from-zero-pnl  1.1
+OK  eval-windows-last15  1.1
+OK  block-unlim-stack  6
+OK  block-unlim-eval-bounded  n=7
+OK  block-parse-21  21
+OK  block-parse-1
+OK  block-finite-stack  3
+OK  block-finite-eval  n=7
+OK  dca-unlim-engine  2
+OK  coord-unlim-already
+OK  block-n1-is-1x-parent  {'volumeIncrement': 1.0, 'stepQty': 10.0, 'volScale': 1.0, 'targetAddQty': 10.0, 'targetBlockQty': 20.0, 'blockMinPF': 1.11}
+OK  block-n3-total-capped-2x  {'volumeIncrement': 1.0, 'stepQty': 0.0, 'volScale': 1.0, 'targetAddQty': 10.0, 'targetBlockQty': 20.0, 'blockMinPF': 1.11}
+OK  block-pick-n1-requests-1x  n=1 qty=10.0
+OK  astart-boot-stale-eq-clears  halted=False reason=None start_eq=80.0
+OK  astart-reset-persists
+OK  astart-stop-file-halts  True stopped
+OK  astart-stop-start-resumes  False None
+OK  astart-drawdown-disabled-default  False None
+OK  astart-drawdown-latches  True drawdown halt
+OK  astart-auto-resume  False None
+2026-09-12T08:52:13 EQ re-baseline on system capital start_eq 100.0000 -> 200.0000
+OK  astart-deposit-rescue  halted=False start_eq=200.0
+OK  astart-pause-resume  False None
+OK  astart-sidecar-clears-all  bingx-t01 start rc=0 state=active running=0
+OK  astart-sidecar-retry-after-limit  ['enable', 'restart', 'reset-failed', 'enable', 'restart']
+OK  astart-sidecar-stop-marks  bingx-t01 stop rc=0 state=active forced paused=0
+OK  stop-force-kills-if-still-up  bingx-t01 stop rc=0 state=active forced paused=0
+OK  stop-cancels-hist-request
+OK  stop-marks-stats-stopped  {'running': False, 'halted': True, 'haltReason': 'stopped', 'paused': False, 'alive': False}
+OK  start-after-stop-clears  bingx-t01 start rc=0 state=active running=0
+OK  live-start-default-on
+OK  vst-start-always-on
+OK  live-start-allowed-by-default  bingx-x01 start rc=0 state=active running=0
+OK  live-start-test-disable
+OK  vst-start-still-on-when-live-disabled
+OK  live-start-blocked-when-disabled  bingx-x01 start blocked: CTS_DISABLE_LIVE_START
+OK  ctrl-mtimes-all-missing  {'/tmp/ctrlcoord-test-5w7np0bq/STOP-bingx-x02': 0.0, '/tmp/ctrlcoord-test-5w7np0bq/PAUSE-bingx-x02': 0.0, '/tmp/ctrlcoord-test-5w7np0bq/STOP': 0.0, '/tmp/ctrlco
+OK  ctrl-mtimes-create
+OK  ctrl-mtimes-delete
+OK  ctrl-mtimes-touch
+OK  ctrl-resume-no-pre-restore  halted=False reason=None
+OK  ctrl-resume-clears-pre  None
+OK  ctrl-resume-restores-pre  halted=True reason=drawdown halt
+OK  ctrl-stop-branch-halts  halted=True reason=stopped
+OK  ctrl-stress-no-errors  errs=[] n=48
+OK  ctrl-stress-serialized  max_concurrent=1 calls=112
+OK  ctrl-stress-consistent  stop=True pause=False
+OK  ctrl-stress-final-start  bingx-t01 start rc=0 state=active running=0
+OK  prog-stop-no-nested-wait  halted=True waits=[]
+OK  prog-pause-no-nested-wait  halted=True waits=[]
+OK  prog-start-resumes-cycle  halted=False reason=None cycle=1
+OK  prog-flag-cycle-consistent  cycle=3 reason=None
+OK  prog-wait-consumes-pending-bump  hit=True dt=0.000 set=False
+OK  prog-wait-wakes-on-ctrl-bump  hit=True dt=0.030
+OK  prog-tick-does-not-wake-hist  tick
+OK  prog-ctrl-wakes-hist-and-cycle  hist=True cycle=True
+OK  prog-config-wakes-hist
+OK  prog-cycle-busy-cleared-on-error  False
+OK  prog-hot-loop-advances  n=24 busy=False cycle=24
+OK  prog-coord-pause-blocks  ['base/last 4 PF -19.10<1.05 (1.00=neutral 1.10=+1×cost)', 'pause 8/8', 'main 5 PF -19.10<1.05', 'real 3 PF -19.10<1.05']
+OK  prog-coord-recovers-after-win  allow=True []
+OK  prog-coord-last-independent  ['base/last 4 PF -29.10<1.05 (1.00=neutral 1.10=+1×cost)', 'main 5 PF -17.10<1.05', 'real 3 PF -29.10<1.05']
+OK  prog-coord-add-gate-allows  []
+OK  prog-coord-add-gate-independent  ['count-pos n=3 last4 PF 0.00<1.05']
+OK  prog-rearrange-when-full  {'from': 'BBB-USDT', 'to': 'AAA-USDT', 'dir': 1, 'why': 'ind:state', 'conf': 0.9, 'weakPnl': -0.4}
+OK  prog-rearrange-skipped-with-room  None
+OK  prog-rearrange-respects-flag
+OK  prog-size-mult-monotonic
+OK  prog-stack-cap-weak-halves
+OK  prog-stats-skips-busy-lock  dt=0.080 {'cycle': 11, 'statsDeferred': True}
+OK  prog-unprotected-still-enters  ['entries', 'block', 'dca']
+OK  prog-running-flag-cleared
+2026-09-12T08:52:14 ADOPT skip empty rest
+OK  phantom-skip-first-empty  book=2 streak=1
+OK  phantom-count-visible  exchange_open_count=0
+2026-09-12T08:52:14 ADOPT flat-exchange confirmed streak=2 book=2
+2026-09-12T08:52:14 DROP stale local AAA-USDT LONG group=AAA-USDT age=3600s miss=1
+2026-09-12T08:52:14 DROP stale local BBB-USDT LONG group=BBB-USDT age=3600s miss=1
+OK  phantom-drop-on-confirm  book=0 recon=ok ours=0 foreign=0 live=0
+OK  phantom-streak-resets  streak=0
+2026-09-12T08:52:14 ADOPT flat-exchange confirmed streak=2 book=1
+OK  phantom-keeps-young  book=['NEW-USDT']
+2026-09-12T08:52:14 ADOPT flat-exchange confirmed streak=2 book=1
+2026-09-12T08:52:14 DROP stale local CTL-USDT LONG group=CTL-USDT age=3600s miss=1
+OK  phantom-controlled-dropped  book=[] cool=True
+OK  phantom-live-pos-kept  book=['REAL-USDT'] xch=1 streak=0
+OK  phantom-api-fail-keeps-book  book=1 recon=adopt boom
+OK  sim-unknown-minus1  (-1, 0.0)
+OK  sim-count-real-minus-live  n=2
+OK  sim-upnl-math  n=2 upnl=30.0
+OK  sim-all-when-flat  n=3
+OK  sim-adopt-keys  keys={'A-USDT:LONG'} n=0 xch=1
+OK  sim-foreign-excluded  open=0 own=0 total=1 foreign=1
+OK  block-formula-inc  4.5
+OK  block-formula-minpf  1.9899999999999998
+OK  block-coverage-unlimited-all-counts  n=6
+OK  block-coverage-limited-all-counts  n=6
+OK  block-coverage-enabled-flag
+OK  block-eval-all-counts  regular=[1, 2, 3, 4, 5, 6] total=7
+OK  block-eval-active-live
+OK  block-eval-window-rolls  [1, 2, 3, 4, 5, 6]
+OK  block-eval-satisfied-no-request
+OK  block-eval-pick-smallest-unsat  pick=2
+OK  block-pick-gated-by-new-ratio  intern 1.05 < capped count2 gate 1.11
+OK  block-floor-follows-default  posts=[]
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
+OK  block-warm-set-emits  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
+OK  block-fill-coordination  q=0.075 add=0.025 entry=100.0
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+OK  block-cold-count1-emits  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
+OK  block-disabled-no-emit  posts=[]
+OK  block-lane-retires-without-parent  active=False base=0.0
+OK  block-max-add-not-sum  sequential extra=3, independent sum=6
+2026-09-12T08:52:14 BLOCK ADD TST-USDT SHORT n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:short#block:1
+OK  block-short-emits-sell  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'SELL', 'positionSide': 'SHORT', 'quantity': 0.0125, 'clientOrderID': '
+OK  block-short-lane
+OK  block-no-liven-jump  pick=(1, 0.0125) act=[1]
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.028 TST-USDT:long#block:1
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=3 +0.0125 base=0.05 add=0.037500000000000006 tot=0.08750000000000001 minPF=1.083 TST-USDT:long#block:3
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=4 +0.012499999999999997 base=0.05 add=0.05 tot=0.1 minPF=1.110 TST-USDT:long#block:4
+OK  block-seq-four-portions-2x-cap  posts=4 add=0.05 tot=0.1
+OK  block-seq-full-stops  posts=4
+OK  block-no-add-at-entry  posts=[]
+OK  block-no-add-flat  posts=[]
+2026-09-12T08:52:14 BLOCK sat dust TST-USDT n=4 rem=0.0010000000000000009 min=0.01/1.0
+OK  block-remainder-no-bump  posts=[] sat={4: True, 1: True, 2: True, 3: True}
+OK  block-minimum-retry-never-exceeds-approved-portion  requests=1
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+OK  block-rounding-cannot-exceed-remainder  [('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GTEST0'}
+2026-09-12T08:52:14 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+OK  block-independent-from-dca  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
+OK  dca-mult-clamp  mults=[2.1, 2.5, 2.5, 2.5]
+OK  block-intern-long-lifts  1.4
+OK  block-intern-short-floor  1.2
+OK  block-book-extra-capped-1  1.0
+OK  block-book-cap-2x  book=4.3 base=2.15 ratio=2.000
+OK  block-close-net-pct
+OK  block-close-other-side-live  short=0.04
+2026-09-12T08:52:15 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.73 tp=100.45 sl_oid=EX000002 tp_oid=EX000003
+2026-09-12T08:52:15 OPEN BBB-USDT LONG qty=0.05 px=200.0 sl=199.01 tp=201.1 sl_oid=EX000005 tp_oid=EX000006
+2026-09-12T08:52:15 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000008 tp_oid=EX000009
+OK  setord-3-independent-entries  entries=3 errors=0
+OK  setord-entry-cids-unique  ['Gx02og0603100000xzxq', 'Gx02og0903200012cj2l', 'Gx02oi1503300021lzfh']
+OK  setord-entry-cids-resolve-sets  [('general:1m:sl0.6:st10', 10), ('general:1m:sl0.9:st20', 20), ('indications:1m:sl1.5:st30', 30)]
+OK  setord-positions-track-own-set  [('general:1m:sl0.6:st10', 0), ('general:1m:sl0.9:st20', 1), ('indications:1m:sl1.5:st30', 2)]
+OK  setord-3-control-pairs  batches=3
+OK  setord-pairs-wellformed  [('AAA-USDT', 2), ('BBB-USDT', 2), ('CCC-USDT', 2)]
+OK  setord-control-cids-unique  6
+OK  setord-per-set-sl-distances  sl={'AAA-USDT': 99.73, 'BBB-USDT': 199.01, 'CCC-USDT': 49.55} tp={'AAA-USDT': 100.45, 'BBB-USDT': 201.1, 'CCC-USDT': 50.32}
+OK  setord-control-oids-independent  oids=6 live=6
+OK  setord-exchange-orders-per-set  {'AAA-USDT': ['EX000002', 'EX000003'], 'BBB-USDT': ['EX000005', 'EX000006'], 'CCC-USDT': ['EX000008', 'EX000009']}
+2026-09-12T08:52:15 CLOSE AAA-USDT LONG pnl=0.0225 (0.600%) tp hold=0s
+OK  setord-cancel-isolation  del=2 live=4
+OK  setord-win-attributes-setA  A n=1 r=1.3 B live=0 C live=0
+2026-09-12T08:52:15 CLOSE BBB-USDT LONG pnl=-0.0650 (-0.500%) sl hold=0s
+OK  setord-loss-attributes-setB  B n=1 r=0.5667 A r=1.3
+OK  setord-engine-stats-coordination  w=1 l=1 closed=2
+OK  setord-snapshot-per-set  {'indications:1m:sl1.5:st30': (0, 1.5), 'general:1m:sl0.6:st10': (1, 1.3), 'general:1m:sl0.9:st20': (1, 0.5667)}
+OK  setord-real-live-sim-coordination  sim=0/1
+2026-09-12T08:52:15 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000013 tp_oid=EX000014
+OK  setord-independent-lane-and-dedup  independent=1 duplicate=0
+2026-09-12T08:52:15 CTRL SKIP sec-sl DDD-USDT signature mismatch
+2026-09-12T08:52:15 OPEN scratch no-ctrl DDD-USDT
+2026-09-12T08:52:15 CLOSE DDD-USDT LONG pnl=-0.0375 (0.000%) no-ctrl hold=0s skip-eval
+OK  setord-no-ctrl-scratches  open=[] market_posts=2 live_ctrl=0
+OK  group-normalize-fraction
+OK  group-normalize-percent
+OK  group-range-stable
+OK  group-range-parse
+OK  group-range-reject
+OK  group-symbol-side-range-separate
+OK  group-token-range
+OK  group-two-pairs-four-controls  orders=4
+OK  group-controls-quantity-no-close  [{'symbol': 'AAA-USDT', 'type': 'STOP_MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'stopPrice': '99.52', 'workingType': 'MARK_PRICE', 'clientOrderID': 'Gx02
+OK  group-cancel-isolated  remaining=['ctrl-3', 'ctrl-4']
+OK  group-same-range-merge  qty=3.0 entry=106.66666666666667
+OK  group-parent-lanes-merge  block=3.0 dca=3.0
+OK  group-cid-restart-range  {'kind': 'u', 'pack': 'general', 'sl': 0.6, 'trail': '0.3:0.1', 'trail_arm': 0.3, 'trail_give': 0.1, 'step': 8, 'idx': 0, 'set_id': 'general:1m:sl0.6:tr0.3:0.1:
+OK  group-close-quantity-matched  {'symbol': 'AAA-USDT', 'type': 'MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'quantity': 3.0, 'clientOrderID': 'Gx02cg060308000r048075h3do9eti7t'}
+OK  group-legacy-disables-key
+OK  group-legacy-close-position
+OK  historic-entry-blocked-before-ready  historic-gate
+OK  historic-adds-blocked-before-ready
+OK  strict-entry-blocked-no-set  set-gate
+OK  strict-packs-closed
+OK  strict-entry-allowed-validated  None
+OK  strict-pick-is-winner  indications:1m:sl0.6:st3 pf=1.2 n=15
+OK  strict-loser-never-picked  pick=None
+OK  strict-ind-loser-kind-blocked  move kind gated
+OK  strict-ind-winner-kind-runs  state kind runs
+OK  strict-ind-unproven-rides-pack  common kind unproven but pack validated
+OK  strict-ind-state-loser-blocked  state kind gated
+OK  strict-ind-signals-runs  signals kind runs while state is gated
+OK  strict-ind-unproven-pack-closed  ind-gate
+OK  strict-place-no-order-cold  posts=[]
+OK  strict-place-no-order-losers  posts=[]
+2026-09-12T08:52:15 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.79 tp=100.35000000000001 sl_oid= tp_oid=
+OK  strict-place-trades-validated  posts=1 set=general:1m:sl0.6:st3
+OK  strict-block-pf-validated-lifts  intern=1.5 set_pf=1.5
+OK  strict-block-pf-cold-floor  intern=1.2
+OK  strict-block-pf-loser-floor  intern=1.2
+OK  legacy-block-pf-unchanged  intern=1.5
+OK  dd-time-closes-stuck-loser  [('AAA-USDT', 99.0, 'dd-time')]
+OK  dd-time-within-window-kept  []
+OK  dd-time-disabled-off  []
+OK  dd-time-breakeven-resets  under_since=0.0 closed=[]
+OK  dd-time-short-symmetric  [('AAA-USDT', 101.0, 'dd-time')]
+OK  dd-time-overlay-mapped
+OK  dd-time-config-model
+OK  dd-time-settings-ui
+OK  hist-snapshot-atomic  ok=True source_kept=True phase=ready
+OK  hist-snapshot-keeps-live  live=1
+OK  hist-snapshot-no-bars-loss  bars=120
+OK  public-cooldown-no-request  {'code': 101209, 'msg': 'cooling', 'error': True, 'cooled': True}
+OK  async-cooldown-no-request  [('/openApi/swap/v2/quote/klines', {'symbol': 'ETH-USDT'}, {'code': 101209, 'msg': 'cooling', 'error': True, 'cooled': True})]
+OK  async-rate-trip-propagates  {'rest': 1, 'ws': 0, 'wsOk': False, 'wsAgeMs': None, 'rateWaits': 0.0, 'rateTrips': 1, 'httpErr': 0, 'asyncN': 1, 'asyncSuppressed': 1, 'publicSuppressed': 1, '
+OK  suppression-accounting  {'rest': 1, 'ws': 0, 'wait': 0.0, 'rl': 1, 'err': 0, 'asyncN': 1, 'asyncSuppressed': 1, 'publicSuppressed': 1, 'asyncP50': 0.0}
+OK  history-fetch-backoff
+OK  history-no-short-replay
+OK  kline-budget-gate
+OK  recon-pending-not-failure
+OK  stop-file-negative-control
+OK  async-shared-rate-trip
+OK  watchdog-heartbeat-loop
+OK  hist-durable-watchdog
+OK  hist-partial-publish-helper
+OK  hist-replay-selection-helper
+OK  hist-durable-deferred-persist
+OK  partial-publish-high-coverage
+OK  partial-publish-high-coverage-no-retry-stall
+OK  partial-publish-waits-retries
+OK  partial-publish-low-coverage-blocked
+OK  partial-publish-complete
+OK  partial-publish-empty-blocked
+OK  replay-selection-partial  partial
+OK  replay-selection-partial-any-ready  ['a', 'a'] partial
+OK  replay-selection-wait-existing-partial  wait-gaps
+OK  replay-selection-add-new-contiguous  ['b'] incremental-gap-fill
+OK  replay-selection-skip-unchanged  skip-unchanged
+OK  replay-selection-changed-only  ['b']
+OK  replay-selection-full-initial  full
+OK  hist-replay-chunk-helper
+OK  hist-replay-chunk-wired
+OK  hist-first-slice-gate
+OK  hist-replay-workers-helper
+OK  hist-peer-claim
+OK  hist-peer-defer-ready
+OK  hist-heal-trim
+OK  hist-keep-scan-tapes
+OK  http-heal-stuck
+OK  http-stamp-load
+OK  http-slim-variants
+OK  default-symbol-cap-const
+OK  hist-progress-total-ignores-watermark
+OK  hist-scan-cap-helper
+OK  hist-cap-no-stomp
+OK  hist-tick-bars-scan-only
+OK  hist-cap-truncates-80-to-25  25
+OK  hist-cap-wildcard-uses-scan  25
+OK  hist-cap-50-runs  50
+OK  hist-cap-zero-unlimited  80
+OK  hist-replay-chunk-overload  8
+OK  hist-replay-chunk-capped-book  24
+OK  hist-replay-chunk-eight  8
+OK  hist-replay-workers-eight  2
+OK  hist-replay-workers-follow-cpu  2
+OK  hist-replay-workers-one  1
+OK  hist-trim-keep-hist
+OK  hist-no-abort-critical
+OK  hist-score-each-slice  []
+OK  replay-pool-else
+OK  replay-blas-pin
+OK  replay-progress-no-preset
+OK  hist-merge-keeps-seen  seen=['AAA-USDT', 'BBB-USDT'] done=2 first=['AAA-USDT']/1
+
+409/409 passed  fail=0
