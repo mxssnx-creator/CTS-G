@@ -1034,6 +1034,7 @@ tbody tr:nth-child(even) {{ background: color-mix(in srgb, var(--muted) 5%, var(
 td {{ font-size: 13px; }}
 .empty {{ padding: 24px; color: var(--muted); text-align: center; }}
 .two {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }}
+.two > .panel {{ min-width: 0; }}
 .status-line {{ display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font: 12px ui-monospace, monospace; }}
 .status-line b {{ color: var(--text); font-weight: 500; }}
 details {{ border-top: 1px solid color-mix(in srgb, var(--muted) 25%, var(--bg)); margin-top: 16px; padding-top: 12px; }}

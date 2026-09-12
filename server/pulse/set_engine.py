@@ -2107,6 +2107,7 @@ class SetBook:
             hist: Dict[str, List[Dict[str, Any]]] = {}
             ind_hist: Dict[str, List[Dict[str, Any]]] = {}
             strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
+            symbol_counts: Dict[str, Dict[str, int]] = {}
             processed_symbols: set[str] = set()
             aborted = False
             w = max(1, min(int(workers or 1), 16, len(names) or 1))
@@ -2117,7 +2118,11 @@ class SetBook:
                 local: Dict[str, List[Dict[str, Any]]],
                 local_ind: Dict[str, List[Dict[str, Any]]],
                 local_strategy: Dict[str, List[Dict[str, Any]]],
+                local_counts: Dict[str, int],
             ) -> None:
+                for sid, count in local_counts.items():
+                    if count:
+                        symbol_counts.setdefault(sid, {})[symbol] = count
                 for sid, rows in local.items():
                     if rows:
                         target = hist.setdefault(sid, [])
@@ -2147,10 +2152,12 @@ class SetBook:
                 Dict[str, List[Dict[str, Any]]],
                 Dict[str, List[Dict[str, Any]]],
                 Dict[str, List[Dict[str, Any]]],
+                Dict[str, int],
             ]:
                 local: Dict[str, List[Dict[str, Any]]] = {}
                 local_ind: Dict[str, List[Dict[str, Any]]] = {}
                 local_strategy: Dict[str, List[Dict[str, Any]]] = {}
+                local_counts: Dict[str, int] = {}
                 self._replay_symbol(
                     symbol,
                     local,
@@ -2163,8 +2170,13 @@ class SetBook:
                     on_step=on_step,
                     ind_hist=local_ind,
                     strat_hist=local_strategy,
+                    hist_counts=local_counts,
                 )
-                return symbol, local, local_ind, local_strategy
+                # Core replay bounds its tape while counting every close.
+                # Other replay paths still return complete local tapes.
+                for sid, rows in local.items():
+                    local_counts.setdefault(sid, len(rows))
+                return symbol, local, local_ind, local_strategy, local_counts
 
             done = 0
             if w <= 1 or len(names) <= 1:
@@ -2179,8 +2191,8 @@ class SetBook:
                     self.progress.pct = 5.0 + (coverage_now / max(1, denom)) * 80.0
                     self.progress.elapsed_ms = (time.time() - t0) * 1000
                     self.progress.detail = f"replay {symbol} {coverage_now + 1}/{denom}"
-                    _sym, local, local_ind, local_strategy = _one(symbol)
-                    _merge(_sym, local, local_ind, local_strategy)
+                    _sym, local, local_ind, local_strategy, local_counts = _one(symbol)
+                    _merge(_sym, local, local_ind, local_strategy, local_counts)
                     done += 1
                     coverage_now = len(self._hist_seen) if merge else done
                     self.progress.symbols_done = coverage_now
@@ -2218,7 +2230,7 @@ class SetBook:
                         for fut in finished:
                             symbol, _attempt = pending.pop(fut)
                             try:
-                                result_symbol, local, local_ind, local_strategy = fut.result()
+                                result_symbol, local, local_ind, local_strategy, local_counts = fut.result()
                             except Exception:
                                 attempt = retries.get(symbol, 0) + 1
                                 retries[symbol] = attempt
@@ -2227,7 +2239,7 @@ class SetBook:
                                     continue
                                 raise
                             with lock:
-                                _merge(result_symbol, local, local_ind, local_strategy)
+                                _merge(result_symbol, local, local_ind, local_strategy, local_counts)
                                 done += 1
                                 coverage_now = len(self._hist_seen) if merge else done
                                 self.progress.symbol = result_symbol
@@ -2250,6 +2262,7 @@ class SetBook:
                 ind_hist,
                 merge=merge,
                 replayed_symbols=processed_symbols if merge else names,
+                hist_symbol_counts=symbol_counts,
                 score=score,
             )
             strategy_names = processed_symbols if merge else names
@@ -2303,6 +2316,7 @@ class SetBook:
         merge: bool = False,
         replayed_symbols: Optional[Sequence[str]] = None,
         hist_counts: Optional[Dict[str, int]] = None,
+        hist_symbol_counts: Optional[Dict[str, Dict[str, int]]] = None,
         score: bool = True,
         score_ids: Optional[Sequence[str]] = None,
     ) -> None:
@@ -2328,7 +2342,7 @@ class SetBook:
             # its already committed symbol evidence.
             full = hist.get(st.id, [])
             if merge:
-                counts = self._hist_counts.setdefault(st.id, {})
+                counts = self._hist_counts.get(st.id, {})
                 if not counts and st.hist:
                     for row in st.hist:
                         symbol = str(row.get("symbol") or "")
@@ -2338,10 +2352,20 @@ class SetBook:
                     symbol = str(row.get("symbol") or "")
                     full_counts[symbol] = full_counts.get(symbol, 0) + 1
                 for symbol in names:
-                    if hist_counts is not None and st.id in hist_counts:
-                        counts[symbol] = max(0, int(hist_counts[st.id]))
+                    if hist_symbol_counts is not None:
+                        count = max(0, int(hist_symbol_counts.get(st.id, {}).get(symbol, 0)))
+                    elif hist_counts is not None and st.id in hist_counts:
+                        count = max(0, int(hist_counts[st.id]))
                     else:
-                        counts[symbol] = full_counts.get(symbol, 0)
+                        count = full_counts.get(symbol, 0)
+                    if count:
+                        counts[symbol] = count
+                    else:
+                        counts.pop(symbol, None)
+                if counts:
+                    self._hist_counts[st.id] = counts
+                else:
+                    self._hist_counts.pop(st.id, None)
                 st.hist = merge_hist_rows(st.hist, full, names)
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
@@ -2351,7 +2375,15 @@ class SetBook:
                 st.hist = full
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
-                n_full = len(full)
+                if hist_symbol_counts is not None:
+                    counts = dict(hist_symbol_counts.get(st.id, {}))
+                    if counts:
+                        self._hist_counts[st.id] = counts
+                    else:
+                        self._hist_counts.pop(st.id, None)
+                    n_full = sum(counts.values())
+                else:
+                    n_full = int(hist_counts.get(st.id, len(full))) if hist_counts is not None else len(full)
                 st.hist = trim_hist(full, HIST_CAP)
                 st.n = n_full
         if score:
@@ -3741,7 +3773,10 @@ class SetBook:
             tape = list(st.live) if len(st.live) >= self.eval_need() else st.tape()
             tape.sort(key=lambda r: finite(r.get("t")))
             m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False)
-        st.n = m["n"]
+        # Reporting counts all historic closes; PF/WR continue using the
+        # explicit retained evaluation sample in m.
+        counts = self._hist_counts.get(st.id)
+        st.n = sum(counts.values()) if counts is not None else m["n"]
         st.wins = m["wins"]
         st.gp = m["gp"]
         st.gl = m["gl"]
@@ -3948,7 +3983,7 @@ class SetBook:
         validated_n = sum(
             1
             for s in self.sets.values()
-            if int(s.last15_n or 0) >= self.eval_need() and is_positive_pf(s.last15_ratio)
+            if bool((s.stage_ledger or {}).get("base"))
         )
         seen = len(self._hist_seen)
         total = int(symbols_total if symbols_total is not None else (self.progress.symbols_total or 0) or seen)
@@ -3983,7 +4018,7 @@ class SetBook:
             ordered = sorted(
                 ordered,
                 key=lambda s: (
-                    0 if int(s.last15_n or 0) >= need and is_positive_pf(s.last15_ratio) else 1,
+                    0 if bool((s.stage_ledger or {}).get("base")) else 1,
                     -float(s.last15_ratio or 0),
                     float(s.max_dd_s or 0),
                     s.id,
@@ -3995,7 +4030,7 @@ class SetBook:
         for st in self.by_idx:
             by_pack.setdefault(str(st.pack), []).append(st.id)
             by_kind.setdefault(str(st.kind), []).append(st.id)
-            if int(st.last15_n or 0) >= need and is_positive_pf(st.last15_ratio):
+            if bool((st.stage_ledger or {}).get("base")):
                 validated_ids.append(st.id)
         if id_limit > 0:
             ids = ids[:id_limit]
@@ -4019,7 +4054,7 @@ class SetBook:
                 "validated": sum(
                     1
                     for s in self.by_idx
-                    if int(s.last15_n or 0) >= need and is_positive_pf(s.last15_ratio)
+                    if bool((s.stage_ledger or {}).get("base"))
                 ),
                 "active": sum(1 for s in self.by_idx if s.active),
                 "packs": {k: len(v) for k, v in (self._ids_by_pack or by_pack).items()},

@@ -8,7 +8,7 @@ OK  unit-stats  n=26 fail=0 []
 OK  unit-load  n=25 fail=0 []
 ...........
 ----------------------------------------------------------------------
-Ran 11 tests in 0.017s
+Ran 11 tests in 0.018s
 
 OK
 ...........
@@ -118,7 +118,7 @@ OK  fill-control-half-up  50
 OK  close-partial-direct  qty=3.0 pending=3.0 closed=1
 OK  close-partial-cumulative-delta  qty=1.0 pending=1.0 closed=2
 OK  close-partial-repeat-idempotent  qty=1.0 closed=2
-2026-09-12T06:23:31 CLOSE AAA-USDT LONG pnl=1.8500 (2.000%) test-partial hold=60s
+2026-09-12T06:46:28 CLOSE AAA-USDT LONG pnl=1.8500 (2.000%) test-partial hold=60s
 OK  close-partial-final-reconciles  open=0 pending=False closed_qty=5.0 wins=3
 OK  fill-empty-no-obsolete-fallback  ['/openApi/swap/v2/trade/allOrders', '/openApi/swap/v2/trade/allOrders']
 OK  ctrl-replace-bingx-safe  calls=['place', 'cancel'] sl=new-sl
@@ -191,7 +191,7 @@ OK  astart-stop-start-resumes  False None
 OK  astart-drawdown-disabled-default  False None
 OK  astart-drawdown-latches  True drawdown halt
 OK  astart-auto-resume  False None
-2026-09-12T06:23:31 EQ re-baseline on system capital start_eq 100.0000 -> 200.0000
+2026-09-12T06:46:28 EQ re-baseline on system capital start_eq 100.0000 -> 200.0000
 OK  astart-deposit-rescue  halted=False start_eq=200.0
 OK  astart-pause-resume  False None
 OK  astart-sidecar-clears-all  bingx-t01 start rc=0 state=active running=0
@@ -207,7 +207,7 @@ OK  live-start-allowed-by-default  bingx-x01 start rc=0 state=active running=0
 OK  live-start-test-disable
 OK  vst-start-still-on-when-live-disabled
 OK  live-start-blocked-when-disabled  bingx-x01 start blocked: CTS_DISABLE_LIVE_START
-OK  ctrl-mtimes-all-missing  {'/tmp/ctrlcoord-test-ydirc8d4/STOP-bingx-x02': 0.0, '/tmp/ctrlcoord-test-ydirc8d4/PAUSE-bingx-x02': 0.0, '/tmp/ctrlcoord-test-ydirc8d4/STOP': 0.0, '/tmp/ctrlco
+OK  ctrl-mtimes-all-missing  {'/tmp/ctrlcoord-test-t7fb1krq/STOP-bingx-x02': 0.0, '/tmp/ctrlcoord-test-t7fb1krq/PAUSE-bingx-x02': 0.0, '/tmp/ctrlcoord-test-t7fb1krq/STOP': 0.0, '/tmp/ctrlco
 OK  ctrl-mtimes-create
 OK  ctrl-mtimes-delete
 OK  ctrl-mtimes-touch
@@ -217,7 +217,7 @@ OK  ctrl-resume-restores-pre  halted=True reason=drawdown halt
 OK  ctrl-stop-branch-halts  halted=True reason=stopped
 OK  ctrl-stress-no-errors  errs=[] n=48
 OK  ctrl-stress-serialized  max_concurrent=1 calls=112
-OK  ctrl-stress-consistent  stop=False pause=True
+OK  ctrl-stress-consistent  stop=True pause=False
 OK  ctrl-stress-final-start  bingx-t01 start rc=0 state=active running=0
 OK  prog-stop-no-nested-wait  halted=True waits=[]
 OK  prog-pause-no-nested-wait  halted=True waits=[]
@@ -243,18 +243,18 @@ OK  prog-stack-cap-weak-halves
 OK  prog-stats-skips-busy-lock  dt=0.080 {'cycle': 11, 'statsDeferred': True}
 OK  prog-unprotected-still-enters  ['entries', 'block', 'dca']
 OK  prog-running-flag-cleared
-2026-09-12T06:23:32 ADOPT skip empty rest
+2026-09-12T06:46:29 ADOPT skip empty rest
 OK  phantom-skip-first-empty  book=2 streak=1
 OK  phantom-count-visible  exchange_open_count=0
-2026-09-12T06:23:32 ADOPT flat-exchange confirmed streak=2 book=2
-2026-09-12T06:23:32 DROP stale local AAA-USDT LONG group=AAA-USDT age=3600s miss=1
-2026-09-12T06:23:32 DROP stale local BBB-USDT LONG group=BBB-USDT age=3600s miss=1
+2026-09-12T06:46:29 ADOPT flat-exchange confirmed streak=2 book=2
+2026-09-12T06:46:29 DROP stale local AAA-USDT LONG group=AAA-USDT age=3600s miss=1
+2026-09-12T06:46:29 DROP stale local BBB-USDT LONG group=BBB-USDT age=3600s miss=1
 OK  phantom-drop-on-confirm  book=0 recon=ok ours=0 foreign=0 live=0
 OK  phantom-streak-resets  streak=0
-2026-09-12T06:23:32 ADOPT flat-exchange confirmed streak=2 book=1
+2026-09-12T06:46:29 ADOPT flat-exchange confirmed streak=2 book=1
 OK  phantom-keeps-young  book=['NEW-USDT']
-2026-09-12T06:23:32 ADOPT flat-exchange confirmed streak=2 book=1
-2026-09-12T06:23:32 DROP stale local CTL-USDT LONG group=CTL-USDT age=3600s miss=1
+2026-09-12T06:46:29 ADOPT flat-exchange confirmed streak=2 book=1
+2026-09-12T06:46:29 DROP stale local CTL-USDT LONG group=CTL-USDT age=3600s miss=1
 OK  phantom-controlled-dropped  book=[] cool=True
 OK  phantom-live-pos-kept  book=['REAL-USDT'] xch=1 streak=0
 OK  phantom-api-fail-keeps-book  book=1 recon=adopt boom
@@ -276,32 +276,32 @@ OK  block-eval-satisfied-no-request
 OK  block-eval-pick-smallest-unsat  pick=2
 OK  block-pick-gated-by-new-ratio  intern 1.05 < capped count2 gate 1.11
 OK  block-floor-follows-default  posts=[]
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
 OK  block-warm-set-emits  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
 OK  block-fill-coordination  q=0.075 add=0.025 entry=100.0
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
 OK  block-cold-count1-emits  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
 OK  block-disabled-no-emit  posts=[]
 OK  block-lane-retires-without-parent  active=False base=0.0
 OK  block-max-add-not-sum  sequential extra=3, independent sum=6
-2026-09-12T06:23:32 BLOCK ADD TST-USDT SHORT n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:short#block:1
+2026-09-12T06:46:29 BLOCK ADD TST-USDT SHORT n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:short#block:1
 OK  block-short-emits-sell  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'SELL', 'positionSide': 'SHORT', 'quantity': 0.0125, 'clientOrderID': '
 OK  block-short-lane
 OK  block-no-liven-jump  pick=(1, 0.0125) act=[1]
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.028 TST-USDT:long#block:1
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=3 +0.0125 base=0.05 add=0.037500000000000006 tot=0.08750000000000001 minPF=1.083 TST-USDT:long#block:3
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=4 +0.012499999999999997 base=0.05 add=0.05 tot=0.1 minPF=1.110 TST-USDT:long#block:4
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.028 TST-USDT:long#block:1
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=2 +0.0125 base=0.05 add=0.025 tot=0.07500000000000001 minPF=1.055 TST-USDT:long#block:2
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=3 +0.0125 base=0.05 add=0.037500000000000006 tot=0.08750000000000001 minPF=1.083 TST-USDT:long#block:3
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=4 +0.012499999999999997 base=0.05 add=0.05 tot=0.1 minPF=1.110 TST-USDT:long#block:4
 OK  block-seq-four-portions-2x-cap  posts=4 add=0.05 tot=0.1
 OK  block-seq-full-stops  posts=4
 OK  block-no-add-at-entry  posts=[]
 OK  block-no-add-flat  posts=[]
-2026-09-12T06:23:32 BLOCK sat dust TST-USDT n=4 rem=0.0010000000000000009 min=0.01/1.0
+2026-09-12T06:46:29 BLOCK sat dust TST-USDT n=4 rem=0.0010000000000000009 min=0.01/1.0
 OK  block-remainder-no-bump  posts=[] sat={4: True, 1: True, 2: True, 3: True}
 OK  block-minimum-retry-never-exceeds-approved-portion  requests=1
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
 OK  block-rounding-cannot-exceed-remainder  [('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GTEST0'}
-2026-09-12T06:23:32 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
+2026-09-12T06:46:29 BLOCK ADD TST-USDT LONG n=1 +0.0125 base=0.05 add=0.0125 tot=0.0625 minPF=1.055 TST-USDT:long#block:1
 OK  block-independent-from-dca  posts=[('/openApi/swap/v2/trade/order', {'symbol': 'TST-USDT', 'type': 'MARKET', 'side': 'BUY', 'positionSide': 'LONG', 'quantity': 0.0125, 'clientOrderID': 'GT
 OK  dca-mult-clamp  mults=[2.1, 2.5, 2.5, 2.5]
 OK  block-intern-long-lifts  1.4
@@ -310,11 +310,11 @@ OK  block-book-extra-capped-1  1.0
 OK  block-book-cap-2x  book=4.3 base=2.15 ratio=2.000
 OK  block-close-net-pct
 OK  block-close-other-side-live  short=0.04
-2026-09-12T06:23:32 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.73 tp=100.45 sl_oid=EX000002 tp_oid=EX000003
-2026-09-12T06:23:32 OPEN BBB-USDT LONG qty=0.05 px=200.0 sl=199.01 tp=201.1 sl_oid=EX000005 tp_oid=EX000006
-2026-09-12T06:23:32 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000008 tp_oid=EX000009
+2026-09-12T06:46:29 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.73 tp=100.45 sl_oid=EX000002 tp_oid=EX000003
+2026-09-12T06:46:29 OPEN BBB-USDT LONG qty=0.05 px=200.0 sl=199.01 tp=201.1 sl_oid=EX000005 tp_oid=EX000006
+2026-09-12T06:46:29 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000008 tp_oid=EX000009
 OK  setord-3-independent-entries  entries=3 errors=0
-OK  setord-entry-cids-unique  ['Gx02og060310000ciwme', 'Gx02og090320001dbpk4', 'Gx02oi150330002fy4do']
+OK  setord-entry-cids-unique  ['Gx02og060310000v9o6t', 'Gx02og090320001b7tqw', 'Gx02oi15033000235a7j']
 OK  setord-entry-cids-resolve-sets  [('general:1m:sl0.6:st10', 10), ('general:1m:sl0.9:st20', 20), ('indications:1m:sl1.5:st30', 30)]
 OK  setord-positions-track-own-set  [('general:1m:sl0.6:st10', 0), ('general:1m:sl0.9:st20', 1), ('indications:1m:sl1.5:st30', 2)]
 OK  setord-3-control-pairs  batches=3
@@ -323,19 +323,19 @@ OK  setord-control-cids-unique  6
 OK  setord-per-set-sl-distances  sl={'AAA-USDT': 99.73, 'BBB-USDT': 199.01, 'CCC-USDT': 49.55} tp={'AAA-USDT': 100.45, 'BBB-USDT': 201.1, 'CCC-USDT': 50.32}
 OK  setord-control-oids-independent  oids=6 live=6
 OK  setord-exchange-orders-per-set  {'AAA-USDT': ['EX000002', 'EX000003'], 'BBB-USDT': ['EX000005', 'EX000006'], 'CCC-USDT': ['EX000008', 'EX000009']}
-2026-09-12T06:23:32 CLOSE AAA-USDT LONG pnl=0.0225 (0.600%) tp hold=0s
+2026-09-12T06:46:29 CLOSE AAA-USDT LONG pnl=0.0225 (0.600%) tp hold=0s
 OK  setord-cancel-isolation  del=2 live=4
 OK  setord-win-attributes-setA  A n=1 r=1.3 B live=0 C live=0
-2026-09-12T06:23:32 CLOSE BBB-USDT LONG pnl=-0.0650 (-0.500%) sl hold=0s
+2026-09-12T06:46:29 CLOSE BBB-USDT LONG pnl=-0.0650 (-0.500%) sl hold=0s
 OK  setord-loss-attributes-setB  B n=1 r=0.5667 A r=1.3
 OK  setord-engine-stats-coordination  w=1 l=1 closed=2
 OK  setord-snapshot-per-set  {'indications:1m:sl1.5:st30': (0, 1.5), 'general:1m:sl0.6:st10': (1, 1.3), 'general:1m:sl0.9:st20': (1, 0.5667)}
 OK  setord-real-live-sim-coordination  sim=0/1
-2026-09-12T06:23:32 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000013 tp_oid=EX000014
+2026-09-12T06:46:29 OPEN CCC-USDT LONG qty=0.05 px=50.0 sl=49.55 tp=50.32 sl_oid=EX000013 tp_oid=EX000014
 OK  setord-independent-lane-and-dedup  independent=1 duplicate=0
-2026-09-12T06:23:32 CTRL SKIP sec-sl DDD-USDT signature mismatch
-2026-09-12T06:23:32 OPEN scratch no-ctrl DDD-USDT
-2026-09-12T06:23:32 CLOSE DDD-USDT LONG pnl=-0.0375 (0.000%) no-ctrl hold=0s skip-eval
+2026-09-12T06:46:29 CTRL SKIP sec-sl DDD-USDT signature mismatch
+2026-09-12T06:46:29 OPEN scratch no-ctrl DDD-USDT
+2026-09-12T06:46:29 CLOSE DDD-USDT LONG pnl=-0.0375 (0.000%) no-ctrl hold=0s skip-eval
 OK  setord-no-ctrl-scratches  open=[] market_posts=2 live_ctrl=0
 OK  group-normalize-fraction
 OK  group-normalize-percent
@@ -350,7 +350,7 @@ OK  group-cancel-isolated  remaining=['ctrl-3', 'ctrl-4']
 OK  group-same-range-merge  qty=3.0 entry=106.66666666666667
 OK  group-parent-lanes-merge  block=3.0 dca=3.0
 OK  group-cid-restart-range  {'kind': 'u', 'pack': 'general', 'sl': 0.6, 'trail': '0.3:0.1', 'trail_arm': 0.3, 'trail_give': 0.1, 'step': 8, 'idx': 0, 'set_id': 'general:1m:sl0.6:tr0.3:0.1:
-OK  group-close-quantity-matched  {'symbol': 'AAA-USDT', 'type': 'MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'quantity': 3.0, 'clientOrderID': 'Gx02cg060308000r048075t0963ib550'}
+OK  group-close-quantity-matched  {'symbol': 'AAA-USDT', 'type': 'MARKET', 'side': 'SELL', 'positionSide': 'LONG', 'quantity': 3.0, 'clientOrderID': 'Gx02cg060308000r048075mxzidpjrar'}
 OK  group-legacy-disables-key
 OK  group-legacy-close-position
 OK  historic-entry-blocked-before-ready  historic-gate
@@ -368,7 +368,7 @@ OK  strict-ind-signals-runs  signals kind runs while state is gated
 OK  strict-ind-unproven-pack-closed  ind-gate
 OK  strict-place-no-order-cold  posts=[]
 OK  strict-place-no-order-losers  posts=[]
-2026-09-12T06:23:32 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.79 tp=100.35000000000001 sl_oid= tp_oid=
+2026-09-12T06:46:29 OPEN AAA-USDT LONG qty=0.05 px=100.0 sl=99.79 tp=100.35000000000001 sl_oid= tp_oid=
 OK  strict-place-trades-validated  posts=1 set=general:1m:sl0.6:st3
 OK  strict-block-pf-validated-lifts  intern=1.5 set_pf=1.5
 OK  strict-block-pf-cold-floor  intern=1.2

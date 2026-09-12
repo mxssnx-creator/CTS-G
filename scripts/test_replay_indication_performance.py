@@ -81,6 +81,41 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_full_replay_counts_survive_tape_retention_and_symbol_replacement(self):
+        overlay = dict(histEnabled=True, histLookbackBars=1000, histMinBars=60,
+                       histWarmup=0, stratIndications=False, stratGeneral=True,
+                       stratTrailing=False, stratBlock=False, histSimulateBlock=False,
+                       histSimulateDca=False, setMinStep=1, setStepMax=1, slToTpRatios=[.6])
+        book = SetBook(); book.load(overlay); book.cooldown_bars = 0
+        bars = [[100.,101.,99.,100.,1.] for _ in range(1000)]
+        for symbol in ('A-USDT','B-USDT'):
+            book.ingest_bars(symbol, bars)
+        signals = ({'general':[(1,.9,'test')]*1000}, {}, 0)
+        with patch.object(book, 'prepare_replay_signals', return_value=signals):
+            book.replay_all(symbols=['A-USDT','B-USDT'], workers=2, score=False)
+        st = next(s for s in book.by_idx if s.n)
+        self.assertEqual(st.n, 1998)
+        self.assertLessEqual(len(st.hist), 160)
+        self.assertEqual(book._hist_counts[st.id], {'A-USDT':999,'B-USDT':999})
+
+        target = book.replay_clone(['A-USDT','B-USDT'])
+        target._commit_hist({st.id:st.hist}, merge=True,
+                            replayed_symbols=['A-USDT','B-USDT'],
+                            hist_symbol_counts=book._hist_counts, score=False)
+        self.assertEqual(target.sets[st.id].n, 1998)
+        target._score_pair((target.sets[st.id], None))
+        self.assertEqual(target.sets[st.id].n, 1998)
+        target._commit_hist({}, merge=True, replayed_symbols=['A-USDT'],
+                            hist_symbol_counts={}, score=False)
+        self.assertEqual(target.sets[st.id].n, 999)
+        target._score_pair((target.sets[st.id], None))
+        self.assertEqual(target.sets[st.id].n, 999)
+        self.assertEqual(target._hist_counts[st.id], {'B-USDT':999})
+        target._commit_hist({}, merge=True, replayed_symbols=['B-USDT'],
+                            hist_symbol_counts={}, score=False)
+        self.assertEqual(target.sets[st.id].n, 0)
+        self.assertNotIn(st.id, target._hist_counts)
+
     def test_periodic_export_reuses_the_published_snapshot(self):
         from types import SimpleNamespace
         pulse = trader.Pulse.__new__(trader.Pulse)

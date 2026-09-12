@@ -11701,6 +11701,7 @@ class Pulse:
                     replay_book.ind_hist,
                     merge=True,
                     replayed_symbols=names,
+                    hist_symbol_counts=replay_book._hist_counts,
                     score=False,
                     score_ids=affected,
                 )

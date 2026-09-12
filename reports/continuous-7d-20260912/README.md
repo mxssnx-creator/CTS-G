@@ -17,10 +17,10 @@ No winner selected solely on training has at least eight holdout trades with pos
 
 ## Functional verification
 
-- Full Python discovery, including durable SQLite crash recovery and Redis Lua tests: 319/319.
+- Full Python discovery, including durable SQLite crash recovery and Redis Lua tests: 321/321.
 - Engine integration suite: 409/409.
 - Nine continuous regressions: 700 independently scored normal/trailing sets produce exactly 700 adapter-confirmed owned openings, 1,400 quantity-matched TP/SL controls, zero duplicates and zero remaining admission lanes. A valid LONG remains visible despite losing SHORT history. The first live close retains sufficient historical evidence; unchanged content reuses calculations. Retention preserves last75 per direction and every middle history slice publishes qualification.
-- Admission regressions: 24/24; performance regressions: 18/18, including reuse of the exact published snapshot for periodic exports.
+- Admission regressions: 24/24; performance regressions: 19/19, including reuse of the exact published snapshot for periodic exports and full historic close counts surviving both retention and re-scoring.
 - C++ policy kernel compared with an independent Python scalar oracle; cold-start/same-bar causal boundary tested.
 - Release contract: 15/15; forced-config checks: 16/16.
 - JavaScript/TypeScript suites: 261 passed, four intentional skips. Typecheck and production build pass.
@@ -38,6 +38,8 @@ The unrestricted 37,440-set/574-symbol process exceeded its 3,456 MiB `MemoryHig
 CSS compilation previously scanned large research JSON/HTML as candidate class sources. Restricting Tailwind detection to `src` restores compilation (client approximately six seconds). Source-path syntax: [Tailwind documentation](https://tailwindcss.com/docs/detecting-classes-in-source-files#setting-your-base-path).
 
 The Actions workflow could not create any job because job-level `env` referenced `runner.temp`, which is unavailable in that evaluation context. It now uses the isolated Ubuntu job temporary path, and GitHub creates and executes the job. The newly exposed old fixtures were corrected to include installation ownership and explicitly requested evaluation/guard settings. See [GitHub context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+
+The replay now carries full per-symbol close counters through worker output, isolated publication and scoring. A 1,998-close regression retains only 160 evaluation rows while preserving all 1,998 closes, replaces one symbol independently and stores no zero-filled symbol counters. PF/sample evaluation remains based on the retained window.
 
 Overall reports now preserve full logical counts even with truncated display rows, honor the configured PF window up to 75, and reject insufficient samples or PF exactly 1.05. An older report cannot silently substitute PF 1.10 or a last15 window.
 
