@@ -71,6 +71,43 @@ class ContinuousTests(AllValidEntries):
         self.assertEqual(b.entry_sets('general','LONG'),[st])
         self.assertEqual(b.entry_sets('general','SHORT'),[])
 
+    def test_memory_trim_retains_last75_of_each_direction(self):
+        from set_engine import trim_hist
+        b=self.book(1);b.pf_n=b.min_samples=75;st=b.by_idx[0]
+        short=[dict(r,side='SHORT') for r in self.tape(75)]
+        long=[dict(r,t=r['t']+10000) for r in self.tape(200)]
+        st.hist=trim_hist(short+long);st.live=list(short+long)
+        b.trim_tapes(hist_cap=24,live_cap=16)
+        self.assertEqual(sum(r['side']=='SHORT' for r in st.hist),75)
+        self.assertGreaterEqual(sum(r['side']=='LONG' for r in st.hist),75)
+        self.assertEqual(sum(r['side']=='SHORT' for r in st.live),75)
+        b._score_one(st)
+        self.assertTrue(st.by_side['LONG']['active'])
+        self.assertTrue(st.by_side['SHORT']['active'])
+
+    def test_middle_history_slices_publish_qualification(self):
+        b=self.book(1);p=self.pulse(b);scores=[]
+        p._hist_request_changed=lambda:False
+        p._hist_replay_chunk_size=lambda n:1
+        p._hist_peer_claim=lambda:True
+        p._hist_peer_touch=lambda:None
+        p._hist_peer_release=lambda:None
+        p._hist_write_status=lambda *a,**k:None
+        p.write_stats=lambda **k:None
+        p.trim_caches=lambda **k:None
+        p._hist_incremental_symbols=set()
+        def publish(names, already, total, score=True, **kwargs):
+            scores.append(score)
+            if names==['BCH-USDT']:
+                b.by_idx[0].hist=self.tape()
+                if score:b._score_pair((b.by_idx[0],None))
+            if names==['SOL-USDT']:
+                self.assertTrue(b.by_idx[0].stage_ledger['real'])
+            return True
+        p._replay_sets_isolated=publish
+        self.assertTrue(p._hist_replay_chunked(['XRP-USDT','BCH-USDT','SOL-USDT'],False,3))
+        self.assertEqual(scores,[True,True,True])
+
     def test_deactivation_uses_exact_window(self):
         b=self.book(1);b.deact_n=5;st=b.by_idx[0]
         st.live=[dict(row,pnl=-1.,pnl_pct=-.009) for row in self.tape(4)]

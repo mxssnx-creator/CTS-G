@@ -8320,17 +8320,16 @@ class Pulse:
             return False
         if not getattr(self.sets, "live_test_mode", False) or not getattr(self, "control_orders", True):
             return False
-        if (not valid_candidate(row) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
+        if (not valid_candidate(row, self.coord.min_pf) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
             return False
         if not any(r.get("id") == row.get("id") for r in self._forced_data().get("rows", [])):
             return False
-        # No merging with a different config; preserve one attributable trial
-        # per symbol+side and at most three forced positions across the book.
-        if self.positions_for(sym, side) or sum(str(p.set_id).startswith("forced:") for p in self.open.values()) >= 3:
+        # Each eligible trial owns one independent config lane.
+        if any(p.set_id == row["id"] for p in self.open.values()):
             return False
         tape = completed_roundtrips([c for c in self.closed if c.set_id == row["id"]])
         recent = last_n_cost_pf(tape, 15, self.position_cost_pct)
-        if len(tape) >= 8 and (recent["classicPf"] <= FORCED_MIN_PF or recent["netAvg"] <= 0):
+        if len(tape) >= 8 and (recent["classicPf"] <= max(FORCED_MIN_PF, self.coord.min_pf) or recent["netAvg"] <= 0):
             return False
         if len(tape) >= 3 and all(float(c.get("pnl") or 0) < 0 for c in tape[-3:]):
             return False
@@ -11274,7 +11273,6 @@ class Pulse:
                 size = self._hist_replay_chunk_size(len(pending))
                 if first and len(pending) > 8:
                     size = min(size, 4)
-                is_first = first
                 first = False
                 chunk = pending[:size]
                 pending = pending[size:]
@@ -11282,10 +11280,11 @@ class Pulse:
                 self.hist_busy = True
                 self._hist_peer_touch()
                 try:
-                    # Score the first slice so intern can open, and the last
-                    # slice so the 50-name book is fully ranked. Middle slices
-                    # only merge fills — rescoring 34k sets per slice stalled 4/50.
-                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending, completed_symbols=run_completed)
+                    # Each published slice changes evidence. Re-evaluate its
+                    # affected IDs; the content cache reuses unchanged inputs.
+                    # Deferring middle slices hides new winners until the end
+                    # of an unlimited universe and leaves losing sets active.
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=True, completed_symbols=run_completed)
                 finally:
                     self.hist_busy = False
                 if not ok:

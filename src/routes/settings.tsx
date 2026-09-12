@@ -542,7 +542,7 @@ function SettingsPage() {
                     />
                     <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
-                    <Num label="Set PF minimum" value={overlay.setMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("setMinPf", normalizePf(v, overlay.setMinPf))} />
+                    <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
                     <Toggle label="Individual SL/TP per configuration" hint={overlay.controlOrdersPerConfig ? "ON · quantity-matched pair per config/range" : "OFF · one common close-position pair per symbol + direction"} on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
                   </Grid>
@@ -1204,7 +1204,7 @@ function SettingsPage() {
             <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
-              hint="1.00 = Neutral after cost · 1.10 = +1× PositionCost net · last 15 closes"
+              hint="One overall threshold · independent evaluation windows in every stage · Base defaults to last 30"
             >
               <Grid>
                 <Slider
@@ -1218,35 +1218,13 @@ function SettingsPage() {
                   onChange={(v) => { patch("positionCostFallbackPct", v); if (!overlay.useLivePositionCosts) patch("positionCostPct", v); }}
                 />
                 <Slider
-                  label="Base min PF"
-                  value={overlay.baseMinPf}
+                  label="Overall minimum PF"
+                  value={overlay.minPf}
                   min={PF_MIN}
                   max={PF_MAX}
                   step={PF_STEP}
-                  hint={pfHint(overlay.baseMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))}
-                />
-                <Slider
-                  label="Main min PF"
-                  value={overlay.mainMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  hint={pfHint(overlay.mainMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))}
-                />
-                <Slider
-                  label="Real min PF"
-                  value={overlay.realMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
-                  onChange={(v) => {
-                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
-                    patch("realMinPf", next);
-                    patch("minPf", next);
-                  }}
+                  hint={`Shared by Base, Main, Real, DCA and exits. Default requires PF > 1.05. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
+                  onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
                 />
                 <Slider
                   label="PF window"
@@ -1349,32 +1327,12 @@ function SettingsPage() {
                     hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
                     onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)}
                   />
-                  <Slider
-                    label="Set minimum PF"
-                    value={overlay.setMinPf}
-                    min={0.8}
-                    max={2.5}
-                    step={0.02}
-                    hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
-                    onChange={(v) => patch("setMinPf", v)}
-                  />
-                  <Slider
-                    label="Real minimum PF"
-                    value={overlay.realMinPf}
-                    min={0.8}
-                    max={2.5}
-                    step={0.02}
-                    hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
-                    onChange={(v) => {
-                      patch("realMinPf", v);
-                      patch("minPf", v);
-                    }}
-                  />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                   <Num
                     label="Validation samples"
                     value={overlay.setMinSamples}
                     min={5}
-                    max={40}
+                    max={75}
                     step={1}
                     hint="Minimum historic closes before a Set can qualify."
                     onChange={(v) => patch("setMinSamples", Math.round(v))}
@@ -1382,7 +1340,7 @@ function SettingsPage() {
                   <Num
                     label="Deactivation window"
                     value={overlay.setDeactN}
-                    min={10}
+                    min={5}
                     max={80}
                     step={1}
                     hint="Latest live fills used by the negative-result deactivation gate."
@@ -1601,15 +1559,7 @@ function SettingsPage() {
                   on={overlay.setLiveNegativeDeact}
                   onChange={(v) => patch("setLiveNegativeDeact", v)}
                 />
-                <Slider
-                  label="Set min PF"
-                  value={overlay.setMinPf}
-                  min={0.8}
-                  max={2.5}
-                  step={0.02}
-                  hint="Base-stage cost PF. Shared range 0.80–2.50; qualified Sets flow to Main and Real."
-                  onChange={(v) => patch("setMinPf", v)}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Slider
                   label="Max DD time"
                   value={Math.round(overlay.setMaxDdTimeS / 60)}
@@ -1624,7 +1574,7 @@ function SettingsPage() {
                   label="Min samples"
                   value={overlay.setMinSamples}
                   min={5}
-                  max={40}
+                  max={75}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
                 />
@@ -1694,15 +1644,7 @@ function SettingsPage() {
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
                 <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
                 <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
-                <Slider
-                  label="Exit min PF"
-                  value={overlay.exitMinPf}
-                  min={1}
-                  max={2.3}
-                  step={0.02}
-                  hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("exitMinPf", v)}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
               </Grid>
               <ExitLanesTable stats={stats} />
               <p className="text-sm text-muted">
@@ -1743,9 +1685,7 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("realMinPf", v)} />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
@@ -2012,14 +1952,7 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("dcaBreakevenProfitPct", v)}
                 />
-                <Num
-                  label="Min PF"
-                  value={overlay.dcaMinPf}
-                  min={1}
-                  max={1.5}
-                  step={0.05}
-                  onChange={(v) => patch("dcaMinPf", v)}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
@@ -2141,20 +2074,7 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Base min PF" value={overlay.baseMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))} />
-                <Num label="Main min PF" value={overlay.mainMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))} />
-                <Num
-                  label="Real min PF"
-                  value={overlay.realMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  onChange={(v) => {
-                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
-                    patch("realMinPf", next);
-                    patch("minPf", next);
-                  }}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(30, Math.round(v))))} />

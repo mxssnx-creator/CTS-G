@@ -403,7 +403,8 @@ class HistoricScoreBundleTests(unittest.TestCase):
         book._score_one(sample)
         self.assertEqual(sample.n, 24)
         self.assertEqual(set(sample.evaluation_windows), {f"last{n}" for n in EVALUATION_WINDOWS})
-        self.assertEqual(sample.evaluation_windows["last15"]["n"], 15)
+        # Stage windows follow one independent direction, not a mixed tape.
+        self.assertEqual(sample.evaluation_windows["last15"]["n"], 12)
         self.assertIn("LONG", sample.by_side)
         self.assertIn("SHORT", sample.by_side)
         ranked = _rank_set_rows(book)

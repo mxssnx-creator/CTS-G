@@ -47,18 +47,19 @@ class ForcedTests(unittest.TestCase):
 
     def test_strict_pf_and_input_validation(self):
         self.assertTrue(forced.valid_candidate(self.row()))
+        self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.15))
         for field in ("pf", "trainPf", "holdoutPf"):
-            self.assertFalse(forced.valid_candidate(self.row(**{field: 1.02})))
+            self.assertFalse(forced.valid_candidate(self.row(**{field: 1.05})))
             self.assertFalse(forced.valid_candidate(self.row(**{field: float("nan")})))
         for changes in ({"source": "synth"}, {"trainN": 7}, {"holdoutN": 7}, {"slPct": .12}, {"maxDrawdownR": 7}):
             self.assertFalse(forced.valid_candidate(self.row(**changes)))
 
-    def test_top_five_per_symbol_and_kind_throughput_first(self):
+    def test_all_eligible_per_symbol_and_kind_throughput_first(self):
         rows = [self.row(id=f"{sym}:{kind}:{i}", symbol=sym, indication=kind, tradesPerHour=i)
                 for sym in forced.FORCED_SYMBOLS for kind in IND_KINDS for i in range(8)]
         selected = forced.select_best(rows)
-        self.assertEqual(len(selected), 120)
-        self.assertTrue(all(row["tradesPerHour"] >= 3 for row in selected))
+        self.assertEqual(len(selected), 192)
+        self.assertEqual(selected[0]["tradesPerHour"], 7)
         self.assertEqual(forced.select_best([self.row(eligible=False)]), [])
 
     def test_positive_baseline_and_costs(self):
@@ -114,6 +115,7 @@ class ForcedTests(unittest.TestCase):
         p = object.__new__(Pulse)
         p.api = SimpleNamespace(base="https://open-api-vst.bingx.com")
         p.sets = SimpleNamespace(live_test_mode=True)
+        p.coord = SimpleNamespace(min_pf=1.05)
         p.open, p.closed, p.control_orders, p.position_cost_pct = {}, [], True, .15
         p._forced_data = lambda: {"rows": [self.row()]}
         with patch("pulse_trader.CONN_SHORT", "bingx-x02"):

@@ -25,6 +25,7 @@ from position_cost import (
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
     cost_aware_metrics,
+    clears_pf,
     EVALUATION_WINDOWS,
     evaluation_windows,
     is_positive_pf,
@@ -317,23 +318,29 @@ def trades_per_hour(rows: Sequence[Any]) -> float:
     return len(keys) / span_h
 
 
-def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
-    """Keep recent fills from every symbol so last-N PF/DDT is not the last 1–2 names."""
-    rows = [slim_hist_row(r) for r in bucket if _is_hist_row(r)]
-    cap = max(8, int(cap or HIST_CAP))
+def recent_direction_rows(bucket, cap):
+    """Retain chronological last-N evidence for both independent directions."""
+    rows = sorted(bucket, key=lambda r: finite(r.get("t")))
     if len(rows) <= cap:
-        rows.sort(key=lambda r: finite(r.get("t")))
         return rows
-    by: Dict[str, List[Dict[str, Any]]] = {}
-    for r in rows:
-        by.setdefault(str(r.get("symbol") or "?"), []).append(r)
-    per = max(3, cap // max(1, len(by)))
-    out: List[Dict[str, Any]] = []
-    for tape in by.values():
-        tape.sort(key=lambda r: finite(r.get("t")))
-        out.extend(tape[-per:])
-    out.sort(key=lambda r: finite(r.get("t")))
-    return out[-cap:]
+    per = min(75, cap // 2)
+    counts = {"L": 0, "S": 0}
+    keep = set()
+    for i in range(len(rows)-1, -1, -1):
+        side = str(rows[i].get("side") or rows[i].get("direction") or "")[:1].upper()
+        if side in counts and counts[side] < per:
+            counts[side] += 1
+            keep.add(i)
+    for i in range(len(rows)-1, -1, -1):
+        if len(keep) >= cap:
+            break
+        keep.add(i)
+    return [rows[i] for i in sorted(keep)]
+
+
+def trim_hist(bucket: Sequence[Dict[str, Any]], cap: int = HIST_CAP) -> List[Dict[str, Any]]:
+    """Keep actual recent closes; symbol balancing must not distort last-N PF."""
+    return recent_direction_rows([slim_hist_row(r) for r in bucket if _is_hist_row(r)], max(8, int(cap or HIST_CAP)))
 
 
 def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, float]:
@@ -1850,14 +1857,15 @@ class SetBook:
 
     def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
         n = 0
-        hc = max(24, int(hist_cap or HIST_CAP))
-        lc = max(16, int(live_cap or 80))
+        evidence = 2 * max(75, self.pf_n, self.deact_n, self.main_eval, self.real_eval)
+        hc = max(evidence, int(hist_cap or HIST_CAP))
+        lc = max(evidence, int(live_cap or HIST_CAP))
         for st in self.by_idx:
             if len(st.hist) > hc:
-                st.hist = st.hist[-hc:]
+                st.hist = recent_direction_rows(st.hist, hc)
                 n += 1
             if len(st.live) > lc:
-                st.live = st.live[-lc:]
+                st.live = recent_direction_rows(st.live, lc)
                 n += 1
         n += self.clamp_bars(bar_cap)
         for k, tape in list(self.ind_hist.items()):
@@ -2000,7 +2008,7 @@ class SetBook:
             tape = self.ind_live.setdefault(ind_kind, [])
             if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in tape):
                 tape.append(dict(row))
-                self.ind_live[ind_kind] = sorted(tape, key=lambda r: finite(r.get("t")))[-HIST_CAP:]
+                self.ind_live[ind_kind] = recent_direction_rows(tape, HIST_CAP)
         extra = ""
         if isinstance(rec, dict):
             extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
@@ -2021,7 +2029,7 @@ class SetBook:
             if any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in st.live):
                 continue
             st.live.append(row)
-            st.live = sorted(st.live, key=lambda r: finite(r.get("t")))[-HIST_CAP:]
+            st.live = recent_direction_rows(st.live, HIST_CAP)
             self._score_one(st)
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
@@ -2117,7 +2125,7 @@ class SetBook:
                         # A multi-symbol slice must not multiply the bounded
                         # per-Set evaluation tape by the slice width.
                         if len(target) > HIST_CAP:
-                            del target[:-HIST_CAP]
+                            target[:] = recent_direction_rows(target, HIST_CAP)
                 for k, rows in local_ind.items():
                     if rows:
                         ind_hist.setdefault(k, []).extend(rows)
@@ -2755,7 +2763,7 @@ class SetBook:
                         # retain millions of raw fills before the chunk
                         # boundary gets a chance to compact it.
                         if len(bucket) > HIST_CAP:
-                            del bucket[:-HIST_CAP]
+                            bucket[:] = recent_direction_rows(bucket, HIST_CAP)
                     if exit_indices.size:
                         active[exited] = False
                         cooldown[exited] = cooldown_n
@@ -3289,7 +3297,7 @@ class SetBook:
                 "n": count,
                 "available": count >= int(requested),
                 "requiredSamples": required_window,
-                "validated": count >= required_window and is_positive_pf(metric["ratio"]),
+                "validated": count >= required_window and clears_pf(metric["ratio"], self.min_pf),
                 "pf": round(float(metric["ratio"]), 4),
                 "classicPf": float(metric["classicPf"]),
                 "avgR": float(metric["avgR"]),
@@ -3339,7 +3347,7 @@ class SetBook:
             "avg_dd_s": float(dd["avgS"]),
             "dd_episodes": int(dd["episodes"]),
             "source_n": n_rows,
-            "validated": n15 >= required and is_positive_pf(ratio),
+            "validated": n15 >= required and clears_pf(ratio, self.min_pf),
             "active": bool(n15 >= required and ratio + 1e-9 >= enable_pf and dd_s <= max_dd + 1e-9),
             "enablePf": enable_pf,
             "ddOk": dd_s <= max_dd + 1e-9,

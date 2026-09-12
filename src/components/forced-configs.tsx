@@ -40,7 +40,7 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="font-medium">Forced best configs · XRP / BCH / SOL</h2>
-          <p className="mt-1 text-xs text-muted">TP 0.40–0.80% · SL 0.10–0.50% · step 0.05% · up to 5 per symbol / indication</p>
+          <p className="mt-1 text-xs text-muted">TP 0.40–0.80% · SL 0.10–0.50% · step 0.05% · all eligible configurations · unlimited</p>
         </div>
         <button type="button" disabled={busy} onClick={() => void start()} className="min-h-11 rounded-lg border border-border px-4 text-sm disabled:opacity-50">
           {busy ? "Calculating…" : "Run 24h baseline test"}
@@ -50,7 +50,7 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
         <span>{data?.completed ?? 0} / {data?.requested ?? 3888} combinations</span>
         <span>{data?.coveragePct ?? 0}% coverage</span>
         <span>{rows.length} selected</span>
-        <span>Net classic PF &gt; 1.02</span>
+        <span>Net classic PF &gt; 1.05 · shared overall threshold at admission</span>
         <span>{live?.trialMode ? "VST trial lane on" : "Live lane not enabled"}</span>
       </div>
       <p className="text-xs leading-relaxed text-muted">

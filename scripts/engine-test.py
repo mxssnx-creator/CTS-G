@@ -2845,7 +2845,12 @@ def process_guard_test() -> None:
     rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
     rec("hist-trim-keep-hist", "keep_hist" in trader)
     rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
-    rec("hist-score-edges", "score=is_first or not pending" in trader)
+    # Verify middle-slice qualification behavior rather than matching source text.
+    import unittest
+    from test_continuous_real_live import ContinuousTests
+    slice_result = unittest.TestResult()
+    ContinuousTests("test_middle_history_slices_publish_qualification").run(slice_result)
+    rec("hist-score-each-slice", slice_result.wasSuccessful(), str(slice_result.failures + slice_result.errors))
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
     rec("replay-blas-pin", "def pin_compute_threads" in set_src)
