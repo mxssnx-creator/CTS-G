@@ -302,6 +302,8 @@ class FastBingX:
             "asyncP50": 0.0,
         }
         self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err)
+        self.bridge.before_request = self._admit_public_async
+        self.bridge.on_response = self._trip
         self._ts_lock = threading.Lock()
         self._last_ts = 0
 
@@ -540,29 +542,27 @@ class FastBingX:
                     "pendingIndexes": pending, "partialResponse": response}
         return {"code": 0, "data": {"orders": results}, "complete": True, "pendingIndexes": []}
 
+    def _admit_public_async(self, path: str) -> bool:
+        admitted = self._take("public", path)
+        if admitted:
+            self.stats["rest"] += 1
+            self.stats["asyncN"] += 1
+        else:
+            self.stats["asyncSuppressed"] += 1
+        return admitted
+
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
         if not reqs:
             return []
-        admitted: List[Tuple[str, Dict[str, Any]]] = []
-        rows: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
-        for path, extra in reqs:
-            if self._take("public", path):
-                admitted.append((path, extra))
-            else:
-                self.stats["asyncSuppressed"] += 1
-                rows.append((path, extra, {"code": 101209, "msg": "cooling", "error": True, "cooled": True}))
-        self.stats["rest"] += len(admitted)
-        self.stats["asyncN"] += len(admitted)
-        if admitted:
-            rows.extend(self.bridge.gather(admitted, timeout=timeout))
+        # Admission belongs immediately before each network request. Spending
+        # every token first then releasing a whole batch creates a fresh burst.
+        rows = self.bridge.gather(reqs, timeout=timeout)
         for path, _extra, body in rows:
             if not isinstance(body, dict):
                 self.stats["err"] += 1
                 continue
             if body.get("error") and not body.get("cooled"):
                 self.stats["err"] += 1
-            if not body.get("cooled"):
-                self._trip(path, body)
         snap = self.bridge.latency()
         if snap:
             self.stats["asyncP50"] = snap
@@ -639,18 +639,32 @@ class AsyncBridge:
             return [(p, e2, {"error": True, "msg": str(e)[:180]}) for p, e2 in reqs]
 
     async def _gather(self, reqs: List[Tuple[str, Dict[str, Any]]]):
-        # Admission is handled by FastBingX.gather_public; keep the transport
-        # fan-out bounded as a second line of defense against exchange bursts.
+        # Keep a bounded transport fan-out and share tokens with sync GETs.
         sem = asyncio.Semaphore(4)
 
         async def one(path: str, extra: Dict[str, Any]):
             async with sem:
+                admission = getattr(self, "before_request", None)
+                if admission is not None and not await asyncio.to_thread(admission, path):
+                    return path, extra, {"code":101209, "msg":"cooling", "error":True, "cooled":True}
                 qs = urllib.parse.urlencode(extra or {})
                 url = path + (("?" + qs) if qs else "")
                 t0 = time.perf_counter()
                 try:
                     r = await self.client.get(url)
-                    body = loads(r.content) if r.content else {"code": r.status_code, "error": True}
+                    try:
+                        body = loads(r.content) if r.content else {"code": r.status_code, "error": True}
+                    except Exception:
+                        body = {"code":r.status_code, "error":True, "msg":"non-JSON response"}
+                    if r.status_code == 429:
+                        if not isinstance(body, dict):
+                            body = {}
+                        body.update(code=429, error=True)
+                        if r.headers.get("Retry-After"):
+                            body["retryAfter"] = r.headers.get("Retry-After")
+                    response_hook = getattr(self, "on_response", None)
+                    if response_hook is not None and isinstance(body, dict):
+                        response_hook(path, body)
                 except Exception as e:
                     return path, extra, {"error": True, "msg": str(e)[:180]}
                 self.lat.append((time.perf_counter() - t0) * 1000)

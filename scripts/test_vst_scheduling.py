@@ -122,6 +122,26 @@ class VstSchedulingTests(unittest.TestCase):
         self.assertEqual([r['clientOrderID'] for r in result['data']['orders']], [str(i) for i in range(12)])
         self.assertTrue(result['complete'])
 
+    def test_async_public_admission_is_per_request_and_keeps_http_deadline(self):
+        import asyncio
+        from collections import deque
+        bridge = bingx_fast.AsyncBridge.__new__(bingx_fast.AsyncBridge)
+        bridge.lat = deque(); admitted = []; sent = []; responses = []
+        def admit(path):
+            admitted.append(path)
+            return path != '/cooled'
+        async def get(url):
+            self.assertIn(url, admitted)
+            sent.append(url)
+            return SimpleNamespace(status_code=429, content=b'busy', headers={'Retry-After':'90'})
+        bridge.before_request = admit
+        bridge.on_response = lambda path, body: responses.append((path, body))
+        bridge.client = SimpleNamespace(get=get)
+        rows = asyncio.run(bridge._gather([('/one',{}),('/cooled',{}),('/two',{})]))
+        self.assertEqual(sorted(sent), ['/one','/two'])
+        self.assertTrue(rows[1][2]['cooled'])
+        self.assertTrue(all(body['code'] == 429 and body['retryAfter'] == '90' for _,body in responses))
+
     def test_batch_cooldown_retains_pending_without_resubmitting_accepted(self):
         a = self.api(); calls = []
         orders = [{'clientOrderID':str(i)} for i in range(12)]
