@@ -373,6 +373,7 @@ _TRANSIENT_API = (
     "rate limit",
     "rate-limit",
     "too many request",
+    "please try again later",
     "requests within",
     "request limit",
     "109420",
@@ -3807,7 +3808,24 @@ class Pulse:
         return price
 
     def _controls_waiting_for_position(self, pos: Position) -> bool:
-        return time.time() < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
+        now = time.time()
+        return (now < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
+                or now < self.ctrl_skip.get(self._control_minimum_key(pos), 0))
+
+    def _control_minimum_key(self, pos: Position) -> str:
+        # Equal-size sibling sets share the venue floor. A changed quantity
+        # may be legal immediately and must not inherit the old rejection.
+        return f"min-control:{pos.symbol}:{pos.side}:{float(pos.qty):.12g}"
+
+    def _defer_minimum_controls(self, pos: Position, response: Dict[str, Any]) -> bool:
+        msg = str(response.get("msg") or "").lower()
+        if "minimum size" not in msg and "minimum order amount" not in msg:
+            return False
+        # Changing trigger prices or order types cannot repair a size floor.
+        # Preserve the position and any accepted controls; retry after the
+        # bounded pause without increasing exposure or claiming protection.
+        self.ctrl_skip[self._control_minimum_key(pos)] = time.time() + 60.0
+        return True
 
     def _defer_missing_position_controls(self, pos: Position, response: Dict[str, Any]) -> bool:
         if str(response.get("code")) != "109420" and ctrl_err_kind(str(response.get("msg") or "")) != "flat":
@@ -3919,6 +3937,8 @@ class Pulse:
                 if r.get("cooled"):
                     return ""
                 if not self.ok(r) and self._defer_missing_position_controls(pos, r):
+                    return have_this
+                if not self.ok(r) and self._defer_minimum_controls(pos, r):
                     return have_this
                 msg = str(r.get("msg") or "")
                 kind_err = ctrl_err_kind(msg)
@@ -4194,6 +4214,8 @@ class Pulse:
         )
         if r.get("cooled") or (not self.ok(r) and self._defer_missing_position_controls(pos, r)):
             return
+        if not self.ok(r) and self._defer_minimum_controls(pos, r):
+            return
         data = (r.get("data") or {}) if self.ok(r) else {}
         rows = data.get("orders") if isinstance(data, dict) else data
         if not isinstance(rows, list):
@@ -4204,6 +4226,7 @@ class Pulse:
             code = o.get("code")
             if code not in (0, None, "0", ""):
                 self._defer_missing_position_controls(pos, o)
+                self._defer_minimum_controls(pos, o)
                 continue
             oid = str(o.get("orderId") or o.get("orderID") or "")
             if not oid:

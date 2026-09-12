@@ -10,4 +10,7 @@
 - The completed exhaustive seven-day BCH/SOL/XRP report is a separate,
   reproducible benchmark. Reuse its evidence when its calculation sources
   and inputs are unchanged.
-
+- User instruction, 2026-09-12: process work in batches and respect venue
+  rate limits, including complete retry deadlines shared by batch and single
+  order submission. Keep unfinished eligible lanes available for subsequent
+  processing; count confirmed openings and never duplicate accepted orders.

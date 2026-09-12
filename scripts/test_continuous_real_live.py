@@ -115,7 +115,7 @@ class ContinuousTests(AllValidEntries):
         st.live.append(dict(st.live[-1],t=5000))
         self.assertFalse(b._live_entry_allowed(st,'LONG'))
 
-    def test_700_qualified_sets_open_exactly_once_and_keep_controls(self):
+    def test_700_qualified_sets_resume_after_rate_limit_open_once_and_keep_controls(self):
         b=self.book(700);b.pf_n=b.min_samples=30
         for i,st in enumerate(b.by_idx):
             st.hist=self.tape()
@@ -124,9 +124,27 @@ class ContinuousTests(AllValidEntries):
             b._score_pair((st,None))
         self.assertEqual(len(b.entry_sets('general','LONG')),700)
         p=self.pulse(b);p.strat_trail=True
+        original_post = p.api.post
+        ban = {'active':False, 'injected':False}
+        def post(path, body):
+            if len(p.api.posts) == 137 and not ban['injected']:
+                ban.update(active=True, injected=True)
+                return {'code':100410, 'msg':'Please try again later.'}
+            return original_post(path, body)
+        p.api.post = post
+        p.api.order_retry_after = lambda: 480 if ban['active'] else 0
         with patch.object(pt,'SYMBOLS',['X-USDT']):
             for _ in range(150):
                 p.maybe_entries()
+                if ban['active']:
+                    self.assertEqual(len(p.open),137)
+                    self.assertEqual(p._entry_queue['remaining'],563)
+                    for _ in range(8):p.maybe_entries()
+                    self.assertEqual(len(p.api.posts),137)
+                    self.assertFalse(p.pending_orders)
+                    # Simulate expiry without waiting or sending network traffic.
+                    ban['active']=False
+                    p.cooldown.clear()
                 if len(p.open)==700:break
             self.assertEqual(len(p.open),700,p.last_error)
             for _ in range(5):p.maybe_entries()
@@ -141,6 +159,7 @@ class ContinuousTests(AllValidEntries):
             self.assertEqual(float(p.api.orders[q.sl_oid]['quantity']),q.qty)
             self.assertEqual(float(p.api.orders[q.tp_oid]['quantity']),q.qty)
         self.assertEqual(p.errors,0,p.last_error)
+        self.assertTrue(ban['injected'])
 
 
 if __name__=='__main__':

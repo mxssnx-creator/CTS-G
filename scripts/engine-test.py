@@ -2711,13 +2711,21 @@ def process_guard_test() -> None:
         path = "/openApi/swap/v2/quote/klines"
         calls = []
         api._http = lambda method, url: calls.append((method, url)) or {"code": 0, "data": []}
+        # Exercise the real async dispatch even without optional HTTPX locally.
+        import asyncio
+        from types import SimpleNamespace
+        async def rate_limited_get(url):
+            calls.append(("GET", url))
+            return SimpleNamespace(status_code=200, headers={},
+                                   content=b'{"code":100410,"msg":"frequency limit"}')
+        api.bridge.client = SimpleNamespace(get=rate_limited_get)
+        api.bridge.gather = lambda reqs, timeout=4.2: asyncio.run(api.bridge._gather(reqs))
         api.path_cd[path] = time.time() + 30.0
         cooled = api.public(path, {"symbol": "BTC-USDT"})
         rec("public-cooldown-no-request", cooled.get("cooled") is True and not calls, str(cooled))
         rows = api.gather_public([(path, {"symbol": "ETH-USDT"})])
         rec("async-cooldown-no-request", rows and rows[0][2].get("cooled") is True and not calls, str(rows))
         api.path_cd[path] = 0.0
-        api.bridge.gather = lambda reqs, timeout=4.2: [(p, e, {"code": 100410, "msg": "frequency limit"}) for p, e in reqs]
         api.gather_public([(path, {"symbol": "SOL-USDT"})])
         rec("async-rate-trip-propagates", api.stats["rl"] == 1 and api.path_cd[path] > time.time(), str(api.snapshot()))
         rec("suppression-accounting", api.stats["publicSuppressed"] == 1 and api.stats["asyncSuppressed"] == 1 and api.stats["rest"] == 1, str(api.stats))
