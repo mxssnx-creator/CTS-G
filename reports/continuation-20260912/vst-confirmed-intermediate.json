@@ -1,0 +1,116 @@
+{
+  "observedAt": 1789229254.026444,
+  "source": "e4969b8444b65daa6d078879d6491d7b2d72fbc6",
+  "mode": "VST_DEMO",
+  "cycle": 1709,
+  "statsAgeS": 1.72,
+  "errors": 0,
+  "halted": false,
+  "haltReason": null,
+  "logicalOpen": 24,
+  "internalSymbolSideGroups": 18,
+  "exchangeOwnOpen": 18,
+  "exchangeTotalOpen": 18,
+  "reconciliation": {
+    "ok": true,
+    "pending": true,
+    "detail": "pending 3 absent \u00b7 ours=24 live=18",
+    "logicalOpen": 24,
+    "exchangeOpen": 18,
+    "exchangePositionGroups": 18,
+    "simOpen": 3
+  },
+  "controls": {
+    "open": 24,
+    "logicalOpen": 24,
+    "exchangePositionGroups": 18,
+    "ok": 24,
+    "missing": 0,
+    "security": 24,
+    "mode": "per-config",
+    "pairCount": 24,
+    "expectedPairs": 24,
+    "protectedPairs": 24,
+    "pairGaps": 0,
+    "aggregatePairCount": 0,
+    "logicalPositionCap": 0,
+    "groupCount": 24,
+    "protectedGroups": 24,
+    "mergedMembers": 24
+  },
+  "tracking": {
+    "ours": 24,
+    "foreign": 0,
+    "withSet": 24,
+    "withCid": 24,
+    "closedOurs": 37
+  },
+  "sets": {
+    "setCount": 37440,
+    "validatedCount": 122,
+    "activeCount": 2,
+    "histFills": 10483036,
+    "liveFills": 3
+  },
+  "progress": {
+    "phase": "replay",
+    "pct": 35.2,
+    "symbol": "ETC-USDT",
+    "setId": "",
+    "barsDone": 0,
+    "barsTotal": 2880,
+    "setsDone": 0,
+    "setsTotal": 37440,
+    "symbolsDone": 2,
+    "symbolsTotal": 574,
+    "elapsedMs": 0.1,
+    "lastRunMs": 0.0,
+    "cycle": 3,
+    "detail": "replay ETC-USDT 3/574",
+    "ready": true,
+    "error": "",
+    "runId": "bingx-x02:1789228550143",
+    "generation": 3,
+    "mode": "initial",
+    "requestedStart": 29817595,
+    "requestedEnd": 29820474,
+    "lastCompleteRun": 0.0,
+    "nextRunAt": 0.0,
+    "stale": false,
+    "deferredReason": "",
+    "coordinationComplete": false
+  },
+  "entryQueue": {
+    "eligible": 0,
+    "opened": 0,
+    "pending": 0,
+    "remaining": 0,
+    "updatedAt": 1789229245.1533995,
+    "scope": "current-signal-normal-trailing-config-lanes"
+  },
+  "load": {
+    "level": "critical",
+    "rssMb": 4211.0,
+    "histBusy": true,
+    "hotMs": 1646.7,
+    "overrunN": 0
+  },
+  "service": {
+    "MainPID": "3538490",
+    "NRestarts": "0",
+    "ControlGroup": "/system.slice/system-cts\\x2dgx\\x2dpulse.slice/cts-gx-pulse@bingx-x02.service",
+    "MemoryCurrent": "4684926976",
+    "WorkingDirectory": "/opt/cts-gx-releases/e4969b8444b6/server/pulse",
+    "ActiveState": "active"
+  },
+  "memoryEvents": "low 0\nhigh 95\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+  "positions": {
+    "shown": 24,
+    "owned": 24,
+    "withSet": 24,
+    "youngestAgeS": 58.5,
+    "lanes": {
+      "core": 24
+    }
+  }
+}

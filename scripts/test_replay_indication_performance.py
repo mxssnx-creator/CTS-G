@@ -81,6 +81,80 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_columnar_close_rings_match_full_scalar_tapes_and_counts(self):
+        import set_engine as engine
+        if engine._np is None:
+            self.skipTest("NumPy replay requires NumPy")
+        overlay = dict(histEnabled=True, histLookbackBars=1000, histMinBars=60,
+                       histWarmup=0, stratIndications=False, stratGeneral=True,
+                       stratTrailing=True, stratBlock=True, histSimulateBlock=True,
+                       histSimulateDca=True, setMinStep=1, setStepMax=2, slToTpRatios=[.2,.6])
+        # Both directions overflow their retained windows; include same-bar
+        # TP/SL/trailing decisions and independent Block/DCA representative lanes.
+        bars = [[100.,102.,98.,100.,1.] for _ in range(1000)]
+        prepared = ({'general':[(1 if i % 400 < 200 else -1,.9,'test') for i in range(1000)]}, {}, 0)
+        for honor in (True, False):
+            with self.subTest(honor_tp=honor):
+                reference = SetBook(); reference.load(overlay); reference.cooldown_bars = 0
+                reference.hist_honor_tp = honor; reference.ingest_bars('RING-USDT', bars)
+                actual = reference.replay_clone(['RING-USDT'])
+                expected_hist = {}; expected_counts = {}; expected_strategy = {}
+                with patch.object(engine, '_np', None):
+                    reference._replay_symbol('RING-USDT', expected_hist, 1_700_000_000,
+                        prepared=prepared, hist_counts=expected_counts, strat_hist=expected_strategy)
+                actual_hist = {}; actual_counts = {}; actual_strategy = {}; progress = []
+                actual._replay_symbol('RING-USDT', actual_hist, 1_700_000_000,
+                    prepared=prepared, hist_counts=actual_counts, strat_hist=actual_strategy,
+                    on_step=lambda: progress.append(actual.progress.detail))
+                self.assertEqual(actual_counts, expected_counts)
+                self.assertGreater(min(actual_counts.values()), 320)
+                for sid, rows in expected_hist.items():
+                    self.assertEqual([dict(r) for r in actual_hist[sid]],
+                                     [{k:v for k,v in dict(r).items() if k != 'strategy'}
+                                      for r in engine.recent_direction_rows(rows, engine.HIST_CAP)], sid)
+                    for side in ('LONG','SHORT'):
+                        self.assertGreaterEqual(sum(r['side']==side for r in actual_hist[sid]), 75)
+                self.assertEqual(actual_strategy, expected_strategy)
+                self.assertTrue(any('LONG' in p and 'bar ' in p for p in progress))
+                self.assertTrue(any('SHORT' in p and 'bar ' in p for p in progress))
+
+    def test_indication_metrics_reuse_content_and_invalidate_same_length_corrections(self):
+        import set_engine as engine
+        book = SetBook(); book.load({'baseEvalPosCount':30, 'minPf':1.05})
+        book.ind_hist['signals'] = [dict(hist_fill(i*60, 'X-USDT', 1, .004, 60, 'tp')) for i in range(40)]
+        with patch.object(engine, 'evaluation_windows', wraps=engine.evaluation_windows) as evaluate:
+            first = book.ind_stats('signals', 'LONG')
+            n = evaluate.call_count
+            for _ in range(10): self.assertEqual(book.ind_stats('signals', 'LONG'), first)
+            self.assertEqual(evaluate.call_count, n)
+            # A correction can keep the same list, length and timestamps.
+            book.ind_hist['signals'][-1]['pnl_pct'] = -.5
+            corrected = book.ind_stats('signals', 'LONG')
+            self.assertLess(corrected['pf'], first['pf'])
+            self.assertGreater(evaluate.call_count, n)
+        book.ind_hist['signals'][-1]['pnl_pct'] = .004
+        self.assertTrue(book.ind_stats('signals', 'LONG')['profitable'])
+        book.min_pf = 2.0
+        self.assertFalse(book.ind_stats('signals', 'LONG')['profitable'])
+        book.pf_n = 35
+        self.assertEqual(book.ind_stats('signals', 'LONG')['n'], 35)
+        response = book.ind_stats('signals')
+        response['bySide']['LONG']['pf'] = -999
+        self.assertNotEqual(book.ind_stats('signals')['bySide']['LONG']['pf'], -999)
+
+    def test_unchanged_processing_lineages_reuse_snapshot(self):
+        book = SetBook(); book.load({'setMinStep':1, 'setStepMax':1, 'slToTpRatios':[.6]})
+        sid = book.by_idx[0].id
+        book.sync_processing_sets([sid])
+        with patch.object(book, 'coverage', wraps=book.coverage) as coverage:
+            first = book.snapshot()
+            book.sync_processing_sets([sid])
+            self.assertIs(book.snapshot(), first)
+            self.assertEqual(coverage.call_count, 1)
+            book.sync_processing_sets([])
+            self.assertEqual(book.snapshot()['processingCount'], 0)
+            self.assertEqual(coverage.call_count, 2)
+
     def test_full_replay_counts_survive_tape_retention_and_symbol_replacement(self):
         overlay = dict(histEnabled=True, histLookbackBars=1000, histMinBars=60,
                        histWarmup=0, stratIndications=False, stratGeneral=True,

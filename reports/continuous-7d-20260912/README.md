@@ -3,6 +3,8 @@
 Source checkpoint: `15d50a4`, merged with GitHub main without discarding its commits.
 Runtime changes are deployed to the isolated CTS-GX VST lane. Deployment records identify immutable revisions; no monetary X01 orders are initiated by this verification.
 
+Continuation at pricing-engine revision `e4969b8444b65daa6d078879d6491d7b2d72fbc6`: all 48 groups were regenerated and their signatures match the current source. Aggregate research results are unchanged. Additional replay, indication and scoring-publication regressions bring full discovery to 326/326, with the engine suite still 409/409. The subsequent pipeline change does not alter the pricing/research source signature. See [runtime and benchmark follow-up](../continuation-20260912/README.md).
+
 Open [cts-g-seven-days.html](cts-g-seven-days.html) for the full parameter matrix, 50 leading observed variants, best result in each symbol/indication/direction group, and training-only choices with their independent holdout results.
 
 The seven-day source window is September 4–11, 2026 UTC. Three validated BingX one-minute OHLCV inputs (BCH/SOL/XRP) are retained in `../7d-simulation-20260911/data`. The runtime history default is separately two days. All 48 symbol/indication/direction groups completed; 7,920 risk configurations × 3,375 admission policies per group = 1,283,040,000 requested alternatives. Equivalent TP-floor parameters share computed price paths but retain all requested config IDs. Their profits must not be added into an account return.

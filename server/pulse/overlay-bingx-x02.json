@@ -194,7 +194,7 @@
   "stratGeneral": true,
   "stratIndications": true,
   "stratTrailing": true,
-  "symbolCap": 0,
+  "symbolCap": 20,
   "symbolSort": "vol1h",
   "symbols": [
     "*"
