@@ -526,7 +526,7 @@ def stage_engine_calc_test() -> None:
     rec("set-stage-ddt-nonzero", st.max_dd_s >= 0.0 and st.dd_episodes >= 0, f"ddt={st.max_dd_s} ep={st.dd_episodes}")
     snap = book.snapshot()
     row = next((r for r in (snap.get("rows") or []) if r.get("id") == st.id), {})
-    rec("set-intern-validated", bool(row.get("validated")) and float(row.get("last15Ratio") or 0) >= 1.0
+    rec("set-intern-shared-floor", not bool(row.get("validated")) and float(row.get("last15Ratio") or 0) < 1.20
         and not bool(row.get("realQualified")),
         f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
     rec("set-eval-windows-present", bool((row.get("evaluationWindows") or {}).get("last15")),
@@ -2802,7 +2802,7 @@ def process_guard_test() -> None:
     rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
     rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
     rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 0)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)

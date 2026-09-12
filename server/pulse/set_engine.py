@@ -5840,7 +5840,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ssnap = sbook.snapshot()
     srow = next((r for r in (ssnap.get("rows") or []) if r.get("id") == sst.id), {})
     intern_ok = bool(srow.get("validated")) and float(srow.get("last15Ratio") or 0) >= 1.0
-    out.append(("set-intern-validated-vs-stage", intern_ok and not bool(srow.get("realQualified")), f"val={srow.get('validated')} realQ={srow.get('realQualified')} pf={srow.get('last15Ratio')} stage={srow.get('stage')}"))
+    out.append(("set-intern-shares-stage-floor", not intern_ok and not bool(srow.get("realQualified")), f"val={srow.get('validated')} realQ={srow.get('realQualified')} pf={srow.get('last15Ratio')} stage={srow.get('stage')}"))
     rec_m = sbook.stage_record(sst, "main")
     rec_r = sbook.stage_record(sst, "real")
     out.append(("set-stage-record-cost-pf", abs(rec_m.net_pf - sst.main_pf) < 1e-9 and rec_m.net_pf < 20 and rec_m.net_pf > 1.0, f"net={rec_m.net_pf} main={sst.main_pf} classic={sst.net_pf}"))
