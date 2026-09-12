@@ -40,6 +40,7 @@ from position_cost import (
     resolve_sl_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
+    clears_pf,
     SL_TP_RATIOS,
     SL_TP_MIN,
     SL_TP_MAX,
@@ -157,7 +158,7 @@ CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
-DEFAULT_SYMBOL_CAP = 50
+DEFAULT_SYMBOL_CAP = 0
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -1581,6 +1582,47 @@ class Pulse:
             if self._position_for_client(cid) is None:
                 pending.add(row.get("group_key") or cid)
         return len(self.open) + len(pending)
+
+    def entry_queue_state(self, matrix) -> Dict[str, Any]:
+        """Count currently signalled config lanes without expanding the matrix.
+
+        Block additions have their own lifecycle; this is the normal/trailing
+        admission queue. Filled and uncertain intents are counted once.
+        """
+        scopes = {scope: {st.id: st for st in states if st is not None}
+                  for scope, states in matrix.sets_by_scope.items()}
+        signals = {}
+        for signal in matrix.signals:
+            pack, side = matrix.scope(signal)
+            signals.setdefault((signal[1], side, pack), []).append(signal)
+
+        def lane_key(symbol, side, pack, set_id, lane):
+            st = scopes.get((pack, side), {}).get(set_id)
+            if st is None:
+                return None
+            mode = "trailing" if st.kind == "trail" else "normal"
+            for signal in signals.get((symbol, side, pack), ()):
+                expected = self.execution_lane_key(pack, signal[3], st, mode)
+                if self.execution_lane_matches(lane, expected):
+                    return (symbol, side, expected)
+            return None
+
+        opened = set()
+        for pos in self.open.values():
+            key = lane_key(pos.symbol, pos.side, pos.pack, pos.set_id, getattr(pos, "execution_lane", ""))
+            if key:
+                opened.add(key)
+        pending = set()
+        for row in (getattr(self, "pending_orders", {}) or {}).values():
+            if str(row.get("kind") or "entry") != "entry" or _sf(row.get("requested_qty")) <= _sf(row.get("filled_qty")) + 1e-12:
+                continue
+            meta = row.get("metadata") or {}
+            key = lane_key(row.get("symbol"), row.get("side"), meta.get("pack"), meta.get("set_id"), meta.get("execution_lane"))
+            if key:
+                pending.add(key)
+        return {"eligible": len(matrix), "opened": len(opened), "pending": len(pending - opened),
+                "remaining": max(0, len(matrix) - len(opened | pending)), "updatedAt": time.time(),
+                "scope": "current-signal-normal-trailing-config-lanes"}
 
     def pending_entry_margin(self) -> float:
         reserved = 0.0
@@ -7170,6 +7212,7 @@ class Pulse:
             "trackPrefix": TAG,
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -8278,17 +8321,16 @@ class Pulse:
             return False
         if not getattr(self.sets, "live_test_mode", False) or not getattr(self, "control_orders", True):
             return False
-        if (not valid_candidate(row) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
+        if (not valid_candidate(row, self.coord.min_pf) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
             return False
         if not any(r.get("id") == row.get("id") for r in self._forced_data().get("rows", [])):
             return False
-        # No merging with a different config; preserve one attributable trial
-        # per symbol+side and at most three forced positions across the book.
-        if self.positions_for(sym, side) or sum(str(p.set_id).startswith("forced:") for p in self.open.values()) >= 3:
+        # Each eligible trial owns one independent config lane.
+        if any(p.set_id == row["id"] for p in self.open.values()):
             return False
         tape = completed_roundtrips([c for c in self.closed if c.set_id == row["id"]])
         recent = last_n_cost_pf(tape, 15, self.position_cost_pct)
-        if len(tape) >= 8 and (recent["classicPf"] <= FORCED_MIN_PF or recent["netAvg"] <= 0):
+        if len(tape) >= 8 and (recent["classicPf"] <= max(FORCED_MIN_PF, self.coord.min_pf) or recent["netAvg"] <= 0):
             return False
         if len(tape) >= 3 and all(float(c.get("pnl") or 0) < 0 for c in tape[-3:]):
             return False
@@ -8576,6 +8618,7 @@ class Pulse:
                 burst = 1
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
+        self._entry_queue = self.entry_queue_state(matrix)
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             # Per-scope signal counts: when every ranked signal maps to a
             # scope whose entry_sets() is empty (e.g. indications mid-replay),
@@ -9858,7 +9901,8 @@ class Pulse:
         pc["ddEpisodes"] = ddt.get("episodes")
         pc["currentS"] = ddt.get("currentS")
         pc["minPf"] = self.coord.min_pf
-        pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
+        pc["requiredSamples"] = self.pf_window
+        pc["pass"] = bool(pc["count"] >= self.pf_window and clears_pf(pc["ratio"], self.coord.min_pf))
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -9966,6 +10010,7 @@ class Pulse:
             "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
             "activeSetCount": int(sets_snap.get("activeCount") or 0),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
             "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
             "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
             "progressPhase": phase,
@@ -10456,6 +10501,7 @@ class Pulse:
                 "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
                 "validatedCount": int(scov.get("validatedCount") or 0),
                 "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+                "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
                 "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),
@@ -10567,7 +10613,7 @@ class Pulse:
         if now - float(getattr(self, "_report_ts", 0)) >= getattr(self, "system_settings", {}).get("systemReportIntervalS", 30):
             self._report_ts = now
             try:
-                self.write_results_export()
+                self.write_results_export(stats)
             except Exception:
                 pass
 
@@ -10640,9 +10686,12 @@ class Pulse:
         out.sort(key=lambda r: r["net"])
         return out
 
-    def write_results_export(self) -> None:
+    def write_results_export(self, stats: Optional[Dict[str, Any]] = None) -> None:
         from stats_report import write as write_report
-        st = self.stats()
+        # Periodic export uses the already coherent snapshot. Rebuilding the
+        # full catalog here duplicates scoring summaries while the history
+        # publisher waits for the state lock.
+        st = stats if stats is not None else self.stats()
         write_report(
             st,
             os.path.join(DIR, f"results-export-{CONN_SHORT}.json"),
@@ -11229,7 +11278,6 @@ class Pulse:
                 size = self._hist_replay_chunk_size(len(pending))
                 if first and len(pending) > 8:
                     size = min(size, 4)
-                is_first = first
                 first = False
                 chunk = pending[:size]
                 pending = pending[size:]
@@ -11237,10 +11285,11 @@ class Pulse:
                 self.hist_busy = True
                 self._hist_peer_touch()
                 try:
-                    # Score the first slice so intern can open, and the last
-                    # slice so the 50-name book is fully ranked. Middle slices
-                    # only merge fills — rescoring 34k sets per slice stalled 4/50.
-                    ok = self._replay_sets_isolated(chunk, ready, total, score=is_first or not pending, completed_symbols=run_completed)
+                    # Each published slice changes evidence. Re-evaluate its
+                    # affected IDs; the content cache reuses unchanged inputs.
+                    # Deferring middle slices hides new winners until the end
+                    # of an unlimited universe and leaves losing sets active.
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=True, completed_symbols=run_completed)
                 finally:
                     self.hist_busy = False
                 if not ok:
@@ -11652,6 +11701,7 @@ class Pulse:
                     replay_book.ind_hist,
                     merge=True,
                     replayed_symbols=names,
+                    hist_symbol_counts=replay_book._hist_counts,
                     score=False,
                     score_ids=affected,
                 )

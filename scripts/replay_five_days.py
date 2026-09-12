@@ -37,7 +37,7 @@ def pf(gain, loss):
 
 def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
            entry_filter=None, add_filter=None, on_close=None, on_equity=None,
-           min_pf=1.02, max_dd_s=57600):
+           min_pf=1.02, max_dd_s=57600, on_closes=None, return_rows=True):
     """Parallel independent configs. Only completed bar information is used.
 
     Stops/targets are tested before close-price additions. Same-bar ambiguity
@@ -119,6 +119,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
                           np.where(hit_tp, target, price))[ids]
             cost = (fees[ids] + qty[ids]*px*fee)/original[ids]
             pnl = side*qty[ids]*(px-entry[ids])/original[ids] - cost
+            if on_closes is not None:
+                on_closes(ids.copy(), entered[ids].astype(np.int32), i, pnl.copy(), cost.copy())
             if on_close is not None:
                 for offset, k in enumerate(ids):
                     on_close(dict(config=int(k),bar=i,entryBar=int(entered[k]),
@@ -190,6 +192,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
         dd_total += underwater*60; dd_max = np.maximum(dd_max, dd_age)
         if i == split-1:
             train_dd = dd.copy()
+    if not return_rows:
+        return []
     hours = (len(bars)-warmup)/60
     rows = []
     for k in range(count):
@@ -249,7 +253,7 @@ def one_symbol(path):
                 sha256=hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest())
 
 
-def report(results, elapsed):
+def report(results, elapsed, days):
     cfg = configs()
     rows = [r for result in results for r in result['rows']]
     # Exploratory ranking only; the 30% chronological check is disclosed and
@@ -281,10 +285,10 @@ def report(results, elapsed):
     heads = ''.join(f'<th>{html.escape(x)}</th>' for x in ('Symbol','Geprüft','Ohne Trades','Netto positiv','PF/Samples beide Teilfenster'))
     body = ''.join('<tr>'+''.join(f'<td>{s[k]}</td>' for k in ('symbol','configs','noTrades','positive','qualified'))+'</tr>' for s in summary)
     return r'''<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CTS-G · Fünf Tage historischer Konfigurationstest</title><style>
+<title>CTS-G · Historischer Konfigurationstest</title><style>
 body{background:#0b1421;color:#e5edf7;font:15px/1.55 system-ui;margin:0}main{max-width:1450px;margin:auto;padding:30px}h1{font-size:34px}h2{margin-top:32px}p{max-width:1080px}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:9px;text-align:left;border-bottom:1px solid #34445b;white-space:nowrap}th{color:#9eb9d9}button,select,input{padding:8px;margin:4px;background:#20334d;color:white;border:1px solid #577190;border-radius:5px}button{cursor:pointer}section{overflow:auto;background:#111f31;padding:18px;margin-top:18px;border-radius:10px}.note{border-left:4px solid #eac36c;padding:14px;background:#292b27}pre{white-space:pre-wrap;font-size:13px}a{color:#81d2fa}.muted{color:#a6b6c9}</style>
 <main><p class="muted">CTS-G · Research-Replay · keine Exchange-Ausführungen</p>
-<h1>Fünf Tage · XRP / BCH / SOL</h1><p>WINDOW</p>
+<h1>DAYS Tage · XRP / BCH / SOL</h1><p>WINDOW</p>
 <p class="note">Echte öffentliche BingX-1m-Kerzen; alle Zeitstempel lückenlos geprüft. Jede Konfiguration ist ein unabhängiges hypothetisches Konto. Summen über alternative Konfigurationen sind kein Portfolioergebnis. Positive Backtests sind keine Profitgarantie; keine Live-Defaults wurden übernommen.</p>
 <section><h2>Abdeckung und Ergebnisse</h2><table><tr>HEADS</tr>BODY</table><p id="coverage"></p></section>
 <section><h2>Stärkster beobachteter PF je Symbol</h2><p>Mindestens acht Abschlüsse in beiden Abschnitten. Auch negative Ergebnisse bleiben sichtbar; dies ist keine Empfehlung.</p><pre>OBSERVED</pre></section>
@@ -322,16 +326,20 @@ el('csv').onclick=()=>{const cc=[...Object.keys(D.configs[0]),...cols],q=x=>'"'+
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument('--data',required=True); p.add_argument('--output',required=True)
+    p = argparse.ArgumentParser(); p.add_argument('--data',required=True); p.add_argument('--output',required=True); p.add_argument('--days',type=int,default=5); p.add_argument('--symbols',default='XRP,BCH,SOL')
     args = p.parse_args(); started=time.monotonic()
-    paths = [str(pathlib.Path(args.data)/(s+'-USDT.json')) for s in ('XRP','BCH','SOL')]
+    if args.days < 1:
+        raise ValueError('--days must be positive')
+    symbols = tuple(s.strip().upper() for s in args.symbols.split(',') if s.strip())
+    paths = [str(pathlib.Path(args.data)/(s+'-USDT.json')) for s in symbols]
     blobs = [json.loads(pathlib.Path(path).read_text()) for path in paths]
-    if len({(b['start'],b['end']) for b in blobs}) != 1 or any(b['end']-b['start'] != 5*86400000 for b in blobs):
-        raise ValueError('Require the same exact five-day period for every symbol')
+    if len({(b['start'],b['end']) for b in blobs}) != 1 or any(b['end']-b['start'] != args.days*86400000 for b in blobs):
+        raise ValueError(f'Require the same exact {args.days}-day period for every symbol')
     with ProcessPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(one_symbol, paths))
     output = pathlib.Path(args.output); output.parent.mkdir(parents=True,exist_ok=True)
-    page, summary = report(results, time.monotonic()-started)
+    page, summary = report(results, time.monotonic()-started, args.days)
+    page = page.replace('DAYS', str(args.days))
     output.write_text(page)
     output.with_suffix('.summary.json').write_text(json.dumps(summary,indent=2,allow_nan=False))
     print(json.dumps(dict(output=str(output),summary=summary,elapsedS=time.monotonic()-started)),flush=True)

@@ -1,0 +1,70 @@
+{
+  "scope": "CTS-GX VST_DEMO only; no account balances or credentials",
+  "adjustment": {
+    "after": {
+      "ControlGroup": "/system.slice/system-cts\\x2dgx\\x2dpulse.slice/cts-gx-pulse@bingx-x02.service",
+      "MainPID": "3474850",
+      "MemoryCurrent": "3784556544",
+      "MemoryHigh": "4831838208",
+      "MemoryMax": "5368709120"
+    },
+    "before": {
+      "ControlGroup": "/system.slice/system-cts\\x2dgx\\x2dpulse.slice/cts-gx-pulse@bingx-x02.service",
+      "MainPID": "3474850",
+      "MemoryCurrent": "3784302592",
+      "MemoryHigh": "3623878656",
+      "MemoryMax": "4026531840"
+    },
+    "hostMemoryKb": {
+      "MemAvailable": 3948512,
+      "MemTotal": 16380160
+    },
+    "memoryEventsBefore": "low 0\nhigh 175722\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "mode": "VST_DEMO",
+    "observedAt": 1789219895.7310236,
+    "processUnchanged": true
+  },
+  "observationAfter": {
+    "active": 0,
+    "cycle": 3386,
+    "entryQueue": {
+      "eligible": 0,
+      "opened": 0,
+      "pending": 0,
+      "remaining": 0,
+      "scope": "current-signal-normal-trailing-config-lanes",
+      "updatedAt": 1789219930.0970697
+    },
+    "errors": 0,
+    "load": {
+      "histBusy": true,
+      "hotMs": 8481.9,
+      "level": "critical",
+      "overrunN": 0,
+      "rssMb": 3622.3
+    },
+    "mode": "VST_DEMO",
+    "observedAt": 1789219943.4050288,
+    "open": 0,
+    "progress": {
+      "coordinationComplete": false,
+      "detail": "slice 2/574 ready · continuing 572",
+      "generation": 3,
+      "pct": 35.2,
+      "phase": "partial",
+      "ready": true,
+      "symbol": "BCH-USDT",
+      "symbolsDone": 2,
+      "symbolsTotal": 574
+    },
+    "service": {
+      "ActiveState": "active",
+      "MainPID": "3474850",
+      "MemoryCurrent": "3807981568",
+      "NRestarts": "0",
+      "WorkingDirectory": "/opt/cts-gx-releases/571fa15099fa/server/pulse"
+    },
+    "setCount": 37440,
+    "validated": 0
+  }
+}

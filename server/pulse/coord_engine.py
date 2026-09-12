@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
+from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
 from set_engine import row_equity_pnl
 
@@ -157,26 +157,12 @@ class Coordinator:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
         except Exception:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or POSITIVE_PF)
-        # Per-stage floors: overlay wins, then strategies.main.<stage>, then the shared defaults.
-        try:
-            stages_cts = (cts.get("strategies") or {}).get("main") or {}
-        except Exception:
-            stages_cts = {}
-        for _stage, _dflt in (("base", POSITIVE_PF), ("main", POSITIVE_PF), ("real", POSITIVE_PF)):
-            _v = ov.get(f"{_stage}MinPf")
-            if _v is None:
-                try:
-                    _v = (stages_cts.get(_stage) or {}).get("min_profit_factor")
-                except Exception:
-                    _v = None
-            if _v is None and _stage == "real":
-                _v = self.min_pf
-            try:
-                self.stage_min_pf[_stage] = normalize_pf(_v, _dflt) if _v is not None else _dflt
-            except Exception:
-                self.stage_min_pf[_stage] = _dflt
-        # Strictest stage (Real) is the canonical min PF consumers read.
-        self.min_pf = self.stage_min_pf["real"]
+        # Migrate a legacy overall Real PF to one setting when no overlay
+        # control is present. Any explicit overlay alias wins atomically.
+        from position_cost import PF_SETTING_KEYS, shared_pf_settings
+        unified = shared_pf_settings(ov if any(k in ov for k in PF_SETTING_KEYS) else {"minPf": self.min_pf})
+        self.min_pf = unified["minPf"]
+        self.stage_min_pf = {stage: self.min_pf for stage in ("base", "main", "real")}
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         if self.position_cost_pct > 2:
@@ -331,14 +317,14 @@ class Coordinator:
         real_floor = float(self.stage_min_pf.get("real", POSITIVE_PF))
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
-            if last_cost["ratio"] + 1e-9 < base_floor:
+            if not clears_pf(last_cost["ratio"], base_floor):
                 allow = False
                 reasons.append(
                     f"base/last {int(last_cost['count'])} PF {last_cost['ratio']:.2f}<{base_floor:.2f} (1.00=neutral 1.10=+1×cost)"
                 )
         if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
-            floor = base_floor * 0.85
-            if prev_cost["ratio"] + 1e-9 < floor and cost["ratio"] + 1e-9 < floor:
+            floor = base_floor
+            if not clears_pf(prev_cost["ratio"], floor) and not clears_pf(cost["ratio"], floor):
                 allow = False
                 reasons.append(f"prev PF {prev_cost['ratio']:.2f}<{floor:.2f} (cost-scale)")
         if self.axes["pause"].enabled:
@@ -347,9 +333,9 @@ class Coordinator:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["ratio"]) + 1e-9 < main_floor:
+        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and not clears_pf(main_cost["ratio"], main_floor):
             reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<{main_floor:.2f}")
-        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["ratio"]) + 1e-9 < real_floor:
+        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and not clears_pf(real_cost["ratio"], real_floor):
             reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<{real_floor:.2f}")
         stages = {
             "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
@@ -396,7 +382,7 @@ class Coordinator:
                 continue
             n = int(getattr(st, "last15_n", 0) or 0)
             pf = float(getattr(st, "last15_ratio", 1.0) or 1.0)
-            ok = n >= need and pf + 1e-9 >= floor
+            ok = n >= need and clears_pf(pf, floor)
             if ok:
                 qualified += 1
             parent_rows.append({
@@ -488,7 +474,7 @@ class Coordinator:
                 qualifies = (
                     len(tape) >= min(3, count)
                     and not paused
-                    and float(pf.get("ratio") or 0.0) + 1e-9 >= float(self.stage_min_pf.get("base", POSITIVE_PF))
+                    and clears_pf(pf.get("ratio"), self.stage_min_pf.get("base", POSITIVE_PF))
                 )
                 child_key = stable_key(parent_set_id, axis, count, len(tape), round(float(pf.get("ratio") or 0.0), 6))
                 self.record_coordination(axis, "evaluated", event_key=child_key + ":evaluated")
@@ -567,7 +553,7 @@ class Coordinator:
             pf = float(last_pf or 0)
         except Exception:
             pf = 0.0
-        if pf + 1e-9 >= float(self.min_pf or POSITIVE_PF):
+        if clears_pf(pf, self.min_pf):
             return stack
         return max(1, stack // 2)
 
@@ -598,7 +584,7 @@ class Coordinator:
                 pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
                 floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
                 metrics["countPf"] = round(pf, 4)
-                if pf + 1e-9 < floor:
+                if not clears_pf(pf, floor):
                     allow = False
                     reasons.append(f"count-pos n={n} last{len(tail)} PF {pf:.2f}<{floor:.2f}")
             if self.axes["pause"].enabled and tail:
@@ -618,7 +604,7 @@ class Coordinator:
         cap = max_open
         if self.axes["cont"].enabled:
             extra = self.axes["cont"].max_window
-            if last_pf >= self.min_pf:
+            if clears_pf(last_pf, self.min_pf):
                 cap = min(max_open, extra)
             else:
                 cap = min(max_open, max(2, extra // 2))

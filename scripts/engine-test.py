@@ -127,7 +127,7 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
@@ -135,8 +135,8 @@ def overlay_test() -> None:
     rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
     rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
-    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
+    rec("default-unlimited-symbols", int(x01.get("symbolCap") or 0) == 0 and int(x02.get("symbolCap") or 0) == 0)
     rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
@@ -401,7 +401,7 @@ def coord_test() -> None:
     base_st = next((s for s in book_ax.by_idx if s.kind == "base"), None)
     rec("coord-base-index", base_st is not None and bool((book_ax._ids_by_kind or {}).get("base")), str(len((book_ax._ids_by_kind or {}).get("base") or [])))
     if base_st is not None:
-        base_st.last15_n = 15
+        base_st.last15_n = book_ax.eval_need()
         base_st.last15_ratio = 1.4
     c_base = Coordinator()
     agg = c_base.coordinate_base_sets(book_ax)
@@ -413,7 +413,7 @@ def coord_test() -> None:
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow the shared +1× PositionCost (1.10) default unless overridden."""
+    """Every stage follows one overall Cost-PF floor, >1.05 by default."""
     from coord_engine import Coordinator, recent_closed_rows
     from position_cost import POSITIVE_PF
 
@@ -432,7 +432,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.06}}}},
             {"baseMinPf": 1.05, "mainMinPf": 1.08, "realMinPf": 1.1})
     rec("stage-pf-overlay-wins",
-        c2.stage_min_pf == {"base": 1.05, "main": 1.08, "real": 1.10},
+        c2.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(c2.stage_min_pf))
 
     # 3) strategies.main.<stage> used when no overlay key
@@ -442,7 +442,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.15}}}},
             {})
     rec("stage-pf-strategies-fallback",
-        c3.stage_min_pf == {"base": 1.05, "main": 1.07, "real": 1.15},
+        c3.stage_min_pf == {"base": 1.15, "main": 1.15, "real": 1.15},
         str(c3.stage_min_pf))
     rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
 
@@ -526,7 +526,7 @@ def stage_engine_calc_test() -> None:
     rec("set-stage-ddt-nonzero", st.max_dd_s >= 0.0 and st.dd_episodes >= 0, f"ddt={st.max_dd_s} ep={st.dd_episodes}")
     snap = book.snapshot()
     row = next((r for r in (snap.get("rows") or []) if r.get("id") == st.id), {})
-    rec("set-intern-validated", bool(row.get("validated")) and float(row.get("last15Ratio") or 0) >= 1.0
+    rec("set-intern-shared-floor", not bool(row.get("validated")) and float(row.get("last15Ratio") or 0) < 1.20
         and not bool(row.get("realQualified")),
         f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
     rec("set-eval-windows-present", bool((row.get("evaluationWindows") or {}).get("last15")),
@@ -2802,7 +2802,7 @@ def process_guard_test() -> None:
     rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
     rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
     rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 0)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
@@ -2845,7 +2845,12 @@ def process_guard_test() -> None:
     rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
     rec("hist-trim-keep-hist", "keep_hist" in trader)
     rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
-    rec("hist-score-edges", "score=is_first or not pending" in trader)
+    # Verify middle-slice qualification behavior rather than matching source text.
+    import unittest
+    from test_continuous_real_live import ContinuousTests
+    slice_result = unittest.TestResult()
+    ContinuousTests("test_middle_history_slices_publish_qualification").run(slice_result)
+    rec("hist-score-each-slice", slice_result.wasSuccessful(), str(slice_result.failures + slice_result.errors))
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
     rec("replay-blas-pin", "def pin_compute_threads" in set_src)

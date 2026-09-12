@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, unquote
-from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import (
     DATA_DIR,
@@ -347,6 +347,16 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     # not just rename. A common .tmp also collided between HTTP threads.
     with _OVERLAY_LOCKS[cid]:
         cur = load_overlay(cid)
+        # A partial save to any legacy PF/window control updates the canonical
+        # setting before merging, so an older persisted alias cannot win.
+        from position_cost import PF_SETTING_KEYS, shared_pf_settings
+        if any(k in overlay for k in PF_SETTING_KEYS):
+            overlay = {**overlay, **{k: v for k, v in shared_pf_settings(overlay).items() if k in PF_SETTING_KEYS}}
+        if "baseEvalPosCount" in overlay or "setPfWindow" in overlay:
+            overlay = dict(overlay)
+            overlay["baseEvalPosCount"] = overlay.get("baseEvalPosCount", overlay.get("setPfWindow"))
+            overlay["setPfWindow"] = overlay["baseEvalPosCount"]
+            overlay.setdefault("setMinSamples", overlay["baseEvalPosCount"])
         cur.update(overlay)
         cur = calculation_overlay(cur)
         atomic_write(dest, cur)
@@ -919,6 +929,16 @@ def _report_row_in_scope(row: dict, state: dict) -> bool:
     return bool(row_connection and row_connection == connection and not expected)
 
 
+def overall_pf_policy(states) -> dict:
+    policies = [state.get("pfCost") or {} for state in states]
+    pf_window = max(int(_report_number(policy.get("n"), LAST_N_DEFAULT)) for policy in policies)
+    pf_floor = max(POSITIVE_PF, *(float(_report_number(policy.get("minPf"), POSITIVE_PF)) for policy in policies))
+    required_samples = max(int(_report_number(policy.get("requiredSamples"), pf_window)) for policy in policies)
+    position_cost = next((_report_number(policy.get("costPct"), POSITION_COST_PCT_DEFAULT)
+                          for policy in policies if policy.get("costPct") is not None), POSITION_COST_PCT_DEFAULT)
+    return dict(n=pf_window, costPct=position_cost, minPf=pf_floor, requiredSamples=required_samples)
+
+
 def overall_report_state(live: dict, vst: dict) -> dict:
     """Build a safe combined input for the canonical stats report renderer."""
     states = (live, vst)
@@ -953,14 +973,6 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     })
     wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
     losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
-    position_cost = next(
-        (
-            _report_number((state.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
-            for state in states
-            if isinstance(state.get("pfCost"), dict) and state.get("pfCost", {}).get("costPct") is not None
-        ),
-        POSITION_COST_PCT_DEFAULT,
-    )
     coverages = [state.get("coverage") or {} for state in states]
     strategies = {
         key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
@@ -999,7 +1011,8 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
     has_historic = any(bool(historic) for historic in historic_states)
     logical_position_count = sum(
-        int(_report_number(state.get("logicalPositionCount", state.get("openCount"))))
+        int(_report_number(state.get("logicalPositionCount", state.get("openCount",
+            sum(_report_row_in_scope(row, state) for row in (state.get("open") or []))))))
         for state in states
     )
     exchange_group_values = [
@@ -1055,7 +1068,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
-        "pfCost": {"n": 15, "costPct": position_cost, "minPf": 1.1},
+        "pfCost": overall_pf_policy(states),
         "historic": {
             "phase": "aggregate" if has_historic else "offline",
             "coordinationComplete": has_historic and all(bool(historic.get("coordinationComplete")) for historic in historic_states),
@@ -1413,13 +1426,15 @@ def merge_overall() -> dict:
         tests.extend({**test, "connection": lane["id"]} for test in (st.get("tests") or []) if isinstance(test, dict))
     tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
-    closed = closed[:40]
+    policy = overall_pf_policy(stats_by_id.values())
+    closed = closed[:max(40, policy["n"])]
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-    pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
-    pc["minPf"] = 1.1
-    pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
+    pc = last_n_cost_pf(list(reversed(closed)), policy["n"], policy["costPct"])
+    pc["minPf"] = policy["minPf"]
+    pc["requiredSamples"] = policy["requiredSamples"]
+    pc["pass"] = bool(pc["count"] >= pc["requiredSamples"] and clears_pf(pc["ratio"], pc["minPf"]))
     detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)

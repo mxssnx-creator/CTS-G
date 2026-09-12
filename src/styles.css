@@ -1,4 +1,5 @@
-@import "tailwindcss";
+/* Report data and Python/C++ research files are not UI class sources. */
+@import "tailwindcss" source(".");
 
 @theme {
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;

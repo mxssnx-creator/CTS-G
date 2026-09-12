@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import json
+from position_cost import shared_pf_settings
 from pathlib import Path
 
 # name: default, minimum, maximum, integer. Zero memory limits mean automatic.
@@ -32,7 +33,15 @@ def calculation_overlay(overlay, cts=None):
     Standalone research can still select packs explicitly. Runtime callers
     use this boundary before building/rebuilding any coordination catalog.
     """
-    result = dict(overlay or {})
+    result = shared_pf_settings(overlay)
+    result.setdefault("histLookbackBars", 2880)
+    result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
+    result["setPfWindow"] = result["baseEvalPosCount"]
+    result.setdefault("setMinSamples", result["baseEvalPosCount"])
+    for key in ("maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates", "symbolCap"):
+        result.setdefault(key, 0)
+    for key in ("axisPrevEnabled", "axisLastEnabled", "axisContEnabled", "axisPauseEnabled"):
+        result.setdefault(key, False)
     result["stratGeneral"] = True
     result["histEnabled"] = True
     modules = dict(result.get("modules") or {}) if isinstance(result.get("modules"), dict) else {}

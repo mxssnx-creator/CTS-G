@@ -50,7 +50,7 @@ from set_engine import (
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
-DEFAULT_SYMBOL_CAP = 50
+DEFAULT_SYMBOL_CAP = 0
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
     "XRP-USDT",
@@ -65,7 +65,7 @@ DEFAULT_SYMBOLS = [
     "1000PEPE-USDT",
     "KAS-USDT",
 ]
-HOURS_DEFAULT = 7
+HOURS_DEFAULT = 48
 HOURS_MIN = 1
 # The bounded fourteen-day/336-hour validation window is the maximum
 # supported public window. Keep the exchange request bounded to avoid
@@ -809,7 +809,9 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "additionalCoordination": bool(opt.get("additionalCoordination", opt.get("minimalPositiveCoordination", False))),
         "coordOptimizationN": int(opt.get("coordOptimizationN") or 50),
         "setAutoDeact": True,
-        "setMinSamples": 8,
+        "baseEvalPosCount": int(opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
+        "setPfWindow": int(opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
+        "setMinSamples": int(opt.get("setMinSamples") or opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
         "setMinPf": POSITIVE_PF,
         "setMaxDdTimeS": 57600,
         "setLiveNegativeDeact": False,
@@ -2527,7 +2529,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
-    rec("symbol-cap-default-50", configured_symbol_cap({}) == 50)
+    rec("symbol-cap-default-unlimited", configured_symbol_cap({}) == 0)
     rec("symbol-cap-explicit-unlimited", configured_symbol_cap({"symbolCap": 0}) == 0)
     rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
@@ -2537,7 +2539,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
     )))
-    rec("opt-hours-default-7", parse_options({})["hours"] == 7)
+    rec("opt-hours-default-48", parse_options({})["hours"] == 48)
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
     rec("klines-parse-list", len(parse_klines([[0, 1, 2, 0.5, 1.2, 3]])) == 1)

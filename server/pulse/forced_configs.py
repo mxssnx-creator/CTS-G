@@ -19,8 +19,8 @@ from set_engine import BAR_S, IND_KINDS, IND_TAG_KIND, indication_kind_votes
 FORCED_SYMBOLS = ("XRP-USDT", "BCH-USDT", "SOL-USDT")
 TP_GRID = tuple(v / 100 for v in range(40, 81, 5))
 SL_GRID = tuple(v / 100 for v in range(10, 51, 5))
-MIN_PF = 1.02
-TOP_N = 5
+MIN_PF = 1.05
+TOP_N = 0  # zero means all eligible configurations
 MAX_TAPE = 80
 
 
@@ -45,10 +45,10 @@ def select_best(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if row.get("eligible"):
             groups.setdefault((row["symbol"], row["indication"]), []).append(row)
     return [dict(row, rank=i + 1) for key in sorted(groups)
-            for i, row in enumerate(sorted(groups[key], key=rank_key)[:TOP_N])]
+            for i, row in enumerate(sorted(groups[key], key=rank_key)[:TOP_N or None])]
 
 
-def valid_candidate(row: Dict[str, Any]) -> bool:
+def valid_candidate(row: Dict[str, Any], min_pf: float = MIN_PF) -> bool:
     """Fail closed before a historical row can enter the VST trial lane."""
     try:
         metrics = [float(row[k]) for k in ("pf", "trainPf", "holdoutPf", "maxDrawdownR")]
@@ -56,7 +56,7 @@ def valid_candidate(row: Dict[str, Any]) -> bool:
                     and row.get("symbol") in FORCED_SYMBOLS and row.get("indication") in IND_KINDS
                     and row.get("direction") in ("LONG", "SHORT")
                     and all(math.isfinite(v) for v in metrics)
-                    and min(metrics[:3]) > MIN_PF and 0 <= metrics[3] <= 6
+                    and min(metrics[:3]) > max(MIN_PF, float(min_pf)) and 0 <= metrics[3] <= 6
                     and int(row["trainN"]) >= 8 and int(row["holdoutN"]) >= 8
                     and float(row["tpPct"]) in TP_GRID and float(row["slPct"]) in SL_GRID)
     except (KeyError, TypeError, ValueError, OverflowError):

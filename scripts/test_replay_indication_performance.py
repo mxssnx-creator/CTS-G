@@ -7,7 +7,8 @@ import pathlib
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PULSE = ROOT / "server" / "pulse"
@@ -80,6 +81,57 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_full_replay_counts_survive_tape_retention_and_symbol_replacement(self):
+        overlay = dict(histEnabled=True, histLookbackBars=1000, histMinBars=60,
+                       histWarmup=0, stratIndications=False, stratGeneral=True,
+                       stratTrailing=False, stratBlock=False, histSimulateBlock=False,
+                       histSimulateDca=False, setMinStep=1, setStepMax=1, slToTpRatios=[.6])
+        book = SetBook(); book.load(overlay); book.cooldown_bars = 0
+        bars = [[100.,101.,99.,100.,1.] for _ in range(1000)]
+        for symbol in ('A-USDT','B-USDT'):
+            book.ingest_bars(symbol, bars)
+        signals = ({'general':[(1,.9,'test')]*1000}, {}, 0)
+        with patch.object(book, 'prepare_replay_signals', return_value=signals):
+            book.replay_all(symbols=['A-USDT','B-USDT'], workers=2, score=False)
+        st = next(s for s in book.by_idx if s.n)
+        self.assertEqual(st.n, 1998)
+        self.assertLessEqual(len(st.hist), 160)
+        self.assertEqual(book._hist_counts[st.id], {'A-USDT':999,'B-USDT':999})
+
+        target = book.replay_clone(['A-USDT','B-USDT'])
+        target._commit_hist({st.id:st.hist}, merge=True,
+                            replayed_symbols=['A-USDT','B-USDT'],
+                            hist_symbol_counts=book._hist_counts, score=False)
+        self.assertEqual(target.sets[st.id].n, 1998)
+        target._score_pair((target.sets[st.id], None))
+        self.assertEqual(target.sets[st.id].n, 1998)
+        target._commit_hist({}, merge=True, replayed_symbols=['A-USDT'],
+                            hist_symbol_counts={}, score=False)
+        self.assertEqual(target.sets[st.id].n, 999)
+        target._score_pair((target.sets[st.id], None))
+        self.assertEqual(target.sets[st.id].n, 999)
+        self.assertEqual(target._hist_counts[st.id], {'B-USDT':999})
+        target._commit_hist({}, merge=True, replayed_symbols=['B-USDT'],
+                            hist_symbol_counts={}, score=False)
+        self.assertEqual(target.sets[st.id].n, 0)
+        self.assertNotIn(st.id, target._hist_counts)
+
+    def test_periodic_export_reuses_the_published_snapshot(self):
+        from types import SimpleNamespace
+        pulse = trader.Pulse.__new__(trader.Pulse)
+        pulse.load = SimpleNamespace(last_budget=SimpleNamespace(stats_full=False))
+        pulse.system_settings = {"systemStatsIntervalS":2, "systemReportIntervalS":0}
+        pulse._stats_force = True; pulse._stats_ts = pulse._report_ts = 0
+        snapshot = {"mode":"QA_FIXTURE", "setCount":37440}
+        pulse.stats = Mock(return_value=snapshot)
+        pulse.position_cost_pct = .1
+        with tempfile.TemporaryDirectory() as root, patch.object(trader, 'DIR', root), \
+                patch.object(trader, 'atomic_write') as publish, patch('stats_report.write') as export:
+            pulse._write_stats_locked(force=True)
+        pulse.stats.assert_called_once_with()
+        self.assertIs(publish.call_args.args[1], snapshot)
+        self.assertIs(export.call_args.args[0], snapshot)
+
     def test_disabled_combined_types_do_not_run_unused_tf_or_consensus_work(self):
         bars = _fixture("rising")
         book = IndicationBook()
@@ -403,7 +455,8 @@ class HistoricScoreBundleTests(unittest.TestCase):
         book._score_one(sample)
         self.assertEqual(sample.n, 24)
         self.assertEqual(set(sample.evaluation_windows), {f"last{n}" for n in EVALUATION_WINDOWS})
-        self.assertEqual(sample.evaluation_windows["last15"]["n"], 15)
+        # Stage windows follow one independent direction, not a mixed tape.
+        self.assertEqual(sample.evaluation_windows["last15"]["n"], 12)
         self.assertIn("LONG", sample.by_side)
         self.assertIn("SHORT", sample.by_side)
         ranked = _rank_set_rows(book)

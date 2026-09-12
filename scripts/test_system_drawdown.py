@@ -96,7 +96,8 @@ class SystemDrawdown(unittest.TestCase):
         p.record_event = lambda *args, **kwargs: None
         p._persist_start_equity = lambda: None
         paths = {name: f"/tmp/cts-g-drawdown-{name}" for name in ("STOP_PATH", "STOP_ALL", "PAUSE_PATH", "RESET_EQ_PATH")}
-        with patch.multiple("pulse_trader", **paths):
+        # This guard test explicitly enables a 10% halt; the default is unlimited.
+        with patch.multiple("pulse_trader", DD_HALT=.10, **paths):
             p.refresh_balance()
             self.assertFalse(p.halted)
             self.assertAlmostEqual(p.system_equity, 100.0)
