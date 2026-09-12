@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
     POSITION_COST_PCT_DEFAULT,
+    LAST_N_DEFAULT,
+    POSITIVE_PF,
+    clears_pf,
     cost_as_frac,
     evaluation_windows,
     last_n_cost_pf,
@@ -498,7 +501,11 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
     closed = [enrich(_row(c), cost_pct) for c in (st.get("closed") or [])]
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
-    pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
+    policy = st.get("pfCost") or {}
+    pf_n = int(policy.get("n") or LAST_N_DEFAULT)
+    pf_floor = max(POSITIVE_PF, float(policy.get("minPf") or POSITIVE_PF))
+    required_samples = int(policy.get("requiredSamples") or pf_n)
+    pc = last_n_cost_pf(closed, pf_n, cost_pct)
     windows = evaluation_windows(closed, cost_pct)
     ddt = drawdown_time_by_symbol(_ddt_tape(closed))
     ddt_gross = drawdown_time_by_symbol(_ddt_tape(closed, gross=True))
@@ -594,9 +601,12 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "costFrac": cost_as_frac(cost_pct),
             "rule": "1.00 PF = net 0 after 1× PositionCost; 1.10 = +1× PositionCost. All intern PF/R/E deduct cost once from gross price-move.",
             "last15": pc,
+            "currentWindow": pc,
+            "windowSize": pf_n,
+            "requiredSamples": required_samples,
             "evaluationWindows": windows,
-            "pass": bool(pc.get("count", 0) < 8 or float(pc.get("ratio") or 1) + 1e-9 >= float((st.get("pfCost") or {}).get("minPf") or 1.1)),
-            "minPf": (st.get("pfCost") or {}).get("minPf"),
+            "pass": bool(pc["count"] >= required_samples and clears_pf(pc["ratio"], pf_floor)),
+            "minPf": pf_floor,
         },
         "profitFactor": {
             "last5": pf_window(closed, 5, cost_pct),
@@ -763,7 +773,7 @@ def render_html(blob: Dict[str, Any]) -> str:
         try:
             if int(count or 0) < 1:
                 return "muted"
-            return "positive" if float(value or 0) >= 1.1 else "negative" if float(value or 0) < 1 else ""
+            return "positive" if clears_pf(value, (blob.get("costAccounting") or {}).get("minPf", POSITIVE_PF)) else "negative" if float(value or 0) < 1 else ""
         except (TypeError, ValueError):
             return "muted"
 
@@ -797,7 +807,8 @@ def render_html(blob: Dict[str, Any]) -> str:
     status_class = "positive" if running else "muted"
     cost = (blob.get("costAccounting") or {}).get("last15") or {}
     windows = blob.get("profitFactor") or {}
-    last15 = windows.get("last15") or cost
+    current_pf = (blob.get("costAccounting") or {}).get("currentWindow") or cost
+    current_n = (blob.get("costAccounting") or {}).get("windowSize", LAST_N_DEFAULT)
     ddt = (blob.get("drawdownTime") or {}).get("afterCost") or {}
     coverage = blob.get("coverage") or {}
     sets_coverage = coverage.get("sets") or {}
@@ -816,7 +827,7 @@ def render_html(blob: Dict[str, Any]) -> str:
         [
             f'<div class="card"><span class="label">Equity</span><strong>{number(blob.get("equity"), 4)}</strong><small>{unit} · start {number(blob.get("startEquity"), 4)}</small></div>',
             f'<div class="card"><span class="label">Session PnL</span><strong class="{metric_class(blob.get("sessionPnl"))}">{signed(blob.get("sessionPnl"), 4)}</strong><small>{number(blob.get("wins"), 0)}W / {number(blob.get("losses"), 0)}L · {number(blob.get("winRate"), 1)}% WR</small></div>',
-            f'<div class="card"><span class="label">Last 15 cost PF</span><strong class="{pf_class(last15.get("ratio"), last15.get("count"))}">{number(last15.get("ratio"), 2)}</strong><small>n {number(last15.get("count"), 0)} · min {number((blob.get("costAccounting") or {}).get("minPf"), 2)}</small></div>',
+            f'<div class="card"><span class="label">Last {number(current_n, 0)} cost PF</span><strong class="{pf_class(current_pf.get("ratio"), current_pf.get("count"))}">{number(current_pf.get("ratio"), 2)}</strong><small>n {number(current_pf.get("count"), 0)} · min {number((blob.get("costAccounting") or {}).get("minPf"), 2)}</small></div>',
             f'<div class="card"><span class="label">Drawdown time</span><strong>{number(float(ddt.get("maxDdS") or 0) / 3600, 2)} h</strong><small>{number(ddt.get("episodes"), 0)} episodes · avg {number(float(ddt.get("avgDdS") or 0) / 3600, 2)} h</small></div>',
             f'<div class="card"><span class="label">Set coverage</span><strong>{number(sets_coverage.get("validatedCount", blob.get("setValidated")), 0)} / {number(sets_coverage.get("setCount", blob.get("setCount")), 0)}</strong><small>{number(sets_coverage.get("activeCount", blob.get("setActive")), 0)} active · {number(blob.get("histFills"), 0)} historic fills</small></div>',
         ]

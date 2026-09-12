@@ -1230,7 +1230,7 @@ function SettingsPage() {
                   label="PF window"
                   value={overlay.pfWindow}
                   min={5}
-                  max={50}
+                  max={75}
                   step={1}
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
@@ -1642,8 +1642,8 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
-                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
-                <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
+                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={75} step={1} onChange={(v) => patch("exitPfWindow", v)} />
+                <Slider label="Exit deact N" value={overlay.exitDeactN} min={5} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
                 <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
               </Grid>
               <ExitLanesTable stats={stats} />
@@ -1957,14 +1957,14 @@ function SettingsPage() {
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
                   min={5}
-                  max={40}
+                  max={75}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
                 />
                 <Num
                   label="DCA deact N"
                   value={overlay.dcaDeactN ?? overlay.setDeactN}
-                  min={10}
+                  min={5}
                   max={80}
                   step={1}
                   onChange={(v) => patch("dcaDeactN", v)}

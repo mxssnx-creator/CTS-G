@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const root = '/workspace/CTS-G/reports/continuous-7d-20260912';
+const root = process.env.QA_OUTPUT_DIR || fileURLToPath(new URL('../reports/continuous-7d-20260912', import.meta.url));
+mkdirSync(root, { recursive: true });
 const browser = await chromium.launch({
   executablePath: process.env.BROWSER_EXECUTABLE_PATH || undefined,
   headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'],
@@ -42,7 +44,14 @@ try {
   assert.equal(overlay.setMinSamples, 75);
   assert.deepEqual(errors, []);
   await page.screenshot({ path: root + '/base-evaluation-settings.png' });
-  const result = { ok: true, checked: 'single PF control, all stage aliases, Base default30 and saved75',
+  for (const [section, label] of [['exits', 'Exit deact N'], ['dca', 'DCA deact N']]) {
+    await page.getByTestId('section-' + section).click();
+    const input = page.locator('label').filter({ hasText: label }).locator('input[type=number]');
+    assert.equal(await input.getAttribute('min'), '5');
+    await input.fill('5');
+    assert.equal(await input.inputValue(), '5');
+  }
+  const result = { ok: true, checked: 'single PF control, all stage aliases, Base default30 and saved75, DCA/Exit deactivation5',
                    exchangeAccess: false, pageErrors: errors, optionalExternalResourcesStubbed: true };
   writeFileSync(root + '/settings-contract.json', JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));

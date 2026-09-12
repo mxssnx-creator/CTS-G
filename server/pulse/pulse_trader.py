@@ -40,6 +40,7 @@ from position_cost import (
     resolve_sl_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
+    clears_pf,
     SL_TP_RATIOS,
     SL_TP_MIN,
     SL_TP_MAX,
@@ -9900,7 +9901,8 @@ class Pulse:
         pc["ddEpisodes"] = ddt.get("episodes")
         pc["currentS"] = ddt.get("currentS")
         pc["minPf"] = self.coord.min_pf
-        pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
+        pc["requiredSamples"] = self.pf_window
+        pc["pass"] = bool(pc["count"] >= self.pf_window and clears_pf(pc["ratio"], self.coord.min_pf))
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"

@@ -39,10 +39,10 @@ class Top25Research(unittest.TestCase):
 
     def test_gate_is_effective_next_bar_and_future_rows_do_not_change_past(self):
         bars=[[100.,100.,100.,100.,1.] for _ in range(110)]
-        tape=[dict(t=60+i,bar=60+i,pnl=1.,pnl_pct=.0115,qty=1,entry=100,position_cost_pct=.15) for i in range(8)]
+        tape=[dict(t=60+i,bar=60+i,pnl=1.,pnl_pct=.0115,qty=1,entry=100,position_cost_pct=.15) for i in range(30)]
         settings={'overlay': {'axisLastEnabled': True}}
         allowed,_,events,_,isolated=causal_gates(bars,tape,np.zeros(110),settings)
-        self.assertFalse(allowed[67].any());self.assertTrue(allowed[68].any())
+        self.assertFalse(allowed[89].any());self.assertTrue(allowed[90].any())
         future=tape+[dict(t=100,bar=100,pnl=-20,pnl_pct=-.2,qty=1,entry=100,position_cost_pct=.15)]
         again,_,_,_,_=causal_gates(bars,future,np.zeros(110),settings)
         np.testing.assert_array_equal(allowed[:101],again[:101])

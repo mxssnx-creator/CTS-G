@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
+from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -96,7 +96,7 @@ class DcaBook:
         self.cooldown_s = 30.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.10
+        self.min_pf = POSITIVE_PF
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
@@ -160,8 +160,8 @@ class DcaBook:
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
-        self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.10)
+        self.deact_n = max(5, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
+        self.min_pf = shared_pf_settings(ov)["minPf"]
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:
@@ -253,11 +253,11 @@ class DcaBook:
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
             self.active = False
             self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
-        elif pc["count"] >= min(8, self.pf_n) and pc["ratio"] + 1e-9 < self.min_pf:
+        elif pc["count"] >= min(8, self.pf_n) and not clears_pf(pc["ratio"], self.min_pf):
             self.active = False
             self.deact_reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
         else:
-            if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["ratio"] >= self.min_pf):
+            if not self.active and avg_r >= 0 and (pc["count"] < 8 or clears_pf(pc["ratio"], self.min_pf)):
                 self.active = True
                 self.deact_reason = ""
         pc["last25AvgR"] = round(avg_r, 4)

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, signed_result_r, POSITION_COST_PCT_DEFAULT
+from position_cost import POSITIVE_PF, clears_pf, shared_pf_settings, last_n_cost_pf, signed_result_r, POSITION_COST_PCT_DEFAULT
 from set_engine import drawdown_time
 
 LANES = ("hard", "lock", "peak", "rev", "time")
@@ -97,7 +97,7 @@ class ExitBook:
         self.trail_min_step = 6.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.10
+        self.min_pf = POSITIVE_PF
         self.min_samples = 8
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
@@ -125,8 +125,8 @@ class ExitBook:
         self.scratch_min = pct_to_frac(float(ov.get("scratchMin") or ov.get("scratchMinPct") or 0.25))
         self.trail_min_step = float(ov.get("trailingMinStep") or 3)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
-        self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or 1.10)
+        self.deact_n = max(5, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
+        self.min_pf = shared_pf_settings(ov)["minPf"]
         self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
@@ -293,7 +293,7 @@ class ExitBook:
         reasons = []
         if len(last25) >= self.deact_n and ln.last25_avg_r < 0:
             reasons.append(f"last{len(last25)} avgR {ln.last25_avg_r:.2f}<0")
-        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and ln.last15_ratio + 1e-9 < self.min_pf:
+        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and not clears_pf(ln.last15_ratio, self.min_pf):
             reasons.append(f"last15 PF {ln.last15_ratio:.2f}<{self.min_pf:.2f}")
         ln.active = not reasons
         ln.deact_reason = "; ".join(reasons)
