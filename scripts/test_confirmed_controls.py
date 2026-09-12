@@ -181,6 +181,49 @@ class MissingPositionControls(unittest.TestCase):
         self.assertFalse(pos.sl_oid)
         self.assertEqual(self.posts,[])
 
+    def test_minimum_rejection_stops_forms_and_equal_size_siblings_then_retries(self):
+        self.response = {'code':110422, 'msg':'The minimum size per order is 2.27 USDT.'}
+        with patch.object(pt.time, 'time', return_value=100.):
+            positions = [self.position(str(i)) for i in range(250)]
+            for pos in positions:
+                self.p.place_ctrl(pos, 'sl', 99.)
+                self.p.place_ctrl(pos, 'tp', 102.)
+                self.p.place_ctrl_pair(pos)
+                self.p.ensure_controls(pos)
+            self.assertEqual(len(self.posts), 1)
+            self.assertEqual(self.batches, [])
+            self.assertEqual(len(self.p.open), 250)
+            self.assertTrue(all(not p.controls_ok for p in positions))
+            self.response = {'code':0, 'data':{'orderId':'resized-sl'}}
+            positions[1].qty = 4.
+            self.assertEqual(self.p.place_ctrl(positions[1], 'sl', 99.), 'resized-sl')
+        with patch.object(pt.time, 'time', return_value=161.):
+            self.assertEqual(self.p.place_ctrl(positions[0], 'sl', 99.), 'resized-sl')
+            self.assertEqual(len(self.posts), 3)
+
+    def test_minimum_partial_batch_keeps_accepted_control_without_fallback(self):
+        self.batch_response = {'code':0, 'data':{'orders':[
+            {'code':0, 'type':'STOP_MARKET', 'orderId':'accepted-sl'},
+            {'code':110422, 'msg':'The minimum size per order is 2.27 USDT.'}]}}
+        pos = self.position('partial-minimum')
+        self.p.place_ctrl_pair(pos)
+        self.p.place_ctrl_pair(self.position('same-size'))
+        self.assertEqual(pos.sl_oid, 'accepted-sl')
+        self.assertFalse(pos.tp_oid)
+        self.assertFalse(pos.controls_ok)
+        self.assertEqual(len(self.batches), 1)
+        self.assertEqual(self.posts, [])
+
+    def test_minimum_batch_envelope_never_trusts_nested_ids(self):
+        self.batch_response = {'code':110422, 'msg':'The minimum size per order is 2.27 USDT.',
+                               'data':{'orders':[{'code':0,'type':'STOP_MARKET','orderId':'untrusted'}]}}
+        pos = self.position('minimum-envelope')
+        self.p.place_ctrl_pair(pos)
+        self.p.place_ctrl_pair(pos)
+        self.assertFalse(pos.sl_oid)
+        self.assertEqual(len(self.batches), 1)
+        self.assertEqual(self.posts, [])
+
 
 class AggregateLaneControls(unittest.TestCase):
     def setUp(self):
