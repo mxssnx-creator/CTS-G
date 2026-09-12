@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+from email.utils import parsedate_to_datetime
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
@@ -62,7 +63,7 @@ LIMITS = {
     "order": (2.4, 5.0),
 }
 
-RATE_CODES = {100410, 100421, 109421, 109429, 100429, 101209}
+RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
 SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429}
 
 
@@ -378,6 +379,10 @@ class FastBingX:
 
     def _trip(self, path: str, body: Dict[str, Any]) -> None:
         code = body.get("code")
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            pass
         msg = str(body.get("msg") or "")
         if code not in RATE_CODES and "rate limit" not in msg.lower() and "100410" not in msg and "frequency limit" not in msg.lower():
             return
@@ -390,8 +395,21 @@ class FastBingX:
             until = raw / 1000.0 if raw > 10_000_000_000 else float(raw)
             # Honor the complete server deadline, including waits >15 min.
             wait = max(0.8, until - now + 0.4)
+        retry = body.get("retryAfter")
+        if retry is not None:
+            try:
+                delay = float(retry)
+            except (TypeError, ValueError):
+                try:
+                    delay = parsedate_to_datetime(str(retry)).timestamp() - now
+                except (TypeError, ValueError, OverflowError):
+                    delay = 0.0
+            wait = max(wait, delay + 0.4)
         self.path_cd[path] = max(self.path_cd.get(path, 0.0), now + wait)
-        self.cooldown_until = max(self.cooldown_until, now + min(wait, 12.0))
+        # Batch and single orders share admission. Switching endpoints must
+        # never bypass the full venue deadline; private reads stay available.
+        shared_wait = wait if self._lane(path, "POST") == "order" else min(wait, 12.0)
+        self.cooldown_until = max(self.cooldown_until, now + shared_wait)
         self.err.write("rate-limit", path=path, code=code, msg=msg[:180], wait=round(wait, 2))
 
     def _req(self, method: str, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -418,6 +436,13 @@ class FastBingX:
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
             self._trip(path, body)
+        if isinstance(body, dict) and body.get("code") in (0, "0", None):
+            data = body.get("data") or {}
+            rows = data.get("orders", []) if isinstance(data, dict) else data
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        self._trip(path, row)
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def _http(self, method: str, url: str) -> Dict[str, Any]:
@@ -437,9 +462,16 @@ class FastBingX:
                 return loads(resp.read())
         except urllib.error.HTTPError as e:
             try:
-                return loads(e.read())
+                body = loads(e.read())
             except Exception:
-                return {"code": e.code, "msg": str(e)[:400], "error": True}
+                body = {"code": e.code, "msg": str(e)[:400], "error": True}
+            if e.code == 429:
+                if not isinstance(body, dict):
+                    body = {}
+                body.update(code=429, error=True)
+                if e.headers and e.headers.get("Retry-After"):
+                    body["retryAfter"] = e.headers.get("Retry-After")
+            return body
         except Exception as e:
             return {"code": -1, "msg": str(e)[:400], "error": True}
 
@@ -479,8 +511,34 @@ class FastBingX:
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
-        chunk = orders[:5]
-        return self.post("/openApi/swap/v2/trade/batchOrders", {"batchOrders": dumps(chunk)})
+        path = "/openApi/swap/v2/trade/batchOrders"
+        if len(orders) <= 5:
+            return self.post(path, {"batchOrders": dumps(orders)})
+        results = []
+        for start in range(0, len(orders), 5):
+            chunk = orders[start:start + 5]
+            response = self.post(path, {"batchOrders": dumps(chunk)})
+            data = response.get("data") or {}
+            rows = data.get("orders", []) if isinstance(data, dict) else data
+            if response.get("code") in (0, "0", None) and isinstance(rows, list) and len(rows) == len(chunk):
+                results.extend(rows)
+                continue
+            # Retain every input's outcome, including work not submitted.
+            # Never replay accepted chunks after a partial batch or ban.
+            pending = list(range(start + len(chunk), len(orders)))
+            for index in range(start, len(orders)):
+                unsubmitted = index >= start + len(chunk) or bool(response.get("cooled"))
+                results.append({"clientOrderID": orders[index].get("clientOrderID"),
+                                "code": response.get("code") or -1,
+                                "msg": response.get("msg") or "Incomplete batch response; reconcile before retry",
+                                "submitted": not unsubmitted,
+                                "cooled": bool(response.get("cooled")),
+                                "error": True})
+            if response.get("cooled"):
+                pending = list(range(start, len(orders)))
+            return {"code": 0, "data": {"orders": results}, "complete": False,
+                    "pendingIndexes": pending, "partialResponse": response}
+        return {"code": 0, "data": {"orders": results}, "complete": True, "pendingIndexes": []}
 
     def gather_public(self, reqs: List[Tuple[str, Dict[str, Any]]], timeout: float = 4.2) -> List[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
         if not reqs:
