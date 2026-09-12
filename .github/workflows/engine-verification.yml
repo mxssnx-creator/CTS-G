@@ -13,7 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CTS_DATA_DIR: ${{ runner.temp }}/cts-g-verification
+      # Job-level env is evaluated before the runner context exists.
+      # ubuntu-latest gives this job its own temporary filesystem.
+      CTS_DATA_DIR: /tmp/cts-g-verification
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     steps:
