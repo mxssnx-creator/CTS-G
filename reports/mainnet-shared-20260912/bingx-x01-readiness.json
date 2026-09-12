@@ -1,0 +1,107 @@
+{
+  "connection": "bingx-x01",
+  "endpoint": "https://open-api.bingx.com",
+  "activationPerformed": false,
+  "profilePatch": {
+    "histLookbackBars": 2880,
+    "baseEvalPosCount": 30,
+    "setPfWindow": 30,
+    "setMinSamples": 30,
+    "maxOpen": 0,
+    "maxPerGroup": 0,
+    "setMaxActive": 0,
+    "entryPolicyMaxCandidates": 0,
+    "symbolCap": 20,
+    "axisPrevEnabled": false,
+    "axisLastEnabled": false,
+    "axisContEnabled": false,
+    "axisPauseEnabled": false,
+    "normalExecutionEnabled": true,
+    "stratTrailing": true,
+    "setUseHistoricGate": true,
+    "setStrictGate": true,
+    "controlOrdersPerConfig": true,
+    "minPf": 1.05,
+    "baseMinPf": 1.05,
+    "mainMinPf": 1.05,
+    "realMinPf": 1.05,
+    "setMinPf": 1.05,
+    "dcaMinPf": 1.05,
+    "exitMinPf": 1.05
+  },
+  "changes": {
+    "histLookbackBars": {
+      "previous": 3120,
+      "proposed": 2880
+    },
+    "baseEvalPosCount": {
+      "previous": null,
+      "proposed": 30
+    },
+    "setPfWindow": {
+      "previous": 25,
+      "proposed": 30
+    },
+    "symbolCap": {
+      "previous": 90,
+      "proposed": 20
+    },
+    "axisPrevEnabled": {
+      "previous": null,
+      "proposed": false
+    },
+    "axisLastEnabled": {
+      "previous": null,
+      "proposed": false
+    },
+    "axisContEnabled": {
+      "previous": null,
+      "proposed": false
+    },
+    "axisPauseEnabled": {
+      "previous": null,
+      "proposed": false
+    },
+    "setStrictGate": {
+      "previous": false,
+      "proposed": true
+    },
+    "minPf": {
+      "previous": 1.18,
+      "proposed": 1.05
+    },
+    "baseMinPf": {
+      "previous": 1.08,
+      "proposed": 1.05
+    },
+    "mainMinPf": {
+      "previous": 1.12,
+      "proposed": 1.05
+    },
+    "realMinPf": {
+      "previous": 1.18,
+      "proposed": 1.05
+    },
+    "setMinPf": {
+      "previous": 1.26,
+      "proposed": 1.05
+    },
+    "dcaMinPf": {
+      "previous": null,
+      "proposed": 1.05
+    },
+    "exitMinPf": {
+      "previous": null,
+      "proposed": 1.05
+    }
+  },
+  "requiredIndependentState": [
+    "credentials",
+    "open positions",
+    "pending orders",
+    "fills",
+    "STOP marker",
+    "ownership prefix",
+    "Redis connection key"
+  ]
+}
