@@ -7,7 +7,8 @@ import pathlib
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PULSE = ROOT / "server" / "pulse"
@@ -80,6 +81,22 @@ def _fixture(name: str, count: int = 96) -> list[list[float]]:
 
 
 class ReplayIndicationTests(unittest.TestCase):
+    def test_periodic_export_reuses_the_published_snapshot(self):
+        from types import SimpleNamespace
+        pulse = trader.Pulse.__new__(trader.Pulse)
+        pulse.load = SimpleNamespace(last_budget=SimpleNamespace(stats_full=False))
+        pulse.system_settings = {"systemStatsIntervalS":2, "systemReportIntervalS":0}
+        pulse._stats_force = True; pulse._stats_ts = pulse._report_ts = 0
+        snapshot = {"mode":"QA_FIXTURE", "setCount":37440}
+        pulse.stats = Mock(return_value=snapshot)
+        pulse.position_cost_pct = .1
+        with tempfile.TemporaryDirectory() as root, patch.object(trader, 'DIR', root), \
+                patch.object(trader, 'atomic_write') as publish, patch('stats_report.write') as export:
+            pulse._write_stats_locked(force=True)
+        pulse.stats.assert_called_once_with()
+        self.assertIs(publish.call_args.args[1], snapshot)
+        self.assertIs(export.call_args.args[0], snapshot)
+
     def test_disabled_combined_types_do_not_run_unused_tf_or_consensus_work(self):
         bars = _fixture("rising")
         book = IndicationBook()

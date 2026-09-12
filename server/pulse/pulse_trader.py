@@ -10613,7 +10613,7 @@ class Pulse:
         if now - float(getattr(self, "_report_ts", 0)) >= getattr(self, "system_settings", {}).get("systemReportIntervalS", 30):
             self._report_ts = now
             try:
-                self.write_results_export()
+                self.write_results_export(stats)
             except Exception:
                 pass
 
@@ -10686,9 +10686,12 @@ class Pulse:
         out.sort(key=lambda r: r["net"])
         return out
 
-    def write_results_export(self) -> None:
+    def write_results_export(self, stats: Optional[Dict[str, Any]] = None) -> None:
         from stats_report import write as write_report
-        st = self.stats()
+        # Periodic export uses the already coherent snapshot. Rebuilding the
+        # full catalog here duplicates scoring summaries while the history
+        # publisher waits for the state lock.
+        st = stats if stats is not None else self.stats()
         write_report(
             st,
             os.path.join(DIR, f"results-export-{CONN_SHORT}.json"),

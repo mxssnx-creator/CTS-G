@@ -20,7 +20,7 @@ No winner selected solely on training has at least eight holdout trades with pos
 - Full Python discovery, including durable SQLite crash recovery and Redis Lua tests: 319/319.
 - Engine integration suite: 409/409.
 - Nine continuous regressions: 700 independently scored normal/trailing sets produce exactly 700 adapter-confirmed owned openings, 1,400 quantity-matched TP/SL controls, zero duplicates and zero remaining admission lanes. A valid LONG remains visible despite losing SHORT history. The first live close retains sufficient historical evidence; unchanged content reuses calculations. Retention preserves last75 per direction and every middle history slice publishes qualification.
-- Admission regressions: 24/24; performance regressions: 17/17.
+- Admission regressions: 24/24; performance regressions: 18/18, including reuse of the exact published snapshot for periodic exports.
 - C++ policy kernel compared with an independent Python scalar oracle; cold-start/same-bar causal boundary tested.
 - Release contract: 15/15; forced-config checks: 16/16.
 - JavaScript/TypeScript suites: 261 passed, four intentional skips. Typecheck and production build pass.
@@ -32,6 +32,8 @@ No winner selected solely on training has at least eight holdout trades with pos
 The VST-only release deployment script preserves `/var/lib/cts-gx` and leaves the X01 process on its existing code. X02, its HTTP sidecar and the CTS-GX UI use an isolated revision. Runtime checks require `VST_DEMO`; `CTS_VST_ONLY=1` rejects any mainnet endpoint before execution. The separate forced baseline also selects all eligible rows, uses a 1.05 minimum and rechecks the shared PF at admission. Its VST-only switch remains explicit. Logical test order counts above are not claims of 700 BingX exchange positions. Exchange position endpoints aggregate by symbol and hedge side; CTS owns independent quantity-scoped order/control groups.
 
 The CTS-GX UI restart loop was a conflict with CTS-GA on port 3107. CTS-GX now uses its intended free port 3102. Before the change it had over 17,000 restarts; after repair it serves HTTP 200 without restarts.
+
+The unrestricted 37,440-set/574-symbol process exceeded its 3,456 MiB `MemoryHigh` during the second symbol. The kernel recorded 175,722 high-memory throttling events, without an OOM. Available host memory permitted a VST-only adjustment to 4,608 MiB high / 5,120 MiB maximum while preserving at least 2 GiB host headroom. The same process then published the second symbol. `runtime-memory-verification.json` retains the before/after evidence. Initial coverage was still incomplete and no real VST opening had been observed at that checkpoint. Periodic report generation also now reuses the published snapshot instead of rebuilding it under the shared state lock.
 
 CSS compilation previously scanned large research JSON/HTML as candidate class sources. Restricting Tailwind detection to `src` restores compilation (client approximately six seconds). Source-path syntax: [Tailwind documentation](https://tailwindcss.com/docs/detecting-classes-in-source-files#setting-your-base-path).
 
