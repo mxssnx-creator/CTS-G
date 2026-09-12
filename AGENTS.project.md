@@ -14,3 +14,7 @@
   rate limits, including complete retry deadlines shared by batch and single
   order submission. Keep unfinished eligible lanes available for subsequent
   processing; count confirmed openings and never duplicate accepted orders.
+- User instruction, 2026-09-12: Mainnet and VST use the same processing
+  structures and shared profile. Keep endpoints, credentials, ownership and
+  position/fill/pending state separate. The stopped Mainnet preparation must
+  preserve STOP and must not start, enable or restart the trading service.

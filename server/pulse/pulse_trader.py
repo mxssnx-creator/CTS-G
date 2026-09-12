@@ -75,6 +75,7 @@ from system_settings import calculation_overlay, normalize_system_settings
 from runtime_statistics import RuntimeMonitor, persistent_activity
 from redis_coordination import coordinator as redis_config
 from calculation_cache import CalculationCache
+from connection_profile import connection_endpoint
 
 _CID_SEQUENCE_LOCK = threading.Lock()
 _CID_SEQUENCES: Dict[str, Tuple[int, int]] = {}
@@ -12940,17 +12941,13 @@ def main() -> None:
     secret = redis_hget("api_secret")
     if not key or not secret:
         raise SystemExit(f"missing {CONN_SHORT} credentials")
-    test = (redis_hget("is_testnet") or "").strip().lower()
-    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
-        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
-    else:
-        BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
-    if str(os.environ.get("CTS_VST_ONLY") or "").lower() in ("1", "true", "yes"):
-        endpoint = urlparse(BASE)
-        if (CONN_SHORT != "bingx-x02" or endpoint.scheme != "https" or endpoint.hostname != "open-api-vst.bingx.com"
-                or endpoint.port not in (None, 443) or endpoint.username or endpoint.password
-                or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment):
-            raise SystemExit("VST-only deployment requires the verified X02 demo endpoint")
+    try:
+        BASE = connection_endpoint(
+            CONN_SHORT, redis_hget("base_url"), redis_hget("is_testnet"),
+            vst_only=str(os.environ.get("CTS_VST_ONLY") or "").lower() in ("1", "true", "yes"),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
     pulse = Pulse(api, load_contracts())
     import signal
