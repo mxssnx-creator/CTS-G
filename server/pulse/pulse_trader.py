@@ -157,7 +157,7 @@ CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
-DEFAULT_SYMBOL_CAP = 50
+DEFAULT_SYMBOL_CAP = 0
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -1581,6 +1581,47 @@ class Pulse:
             if self._position_for_client(cid) is None:
                 pending.add(row.get("group_key") or cid)
         return len(self.open) + len(pending)
+
+    def entry_queue_state(self, matrix) -> Dict[str, Any]:
+        """Count currently signalled config lanes without expanding the matrix.
+
+        Block additions have their own lifecycle; this is the normal/trailing
+        admission queue. Filled and uncertain intents are counted once.
+        """
+        scopes = {scope: {st.id: st for st in states if st is not None}
+                  for scope, states in matrix.sets_by_scope.items()}
+        signals = {}
+        for signal in matrix.signals:
+            pack, side = matrix.scope(signal)
+            signals.setdefault((signal[1], side, pack), []).append(signal)
+
+        def lane_key(symbol, side, pack, set_id, lane):
+            st = scopes.get((pack, side), {}).get(set_id)
+            if st is None:
+                return None
+            mode = "trailing" if st.kind == "trail" else "normal"
+            for signal in signals.get((symbol, side, pack), ()):
+                expected = self.execution_lane_key(pack, signal[3], st, mode)
+                if self.execution_lane_matches(lane, expected):
+                    return (symbol, side, expected)
+            return None
+
+        opened = set()
+        for pos in self.open.values():
+            key = lane_key(pos.symbol, pos.side, pos.pack, pos.set_id, getattr(pos, "execution_lane", ""))
+            if key:
+                opened.add(key)
+        pending = set()
+        for row in (getattr(self, "pending_orders", {}) or {}).values():
+            if str(row.get("kind") or "entry") != "entry" or _sf(row.get("requested_qty")) <= _sf(row.get("filled_qty")) + 1e-12:
+                continue
+            meta = row.get("metadata") or {}
+            key = lane_key(row.get("symbol"), row.get("side"), meta.get("pack"), meta.get("set_id"), meta.get("execution_lane"))
+            if key:
+                pending.add(key)
+        return {"eligible": len(matrix), "opened": len(opened), "pending": len(pending - opened),
+                "remaining": max(0, len(matrix) - len(opened | pending)), "updatedAt": time.time(),
+                "scope": "current-signal-normal-trailing-config-lanes"}
 
     def pending_entry_margin(self) -> float:
         reserved = 0.0
@@ -7170,6 +7211,7 @@ class Pulse:
             "trackPrefix": TAG,
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -8576,6 +8618,7 @@ class Pulse:
                 burst = 1
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
+        self._entry_queue = self.entry_queue_state(matrix)
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             # Per-scope signal counts: when every ranked signal maps to a
             # scope whose entry_sets() is empty (e.g. indications mid-replay),
@@ -9966,6 +10009,7 @@ class Pulse:
             "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
             "activeSetCount": int(sets_snap.get("activeCount") or 0),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
             "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
             "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
             "progressPhase": phase,
@@ -10456,6 +10500,7 @@ class Pulse:
                 "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
                 "validatedCount": int(scov.get("validatedCount") or 0),
                 "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+                "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
                 "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),

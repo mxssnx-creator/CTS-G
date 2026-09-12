@@ -157,26 +157,12 @@ class Coordinator:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or POSITIVE_PF)
         except Exception:
             self.min_pf = float(ov.get("realMinPf") or ov.get("minPf") or POSITIVE_PF)
-        # Per-stage floors: overlay wins, then strategies.main.<stage>, then the shared defaults.
-        try:
-            stages_cts = (cts.get("strategies") or {}).get("main") or {}
-        except Exception:
-            stages_cts = {}
-        for _stage, _dflt in (("base", POSITIVE_PF), ("main", POSITIVE_PF), ("real", POSITIVE_PF)):
-            _v = ov.get(f"{_stage}MinPf")
-            if _v is None:
-                try:
-                    _v = (stages_cts.get(_stage) or {}).get("min_profit_factor")
-                except Exception:
-                    _v = None
-            if _v is None and _stage == "real":
-                _v = self.min_pf
-            try:
-                self.stage_min_pf[_stage] = normalize_pf(_v, _dflt) if _v is not None else _dflt
-            except Exception:
-                self.stage_min_pf[_stage] = _dflt
-        # Strictest stage (Real) is the canonical min PF consumers read.
-        self.min_pf = self.stage_min_pf["real"]
+        # Migrate a legacy overall Real PF to one setting when no overlay
+        # control is present. Any explicit overlay alias wins atomically.
+        from position_cost import PF_SETTING_KEYS, shared_pf_settings
+        unified = shared_pf_settings(ov if any(k in ov for k in PF_SETTING_KEYS) else {"minPf": self.min_pf})
+        self.min_pf = unified["minPf"]
+        self.stage_min_pf = {stage: self.min_pf for stage in ("base", "main", "real")}
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
         if self.position_cost_pct > 2:

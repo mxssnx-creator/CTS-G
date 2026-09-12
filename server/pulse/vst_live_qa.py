@@ -571,6 +571,9 @@ def main() -> int:
     api = None
     if key and secret:
         base = redis("base_url") or "https://open-api-vst.bingx.com"
+        from urllib.parse import urlparse
+        if urlparse(base).scheme != "https" or urlparse(base).hostname != "open-api-vst.bingx.com":
+            raise RuntimeError("VST QA requires the BingX virtual-money demo endpoint")
         api = FastBingX(key, secret, ErrorLog("/tmp/vst-live-qa-err.jsonl"), base=base)
         snap = api_tests(api, out)
         classify_book(api, snap.get("positions") or [], out)

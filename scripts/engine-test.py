@@ -127,7 +127,7 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
@@ -135,8 +135,8 @@ def overlay_test() -> None:
     rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
     rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
-    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 0)
+    rec("default-unlimited-symbols", int(x01.get("symbolCap") or 0) == 0 and int(x02.get("symbolCap") or 0) == 0)
     rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
@@ -401,7 +401,7 @@ def coord_test() -> None:
     base_st = next((s for s in book_ax.by_idx if s.kind == "base"), None)
     rec("coord-base-index", base_st is not None and bool((book_ax._ids_by_kind or {}).get("base")), str(len((book_ax._ids_by_kind or {}).get("base") or [])))
     if base_st is not None:
-        base_st.last15_n = 15
+        base_st.last15_n = book_ax.eval_need()
         base_st.last15_ratio = 1.4
     c_base = Coordinator()
     agg = c_base.coordinate_base_sets(book_ax)
@@ -413,7 +413,7 @@ def coord_test() -> None:
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow the shared +1× PositionCost (1.10) default unless overridden."""
+    """Every stage follows one overall Cost-PF floor, >1.05 by default."""
     from coord_engine import Coordinator, recent_closed_rows
     from position_cost import POSITIVE_PF
 
@@ -432,7 +432,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.06}}}},
             {"baseMinPf": 1.05, "mainMinPf": 1.08, "realMinPf": 1.1})
     rec("stage-pf-overlay-wins",
-        c2.stage_min_pf == {"base": 1.05, "main": 1.08, "real": 1.10},
+        c2.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(c2.stage_min_pf))
 
     # 3) strategies.main.<stage> used when no overlay key
@@ -442,7 +442,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.15}}}},
             {})
     rec("stage-pf-strategies-fallback",
-        c3.stage_min_pf == {"base": 1.05, "main": 1.07, "real": 1.15},
+        c3.stage_min_pf == {"base": 1.15, "main": 1.15, "real": 1.15},
         str(c3.stage_min_pf))
     rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
 

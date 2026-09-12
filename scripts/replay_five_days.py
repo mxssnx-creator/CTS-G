@@ -37,7 +37,7 @@ def pf(gain, loss):
 
 def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
            entry_filter=None, add_filter=None, on_close=None, on_equity=None,
-           min_pf=1.02, max_dd_s=57600):
+           min_pf=1.02, max_dd_s=57600, on_closes=None, return_rows=True):
     """Parallel independent configs. Only completed bar information is used.
 
     Stops/targets are tested before close-price additions. Same-bar ambiguity
@@ -119,6 +119,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
                           np.where(hit_tp, target, price))[ids]
             cost = (fees[ids] + qty[ids]*px*fee)/original[ids]
             pnl = side*qty[ids]*(px-entry[ids])/original[ids] - cost
+            if on_closes is not None:
+                on_closes(ids.copy(), entered[ids].astype(np.int32), i, pnl.copy(), cost.copy())
             if on_close is not None:
                 for offset, k in enumerate(ids):
                     on_close(dict(config=int(k),bar=i,entryBar=int(entered[k]),
@@ -190,6 +192,8 @@ def replay(bars, signals, side, cfg, warmup=60, cost_pct=.10,
         dd_total += underwater*60; dd_max = np.maximum(dd_max, dd_age)
         if i == split-1:
             train_dd = dd.copy()
+    if not return_rows:
+        return []
     hours = (len(bars)-warmup)/60
     rows = []
     for k in range(count):

@@ -81,6 +81,7 @@ const CALC_RANGE_PRESETS = [
   { label: "2h", hours: 2 },
   { label: "7h", hours: 7 },
   { label: "24h", hours: 24 },
+  { label: "2d", hours: 48 },
   { label: "72h", hours: 72 },
   { label: "7d", hours: 168 },
   { label: "14d", hours: 336 },
@@ -234,7 +235,17 @@ function SettingsPage() {
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
-    setOverlay((o) => ({ ...o, [k]: v }));
+    setOverlay((o) => {
+      const next = { ...o, [k]: v };
+      if (["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"].includes(k)) {
+        for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
+          next[key] = normalizePf(Number(v), 1.05);
+      }
+      if (k === "setPfWindow" || k === "baseEvalPosCount") {
+        next.baseEvalPosCount = Number(v); next.setPfWindow = Number(v); next.setMinSamples = Number(v);
+      }
+      return next;
+    });
     setDirty(true);
     setSaveMsg(null);
   };
@@ -253,7 +264,7 @@ function SettingsPage() {
         trailing: true,
         stratBlock: true,
         stratDca: false,
-        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 420) / 60)),
+        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 2880) / 60)),
         allConfigs: true,
       }));
     }
@@ -1545,18 +1556,18 @@ function SettingsPage() {
                   onChange={(v) => patch("histRefreshS", v)}
                 />
                 <Slider
-                  label="PF window"
+                  label="Base evaluation · last positions"
                   value={overlay.setPfWindow}
                   min={5}
-                  max={40}
-                  step={1}
-                  hint="Last N historic+live fills for PositionCost PF"
+                  max={75}
+                  step={5}
+                  hint="Default 30 closed positions · one shared PF floor across all stages"
                   onChange={(v) => patch("setPfWindow", v)}
                 />
                 <Slider
                   label="Deact window"
                   value={overlay.setDeactN}
-                  min={10}
+                  min={5}
                   max={80}
                   step={1}
                   hint="Latest N live fills · overall average loss deactivates that Set"
@@ -1732,9 +1743,9 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("realMinPf", v)} />
+                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("baseMinPf", v)} />
+                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("mainMinPf", v)} />
+                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared overall PF · default 1.05" onChange={(v) => patch("realMinPf", v)} />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />

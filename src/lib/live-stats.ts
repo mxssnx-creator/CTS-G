@@ -293,6 +293,7 @@ export type LiveStats = {
     exchangeOwnOpen?: number;
     exchangePositionGroups?: number;
     entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
     activeSetCap?: number;
     activeSetUnlimited?: boolean;
     foreignPositionCount?: number;
@@ -519,6 +520,7 @@ export type LiveStats = {
       activeCount?: number;
       validatedCount?: number;
       entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
       entryCandidateCap?: number;
       histFills?: number;
       liveFills?: number;

@@ -22,10 +22,10 @@ PF_STEP = 0.01
 RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
-LAST_N_DEFAULT = 15
-# +1× PositionCost net. 1.00 is only break-even after cost; validated /
-# positive results must clear this floor so "PF > 1.10" is the real edge.
-POSITIVE_PF = RATIO_BASE + RATIO_SCALE
+LAST_N_DEFAULT = 30
+# Validation requires strictly more than +0.5× PositionCost net.
+# A higher configured floor is shared by every stage.
+POSITIVE_PF = 1.05
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -262,6 +262,22 @@ def normalize_pf(value: Any, fallback: float) -> float:
     if parsed != parsed or abs(parsed) == float("inf"):
         parsed = float(fallback)
     return round(max(PF_MIN, min(PF_MAX, parsed)), 2)
+
+
+PF_SETTING_KEYS = ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf")
+
+
+def shared_pf_settings(overlay):
+    """One threshold; legacy stage keys are aliases, never extra PF multipliers."""
+    result = dict(overlay or {})
+    value = next((result[k] for k in PF_SETTING_KEYS if result.get(k) is not None), POSITIVE_PF)
+    floor = normalize_pf(value, POSITIVE_PF)
+    result.update({key: floor for key in PF_SETTING_KEYS})
+    return result
+
+
+def clears_pf(value, floor=POSITIVE_PF):
+    return finite(value) > POSITIVE_PF + 1e-9 and finite(value) + 1e-9 >= finite(floor, POSITIVE_PF)
 SL_TP_MIN = 0.1
 SL_TP_MAX = 3.0
 SL_TP_STEP = 0.1
@@ -476,8 +492,8 @@ def r_from_ratio(ratio: float) -> float:
 
 
 def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
-    """True when cost-scale PF has earned at least +1× PositionCost (1.10)."""
-    return finite(ratio) + 1e-9 >= finite(floor, POSITIVE_PF)
+    """Strictly above the 1.05 Base floor and at least the configured floor."""
+    return clears_pf(ratio, floor)
 
 
 def net_move_pct(ratio: float, cost_pct: float) -> float:

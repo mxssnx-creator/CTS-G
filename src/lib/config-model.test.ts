@@ -54,7 +54,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.10, key);
+      assert.equal(value[key], 1.05, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -75,7 +75,7 @@ test("risk and step limits preserve unlimited TP and the 0.15 percent SL floor",
   assert.equal(value.slMinPct, .15);
   assert.equal(value.setStepMax, 30);
   assert.equal(value.minPf, 1.35);
-  assert.equal(value.setMinPf, 1.05);
+  assert.equal(value.setMinPf, 1.35);
 });
 
 test("saving a measured cost never overwrites the explicit fallback", () => {
@@ -89,7 +89,7 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to unlimited logical positions, independent lanes and 50 symbols", () => {
+test("new and legacy settings default to unlimited logical positions, independent lanes and unlimited symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
@@ -110,8 +110,8 @@ test("new and legacy settings default to unlimited logical positions, independen
     for (const key of ["strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls"] as const) {
       assert.equal(value.modules?.[key], true, key);
     }
-    assert.equal(value.symbolCap, 50);
-    assert.equal(isUnlimitedSymbolBook(value), false);
+    assert.equal(value.symbolCap, 0);
+    assert.equal(isUnlimitedSymbolBook(value), true);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
 });

@@ -83,8 +83,8 @@ except Exception:  # pragma: no cover - scalar replay remains the fallback
 PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
-PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 420
+PF_N_DEFAULT = 30
+LOOKBACK_DEFAULT = 2880
 LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
@@ -98,7 +98,7 @@ STEP_MAX = 30
 # Keep enough recent fills for the 5/10/15/25/50/75 evaluation windows while
 # retaining a hard per-set memory bound.  trim_hist distributes this cap over
 # symbols, so a busy multi-symbol book cannot grow without limit.
-HIST_CAP = 80
+HIST_CAP = 160
 _SIDE_LONG = "LONG"
 _SIDE_SHORT = "SHORT"
 ENTRY_POLICY_STRICT = "strict"
@@ -937,6 +937,7 @@ class SetState:
     normal_evaluation: Dict[str, Any] = field(default_factory=dict)
     adjusted_evaluation: Dict[str, Any] = field(default_factory=dict)
     adjustment_deltas: Dict[str, Any] = field(default_factory=dict)
+    _scored_input: Any = field(default=None, repr=False, compare=False)
 
     def catalog_copy(self) -> "SetState":
         """Parameter-only clone for isolated replay. No hist/live/eval payload."""
@@ -1027,7 +1028,7 @@ class SetBook:
         self.max_dd_s = 57600.0
         self.auto_deact = True
         self.use_historic_gate = True
-        self.min_samples = 8
+        self.min_samples = 30
         self.reactivate = True
         self.strict_gate = True
         # Keep every quality-qualified Set available by default. Positive values
@@ -1306,6 +1307,8 @@ class SetBook:
         self._invalidate_entry_cache()
         self._entry_rows_cache = {}
         cts = cts or {}
+        from position_cost import shared_pf_settings
+        ov = shared_pf_settings(ov)
         from system_settings import normalize_system_settings
         self.system_workers = normalize_system_settings(ov)["systemWorkers"]
         self.sl_min = min(.03, max(.0015, finite(ov.get("slMinPct"), .15) / 100))
@@ -1320,8 +1323,8 @@ class SetBook:
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(60.0, min(86400.0, float(ov.get("histRefreshS") or 3600)))
-        self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
-        self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
+        self.pf_n = max(5, min(75, int(ov.get("baseEvalPosCount") or ov.get("setPfWindow") or PF_N_DEFAULT)))
+        self.deact_n = max(5, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
         def _pf(key: str, fallback: float) -> float:
             return normalize_pf(ov.get(key, fallback), fallback)
         self.stage_min_pf = {
@@ -1332,11 +1335,11 @@ class SetBook:
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
         try:
-            self.main_eval = max(3, min(25, int(ov.get("mainEvalPosCount") or 5)))
+            self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
         except Exception:
             self.main_eval = 5
         try:
-            self.real_eval = max(3, min(15, int(ov.get("realEvalPosCount") or 3)))
+            self.real_eval = max(3, min(75, int(ov.get("realEvalPosCount") or 3)))
         except Exception:
             self.real_eval = 3
         self.max_dd_s = max(600.0, min(960.0 * 60.0, float(ov.get("setMaxDdTimeS") or 57600)))
@@ -1367,7 +1370,7 @@ class SetBook:
         except Exception:
             self.optimization_n = 50
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
-        self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 8)))
+        self.min_samples = max(5, min(75, int(ov.get("setMinSamples") or self.pf_n)))
         try:
             self.entry_policy_min_live_samples = max(
                 5,
@@ -1503,7 +1506,7 @@ class SetBook:
             self._rebuild_sets()
 
     def eval_need(self) -> int:
-        """Fills needed to enable a Set. Capped at 8 so last-15 can validate."""
+        """Required completed Base samples; default is the full last-30 window."""
         try:
             ms = int(self.min_samples or 8)
         except Exception:
@@ -1512,7 +1515,7 @@ class SetBook:
             pf = int(self.pf_n or 15)
         except Exception:
             pf = 15
-        return max(5, min(8, ms, pf))
+        return max(5, min(ms, pf))
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
         base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
@@ -2018,7 +2021,7 @@ class SetBook:
             if any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in st.live):
                 continue
             st.live.append(row)
-            st.live = sorted(st.live, key=lambda r: finite(r.get("t")))[-80:]
+            st.live = sorted(st.live, key=lambda r: finite(r.get("t")))[-HIST_CAP:]
             self._score_one(st)
         self._snap_ts = 0.0
         self._live_ov_ts = 0.0
@@ -2376,10 +2379,21 @@ class SetBook:
 
     def _score_pair(self, pair):
         state, bundle = pair
+        # Repeated publications of identical evidence do not rescore a Set.
+        # Hash contents (not list identity/length): rolling tapes replace rows.
+        from calculation_cache import CalculationCache
+        signature = (CalculationCache.signature(self, state, rows=state.tape()),
+                     self.auto_deact, self.live_negative_deact, self.strict_gate,
+                     self.reactivate, self.min_pf, state.locked)
+        if getattr(state, "_scored_input", None) == signature:
+            self.score_reused = getattr(self, "score_reused", 0) + 1
+            return
         if bundle is not None and hasattr(bundle, "signature"):
             cache = self.calculation_cache
             bundle = bundle.value if not state.live and cache and cache.signature(self, state) == bundle.signature else None
         self._score_one(state, bundle=bundle)
+        state._scored_input = signature
+        self.score_completed = getattr(self, "score_completed", 0) + 1
 
     def replay_symbol_partial(
         self,
@@ -3394,7 +3408,8 @@ class SetBook:
         need = self.eval_need()
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
-        validated = n15 >= need and is_positive_pf(ratio)
+        from position_cost import clears_pf
+        validated = n15 >= need and clears_pf(ratio, self.min_pf)
         enable_pf = float(self.real_min_pf or POSITIVE_PF)
         proven_neg = n15 >= need and ratio + 1e-9 < enable_pf
         dd_s = float(dd["maxS"])
@@ -3465,9 +3480,10 @@ class SetBook:
         base_floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
         main_floor = float(self.stage_min_pf.get("main", POSITIVE_PF))
         real_floor = float(self.stage_min_pf.get("real", POSITIVE_PF))
-        base = base_n >= need and base_pf + 1e-9 >= base_floor and dd_ok
-        main = base and main_n >= main_req and main_pf + 1e-9 >= main_floor
-        real = main and real_n >= real_req and real_pf + 1e-9 >= real_floor
+        from position_cost import clears_pf
+        base = base_n >= need and clears_pf(base_pf, base_floor) and dd_ok
+        main = base and main_n >= main_req and clears_pf(main_pf, main_floor)
+        real = main and real_n >= real_req and clears_pf(real_pf, real_floor)
         qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
         st.stage = qualified or "Unqualified"
@@ -3499,30 +3515,30 @@ class SetBook:
         reasons: List[str] = []
         if base_n < need:
             reasons.append(f"sample {base_n}/{need}")
-        if base_pf + 1e-9 < base_floor:
+        if not clears_pf(base_pf, base_floor):
             reasons.append(f"base PF {base_pf:.2f}<{base_floor:.2f}")
         elif main_n < main_req:
             reasons.append(f"main sample {main_n}/{main_req}")
-        elif main_pf + 1e-9 < main_floor:
+        elif not clears_pf(main_pf, main_floor):
             reasons.append(f"main PF {main_pf:.2f}<{main_floor:.2f}")
         elif real_n < real_req:
             reasons.append(f"real sample {real_n}/{real_req}")
-        elif real_pf + 1e-9 < real_floor:
+        elif not clears_pf(real_pf, real_floor):
             reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         if not dd_ok:
             reasons.append("DDt cap")
         reason = "; ".join(reasons)
         st.strategy_adjustments = {
             "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
-            "main": {"qualified": main, "evaluated": True, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
-            "real": {"qualified": real, "evaluated": True, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
+            "main": {"qualified": main, "evaluated": base, "minPf": main_floor, "pf": round(main_pf, 6), "n": main_n, "ddtS": dd_s},
+            "real": {"qualified": real, "evaluated": main, "minPf": real_floor, "pf": round(real_pf, 6), "n": real_n, "ddtS": dd_s},
             "live": {"evaluation": False, "source": "real"},
             "exchange": {"trackingOnly": True},
         }
         records = {
             "Base": {"evaluated": True, "qualified": base, "sampleCount": base_n, "pf": round(base_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Main": {"evaluated": True, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
-            "Real": {"evaluated": True, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Main": {"evaluated": base, "qualified": main, "sampleCount": main_n, "pf": round(main_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
+            "Real": {"evaluated": main, "qualified": real, "sampleCount": real_n, "pf": round(real_pf, 6), "ddtS": dd_s, "reason": reason or "qualified"},
         }
         return {
             "stage": st.stage,
@@ -3676,7 +3692,7 @@ class SetBook:
         return coordinator.aggregate_axis_variants(rows)
 
     def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:
-        """Return unique parent Set IDs qualified for a downstream stage."""
+        """Return unique config Set IDs qualified for a downstream stage."""
         name = str(stage or "").strip().lower()
         if name not in {"base", "main", "real"}:
             raise ValueError(f"qualification stage must be Base, Main, or Real: {stage}")
@@ -3687,7 +3703,7 @@ class SetBook:
                 continue
             if not bool((st.stage_ledger or {}).get(name)):
                 continue
-            parent = st.parent_set_id or st.id
+            parent = st.id
             if parent not in seen:
                 seen.add(parent)
                 out.append(parent)
@@ -3695,52 +3711,12 @@ class SetBook:
 
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
-        if not self.auto_deact:
-            return True, ""
-        live_rows = sorted((r for r in live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
-        need = self.eval_need()
-        enable_pf = float(self.real_min_pf or POSITIVE_PF)
-        if len(live_rows) < need:
-            if not self.strict_gate:
-                return True, ""
-            if not m:
-                return False, "unproven"
-            n15 = int(m.get("last15_n") or 0)
-            ratio = float(m.get("last15_ratio") or 0)
-            if n15 < need:
-                return False, "unproven"
-            if ratio + 1e-9 < enable_pf:
-                return False, f"hist PF {ratio:.2f}<{enable_pf:.2f}"
-            dd_s = float(m.get("max_dd_s") or 0)
-            if dd_s > float(self.max_dd_s or 57600) + 1e-9:
-                return False, f"hist DDt {dd_s:.0f}s"
-            return True, ""
-        window_ok, window_reason, _windows = self._live_windows_ok(live_rows, minimum_pf=1.0)
-        if not window_ok:
-            return False, window_reason
-        live25 = live_rows[-self.deact_n :]
-        live_avg = (
-            sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25) if live25 else 0.0
-        )
-        live_tail = live_rows[-max(8, min(self.deact_n, 15)) :]
-        live_tail_avg = (
-            sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail) if live_tail else 0.0
-        )
-        if self.live_negative_deact and len(live25) >= self.deact_n and live_avg < 0:
-            return False, f"live last{len(live25)} avg loss {live_avg:.4f}"
-        if self.live_negative_deact and len(live_rows) >= need and live_tail_avg < 0:
-            return False, f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
-        if not m:
-            return True, ""
-        n15 = int(m.get("last15_n") or 0)
-        ratio = float(m.get("last15_ratio") or 0)
-        if self.live_negative_deact and n15 >= need and ratio + 1e-9 < 1.0:
-            return False, f"live last{n15} PF {ratio:.2f}<1.00 neg"
-        if self.live_negative_deact and n15 >= need and ratio + 1e-9 < enable_pf:
-            return False, f"live last{n15} PF {ratio:.2f}<{enable_pf:.2f}"
-        dd_s = float(m.get("max_dd_s") or 0)
-        if n15 >= need and dd_s > float(self.max_dd_s or 57600) + 1e-9:
-            return False, f"live DDt {dd_s:.0f}s"
+        if self.live_negative_deact and len(live) >= self.deact_n:
+            tail = sorted(live, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+            if sum(row_net_pnl(row, self.cost_pct) for row in tail) < 0:
+                return False, f"live last{self.deact_n} avg loss"
+        if not m or not self._real_metrics_ok(m):
+            return False, "unproven" if not m or int(m.get("last15_n") or 0) < self.eval_need() else "stage qualification"
         return True, ""
 
     @_invalidate_entry_cache_around_score
@@ -3754,7 +3730,7 @@ class SetBook:
         elif not st.live:
             m, side_bundle = self._fast_historic_bundle(st.hist, hist_n=len(st.hist), ordered=True)
         else:
-            tape = st.tape()
+            tape = list(st.live) if len(st.live) >= self.eval_need() else st.tape()
             tape.sort(key=lambda r: finite(r.get("t")))
             m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False)
         st.n = m["n"]
@@ -3873,7 +3849,9 @@ class SetBook:
             else:
                 sub_hist = filter_side(st.hist, side)
                 sub_live = filter_side(st.live, side)
-                sub_tape = filter_side(st.live or st.hist, side)
+                # Keep Base evidence while live history is still filling.
+                # A first live close must not erase the last-30 qualification.
+                sub_tape = sub_live if len(sub_live) >= self.eval_need() else filter_side(st.tape(), side)
                 sm = self._score_metrics(
                     sub_tape,
                     hist_n=len(sub_hist),
@@ -3901,136 +3879,35 @@ class SetBook:
                 "optimization_n": live_opt_n,
             }
             sm["liveN"] = len(sub_live)
-            if len(sub_live) >= self.eval_need():
-                sm["last15_ratio"] = lm["last15_ratio"]
-                sm["last15_n"] = lm["last15_n"]
-                sm["last15_r"] = lm["last15_r"]
-                sm["net_avg"] = lm["net_avg"]
-                sm["expectancy"] = lm["expectancy"]
-                sm["max_dd_s"] = lm["max_dd_s"]
-                sm["validated"] = lm["validated"]
-                sm["source"] = "live-exchange"
-            else:
-                sm["source"] = "hist-sim"
-            active_s, reason_s = self._side_active_flags(lm if len(sub_live) >= self.eval_need() else sm, sub_live)
+            sm["source"] = "mixed" if sub_live and sub_hist else "live-exchange" if sub_live else "hist-sim"
+            active_s, reason_s = self._side_active_flags(sm, sub_live)
             sm["active"] = active_s
             sm["deact_reason"] = reason_s
             by[side] = sm
         st.by_side = by
-        if historic:
+        # Qualification counts follow the same independent directional
+        # evidence as admission. A losing SHORT tape cannot hide a valid LONG.
+        if by:
+            def stage_rank(item):
+                sm = item[1]
+                from position_cost import clears_pf
+                base = int(sm.get("last15_n") or 0) >= need and clears_pf(sm.get("base_pf", sm.get("last15_ratio")), self.min_pf) and sm.get("ddOk", True)
+                main = base and int(sm.get("main_n") or 0) >= self.main_eval and clears_pf(sm.get("main_pf"), self.min_pf)
+                real = main and self._real_metrics_ok(sm)
+                return (int(base) + int(main) + int(real), finite(sm.get("base_pf")), item[0])
+            direction, directional = max(by.items(), key=stage_rank)
+            st.stage_ledger = self._stage_qualification(st, directional)
+            st.stage_ledger["evaluationDirection"] = direction
+        # A single admission decision is shared by display, queue and submit.
+        # Live deactivation uses exactly the configured last-N closed fills.
+        for side, sm in by.items():
             if st.locked:
-                st.active = False
-                st.deact_reason = "locked"
-                return
-            if not self.auto_deact:
-                st.active = True
-                st.deact_reason = ""
-                return
-            need_h = self.eval_need()
-            hist_n15 = int(m.get("last15_n") or 0)
-            hist_pf = float(m.get("last15_ratio") or 0)
-            hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= enable_pf
-            hist_dd_ok = float(m.get("max_dd_s") or 0) <= self.max_dd_s + 1e-9
-            if self.strict_gate:
-                any_side = any(bool((by.get(d) or {}).get("active")) for d in DIRECTIONS)
-                st.active = bool((hist_ok and hist_dd_ok) or any_side)
-                if st.active:
-                    st.deact_reason = ""
-                elif hist_n15 < need_h:
-                    st.deact_reason = "unproven"
-                elif not hist_ok:
-                    st.deact_reason = f"hist PF {hist_pf:.2f}<{enable_pf:.2f}"
-                else:
-                    st.deact_reason = f"hist DDt {m.get('max_dd_s'):.0f}s"
-            else:
-                st.active = True
-                st.deact_reason = ""
-            return
-        live_ordered = sorted((r for r in st.live if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
-        live25 = live_ordered[-self.deact_n :]
-        live_avg = 0.0
-        if live25:
-            live_avg = sum(row_net_pnl(r, self.cost_pct) for r in live25) / len(live25)
-        live_n = len(st.live)
-        live_window_ok, live_window_reason, _live_windows = self._live_windows_ok(st.live, minimum_pf=1.0)
-        live_tail = live_ordered[-max(8, min(self.deact_n, 15)) :]
-        live_tail_avg = 0.0
-        if live_tail:
-            live_tail_avg = sum(row_net_pnl(r, self.cost_pct) for r in live_tail) / len(live_tail)
-        if st.locked:
-            st.active = False
-            st.deact_reason = "locked"
-            return
-        if not self.auto_deact:
-            st.active = True
-            st.deact_reason = ""
-            return
-        need_h = self.eval_need()
-        hist_n15 = int(m.get("last15_n") or 0)
-        hist_pf = float(m.get("last15_ratio") or 0)
-        hist_ok = hist_n15 >= need_h and hist_pf + 1e-9 >= enable_pf
-        hist_dd_ok = float(m.get("max_dd_s") or 0) <= self.max_dd_s + 1e-9
-        # Realtime only validated books. Historic still scores every SL×TP;
-        # unproven / hist-losing / high-DDt sets stay off the live path.
-        if live_n < need_h:
-            if self.strict_gate:
-                any_side = any(bool((by.get(d) or {}).get("active")) for d in DIRECTIONS)
-                st.active = bool((hist_ok and hist_dd_ok) or any_side)
-                if st.active:
-                    st.deact_reason = ""
-                elif hist_n15 < need_h:
-                    st.deact_reason = "unproven"
-                elif not hist_ok:
-                    st.deact_reason = f"hist PF {hist_pf:.2f}<{enable_pf:.2f}"
-                else:
-                    st.deact_reason = f"hist DDt {m.get('max_dd_s'):.0f}s"
-            else:
-                st.active = True
-                st.deact_reason = ""
-            return
-        # Deactivation of a live-processed Set is LIVE on-exchange only.
-        # Use all available recent live fills, with a 50+ sample optimization
-        # window once available. The current Set alone is evaluated here, so
-        # one losing ratio/trail/step can never deactivate its siblings.
-        if self.live_negative_deact and live_n >= self.deact_n and live_opt_avg < 0:
-            st.active = False
-            st.deact_reason = f"live last{len(live_opt_window)} avg loss {live_opt_avg:.4f}"
-            st.last25_avg_pnl = live_opt_avg
-            st.last25_n = len(live_opt_window)
-            return
-        if live_n >= need_h and not live_window_ok:
-            st.active = False
-            st.deact_reason = live_window_reason
-            return
-        if self.live_negative_deact and live_n >= need_h and live_tail_avg < 0:
-            st.active = False
-            st.deact_reason = f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
-            st.last25_avg_pnl = live_tail_avg
-            return
-        notes = []
-        live_ratio = float(live_m["last15_ratio"])
-        live_n15 = int(live_m["last15_n"])
-        if self.live_negative_deact and live_n15 >= need and live_ratio + 1e-9 < 1.0:
-            st.active = False
-            st.deact_reason = f"live last{live_n15} PF {live_ratio:.2f}<1.00 neg"
-            return
-        if live_n15 >= need and live_ratio + 1e-9 < self.min_pf:
-            notes.append(f"live last{live_n15} PF {live_ratio:.2f}<{self.min_pf:.2f}")
-        if live_n >= need and float(live_m["max_dd_s"]) > self.max_dd_s:
-            notes.append(f"live maxDDt {live_m['max_dd_s']:.0f}s>{self.max_dd_s:.0f}s")
-        was_live_off = (not st.active) and st.deact_reason.startswith("live ")
-        if notes and not self.reactivate and was_live_off:
-            st.active = False
-            st.deact_reason = "; ".join(dict.fromkeys(notes + [st.deact_reason]))
-            return
-        if notes and not self.reactivate and live_n15 >= need:
-            st.active = False
-            st.deact_reason = "; ".join(dict.fromkeys(notes))
-            return
-        st.active = True
-        st.deact_reason = "; ".join(dict.fromkeys(notes))
-        self._snap_ts = 0.0
-        self._live_ov_ts = 0.0
+                sm["active"] = False
+                sm["deact_reason"] = "locked"
+        st.active = not st.locked and any(bool(sm.get("active")) for sm in by.values())
+        st.deact_reason = "" if st.active else ("locked" if st.locked else "; ".join(
+            dict.fromkeys(str(sm.get("deact_reason") or "stage qualification") for sm in by.values())))
+
 
     def _cap_active(self, force: bool = True) -> None:
         selection_key = (id(self.by_idx), len(self.by_idx), self.max_active)
@@ -4238,7 +4115,7 @@ class SetBook:
         validated_count = sum(
             1
             for st in self.sets.values()
-            if int(st.last15_n or 0) >= need and is_positive_pf(st.last15_ratio)
+            if bool((st.stage_ledger or {}).get("base"))
         )
         stage_counts = {"Base": 0, "Main": 0, "Real": 0, "Unqualified": 0}
         stage_parent_counts = {k: set() for k in stage_counts}
@@ -4479,13 +4356,7 @@ class SetBook:
         return self.pick(pack, kind="trail", side=side)
 
     def pick_entry(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
-        """Pick one validated Base Set for a new entry.
-
-        Trailing Set rows remain fully available to historic/live overview and
-        to the existing position lineage, but they are not an entry source.
-        This boundary prevents a trailing sibling from bypassing the Base
-        qualification gate.
-        """
+        """Pick the first Real-qualified normal or trailing Set."""
         rows = self.entry_sets(pack, side=side)
         return rows[0] if rows else None
 
@@ -4495,9 +4366,10 @@ class SetBook:
     def _live_entry_allowed(self, state: SetState, side: Optional[str] = None) -> bool:
         """Apply the selected live-evidence policy without bypassing risk gates."""
         rows = filter_side(state.live, side)
-        if self._entry_policy_is_permissive() and len(rows) < int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need()):
+        if not self.live_negative_deact or len(rows) < self.deact_n:
             return True
-        return self._live_windows_ok(rows, minimum_pf=1.0)[0]
+        tail = sorted(rows, key=lambda r: finite(r.get("t")))[-self.deact_n:]
+        return sum(row_net_pnl(row, self.cost_pct) for row in tail) >= 0
 
     def _validated_entry_rows(self, pack: str, side: Optional[str] = None) -> List[SetState]:
         """Return the exact Base rows allowed to source a new live entry.
@@ -4515,7 +4387,7 @@ class SetBook:
             state
             for state in self.by_idx
             if state.pack == pack
-            and state.kind == "base"
+            and state.kind in ("base", "trail")
             and state.deact_reason != "selection limit"
         ]
         if not rows:
@@ -4541,7 +4413,7 @@ class SetBook:
         need = self.eval_need()
         floor = max(1.0, float(self.real_min_pf or 1.0))
         result: List[SetState] = []
-        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0}
+        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
         for state in rows:
             if not side_active(state):
                 rejected["side_inactive"] += 1
@@ -4561,6 +4433,9 @@ class SetBook:
                 continue
             if not self._live_entry_allowed(state, want_side if use_side else None):
                 rejected["live"] += 1
+                continue
+            if not self._real_metrics_ok(view):
+                rejected["stage"] += 1
                 continue
             result.append(state)
         # Observability for the live entry boundary: which gate starves the
@@ -4611,7 +4486,7 @@ class SetBook:
         )
 
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
-        """Return every validated Base Set eligible for new entries.
+        """Return every Real-qualified normal/trailing Set eligible for entries.
 
         The list is intentionally not ranked down to one winner. EntryMatrix
         performs fair lazy round-robin dispatch over this stable list; the
@@ -4654,13 +4529,7 @@ class SetBook:
         return list(rows)
 
     def entry_pack_open(self, pack: str, side: Optional[str] = None) -> bool:
-        """Return whether a validated Base Set can source a new entry.
-
-        ``pack_open`` intentionally includes the trailing family for legacy
-        overview/research callers. The live entry gate must not do that:
-        trailing rows belong to an existing position's management lineage,
-        never to the new-entry candidate pool.
-        """
+        """Whether this pack has a Real-qualified execution candidate."""
         if not self.enabled or not self.use_historic_gate:
             return True
         if not getattr(self.progress, "ready", False):
@@ -4673,6 +4542,21 @@ class SetBook:
             (self.pick(pack, "base", side=side, all_valid=True) or [])
             + (self.pick(pack, "trail", side=side, all_valid=True) or []),
             key=lambda s: (s.idx, s.id),
+        )
+
+    def _real_metrics_ok(self, view: Dict[str, Any]) -> bool:
+        """Same sequential window gates for stage display and order admission."""
+        from position_cost import clears_pf
+        _, main_n, real_n = self._stage_window_ns()
+        n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
+        pf = float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
+        return bool(
+            n >= self.eval_need() and clears_pf(pf, self.min_pf)
+            and int(view.get("main_n", n) or 0) >= main_n
+            and clears_pf(view.get("main_pf", pf), self.min_pf)
+            and int(view.get("real_n", n) or 0) >= real_n
+            and clears_pf(view.get("real_pf", pf), self.min_pf)
+            and 0 <= float(view.get("max_dd_s", 0) or 0) <= self.max_dd_s
         )
 
     def execution_allowed(self, st: SetState, pack: str, side: str) -> bool:
@@ -4689,7 +4573,7 @@ class SetBook:
         dd = float(view.get("max_dd_s") or 0)
         if not active or not math.isfinite(pf) or not math.isfinite(dd) or dd < 0 or dd > self.max_dd_s:
             return False
-        if self.strict_gate and (int(view.get("last15_n") or 0) < self.eval_need() or pf + 1e-9 < self.real_min_pf):
+        if not self._real_metrics_ok(view):
             return False
         if int(view.get("last15_n") or 0) >= self.eval_need() and pf < 1.0:
             return False
@@ -4955,7 +4839,7 @@ class SetBook:
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
                     "classicPf": st.classic_all,
-                    "validated": int(st.last15_n or 0) >= self.eval_need() and is_positive_pf(st.last15_ratio),
+                    "validated": bool((st.stage_ledger or {}).get("base")),
                     "baseQualified": bool((st.stage_ledger or {}).get("base")),
                     "mainQualified": bool((st.stage_ledger or {}).get("main")),
                     "realQualified": bool((st.stage_ledger or {}).get("real")),
@@ -4997,7 +4881,7 @@ class SetBook:
                         "avgHoldS": st.avg_hold_s,
                         "n": st.n,
                         "liveN": len(st.live),
-                        "validated": int(st.last15_n or 0) >= self.eval_need() and is_positive_pf(st.last15_ratio),
+                        "validated": bool((st.stage_ledger or {}).get("base")),
                     },
                     "active": st.active,
                     "processingActive": bool(getattr(st, "processing_active", False)),
@@ -5181,7 +5065,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     bal = last_n_balanced(mixed_sym, 15)
     out.append(("set-last-n-chrono-newest", all(r["symbol"] == "B" for r in chrono), str({r["symbol"] for r in chrono})))
     out.append(("set-last-n-balanced-mix", {r["symbol"] for r in bal} == {"A", "B"}, str({r["symbol"] for r in bal})))
-    out.append(("set-positive-pf-floor", _PP == 1.10 and (not _is_pos(1.02)) and _is_pos(1.10), f"floor={_PP}"))
+    out.append(("set-positive-pf-floor", _PP == 1.05 and (not _is_pos(1.05)) and _is_pos(1.06), f"floor={_PP}"))
     live_usdt = {"t": 1, "pnl": 9.0, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     hist_frac = {"t": 2, "pnl": 0.0015, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     out.append((
@@ -5256,7 +5140,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st.hist = [{"t": 1500 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(15)]
     st.live = [{"t": 2500 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(10)]
     book._score_one(st)
-    out.append(("set-live-overrides-hist", (not st.active) and str(st.deact_reason).startswith("live"), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
+    out.append(("set-losing-stage-overrides-hist", (not st.active) and not book._real_metrics_ok(st.by_side.get("LONG") or {}), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
     st.hist = [{"t": 1500 + i, "pnl": -0.02, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(15)]
     st.live = [{"t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(10)]
     book._score_one(st)
@@ -5458,7 +5342,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     if trail_row:
         trail_row.hist = [
             {"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"}
-            for i in range(20)
+            for i in range(book4.eval_need())
         ]
         book4._score_one(trail_row)
         trail_row.active = True
@@ -5686,6 +5570,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-pick-cold-legacy", pk3b is not None and g3.pack_open("general"), f"legacy {getattr(pk3b, 'id', None)}"))
     # strict: validated + profitable set runs; validated loser never picked
     g4 = SetBook()
+    g4.min_samples = 8
     g4.load({"histEnabled": True, "setMinPf": 1.20, "setMinSamples": 8, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
     g4.progress.ready = True
     gb = [x for x in g4.by_idx if x.pack == "general" and x.kind == "base"]
@@ -5873,7 +5758,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-normal-product", len(bases) == 30 * 20, f"base={len(bases)} sl={len(sls)} st={len(steps)}"))
     out.append(("set-live-unproven-off", all(not s.active for s in bases), f"on={sum(1 for s in bases if s.active)}"))
     winner = bases[0]
-    winner.hist = [{"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(16)]
+    winner.hist = [{"t": 1_700_000_000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(fulln.eval_need())]
     fulln.min_pf = 1.0
     fulln._score_one(winner)
     out.append(("set-hist-valid-on", winner.active and winner.last15_n >= 8, f"on={winner.active} n={winner.last15_n} pf={winner.last15_ratio}"))

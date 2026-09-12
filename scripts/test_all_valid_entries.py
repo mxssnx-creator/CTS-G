@@ -201,6 +201,7 @@ class AllValidEntries(unittest.TestCase):
 
     def book(self, count=4):
         book = SetBook()
+        book.min_samples = 8  # Explicit small fixture; production defaults require 30.
         book.max_active = 0
         book.progress.ready = True
         book.sets, book.by_idx = {}, []
@@ -276,9 +277,9 @@ class AllValidEntries(unittest.TestCase):
         book.by_idx[3].active = True
         base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
         entry_ids = {state.id for state in book.entry_sets('general', 'LONG')}
-        self.assertEqual(entry_ids, {book.by_idx[0].id})
+        self.assertEqual(entry_ids, {book.by_idx[0].id, trailing.id})
         self.assertNotEqual(entry_ids, base_ids)
-        self.assertNotIn(trailing.id, entry_ids)
+        self.assertIn(trailing.id, entry_ids)
         # The broader catalogue API remains intentionally unchanged for
         # overview/research consumers.
         self.assertIn(trailing.id, {state.id for state in book.pick_all('general', 'LONG')})
@@ -299,6 +300,7 @@ class AllValidEntries(unittest.TestCase):
         book = self.book(1)
         book.entry_policy = "permissive-bounded"
         book.entry_policy_min_live_samples = 8
+        book.deact_n = 5
         state = book.by_idx[0]
         self.assertEqual([state.id], [row.id for row in book.entry_sets("general", "LONG")])
         self.assertTrue(book.execution_allowed(state, "general", "LONG"))
@@ -331,18 +333,20 @@ class AllValidEntries(unittest.TestCase):
         self.assertFalse(state.processing_active)
         self.assertNotIn(state.id, book.processing_set_ids())
 
-    def test_scheduler_dispatches_only_base_set_lineages(self):
+    def test_scheduler_dispatches_all_qualified_normal_and_trailing_lineages(self):
         book = self.book(4)
         book.by_idx[1].kind = 'trail'
         book.by_idx[1].trail_key = '0.3:0.1'
+        book.by_idx[1].trail_arm = .3; book.by_idx[1].trail_give = .1
         p = self.pulse(book)
+        p.strat_trail = True
         with patch.object(pt, 'SYMBOLS', ['X-USDT']):
             for _ in range(8):
                 p.maybe_entries()
         base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
         self.assertTrue(p.open)
-        self.assertTrue({pos.set_id for pos in p.open.values()} <= base_ids)
-        self.assertNotIn(book.by_idx[1].id, {pos.set_id for pos in p.open.values()})
+        self.assertEqual({pos.set_id for pos in p.open.values()}, set(book.sets))
+        self.assertIn(book.by_idx[1].id, {pos.set_id for pos in p.open.values()})
 
     def test_indication_variants_directions_and_exact_match(self):
         b = IndicationBook(); first = self.indication()

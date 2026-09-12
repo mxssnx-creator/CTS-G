@@ -347,6 +347,16 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     # not just rename. A common .tmp also collided between HTTP threads.
     with _OVERLAY_LOCKS[cid]:
         cur = load_overlay(cid)
+        # A partial save to any legacy PF/window control updates the canonical
+        # setting before merging, so an older persisted alias cannot win.
+        from position_cost import PF_SETTING_KEYS, shared_pf_settings
+        if any(k in overlay for k in PF_SETTING_KEYS):
+            overlay = {**overlay, **{k: v for k, v in shared_pf_settings(overlay).items() if k in PF_SETTING_KEYS}}
+        if "baseEvalPosCount" in overlay or "setPfWindow" in overlay:
+            overlay = dict(overlay)
+            overlay["baseEvalPosCount"] = overlay.get("baseEvalPosCount", overlay.get("setPfWindow"))
+            overlay["setPfWindow"] = overlay["baseEvalPosCount"]
+            overlay.setdefault("setMinSamples", overlay["baseEvalPosCount"])
         cur.update(overlay)
         cur = calculation_overlay(cur)
         atomic_write(dest, cur)
