@@ -2,6 +2,32 @@
 
 Continues the merged `15d50a4` work from main `8978efb6404f5d34f2e8c51d559be6d6f13a70e8`.
 
+## 20-symbol test continuation
+
+The user's September 12 update sets **20 symbols** as the VST/test default,
+including BCH, SOL and XRP. This preference is recorded in `AGENTS.project.md`,
+the X02 overlay and the repeatable VST release helper. Logical position and
+config counts remain unlimited. Existing positions retain management when
+their symbol leaves the selection.
+
+The continued runtime inspection found a false completion: a 574-symbol pass
+had published only five symbols but declared the entire pass complete. A
+consumed manual request also incorrectly cancelled automatic runs through the
+request cache's fast path. Both defects are corrected. Completion now advances
+only after a successful replay and score slice, using the input's watermark,
+not a newer price observed after calculation. Failed slices do not starve
+later symbols; unfinished symbols are prioritized on retry. New prices and
+same-minute corrections remain dirty until calculated. Coverage, processed
+symbols and per-slice scored-config counts are distinct. A config generation
+invalidates its old completion claims.
+
+Offline verification: 328 tests passed in the complete discovery run, 409/409
+engine checks passed, and all three completion regressions passed after the
+final request-cache correction. The completion tests exercise 19/20 with a
+failed middle symbol, retry only that symbol while new prices arrive, refresh
+the changed prefix, skip identical input, and keep data gaps incomplete.
+GitHub repeats the complete suite on the published revision.
+
 Before the update the VST lane reported 13 owned logical positions, 6 internal symbol/side groups and 35,381,856 historical closes. These were local book counts, not a contemporaneous independently confirmed exchange position count. The earlier 11-position observation had 11 recorded protected config pairs and no gaps. These demo observations are distinct from the offline 700-entry regression and monetary mainnet orders.
 
 The exchange returned an empty position snapshot shortly before the update. Startup reconciliation then confirmed two empty snapshots and retired the 13 stale local entries. The current account was flat, rather than 13 still-open exchange positions being discarded by a file migration. Later runtime observations include explicit exchange-own/total counts and reconciliation status; internal symbol/side group counts alone cannot prove exchange openings.
