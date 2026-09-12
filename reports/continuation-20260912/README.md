@@ -26,7 +26,33 @@ engine checks passed, and all three completion regressions passed after the
 final request-cache correction. The completion tests exercise 19/20 with a
 failed middle symbol, retry only that symbol while new prices arrive, refresh
 the changed prefix, skip identical input, and keep data gaps incomplete.
-GitHub repeats the complete suite on the published revision.
+GitHub run `34707108814` passed on `e83b0bb`: 329 Python tests, 409 engine
+checks, 15 release contracts and 16 forced-grid checks.
+
+The deployed VST lane selected exactly 20 symbols and completed the first
+full pass, then further hourly publications and incremental updates. The
+observations include 4/20, 16/20, all 20 published watermarks, and advancing
+closed-bar evidence. Around the storage recovery, 1,510 Base, 1,098 Main and
+1,029 Real Sets qualified; seven logical positions had seven recorded
+protective pairs, matching one owned exchange symbol/side group. A separate
+VST REST snapshot confirmed one nonzero position group. These counts have
+different meanings: an eligible matrix changes with current signals, and
+closed positions and deactivation continue while the queue is processed.
+
+The runtime inspection also exposed a full server filesystem: Redis AOF
+writes and cache writes failed with `No space left on device`. Reclaiming
+7.36 GB of old, regenerable Node/Jest/npm cache files allowed a regular Redis
+background AOF rewrite. The AOF shrank from 59.04 GB to 0.69 GB, leaving
+59.27 GB available; both write and rewrite status returned `ok`. No project
+data or position state was removed. Redis and the VST process continued
+running, and the calculation cache resumed successful writes. Its eight
+historical errors are cumulative; its current error message is empty.
+
+The selected symbols, timestamped progress/position/queue/coverage readings,
+native REST observation and storage recovery evidence are in
+[`vst-20-symbols.json`](vst-20-symbols.json). The accompanying
+[`vst-20-symbols.html`](vst-20-symbols.html) distinguishes this 20-symbol
+operational test from the exhaustive seven-day BCH/SOL/XRP benchmark.
 
 Before the update the VST lane reported 13 owned logical positions, 6 internal symbol/side groups and 35,381,856 historical closes. These were local book counts, not a contemporaneous independently confirmed exchange position count. The earlier 11-position observation had 11 recorded protected config pairs and no gaps. These demo observations are distinct from the offline 700-entry regression and monetary mainnet orders.
 
