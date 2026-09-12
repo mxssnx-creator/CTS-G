@@ -251,7 +251,7 @@ def connection_public(cid: str) -> dict:
         "exchange": "BingX",
         "baseUrl": (raw.get("base_url") or default_url).rstrip("/"),
         "isTestnet": ctype == "vst",
-        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype == "mainnet",
+        "liveTradeEnabled": live_en in ("1", "true", "yes") or ctype in ("mainnet", "vst"),
         "apiKeyMasked": mask_key(raw.get("api_key") or ""),
         "apiKeySet": bool((raw.get("api_key") or "").strip()),
         "apiSecretSet": bool((raw.get("api_secret") or "").strip()),
@@ -298,7 +298,7 @@ def save_connection(cid: str, body: dict) -> tuple:
             "api_secret": secret,
             "is_testnet": "1",
             "base_url": "https://open-api-vst.bingx.com",
-            "live_trade_enabled": "0",
+            "live_trade_enabled": "1",
             "connection_method": method,
             "connection_type": "vst",
             "last_test_status": "saved",
@@ -522,10 +522,6 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["symbolCap"] = (out.get("engine") or {}).get("symbolCap") if isinstance(out.get("engine"), dict) else None
     paused = bool(out.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{conn}"))
     out["paused"] = paused
-    if paused:
-        out["halted"] = True
-        out["running"] = False
-        out["haltReason"] = out.get("haltReason") or "paused"
     # Ground truth: STOP file + systemd state beat a stale stats file, so a
     # stopped/crashed desk never keeps showing its last "running" snapshot.
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{conn}")) or os.path.exists(STOP_ALL_PATH)
@@ -536,6 +532,12 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["halted"] = True
         out["running"] = False
         out["haltReason"] = "stopped"
+        progress.update(phase="stopped", detail="engine stopped; historic snapshot retained")
+    elif paused:
+        out["halted"] = True
+        out["running"] = False
+        out["haltReason"] = out.get("haltReason") or "paused"
+        progress.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
     if state != "active":
         out["running"] = False
         out["alive"] = False
@@ -543,8 +545,14 @@ def stamp_stats(st: dict, conn: str) -> dict:
         if not out.get("halted"):
             out["halted"] = True
             out["haltReason"] = "service failed" if state == "failed" else "service inactive"
+        progress.update(phase="error" if state == "failed" else "deferred", detail=out["haltReason"])
     elif out["statsAgeS"] > 20:
         out["stale"] = True
+    out["progress"] = progress
+    out["progressPhase"] = progress["phase"]
+    out["progressDetail"] = progress["detail"]
+    out["progressReady"] = progress["ready"]
+    out["progressError"] = progress["error"]
     eng = out.get("engine") if isinstance(out.get("engine"), dict) else {}
     load = out.get("load") if isinstance(out.get("load"), dict) else None
     if not load:
@@ -646,6 +654,8 @@ def _mark_stats_stopped(cid: str) -> None:
     st["haltReason"] = "stopped"
     try:
         atomic_write(path, st)
+        with _STATS_CACHE_LOCK:
+            _STATS_CACHE.pop(path, None)
     except Exception:
         pass
 
@@ -712,6 +722,33 @@ def stats_age(conn: str) -> float:
         return 1e9
 
 
+def control_state(cid: str) -> dict:
+    """Return post-action lane truth from markers, systemd, and the last stats file."""
+    state = unit_state(cid, fresh=True)
+    paused = os.path.exists(os.path.join(DIR, f"PAUSE-{cid}"))
+    stopped = os.path.exists(os.path.join(DIR, f"STOP-{cid}")) or os.path.exists(STOP_ALL_PATH)
+    stats = load_stats(cid)
+    if stopped:
+        reason = "stopped"
+    elif paused:
+        reason = "paused"
+    elif state != "active":
+        reason = "service failed" if state == "failed" else "service inactive"
+    else:
+        reason = stats.get("haltReason")
+    return {
+        "connection": cid,
+        "unit": engine_unit(cid),
+        "state": state,
+        "serviceActive": state == "active",
+        "running": state == "active" and bool(stats.get("running")) and not paused and not stopped,
+        "paused": paused,
+        "stopped": stopped,
+        "haltReason": reason,
+        "statsAgeS": round(stats_age(cid), 1),
+    }
+
+
 def apply_control(conn: str, action: str) -> tuple:
     action = (action or "").lower().strip()
     if action not in ("start", "stop", "pause", "resume"):
@@ -725,6 +762,7 @@ def apply_control(conn: str, action: str) -> tuple:
 def _apply_control_locked(conn: str, action: str) -> tuple:
     ids = [l["id"] for l in LANES] if conn in ("", "overall") else [conn]
     notes = []
+    outcomes = []
     for cid in ids:
         pause = os.path.join(DIR, f"PAUSE-{cid}")
         stop = os.path.join(DIR, f"STOP-{cid}")
@@ -733,9 +771,12 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
         if action == "pause":
             _unlink(stop)
             _touch(pause)
-            notes.append(f"{cid} paused state={unit_state(cid, fresh=True)}")
+            state = control_state(cid)
+            outcomes.append(bool(state["paused"]))
+            notes.append(f"{cid} pause state={state['state']} paused={int(state['paused'])}")
         elif action in ("start", "resume"):
             if not _live_start_allowed(cid):
+                outcomes.append(False)
                 notes.append(f"{cid} start blocked: CTS_DISABLE_LIVE_START")
                 continue
             _unlink(pause)
@@ -743,7 +784,8 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             _unlink(STOP_ALL_PATH)
             # Explicit Start = fresh session: engine re-baselines session equity
             # on the next balance tick, so a latched drawdown/equity halt clears.
-            _touch(reset_eq)
+            if action == "start":
+                _touch(reset_eq)
             _sysctl("enable", unit, timeout=8)
             # start is a no-op when the unit is already active, so an in-memory
             # "stopped" latch would stick. Restart always picks up cleared flags.
@@ -754,14 +796,20 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
                 _sysctl("reset-failed", unit, timeout=8)
                 _sysctl("enable", unit, timeout=8)
                 rc, out = _sysctl(verb, unit)
-            st = unit_state(cid, fresh=True)
-            notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
+            state = control_state(cid)
+            action_ok = state["state"] in ("active", "activating") and not state["stopped"]
+            outcomes.append(bool(action_ok))
+            notes.append(f"{cid} {action} rc={rc} state={state['state']} running={int(state['running'])}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
             _touch(stop)
-            notes.append(_force_stop_lane(cid, unit))
-    executed = any("start blocked" not in note for note in notes)
-    return executed, "; ".join(notes)
+            detail = _force_stop_lane(cid, unit)
+            state = control_state(cid)
+            # The marker is the safety barrier even while systemd finishes a
+            # deactivation; expose the real state in the response/detail.
+            outcomes.append(bool(state["stopped"]))
+            notes.append(detail + f" paused={int(state['paused'])}")
+    return bool(outcomes) and all(outcomes), "; ".join(notes)
 
 
 def load_json(path: str) -> dict:
@@ -844,6 +892,33 @@ def _report_number(value, default=0.0) -> float:
         return default
 
 
+def _report_row_in_scope(row: dict, state: dict) -> bool:
+    """Keep overall reports limited to the lane's proven system ownership."""
+    if not isinstance(row, dict) or row.get("ours") is False:
+        return False
+    expected = str(state.get("trackingScope") or "").strip().lower()
+    actual = str(row.get("trackingScope") or row.get("tracking_scope") or "").strip().lower()
+    system_id = str(state.get("systemId") or "").strip().lower()
+    connection = str(state.get("connection") or "").strip().lower()
+    row_system = str(row.get("systemId") or row.get("system_id") or "").strip().lower()
+    row_connection = str(row.get("connection") or row.get("conn") or "").strip().lower()
+    if expected and actual:
+        if actual != expected:
+            return False
+        if row_system and system_id and row_system != system_id:
+            return False
+        if row_connection and connection and row_connection != connection:
+            return False
+        return True
+    if expected and (row_system or row_connection):
+        return bool(system_id and connection and row_system == system_id and row_connection == connection)
+    prefix = str(state.get("trackPrefix") or "").strip().lower()
+    client_id = str(row.get("clientId") or row.get("client_id") or "").strip().lower()
+    if prefix and client_id:
+        return client_id.startswith(prefix)
+    return bool(row_connection and row_connection == connection and not expected)
+
+
 def overall_report_state(live: dict, vst: dict) -> dict:
     """Build a safe combined input for the canonical stats report renderer."""
     states = (live, vst)
@@ -851,13 +926,13 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         row
         for state in states
         for row in (state.get("closed") or [])
-        if isinstance(row, dict)
+        if _report_row_in_scope(row, state)
     ]
     open_positions = [
         row
         for state in states
         for row in (state.get("open") or [])
-        if isinstance(row, dict)
+        if _report_row_in_scope(row, state)
     ]
     set_rows = []
     set_count = active_count = validated_count = hist_fills = 0
@@ -923,21 +998,60 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     historic_completed_bars = sum(int(_report_number(bars.get("completed"))) for bars in historic_bars if isinstance(bars, dict))
     historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
     has_historic = any(bool(historic) for historic in historic_states)
+    logical_position_count = sum(
+        int(_report_number(state.get("logicalPositionCount", state.get("openCount"))))
+        for state in states
+    )
+    exchange_group_values = [
+        int(_report_number(state.get("exchangePositionGroupCount", state.get("exchangeOwnOpenCount", state.get("exchangeOpenCount", -1)))))
+        for state in states
+    ]
+    exchange_position_group_count = sum(exchange_group_values) if all(value >= 0 for value in exchange_group_values) else -1
+    entry_candidate_count = sum(
+        int(_report_number((state.get("pulse") or {}).get("entryCandidateCount")))
+        for state in states
+        if isinstance(state.get("pulse") or {}, dict)
+    )
+    control_modes = set()
+    for state in states:
+        coverage = state.get("coverage") or {}
+        controls = coverage.get("controls") if isinstance(coverage, dict) else None
+        controls = controls if isinstance(controls, dict) else {}
+        pulse = state.get("pulse") or {}
+        mode = controls.get("mode")
+        if mode not in ("per-config", "aggregate"):
+            mode = "aggregate" if isinstance(pulse, dict) and pulse.get("controlOrdersPerConfig") is False else "per-config"
+        control_modes.add(mode)
+    control_mode = next(iter(control_modes)) if len(control_modes) == 1 else "mixed"
     return {
         "running": any(bool(state.get("running")) and not bool(state.get("halted")) for state in states),
         "mode": "MULTI_DESK",
+        "systemId": CTS_G_NAME,
         "connection": "overall",
+        "trackingScope": "overall",
+        "trackPrefix": "mixed",
         "unit": "MIXED",
-        "equity": sum(_report_number(state.get("equity")) for state in states),
-        "startEquity": sum(_report_number(state.get("startEquity")) for state in states),
+        "equity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
+        "systemEquity": sum(_report_number(state.get("systemEquity", state.get("equity"))) for state in states),
+        "systemStartEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
+        "startEquity": sum(_report_number(state.get("systemStartEquity", state.get("startEquity"))) for state in states),
+        "walletEquity": sum(_report_number(state.get("walletEquity", state.get("equity"))) for state in states),
         "available": sum(_report_number(state.get("available")) for state in states),
         "usedMargin": sum(_report_number(state.get("usedMargin")) for state in states),
-        "sessionPnl": sum(_report_number(state.get("sessionPnl")) for state in states),
-        "realizedPnl": sum(_report_number(state.get("realizedPnl")) for state in states),
-        "unrealized": sum(_report_number(state.get("unrealized")) for state in states),
+        "sessionPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
+        "systemPnl": sum(_report_number(state.get("systemPnl", state.get("sessionPnl"))) for state in states),
+        "realizedPnl": sum(_report_number(state.get("systemRealized", state.get("realizedPnl"))) for state in states),
+        "unrealized": sum(_report_number(state.get("systemUnrealized", state.get("unrealized"))) for state in states),
+        "foreignUnrealized": sum(_report_number(state.get("foreignUnrealized")) for state in states),
+        "foreignRealized": sum(_report_number(state.get("foreignRealized")) for state in states),
+        "foreignExposure": sum(_report_number(state.get("foreignExposure")) for state in states),
+        "foreignPositionCount": sum(int(_report_number(state.get("foreignPositionCount"))) for state in states),
+        "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
-        "openCount": len(open_positions),
+        "openCount": logical_position_count,
+        "logicalPositionCount": logical_position_count,
+        "exchangePositionGroupCount": exchange_position_group_count,
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
@@ -961,6 +1075,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "setCount": set_count,
             "activeCount": active_count,
             "validatedCount": validated_count,
+            "entryCandidateCount": entry_candidate_count,
             "histFills": hist_fills,
         },
         "coverage": {
@@ -972,7 +1087,16 @@ def overall_report_state(live: dict, vst: dict) -> dict:
             "qaFail": sum(int(_report_number(coverage.get("qaFail"))) for coverage in coverages),
             "strategies": strategies,
             "indicationTypes": indication_types,
-            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "histFills": hist_fills},
+            "sets": {"setCount": set_count, "activeCount": active_count, "validatedCount": validated_count, "entryCandidateCount": entry_candidate_count, "histFills": hist_fills},
+            "controls": {
+                "mode": control_mode,
+                "open": logical_position_count,
+                "logicalOpen": logical_position_count,
+                "exchangePositionGroups": exchange_position_group_count,
+                "groupCount": logical_position_count,
+                "pairCount": logical_position_count,
+                "expectedPairs": logical_position_count,
+            },
         },
         "coord": {"gate": {"allow": all(bool((state.get("coord") or {}).get("gate", {}).get("allow")) for state in states)}},
     }
@@ -1049,27 +1173,37 @@ def _lane_progress(st: dict) -> dict:
 def lane_summary(lane: dict, st: dict | None = None) -> dict:
     if st is None:
         st = load_stats(lane["id"])
-    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
-    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
+    gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) > 0)
+    gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if _report_row_in_scope(c, st) and (c.get("pnl") or 0) < 0))
     pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
     sets = st.get("sets") or {}
-    prog = _lane_progress(st)
     eng = st.get("engine") or {}
     cov = (st.get("coverage") or {}).get("controls") or {}
     pc = st.get("pfCost") or {}
     stopped = os.path.exists(os.path.join(DIR, f"STOP-{lane['id']}")) or os.path.exists(STOP_ALL_PATH)
+    paused = bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}"))
     state = unit_state(lane["id"])
-    running = bool(st.get("running")) and state == "active" and not stopped
-    halted = bool(st.get("halted")) or stopped or state != "active"
+    prog = dict(_lane_progress(st))
+    running = bool(st.get("running")) and state == "active" and not stopped and not paused
+    halted = bool(st.get("halted")) or stopped or paused or state != "active"
     halt_reason = st.get("haltReason")
     if stopped:
         halt_reason = "stopped"
+        prog.update(phase="stopped", detail="engine stopped; historic snapshot retained")
+    elif paused:
+        halt_reason = "paused"
+        prog.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
     elif state != "active" and not halt_reason:
         halt_reason = "service failed" if state == "failed" else "service inactive"
+        prog.update(phase="error" if state == "failed" else "deferred", detail=halt_reason)
     return {
         "type": lane["type"],
         "id": lane["id"],
         "label": lane["label"],
+        "systemId": st.get("systemId") or CTS_G_NAME,
+        "connection": lane["id"],
+        "trackingScope": st.get("trackingScope") or f"{CTS_G_NAME}:{lane['id']}",
+        "trackPrefix": st.get("trackPrefix") or (st.get("engine") or {}).get("trackPrefix") or "",
         "unit": lane["unit"],
         "exchange": st.get("exchange") or lane["exchange"],
         "mode": st.get("mode"),
@@ -1078,9 +1212,16 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "haltReason": halt_reason,
         "svcActive": state == "active",
         "statsAgeS": round(stats_age(lane["id"]), 1),
-        "equity": st.get("equity") or 0,
+        "equity": st.get("systemEquity", st.get("equity")) or 0,
+        "systemEquity": st.get("systemEquity", st.get("equity")) or 0,
+        "systemStartEquity": st.get("systemStartEquity", st.get("startEquity")) or 0,
+        "walletEquity": st.get("walletEquity", st.get("equity")) or 0,
         "available": st.get("available") or 0,
-        "unrealized": st.get("unrealized") or 0,
+        "unrealized": st.get("systemUnrealized", st.get("unrealized")) or 0,
+        "foreignUnrealized": st.get("foreignUnrealized") or 0,
+        "foreignExposure": st.get("foreignExposure") or 0,
+        "foreignPositionCount": st.get("foreignPositionCount") or 0,
+        "foreignOpenOrderCount": st.get("foreignOpenOrderCount") or 0,
         "openCount": st.get("openCount") or 0,
         "exchangeOpenCount": st.get("exchangeOpenCount", -1),
         "simOpenCount": st.get("simOpenCount", -1),
@@ -1114,6 +1255,8 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "progressCycle": prog.get("cycle"),
         "validatedSetCount": sets.get("validatedCount") or 0,
         "setCount": sets.get("setCount") or 0,
+        "entryPolicy": (st.get("pulse") or {}).get("entryPolicy") or sets.get("entryPolicy"),
+        "executionEvidence": st.get("executionEvidence") or {},
         "progressError": prog.get("error") or "",
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
@@ -1462,6 +1605,8 @@ def connections_blob() -> dict:
                     "pfCost": l.get("pfCost"),
                     "controlsOk": l.get("controlsOk"),
                     "controlsMissing": l.get("controlsMissing"),
+                    "entryPolicy": l.get("entryPolicy"),
+                    "executionEvidence": l.get("executionEvidence"),
                     "symbolCount": l.get("symbolCount"),
                     "haltReason": l.get("haltReason"),
                 }
@@ -1652,6 +1797,44 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
             return
+        if path in ("/progress.json", "/progress"):
+            if conn == "overall":
+                progress_lanes = []
+                for lane in LANES:
+                    lane_stats = stamp_stats(load_stats(lane["id"]), lane["id"])
+                    progress_lanes.append(lane_stats.get("progress") or {})
+                self._json({
+                    "ok": True,
+                    "connection": "overall",
+                    "phase": "aggregate",
+                    "ready": bool(progress_lanes) and all(bool(item.get("ready")) for item in progress_lanes),
+                    "lanes": progress_lanes,
+                })
+                return
+            if conn not in ID_TO_LANE:
+                self._json({"ok": False, "detail": "pick a known connection"}, 400)
+                return
+            raw_progress_stats = load_stats(conn)
+            if not raw_progress_stats:
+                self._json({"ok": False, "connection": conn, "phase": "offline", "ready": False}, 404)
+                return
+            progress_stats = stamp_stats(raw_progress_stats, conn)
+            progress = dict(progress_stats.get("progress") or {})
+            sets = progress_stats.get("sets") if isinstance(progress_stats.get("sets"), dict) else {}
+            pulse = progress_stats.get("pulse") if isinstance(progress_stats.get("pulse"), dict) else {}
+            progress.update({
+                "connection": conn,
+                "setCount": sets.get("setCount"),
+                "activeSetCount": sets.get("activeCount"),
+                "validatedSetCount": sets.get("validatedCount"),
+                "histFills": sets.get("histFills"),
+                "entryPolicy": pulse.get("entryPolicy") or sets.get("entryPolicy"),
+                "entryPolicyMinLiveSamples": pulse.get("entryPolicyMinLiveSamples") or sets.get("entryPolicyMinLiveSamples"),
+                "statsAgeS": progress_stats.get("statsAgeS"),
+                "stale": bool(progress_stats.get("stale")),
+            })
+            self._json(progress)
+            return
         if path in ("/config.json", "/config"):
             if conn == "overall":
                 self._json({
@@ -1665,6 +1848,9 @@ class Handler(SimpleHTTPRequestHandler):
                 })
                 return
             ov = load_overlay(conn)
+            entry_candidate_cap = ov.get("entryPolicyMaxCandidates")
+            if entry_candidate_cap is None:
+                entry_candidate_cap = ov.get("liveTestCandidates")
             self._json({
                 "cts": load_cts(conn),
                 "overlay": ov,
@@ -1675,6 +1861,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "histLookbackBars": ov.get("histLookbackBars"),
                 "maxOpen": ov.get("maxOpen"),
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
+                "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
+                "entryPolicyMaxCandidates": entry_candidate_cap,
+                "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
                 "dcaEnabled": ov.get("dcaEnabled"),
@@ -1761,8 +1950,20 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/control.json", "/control"):
             action = str((body or {}).get("action") or "").lower().strip()
-            ok, detail = apply_control(conn or "overall", action)
-            self._json({"ok": ok, "detail": detail, "conn": conn or "overall", "action": action}, 200 if ok else 400)
+            target = conn or "overall"
+            ok, detail = apply_control(target, action)
+            ids = [l["id"] for l in LANES] if target == "overall" else ([target] if target in ID_TO_LANE else [])
+            states = [control_state(cid) for cid in ids]
+            payload = {
+                "ok": ok,
+                "detail": detail,
+                "conn": target,
+                "action": action,
+                "lanes": states,
+            }
+            if len(states) == 1:
+                payload["state"] = states[0]
+            self._json(payload, 200 if ok else 400)
             return
         if path in ("/connection.json", "/connection"):
             ok, detail, pub = save_connection(conn or "overall", body if isinstance(body, dict) else {})
@@ -1829,7 +2030,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import start_job
+                from hist_calc import read_job, start_job, stop_job
+                action = str((body or {}).get("action") or "start").lower().strip()
+                if action == "stop":
+                    stop_result = stop_job(connection=conn)
+                    job = read_job(conn)
+                    job["ok"] = True
+                    job["running"] = False
+                    job["detail"] = "historic calculation stopped" if stop_result.get("killed") else "historic calculation stop requested"
+                    self._json(job)
+                    return
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
                 job["running"] = job.get("phase") in (

@@ -21,6 +21,8 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     liveActive?: number;
     livePf?: number;
     liveNetAvg?: number;
+    entryCandidateCount?: number;
+    entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;
@@ -40,7 +42,9 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
   const perConfig = (live.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig !== false;
   const controlMode = ctrl?.mode ?? (perConfig ? "per-config" : "aggregate");
   const groupCount = ctrl?.groupCount ?? ctrl?.open ?? live.openCount ?? 0;
+  const pairCount = ctrl?.pairCount ?? (live.pulse?.controlOrders === false ? 0 : groupCount);
   const mergedMembers = ctrl?.mergedMembers;
+  const laneFlags = (live.pulse?.strategyLanes ?? {}) as Record<string, boolean>;
   const miss = ctrl?.missing ?? 0;
   return (
     <div className="rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="coverage-strip">
@@ -53,6 +57,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
+          {sets.entryCandidateCount != null ? ` · candidates ${sets.entryCandidateCount}${sets.entryCandidateCap === 0 ? " (unlimited)" : ""}` : ""}
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2">
@@ -77,8 +82,9 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span className={miss ? "text-danger" : "text-primary"}>
-          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} SL+TP · {ctrl?.security ?? 0} sec · {groupCount} groups
+          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} logical SL+TP · {ctrl?.exchangePositionGroups ?? recon?.exchangePositionGroups ?? "—"} exchange groups · {pairCount} pairs · {ctrl?.security ?? 0} sec
           {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
+          {Object.keys(laneFlags).length ? ` · lanes ${Object.entries(laneFlags).filter(([, enabled]) => enabled).map(([name]) => name).join(",") || "none"}` : ""}
         </span>
         <span className={recon?.ok === false ? "text-danger" : recon?.pending ? "text-warn" : "text-primary"}>
           recon {recon?.ok === false ? recon.detail || "gap" : recon?.pending ? recon.detail || "pending" : "ok"}
@@ -131,6 +137,8 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
     liveActive?: number;
     livePf?: number;
     liveNetAvg?: number;
+    entryCandidateCount?: number;
+    entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
     trailCover?: boolean;
@@ -151,6 +159,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const perConfig = (live?.pulse as { controlOrdersPerConfig?: unknown } | undefined)?.controlOrdersPerConfig !== false;
   const controlMode = ctrl?.mode ?? (perConfig ? "per-config" : "aggregate");
   const groupCount = ctrl?.groupCount ?? ctrl?.open ?? open.length;
+  const pairCount = ctrl?.pairCount ?? (live?.pulse?.controlOrders === false ? 0 : groupCount);
   const mergedMembers = ctrl?.mergedMembers;
   const groupGaps = (ctrl?.groups ?? []).filter((group) => !group.protected).slice(0, 10);
   const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 10);
@@ -162,7 +171,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Klines 1/5/15" v={`${scan?.kl1m ?? "—"} / ${scan?.kl5m ?? "—"} / ${scan?.kl15m ?? "—"}`} ok={Boolean(scan && scan.kl1m && scan.kl5m && scan.kl15m)} />
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
         <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} />
-        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
+        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${pairCount} pairs · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
         <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} />
         <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
         <KV

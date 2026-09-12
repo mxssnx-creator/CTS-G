@@ -153,14 +153,13 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
     setMsg(null);
     try {
       const r = await postControl(conn, action);
-      setMsg(r.detail);
+      setMsg(r.detail || (r.ok ? `${action} accepted` : `${action} failed`));
+      window.dispatchEvent(new CustomEvent("pulse:control", { detail: { conn, action, result: r } }));
     } catch (e) {
       setMsg(String(e));
+      window.dispatchEvent(new CustomEvent("pulse:control", { detail: { conn, action, result: { ok: false } } }));
     } finally {
       setBusy((b) => ({ ...b, [action]: false }));
-      // Event-based coordination: the desk repolls stats immediately instead
-      // of waiting out the 2s poll cadence.
-      window.dispatchEvent(new CustomEvent("pulse:control"));
     }
   };
   const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-40";
@@ -170,13 +169,34 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="flex rounded-radius border border-border bg-surface p-1">
-        <button type="button" className={`${btn} ${active ? "text-muted" : "text-primary"}`} disabled={Boolean(busy[startAction])} onClick={() => run(startAction)}>
+        <button
+          type="button"
+          data-testid="engine-start"
+          aria-label={paused ? "Resume engine" : "Start engine"}
+          className={`${btn} ${active ? "text-muted" : "text-primary"}`}
+          disabled={Boolean(busy[startAction])}
+          onClick={() => run(startAction)}
+        >
           <Play className="size-4" /> {paused ? "Resume" : "Start"}
         </button>
-        <button type="button" className={`${btn}`} disabled={Boolean(busy.pause)} onClick={() => run("pause")}>
+        <button
+          type="button"
+          data-testid="engine-pause"
+          aria-label="Pause engine"
+          className={`${btn}`}
+          disabled={Boolean(busy.pause)}
+          onClick={() => run("pause")}
+        >
           <Pause className="size-4" /> Pause
         </button>
-        <button type="button" className={`${btn} text-danger`} disabled={Boolean(busy.stop)} onClick={() => run("stop")}>
+        <button
+          type="button"
+          data-testid="engine-stop"
+          aria-label="Stop engine"
+          className={`${btn} text-danger`}
+          disabled={Boolean(busy.stop)}
+          onClick={() => run("stop")}
+        >
           <Square className="size-4" /> Stop
         </button>
       </div>

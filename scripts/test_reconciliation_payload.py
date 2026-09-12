@@ -41,4 +41,11 @@ class SnapshotValidation(unittest.TestCase):
             p.api=SimpleNamespace(get=lambda *args, data=rows:{'code':0,'data':data})
             self.assertEqual(p._exchange_flat(pos),expected)
 
+    def test_external_close_delta_is_idempotent_and_pending_intents_win(self):
+        from pulse_trader import confirmed_external_close_delta
+        self.assertEqual(confirmed_external_close_delta(10, 7), 3)
+        self.assertEqual(confirmed_external_close_delta(7, 7), 0)
+        self.assertEqual(confirmed_external_close_delta(7, 8), 0)
+        self.assertEqual(confirmed_external_close_delta(10, 7, 1), 0)
+
 if __name__=='__main__':unittest.main()

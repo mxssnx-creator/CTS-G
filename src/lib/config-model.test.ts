@@ -10,7 +10,7 @@ import {
 } from "./config-model.ts";
 
 test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
-  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, false);
+  assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, true);
   assert.equal(DEFAULT_OVERLAY.blockActiveMinLevel, 0);
   for (const normal of [false, true]) for (const active of [false, true]) for (const level of [0, 1, 3, 6]) {
     const loaded = overlayFromCts({}, { normalExecutionEnabled: normal, blockActive: active,
@@ -44,7 +44,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
     const saved = syncOverlayFlags(overlayFromCts({}, { systemSqliteMemory: mode, systemSqliteCheckpointS: 3 }));
     assert.equal(saved.systemSqliteMemory, mode);
     assert.equal(saved.systemSqliteCheckpointS, 3);
-    assert.equal(saved.normalExecutionEnabled, false);
+    assert.equal(saved.normalExecutionEnabled, true);
     assert.equal(saved.stratGeneral, true);
   }
   assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 0 }).systemSqliteCheckpointS, 1);
@@ -89,17 +89,36 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to adjusted execution, 110 Sets, 100 orders and 50 symbols", () => {
+test("new and legacy settings default to unlimited logical positions, independent lanes and 50 symbols", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
-    assert.equal(value.normalExecutionEnabled, false);
+    assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
-    assert.equal(value.setMaxActive, 110);
-    assert.equal(value.maxOpen, 100);
+    assert.equal(value.setMaxActive, 0);
+    assert.equal(value.maxOpen, 0);
+    assert.equal(value.controlOrdersPerConfig, true);
+    assert.equal(value.entryPolicyMaxCandidates, 0);
+    assert.equal(value.dcaEnabled, true);
+    assert.equal(value.stratDca, true);
+    assert.equal(value.modules?.["strategy.dca"], true);
     assert.equal(value.stratGeneral, true);
+    assert.equal(value.stratIndications, true);
+    assert.equal(value.stratTrailing, true);
+    assert.equal(value.stratBlock, true);
+    for (const key of ["indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak"] as const) {
+      assert.equal(value[key], true, key);
+    }
+    for (const key of ["strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls"] as const) {
+      assert.equal(value.modules?.[key], true, key);
+    }
     assert.equal(value.symbolCap, 50);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
   }
+});
+
+test("missing control mode fields default to independent per-config pairs", () => {
+  const value = syncOverlayFlags(overlayFromCts({}, { controlOrdersPerConfig: undefined }));
+  assert.equal(value.controlOrdersPerConfig, true);
 });
 
 test("an explicit All/* cap of 25 stays ranked and is not unlimited", () => {

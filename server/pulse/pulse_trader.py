@@ -62,7 +62,14 @@ from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from contracts import INDICATION_KINDS, stable_key
-from runtime_scope import redis_key, order_tag
+from runtime_scope import (
+    redis_key,
+    order_tag,
+    row_scope_matches,
+    scope_metadata,
+    system_id,
+    tracking_scope,
+)
 from system_settings import calculation_overlay, normalize_system_settings
 from runtime_statistics import RuntimeMonitor, persistent_activity
 from redis_coordination import coordinator as redis_config
@@ -122,6 +129,9 @@ def effective_indication_timeframes(
     return tuple(tf for tf in TIMEFRAMES if tf in allowed)
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
+SYSTEM_ID = system_id()
+TRACKING_SCOPE = tracking_scope(CONN_SHORT, SYSTEM_ID)
+SCOPE_METADATA = scope_metadata(CONN_SHORT, SYSTEM_ID)
 REDIS_CONN = redis_key(f"connection:{CONN_SHORT}")
 BASE = os.environ.get("PULSE_BASE", "") or "https://open-api.bingx.com"
 # Runtime state lives outside the checkout so reinstalling code preserves it.
@@ -333,7 +343,7 @@ BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
 STAGGER_S = 0.6
-DD_HALT = 0.18
+DD_HALT = 0.0
 EQ_MIN = 0.20
 RECV = 5000
 TAG = order_tag(CONN_SHORT)
@@ -582,6 +592,19 @@ def valid_position_snapshot(rows: Any) -> bool:
         except (TypeError, ValueError, OverflowError):
             return False
     return True
+
+
+def confirmed_external_close_delta(previous_qty: Any, exchange_qty: Any, pending_close_qty: Any = 0.0) -> float:
+    """Return one exchange-confirmed quantity delta not already owned by a close intent."""
+    try:
+        previous = max(0.0, float(previous_qty or 0.0))
+        current = max(0.0, float(exchange_qty or 0.0))
+        pending = max(0.0, float(pending_close_qty or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if pending > 1e-12 or current >= previous - 1e-12:
+        return 0.0
+    return previous - current
 
 
 def ctrl_err_kind(msg: str) -> str:
@@ -846,6 +869,9 @@ class Position:
     pack: str = ""
     client_id: str = ""
     ours: bool = True
+    system_id: str = ""
+    connection: str = ""
+    tracking_scope: str = ""
     overall: bool = True
     close_position: bool = True
     ctrl_qty: float = 0.0
@@ -867,6 +893,10 @@ class Position:
     control_sl_bp: int = 0
     control_tp_bp: int = 0
     legacy_aggregate: bool = False
+    # Aggregate mode keeps the widest effective member ranges so one common
+    # close-position SL/TP pair never becomes narrower after a merge.
+    aggregate_sl_pct: float = 0.0
+    aggregate_tp_pct: float = 0.0
     member_count: int = 1
     lineage_set_ids: List[str] = field(default_factory=list)
     lineage_parent_set_ids: List[str] = field(default_factory=list)
@@ -930,6 +960,8 @@ class Closed:
     roundtrip_qty: float = 0.0
     close_fill_id: str = ""
     roundtrip_result: Dict[str, Any] = field(default_factory=dict)
+    system_id: str = ""
+    tracking_scope: str = ""
 
 
 class Pulse:
@@ -952,20 +984,41 @@ class Pulse:
         self.exchange_own_qty: Dict[str, float] = {}
         self.exchange_own_open_count = -1
         self.exchange_total_open_count = -1
+        self.exchange_order_own_count = -1
+        self.exchange_order_total_count = -1
+        self.exchange_order_foreign_count = -1
         self.control_orders_per_config = True
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
         self.start_eq = 0.0
+        self.realized_baseline = 0.0
+        self.dust_retired: set = set()
+        self.foreign_activity_seen = False
         try:
             if os.path.exists(START_EQ_PATH):
-                self.start_eq = float((json.load(open(START_EQ_PATH)) or {}).get("startEquity") or 0)
+                baseline = json.load(open(START_EQ_PATH)) or {}
+                stored_scope = str(baseline.get("trackingScope") or baseline.get("tracking_scope") or "").strip().lower()
+                if not stored_scope or stored_scope == TRACKING_SCOPE:
+                    self.start_eq = float(baseline.get("systemStartEquity") or baseline.get("startEquity") or 0)
+                    self.realized_baseline = float(baseline.get("realizedBaseline") or 0.0)
+                    self.foreign_activity_seen = bool(baseline.get("foreignActivitySeen") or baseline.get("foreign_activity_seen"))
         except Exception:
             self.start_eq = 0.0
+            self.realized_baseline = 0.0
+        self.system_start_eq = self.start_eq
+        self.wallet_equity = 0.0
+        self.system_equity = 0.0
         self.equity = 0.0
         self.available = 0.0
         self.used = 0.0
         self.upnl = 0.0
+        self.system_upnl = 0.0
+        self.foreign_upnl = 0.0
+        self.foreign_realized = 0.0
+        self.foreign_exposure = 0.0
+        self.foreign_position_count = 0
+        self.foreign_open_order_count = 0
         self.halted = False
         self.halt_reason: Optional[str] = None
         self._pre_pause_halt: Optional[str] = None
@@ -1065,6 +1118,9 @@ class Pulse:
         self.last_scan_io = False
         self.ignored_foreign = 0
         self.dca_fail_cd: Dict[str, float] = {}
+        self.system_id = SYSTEM_ID
+        self.connection_id = CONN_SHORT
+        self.tracking_scope = TRACKING_SCOPE
         self.track_prefix = TAG
         self.boot_ts = time.time()
         self.seen_fill_cids = BoundedSet(4000)
@@ -1159,7 +1215,8 @@ class Pulse:
         self.strat_ind = True
         self.strat_block = True
         self.strat_trail = True
-        self.normal_execution_enabled = False
+        self.strat_dca = True
+        self.normal_execution_enabled = True
         self.block_active = True
         self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
@@ -1183,6 +1240,132 @@ class Pulse:
                 return g
         return "u%d" % (abs(hash(sym)) % 8)
 
+    def _bind_position_scope(self, pos: Position) -> bool:
+        """Attach the exact system/connection scope without widening ownership."""
+        if getattr(pos, "ours", True) is False:
+            return False
+        stored_scope = str(getattr(pos, "tracking_scope", "") or "").strip().lower()
+        stored_system = str(getattr(pos, "system_id", "") or "").strip().lower()
+        stored_connection = str(getattr(pos, "connection", "") or "").strip().lower()
+        has_scope_proof = bool(stored_scope or stored_system or stored_connection)
+        if stored_scope and stored_scope != TRACKING_SCOPE:
+            return False
+        if stored_system and stored_system != SYSTEM_ID:
+            return False
+        if stored_connection and stored_connection != CONN_SHORT:
+            return False
+        client_id = str(getattr(pos, "client_id", "") or "")
+        if not has_scope_proof and not self.cid_ours(client_id):
+            return False
+        pos.system_id = SYSTEM_ID
+        pos.connection = CONN_SHORT
+        pos.tracking_scope = TRACKING_SCOPE
+        pos.ours = True
+        return True
+
+    def position_is_ours(self, pos: Optional[Position]) -> bool:
+        if pos is None or getattr(pos, "ours", True) is False:
+            return False
+        return self._bind_position_scope(pos)
+
+    def row_is_ours(self, row: Any) -> bool:
+        if not isinstance(row, dict) or row.get("ours") is False:
+            return False
+        if not row_scope_matches(row, CONN_SHORT):
+            return False
+        return True
+
+    def _persist_start_equity(self) -> None:
+        try:
+            tmp = START_EQ_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({
+                    "systemStartEquity": float(self.start_eq),
+                    "startEquity": float(self.start_eq),
+                    "realizedBaseline": float(getattr(self, "realized_baseline", 0.0)),
+                    "foreignActivitySeen": bool(getattr(self, "foreign_activity_seen", False)),
+                    **SCOPE_METADATA,
+                    "t": time.time(),
+                }, f)
+            os.replace(tmp, START_EQ_PATH)
+        except Exception:
+            pass
+
+    def _note_foreign_activity(self) -> None:
+        if getattr(self, "foreign_activity_seen", False):
+            return
+        self.foreign_activity_seen = True
+        self._persist_start_equity()
+
+    def _persistent_system_realized(self) -> float:
+        status = getattr(getattr(self, "runtime", None), "snapshot", {}) or {}
+        totals = status.get("totals") if isinstance(status, dict) else {}
+        if isinstance(totals, dict) and "realized" in totals:
+            return _sf(totals.get("realized"))
+        # Startup/unit-test objects can refresh the balance before optional
+        # strategy modules are attached. Keep the fallback scope-safe without
+        # routing through max_book_notional()/DCA configuration.
+        total = 0.0
+        for row in getattr(self, "closed", ()) or ():
+            if isinstance(row, dict):
+                record = row
+            elif hasattr(row, "__dataclass_fields__"):
+                record = asdict(row)
+            else:
+                try:
+                    record = vars(row)
+                except TypeError:
+                    continue
+            if self.row_is_ours(record):
+                total += _sf(record.get("pnl"))
+        return total
+
+    def _system_marked_equity(self) -> float:
+        # An explicit Start/reset re-baselines start_eq to the wallet, but the
+        # runtime realized counter is cumulative and would otherwise keep the
+        # marked equity negative forever. Subtract the baseline captured at the
+        # last reset so a fresh session starts from the real wallet equity.
+        realized = self._persistent_system_realized() - _sf(getattr(self, "realized_baseline", 0.0))
+        return _sf(getattr(self, "start_eq", 0.0)) + realized + self.system_open_upnl()
+
+    def _has_scoped_activity(self) -> bool:
+        open_book = getattr(self, "open", {})
+        for pos in open_book.values() if isinstance(open_book, dict) else ():
+            if self.position_is_ours(pos):
+                return True
+        for row in getattr(self, "closed", ()) or ():
+            if isinstance(row, dict):
+                record = row
+            elif hasattr(row, "__dataclass_fields__"):
+                record = asdict(row)
+            else:
+                try:
+                    record = vars(row)
+                except TypeError:
+                    continue
+            if self.row_is_ours(record):
+                return True
+        return False
+
+    def _foreign_activity_present(self) -> bool:
+        return bool(
+            abs(_sf(getattr(self, "foreign_upnl", 0.0))) > 1e-12
+            or abs(_sf(getattr(self, "foreign_realized", 0.0))) > 1e-12
+            or int(getattr(self, "foreign_position_count", 0) or 0) > 0
+            or int(getattr(self, "foreign_open_order_count", 0) or 0) > 0
+        )
+
+    def _balance_system_equity(self, wallet_system_equity: float) -> float:
+        # Before the first scoped fill, retain the legacy account baseline so
+        # deposits/losses still drive the guard. Once foreign activity has ever
+        # been observed, wallet movement can no longer become system PnL after
+        # that position/order disappears from the next exchange snapshot.
+        if getattr(self, "foreign_activity_seen", False):
+            return self._system_marked_equity()
+        if not self._has_scoped_activity() and not self._foreign_activity_present():
+            return max(0.0, _sf(wallet_system_equity))
+        return self._system_marked_equity()
+
     def per_config_controls(self, pos: Optional[Position] = None) -> bool:
         """Whether a position participates in quantity-matched range controls."""
         if not bool(getattr(self, "control_orders_per_config", True)):
@@ -1198,8 +1381,37 @@ class Pulse:
             _sf(getattr(pos, "sl_pct", 0)) > 0 and _sf(getattr(pos, "tp_pct", 0)) > 0
         )
 
+    def aggregate_member_ranges(self, pos: Position) -> Tuple[float, float]:
+        """Return the widest effective member SL/TP fractions for an aggregate."""
+        sl = max(
+            0.0,
+            _sf(getattr(pos, "aggregate_sl_pct", 0.0)),
+            _sf(getattr(pos, "sl_pct", 0.0)),
+        )
+        tp = max(
+            0.0,
+            _sf(getattr(pos, "aggregate_tp_pct", 0.0)),
+            _sf(getattr(pos, "tp_pct", 0.0)),
+        )
+        return sl, tp
+
+    def widen_aggregate_range(self, pos: Position, sl_pct: Any = 0.0, tp_pct: Any = 0.0) -> None:
+        """Persist a monotonic aggregate range without changing per-config keys."""
+        current_sl, current_tp = self.aggregate_member_ranges(pos)
+        widened_sl = max(current_sl, _sf(sl_pct))
+        widened_tp = max(current_tp, _sf(tp_pct))
+        pos.aggregate_sl_pct = widened_sl
+        pos.aggregate_tp_pct = widened_tp
+        if widened_sl > 0:
+            pos.sl_pct = widened_sl
+        if widened_tp > 0:
+            pos.tp_pct = widened_tp
+
     def prepare_position_group(self, pos: Position, legacy: Optional[bool] = None) -> Position:
         """Attach a restart-safe control identity and bounded lineage metadata."""
+        if not self._bind_position_scope(pos):
+            pos.ours = False
+            return pos
         if legacy is not None:
             pos.legacy_aggregate = bool(legacy)
         # Prefer persisted normalized range fields when available. This keeps a
@@ -1240,6 +1452,7 @@ class Pulse:
         else:
             # Aggregate mode is one symbol/direction scope. Never let a stale
             # range key make the disabled mode look like per-config controls.
+            self.widen_aggregate_range(pos, sl_value, tp_value)
             pos.control_group_key = ""
             pos.control_range_key = "aggregate"
             pos.control_sl_bp = 0
@@ -1328,6 +1541,34 @@ class Pulse:
             pos for pos in self.open.values()
             if pos.symbol == symbol and (not side_u or str(pos.side).upper() == side_u)
         ]
+
+    def execution_lane_key(self, pack: str, reason: str, selected_set: Any = None, strategy: str = "") -> str:
+        """Build the durable duplicate key for one strategy/config lane."""
+        if selected_set is None:
+            return ""
+        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", str(reason or ""))
+        signal_key = exact.group(1) if exact else (
+            str(reason or "").split(":")[1] if pack == "indications" and ":" in str(reason or "") else "general"
+        )
+        lane = stable_key(pack, getattr(selected_set, "id", ""), signal_key)
+        strategy_key = str(strategy or "").strip().lower()
+        if strategy_key == "core":
+            strategy_key = "normal"
+        return f"{strategy_key}:{lane}" if strategy_key and lane else lane
+
+    def execution_lane_matches(self, stored_lane: Any, requested_lane: Any) -> bool:
+        """Match a new lane while retaining pre-strategy-prefix normal rows."""
+        stored = str(stored_lane or "")
+        requested = str(requested_lane or "")
+        if not stored or not requested:
+            return False
+        if stored == requested:
+            return True
+        if requested.startswith("normal:") and stored == requested.removeprefix("normal:"):
+            return True
+        if stored.startswith("normal:") and requested == stored.removeprefix("normal:"):
+            return True
+        return False
 
     def entry_slot_count(self) -> int:
         """Confirmed and pending lanes share the configured open-slot budget."""
@@ -1442,9 +1683,17 @@ class Pulse:
             float(getattr(incoming, "pending_close_qty", 0) or 0),
         )
         # Same-range fills may originate from independent orders with slightly
-        # different sub-basis-point inputs. Keep their weighted effective
-        # fractions for pricing while the canonical range key remains stable.
-        if not bool(getattr(target, "legacy_aggregate", False)) and not bool(getattr(incoming, "legacy_aggregate", False)):
+        # different sub-basis-point inputs. Per-config groups keep a weighted
+        # effective range; aggregate mode keeps the widest member range so a
+        # later merge can never narrow the common symbol/direction controls.
+        aggregate_mode = not self.per_config_controls(target)
+        if aggregate_mode or bool(getattr(target, "legacy_aggregate", False)) or bool(getattr(incoming, "legacy_aggregate", False)):
+            self.widen_aggregate_range(
+                target,
+                max(float(getattr(incoming, "aggregate_sl_pct", 0) or 0), float(getattr(incoming, "sl_pct", 0) or 0)),
+                max(float(getattr(incoming, "aggregate_tp_pct", 0) or 0), float(getattr(incoming, "tp_pct", 0) or 0)),
+            )
+        else:
             if float(getattr(incoming, "sl_pct", 0) or 0) > 0:
                 target.sl_pct = (
                     float(getattr(target, "sl_pct", 0) or 0) * old_qty
@@ -1787,7 +2036,13 @@ class Pulse:
             tagged = self.our_orders(symbol)
         except Exception:
             tagged = []
-        if not tagged and symbol not in self.owned_syms:
+        has_owned_position = any(
+            self.position_is_ours(pos)
+            and str(getattr(pos, "symbol", "")).upper() == str(symbol or "").upper()
+            and str(getattr(pos, "side", "")).upper() == str(side or "").upper()
+            for pos in getattr(self, "open", {}).values()
+        )
+        if not tagged and not has_owned_position:
             log(f"SKIP flatten foreign {symbol} {side}", every=30.0, key=f"flat:{symbol}")
             return False
         dummy = Position(
@@ -1898,7 +2153,7 @@ class Pulse:
             if not isinstance(value, dict):
                 continue
             cid = str(value.get("client_id") or value.get("clientId") or key or "")
-            if not self.cid_ours(cid):
+            if not row_scope_matches(value, CONN_SHORT) or not self.cid_ours(cid):
                 continue
             try:
                 created = float(value.get("created_at") or value.get("createdAt") or now)
@@ -1931,8 +2186,8 @@ class Pulse:
         try:
             os.makedirs(DIR, exist_ok=True)
             blob = {
-                "version": 1,
-                "connection": CONN_SHORT,
+                "version": 2,
+                **SCOPE_METADATA,
                 "updatedAt": time.time(),
                 "orders": {cid: dict(row) for cid, row in list(self.pending_orders.items())[-512:]},
             }
@@ -2027,9 +2282,13 @@ class Pulse:
         merged_meta = dict(old.get("metadata") or {})
         merged_meta.update(metadata or {})
         pending[cid] = {
-            "kind": str(kind or old.get("kind") or "entry"),
-            "client_id": cid,
-            "order_id": real_oid(order_id) or str(old.get("order_id") or ""),
+                "kind": str(kind or old.get("kind") or "entry"),
+                "client_id": cid,
+                "system_id": SYSTEM_ID,
+                "connection": CONN_SHORT,
+                "tracking_scope": TRACKING_SCOPE,
+                "order_id": real_oid(order_id) or str(old.get("order_id") or ""),
+
             "symbol": str(symbol or old.get("symbol") or ""),
             "side": str(side or old.get("side") or "").upper(),
             "requested_qty": requested,
@@ -2098,7 +2357,11 @@ class Pulse:
                 continue
             if pos.qty <= 0:
                 continue
+            if not row_scope_matches(rec, CONN_SHORT):
+                continue
             if pos.client_id and not self.cid_ours(pos.client_id):
+                continue
+            if not self._bind_position_scope(pos):
                 continue
             # Symbol-keyed records predate range groups. Keep them as a
             # legacy aggregate so enabling the new default cannot reinterpret
@@ -2182,6 +2445,13 @@ class Pulse:
                 idx = -1
         ix = f"{max(0, idx):03d}"
         group_token = ""
+        if pos is not None and not self.per_config_controls(pos) and kind in ("u", "v", "s", "t"):
+            # Aggregate controls intentionally omit set/config/range tokens.
+            # The symbol+hedge-side digest scopes the common pair while the
+            # nonce keeps replacement requests unique across restarts.
+            scope = stable_key("aggregate-control", pos.symbol, pos.side)[:8]
+            prefix = f"{TAG}{kind}a{scope}"
+            return prefix + client_order_nonce(prefix, 32 - len(prefix))
         if pos is not None and self.per_config_controls(pos) and getattr(pos, "control_group_key", ""):
             group_token = control_group_token(
                 pos.control_group_key,
@@ -2440,59 +2710,63 @@ class Pulse:
             self.last_error = f"balance {r.get('msg')}"
             self.record_event("error", stable_key(request_key, "invalid"), status="error", code=r.get("code"), detail=self.last_error)
             return
-        self.equity = float(row.get("equity") or row.get("balance") or 0)
-        self.available = float(row.get("availableMargin") or row.get("available") or row.get("availableBalance") or 0)
-        self.used = float(row.get("usedMargin") or row.get("used") or 0)
-        self.upnl = float(row.get("unrealizedProfit") or row.get("unrealized") or 0)
-        if self.start_eq <= 0:
-            self.start_eq = self.equity
-            try:
-                tmp = START_EQ_PATH + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
-                os.replace(tmp, START_EQ_PATH)
-            except Exception:
-                pass
-        self.last_bal = time.time()
-        # Explicit Start (sidecar drops reset-eq) or a real deposit must always
-        # revive the desk: re-baseline the session equity instead of latching
-        # the drawdown / equity-min halt forever.
+
+        self.wallet_equity = _sf(row.get("equity") or row.get("balance"))
+        self.available = _sf(row.get("availableMargin") or row.get("available") or row.get("availableBalance"))
+        self.used = _sf(row.get("usedMargin") or row.get("used"))
+        self.upnl = _sf(row.get("unrealizedProfit") or row.get("unrealized"))
+        if self._foreign_activity_present():
+            self._note_foreign_activity()
+        wallet_system_equity = (
+            self.wallet_equity
+            - _sf(getattr(self, "foreign_upnl", 0.0))
+            - _sf(getattr(self, "foreign_realized", 0.0))
+        )
+
+        if self.start_eq <= 0 and wallet_system_equity > 0:
+            self.start_eq = max(0.0, wallet_system_equity - self.system_open_upnl())
+            self.system_start_eq = self.start_eq
+            self._persist_start_equity()
+
+        reset_requested = False
         try:
-            if os.path.exists(RESET_EQ_PATH):
+            reset_requested = os.path.exists(RESET_EQ_PATH)
+            if reset_requested:
                 os.remove(RESET_EQ_PATH)
-                if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
-                    self._pre_pause_halt = None
-                self.start_eq = 0.0
         except Exception:
-            pass
-        if self.start_eq <= 0 and self.equity > 0:
-            self.start_eq = self.equity
-            try:
-                tmp = START_EQ_PATH + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
-                os.replace(tmp, START_EQ_PATH)
-            except Exception:
-                pass
+            reset_requested = False
+        if reset_requested:
+            # Start/reset is lane-scoped. Foreign mark-to-market and realized
+            # telemetry are removed before establishing the new baseline.
+            self.start_eq = max(0.0, wallet_system_equity - self.system_open_upnl())
+            self.realized_baseline = self._persistent_system_realized()
+            self.system_start_eq = self.start_eq
+            self._persist_start_equity()
+            if self.halt_reason in ("drawdown halt", "stopped", "paused") or str(self.halt_reason or "").startswith("equity "):
+                self._pre_pause_halt = None
+            self._halt_eq = 0.0
+
+        self.system_upnl = self.system_open_upnl()
+        self.system_equity = self._balance_system_equity(wallet_system_equity)
+        self.equity = self.system_equity
+        self.system_start_eq = self.start_eq
+        self.last_bal = time.time()
+        # Only a real system-capital increase can rescue an economic halt.
         halt_eq = float(getattr(self, "_halt_eq", 0.0) or 0.0)
         econ_halt = self.halted and (
             self.halt_reason == "drawdown halt" or str(self.halt_reason or "").startswith("equity ")
         )
         rescued = bool(
-            econ_halt
+            not reset_requested
+            and econ_halt
             and halt_eq > 0
-            and self.equity >= max(EQ_MIN * 2.0, halt_eq * 1.5, halt_eq + 1.0)
+            and self.system_equity >= max(EQ_MIN * 2.0, halt_eq * 1.5, halt_eq + 1.0)
         )
         if rescued:
-            log(f"EQ re-baseline on deposit start_eq {self.start_eq:.4f} -> {self.equity:.4f}")
-            self.start_eq = self.equity
-            try:
-                tmp = START_EQ_PATH + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"startEquity": self.start_eq, "t": time.time()}, f)
-                os.replace(tmp, START_EQ_PATH)
-            except Exception:
-                pass
+            log(f"EQ re-baseline on system capital start_eq {self.start_eq:.4f} -> {self.system_equity:.4f}")
+            self.start_eq = self.system_equity
+            self.system_start_eq = self.start_eq
+            self._persist_start_equity()
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -2507,19 +2781,19 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "paused"
-        elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+        elif DD_HALT > 0 and self.start_eq > 0 and self.system_equity > 0 and (self.start_eq - self.system_equity) / self.start_eq >= DD_HALT:
             if not self.halted:
-                self._halt_eq = self.equity
+                self._halt_eq = self.system_equity
             self.halted = True
             self.halt_reason = "drawdown halt"
             self._pre_pause_halt = None
-        elif self.equity < EQ_MIN:
+        elif self.system_equity < EQ_MIN:
             if not self.halted:
-                self._halt_eq = self.equity
+                self._halt_eq = self.system_equity
             self.halted = True
-            self.halt_reason = f"equity {self.equity:.4f} below min"
+            self.halt_reason = f"equity {self.system_equity:.4f} below min"
             self._pre_pause_halt = None
-        elif self.equity >= EQ_MIN and self.start_eq > 0 and (self.start_eq - self.equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6:
+        elif self.system_equity >= EQ_MIN and (DD_HALT <= 0 or (self.start_eq > 0 and (self.start_eq - self.system_equity) / max(self.start_eq, 1e-9) < DD_HALT * 0.6)):
             self.halted = False
             self.halt_reason = None
             self._pre_pause_halt = None
@@ -2564,7 +2838,10 @@ class Pulse:
             if ledger is None:
                 ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
                 self.event_ledger = ledger
+            fields.setdefault("system_id", SYSTEM_ID)
             fields.setdefault("connection", CONN_SHORT)
+            fields.setdefault("tracking_scope", TRACKING_SCOPE)
+            fields.setdefault("track_prefix", TAG)
             committed = bool(ledger.record(event_type, event_id, status=status, **fields))
             if committed:
                 self.bump(f"event:{event_type}")
@@ -2604,11 +2881,13 @@ class Pulse:
             exchange_open = int(exchange_open)
         except Exception:
             exchange_open = -1
+        owned_positions = [p for p in (getattr(self, "open", {}) or {}).values() if self.position_is_ours(p)]
+        owned_closed = [c for c in (getattr(self, "closed", ()) or ()) if self.row_is_ours(asdict(c))]
         return ledger.summary(
-            internal_open=len(getattr(self, "open", {}) or {}),
-            internal_position_groups=len({(p.symbol, p.side) for p in (getattr(self, "open", {}) or {}).values() if float(p.qty or 0) > 0}),
+            internal_open=len(owned_positions),
+            internal_position_groups=len({(p.symbol, p.side) for p in owned_positions if float(p.qty or 0) > 0}),
             exchange_open=exchange_open,
-            internal_closed=len(getattr(self, "closed", ()) or ()),
+            internal_closed=len(owned_closed),
             pending_count=len(getattr(self, "pending_orders", {}) or {}),
             reconciliation_pending=bool(getattr(self, "recon_pending", False)),
         )
@@ -3179,8 +3458,15 @@ class Pulse:
                     self._order_est_known = True
                 else:
                     rows = hit[1] if hit else []
+        self.exchange_order_total_count = len(rows)
+        self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
+        self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
+        self.foreign_open_order_count = self.exchange_order_foreign_count
+        if self.exchange_order_foreign_count > 0:
+            self._note_foreign_activity()
         if symbol:
             return [o for o in rows if str(o.get("symbol") or "") == symbol]
+
         return rows
 
     def our_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -3249,6 +3535,8 @@ class Pulse:
         return False
 
     def _order_matches_position(self, o: Dict[str, Any], pos: Position) -> bool:
+        if not self.order_is_ours(o) or not self.position_is_ours(pos):
+            return False
         if str(o.get("symbol") or "") != pos.symbol:
             return False
         side = str(o.get("positionSide") or "").upper()
@@ -3276,7 +3564,10 @@ class Pulse:
     def cancel_controls(
         self, symbol: str, keep: Optional[set] = None, pos: Optional[Position] = None
     ) -> None:
+        if pos is not None and not self.position_is_ours(pos):
+            return
         keep = keep or set()
+        seen: set[str] = set()
         for o in self.list_orders(symbol):
             if not self.order_is_ours(o):
                 continue
@@ -3285,8 +3576,23 @@ class Pulse:
             oid = real_oid(o.get("orderId") or o.get("orderID"))
             typ = str(o.get("type") or "")
             if typ in SL_TYPES | TP_TYPES or o.get("stopPrice"):
+                if oid:
+                    seen.add(oid)
                 if oid and oid not in keep:
                     self.cancel_order(symbol, oid, self.order_cid(o))
+        # REST can lag or return an empty cached page immediately after a
+        # partial fill. Known local control IDs are ours, so cancel them too;
+        # this prevents a common aggregate pair from being duplicated on the
+        # next reconciliation pass.
+        if pos is not None:
+            known = {
+                real_oid(getattr(pos, "sl_oid", "")),
+                real_oid(getattr(pos, "tp_oid", "")),
+                real_oid(getattr(pos, "sec_sl_oid", "")),
+                real_oid(getattr(pos, "sec_tp_oid", "")),
+            }
+            for oid in sorted(x for x in known if x and x not in keep and x not in seen):
+                self.cancel_order(symbol, oid)
 
     def opt_fracs(self, pos: Optional[Position] = None) -> Tuple[float, float, float, float]:
         """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges."""
@@ -3338,10 +3644,19 @@ class Pulse:
         return self.clamp_ctrl_price(pos, "sl", sl), self.clamp_ctrl_price(pos, "tp", tp)
 
     def max_range_prices(self, pos: Position) -> Tuple[float, float]:
-        """Overall security SL/TP: widest of the order range and overlay max."""
+        """Return the widest safe member range for the effective control mode."""
         sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
-        sl_w = max(sl_f, sl_hi, float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
-        tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
+        if self.per_config_controls(pos):
+            sl_w = max(sl_f, sl_hi, float(getattr(pos, "sl_pct", 0) or 0), sl_lo)
+            tp_w = max(tp_f, float(self.tp_max), float(getattr(pos, "tp_pct", 0) or 0), float(self.tp_min))
+        else:
+            member_sl, member_tp = self.aggregate_member_ranges(pos)
+            # Aggregate protection is widened from the actual merged members,
+            # then bounded by the configured risk maxima. It must not silently
+            # fall back to the narrower first member after a partial fill.
+            sl_w = max(sl_lo, min(sl_hi, member_sl or sl_f))
+            tp_cap = float(self.tp_max) if float(self.tp_max) > 0 else float("inf")
+            tp_w = max(float(self.tp_min), min(tp_cap, member_tp or tp_f))
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
@@ -3382,10 +3697,15 @@ class Pulse:
     def desired_sl_tp(self, pos: Position) -> Tuple[float, float, float, float]:
         sl, tp = self.security_prices(pos)
         sec_sl, sec_tp = self.max_range_prices(pos)
-        pick_sl = next((p for p in (sl, sec_sl) if self.sl_legal(pos, p)), 0.0)
+        # Aggregate mode has one common pair for the whole symbol/direction;
+        # always prefer its widened range. Per-config mode preserves the
+        # quantity-matched member range and only falls back to security prices
+        # when the exchange rejects the preferred trigger side.
+        aggregate = not self.per_config_controls(pos)
+        pick_sl = next((p for p in ((sec_sl, sl) if aggregate else (sl, sec_sl)) if self.sl_legal(pos, p)), 0.0)
         if not pick_sl:
             pick_sl = self.clamp_ctrl_price(pos, "sl", sec_sl or sl or 0)
-        pick_tp = next((p for p in (tp, sec_tp) if self.tp_legal(pos, p)), 0.0)
+        pick_tp = next((p for p in ((sec_tp, tp) if aggregate else (tp, sec_tp)) if self.tp_legal(pos, p)), 0.0)
         if not pick_tp:
             pick_tp = self.clamp_ctrl_price(pos, "tp", sec_tp or tp or 0)
         return pick_sl, pick_tp, sec_sl, sec_tp
@@ -3467,7 +3787,7 @@ class Pulse:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
@@ -3714,7 +4034,7 @@ class Pulse:
                 # defect because no venue position exists for this side.
                 continue
             px = self.px.get(pos.symbol) or pos.entry
-            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             need = self.missing_controls(pos)
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{scope}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
@@ -3780,7 +4100,7 @@ class Pulse:
                 except Exception:
                     pass
                 self.clear_position_controls(pos)
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
@@ -3790,7 +4110,7 @@ class Pulse:
             b["clientOrderID"] = self.cid(ch, pos=pos)
             if not self.per_config_controls(pos):
                 b["closePosition"] = "true"
-        batch_scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        batch_scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         batch_key = stable_key(
             CONN_SHORT,
             "control-batch",
@@ -3869,6 +4189,8 @@ class Pulse:
         pos.ctrl_verified = pos.controls_ok
 
     def ensure_controls(self, pos: Position) -> None:
+        if not self.position_is_ours(pos):
+            return
         if not self.exchange_position_active(pos):
             return
         now = time.time()
@@ -3880,7 +4202,7 @@ class Pulse:
             return tracked_at_start and not any(candidate is pos for candidate in self.open.values())
         if now < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         have_both = bool((real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))) and (real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", ""))))
         if have_both and now < self.ctrl_skip.get(scope, 0) and getattr(pos, "ctrl_verified", False):
             return
@@ -3997,7 +4319,11 @@ class Pulse:
                     trail = True
                 if pos.side == "SHORT" and want < have_px * 0.9992 and want > mark:
                     trail = True
-            if have_oid and live_have and side_ok and not trail:
+            range_changed = bool(
+                have_px <= 0
+                or abs(float(want or 0) - have_px) / max(float(pos.entry or 0), 1e-9) > 0.00035
+            )
+            if have_oid and live_have and side_ok and not trail and not range_changed:
                 return have_oid
             if have_oid and live_have and not can_replace:
                 return have_oid
@@ -4046,7 +4372,7 @@ class Pulse:
         A failed update preserves the old stop; the event loop can retry it.
         """
         now = time.time()
-        scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if now < self.ctrl_skip.get(f"sync:{scope}", 0):
             return False
         old_sl = float(pos.sl or 0.0)
@@ -4095,6 +4421,9 @@ class Pulse:
         return True
 
     def market_close(self, pos: Position) -> Tuple[bool, float]:
+        if not self.position_is_ours(pos):
+            log(f"SKIP close foreign {pos.symbol} {pos.side}", every=20.0, key=f"skip-close:{pos.symbol}:{pos.side}")
+            return False, self.px.get(pos.symbol) or pos.entry
         close_side = "SELL" if pos.side == "LONG" else "BUY"
         grouped = self.per_config_controls(pos)
         close_cid = self.cid("c", pos=pos)
@@ -4151,6 +4480,41 @@ class Pulse:
             kind = ctrl_err_kind(msg)
             if kind == "qty_close":
                 continue
+            if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                # Unlearnable venue floor (BingX VST reports "0 USDT"): the
+                # remainder cannot be closed at this size, so cool the symbol
+                # down instead of retrying every fallback form.
+                px_now = self.px.get(pos.symbol) or pos.entry
+                if requested_qty * max(px_now, 0.0) < 0.02:
+                    # Economically dust: below the venue close floor forever.
+                    # Retire it locally (write-off) instead of looping the
+                    # flatten path against an uncloseable remainder. Also
+                    # untag our orders on the symbol: adopt re-imports any
+                    # exchange position our tagged orders still claim, which
+                    # would resurrect the dust and loop the close forever.
+                    self.dust_retired.add(f"{pos.symbol}:{pos.side}")
+                    try:
+                        for o in self.our_orders(pos.symbol):
+                            oid = real_oid(o.get("orderId") or o.get("orderID"))
+                            if oid:
+                                try:
+                                    self.cancel_order(pos.symbol, oid)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    self._last_close_result.update({
+                        "avg_price": px_now,
+                        "filled_qty": requested_qty,
+                        "status": "FLAT",
+                        "message": "dust write-off (below venue min close size)",
+                    })
+                    log(f"CLOSE DUST-WRITEOFF {pos.symbol} qty={requested_qty} px={px_now}", key=f"dust:{pos.symbol}")
+                    return True, px_now
+                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 120.0)
+                self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
+                log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=30.0, key=f"close-skip:{pos.symbol}")
+                return False, self.px.get(pos.symbol) or pos.entry
             if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
@@ -4173,32 +4537,56 @@ class Pulse:
         self._last_close_result["status"] = "REJECTED"
         return False, self.px.get(pos.symbol) or pos.entry
 
-    def occupying(self, sym: str, side: str = "", pack: str = "", set_id: str = "") -> bool:
-        """Return whether a candidate conflicts with the configured book mode."""
+    def occupying(
+        self,
+        sym: str,
+        side: str = "",
+        pack: str = "",
+        set_id: str = "",
+        execution_lane: str = "",
+    ) -> bool:
+        """Return whether the exact strategy/config lane already occupies a slot."""
         side_u = (side or "").upper()
         positions = self.positions_for(sym, side_u)
         if self.per_config_controls():
             # A legacy symbol aggregate cannot safely coexist with a new
             # quantity-matched range group. New groups otherwise merge on the
             # normalized range after the exchange fill is confirmed.
-            return any(bool(getattr(p, "legacy_aggregate", False)) for p in positions)
-        if self.positions_for(sym):
-            return True
-        for p in self.positions_for(sym):
-            if pack and p.pack == pack:
+            if any(bool(getattr(p, "legacy_aggregate", False)) for p in positions):
                 return True
-            if set_id and p.set_id == set_id and (not side_u or p.side == side_u):
-                return True
+        if execution_lane:
+            return any(
+                self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
+                for p in positions
+            )
+        if set_id:
+            return any(
+                getattr(p, "pack", "") == pack
+                and getattr(p, "set_id", "") == set_id
+                for p in positions
+            )
+        # Aggregate mode deliberately permits independent lanes and both hedge
+        # directions. place() still deduplicates an empty-lane pending intent.
         return False
 
-    def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str, selected_set=None) -> Optional[str]:
+    def entry_sense(
+        self,
+        sym: str,
+        direction: int,
+        reason: str,
+        conf: float,
+        pack: str,
+        selected_set=None,
+        execution_strategy: str = "",
+    ) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
         if conf < 0.50:
             return "low-conf"
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
         side = "LONG" if direction > 0 else "SHORT"
-        if self.occupying(sym, side, pack):
+        lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
+        if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
                 getattr(self.sets, "progress", None), "ready", False):
@@ -4268,7 +4656,8 @@ class Pulse:
         except Exception:
             chosen = None
         if chosen:
-            if self.occupying(sym, side, pack, chosen.id):
+            chosen_lane = self.execution_lane_key(pack, reason, chosen, execution_strategy)
+            if self.occupying(sym, side, pack, chosen.id, execution_lane=chosen_lane):
                 return "set-slot"
             # pick() already enforces the validation gate: under the strict
             # gate only validated + profitable sets are returned at all.
@@ -4580,6 +4969,12 @@ class Pulse:
         if anchors is None:
             anchors = self._block_reference_anchors = ContinuationBook()
         key = (sym, side, execution_lane or chosen.id)
+        # Older persisted anchors used the Set id before Block Active lanes
+        # became strategy-scoped. Reuse that observation when the new key has
+        # not been seen yet so a restart does not discard a qualified parent.
+        legacy_key = (sym, side, chosen.id)
+        if execution_lane and key not in anchors and legacy_key in anchors:
+            key = legacy_key
         if not observe_continuation(anchors, key, px, 1 if side == "LONG" else -1, time.time()):
             return reject("reference needs 45 seconds and 0.2% continuation")
         def same_lane(lane, strategy):
@@ -4669,13 +5064,10 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         pack = "indications" if str(reason).startswith("ind:") else "general"
-        exact = re.search(r"\bcfg=([a-f0-9]{16})\b", reason)
-        signal_key = exact.group(1) if exact else (reason.split(":")[1] if pack == "indications" else "general")
-        execution_lane = stable_key(pack, selected_set.id, signal_key) if selected_set is not None else ""
-        if execution_strategy == "block-active" and execution_lane:
-            execution_lane = "block-active:" + execution_lane
+        execution_lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
         if execution_lane and normal_allowed and any(
-                getattr(p, "execution_lane", "") == execution_lane and getattr(p, "strategy", "") != "block"
+                self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
+                and getattr(p, "strategy", "") != "block"
                 for p in self.positions_for(sym, side)):
             return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
@@ -4683,13 +5075,16 @@ class Pulse:
                 str(pending.get("kind") or "entry") == "entry"
                 and str(pending.get("symbol") or "") == sym
                 and str(pending.get("side") or "").upper() == side
-                and (not execution_lane or (pending.get("metadata") or {}).get("execution_lane") == execution_lane)
+                and (
+                    not execution_lane
+                    or self.execution_lane_matches(
+                        (pending.get("metadata") or {}).get("execution_lane"), execution_lane
+                    )
+                )
                 and not (normal_allowed and (pending.get("metadata") or {}).get("strategy") == "block")
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
-        if not self.per_config_controls() and self.positions_for(sym):
-            return
         if time.time() < self.cooldown.get(sym, 0):
             return
         if self.ignore_syms.get(sym, 0) > time.time():
@@ -4702,8 +5097,15 @@ class Pulse:
                 return
             skip = None
         else:
-            skip = (self.entry_sense(sym, direction, reason, conf, pack, selected_set)
-                    if selected_set is not None else self.entry_sense(sym, direction, reason, conf, pack))
+            skip = self.entry_sense(
+                sym,
+                direction,
+                reason,
+                conf,
+                pack,
+                selected_set,
+                execution_strategy,
+            )
         if skip:
             if time.time() - self.skip_log.get("sense", 0) > 40:
                 log(f"SKIP {sym} {skip}", every=40.0, key="sense", quiet=True)
@@ -4766,6 +5168,24 @@ class Pulse:
             sl_ratio = self.variants.current_sl()
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             set_id = ""
+        # Direct callers may omit selected_set; entry_sense resolves the same
+        # ranked Set before reaching this point. Persist that resolved lane so
+        # later fills and restarts can deduplicate the exact lane as well.
+        if not execution_lane and chosen is not None:
+            execution_lane = self.execution_lane_key(pack, reason, chosen, execution_strategy)
+        if execution_lane and self.occupying(sym, side, pack, set_id, execution_lane=execution_lane):
+            return
+        for pending in (getattr(self, "pending_orders", {}) or {}).values():
+            if (
+                str(pending.get("kind") or "entry") == "entry"
+                and str(pending.get("symbol") or "") == sym
+                and str(pending.get("side") or "").upper() == side
+                and self.execution_lane_matches(
+                    (pending.get("metadata") or {}).get("execution_lane"), execution_lane
+                )
+                and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
+            ):
+                return
         try:
             position_ratio = max(0.2, min(3.0, float(getattr(chosen, "volume_ratio", 1.0) or 1.0)))
         except Exception:
@@ -4979,6 +5399,25 @@ class Pulse:
                 if "order size" in low or "available amount" in low:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
+                if "minimum size" in low or "minimum order amount" in low:
+                    # The venue rejected the size as below its floor and the
+                    # floor could not be learned (BingX VST reports "0 USDT").
+                    # Retrying the same size only burns the request budget, so
+                    # cool the symbol down instead of treating it as transient.
+                    self.cooldown[sym] = time.time() + 120.0
+                    self.cooldown["__book__"] = time.time() + 20.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
+                if "maximum open amount" in low or "exceeds the maximum" in low:
+                    # Venue aggregate cap on market-order notional for the
+                    # account (101487). It is not a per-symbol fault, so cool
+                    # the whole book briefly instead of hammering the venue.
+                    self.cooldown["__book__"] = time.time() + 30.0
+                    self.cooldown[sym] = time.time() + 30.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
+                    return
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     # No exchange order was accepted. Release the local
@@ -5109,6 +5548,7 @@ class Pulse:
         if attached_tp:
             pos.tp_oid = pos.sec_tp_oid = attached_tp
         self.prepare_position_group(pos, legacy=not bool(getattr(self, "control_orders_per_config", True)))
+
         pending_meta.update({
             "sl_pct": sl_pct,
             "tp_pct": tp_pct,
@@ -5240,6 +5680,8 @@ class Pulse:
         n = 0
         upnl = 0.0
         for p in self.open.values():
+            if not self.position_is_ours(p):
+                continue
             if f"{p.symbol}:{p.side}" in keys:
                 continue
             n += 1
@@ -5398,6 +5840,7 @@ class Pulse:
             cost_source=fill_cost_source,
             exchange_confirmed=bool(exchange), partial=not final_fill,
             strategy=str(getattr(pos, "strategy", "core")),
+            system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE,
             roundtrip_qty=pos.close_started_qty, close_fill_id=close_key,
         )
         self.record_event(
@@ -5711,7 +6154,7 @@ class Pulse:
             px = self.px.get(pos.symbol) or 0
             if px <= 0:
                 continue
-            scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             age = now - pos.opened_at
             if age >= MAX_HOLD_S:
                 self.close_pos(pos, px, "max-hold-6h")
@@ -6108,6 +6551,8 @@ class Pulse:
                     ours=bool(rec.get("ours", True)),
                     conn=str(rec.get("conn") or rec.get("connection") or ""),
                     ind_kind=str(rec.get("ind_kind") or rec.get("indKind") or ""),
+                    system_id=str(rec.get("system_id") or rec.get("systemId") or ""),
+                    tracking_scope=str(rec.get("tracking_scope") or rec.get("trackingScope") or ""),
                     control_group_key=str(rec.get("control_group_key") or rec.get("controlGroupKey") or ""),
                     control_range_key=str(rec.get("control_range_key") or rec.get("controlRangeKey") or ""),
                     control_mode=str(rec.get("control_mode") or rec.get("controlMode") or ""),
@@ -6127,7 +6572,7 @@ class Pulse:
                     roundtrip_result=dict(rec.get("roundtrip_result") or {}),
                 )
                 cid = c.client_id
-                if not self.cid_ours(cid) and not c.set_id:
+                if not row_scope_matches(rec, CONN_SHORT):
                     continue
                 if cid and not self.cid_ours(cid):
                     continue
@@ -6137,6 +6582,8 @@ class Pulse:
                     continue
                 if c.conn and c.conn != CONN_SHORT:
                     continue
+                c.system_id = SYSTEM_ID
+                c.tracking_scope = TRACKING_SCOPE
                 self.closed.append(c)
                 if cid:
                     self.seen_fill_cids.add(cid)
@@ -6367,7 +6814,7 @@ class Pulse:
 
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
-        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, SYMBOLS
+        global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
@@ -6435,9 +6882,19 @@ class Pulse:
         if ov.get("scanS"):
             SCAN_S = max(0.20, min(8.0, float(ov["scanS"])))
         if ov.get("cooldownS") is not None:
-            COOLDOWN_S = float(ov["cooldownS"])
-        if ov.get("staggerS"):
-            STAGGER_S = float(ov["staggerS"])
+            COOLDOWN_S = max(0.0, min(120.0, float(ov["cooldownS"])))
+        if ov.get("staggerS") is not None:
+            STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
+        if ov.get("drawdownHaltPct") is not None:
+            raw_dd = float(ov["drawdownHaltPct"])
+            # 0 (or negative) disables the drawdown halt entirely.
+            DD_HALT = 0.0 if raw_dd <= 0 else max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+        else:
+            DD_HALT = 0.0
+        if ov.get("minimumEquity") is not None:
+            EQ_MIN = max(0.0, min(1_000_000_000.0, float(ov["minimumEquity"])))
+        else:
+            EQ_MIN = 0.20
         manual_cost, use_live_costs = self._position_cost_config(ov, cts)
         self.manual_position_cost_pct = manual_cost
         self.use_live_position_costs = use_live_costs
@@ -6477,11 +6934,11 @@ class Pulse:
         self.strat_ind = bool(ov.get("stratIndications", True))
         self.strat_block = bool(ov.get("stratBlock", True))
         self.strat_trail = bool(ov.get("stratTrailing", True))
-        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", False)) is True
+        self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", True)) is True
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.strat_general = True
-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
@@ -6623,7 +7080,7 @@ class Pulse:
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
             self.strat_ind = True
-        self.dca.enabled = bool(self.mods.get("strategy.dca", False)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
@@ -6698,8 +7155,21 @@ class Pulse:
                 self.api.hub.set_symbols(list(SYMBOLS))
 
     def pulse_snapshot(self) -> Dict[str, Any]:
+        strategy_lanes = {
+            "general": bool(getattr(self, "strat_general", True)),
+            "normal": bool(getattr(self, "normal_execution_enabled", True)),
+            "indications": bool(getattr(self, "strat_ind", True) and getattr(self.indications, "settings", {}).get("enabled", True)),
+            "trailing": bool(getattr(self, "strat_trail", True) and getattr(self, "mods", {}).get("strategy.trailing", True)),
+            "block": bool(getattr(self, "strat_block", True) and getattr(self.block, "enabled", True)),
+            "dca": bool(getattr(self, "strat_dca", True) and getattr(self.dca, "enabled", True)),
+        }
         return {
-            "entrySelectionPolicy": "validated-base-only",
+            "systemId": SYSTEM_ID,
+            "connection": CONN_SHORT,
+            "trackingScope": TRACKING_SCOPE,
+            "trackPrefix": TAG,
+            "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
+            "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -6708,6 +7178,7 @@ class Pulse:
             "leverageMap": dict(getattr(self, "lev_map", {})),
             "leverageMax": dict(getattr(self, "lev_max", {})),
             "maxOpen": MAX_OPEN,
+            "logicalPositionCap": MAX_OPEN,
             "maxPerGroup": MAX_PER_GROUP,
             "slPct": SL_PCT * 100,
             "tpPct": TP_PCT * 100,
@@ -6773,10 +7244,15 @@ class Pulse:
             "stratBlock": self.strat_block,
             "stratTrailing": self.strat_trail,
             "normalExecutionEnabled": self.normal_execution_enabled,
+            "entryPolicy": str(getattr(self.sets, "entry_policy", "strict")),
+            "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
+            "entryPolicyMinLiveSamples": int(getattr(self.sets, "entry_policy_min_live_samples", self.sets.eval_need()) or self.sets.eval_need()),
             "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
             "stratDca": getattr(self, "strat_dca", True),
+            "strategyLanes": strategy_lanes,
+            "enabledStrategyLanes": [name for name, enabled in strategy_lanes.items() if enabled],
             "dcaEnabled": bool(self.dca.enabled),
             "indEnabled": bool(self.indications.settings.get("enabled", True)),
             "indTypeState": bool(self.indications.settings.get("typeState", True)),
@@ -6801,7 +7277,7 @@ class Pulse:
             "setAutoDeact": self.sets.auto_deact,
             "setLiveNegativeDeact": bool(getattr(self.sets, "live_negative_deact", False)),
             "liveTestMode": bool(getattr(self.sets, "live_test_mode", False)),
-            "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 12) or 12),
+            "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 0) or 0),
             "liveTestMinSamples": int(getattr(self.sets, "live_test_min_samples", self.sets.eval_need()) or self.sets.eval_need()),
             "effectiveMinStep": int(getattr(self.sets, "min_step", 1) or 1),
             "configuredMinStep": int(getattr(self.sets, "min_step_cfg", 1) or 1),
@@ -6824,6 +7300,8 @@ class Pulse:
             "setMinSamples": self.sets.min_samples,
             "setReactivate": self.sets.reactivate,
             "setMaxActive": self.sets.max_active,
+            "activeSetCap": self.sets.max_active,
+            "activeSetUnlimited": self.sets.max_active <= 0,
             "exitEnabled": self.exits.enabled,
             "exitIgnoreTp": self.exits.ignore_tp,
             "exitBestOf": self.exits.best_of,
@@ -7040,13 +7518,6 @@ class Pulse:
                     same = True
             if not same:
                 continue
-            # One add-strategy per parent: DCA already filled → skip Block.
-            try:
-                dca_lane = (getattr(self.dca, "lanes", {}) or {}).get(self.dca_lane_key(pos))
-                if dca_lane and int(getattr(dca_lane, "filled_n", 0) or 0) > 0:
-                    continue
-            except Exception:
-                pass
             # Don't pyramid the same second as the entry (that's just 2× size).
             age = time.time() - float(getattr(pos, "opened_at", 0) or 0)
             if age < 45.0:
@@ -7192,6 +7663,13 @@ class Pulse:
                     self.did_io = True
                 msg = str(r.get("msg") or "")
                 if not self.ok(r):
+                    if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
+                        # Unlearnable venue floor (BingX VST reports "0 USDT"):
+                        # retrying the same size only burns the request budget.
+                        self.cooldown["__book__"] = time.time() + 60.0
+                        self.block_last_emit = time.time()
+                        self._clear_pending(cid)
+                        continue
                     if is_transient_api(msg):
                         log(f"BLOCK SKIP {pos.symbol} #{row['blockCount']} {short_api_msg(msg)}", every=20.0, key=f"block-skip:{pos.symbol}")
                         self.block_last_emit = time.time()
@@ -7262,7 +7740,7 @@ class Pulse:
 
     def maybe_dca_adds(self) -> None:
         """Independent CTS DCA adds — own distances/mults/PF, not Block."""
-        if not getattr(self.dca, "enabled", False) or self.halted:
+        if not getattr(self.dca, "enabled", False) or not getattr(self, "strat_dca", True) or self.halted:
             return
         if self.entries_blocked():
             return
@@ -7286,7 +7764,7 @@ class Pulse:
                 break
             if str(pos.set_id).startswith("forced:"):
                 continue
-            group_scope = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+            group_scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             if self._pending_add_open(pos, "dca"):
                 continue
             if time.time() < self.dca_fail_cd.get(group_scope, 0):
@@ -7305,14 +7783,8 @@ class Pulse:
             if pos.qty * px >= self.max_book_notional():
                 self.dca.skips += 1
                 continue
-            # Independent of Block, but never stack both onto the same parent.
-            try:
-                blk = self.block.lanes.get(self.block_lane_key(pos))
-                if blk and float(getattr(blk, "confirmed_add", 0) or 0) > 0:
-                    self.dca.skips += 1
-                    continue
-            except Exception:
-                pass
+            # Block and DCA are independent add-on lanes. Their own PF,
+            # cooldown, step and pending gates still apply below.
             sl_pct = float(pos.sl_pct or SL_PCT or 0.0048)
             adv = abs(px - pos.entry) / pos.entry
             against = (pos.side == "LONG" and px < pos.entry) or (pos.side == "SHORT" and px > pos.entry)
@@ -7684,13 +8156,8 @@ class Pulse:
         cap = self.max_book_notional() * 2.0
         out: List[Closed] = []
         for c in self.closed:
-            if getattr(c, "ours", True) is False:
-                continue
-            cid = getattr(c, "client_id", "") or ""
-            if cid and not self.cid_ours(cid):
-                continue
-            conn = getattr(c, "conn", "") or ""
-            if conn and conn != CONN_SHORT:
+            row = asdict(c) if hasattr(c, "__dataclass_fields__") else vars(c)
+            if not self.row_is_ours(row):
                 continue
             n = abs(float(c.qty) * float(c.entry or 0))
             confirmed = bool(getattr(c, "exchange_confirmed", False))
@@ -7703,17 +8170,14 @@ class Pulse:
             if not confirmed and n > self.max_book_notional() * 1.05:
                 continue
             out.append(c)
-        tagged = [c for c in out if (getattr(c, "client_id", "") and self.cid_ours(getattr(c, "client_id", ""))) or getattr(c, "set_id", "")]
-        return tagged if tagged else []
+        return out
 
     def system_open_upnl(self) -> float:
         """Mark-to-market of this connection's system book only. Cost-net."""
         tot = 0.0
-        for p in self.open.values():
-            if getattr(p, "ours", True) is False:
-                continue
-            cid = getattr(p, "client_id", "") or ""
-            if cid and not self.cid_ours(cid):
+        open_book = getattr(self, "open", {})
+        for p in open_book.values() if isinstance(open_book, dict) else ():
+            if not self.position_is_ours(p):
                 continue
             px = float(self.px.get(p.symbol) or 0)
             if px <= 0 or p.entry <= 0 or p.qty <= 0:
@@ -7760,8 +8224,9 @@ class Pulse:
         if capital > 0 and peak > 1e-12:
             dd_pct = max(dd_pct, (peak - (eq + upnl)) / peak * 100.0)
         traded = sum(abs(float(c.qty) * float(c.entry or 0)) for c in closes)
-        for p in self.open.values():
-            if getattr(p, "ours", True) is False:
+        open_book = getattr(self, "open", {})
+        for p in open_book.values() if isinstance(open_book, dict) else ():
+            if not self.position_is_ours(p):
                 continue
             traded += abs(float(p.qty) * float(p.entry or 0))
         pnl_pct = (net / traded * 100.0) if traded > 1e-12 else 0.0
@@ -7778,7 +8243,9 @@ class Pulse:
             "drawdownPct": round(max(0.0, dd_pct), 3),
             "drawdownAmount": round(max(0.0, max_dd), 6),
             "drawdownAvailable": capital > 0,
-            "drawdownBasis": "retained-system-tape-plus-current-mark / starting-capital",
+            "drawdownBasis": "retained-system-tape-plus-current-mark / system-start-equity",
+            "systemStartEquity": round(capital, 6),
+            "systemEquity": round(capital + net, 6),
             "tradedNotional": round(traded, 4),
             "pnlPct": round(pnl_pct, 3),
             "source": "system-orders",
@@ -8110,8 +8577,33 @@ class Pulse:
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
                 break
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
-            log(f"ENTRY none n={len(ranked)} skip={skipped} intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}", every=30.0, key="entry0")
+            # Per-scope signal counts: when every ranked signal maps to a
+            # scope whose entry_sets() is empty (e.g. indications mid-replay),
+            # the matrix is 0 and the loop below never runs — skip=0 is the
+            # tell. This line makes that case self-evident.
+            sig_scopes = {}
+            for _, _, d, why in ranked:
+                k = ("ind" if why.startswith("ind:") else "gen") + ("/L" if d > 0 else "/S")
+                sig_scopes[k] = sig_scopes.get(k, 0) + 1
+            log(
+                f"ENTRY none n={len(ranked)} skip={skipped} matrix={len(matrix)} sig={sig_scopes} "
+                f"intern={intern} cap={slot_cap} open={len(self.open)} avail={self.available:.4f}",
+                every=30.0,
+                key="entry0",
+            )
             self.skip_log["entry0"] = time.time()
+        if placed == 0 and not ranked and (time.time() - self.skip_log.get("entry-idle", 0) > 60):
+            # Empty signal lanes are invisible in "ENTRY none" (that path
+            # requires ranked). Surface why the book is idle instead.
+            ind_on = bool(self.strat_ind and self.indications.settings.get("enabled"))
+            gen_on = bool(self.strat_general)
+            log(
+                f"ENTRY idle ranked=0 ind={ind_on} gen={gen_on} intern={intern} "
+                f"open={len(self.open)} avail={self.available:.4f} replay={getattr(self.sets.progress, 'pct', 0)}%",
+                every=60.0,
+                key="entry-idle",
+            )
+            self.skip_log["entry-idle"] = time.time()
     def entry_candidate_window(self, ranked):
         """Fair cooperative slice, not a cap on symbols or completed trades.
 
@@ -8347,14 +8839,17 @@ class Pulse:
             status="confirmed",
             qty=live_n,
             detail="exchange position snapshot total",
-            metadata={"keys": sorted(live_keys)[:32], "countTotal": live_n, "scope": "exchange-total-before-ownership-filter"},
+            metadata={
+                "keys": sorted(live_keys)[:32],
+                "countTotal": live_n,
+                "scope": "exchange-total-before-ownership-filter",
+                "trackingScope": TRACKING_SCOPE,
+            },
         )
         self.exchange_total_open_count = live_n
-        # Real/Live/Simulated: live_pos_keys = what the exchange REALLY holds
-        # right now (any valid read refreshes it, even while the flat-exchange
-        # glitch guard below still arms). Book positions not in this set are
-        # "Simulated" — system-internal calcs only.
-        self.live_pos_keys = set(live_keys)
+        # The raw exchange set is diagnostic only. ``live_pos_keys`` is always
+        # narrowed to exact system-owned keys before controls or system stats use it.
+        self.live_pos_keys = set()
         self.exchange_open_count = 0
         self.exchange_own_open_count = 0
         self.recon_pending = False
@@ -8379,6 +8874,10 @@ class Pulse:
         self.exchange_qty = {}
         self.exchange_own_qty = {}
         self.exchange_foreign_qty = {}
+        self.foreign_upnl = 0.0
+        self.foreign_realized = 0.0
+        self.foreign_position_count = 0
+        self.foreign_exposure = 0.0
         for p in rows:
             try:
                 amt = float(p.get("positionAmt") or p.get("availableAmt") or 0)
@@ -8390,6 +8889,17 @@ class Pulse:
             if not sym:
                 continue
             side = (p.get("positionSide") or "").upper() or ("LONG" if amt > 0 else "SHORT")
+            # Dust write-off: this key was retired locally because the venue
+            # can never close it (below min close size). Treat it as foreign
+            # so recovery cannot resurrect it into the book.
+            if f"{sym}:{side}" in getattr(self, "dust_retired", set()):
+                exchange_key = f"{sym}:{side}"
+                self.exchange_qty[exchange_key] = abs(amt)
+                self.exchange_own_qty[exchange_key] = 0.0
+                self.exchange_foreign_qty[exchange_key] = abs(amt)
+                foreign.add(exchange_key)
+                log(f"SKIP dust-retired {sym} {side} q={abs(amt)}", every=60.0, key=f"dust-retired:{sym}:{side}", quiet=True)
+                continue
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
@@ -8406,7 +8916,7 @@ class Pulse:
                 tagged = []
             owned = bool(
                 any(
-                    getattr(candidate, "ours", True)
+                    self.position_is_ours(candidate)
                     and (candidate.client_id and self.cid_ours(candidate.client_id) or candidate.sl_oid or candidate.tp_oid)
                     for candidate in candidates
                 )
@@ -8417,6 +8927,15 @@ class Pulse:
                 self.exchange_own_qty[exchange_key] = 0.0
                 self.exchange_foreign_qty[exchange_key] = qty
                 foreign.add(exchange_key)
+                self.foreign_upnl += _sf(p.get("unrealizedProfit") or p.get("unrealized") or 0.0)
+                self.foreign_realized += _sf(
+                    p.get("realizedProfit")
+                    or p.get("realisedProfit")
+                    or p.get("realizedPnl")
+                    or p.get("realisedPnl")
+                    or 0.0
+                )
+                self.foreign_exposure += qty * max(px, 0.0)
                 log(f"SKIP foreign {sym} {side} q={qty}", every=60.0, key=f"foreign:{sym}:{side}", quiet=True)
                 continue
             # From this point onward `live` is own-system truth only. The raw
@@ -8443,6 +8962,40 @@ class Pulse:
                         if total_book_qty > 0
                         else own_qty / max(1, len(candidates))
                     )
+                    previous_qty = max(
+                        _sf(getattr(candidate, "exchange_qty", 0.0)),
+                        candidate_book_qty,
+                    )
+                    external_delta = confirmed_external_close_delta(
+                        previous_qty,
+                        allocated_qty,
+                        getattr(candidate, "pending_close_qty", 0.0),
+                    )
+                    if external_delta > 1e-12 and _sf(getattr(candidate, "pending_qty", 0.0)) <= 1e-12:
+                        external_px = _sf(
+                            p.get("markPrice") or p.get("lastPrice") or self.px.get(sym) or candidate.entry
+                        )
+                        external_cid = stable_key(
+                            CONN_SHORT,
+                            "external-close",
+                            candidate.client_id,
+                            sym,
+                            side,
+                            round(previous_qty, 12),
+                            round(allocated_qty, 12),
+                        )
+                        self._record_close_fill(
+                            candidate,
+                            external_delta,
+                            external_px,
+                            "external-close",
+                            exchange=True,
+                            close_cid=external_cid,
+                            status="recovered",
+                            cumulative_qty=external_delta,
+                        )
+                        if not any(candidate is current for current in self.open.values()):
+                            continue
                     if liq > 0:
                         candidate.liq = liq
                     if pid:
@@ -8599,6 +9152,9 @@ class Pulse:
             self.remove_position(pos)
             self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
+        self.foreign_position_count = len(foreign)
+        if foreign:
+            self._note_foreign_activity()
         ours_live = live - set(foreign)
         self.exchange_open_count = len(ours_live)
         self.exchange_own_open_count = len(ours_live)
@@ -8608,7 +9164,7 @@ class Pulse:
         for pos in self.open.values():
             exchange_key = f"{pos.symbol}:{pos.side}"
             if exchange_key not in live:
-                group_key = self.position_key(pos) if self.per_config_controls(pos) else pos.symbol
+                group_key = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
                 if group_key in pending_absent:
                     continue
                 confirmed_book_only.append(group_key)
@@ -8986,7 +9542,6 @@ class Pulse:
         self.did_io = True
         r = self.api.get("/openApi/swap/v2/trade/allOrders", {"limit": 50})
         fallback_used = False
-        fallback_attempted = False
         if not self.ok(r):
             code = str(r.get("code") or "")
             low = str(r.get("msg") or "").lower()
@@ -8996,37 +9551,11 @@ class Pulse:
                 stable_key(request_key, "primary-error"),
                 status="error",
                 code=r.get("code"),
-                detail="fill request failed; fallback pending" if retryable else "fill request failed",
+                detail="fill request failed; retry next poll" if retryable else "fill request failed",
             )
-            if not retryable:
-                return
-            fallback_attempted = True
-            fallback = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
-            self.did_io = True
-            if not self.ok(fallback):
-                self.record_event(
-                    "exchange_response",
-                    stable_key(request_key, "fallback-error"),
-                    status="error",
-                    code=fallback.get("code"),
-                    detail="fill fallback failed",
-                )
-                return
-            r = fallback
-            fallback_used = True
+            return
         data = r.get("data")
         orders = data.get("orders") if isinstance(data, dict) else data
-        if (not isinstance(orders, list) or not orders) and not fallback_attempted:
-            r = self.api.get("/openApi/swap/v1/trade/allFillOrders", {"pageIndex": 1, "pageSize": 50})
-            self.did_io = True
-            if not self.ok(r):
-                self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill fallback failed")
-                return
-            fallback_used = True
-            data = r.get("data")
-            orders = (data.get("fill_orders") or data.get("fills") or data.get("orders") or data) if isinstance(data, dict) else data
-            if isinstance(data, dict) and isinstance(data.get("list"), list):
-                orders = data["list"]
         if not isinstance(orders, list):
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail="fill payload malformed")
             return
@@ -9222,7 +9751,7 @@ class Pulse:
             self.record_test(name, ok, detail)
         dca_ms = (time.perf_counter() - t_dca) * 1000
         self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
-        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         self.record_test("dca-enabled", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} steps={self.dca.max_steps} dist={self.dca.distances}")
         self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
         sl, tp, src = resolve_sl_tp(
@@ -9251,9 +9780,11 @@ class Pulse:
         held_px = dict(self.px)
         try:
             ours_cid = f"{TAG}cigen0600000abcd"
+            # Rows must carry the same scope metadata production writes
+            # (system_id/tracking_scope); a bare conn is not ownership proof.
             self.closed = [
-                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
-                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT),
+                Closed(time.time(), "SYS-USDT", "LONG", 1.0, 1.0, 1.1, 0.40, 0.01, "tp", 30.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
+                Closed(time.time(), "SYS-USDT", "SHORT", 1.0, 1.0, 1.1, -0.15, -0.01, "sl", 20.0, set_id="s1", client_id=ours_cid, ours=True, conn=CONN_SHORT, system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.2, 9.99, 0.2, "manual", 10.0, client_id="manual-bot", ours=False, conn=CONN_SHORT),
                 Closed(time.time(), "EXT-USDT", "LONG", 1.0, 1.0, 1.1, 0.50, 0.1, "tp", 10.0, client_id="", ours=True, conn=CONN_SHORT),
             ]
@@ -9307,6 +9838,8 @@ class Pulse:
     def _stats_unlocked(self) -> Dict[str, Any]:
         act = self.system_activity()
         act = persistent_activity(act, getattr(getattr(self, "runtime", None), "snapshot", {}), getattr(self, "start_eq", 0))
+        system_start_equity = float(act.get("systemStartEquity") or self.start_eq or 0.0)
+        system_equity = float(act.get("systemEquity") or (system_start_equity + float(act.get("pnl") or 0.0)))
         realized = float(act["realized"])
         wr = (act["wins"] / (act["wins"] + act["losses"]) * 100) if (act["wins"] + act["losses"]) else 0
         dd = float(act["drawdownPct"])
@@ -9347,6 +9880,10 @@ class Pulse:
         for c in list(act["closes"]):
             d = asdict(c)
             d["indKind"] = d.get("ind_kind") or ""
+            d["systemId"] = d.get("system_id") or SYSTEM_ID
+            d["trackingScope"] = d.get("tracking_scope") or TRACKING_SCOPE
+            d["connection"] = d.get("conn") or CONN_SHORT
+            d["clientId"] = d.get("client_id") or ""
             all_closed_rows.append(d)
         closed_out = all_closed_rows[-closed_n:][::-1]
         cov = self._coverage_blob()
@@ -9386,6 +9923,56 @@ class Pulse:
                 "complete": bool(historic_snap.get("coordinationComplete")),
             }
         config_evidence = self._config_evidence_snapshot()
+        exchange_own_raw = getattr(self, "exchange_own_open_count", -1)
+        exchange_total_raw = getattr(self, "exchange_open_count", -1)
+        exchange_own_open = int(exchange_own_raw) if exchange_own_raw is not None else -1
+        exchange_total_open = int(exchange_total_raw) if exchange_total_raw is not None else -1
+        internal_open = int(len(self.open))
+        internal_position_groups = len({
+            (p.symbol, p.side)
+            for p in self.open.values()
+            if self.position_is_ours(p) and float(p.qty or 0) > 0
+        })
+        if exchange_own_open < 0:
+            open_parity = "pending"
+        elif exchange_own_open == internal_position_groups:
+            open_parity = "match"
+        else:
+            open_parity = "discrepant"
+        stage_flow = sets_snap.get("stageFlow") if isinstance(sets_snap, dict) else {}
+        stage_rows = stage_flow.get("stages") if isinstance(stage_flow, dict) else {}
+        execution_evidence = {
+            "systemId": SYSTEM_ID,
+            "connection": CONN_SHORT,
+            "trackingScope": TRACKING_SCOPE,
+            "trackPrefix": TAG,
+            "systemSource": act.get("source", "system-orders"),
+            "systemClosed": int(act.get("n") or 0),
+            "systemPnl": round(float(act.get("pnl") or 0), 4),
+            "systemRealized": round(realized, 4),
+            "systemUnrealized": round(float(act.get("unrealized") or 0), 4),
+            "internalOpen": internal_open,
+            "internalPositionGroups": internal_position_groups,
+            "exchangeOpen": exchange_total_open,
+            "exchangeOwnOpen": exchange_own_open,
+            "exchangePositionGroups": exchange_own_open,
+            "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
+            "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
+            "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
+            "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
+            "openParity": open_parity,
+            "realStage": dict(stage_rows.get("real") or {}) if isinstance(stage_rows, dict) else {},
+            "setCount": int(sets_snap.get("setCount") or 0),
+            "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
+            "activeSetCount": int(sets_snap.get("activeCount") or 0),
+            "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+            "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
+            "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
+            "progressPhase": phase,
+            "progressPct": pct_val,
+            "progressReady": ready_flag,
+            "snapshotAt": time.time(),
+        }
         try:
             from stats_report import merge_kind_stats, merge_strategy_stats
             now_m = time.monotonic()
@@ -9418,10 +10005,16 @@ class Pulse:
         except Exception:
             by_ind = getattr(self, "_by_ind_cache", {}) or {}
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
+        pulse_view = self.pulse_snapshot()
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
+        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
+            "systemId": SYSTEM_ID,
             "connection": CONN_SHORT,
+            "trackingScope": TRACKING_SCOPE,
+            "trackPrefix": TAG,
             "connType": "vst" if "x02" in CONN_SHORT else "live",
             "unit": "VST" if "x02" in CONN_SHORT else "USDT",
             "exchange": "BingX VST" if "x02" in CONN_SHORT else "BingX",
@@ -9429,12 +10022,19 @@ class Pulse:
             "now": time.time(),
             "uptimeS": age,
             "system": dict(getattr(getattr(self, "runtime", None), "snapshot", {}) or {}),
-            "equity": round(self.equity, 4),
-            "walletEquity": round(self.equity, 4),
-            "startEquity": round(self.start_eq, 4),
+            "equity": round(system_equity, 4),
+            "systemEquity": round(system_equity, 4),
+            "systemStartEquity": round(system_start_equity, 4),
+            "walletEquity": round(float(getattr(self, "wallet_equity", self.equity) or 0.0), 4),
+            "startEquity": round(system_start_equity, 4),
             "available": round(self.available, 4),
             "usedMargin": round(self.used, 4),
             "walletUnrealized": round(self.upnl, 4),
+            "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
+            "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
+            "foreignExposure": round(float(getattr(self, "foreign_exposure", 0.0) or 0.0), 4),
+            "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
+            "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
             "unrealized": round(float(act["unrealized"]), 4),
             "realizedPnl": round(realized, 4),
             "sessionPnl": round(float(act["pnl"]), 4),
@@ -9444,6 +10044,7 @@ class Pulse:
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act["unrealized"]), 4),
             "systemSource": act.get("source", "system-orders"),
+            "executionEvidence": execution_evidence,
             "pnlPct": round(float(act["pnlPct"]), 3),
             "drawdownPct": round(max(0, dd), 3),
             "drawdownAmount": act["drawdownAmount"],
@@ -9453,12 +10054,15 @@ class Pulse:
             "losses": int(act["losses"]),
             "winRate": round(wr, 1),
             "openCount": len(self.open),
+            "logicalPositionCount": len(self.open),
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
+            "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
+            "logicalPositionCap": MAX_OPEN,
             "symbols": SYMBOLS,
             "symbolCount": len(SYMBOLS),
             "symbolCap": int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0),
@@ -9487,7 +10091,7 @@ class Pulse:
             "maxHoldS": MAX_HOLD_S,
             "tests": self.tests[:24],
             "block": self.block.snapshot(),
-            "pulse": self.pulse_snapshot(),
+            "pulse": pulse_view,
             "coord": coord_snap,
             "historic": historic_snap,
             "progressPct": pct_val,
@@ -9569,6 +10173,8 @@ class Pulse:
                     "trailKey": p.trail_key,
                     "slPct": round(p.sl_pct * 100, 3),
                     "tpPct": round(p.tp_pct * 100, 3),
+                    "aggregateSlPct": round(float(getattr(p, "aggregate_sl_pct", 0.0) or 0.0) * 100, 3),
+                    "aggregateTpPct": round(float(getattr(p, "aggregate_tp_pct", 0.0) or 0.0) * 100, 3),
                     "trail": p.trail,
                     "trailPending": getattr(p, "trail_pending", None),
                     "setId": p.set_id,
@@ -9584,7 +10190,10 @@ class Pulse:
                     "pack": p.pack,
                     "indKind": getattr(p, "ind_kind", ""),
                     "clientId": p.client_id,
-                    "ours": p.ours,
+                    "systemId": getattr(p, "system_id", SYSTEM_ID) or SYSTEM_ID,
+                    "connection": getattr(p, "connection", CONN_SHORT) or CONN_SHORT,
+                    "trackingScope": getattr(p, "tracking_scope", TRACKING_SCOPE) or TRACKING_SCOPE,
+                    "ours": bool(self.position_is_ours(p)),
                 }
                 for p in self.open.values()
             ],
@@ -9615,8 +10224,12 @@ class Pulse:
                 "cycleMs": round(SCAN_S * 1000.0, 1),
                 "cycleWaitMs": round(getattr(self, "cycle_wait_ms", 0.0), 1),
                 "cycleOverrun": bool(getattr(self, "cycle_overrun", False)),
+                "systemId": SYSTEM_ID,
+                "connection": CONN_SHORT,
+                "trackingScope": TRACKING_SCOPE,
                 "trackPrefix": TAG,
                 "ignoredForeign": getattr(self, "ignored_foreign", 0),
+                "foreignOpenOrders": int(getattr(self, "foreign_open_order_count", 0)),
                 "klineLimit": KLINE_LIMIT,
                 "tfReady": {tf: sum(1 for s in SYMBOLS if s in self.klines_tf.get(tf, {})) for tf in TIMEFRAMES},
                 "scanChunk": int(getattr(self.load.last_budget, "scan_chunk", 0) or 0),
@@ -9629,6 +10242,8 @@ class Pulse:
         }
 
     def _coverage_blob(self) -> Dict[str, Any]:
+        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
+        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
@@ -9749,7 +10364,7 @@ class Pulse:
             "executionPolicy": {
                 "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
                 "blockActive": bool(getattr(self, "block_active", True)),
-            "targetActiveSets": int(getattr(self.sets, "max_active", 80)),
+            "targetActiveSets": int(getattr(self.sets, "max_active", 0)),
                 "decision": dict(getattr(self, "_execution_decision", {}) or {}),
             },
             "stageFlow": scov.get("stageFlow") or stage_flow,
@@ -9839,6 +10454,9 @@ class Pulse:
                 "families": scov.get("families"),
                 "setCount": len(self.sets.sets),
                 "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
+                "validatedCount": int(scov.get("validatedCount") or 0),
+                "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
+                "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),
                 "liveProcessed": int(live_ov.get("processed") or 0),
@@ -9866,10 +10484,18 @@ class Pulse:
             },
             "controls": {
                 "open": len(self.open),
+                "logicalOpen": len(self.open),
+                "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
-                "mode": "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate",
+                "mode": control_mode,
+                "pairCount": expected_control_pairs,
+                "expectedPairs": expected_control_pairs,
+                "protectedPairs": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "pairGaps": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
+                "aggregatePairCount": expected_control_pairs if control_mode == "aggregate" else 0,
+                "logicalPositionCap": MAX_OPEN,
                 "groupCount": len(self.open),
                 "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
@@ -9880,6 +10506,8 @@ class Pulse:
                         "side": p.side,
                         "range": getattr(p, "control_range_key", "") or "aggregate",
                         "rangeBp": {"sl": int(getattr(p, "control_sl_bp", 0) or 0), "tp": int(getattr(p, "control_tp_bp", 0) or 0)},
+                        "slPct": round(float(getattr(p, "aggregate_sl_pct", getattr(p, "sl_pct", 0.0)) or 0.0) * 100, 3),
+                        "tpPct": round(float(getattr(p, "aggregate_tp_pct", getattr(p, "tp_pct", 0.0)) or 0.0) * 100, 3),
                         "qty": float(p.qty or 0),
                         "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
@@ -9896,7 +10524,7 @@ class Pulse:
                     for p in self.open.values()
                 ],
             },
-            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "simOpen": sim_n},
+            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "logicalOpen": len(self.open), "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))), "simOpen": sim_n},
             "activity": activity,
             "events": activity.get("tail") or [],
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
@@ -10208,7 +10836,7 @@ class Pulse:
             self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
         except Exception as e:
             self.record_test("qa-ind-self", False, str(e)[:80])
-        dca_want = bool(self.mods.get("strategy.dca", False)) and bool(self.overlay.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", False))
+        dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
         try:
             rows_g = self.strategy_closes()
@@ -11879,7 +12507,7 @@ class Pulse:
             elif self.equity and self.equity < EQ_MIN:
                 self.halted = True
                 self.halt_reason = f"equity {self.equity:.4f} below min"
-            elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
+            elif DD_HALT > 0 and self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
                 self.halted = True
                 self.halt_reason = "drawdown halt"
             else:

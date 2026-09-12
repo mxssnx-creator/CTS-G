@@ -69,8 +69,11 @@ function DeskPage() {
   const session = stats?.systemPnl ?? stats?.sessionPnl ?? 0;
   const grow = stats?.systemGrow ?? 0;
   const loss = stats?.systemLoss ?? 0;
+  const systemEquity = stats?.systemEquity ?? stats?.equity ?? 0;
+  const foreignCount = (stats?.foreignPositionCount ?? 0) + (stats?.foreignOpenOrderCount ?? 0);
 
   return (
+
     <DeskShell
       live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
       mode={stats?.paused ? "PAUSED" : stats?.mode}
@@ -89,18 +92,19 @@ function DeskPage() {
         <div className="min-w-0 rounded-radius border border-border bg-surface p-5 lg:col-span-2">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="font-mono text-xs tracking-wide text-muted uppercase">Equity</p>
+              <p className="font-mono text-xs tracking-wide text-muted uppercase">System equity</p>
               <p className="mt-1 font-mono text-3xl tabular-nums">
                 {conn === "overall"
-                  ? `Live $${fmt(stats?.equityLive, 4)}`
+                  ? `System $${fmt(systemEquity, 4)}`
                   : stats?.unit === "VST" || stats?.connType === "vst"
-                    ? `${fmt(stats?.equity, 4)} VST`
-                    : `$${fmt(stats?.equity, 4)}`}
+                    ? `${fmt(systemEquity, 4)} VST`
+                    : `$${fmt(systemEquity, 4)}`}
               </p>
               <p className="mt-1 font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="desk-identity">
                 {stats?.connType || conn} · {stats?.unit || (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED")}
                 {stats?.connection ? ` · ${stats.connection}` : ""}
               </p>
+              <p className="mt-1 text-xs text-muted">System book only; wallet equity and foreign exposure stay diagnostic.</p>
               {conn === "overall" ? (
                 <p className="mt-1 font-mono text-sm text-muted">
                   VST {fmt(stats?.equityVst, 4)} · live {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
@@ -112,14 +116,26 @@ function DeskPage() {
               </p>
             </div>
             <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-              <span className="text-muted">Available</span>
+              <span className="text-muted">Wallet equity</span>
+              <span className="font-mono text-right tabular-nums">{stats?.walletEquity != null ? `$${fmt(stats.walletEquity, 3)}` : "—"}</span>
+              <span className="text-muted">Wallet available</span>
               <span className="font-mono text-right tabular-nums">${fmt(stats?.available, 3)}</span>
-              <span className="text-muted">Used margin</span>
+              <span className="text-muted">Wallet used margin</span>
               <span className="font-mono text-right tabular-nums">${fmt(stats?.usedMargin, 3)}</span>
-              <span className="text-muted">Unrealized</span>
-              <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.unrealized ?? 0)}`}>
-                {fmt(stats?.unrealized, 4)}
+              <span className="text-muted">System unrealized</span>
+              <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.systemUnrealized ?? stats?.unrealized ?? 0)}`}>
+                {fmt(stats?.systemUnrealized ?? stats?.unrealized, 4)}
               </span>
+              {foreignCount > 0 ? (
+                <>
+                  <span className="text-muted">Foreign exposure</span>
+                  <span className="font-mono text-right tabular-nums text-warn">{fmt(stats?.foreignExposure, 3)} · {foreignCount} items</span>
+                  <span className="text-muted">Foreign PnL</span>
+                  <span className={`font-mono text-right tabular-nums ${pnlClass((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0))}`}>
+                    {fmt((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0), 4)}
+                  </span>
+                </>
+              ) : null}
               <span className="text-muted">Uptime</span>
               <span className="font-mono text-right">{stats ? ago(stats.uptimeS) : "—"}</span>
             </div>
@@ -444,9 +460,10 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
             </div>
             <p className="mt-3 font-mono text-2xl tabular-nums">
               {l.unit === "VST" ? "" : "$"}
-              {fmt(l.equity, 2)}
+              {fmt(l.systemEquity ?? l.equity, 2)}
               {l.unit === "VST" ? " VST" : ""}
             </p>
+            <p className="mt-1 text-xs text-muted">System equity · wallet {l.walletEquity != null ? fmt(l.walletEquity, 2) : "—"}</p>
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
               <dt>Real</dt>
               <dd className="text-right text-fg" title="Engine book — valid system entries">

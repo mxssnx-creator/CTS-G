@@ -115,8 +115,11 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
-        rec(f"{name}-per-config-controls", ov.get("controlOrdersPerConfig", True) is True)
+        rec(f"{name}-per-config-controls-on", ov.get("controlOrdersPerConfig", False) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
+        rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
+        rec(f"{name}-modules", all((ov.get("modules") or {}).get(k, True) is True for k in ("strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls")))
+        rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
@@ -125,15 +128,17 @@ def overlay_test() -> None:
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-open-cap", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
-    rec("x01-multi", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
-    rec("x01-set-target110", int(x01.get("setMaxActive") or 0) == 110, str(x01.get("setMaxActive")))
+    rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
+    rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
+    rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
     rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
     rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
-    rec("open-cap-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
-    rec("open-100", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
+    rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -196,7 +201,7 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("bounded-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
+    rec("unlimited-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
     rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
@@ -221,7 +226,9 @@ def fill_accounting_test() -> None:
     class CloseApi:
         def __init__(self):
             self.rows: List[dict] = []
+            self.empty = False
             self.n = 0
+            self.paths: List[str] = []
             self.path_cd: Dict[str, float] = {}
 
         def post(self, _path: str, _body: dict) -> dict:
@@ -234,8 +241,10 @@ def fill_accounting_test() -> None:
                 "status": "PARTIALLY_FILLED",
             }}}
 
-        def get(self, _path: str, _params=None) -> dict:
-            return {"code": 0, "data": {"orders": list(self.rows)}}
+        def get(self, path: str, _params=None) -> dict:
+            self.paths.append(path)
+            rows = [] if self.empty else list(self.rows)
+            return {"code": 0, "data": {"orders": rows}}
 
     api = CloseApi()
     p = object.__new__(pt.Pulse)
@@ -313,6 +322,12 @@ def fill_accounting_test() -> None:
         not p.open and close_cid not in p.pending_orders and abs(sum(x.qty for x in p.closed) - 5.0) < 1e-12
         and p.wins == 3,
         f"open={len(p.open)} pending={close_cid in p.pending_orders} closed_qty={sum(x.qty for x in p.closed)} wins={p.wins}")
+
+    api.empty = True
+    p.sync_own_fills()
+    rec("fill-empty-no-obsolete-fallback",
+        api.paths[-1:] == ["/openApi/swap/v2/trade/allOrders"],
+        str(api.paths[-2:]))
 
 
 def unlimited_test() -> None:
@@ -612,15 +627,23 @@ def always_start_test() -> None:
     p2.refresh_balance()
     rec("astart-stop-start-resumes", (not p2.halted) and p2.halt_reason is None, f"{p2.halted} {p2.halt_reason}")
 
-    # 4) real drawdown without explicit start still halts (negative control)
+    # 4) drawdown halt is disabled by default: a 20% drawdown does not latch
     p4 = mk(equity=80.0, start_eq=100.0)
     p4.refresh_balance()
-    rec("astart-drawdown-latches", p4.halted and p4.halt_reason == "drawdown halt", f"{p4.halted} {p4.halt_reason}")
+    rec("astart-drawdown-disabled-default", (not p4.halted) and p4.halt_reason is None,
+        f"{p4.halted} {p4.halt_reason}")
+
+    # 4b) with an explicit threshold, a real drawdown without explicit start still halts
+    pt.DD_HALT = 0.18
+    p4b = mk(equity=80.0, start_eq=100.0)
+    p4b.refresh_balance()
+    rec("astart-drawdown-latches", p4b.halted and p4b.halt_reason == "drawdown halt", f"{p4b.halted} {p4b.halt_reason}")
 
     # 5) auto-resume once drawdown recovers below DD_HALT*0.6
-    p4.api.equity = 95.0
-    p4.refresh_balance()
-    rec("astart-auto-resume", (not p4.halted) and p4.halt_reason is None, f"{p4.halted} {p4.halt_reason}")
+    p4b.api.equity = 95.0
+    p4b.refresh_balance()
+    rec("astart-auto-resume", (not p4b.halted) and p4b.halt_reason is None, f"{p4b.halted} {p4b.halt_reason}")
+    pt.DD_HALT = 0.0
 
     # 6) deposit rescue re-baselines a latched economic halt
     p6 = mk(equity=200.0, start_eq=100.0, halted=True, reason="drawdown halt")
@@ -1312,7 +1335,9 @@ def phantom_recon_test() -> None:
         return pt.Position(
             symbol=sym, side="LONG", qty=1.0, entry=100.0,
             opened_at=time.time() - age, sl=99.0, tp=101.0, peak=100.0,
-            sl_oid=sl_oid,
+            sl_oid=sl_oid, client_id=f"{pt.TAG}test{sym[:4].lower()}",
+            system_id=pt.SYSTEM_ID, connection=pt.CONN_SHORT,
+            tracking_scope=pt.TRACKING_SCOPE,
         )
 
     # 1) first empty read: glitch guard arms, book untouched, exchange count visible
@@ -1394,7 +1419,9 @@ def sim_stats_test() -> None:
 
     def pos(sym, side, qty, entry):
         return pt.Position(symbol=sym, side=side, qty=qty, entry=entry,
-                           opened_at=time.time() - 60, sl=entry * 0.99, tp=entry * 1.01, peak=entry)
+                           opened_at=time.time() - 60, sl=entry * 0.99, tp=entry * 1.01, peak=entry,
+                           client_id=f"{pt.TAG}sim{sym[:4].lower()}", system_id=pt.SYSTEM_ID,
+                           connection=pt.CONN_SHORT, tracking_scope=pt.TRACKING_SCOPE)
 
     # 1) exchange truth unknown -> sim count -1 (UI shows dash, not a lie)
     p = mk()
@@ -1792,7 +1819,10 @@ def block_calc_test() -> None:
     pMx = mk_trader(1.2, 1.5, 12)
     pMx.dca = SimpleNamespace(enabled=True, lanes={"TST-USDT:LONG": SimpleNamespace(filled_n=1)}, key=lambda s, d: f"{s}:{d}")
     pMx.maybe_block_adds()
-    rec("block-skip-if-dca-filled", pMx.api.posts == [], f"posts={pMx.api.posts}")
+    rec("block-independent-from-dca",
+        len(pMx.api.posts) == 1
+        and pMx.block.lanes["TST-USDT:LONG"].confirmed_add > 0,
+        f"posts={pMx.api.posts}")
     from dca_engine import DcaBook as _Dca
     dclamp = _Dca()
     dclamp.load({"dcaEnabled": True, "dcaStepVolumeMultipliers": [2.1, 3.7, 4.8, 6.2]})
@@ -1847,8 +1877,8 @@ def set_orders_test() -> None:
     paths against a recording fake exchange. Covers: unique parseable
     clientOrderIDs per set, per-position control pairs with per-set SL
     distances, exchange-side cancel isolation, per-set win/loss attribution,
-    snapshot/sim stats coordination, and negative controls (occupied symbol
-    refused; entry without controls scratches, never unprotected)."""
+    snapshot/sim stats coordination, aggregate-mode independent lanes with
+    same-lane deduplication, and the no-controls scratch path."""
     import tempfile
     from types import SimpleNamespace
     import pulse_trader as pt
@@ -2128,12 +2158,17 @@ def set_orders_test() -> None:
     sim_n2, _sim_u2 = p.sim_stats()
     rec("setord-real-live-sim-coordination", sim_n == 0 and sim_n2 == 1, f"sim={sim_n}/{sim_n2}")
 
-    # === 4) negative controls ===
+    # === 4) aggregate lanes: distinct lane allowed, exact lane deduplicated ===
     p.control_orders_per_config = False
     before = len(fx.posts)
-    p.place("CCC-USDT", 1, "gen:dup", 0.9)  # legacy aggregate occupied symbol -> refused
-    rec("setord-occupied-symbol-refused", len(fx.posts) == before and pos_for(p, "CCC-USDT").set_id == stC.id,
-        f"posts={len(fx.posts) - before}")
+    cur["i"] = 2
+    p.place("CCC-USDT", 1, "gen:independent", 0.9)
+    after_independent = len(fx.posts)
+    p.place("CCC-USDT", 1, reasons[2], 0.9)  # exact indication lane is already open
+    rec("setord-independent-lane-and-dedup",
+        after_independent == before + 1 and len(fx.posts) == after_independent
+        and pos_for(p, "CCC-USDT").set_id == stC.id,
+        f"independent={after_independent - before} duplicate={len(fx.posts) - after_independent}")
     cur["i"] = 0
     fx2 = FakeEx(fail_controls=True)
     p2 = mk_pulse(fx2)
@@ -2243,6 +2278,8 @@ def grouped_control_test() -> None:
             client_id=cid,
             set_id=cid,
             pack="general",
+            system_id=pt.SYSTEM_ID, connection=pt.CONN_SHORT,
+            tracking_scope=pt.TRACKING_SCOPE,
         )
         p.prepare_position_group(pos)
         return pos

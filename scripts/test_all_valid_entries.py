@@ -149,6 +149,15 @@ class AllValidEntries(unittest.TestCase):
         for _ in range(34): visited.update(p.entry_candidate_window(matrix))
         self.assertEqual(visited, set(matrix))
 
+    def test_zero_live_candidate_cap_rotates_the_full_permissive_pool(self):
+        book = self.book(40)
+        book.entry_policy = 'permissive-bounded'
+        book.live_test_mode = True
+        book.live_test_candidates = 0
+        book.live_test_min_samples = 8
+        seen = {book.pick('general', 'base', 'LONG').id for _ in range(40)}
+        self.assertEqual(len(seen), 40)
+
     def test_entry_sets_cache_reuses_stable_eligibility_and_invalidates_on_score(self):
         book = self.book(12)
         with patch.object(book, '_validated_entry_rows', wraps=book._validated_entry_rows) as scan:
@@ -285,6 +294,21 @@ class AllValidEntries(unittest.TestCase):
         }
         self.assertEqual([state.id], [row.id for row in book.entry_sets('general', 'LONG')])
         self.assertEqual([], book.entry_sets('general', 'SHORT'))
+
+    def test_permissive_policy_allows_cold_historic_set_then_honors_live_negative_gate(self):
+        book = self.book(1)
+        book.entry_policy = "permissive-bounded"
+        book.entry_policy_min_live_samples = 8
+        state = book.by_idx[0]
+        self.assertEqual([state.id], [row.id for row in book.entry_sets("general", "LONG")])
+        self.assertTrue(book.execution_allowed(state, "general", "LONG"))
+        state.live = [
+            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0}
+            for i in range(8)
+        ]
+        book._invalidate_entry_cache()
+        self.assertEqual([], book.entry_sets("general", "LONG"))
+        self.assertFalse(book.execution_allowed(state, "general", "LONG"))
 
     def test_processing_retention_survives_set_deactivation_until_pending_closes(self):
         book = self.book(2)

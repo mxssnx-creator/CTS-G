@@ -182,4 +182,81 @@ class MissingPositionControls(unittest.TestCase):
         self.assertEqual(self.posts,[])
 
 
+class AggregateLaneControls(unittest.TestCase):
+    def setUp(self):
+        p = self.p = pt.Pulse.__new__(pt.Pulse)
+        p.control_orders_per_config = False
+        p.control_orders = True
+        p.system_id = pt.SYSTEM_ID
+        p.connection = pt.CONN_SHORT
+        p.tracking_scope = pt.TRACKING_SCOPE
+        p.open = {}
+        p.px = {'XRP-USDT': 100.0}
+        p.last_px = {}
+        p.contracts = {'XRP-USDT': pt.Contract('XRP-USDT', 0.001, 0.001, 3, 2, 2.0, 150)}
+        p.sl_min = 0.0015
+        p.sl_max = 0.02
+        p.tp_min = 0.003
+        p.tp_max = 0.02
+        p.exits = SimpleNamespace(enabled=False, opt_sl_min=0.001, opt_sl_max=0.009)
+        p.ctrl_skip = {}
+        p.pending_orders = {}
+        p.sets = SimpleNamespace(sets={})
+
+    def position(self, side='LONG', sl=.004, tp=.006, lane='lane-a'):
+        return pt.Position(
+            'XRP-USDT', side, 1.0, 100.0, 1.0, 99.6 if side == 'LONG' else 100.4,
+            100.6 if side == 'LONG' else 99.4, 100.0,
+            sl_pct=sl, tp_pct=tp, execution_lane=lane, set_id=lane,
+            pack='general', client_id=f'own-{lane}', ours=True, set_idx=1,
+            system_id=pt.SYSTEM_ID, connection=pt.CONN_SHORT, tracking_scope=pt.TRACKING_SCOPE,
+        )
+
+    def test_aggregate_lanes_only_deduplicate_exact_lane(self):
+        first = self.position(lane='lane-a')
+        self.p.open[self.p.position_key(first)] = first
+        self.assertTrue(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane='lane-a'))
+        self.assertFalse(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane='lane-b'))
+        self.assertFalse(self.p.occupying('XRP-USDT', 'SHORT', 'general', execution_lane='lane-a'))
+
+    def test_aggregate_range_widens_and_payload_is_quantity_free(self):
+        first = self.position(sl=.004, tp=.006, lane='lane-a')
+        second = self.position(sl=.009, tp=.012, lane='lane-b')
+        self.p.prepare_position_group(first)
+        self.p.prepare_position_group(second)
+        self.p.merge_position(first, second)
+        self.assertAlmostEqual(first.aggregate_sl_pct, .009)
+        self.assertAlmostEqual(first.aggregate_tp_pct, .012)
+        sl, tp, _, _ = self.p.desired_sl_tp(first)
+        self.assertAlmostEqual(sl, 99.1, places=2)
+        self.assertAlmostEqual(tp, 101.2, places=2)
+        body = self.p._ctrl_body(first, 'sl', sl)
+        self.assertEqual(body.get('closePosition'), 'true')
+        self.assertNotIn('quantity', body)
+        self.assertTrue(self.p.cid('u', pos=first).startswith(pt.TAG + 'ua'))
+
+    def test_strategy_prefixes_keep_general_trailing_and_block_lanes_independent(self):
+        selected = SimpleNamespace(id='set-1')
+        normal = self.p.execution_lane_key('general', 'signal', selected, 'normal')
+        trailing = self.p.execution_lane_key('general', 'signal', selected, 'trailing')
+        block = self.p.execution_lane_key('general', 'signal', selected, 'block-active')
+        self.assertNotEqual(normal, trailing)
+        self.assertNotEqual(normal, block)
+        self.assertTrue(normal.startswith('normal:'))
+        self.assertTrue(block.startswith('block-active:'))
+        legacy = self.position(lane=normal.removeprefix('normal:'))
+        self.p.open['legacy'] = legacy
+        self.assertTrue(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane=normal))
+        self.assertFalse(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane=trailing))
+
+    def test_per_config_opt_in_keeps_quantity_matched_controls(self):
+        self.p.control_orders_per_config = True
+        pos = self.position(lane='lane-a')
+        self.p.prepare_position_group(pos)
+        body = self.p._ctrl_body(pos, 'sl', 99.6)
+        self.assertNotIn('closePosition', body)
+        self.assertIn('quantity', body)
+        self.assertEqual(pos.control_range_key, 'sl0040-tp0060')
+
+
 if __name__=='__main__':unittest.main()

@@ -19,6 +19,7 @@ from contextlib import closing
 import subprocess
 
 from system_settings import normalize_system_settings
+from runtime_scope import row_scope_matches, scope_metadata
 
 MIB = 1024 * 1024
 TABLES = ("meta", "trades", "events", "samples")
@@ -94,6 +95,7 @@ class StatisticsStore:
 
     def __init__(self, root, connection, settings=None, *, timeout=0.2):
         self.connection = connection
+        self.scope = scope_metadata(connection)
         self.directory = lane_directory(root, connection)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.directory / "statistics.sqlite3"
@@ -132,6 +134,7 @@ class StatisticsStore:
         self.configure(settings)
         with self.db:
             self._set("sqliteStorageMode", self.storage_mode)
+            self._set("scope", self.scope)
 
     def get(self, key, default=None):
         with self.lock:
@@ -179,8 +182,10 @@ class StatisticsStore:
             self._set("counters", counters)
 
     def record_trade(self, row, capital=0.0):
-        # Only confirmed own exchange deltas affect persistent financial totals.
+        # Only confirmed, explicitly scoped exchange deltas affect persistent totals.
         if not row.get("exchange_confirmed") or row.get("ours") is False:
+            return False
+        if not row_scope_matches(row, self.connection):
             return False
         if row.get("conn") and row["conn"] != self.connection:
             return False
@@ -323,7 +328,7 @@ class StatisticsStore:
     def status(self):
         with self.lock:
             counts = {table: self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
-            result = {"connection": self.connection, "persistent": True, "dbFile": str(self.path), "storageMode": self.storage_mode,
+            result = {**self.scope, "connection": self.connection, "persistent": True, "dbFile": str(self.path), "storageMode": self.storage_mode,
                       "memoryRestartRequired": bool(self.settings["systemSqliteMemory"]) != (self.storage_mode == "memory"),
                       "directory": str(self.directory), "dbKeys": sum(counts.values()), "dbRows": counts,
                       "dbBytes": sum(p.stat().st_size for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")) if p.exists()),
@@ -367,7 +372,8 @@ def read_status(root, connection):
             counts = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
         size = sum(p.stat().st_size for p in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")) if p.exists())
         latest = meta.get("latest", {})
-        return {**latest, "connection": connection, "persistent": True, "dbFile": str(path), "directory": str(directory),
+        scope = meta.get("scope") if isinstance(meta.get("scope"), dict) else scope_metadata(connection)
+        return {**scope, **latest, "connection": connection, "persistent": True, "dbFile": str(path), "directory": str(directory),
                 "storageMode": "checkpoint" if meta.get("sqliteStorageMode") == "memory" else "disk", "checkpointAt": meta.get("sqliteCheckpointAt", 0),
                 "dbKeys": sum(counts.values()), "dbRows": counts, "dbBytes": size, "snapshotAt": latest.get("sampledAt", 0),
                 **{k: meta.get(k, {}) for k in ("counters", "totals", "session", "limits", "lastReset")},
@@ -488,11 +494,15 @@ class RuntimeMonitor:
 
 
 def persistent_activity(activity, status, capital=0):
-    """Keep evaluation windows separate from the cumulative reporting account."""
-    if not status or not status.get("persistent") or "totals" not in status:
-        return activity
-    totals = status["totals"]
+    """Keep scoped system totals separate from raw wallet telemetry."""
     result = dict(activity)
+    if not status or not status.get("persistent") or "totals" not in status:
+        base = number(result.get("systemStartEquity"), number(capital))
+        result["systemStartEquity"] = base
+        result["systemEquity"] = base + number(result.get("pnl"))
+        result["source"] = result.get("source", "system-orders")
+        return result
+    totals = status["totals"]
     for key in ("n", "wins", "losses", "grow", "loss", "realized"):
         result[key] = number(totals.get(key))
     result["pnl"] = result["realized"] + number(activity.get("unrealized"))
@@ -501,8 +511,10 @@ def persistent_activity(activity, status, capital=0):
     result["tradedNotional"] = number(totals.get("tradedNotional")) + open_notional
     result["pnlPct"] = result["pnl"] / result["tradedNotional"] * 100 if result["tradedNotional"] else 0
     base = number(totals.get("capital")) or number(capital)
+    result["systemStartEquity"] = base
+    result["systemEquity"] = base + result["pnl"]
     peak = base + number(totals.get("peakPnl"))
-    current_dd = max(0, peak - (base + result["pnl"]))
+    current_dd = max(0, peak - result["systemEquity"])
     result["drawdownAmount"] = max(number(totals.get("maxDrawdown")), current_dd)
     result["drawdownPct"] = max(number(totals.get("maxDrawdownPct")), current_dd / peak * 100 if peak > 0 and base > 0 else 0)
     result["drawdownAvailable"] = base > 0
