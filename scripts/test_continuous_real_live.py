@@ -129,7 +129,7 @@ class ContinuousTests(AllValidEntries):
         def post(path, body):
             if len(p.api.posts) == 137 and not ban['injected']:
                 ban.update(active=True, injected=True)
-                return {'code':109429, 'msg':'rate limit; retry after time: 9999999999999'}
+                return {'code':100410, 'msg':'Please try again later.'}
             return original_post(path, body)
         p.api.post = post
         p.api.order_retry_after = lambda: 480 if ban['active'] else 0

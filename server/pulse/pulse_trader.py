@@ -373,6 +373,7 @@ _TRANSIENT_API = (
     "rate limit",
     "rate-limit",
     "too many request",
+    "please try again later",
     "requests within",
     "request limit",
     "109420",
