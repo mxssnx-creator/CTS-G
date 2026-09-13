@@ -1185,6 +1185,14 @@ class Pulse:
         self._catalog_bootstrap_running = False
         self._catalog_overlay: Dict[str, Any] = {}
         self._catalog_cts: Dict[str, Any] = {}
+        self._hist_score_refresh_requested = False
+        self.config_reload_state: Dict[str, Any] = {
+            "updatedAt": 0.0,
+            "initial": True,
+            "replayRequired": True,
+            "scoreRefreshRequired": False,
+            "preservedReady": False,
+        }
         self.exits = ExitBook()
         self.block_last_emit = 0.0
         self.overlay_mtime = 0.0
@@ -3861,7 +3869,9 @@ class Pulse:
         return True
 
     def _defer_missing_position_controls(self, pos: Position, response: Dict[str, Any]) -> bool:
-        if str(response.get("code")) != "109420" and ctrl_err_kind(str(response.get("msg") or "")) != "flat":
+        code = str(response.get("code") or "")
+        stale_codes = {"109400", "109420", "109421", "109500", "101205"}
+        if code not in stale_codes and ctrl_err_kind(str(response.get("msg") or "")) != "flat":
             return False
         # One absent exchange position covers every independent set on this
         # symbol+direction. Alternate payloads/prices cannot repair absence.
@@ -4104,7 +4114,11 @@ class Pulse:
             sets is not None
             and bool(getattr(sets, "enabled", False))
             and bool(getattr(sets, "use_historic_gate", False))
-            and not bool(getattr(getattr(sets, "progress", None), "ready", False))
+            and (
+                not bool(getattr(getattr(sets, "progress", None), "ready", False))
+                or bool(getattr(self, "_hist_score_refresh_requested", False))
+                or str(getattr(getattr(sets, "progress", None), "phase", "")) == "score-refresh"
+            )
         ):
             # DCA and Block adds are new orders too; management and protective
             # controls use separate paths and remain available during startup.
@@ -6961,6 +6975,9 @@ class Pulse:
     def apply_live_config(self, initial: bool = False) -> None:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
+        previous_symbols = tuple(SYMBOLS)
+        previous_ready = bool(getattr(getattr(self, "sets", None), "progress", None) and self.sets.progress.ready)
+        previous_generation = int(getattr(self, "_sets_generation", 0) or 0)
         cts = dump_cts_settings()
         self.cts = cts
         ov = load_json_file(OVERLAY_PATH)
@@ -7186,6 +7203,32 @@ class Pulse:
         self._catalog_overlay = dict(calc_ov)
         self._catalog_cts = dict(cts)
         self.sets.load(calc_ov, cts, rebuild=not initial)
+        replay_required = bool(initial or getattr(self.sets, "replay_required", True))
+        # The symbol universe is part of the history publication boundary even
+        # when the Set catalog itself is unchanged.  A cap/universe edit must
+        # not retain watermarks for symbols that are no longer in the run.
+        # Dynamic ranking may reorder the same capped universe on reload.  That
+        # does not change the history boundary; only membership does.
+        universe_changed = set(SYMBOLS) != set(previous_symbols)
+        if not initial and universe_changed:
+            replay_required = True
+            self.sets.replay_required = True
+        score_refresh_required = bool(
+            not replay_required
+            and not initial
+            and previous_ready
+            and getattr(self.sets, "score_refresh_required", False)
+        )
+        self.config_reload_state = {
+            "updatedAt": time.time(),
+            "initial": bool(initial),
+            "replayRequired": bool(replay_required),
+            "scoreRefreshRequired": bool(score_refresh_required),
+            "preservedReady": bool(previous_ready and not replay_required),
+            "universeChanged": bool(universe_changed),
+            "symbolCount": len(SYMBOLS),
+            "generationBefore": previous_generation,
+        }
         self.history_store.configure(
             max(int(ov["systemHistoryRetentionBars"]), self.sets.lookback + self.sets.warmup + 2),
             ov["systemHistoryPersistS"],
@@ -7260,18 +7303,28 @@ class Pulse:
         # reload was in progress.  Increment only after the complete catalog
         # and its dependent strategy settings are installed so that stale
         # replay results are discarded instead of replacing new settings.
-        self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
-        # A new catalog cannot inherit completion claims from old settings.
-        self._hist_last_published_watermark = {}
-        self._hist_replay_retry = set()
-        self._hist_replay_dirty = set()
-        self.sets.progress.watermark = {}
-        self.sets.progress.last_published_watermark = {}
-        self.sets.progress.symbols_done = 0
-        self.sets.progress.sets_done = 0
-        self.sets.progress.sets_total = len(self.sets.sets)
-        self.sets.progress.coordination_complete = False
-        self._hist_next_hourly_at = 0.0
+        if replay_required:
+            self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
+            # A replay-input change cannot inherit completion claims from the
+            # previous catalog or symbol universe.
+            self._hist_score_refresh_requested = False
+            self._hist_last_published_watermark = {}
+            self._hist_replay_retry = set()
+            self._hist_replay_dirty = set()
+            self.sets.progress.watermark = {}
+            self.sets.progress.last_published_watermark = {}
+            self.sets.progress.symbols_done = 0
+            self.sets.progress.sets_done = 0
+            self.sets.progress.sets_total = len(self.sets.sets)
+            self.sets.progress.coordination_complete = False
+            self._hist_next_hourly_at = 0.0
+        elif score_refresh_required:
+            # Re-score the retained independent tapes on the history lane;
+            # PF/evaluation edits become effective without refetching candles.
+            self._hist_score_refresh_requested = True
+            self.sets.progress.phase = "score-refresh"
+            self.sets.progress.detail = "settings changed · refreshing independent Set scores"
+            self.sets.progress.coordination_complete = False
         self._hist_wake.set()
         if self.sets.sets:
             self._catalog_ready.set()
@@ -7325,6 +7378,7 @@ class Pulse:
             "connection": CONN_SHORT,
             "trackingScope": TRACKING_SCOPE,
             "trackPrefix": TAG,
+            "configReload": dict(getattr(self, "config_reload_state", {}) or {}),
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
@@ -11578,10 +11632,14 @@ class Pulse:
                 done.extend(chunk)
                 self._hist_replay_completed.update(chunk)
                 run_completed.update(chunk)
-                ready = True
+                # A fresh catalog is not ready after one symbol slice.  Keep
+                # it closed until every requested symbol has been published;
+                # an already-live catalog may remain ready while its slice is
+                # refreshed.
+                ready = bool(already) or not pending
                 with self.state_guard():
                     progress = self.sets.progress
-                    progress.ready = True
+                    progress.ready = bool(ready)
                     progress.symbols_done = min(len(run_completed), total)
                     progress.symbols_total = total
                     progress.coordination_complete = False
@@ -12085,12 +12143,24 @@ class Pulse:
             with self.state_guard():
                 if self.sets is not book or int(getattr(self, "_sets_generation", 0) or 0) != generation:
                     return False
-                first_ready = not book.progress.ready
-                # A completed batch has fully scored evidence. Admission
-                # still checks each exact config's Base/Main/Real gates;
-                # unscored configs remain inactive. Do not hold the first
-                # qualified lanes behind the rest of the entire catalog.
-                book.progress.ready = True
+                was_ready = bool(book.progress.ready)
+                # Scoring a replay slice is not the same as completing the
+                # frozen symbol universe.  Keep a fresh catalog closed until
+                # the durable publisher has seen every requested symbol; an
+                # already-live catalog remains available during refresh.
+                replay_complete = bool(
+                    (
+                        not book.progress.symbols_total
+                        and done >= total
+                    )
+                    or (
+                        book.progress.symbols_total
+                        and book.progress.symbols_done >= book.progress.symbols_total
+                        and book.progress.coordination_complete
+                    )
+                )
+                first_ready = (not was_ready) and replay_complete
+                book.progress.ready = bool(was_ready or replay_complete)
                 book.progress.phase = "score"
                 book.progress.sets_done = done
                 book.progress.sets_total = total
@@ -12351,6 +12421,34 @@ class Pulse:
                         book.progress.detail = "historic lane disabled"
                     self._hist_write_status(book)
                     self._hist_wake.wait(timeout=5.0)
+                    continue
+                score_refresh = False
+                score_book = None
+                score_generation = 0
+                score_ids: List[str] = []
+                with self.state_guard():
+                    if getattr(self, "_hist_score_refresh_requested", False) and book.progress.ready:
+                        self._hist_score_refresh_requested = False
+                        score_refresh = True
+                        score_book = book
+                        score_generation = int(getattr(self, "_sets_generation", 0) or 0)
+                        score_ids = list(book.sets)
+                        book.progress.phase = "score-refresh"
+                        book.progress.sets_done = 0
+                        book.progress.sets_total = len(score_ids)
+                        book.progress.detail = f"settings changed · score refresh 0/{len(score_ids)}"
+                if score_refresh and score_book is not None:
+                    self._score_committed(score_book, score_generation, score_ids)
+                    with self.state_guard():
+                        if self.sets is score_book and int(getattr(self, "_sets_generation", 0) or 0) == score_generation:
+                            score_book.progress.ready = True
+                            score_book.progress.phase = "ready"
+                            score_book.progress.pct = 100.0
+                            score_book.progress.coordination_complete = True
+                            score_book.progress.detail = f"settings score refresh complete · {len(score_ids)} independent Sets"
+                            self.config_reload_state["scoreRefreshAppliedAt"] = time.time()
+                    self._hist_write_status(score_book)
+                    self.write_stats(force=True)
                     continue
                 budget = self._budget()
                 catalog_incomplete = (not ready) or (not bool(getattr(book.progress, "coordination_complete", False)))
@@ -12669,7 +12767,11 @@ class Pulse:
                     progress.symbols_total = len(valid)
                     progress.symbols_done = len(valid) - len(pending_symbols)
                     progress.pct = 100.0 * progress.symbols_done / max(1, len(valid))
-                    progress.ready = True
+                    # A fresh run may publish completed slices while other
+                    # symbols remain pending. Keep the historical gate closed
+                    # until the frozen universe is complete; a previously
+                    # live book is allowed to stay ready while it refreshes.
+                    progress.ready = bool(already_ready or not pending_symbols)
                     if not pending_symbols:
                         progress.last_complete_run = complete_at
                         progress.error = ""
