@@ -1166,7 +1166,10 @@ class SetBook:
         # hands admission back to the live evidence gates at the sample floor.
         self.entry_policy = ENTRY_POLICY_STRICT
         self.entry_policy_max_candidates = 0
-        self.entry_policy_min_live_samples = self.pf_n
+        # No additional fixed live-sample hurdle. Independent Set
+        # PF/sample and stage gates remain authoritative; this value only
+        # controls optional cold-candidate preference in permissive mode.
+        self.entry_policy_min_live_samples = 0
         # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
         self.live_test_candidates = 0
@@ -1423,12 +1426,14 @@ class SetBook:
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(75, int(ov.get("setMinSamples") or self.pf_n)))
         try:
-            self.entry_policy_min_live_samples = max(
-                5,
-                min(25, int(ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples") or self.eval_need())),
-            )
+            raw_live_samples = ov.get("entryPolicyMinLiveSamples")
+            if raw_live_samples is None:
+                raw_live_samples = ov.get("liveTestMinSamples")
+            if raw_live_samples is None:
+                raw_live_samples = 0
+            self.entry_policy_min_live_samples = max(0, min(25, int(raw_live_samples)))
         except Exception:
-            self.entry_policy_min_live_samples = self.eval_need()
+            self.entry_policy_min_live_samples = 0
         self.live_test_min_samples = self.entry_policy_min_live_samples
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (configured Last-N fills) AND

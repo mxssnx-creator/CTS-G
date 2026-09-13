@@ -7307,6 +7307,11 @@ class Pulse:
             self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
             # A replay-input change cannot inherit completion claims from the
             # previous catalog or symbol universe.
+            # A persisted/partial snapshot may still carry ready=true. Clear it
+            # before this new universe is replayed so the historic entry gate
+            # cannot publish incomplete Set directions as live candidates.
+            self.sets.progress.ready = False
+            self.sets.progress.stale = False
             self._hist_score_refresh_requested = False
             self._hist_last_published_watermark = {}
             self._hist_replay_retry = set()
@@ -7493,7 +7498,9 @@ class Pulse:
             "setLiveNegativeDeact": bool(getattr(self.sets, "live_negative_deact", False)),
             "liveTestMode": bool(getattr(self.sets, "live_test_mode", False)),
             "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 0) or 0),
-            "liveTestMinSamples": int(getattr(self.sets, "live_test_min_samples", self.sets.eval_need()) or self.sets.eval_need()),
+            "liveTestMinSamples": int(
+                getattr(self.sets, "live_test_min_samples", 0)
+            ),
             "effectiveMinStep": int(getattr(self.sets, "min_step", 1) or 1),
             "configuredMinStep": int(getattr(self.sets, "min_step_cfg", 1) or 1),
             "preferMinimalRange": bool(
