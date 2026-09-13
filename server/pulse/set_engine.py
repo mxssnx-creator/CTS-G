@@ -100,6 +100,14 @@ STEP_MAX = 30
 # retaining a hard per-set memory bound.  trim_hist distributes this cap over
 # symbols, so a busy multi-symbol book cannot grow without limit.
 HIST_CAP = 160
+# The live replay lane only needs the configured Base/entry windows and the
+# standard last-50 diagnostics while it is warming.  Keeping the full 160-row
+# tape during a 37k-Set, multi-symbol replay multiplies temporary CompactRows
+# across the catalog and can exhaust the VST cgroup before readiness.  The
+# offline hist-calculation lane continues to use HIST_CAP for last-75 reports;
+# this smaller live lane still retains enough rows for the default last-30
+# validation and the last-50 selection diagnostics.
+REPLAY_HIST_CAP = 96
 _SIDE_LONG = "LONG"
 _SIDE_SHORT = "SHORT"
 ENTRY_POLICY_STRICT = "strict"
@@ -2232,8 +2240,8 @@ class SetBook:
                         target.extend(rows)
                         # A multi-symbol slice must not multiply the bounded
                         # per-Set evaluation tape by the slice width.
-                        if len(target) > HIST_CAP:
-                            target[:] = recent_direction_rows(target, HIST_CAP)
+                        if len(target) > REPLAY_HIST_CAP:
+                            target[:] = recent_direction_rows(target, REPLAY_HIST_CAP)
                 for k, rows in local_ind.items():
                     if rows:
                         ind_hist.setdefault(k, []).extend(rows)
@@ -2810,14 +2818,14 @@ class SetBook:
         cooldown_n = max(0, int(self.cooldown_bars or 0))
         scratch_min = float(self.scratch_min or 0.0)
         started = time.monotonic()
-        # Columnar rings retain the exact last HIST_CAP closes per direction.
+        # Columnar rings retain the bounded live replay evidence per direction.
         # Constructing and sorting Python rows after *every* close consumed
         # most replay CPU on the unrestricted catalog. Full counts remain
         # independent of these bounded evaluation buffers.
-        close_bar = np.empty((m, HIST_CAP), dtype=np.int32)
-        close_move = np.empty((m, HIST_CAP), dtype=float)
-        close_held = np.empty((m, HIST_CAP), dtype=np.int32)
-        close_reason = np.empty((m, HIST_CAP), dtype=np.uint8)
+        close_bar = np.empty((m, REPLAY_HIST_CAP), dtype=np.int32)
+        close_move = np.empty((m, REPLAY_HIST_CAP), dtype=float)
+        close_held = np.empty((m, REPLAY_HIST_CAP), dtype=np.int32)
+        close_reason = np.empty((m, REPLAY_HIST_CAP), dtype=np.uint8)
         reasons = ("sl", "tp", "time", "scratch+")
 
         for want_side in side_values:
@@ -2902,7 +2910,7 @@ class SetBook:
 
                     exit_indices = np.flatnonzero(exited)
                     if exit_indices.size:
-                        slots = close_count[exit_indices] % HIST_CAP
+                        slots = close_count[exit_indices] % REPLAY_HIST_CAP
                         close_bar[exit_indices, slots] = i
                         close_move[exit_indices, slots] = raw[exit_indices]
                         close_held[exit_indices, slots] = held[exit_indices]
@@ -2935,14 +2943,14 @@ class SetBook:
                 if hist_counts is not None:
                     hist_counts[sid] = int(hist_counts.get(sid, 0)) + count
                 rows = list(hist.get(sid) or [])
-                for serial in range(max(0, count - HIST_CAP), count):
-                    slot = serial % HIST_CAP
+                for serial in range(max(0, count - REPLAY_HIST_CAP), count):
+                    slot = serial % REPLAY_HIST_CAP
                     rows.append(hist_fill(
                         base_ts + int(close_bar[j, slot]) * BAR_S, symbol, want_side,
                         float(close_move[j, slot]), int(close_held[j, slot]) * BAR_S,
                         reasons[int(close_reason[j, slot])],
                     ))
-                hist[sid] = recent_direction_rows(rows, HIST_CAP)
+                hist[sid] = recent_direction_rows(rows, REPLAY_HIST_CAP)
 
     def _replay_symbol(
         self,
