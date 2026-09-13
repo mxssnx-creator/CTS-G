@@ -434,6 +434,8 @@ class FastBingX:
             self.err.write("http", method=method, path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
         if isinstance(body, dict) and body.get("code") not in (0, None):
+            if body.get("code") in (109400, "109400") and "/trade/" in path:
+                self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg") or "")[:220])
             if body.get("code") not in (100404, 109400, 100001, *SKIP_API_LOG) or "signature" in str(body.get("msg") or "").lower():
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
