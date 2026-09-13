@@ -5319,11 +5319,21 @@ class Pulse:
         except TypeError:
             # Keep lightweight in-process fakes and older adapters compatible.
             qty = self.size_qty(c, px)
+        # Once the venue has reported a lot/quote minimum, coordinate the
+        # selected Set's volume with that executable floor before submitting
+        # the market entry.  This prevents creating a position whose later
+        # SL/TP close can only be rejected as below the exchange minimum.
+        if c is not None and qty > 0:
+            qty = max(qty, self.min_order_qty(c, px))
+            qty = self.round_qty_up(c, qty)
         execution_plan = None
         if execution_strategy == "block-active":
             execution_plan = self.block_active_plan(sym, side, chosen, qty, px, execution_lane=execution_lane)
         if execution_plan:
             qty = self.round_qty(c, execution_plan["requestedQty"])
+            if c is not None and qty > 0:
+                qty = max(qty, self.min_order_qty(c, px))
+                qty = self.round_qty_up(c, qty)
             if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
                 self._execution_decision.update(allowed=False, reason="adjusted quantity below exchange minimum")
                 return
