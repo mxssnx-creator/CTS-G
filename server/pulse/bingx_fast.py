@@ -69,7 +69,7 @@ RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
 # asked about an object that the venue has already removed. They must not make
 # a healthy continuous loop look failed; the caller still receives the
 # response and applies its normal stale-state recovery.
-SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 101205}
+SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 109421, 101205}
 
 
 class TokenBucket:
