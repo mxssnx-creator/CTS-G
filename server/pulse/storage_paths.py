@@ -75,6 +75,13 @@ MAX_RETAINED_LINES = min(
     1000,
     max(32, _safe_int(os.environ.get("CTS_MAX_RETAINED_LINES", "1000"), 1000)),
 )
+# Error evidence has a deliberately smaller hard tail.  It is independent of
+# the larger operational/trade-history retention setting so repeated venue
+# failures cannot crowd out the useful recent diagnostics.
+MAX_ERROR_LOG_LINES = min(
+    500,
+    max(32, _safe_int(os.environ.get("CTS_MAX_ERROR_LOG_LINES", "500"), 500)),
+)
 MAX_RETAINED_LINE_BYTES = 16 * 1024
 MAX_RETAINED_FILE_BYTES = 8 * 1024 * 1024
 _APPEND_LOCK = threading.RLock()
@@ -464,6 +471,7 @@ def storage_info() -> Dict[str, Any]:
         "retentionDays": 35,
         "retentionSeconds": 35 * 24 * 60 * 60,
         "maxRetainedLines": MAX_RETAINED_LINES,
+        "maxErrorLogLines": MAX_ERROR_LOG_LINES,
         "maxRetainedLineBytes": MAX_RETAINED_LINE_BYTES,
         "maxRetainedFileBytes": MAX_RETAINED_FILE_BYTES,
         "updatedAt": time.time(),
@@ -489,6 +497,7 @@ ensure_storage_info()
 __all__ = [
     "DATA_DIR",
     "MAX_RETAINED_LINES",
+    "MAX_ERROR_LOG_LINES",
     "MAX_RETAINED_LINE_BYTES",
     "MAX_RETAINED_FILE_BYTES",
     "path_for",

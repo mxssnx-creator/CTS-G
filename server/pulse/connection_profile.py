@@ -28,9 +28,10 @@ def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
     result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
                   maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
-                  # X02 intentionally scans the ranked top-20 book.  The
-                  # wildcard selects the exchange universe before the cap;
-                  # it must not be mistaken for an unlimited live universe.
+                  # VST keeps a deliberate 20-symbol execution universe for
+                  # stable high-count processing; Set, position and order
+                  # counts remain unlimited. The wildcard still selects the
+                  # exchange universe before the ranked test cap.
                   symbolsAll=True, symbolsDynamic=True, symbolCap=20,
                   maxRealSets=0, strategyLiveSetsCeiling=0,
                   strategyRealSetsSafetyCeiling=0,

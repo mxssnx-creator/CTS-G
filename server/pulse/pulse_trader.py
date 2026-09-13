@@ -60,7 +60,7 @@ from set_engine import SetBook, self_test as sets_self_test, indication_kind_vot
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
-from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
+from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
@@ -3885,8 +3885,13 @@ class Pulse:
         # symbol+direction. Alternate payloads/prices cannot repair absence.
         # Keep the book and existing protection until reconciliation confirms
         # exchange truth; stop sibling sets from exhausting the venue budget.
-        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = time.time() + 60.0
+        # A freshly filled aggregate position can be invisible to the venue
+        # for a few seconds.  Sixty seconds leaves the whole group visibly
+        # unprotected while new Sets keep arriving; retry soon, but through
+        # the normal paced order path and one bounded reconciliation.
+        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = time.time() + 8.0
         self.recon_pending = True
+        self._reconcile_retry_at = min(float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0), time.monotonic())
         return True
 
     def place_ctrl(self, pos: Position, kind: str, price: float) -> str:
@@ -7096,8 +7101,13 @@ class Pulse:
         if hasattr(self.api, "configure_limits"):
             self.api.configure_limits(ov)
         from storage_paths import configure_retention
-        for path in (LOG_PATH, ERR_PATH, TRADES_PATH):
-            configure_retention(path, ov["systemLogMaxLines"], int(ov["systemLogMaxMb"] * 1024 * 1024))
+        configure_retention(LOG_PATH, ov["systemLogMaxLines"], int(ov["systemLogMaxMb"] * 1024 * 1024))
+        configure_retention(
+            ERR_PATH,
+            min(MAX_ERROR_LOG_LINES, int(ov["systemLogMaxLines"])),
+            int(ov["systemLogMaxMb"] * 1024 * 1024),
+        )
+        configure_retention(TRADES_PATH, ov["systemLogMaxLines"], int(ov["systemLogMaxMb"] * 1024 * 1024))
         try:
             self.overlay_mtime = os.path.getmtime(OVERLAY_PATH)
         except Exception:
@@ -7280,7 +7290,14 @@ class Pulse:
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
         self.control_orders = _bool_setting(ov.get("controlOrders", cts.get("control_orders", True)), True)
-        self.control_orders_overall = _bool_setting(ov.get("controlOrdersOverall", False), False)
+        # Overall symbol+direction protection is the safe high-throughput
+        # default.  A missing key must not silently fall back to per-config
+        # TP/SL pairs: hundreds of qualified Sets would then consume the
+        # venue's TP/SL order quota.  An explicit false still opts out.
+        self.control_orders_overall = _bool_setting(
+            ov.get("controlOrdersOverall", cts.get("controlOrdersOverall", True)),
+            True,
+        )
         control_orders_per_config = _bool_setting(
             ov.get(
                 "controlOrdersPerConfig",
@@ -13160,8 +13177,17 @@ class Pulse:
         # Reconcile immediately after the boot snapshot, before touching old
         # local controls. Waiting for cycle 25 can take hours when a stale book
         # contains many positions and each repair encounters venue cooldowns.
-        if self.cycle == 1 or self.cycle % 25 == 0:
+        reconcile_due = (
+            self.cycle == 1
+            or self.cycle % 25 == 0
+            or (
+                bool(getattr(self, "recon_pending", False))
+                and time.monotonic() >= float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0)
+            )
+        )
+        if reconcile_due:
             self._cycle_step("reconcile", self.adopt_exchange_positions)
+            self._reconcile_retry_at = time.monotonic() + 5.0 if self.recon_pending else 0.0
         self._sync_set_processing()
         unprotected = self._cycle_step("controls", self.priority_controls)
         if self.cycle % 8 == 0:

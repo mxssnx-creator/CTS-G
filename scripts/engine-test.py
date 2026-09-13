@@ -115,6 +115,7 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
+        rec(f"{name}-overall-controls", ov.get("controlOrdersOverall", True) is True)
         rec(f"{name}-per-config-controls-on", ov.get("controlOrdersPerConfig", False) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
