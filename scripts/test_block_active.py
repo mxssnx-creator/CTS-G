@@ -220,12 +220,22 @@ class BlockActiveTests(unittest.TestCase):
                 p.place('X-USDT',1,'gen:test',.9)
         self.assertEqual(p.api.post.call_args.args[1]['quantity'],8)
 
-    def test_exchange_minimum_does_not_upsize_adjustment(self):
+    def test_exchange_minimum_upsizes_adjustment_for_closing(self):
         p=self.entry_fixture(); p.contracts['X-USDT'].min_qty=3
         with patch.object(pt.os.path,'exists',return_value=False), patch.object(pt.time,'time',return_value=60):
-            p.place('X-USDT',1,'gen:test',.9)
-        p.api.post.assert_not_called()
-        p.ensure_max_leverage.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
+                p.place('X-USDT',1,'gen:test',.9)
+        self.assertEqual(p.api.post.call_args.args[1]['quantity'],3)
+
+    def test_known_exchange_minimum_is_applied_before_entry(self):
+        p=self.entry_fixture(); p.block_active=False
+        p.normal_execution_enabled=True
+        p.size_qty=lambda *a,**k:2
+        p.contracts['X-USDT'].min_qty=3
+        with patch.object(pt.os.path,'exists',return_value=False), patch.object(pt.time,'time',return_value=60):
+            with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
+                p.place('X-USDT',1,'gen:test',.9)
+        self.assertEqual(p.api.post.call_args.args[1]['quantity'],3)
 
     def test_unlimited_selection_and_explicit_bounded_policy(self):
         b=SetBook(); self.assertEqual(b.max_active,0)
