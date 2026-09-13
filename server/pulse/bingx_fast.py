@@ -50,7 +50,7 @@ try:
 except Exception:
     _ws = None
 
-from storage_paths import append_bounded_line, retain_last_lines, read_jsonl
+from storage_paths import MAX_ERROR_LOG_LINES, append_bounded_line, retain_last_lines, read_jsonl
 
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
@@ -118,7 +118,7 @@ class ErrorLog:
         line = dumps(rec) + "\n"
         with self.lock:
             try:
-                append_bounded_line(self.path, line)
+                append_bounded_line(self.path, line, max_lines=MAX_ERROR_LOG_LINES)
                 if self.n % 80 == 0:
                     self._rotate()
             except Exception:
@@ -126,7 +126,7 @@ class ErrorLog:
 
     def _rotate(self) -> None:
         try:
-            retain_last_lines(self.path)
+            retain_last_lines(self.path, max_lines=MAX_ERROR_LOG_LINES)
         except Exception:
             pass
 

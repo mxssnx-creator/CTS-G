@@ -17,11 +17,16 @@ PULSE_DIR="${PULSE_DIR:-/opt/${CTS_G_NAME}-pulse}"
 CTS_DATA_DIR="${CTS_DATA_DIR:-/var/lib/${CTS_G_NAME}}"
 LOG_DIR="${LOG_DIR:-/var/log/${CTS_G_NAME}}"
 MAX_LINES="${CTS_MAX_RETAINED_LINES:-1000}"
+MAX_ERROR_LINES="${CTS_MAX_ERROR_LOG_LINES:-500}"
 
 case "$MAX_LINES" in
   ''|*[!0-9]*) MAX_LINES=1000 ;;
 esac
 (( MAX_LINES > 0 && MAX_LINES <= 1000 )) || MAX_LINES=1000
+case "$MAX_ERROR_LINES" in
+  ''|*[!0-9]*) MAX_ERROR_LINES=500 ;;
+esac
+(( MAX_ERROR_LINES > 0 && MAX_ERROR_LINES <= 500 )) || MAX_ERROR_LINES=500
 
 [[ "${1:---once}" == "--once" ]] || {
   printf 'usage: %s --once\n' "$0" >&2
@@ -78,9 +83,12 @@ for path in sorted(set(files)):
     try:
         before = path.stat().st_size
         selected = [value for lane, value in limits.items() if lane in path.name] or list(limits.values())
+        selected_max_lines = min(max_lines, min(value["systemLogMaxLines"] for value in selected))
+        if path.name.startswith("errors-") or path.name.endswith(".err") or path.name.endswith(".err.log"):
+            selected_max_lines = min(selected_max_lines, int(os.environ.get("CTS_MAX_ERROR_LOG_LINES", "500")))
         kept = retain_last_lines(
             str(path),
-            max_lines=min(max_lines, min(value["systemLogMaxLines"] for value in selected)),
+            max_lines=selected_max_lines,
             max_bytes=min(MAX_RETAINED_FILE_BYTES, int(min(value["systemLogMaxMb"] for value in selected)*1048576)),
         )
         after = path.stat().st_size
