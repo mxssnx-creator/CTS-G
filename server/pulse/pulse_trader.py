@@ -10134,6 +10134,8 @@ class Pulse:
         # engine can track many independent config/set lanes in that group.
         live_order_count = int(getattr(self, "exchange_order_own_count", -1) or -1)
         live_total_order_count = int(getattr(self, "exchange_order_total_count", -1) or -1)
+        if live_order_count < 0 and live_total_order_count >= 0:
+            live_order_count = max(0, live_total_order_count - int(getattr(self, "foreign_open_order_count", 0) or 0))
         if exchange_own_open < 0:
             open_parity = "pending"
         elif exchange_own_open == internal_position_groups:
