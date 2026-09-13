@@ -7244,6 +7244,7 @@ class Pulse:
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -8386,7 +8387,9 @@ class Pulse:
         blob = self._forced_data()
         candidates = blob.get("rows") or []
         if not candidates:
+            self._forced_entry_queue = {"eligible": 0, "examined": 0, "attempted": 0, "opened": 0, "failed": 0, "updatedAt": time.time()}
             return
+        queue = self._forced_entry_queue = dict(eligible=len(candidates), examined=0, attempted=0, opened=0, failed=0, updatedAt=time.time(), scope="baseline-batch")
         cursor = getattr(self, "_forced_cursor", 0) % len(candidates)
         self._forced_cursor = cursor + 1
         # Rotate all qualified candidates without a high-PF row monopolizing
@@ -8399,6 +8402,7 @@ class Pulse:
             if time.monotonic() >= deadline or getattr(self, "halted", False):
                 break
             row = candidates[(cursor + offset) % len(candidates)]
+            queue["examined"] += 1
             self._forced_cursor = (cursor + offset + 1) % len(candidates)
             sym = row["symbol"]
             if sym not in votes_by_symbol:
@@ -8408,8 +8412,16 @@ class Pulse:
             d, conf = votes_by_symbol[sym].get(row["indication"], (0, 0))
             side = "LONG" if d > 0 else "SHORT"
             if d and self._forced_entry_allowed(row, sym, side, conf):
-                self.place(sym, d, f"ind:{row['indication']}:forced-baseline", conf, forced_row=row)
-                # Continue within the cooperative budget; place owns rate limits and pending-order guards.
+                queue["attempted"] += 1
+                before = len(getattr(self, "open", {}))
+                try:
+                    self.place(sym, d, f"ind:{row['indication']}:forced-baseline", conf, forced_row=row)
+                except Exception as exc:
+                    queue["failed"] += 1
+                    self.errors = getattr(self, "errors", 0) + 1
+                    self.last_error = f"baseline entry {sym}: {type(exc).__name__}: {str(exc)[:140]}"
+                queue["opened"] += max(0, len(getattr(self, "open", {}))-before)
+                # Cursor advances even on failure; the Set remains available next cycle.
 
     def _forced_snapshot(self) -> Dict[str, Any]:
         blob = self._forced_data()
@@ -10062,6 +10074,7 @@ class Pulse:
             "activeSetCount": int(sets_snap.get("activeCount") or 0),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
             "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
             "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
             "progressPhase": phase,
@@ -10557,6 +10570,7 @@ class Pulse:
                 "validatedCount": int(scov.get("validatedCount") or 0),
                 "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
                 "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
                 "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),

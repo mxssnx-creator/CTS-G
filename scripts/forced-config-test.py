@@ -48,7 +48,14 @@ class ForcedTests(unittest.TestCase):
         p._forced_data = lambda: {"rows": rows}
         accepted = set()
         p._forced_entry_allowed = lambda row, *args: row["id"] not in accepted
-        p.place = lambda *args, **kw: accepted.add(kw["forced_row"]["id"])
+        attempts = {}
+        def place(*args, **kw):
+            sid = kw["forced_row"]["id"]
+            attempts[sid] = attempts.get(sid, 0) + 1
+            if sid == "0" and attempts[sid] == 1:
+                raise TimeoutError("retryable fake transport")
+            accepted.add(sid)
+        p.place = place
         with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,"ind:signals")]):
             # Use the actual tag from the registry, avoiding a fabricated signal.
             from set_engine import IND_TAG_KIND
@@ -56,6 +63,8 @@ class ForcedTests(unittest.TestCase):
             with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,tag)]):
                 for _ in range(4): p.maybe_forced_entries()
         self.assertEqual(len(accepted),700)
+        self.assertEqual(attempts["0"],2)
+        self.assertTrue(all(n==1 for sid,n in attempts.items() if sid != "0"))
 
     def test_exact_grid(self):
         self.assertEqual(len(forced.TP_GRID) * len(forced.SL_GRID), 81)
