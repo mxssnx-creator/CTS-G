@@ -20,7 +20,7 @@ from runtime_statistics import StatisticsStore, RuntimeMonitor, lane_directory, 
 import runtime_statistics as runtime_stats
 from system_settings import calculation_overlay, normalize_system_settings
 from set_engine import SetBook
-from storage_paths import append_bounded_line, configure_retention
+from storage_paths import MAX_ERROR_LOG_LINES, append_bounded_line, configure_retention, retain_last_lines
 from event_ledger import EventLedger
 from runtime_scope import tracking_scope
 import pulse_http as ph
@@ -271,6 +271,16 @@ class StatisticsTests(unittest.TestCase):
         ledger.record("evaluation", "big", metadata={"oversized": ["secret-free-test"] * 100000})
         ledger.flush()
         self.assertLess(Path(ledger.path).stat().st_size, 20000)
+
+    def test_error_log_has_independent_500_line_cap(self):
+        path = Path(self.root) / "errors-bingx-x02.jsonl"
+        for i in range(MAX_ERROR_LOG_LINES + 125):
+            append_bounded_line(str(path), json.dumps({"n": i}), max_lines=MAX_ERROR_LOG_LINES)
+        rows = path.read_text().splitlines()
+        self.assertEqual(len(rows), MAX_ERROR_LOG_LINES)
+        self.assertEqual(json.loads(rows[0])["n"], 125)
+        self.assertEqual(json.loads(rows[-1])["n"], MAX_ERROR_LOG_LINES + 124)
+        self.assertEqual(retain_last_lines(str(path), max_lines=MAX_ERROR_LOG_LINES), MAX_ERROR_LOG_LINES)
 
     def test_corrupt_database_is_reported_without_deleting_anything(self):
         directory = lane_directory(self.root, "bingx-x02"); directory.mkdir(parents=True)
