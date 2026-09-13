@@ -92,6 +92,16 @@ class OverallTests(unittest.TestCase):
         with patch.object(p.api,'post',return_value={'code':1}):overall.ensure(p,pos)
         self.assertEqual((pos.sl_oid,pos.tp_oid),old)
 
+    def test_empty_control_creation_is_not_reported_as_successful_replacement(self):
+        p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
+        pos=next(iter(p.open.values()));pos.sl=0.95;pos.qty*=2
+        pos.sl_oid=pos.sec_sl_oid=''
+        old_tp=pos.tp_oid
+        with patch.object(p,'place_ctrl',return_value=''):
+            overall.ensure(p,pos)
+        self.assertEqual((pos.sl_oid,pos.tp_oid),('',old_tp))
+        self.assertNotIn('overall replacement 0', str(getattr(p,'last_error','')))
+
     def test_second_leg_failure_keeps_first_confirmed_and_retries_only_missing_leg(self):
         p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
         pos=next(iter(p.open.values()));old=(pos.sl_oid,pos.tp_oid);pos.qty*=2
