@@ -444,7 +444,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
+                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
                 "clientOrderID": Pulse.cid(p, "s", set_id=set_id, pack="general"),
             },
         )
@@ -452,7 +452,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
+                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
                 "clientOrderID": Pulse.cid(p, "t", set_id=set_id, pack="general"),
             },
         )

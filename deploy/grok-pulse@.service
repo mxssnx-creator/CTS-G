@@ -28,10 +28,13 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
 Nice=-5
-CPUWeight=200
+CPUWeight=10000
+CPUQuota=infinity
 # A 25-symbol 34,320-set catalog plus klines sits around 2.4–2.6G RSS.
 # MemoryHigh must stay above that working set; reclaim at 2304M turned the
 # first hist slice into a multi-minute futex stall (mem_cgroup_handle_over_high).
+# These are conservative fallbacks. The scoped dynamic-resources timer writes
+# a host-aware 99-* drop-in and applies the current policy at runtime.
 MemoryHigh=3456M
 MemoryMax=3840M
 MemorySwapMax=0

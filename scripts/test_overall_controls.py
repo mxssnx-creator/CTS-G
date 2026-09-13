@@ -53,6 +53,32 @@ class OverallTests(unittest.TestCase):
         self.assertNotIn('closePosition', body)
         self.assertAlmostEqual(float(body.get('quantity')), proxy.qty)
 
+    def test_overall_members_normalize_legacy_close_position_state(self):
+        p = self.pulse(1)
+        p.place('X-USDT', 1, 'trend', .9, selected_set=p.sets.by_idx[0])
+        pos = next(iter(p.open.values()))
+        pos.close_position = True
+        self.assertTrue(overall.ensure(p, pos))
+        self.assertFalse(pos.close_position)
+
+    def test_overall_control_events_report_overall_mode(self):
+        p = self.pulse(1)
+        p.place('X-USDT', 1, 'trend', .9, selected_set=p.sets.by_idx[0])
+        pos = next(iter(p.open.values()))
+        pos._overall_proxy = True
+        self.assertEqual(p.control_event_fields(pos)['control_mode'], 'overall')
+
+    def test_cooling_does_not_emit_control_requests(self):
+        p = self.pulse(1)
+        p.place('X-USDT', 1, 'trend', .9, selected_set=p.sets.by_idx[0])
+        pos = next(iter(p.open.values()))
+        pos.sl_oid = pos.tp_oid = pos.sec_sl_oid = pos.sec_tp_oid = ''
+        p._overall_pairs = {}
+        p.api.order_retry_after = lambda: 60.0
+        with patch.object(p, 'place_ctrl', return_value='') as place_ctrl:
+            self.assertFalse(overall.ensure(p, pos))
+        place_ctrl.assert_not_called()
+
     def test_multiple_sets_share_pair_but_keep_own_lots_and_targets(self):
         p=self.pulse()
         for st in p.sets.by_idx:p.place('X-USDT',1,'trend',.9,selected_set=st)

@@ -132,6 +132,8 @@ pulse_instance_unit() { printf '%s-pulse@%s.service' "$CTS_G_NAME" "$1"; }
 pulse_target_unit() { printf '%s-pulse.target' "$CTS_G_NAME"; }
 retention_service_unit() { printf '%s-retention.service' "$CTS_G_NAME"; }
 retention_timer_unit() { printf '%s-retention.timer' "$CTS_G_NAME"; }
+resource_service_unit() { printf '%s-resources.service' "$CTS_G_NAME"; }
+resource_timer_unit() { printf '%s-resources.timer' "$CTS_G_NAME"; }
 
 detect_pkg() {
   if have apt-get; then echo apt
@@ -483,6 +485,8 @@ render_unit() {
     -e "s|grok-desk|${CTS_G_NAME}-desk|g" \
     -e "s|grok-pulse.target|${CTS_G_NAME}-pulse.target|g" \
     -e "s|grok-retention|${CTS_G_NAME}-retention|g" \
+    -e "s|grok-resources|${CTS_G_NAME}-resources|g" \
+    -e "s|__CTS_G_NAME__|${CTS_G_NAME}|g" \
     -e "s|:3015|:${PULSE_PORT}|g" \
     -e "s|/usr/bin/python3|${PYTHON_BIN}|g" \
     -e "s|:3102|:${DESK_PORT}|g" \
@@ -494,7 +498,7 @@ render_unit() {
 install_units() {
   local source target name
   mkdir -p "$CTS_G_ROOT/deploy/units"
-  for source in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target grok-retention.service grok-retention.timer; do
+  for source in grok-pulse@.service grok-pulse-http.service grok-desk.service grok-pulse.target grok-retention.service grok-retention.timer grok-resources.service grok-resources.timer; do
     name="${source/grok-/$CTS_G_NAME-}"
     target="$CTS_G_ROOT/deploy/units/$name"
     render_unit "$CTS_G_ROOT/deploy/$source" "$target"
@@ -507,6 +511,17 @@ install_units() {
   systemctl daemon-reload
   "$PYTHON_BIN" "$CTS_G_ROOT/deploy/instance-manifest.py" write
   ok "scoped units (canonical files under project/deploy/units)"
+}
+
+apply_dynamic_resources() {
+  if [[ -f "$CTS_G_ROOT/deploy/dynamic-resources.py" ]]; then
+    "$PYTHON_BIN" "$CTS_G_ROOT/deploy/dynamic-resources.py" \
+      --name "$CTS_G_NAME" --root "$CTS_G_ROOT" --apply \
+      >/dev/null || warn "dynamic resource policy could not be applied"
+    ok "dynamic pulse memory / maximum CPU policy"
+  else
+    warn "dynamic resource helper missing at $CTS_G_ROOT/deploy/dynamic-resources.py"
+  fi
 }
 
 npm_install_desk() {
@@ -540,7 +555,7 @@ redis_has_keys() {
 
 enable_stack() {
   [[ "${NO_START:-0}" != 1 ]] || { skip "enable (--no-start)"; return; }
-  systemctl enable "$(pulse_http_unit)" "$(desk_unit)" "$(retention_timer_unit)" >/dev/null
+  systemctl enable "$(pulse_http_unit)" "$(desk_unit)" "$(retention_timer_unit)" "$(resource_timer_unit)" >/dev/null
   if redis_has_keys "$VST_SLOT"; then systemctl enable "$(pulse_instance_unit "$VST_SLOT")" >/dev/null; fi
   if [[ "${START_LIVE:-1}" != 0 ]] && redis_has_keys "$LIVE_SLOT"; then
     systemctl enable "$(pulse_instance_unit "$LIVE_SLOT")" >/dev/null
@@ -562,6 +577,7 @@ start_stack() {
   systemctl restart "$(pulse_http_unit)"
   systemctl restart "$(desk_unit)"
   systemctl start "$(retention_timer_unit)"
+  systemctl start "$(resource_timer_unit)"
   if redis_has_keys "$VST_SLOT"; then
     systemctl restart "$(pulse_instance_unit "$VST_SLOT")"
   else
@@ -651,6 +667,7 @@ print_results() {
   printf '  %-36s %s\n' "$(pulse_instance_unit "$VST_SLOT")" "$(unit_state "$(pulse_instance_unit "$VST_SLOT")")"
   printf '  %-36s %s\n' "$(pulse_instance_unit "$LIVE_SLOT")" "$(unit_state "$(pulse_instance_unit "$LIVE_SLOT")")"
   printf '  %-36s %s\n' "$(retention_timer_unit)" "$(unit_state "$(retention_timer_unit)")"
+  printf '  %-36s %s\n' "$(resource_timer_unit)" "$(unit_state "$(resource_timer_unit)")"
   echo
   echo "packages installed  ${PKG_INSTALLED[*]:-(none)}"
   echo "packages skipped    ${PKG_SKIPPED[*]:-(none)}"

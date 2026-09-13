@@ -1,0 +1,17 @@
+[Unit]
+Description=CTS-G dynamic pulse resource policy
+Documentation=https://github.com/mxssnx-creator/CTS-G
+After=local-fs.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/cts-g/cts-g.env
+WorkingDirectory=/opt/cts-g
+ExecStart=/usr/bin/python3 -O /opt/cts-g/deploy/dynamic-resources.py --name __CTS_G_NAME__ --root /opt/cts-g --apply
+Nice=10
+NoNewPrivileges=false
+PrivateTmp=true
+TimeoutStartSec=30
+StandardOutput=append:/var/log/cts-g/resources.log
+StandardError=append:/var/log/cts-g/resources.err.log
+SyslogIdentifier=grok-resources
