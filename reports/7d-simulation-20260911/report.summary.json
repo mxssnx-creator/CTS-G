@@ -1,0 +1,263 @@
+[
+  {
+    "symbol": "XRP-USDT",
+    "configs": 20736,
+    "positive": 30,
+    "noTrades": 2592,
+    "qualified": 0,
+    "best": null,
+    "highestObservedPf": {
+      "symbol": "XRP-USDT",
+      "indication": "move",
+      "direction": "SHORT",
+      "config": 962,
+      "n": 75,
+      "wins": 43,
+      "losses": 32,
+      "pf": 1.165799,
+      "netPct": 4.780556,
+      "costPct": 10.198224,
+      "grossProfitPct": 33.613914,
+      "grossLossPct": 28.833358,
+      "winRate": 57.3333,
+      "maxDrawdownPct": 4.581228,
+      "maxDdS": 469140,
+      "avgDdS": 20726.9,
+      "ddEpisodes": 29,
+      "tradesPerHour": 0.446429,
+      "avgHoldS": 5831.2,
+      "maxVolume": 1.5,
+      "entryExecutions": 183,
+      "entryQtyTotal": 102.0,
+      "avgEntryQty": 0.55737705,
+      "avgEntryPrice": 1.40536397,
+      "additions": 108,
+      "boundaryCloses": 2,
+      "trainN": 50,
+      "trainPf": 0.923328,
+      "trainDdPct": 4.581228,
+      "holdoutN": 25,
+      "holdoutPf": 1.893154,
+      "holdoutNetPct": 6.43855,
+      "recentPf": [
+        {
+          "n": 8,
+          "requested": 8,
+          "pf": 2.337911
+        },
+        {
+          "n": 25,
+          "requested": 25,
+          "pf": 1.893154
+        },
+        {
+          "n": 75,
+          "requested": 75,
+          "pf": 1.165799
+        }
+      ],
+      "positive": true,
+      "qualified": false,
+      "dailyNetPct": [
+        -0.689645,
+        -1.151642,
+        -1.164166,
+        2.889478,
+        -1.542019,
+        2.000456,
+        4.438094
+      ],
+      "dailyN": [
+        12,
+        3,
+        7,
+        16,
+        12,
+        13,
+        12
+      ]
+    },
+    "parameters": {
+      "strategy": "dca",
+      "levels": 2,
+      "incrementPct": 0.1,
+      "volumeRatio": 0.25,
+      "tpPct": 0.75,
+      "slPct": 0.5
+    }
+  },
+  {
+    "symbol": "BCH-USDT",
+    "configs": 20736,
+    "positive": 0,
+    "noTrades": 2592,
+    "qualified": 0,
+    "best": null,
+    "highestObservedPf": {
+      "symbol": "BCH-USDT",
+      "indication": "signals",
+      "direction": "SHORT",
+      "config": 323,
+      "n": 155,
+      "wins": 60,
+      "losses": 95,
+      "pf": 0.937338,
+      "netPct": -4.805509,
+      "costPct": 23.344729,
+      "grossProfitPct": 71.884083,
+      "grossLossPct": 76.689591,
+      "winRate": 38.7097,
+      "maxDrawdownPct": 16.415192,
+      "maxDdS": 595800,
+      "avgDdS": 54861.82,
+      "ddEpisodes": 11,
+      "tradesPerHour": 0.922619,
+      "avgHoldS": 3210.97,
+      "maxVolume": 1.75,
+      "entryExecutions": 260,
+      "entryQtyTotal": 233.75,
+      "avgEntryQty": 0.89903846,
+      "avgEntryPrice": 252.5966738,
+      "additions": 105,
+      "boundaryCloses": 2,
+      "trainN": 106,
+      "trainPf": 0.82288,
+      "trainDdPct": 12.364308,
+      "holdoutN": 49,
+      "holdoutPf": 1.25846,
+      "holdoutNetPct": 5.208453,
+      "recentPf": [
+        {
+          "n": 8,
+          "requested": 8,
+          "pf": 1.095231
+        },
+        {
+          "n": 25,
+          "requested": 25,
+          "pf": 1.75885
+        },
+        {
+          "n": 75,
+          "requested": 75,
+          "pf": 0.99167
+        }
+      ],
+      "positive": false,
+      "qualified": false,
+      "dailyNetPct": [
+        -0.552528,
+        -1.679201,
+        -6.147584,
+        3.86911,
+        -6.704259,
+        -0.205652,
+        6.614605
+      ],
+      "dailyN": [
+        20,
+        15,
+        21,
+        24,
+        28,
+        17,
+        30
+      ]
+    },
+    "parameters": {
+      "strategy": "block",
+      "levels": 3,
+      "incrementPct": 0.2,
+      "volumeRatio": 0.25,
+      "tpPct": 0.8,
+      "slPct": 0.5
+    }
+  },
+  {
+    "symbol": "SOL-USDT",
+    "configs": 20736,
+    "positive": 12,
+    "noTrades": 2592,
+    "qualified": 0,
+    "best": null,
+    "highestObservedPf": {
+      "symbol": "SOL-USDT",
+      "indication": "active",
+      "direction": "SHORT",
+      "config": 1077,
+      "n": 36,
+      "wins": 23,
+      "losses": 13,
+      "pf": 1.127088,
+      "netPct": 1.399633,
+      "costPct": 5.299622,
+      "grossProfitPct": 12.412706,
+      "grossLossPct": 11.013072,
+      "winRate": 63.8889,
+      "maxDrawdownPct": 3.651442,
+      "maxDdS": 269580,
+      "avgDdS": 15158.71,
+      "ddEpisodes": 31,
+      "tradesPerHour": 0.214286,
+      "avgHoldS": 2290.0,
+      "maxVolume": 1.75,
+      "entryExecutions": 104,
+      "entryQtyTotal": 53.0,
+      "avgEntryQty": 0.50961538,
+      "avgEntryPrice": 102.82913679,
+      "additions": 68,
+      "boundaryCloses": 0,
+      "trainN": 23,
+      "trainPf": 1.51285,
+      "trainDdPct": 3.651442,
+      "holdoutN": 13,
+      "holdoutPf": 0.704612,
+      "holdoutNetPct": -1.552677,
+      "recentPf": [
+        {
+          "n": 8,
+          "requested": 8,
+          "pf": 0.571244
+        },
+        {
+          "n": 25,
+          "requested": 25,
+          "pf": 1.285506
+        },
+        {
+          "n": 36,
+          "requested": 75,
+          "pf": 1.127088
+        }
+      ],
+      "positive": true,
+      "qualified": false,
+      "dailyNetPct": [
+        1.526872,
+        0.0,
+        -3.004045,
+        2.727574,
+        1.701909,
+        0.350113,
+        -1.90279
+      ],
+      "dailyN": [
+        7,
+        0,
+        5,
+        8,
+        3,
+        6,
+        7
+      ]
+    },
+    "parameters": {
+      "strategy": "dca",
+      "levels": 3,
+      "incrementPct": 0.05,
+      "volumeRatio": 0.25,
+      "tpPct": 0.5,
+      "slPct": 0.4
+    }
+  }
+]

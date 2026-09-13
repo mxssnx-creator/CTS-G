@@ -1,0 +1,14 @@
+test_new_defaults_and_unified_pf (__main__.ContinuousTests.test_new_defaults_and_unified_pf) ... ok
+test_first_live_close_preserves_base_evidence (__main__.ContinuousTests.test_first_live_close_preserves_base_evidence) ... ok
+test_base_requires_30_and_strictly_above_105 (__main__.ContinuousTests.test_base_requires_30_and_strictly_above_105) ... ok
+test_identical_evidence_reuses_score_changed_content_rescores (__main__.ContinuousTests.test_identical_evidence_reuses_score_changed_content_rescores) ... ok
+test_valid_direction_counts_survive_opposite_losses (__main__.ContinuousTests.test_valid_direction_counts_survive_opposite_losses) ... ok
+test_memory_trim_retains_last75_of_each_direction (__main__.ContinuousTests.test_memory_trim_retains_last75_of_each_direction) ... ok
+test_middle_history_slices_publish_qualification (__main__.ContinuousTests.test_middle_history_slices_publish_qualification) ... ok
+test_deactivation_uses_exact_window (__main__.ContinuousTests.test_deactivation_uses_exact_window) ... ok
+test_700_qualified_sets_open_exactly_once_and_keep_controls (__main__.ContinuousTests.test_700_qualified_sets_open_exactly_once_and_keep_controls) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 20.927s
+
+OK

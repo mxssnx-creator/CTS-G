@@ -1,0 +1,42 @@
+{
+  "url": "http://127.0.0.1:8081/settings",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "X01 Pulse Desk",
+      "hasCanvas": false,
+      "bodyTextLen": 4240,
+      "bodyTextHash": "9a4acd78051f68be3de423d9224f0d9db6042ecf4f24c379d2db52672af9eb41",
+      "bodyTextPrefix": "Overall ALL · R 0 Live USDT · R 0 VST demo VST · R 0 ALL DESKS ·",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "requestFailures": [],
+      "screenshot": "/workspace/screenshots/control-audit-prod.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "X01 Pulse Desk",
+      "hasCanvas": false,
+      "bodyTextLen": 4240,
+      "bodyTextHash": "9a4acd78051f68be3de423d9224f0d9db6042ecf4f24c379d2db52672af9eb41",
+      "bodyTextPrefix": "Overall ALL · R 0 Live USDT · R 0 VST demo VST · R 0 ALL DESKS ·",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "requestFailures": [],
+      "screenshot": "/workspace/screenshots/control-audit-prod-mobile.png"
+    }
+  },
+  "brandWarnings": [
+    "BRAND NOTE: no custom public/og.jpg — the platform will serve the og.grok.me placeholder. Custom cards are the default for games of every kind (DOM board/word games included), whimsical apps, creative tools, and brand-forward pages — only plain utilities (converters, CRUD trackers, admin dashboards) keep the placeholder. If this app is not a plain utility, finish the brand-asset pass per /workspace/.grok/skills/og/SKILL.md."
+  ],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/control-audit-prod.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

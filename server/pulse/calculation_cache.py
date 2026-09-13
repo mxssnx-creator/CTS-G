@@ -19,7 +19,8 @@ from redis_coordination import redis_client
 from runtime_scope import redis_key
 from system_settings import normalize_system_settings
 
-REVISION = hashlib.sha256(Path(__file__).with_name('set_engine.py').read_bytes()).hexdigest()[:16]
+REVISION = hashlib.sha256(b''.join(Path(__file__).with_name(name).read_bytes()
+                                   for name in ('set_engine.py', 'position_cost.py'))).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -131,7 +132,7 @@ class CalculationCache:
         # Complete input to _fast_historic_bundle. Execution flags deliberately
         # remain outside this pure-metric cache and are reapplied by _score_one.
         params = [REVISION, book.cost_pct, book.pf_n, book.deact_n, book.eval_need(),
-                  book.real_min_pf, book.max_dd_s, book._stage_window_ns()]
+                  book.min_pf, book.real_min_pf, book.max_dd_s, book._stage_window_ns()]
         source_rows = state.hist if rows is None else rows
         # Compact historic rows are Mapping-compatible but intentionally not
         # JSONEncoder objects.  Convert only the small cache-signature input;

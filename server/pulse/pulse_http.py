@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse, unquote
-from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import (
     DATA_DIR,
@@ -347,6 +347,16 @@ def write_overlay(conn: str, overlay: dict) -> dict:
     # not just rename. A common .tmp also collided between HTTP threads.
     with _OVERLAY_LOCKS[cid]:
         cur = load_overlay(cid)
+        # A partial save to any legacy PF/window control updates the canonical
+        # setting before merging, so an older persisted alias cannot win.
+        from position_cost import PF_SETTING_KEYS, shared_pf_settings
+        if any(k in overlay for k in PF_SETTING_KEYS):
+            overlay = {**overlay, **{k: v for k, v in shared_pf_settings(overlay).items() if k in PF_SETTING_KEYS}}
+        if "baseEvalPosCount" in overlay or "setPfWindow" in overlay:
+            overlay = dict(overlay)
+            overlay["baseEvalPosCount"] = overlay.get("baseEvalPosCount", overlay.get("setPfWindow"))
+            overlay["setPfWindow"] = overlay["baseEvalPosCount"]
+            overlay.setdefault("setMinSamples", overlay["baseEvalPosCount"])
         cur.update(overlay)
         cur = calculation_overlay(cur)
         atomic_write(dest, cur)
@@ -442,10 +452,32 @@ def slim_for_ui(st: dict) -> dict:
         historic["rows"] = historic["rows"][:40]
         out["historic"] = historic
     sets = dict(out.get("sets") or {})
-    if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
-        sets = dict(sets)
-        sets["rowCount"] = len(sets["rows"])
-        sets["rows"] = sets["rows"][:40]
+    if sets:
+        nested_cov = dict(sets.get("coverage") or {})
+        if nested_cov:
+            qualified = nested_cov.get("qualifiedParentIds")
+            if isinstance(qualified, dict):
+                counts = {}
+                sample = {}
+                for stage, ids in qualified.items():
+                    if isinstance(ids, list):
+                        counts[str(stage)] = len(ids)
+                        sample[str(stage)] = ids[:64]
+                    else:
+                        sample[str(stage)] = ids
+                nested_cov["qualifiedParentIdCounts"] = counts
+                nested_cov["qualifiedParentIds"] = sample
+            elif isinstance(qualified, list) and len(qualified) > 128:
+                nested_cov["qualifiedParentIdCount"] = len(qualified)
+                nested_cov["qualifiedParentIds"] = qualified[:128]
+            processing_ids = nested_cov.get("processingSetIds")
+            if isinstance(processing_ids, list) and len(processing_ids) > 256:
+                nested_cov["processingSetIdCount"] = len(processing_ids)
+                nested_cov["processingSetIds"] = processing_ids[:256]
+            sets["coverage"] = nested_cov
+        if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
+            sets["rowCount"] = len(sets["rows"])
+            sets["rows"] = sets["rows"][:40]
         out["sets"] = sets
     lev = out.get("leverageMap")
     if isinstance(lev, dict) and len(lev) > 40:
@@ -919,6 +951,16 @@ def _report_row_in_scope(row: dict, state: dict) -> bool:
     return bool(row_connection and row_connection == connection and not expected)
 
 
+def overall_pf_policy(states) -> dict:
+    policies = [state.get("pfCost") or {} for state in states]
+    pf_window = max(int(_report_number(policy.get("n"), LAST_N_DEFAULT)) for policy in policies)
+    pf_floor = max(POSITIVE_PF, *(float(_report_number(policy.get("minPf"), POSITIVE_PF)) for policy in policies))
+    required_samples = max(int(_report_number(policy.get("requiredSamples"), pf_window)) for policy in policies)
+    position_cost = next((_report_number(policy.get("costPct"), POSITION_COST_PCT_DEFAULT)
+                          for policy in policies if policy.get("costPct") is not None), POSITION_COST_PCT_DEFAULT)
+    return dict(n=pf_window, costPct=position_cost, minPf=pf_floor, requiredSamples=required_samples)
+
+
 def overall_report_state(live: dict, vst: dict) -> dict:
     """Build a safe combined input for the canonical stats report renderer."""
     states = (live, vst)
@@ -953,14 +995,6 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     })
     wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
     losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
-    position_cost = next(
-        (
-            _report_number((state.get("pfCost") or {}).get("costPct"), POSITION_COST_PCT_DEFAULT)
-            for state in states
-            if isinstance(state.get("pfCost"), dict) and state.get("pfCost", {}).get("costPct") is not None
-        ),
-        POSITION_COST_PCT_DEFAULT,
-    )
     coverages = [state.get("coverage") or {} for state in states]
     strategies = {
         key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
@@ -999,7 +1033,8 @@ def overall_report_state(live: dict, vst: dict) -> dict:
     historic_missing_bars = sum(int(_report_number(bars.get("missing"))) for bars in historic_bars if isinstance(bars, dict))
     has_historic = any(bool(historic) for historic in historic_states)
     logical_position_count = sum(
-        int(_report_number(state.get("logicalPositionCount", state.get("openCount"))))
+        int(_report_number(state.get("logicalPositionCount", state.get("openCount",
+            sum(_report_row_in_scope(row, state) for row in (state.get("open") or []))))))
         for state in states
     )
     exchange_group_values = [
@@ -1055,7 +1090,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
-        "pfCost": {"n": 15, "costPct": position_cost, "minPf": 1.1},
+        "pfCost": overall_pf_policy(states),
         "historic": {
             "phase": "aggregate" if has_historic else "offline",
             "coordinationComplete": has_historic and all(bool(historic.get("coordinationComplete")) for historic in historic_states),
@@ -1223,7 +1258,13 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "foreignPositionCount": st.get("foreignPositionCount") or 0,
         "foreignOpenOrderCount": st.get("foreignOpenOrderCount") or 0,
         "openCount": st.get("openCount") or 0,
+        "realPositionCount": st.get("realPositionCount", st.get("openCount") or 0),
+        "realPositionGroupCount": st.get("realPositionGroupCount", (st.get("executionEvidence") or {}).get("internalPositionGroups", st.get("openCount") or 0)),
+        "realOrderCount": st.get("realOrderCount", st.get("openCount") or 0),
         "exchangeOpenCount": st.get("exchangeOpenCount", -1),
+        "livePositionCount": st.get("livePositionCount", st.get("exchangeOwnOpenCount", st.get("exchangeOpenCount", -1))),
+        "liveOrderCount": st.get("liveOrderCount", -1),
+        "liveTotalOrderCount": st.get("liveTotalOrderCount", -1),
         "simOpenCount": st.get("simOpenCount", -1),
         "simUPnl": st.get("simUPnl", 0),
         "wins": st.get("wins") or 0,
@@ -1263,6 +1304,11 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "pfCost": pc.get("ratio"),
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
+        "controlPairsOk": cov.get("protectedPairs") if cov.get("protectedPairs") is not None else cov.get("ok") or 0,
+        "controlPairsExpected": cov.get("expectedPairs") if cov.get("expectedPairs") is not None else cov.get("pairCount") or 0,
+        "controlPairsMissing": cov.get("pairGaps") if cov.get("pairGaps") is not None else cov.get("missing") or 0,
+        "controlMemberOk": cov.get("memberProtected") if cov.get("memberProtected") is not None else cov.get("ok") or 0,
+        "controlMemberMissing": cov.get("memberMissing") if cov.get("memberMissing") is not None else cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
         "symbolCount": st.get("symbolCount") or len(st.get("symbols") or []),
         "lastError": _short_err(st.get("lastError")),
@@ -1413,13 +1459,15 @@ def merge_overall() -> dict:
         tests.extend({**test, "connection": lane["id"]} for test in (st.get("tests") or []) if isinstance(test, dict))
     tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
-    closed = closed[:40]
+    policy = overall_pf_policy(stats_by_id.values())
+    closed = closed[:max(40, policy["n"])]
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-    pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
-    pc["minPf"] = 1.1
-    pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
+    pc = last_n_cost_pf(list(reversed(closed)), policy["n"], policy["costPct"])
+    pc["minPf"] = policy["minPf"]
+    pc["requiredSamples"] = policy["requiredSamples"]
+    pc["pass"] = bool(pc["count"] >= pc["requiredSamples"] and clears_pf(pc["ratio"], pc["minPf"]))
     detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)
@@ -1458,7 +1506,13 @@ def merge_overall() -> dict:
         "losses": losses,
         "winRate": round(wr, 1),
         "openCount": len(opens),
+        "realPositionCount": sum(l.get("realPositionCount") or 0 for l in lanes),
+        "realPositionGroupCount": sum(l.get("realPositionGroupCount") or 0 for l in lanes),
+        "realOrderCount": sum(l.get("realOrderCount") or 0 for l in lanes),
         "exchangeOpenCount": sum(l.get("exchangeOpenCount") or 0 for l in lanes if (l.get("exchangeOpenCount") or 0) >= 0) if any((l.get("exchangeOpenCount") or 0) >= 0 for l in lanes) else -1,
+        "livePositionCount": sum(l.get("livePositionCount") or 0 for l in lanes if (l.get("livePositionCount") or 0) >= 0) if any((l.get("livePositionCount") or 0) >= 0 for l in lanes) else -1,
+        "liveOrderCount": sum(l.get("liveOrderCount") or 0 for l in lanes if (l.get("liveOrderCount") or 0) >= 0) if any((l.get("liveOrderCount") or 0) >= 0 for l in lanes) else -1,
+        "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
         "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
         "simUPnl": round(sum(float(l.get("simUPnl") or 0) for l in lanes), 4),
         "maxOpen": 0,
@@ -1572,7 +1626,13 @@ def connections_blob() -> dict:
                 "blurb": "All desks in parallel",
                 "running": any(l["running"] and not l["halted"] for l in lanes),
                 "openCount": sum(l["openCount"] for l in lanes),
+                "realPositionCount": sum(l.get("realPositionCount") or 0 for l in lanes),
+                "realPositionGroupCount": sum(l.get("realPositionGroupCount") or 0 for l in lanes),
+                "realOrderCount": sum(l.get("realOrderCount") or 0 for l in lanes),
                 "exchangeOpenCount": sum(l.get("exchangeOpenCount") or 0 for l in lanes if (l.get("exchangeOpenCount") or 0) >= 0) if any((l.get("exchangeOpenCount") or 0) >= 0 for l in lanes) else -1,
+                "livePositionCount": sum(l.get("livePositionCount") or 0 for l in lanes if (l.get("livePositionCount") or 0) >= 0) if any((l.get("livePositionCount") or 0) >= 0 for l in lanes) else -1,
+                "liveOrderCount": sum(l.get("liveOrderCount") or 0 for l in lanes if (l.get("liveOrderCount") or 0) >= 0) if any((l.get("liveOrderCount") or 0) >= 0 for l in lanes) else -1,
+                "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
                 "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
                 "halted": all(l["halted"] or not l["running"] for l in lanes),
                 "progressReady": all(bool(l.get("progressReady")) for l in lanes) if lanes else False,
@@ -1589,7 +1649,13 @@ def connections_blob() -> dict:
                     "paused": l.get("paused"),
                     "equity": l["equity"],
                     "openCount": l["openCount"],
+                    "realPositionCount": l.get("realPositionCount"),
+                    "realPositionGroupCount": l.get("realPositionGroupCount"),
+                    "realOrderCount": l.get("realOrderCount"),
                     "exchangeOpenCount": l.get("exchangeOpenCount", -1),
+                    "livePositionCount": l.get("livePositionCount", -1),
+                    "liveOrderCount": l.get("liveOrderCount", -1),
+                    "liveTotalOrderCount": l.get("liveTotalOrderCount", -1),
                     "simOpenCount": l.get("simOpenCount", -1),
                     "simUPnl": l.get("simUPnl", 0),
                     "alive": l["alive"],
@@ -1829,7 +1895,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "validatedSetCount": sets.get("validatedCount"),
                 "histFills": sets.get("histFills"),
                 "entryPolicy": pulse.get("entryPolicy") or sets.get("entryPolicy"),
-                "entryPolicyMinLiveSamples": pulse.get("entryPolicyMinLiveSamples") or sets.get("entryPolicyMinLiveSamples"),
+                "entryPolicyMinLiveSamples": (
+                    pulse.get("entryPolicyMinLiveSamples")
+                    if pulse.get("entryPolicyMinLiveSamples") is not None
+                    else sets.get("entryPolicyMinLiveSamples")
+                ),
                 "statsAgeS": progress_stats.get("statsAgeS"),
                 "stale": bool(progress_stats.get("stale")),
             })
@@ -1863,7 +1933,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
                 "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
                 "entryPolicyMaxCandidates": entry_candidate_cap,
-                "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
+                "entryPolicyMinLiveSamples": (
+                    ov.get("entryPolicyMinLiveSamples")
+                    if ov.get("entryPolicyMinLiveSamples") is not None
+                    else ov.get("liveTestMinSamples")
+                ),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
                 "dcaEnabled": ov.get("dcaEnabled"),

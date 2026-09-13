@@ -20,7 +20,7 @@ from runtime_statistics import StatisticsStore, RuntimeMonitor, lane_directory, 
 import runtime_statistics as runtime_stats
 from system_settings import calculation_overlay, normalize_system_settings
 from set_engine import SetBook
-from storage_paths import append_bounded_line, configure_retention
+from storage_paths import MAX_ERROR_LOG_LINES, append_bounded_line, configure_retention, retain_last_lines
 from event_ledger import EventLedger
 from runtime_scope import tracking_scope
 import pulse_http as ph
@@ -114,6 +114,44 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(report["foreignPositionCount"], 2)
         self.assertEqual(report["foreignRealized"], 8)
         self.assertEqual({row["symbol"] for row in report["open"]}, {"OWN-USDT"})
+        self.assertEqual(report["pfCost"]["n"], 30)
+        self.assertEqual(report["pfCost"]["minPf"], 1.02)
+
+        live, vst = lane("bingx-x01", 100, 130), lane("bingx-x02", 200, 240)
+        live.update(logicalPositionCount=700, pfCost={"n": 75, "minPf": 1.2})
+        vst.update(logicalPositionCount=300, pfCost={"n": 30, "minPf": 1.05})
+        report = ph.overall_report_state(live, vst)
+        # Full owned counts remain independent of the small display tape.
+        self.assertEqual(report["openCount"], 1000)
+        self.assertEqual(report["pfCost"]["n"], 75)
+        self.assertEqual(report["pfCost"]["minPf"], 1.2)
+
+    def test_report_uses_configured_window_floor_and_enough_evidence(self):
+        from stats_report import build, render_html
+        rows = [dict(t=i, symbol="TEST-USDT", side="LONG", qty=1, entry=100,
+                     pnl=.30, pnl_pct=.003, hold_s=60) for i in range(75)]
+        def report(n, floor=1.02, tape=None):
+            return build({"closed": rows if tape is None else tape,
+                          "pfCost": {"n": n, "minPf": floor}})
+        self.assertFalse(report(30, tape=rows[:29])["costAccounting"]["pass"])
+        self.assertTrue(report(30, tape=rows[:30])["costAccounting"]["pass"])
+        boundary = report(30, tape=[dict(row, pnl=.05, pnl_pct=.0012) for row in rows])["costAccounting"]
+        self.assertAlmostEqual(boundary["currentWindow"]["ratio"], 1.02)
+        self.assertFalse(boundary["pass"])
+        self.assertFalse(report(30, floor=1.35)["costAccounting"]["pass"])
+        blob = report(75, floor=1.2)
+        self.assertEqual(blob["costAccounting"]["currentWindow"]["count"], 75)
+        self.assertEqual(blob["costAccounting"]["minPf"], 1.2)
+        self.assertIn("Last 75 cost PF", render_html(blob))
+
+    def test_overall_pf_preserves_all_75_required_closes(self):
+        rows = [dict(t=i, pnl=.30, qty=1, entry=100) for i in range(75)]
+        lane = {"closed": rows, "pfCost": {"n": 75, "minPf": 1.2, "requiredSamples": 75}}
+        with patch.object(ph, "load_stats", return_value=lane):
+            report = ph.merge_overall()
+        self.assertEqual(report["pfCost"]["count"], 75)
+        self.assertEqual(report["pfCost"]["minPf"], 1.2)
+        self.assertTrue(report["pfCost"]["pass"])
 
     def test_partial_fill_identity_and_reporting_are_not_limited_to_recent_tape(self):
         store = self.store(systemTradeMaxRows=250)
@@ -233,6 +271,16 @@ class StatisticsTests(unittest.TestCase):
         ledger.record("evaluation", "big", metadata={"oversized": ["secret-free-test"] * 100000})
         ledger.flush()
         self.assertLess(Path(ledger.path).stat().st_size, 20000)
+
+    def test_error_log_has_independent_500_line_cap(self):
+        path = Path(self.root) / "errors-bingx-x02.jsonl"
+        for i in range(MAX_ERROR_LOG_LINES + 125):
+            append_bounded_line(str(path), json.dumps({"n": i}), max_lines=MAX_ERROR_LOG_LINES)
+        rows = path.read_text().splitlines()
+        self.assertEqual(len(rows), MAX_ERROR_LOG_LINES)
+        self.assertEqual(json.loads(rows[0])["n"], 125)
+        self.assertEqual(json.loads(rows[-1])["n"], MAX_ERROR_LOG_LINES + 124)
+        self.assertEqual(retain_last_lines(str(path), max_lines=MAX_ERROR_LOG_LINES), MAX_ERROR_LOG_LINES)
 
     def test_corrupt_database_is_reported_without_deleting_anything(self):
         directory = lane_directory(self.root, "bingx-x02"); directory.mkdir(parents=True)

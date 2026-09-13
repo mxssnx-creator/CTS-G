@@ -1,7 +1,7 @@
 """Bounded, source-separated previews for the hierarchical Sets browser.
 
-Counts cover every configuration. Only a small preview per exact filter cell
-is scored/serialized; a large winning family cannot hide another TP/strategy.
+System results cover Base-qualified configurations. Rejected configurations
+remain in the catalog; confirmed exchange accounting remains complete.
 """
 from __future__ import annotations
 
@@ -114,7 +114,13 @@ def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dic
     for st in book.by_idx:
         kind = "general" if st.pack == "general" else "combined"
         strat = "trailing" if st.kind == "trail" else "normal"
-        out.add(set_meta(st, "system", kind, strat), st.hist)
+        if (st.stage_ledger or {}).get("base"):
+            for side, metrics in st.by_side.items():
+                if not book._base_metrics_ok(metrics):
+                    continue
+                meta = set_meta(st, "system", kind, strat, side)
+                meta["side"] = side
+                out.add(meta, [row for row in st.hist if str(row.get("side") or "").upper() == side])
         lanes: dict[tuple, list] = defaultdict(list)
         for row in st.live:
             # Open PnL, pending fills and unconfirmed local closes are never
@@ -132,29 +138,12 @@ def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dic
             meta.update(axisKey=key[3], side=key[4], tpPct=number(tape[0].get("tp_pct")) * 100 or None)
             out.add(meta, tape)
 
-    # These tapes are independent calculations. Legacy records without range
-    # metadata stay explicitly unassigned, never attached to today's settings.
-    for name, tape in list(book.ind_hist.items()) + list(book.strategy_hist.items()):
-        buckets: dict[tuple, list] = defaultdict(list)
-        for row in tape:
-            pack = str(row.get("pack") or ("indications" if name in INDICATION_KINDS or ":" in name else ""))
-            kind = name if name in INDICATION_KINDS else indication(row, pack)
-            strat = "normal" if name in INDICATION_KINDS else strategy({**row, "strategy": name.split(":")[0]})
-            sid = str(row.get("set_id") or "")
-            tp = number(row.get("tp_pct")) * 100 or None
-            key = (kind, strat, sid, range_key(tp), pack, str(row.get("ind_config") or ""))
-            buckets[key].append(row)
-        for key, samples in buckets.items():
-            first = samples[0]
-            out.add({"id": stable_key("system", name, *key), "setId": key[2], "scope": "system",
-                     "indicationKind": key[0], "strategyType": key[1], "pack": key[4],
-                     "indicationConfig": key[5],
-                     "tf": "1m", "slRatio": first.get("sl_ratio"), "trailKey": "",
-                     "step": first.get("step"), "tpPct": number(first.get("tp_pct")) * 100 or None}, samples)
+    for meta, samples, metrics in qualified_strategy_results(book):
+        out.add(meta, samples, metrics=metrics)
 
     for row in axis_rows if axis_enabled else ():
         st = book.sets.get(str(row.get("parentSetId") or ""))
-        if st is None:
+        if st is None or not (st.stage_ledger or {}).get("base") or not row.get("qualified"):
             continue
         axis = str(row.get("axisKey") or "")
         meta = set_meta(st, "system", "general" if st.pack == "general" else "combined", "axis", axis)
@@ -164,7 +153,47 @@ def build_overview(book: Any, axis_rows=(), *, axis_enabled: bool = True) -> dic
         out.add(meta, [], metrics={"n": int(row.get("closedN") or 0), "last15_ratio": row.get("pf"),
                                   "active": bool(row.get("qualified")),
                                   "reason": row.get("qualificationReason") or ""})
-    return out.finish()
+    result = out.finish()
+    qualified = sum(bool((st.stage_ledger or {}).get("base")) for st in book.by_idx)
+    result["selection"] = {"catalogSets": len(book.by_idx), "baseQualifiedSets": qualified,
+                           "excludedSets": len(book.by_idx) - qualified, "minPf": book.min_pf,
+                           "systemScope": "base-qualified", "exchangeScope": "all-confirmed"}
+    return result
+
+
+def qualified_strategy_results(book: Any):
+    """Independent strategy/range/direction Base checks, memoized by content."""
+    from calculation_cache import CalculationCache
+    from types import SimpleNamespace
+    previous = getattr(book, "_strategy_result_cache", {})
+    current = {}
+    results = []
+    for name, tape in list(book.ind_hist.items()) + list(book.strategy_hist.items()):
+        buckets = defaultdict(list)
+        for row in tape:
+            # Unknown legacy ranges cannot qualify a current configuration.
+            if not row.get("set_id") or not row.get("tp_pct") or not row.get("sl_ratio"):
+                continue
+            key = tuple(str(row.get(k) or "") for k in ("set_id", "pack", "ind_kind", "ind_config", "side",
+                                                       "tp_pct", "sl_ratio", "trail_key", "step", "execution_lane"))
+            buckets[key].append(row)
+        for key, samples in buckets.items():
+            sid = stable_key("system", name, *key)
+            token = CalculationCache.signature(book, SimpleNamespace(hist=samples))
+            cached = previous.get(sid)
+            metrics = cached[1] if cached and cached[0] == token else book._score_metrics(samples)
+            current[sid] = (token, metrics)
+            if not book._base_metrics_ok(metrics):
+                continue
+            first = samples[0]
+            meta = {"id": sid, "setId": key[0], "scope": "system", "pack": key[1],
+                    "indicationKind": name if name in INDICATION_KINDS else indication(first, key[1]),
+                    "strategyType": "normal" if name in INDICATION_KINDS else strategy({**first, "strategy": name.split(":")[0]}),
+                    "indicationConfig": key[3], "side": key[4], "tpPct": number(first["tp_pct"]) * 100,
+                    "slRatio": first["sl_ratio"], "trailKey": key[7], "step": first.get("step"), "tf": "1m"}
+            results.append((meta, samples, metrics))
+    book._strategy_result_cache = current
+    return results
 
 
 def merge_overviews(lanes: list[tuple[str, dict]]) -> dict | None:

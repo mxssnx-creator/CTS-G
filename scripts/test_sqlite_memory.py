@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server/pulse"))
 from runtime_statistics import StatisticsStore, RuntimeMonitor, lane_directory, read_status
+from runtime_scope import scope_metadata
 from sqlite_memory import (MemoryStatisticsStore, DiskStatisticsStore,
                            JOURNAL_LIMIT, RECORD_LIMIT, RPC_LIMIT, memory_request, _write_message)
 
@@ -38,7 +39,9 @@ h.do_POST()
 
 
 def fill(i, **changes):
-    return dict(t=changes.pop("t", time.time() - 10 + i / 100000), conn=LANE,
+    connection = changes.pop("conn", LANE)
+    return dict(t=changes.pop("t", time.time() - 10 + i / 100000), conn=connection,
+                **scope_metadata(connection),
                 symbol="TEST-USDT", side="LONG", qty=1, entry=100,
                 pnl=2 if i % 2 else -1, fee_total=.1, exchange_confirmed=True,
                 ours=True, close_fill_id=f"ram-fill-{i}", **changes)
@@ -258,7 +261,7 @@ s.checkpoint(force=True)
     def test_http_process_backup_and_reset_target_the_running_owner(self):
         store = self.store()
         other = self.store("bingx-x01")
-        other.record_trade({**fill(3), "conn": "bingx-x01"})
+        other.record_trade(fill(3, conn="bingx-x01"))
         store.record_trade(fill(1))
         store.increment("requests", 5)
         sentinel = Path(self.root) / "open-bingx-x02.json"

@@ -1,0 +1,17 @@
+{
+  "mode": "offline-fake-exchange",
+  "symbols": 20,
+  "configurationsPerSymbol": 25,
+  "confirmedLogicalPositions": 500,
+  "sharedProtectionPairs": 20,
+  "elapsedS": 10.3835,
+  "positionsPerS": 48.15,
+  "perPositionMs": {
+    "p50": 20.155,
+    "p95": 39.886,
+    "max": 53.668
+  },
+  "includesNetwork": false,
+  "includesVenueRateWait": false,
+  "note": "Measures local scheduling/accounting with simulated fills. Actual API latency is reported separately in api.requestLatencyMs."
+}

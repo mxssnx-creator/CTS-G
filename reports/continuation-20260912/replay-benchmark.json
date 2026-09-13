@@ -1,0 +1,113 @@
+{
+  "kind": "offline isolated replay benchmark; not live throughput",
+  "settings": {
+    "histEnabled": true,
+    "histLookbackBars": 2880,
+    "histMinBars": 60,
+    "histWarmup": 0,
+    "stratGeneral": true,
+    "stratIndications": false,
+    "stratTrailing": true,
+    "stratBlock": true,
+    "histSimulateBlock": true,
+    "histSimulateDca": true,
+    "setMinStep": 1,
+    "setStepMax": 4,
+    "slToTpRatios": [
+      0.2,
+      0.6
+    ]
+  },
+  "baselineSourceSha256": "630e55ec0a48484a68c955291455ee5a50e7dfed903e56d9d0e5fedefac858c0",
+  "currentSourceSha256": "6dbbe27905423e42bfb3b2678d758ab9cc208c9bd613af43af1b0b39f0ea7e23",
+  "results": [
+    {
+      "symbol": "BCH-USDT",
+      "bars": 2880,
+      "baseline": {
+        "seconds": 0.890442,
+        "sets": 208,
+        "closes": 39505,
+        "retainedRows": 33280,
+        "callbacks": 4,
+        "resultSha256": "2330c0a3d07e2237c91ac7bc7b4d4b72b4bd185c0fd49fa1c23950f0a9342a53"
+      },
+      "current": {
+        "seconds": 0.204611,
+        "sets": 208,
+        "closes": 39505,
+        "retainedRows": 33280,
+        "callbacks": 74,
+        "resultSha256": "2330c0a3d07e2237c91ac7bc7b4d4b72b4bd185c0fd49fa1c23950f0a9342a53"
+      },
+      "equivalent": true,
+      "speedup": 4.352
+    },
+    {
+      "symbol": "SOL-USDT",
+      "bars": 2880,
+      "baseline": {
+        "seconds": 0.880291,
+        "sets": 208,
+        "closes": 39602,
+        "retainedRows": 33280,
+        "callbacks": 5,
+        "resultSha256": "a6d930df5ae19988931e47799e77e00e732a994599f6a3e8d47b26cbc028455e"
+      },
+      "current": {
+        "seconds": 0.228342,
+        "sets": 208,
+        "closes": 39602,
+        "retainedRows": 33280,
+        "callbacks": 75,
+        "resultSha256": "a6d930df5ae19988931e47799e77e00e732a994599f6a3e8d47b26cbc028455e"
+      },
+      "equivalent": true,
+      "speedup": 3.855
+    },
+    {
+      "symbol": "XRP-USDT",
+      "bars": 2880,
+      "baseline": {
+        "seconds": 1.046975,
+        "sets": 208,
+        "closes": 41240,
+        "retainedRows": 33280,
+        "callbacks": 3,
+        "resultSha256": "72eadfcbbd0f0ab71cefcbea976eb2ae17a0d2877ef14b5b600549deba0c824a"
+      },
+      "current": {
+        "seconds": 0.255069,
+        "sets": 208,
+        "closes": 41240,
+        "retainedRows": 33280,
+        "callbacks": 73,
+        "resultSha256": "72eadfcbbd0f0ab71cefcbea976eb2ae17a0d2877ef14b5b600549deba0c824a"
+      },
+      "equivalent": true,
+      "speedup": 4.105
+    },
+    {
+      "symbol": "OVERFLOW-FIXTURE",
+      "bars": 1000,
+      "baseline": {
+        "seconds": 3.539567,
+        "sets": 208,
+        "closes": 69680,
+        "retainedRows": 33280,
+        "callbacks": 13,
+        "resultSha256": "1b14abaa24b0aa378dae02e467ae38b1bbb067a16fe79ee5588287e1bb06ea52"
+      },
+      "current": {
+        "seconds": 0.186599,
+        "sets": 208,
+        "closes": 69680,
+        "retainedRows": 33280,
+        "callbacks": 39,
+        "resultSha256": "1b14abaa24b0aa378dae02e467ae38b1bbb067a16fe79ee5588287e1bb06ea52"
+      },
+      "equivalent": true,
+      "speedup": 18.969
+    }
+  ]
+}

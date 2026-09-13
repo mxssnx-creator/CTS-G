@@ -22,6 +22,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
     livePf?: number;
     liveNetAvg?: number;
     entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
     entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };
@@ -58,6 +59,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
           {sets.entryCandidateCount != null ? ` · candidates ${sets.entryCandidateCount}${sets.entryCandidateCap === 0 ? " (unlimited)" : ""}` : ""}
+          {sets.entryQueue ? ` · opened ${sets.entryQueue.opened} · pending ${sets.entryQueue.pending} · remaining ${sets.entryQueue.remaining}` : ""}
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2">
@@ -138,6 +140,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
     livePf?: number;
     liveNetAvg?: number;
     entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
     entryCandidateCap?: number;
     costSubtracted?: boolean;
     families?: { base?: number; trail?: number };

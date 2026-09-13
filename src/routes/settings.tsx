@@ -81,6 +81,7 @@ const CALC_RANGE_PRESETS = [
   { label: "2h", hours: 2 },
   { label: "7h", hours: 7 },
   { label: "24h", hours: 24 },
+  { label: "2d", hours: 48 },
   { label: "72h", hours: 72 },
   { label: "7d", hours: 168 },
   { label: "14d", hours: 336 },
@@ -234,7 +235,17 @@ function SettingsPage() {
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
-    setOverlay((o) => ({ ...o, [k]: v }));
+    setOverlay((o) => {
+      const next = { ...o, [k]: v };
+      if (["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"].includes(k)) {
+        for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
+          next[key] = normalizePf(Number(v), 1.02);
+      }
+      if (k === "setPfWindow" || k === "baseEvalPosCount") {
+        next.baseEvalPosCount = Number(v); next.setPfWindow = Number(v); next.setMinSamples = Number(v);
+      }
+      return next;
+    });
     setDirty(true);
     setSaveMsg(null);
   };
@@ -253,7 +264,7 @@ function SettingsPage() {
         trailing: true,
         stratBlock: true,
         stratDca: false,
-        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 420) / 60)),
+        hours: Math.max(1, Math.round(Number(preset?.patch.histLookbackBars || 2880) / 60)),
         allConfigs: true,
       }));
     }
@@ -531,9 +542,9 @@ function SettingsPage() {
                     />
                     <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
-                    <Num label="Set PF minimum" value={overlay.setMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("setMinPf", normalizePf(v, overlay.setMinPf))} />
+                    <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
-                    <Toggle label="Individual SL/TP per configuration" hint={overlay.controlOrdersPerConfig ? "ON · quantity-matched pair per config/range" : "OFF · one common close-position pair per symbol + direction"} on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
+                    <Toggle label="Overall SL/TP by symbol and direction" hint="Shared exchange protection; each Set keeps its own targets and fills." on={overlay.controlOrdersOverall} onChange={(v) => patch("controlOrdersOverall", v)} />
                   </Grid>
                 </div>
               </div>
@@ -1193,7 +1204,7 @@ function SettingsPage() {
             <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
-              hint="1.00 = Neutral after cost · 1.10 = +1× PositionCost net · last 15 closes"
+              hint="One overall threshold · independent evaluation windows in every stage · Base defaults to last 30"
             >
               <Grid>
                 <Slider
@@ -1207,41 +1218,19 @@ function SettingsPage() {
                   onChange={(v) => { patch("positionCostFallbackPct", v); if (!overlay.useLivePositionCosts) patch("positionCostPct", v); }}
                 />
                 <Slider
-                  label="Base min PF"
-                  value={overlay.baseMinPf}
+                  label="Overall minimum PF"
+                  value={overlay.minPf}
                   min={PF_MIN}
                   max={PF_MAX}
                   step={PF_STEP}
-                  hint={pfHint(overlay.baseMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))}
-                />
-                <Slider
-                  label="Main min PF"
-                  value={overlay.mainMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  hint={pfHint(overlay.mainMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))}
-                />
-                <Slider
-                  label="Real min PF"
-                  value={overlay.realMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
-                  onChange={(v) => {
-                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
-                    patch("realMinPf", next);
-                    patch("minPf", next);
-                  }}
+                  hint={`Shared by Base, Main, Real, DCA and exits. Default requires PF > 1.02. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
+                  onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
                 />
                 <Slider
                   label="PF window"
                   value={overlay.pfWindow}
                   min={5}
-                  max={50}
+                  max={75}
                   step={1}
                   hint="Last N closed trades for the average Result-R."
                   onChange={(v) => patch("pfWindow", v)}
@@ -1338,32 +1327,12 @@ function SettingsPage() {
                     hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
                     onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)}
                   />
-                  <Slider
-                    label="Set minimum PF"
-                    value={overlay.setMinPf}
-                    min={0.8}
-                    max={2.5}
-                    step={0.02}
-                    hint={pfHint(overlay.setMinPf, overlay.positionCostPct)}
-                    onChange={(v) => patch("setMinPf", v)}
-                  />
-                  <Slider
-                    label="Real minimum PF"
-                    value={overlay.realMinPf}
-                    min={0.8}
-                    max={2.5}
-                    step={0.02}
-                    hint={pfHint(overlay.realMinPf, overlay.positionCostPct)}
-                    onChange={(v) => {
-                      patch("realMinPf", v);
-                      patch("minPf", v);
-                    }}
-                  />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                   <Num
                     label="Validation samples"
                     value={overlay.setMinSamples}
                     min={5}
-                    max={40}
+                    max={75}
                     step={1}
                     hint="Minimum historic closes before a Set can qualify."
                     onChange={(v) => patch("setMinSamples", Math.round(v))}
@@ -1371,7 +1340,7 @@ function SettingsPage() {
                   <Num
                     label="Deactivation window"
                     value={overlay.setDeactN}
-                    min={10}
+                    min={5}
                     max={80}
                     step={1}
                     hint="Latest live fills used by the negative-result deactivation gate."
@@ -1545,18 +1514,27 @@ function SettingsPage() {
                   onChange={(v) => patch("histRefreshS", v)}
                 />
                 <Slider
-                  label="PF window"
+                  label="Control trades · holdout"
+                  value={overlay.controlMinTrades}
+                  min={0}
+                  max={75}
+                  step={1}
+                  hint="Default 0 = off. Later control results stay visible; training validates each Set independently."
+                  onChange={(v) => patch("controlMinTrades", Math.round(v))}
+                />
+                <Slider
+                  label="Base evaluation · last positions"
                   value={overlay.setPfWindow}
                   min={5}
-                  max={40}
-                  step={1}
-                  hint="Last N historic+live fills for PositionCost PF"
+                  max={75}
+                  step={5}
+                  hint="Default 30 closed positions · one shared PF floor across all stages"
                   onChange={(v) => patch("setPfWindow", v)}
                 />
                 <Slider
                   label="Deact window"
                   value={overlay.setDeactN}
-                  min={10}
+                  min={5}
                   max={80}
                   step={1}
                   hint="Latest N live fills · overall average loss deactivates that Set"
@@ -1590,15 +1568,7 @@ function SettingsPage() {
                   on={overlay.setLiveNegativeDeact}
                   onChange={(v) => patch("setLiveNegativeDeact", v)}
                 />
-                <Slider
-                  label="Set min PF"
-                  value={overlay.setMinPf}
-                  min={0.8}
-                  max={2.5}
-                  step={0.02}
-                  hint="Base-stage cost PF. Shared range 0.80–2.50; qualified Sets flow to Main and Real."
-                  onChange={(v) => patch("setMinPf", v)}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Slider
                   label="Max DD time"
                   value={Math.round(overlay.setMaxDdTimeS / 60)}
@@ -1613,7 +1583,7 @@ function SettingsPage() {
                   label="Min samples"
                   value={overlay.setMinSamples}
                   min={5}
-                  max={40}
+                  max={75}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
                 />
@@ -1681,17 +1651,9 @@ function SettingsPage() {
                 <Slider label="Opt SL min" value={overlay.exitOptSlMin} min={0.05} max={0.5} step={0.01} unit="%" onChange={(v) => patch("exitOptSlMin", v)} />
                 <Slider label="Opt SL max" value={overlay.exitOptSlMax} min={0.2} max={1.5} step={0.05} unit="%" onChange={(v) => patch("exitOptSlMax", v)} />
                 <Slider label="Min hold" value={overlay.exitMinHoldS} min={4} max={90} step={1} unit="s" onChange={(v) => patch("exitMinHoldS", v)} />
-                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={40} step={1} onChange={(v) => patch("exitPfWindow", v)} />
-                <Slider label="Exit deact N" value={overlay.exitDeactN} min={10} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
-                <Slider
-                  label="Exit min PF"
-                  value={overlay.exitMinPf}
-                  min={1}
-                  max={2.3}
-                  step={0.02}
-                  hint={pfHint(overlay.exitMinPf, overlay.positionCostPct)}
-                  onChange={(v) => patch("exitMinPf", v)}
-                />
+                <Slider label="Exit PF window" value={overlay.exitPfWindow} min={5} max={75} step={1} onChange={(v) => patch("exitPfWindow", v)} />
+                <Slider label="Exit deact N" value={overlay.exitDeactN} min={5} max={80} step={1} onChange={(v) => patch("exitDeactN", v)} />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
               </Grid>
               <ExitLanesTable stats={stats} />
               <p className="text-sm text-muted">
@@ -1732,9 +1694,7 @@ function SettingsPage() {
                 </table>
               </div>
               <Grid>
-                <Num label="Base stage min PF" value={overlay.baseMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("baseMinPf", v)} />
-                <Num label="Main stage min PF" value={overlay.mainMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("mainMinPf", v)} />
-                <Num label="Real stage min PF" value={overlay.realMinPf} min={0.8} max={2.5} step={0.02} hint="Shared PF range 0.80–2.50 · default 1.02" onChange={(v) => patch("realMinPf", v)} />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
               </Grid>
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
@@ -2001,26 +1961,19 @@ function SettingsPage() {
                   step={0.05}
                   onChange={(v) => patch("dcaBreakevenProfitPct", v)}
                 />
-                <Num
-                  label="Min PF"
-                  value={overlay.dcaMinPf}
-                  min={1}
-                  max={1.5}
-                  step={0.05}
-                  onChange={(v) => patch("dcaMinPf", v)}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Num
                   label="DCA PF window"
                   value={overlay.dcaPfWindow ?? overlay.pfWindow}
                   min={5}
-                  max={40}
+                  max={75}
                   step={1}
                   onChange={(v) => patch("dcaPfWindow", v)}
                 />
                 <Num
                   label="DCA deact N"
                   value={overlay.dcaDeactN ?? overlay.setDeactN}
-                  min={10}
+                  min={5}
                   max={80}
                   step={1}
                   onChange={(v) => patch("dcaDeactN", v)}
@@ -2130,20 +2083,7 @@ function SettingsPage() {
                 />
               </div>
               <Grid>
-                <Num label="Base min PF" value={overlay.baseMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("baseMinPf", normalizePf(v, DEFAULT_OVERLAY.baseMinPf))} />
-                <Num label="Main min PF" value={overlay.mainMinPf} min={PF_MIN} max={PF_MAX} step={PF_STEP} onChange={(v) => patch("mainMinPf", normalizePf(v, DEFAULT_OVERLAY.mainMinPf))} />
-                <Num
-                  label="Real min PF"
-                  value={overlay.realMinPf}
-                  min={PF_MIN}
-                  max={PF_MAX}
-                  step={PF_STEP}
-                  onChange={(v) => {
-                    const next = normalizePf(v, DEFAULT_OVERLAY.realMinPf);
-                    patch("realMinPf", next);
-                    patch("minPf", next);
-                  }}
-                />
+                <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(30, Math.round(v))))} />
@@ -2226,7 +2166,7 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Hedge-safe TP/SL protection · independent quantity-matched pair per logical configuration by default">
+            <Card title="Control orders" hint="Shared quantity-matched SL/TP by symbol and direction · independent Set targets and fills">
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
@@ -2234,10 +2174,10 @@ function SettingsPage() {
                   onChange={(v) => patch("controlOrders", v)}
                 />
                 <Toggle
-                  label="Individual controls per configuration/order"
-                  hint="ON = quantity-matched pair per logical config/range; OFF = one common close-position pair per symbol/direction"
-                  on={overlay.controlOrdersPerConfig}
-                  onChange={(v) => patch("controlOrdersPerConfig", v)}
+                  label="Overall SL/TP by symbol and direction"
+                  hint="ON = shared protection for the own total quantity; individual Set targets and fills stay separate"
+                  on={overlay.controlOrdersOverall}
+                  onChange={(v) => patch("controlOrdersOverall", v)}
                 />
               </div>
               <Grid>
@@ -2246,14 +2186,14 @@ function SettingsPage() {
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />
-                <KV k="Applied control mode" v={overlay.controlOrdersPerConfig ? "PER-CONFIG RANGE" : "AGGREGATE"} />
+                <KV k="Applied control mode" v={overlay.controlOrdersOverall ? "OVERALL · SYMBOL / DIRECTION" : "PER-CONFIG RANGE"} />
                 <KV k="Working type" v="MARK_PRICE" />
               </Grid>
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
-                {overlay.controlOrdersPerConfig
-                  ? "Each symbol + direction + normalized SL/TP range receives its own quantity-matched TP/SL pair. Identical ranges merge by quantity and weighted entry, while Set lineage stays attached."
-                  : "Controls use one common close-position SL + TP per symbol and hedge direction. The pair widens to the highest effective merged member range; turn on individual mode for quantity-matched pairs per config/range."}
+                {overlay.controlOrdersOverall
+                  ? "One exchange SL/TP pair protects the total own quantity for each symbol and direction. The system manages each Set’s targets and trailing separately and allocates confirmed partial fills to the bound positions."
+                  : "Each independent configuration has its own quantity-matched exchange SL/TP pair."}
               </p>
             </Card>
           )}
@@ -2946,7 +2886,7 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const missing = groups.filter((group) => !group.protected);
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
-  const mode = c?.mode ?? (stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
+  const mode = c?.mode ?? (stats?.pulse?.controlOrdersOverall ? "overall" : stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
@@ -2957,6 +2897,9 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
       </div>
       <p className="mt-1 text-muted">
         {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
+      </p>
+      <p className="mt-1 text-muted">
+        Real positions {stats?.realPositionCount ?? stats?.openCount ?? 0} ({stats?.realPositionGroupCount ?? "—"} groups) · Live positions {stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · Orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}
       </p>
       {groups.length ? (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
@@ -2986,7 +2929,7 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">{mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
+        <p className="mt-2 text-muted">{mode === "overall" ? "Each symbol and direction shares protection for its own total quantity; Set targets and fills stay independent" : mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
       )}
     </div>
   );
@@ -3006,7 +2949,7 @@ function LiveApplied({
   const p = (stats?.pulse ?? {}) as PulseOverlay & Record<string, unknown>;
   const v = stats?.variants;
   const controls = stats?.coverage?.controls;
-  const controlMode = controls?.mode ?? (overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
+  const controlMode = controls?.mode ?? (overlay.controlOrdersOverall ? "overall" : overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
   const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
   const controlPairs = controls?.pairCount ?? (overlay.controlOrders ? controlGroups : 0);
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
@@ -3031,6 +2974,7 @@ function LiveApplied({
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
         <span>controls {controlMode} · {controlPairs} SL+TP pairs · {controlGroups} groups</span>
+        <span>positions R/L {stats?.realPositionCount ?? stats?.openCount ?? 0}/{stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}</span>
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F

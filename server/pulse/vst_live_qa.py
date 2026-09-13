@@ -19,6 +19,7 @@ os.environ.setdefault("PULSE_CONN", "bingx-x02")
 
 from bingx_fast import FastBingX, ErrorLog
 from pulse_trader import Pulse, TAG, CONN_SHORT, redis_hget, BASE
+from runtime_scope import order_tag
 from set_engine import self_test as sets_self_test
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
@@ -106,13 +107,15 @@ def cid_tests(out: List[Tuple[str, bool, str]]) -> None:
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
     p.parse_track = lambda c: Pulse.parse_track(p, c)
     sample = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
-    rec("cid-tag", sample.startswith(TAG) and TAG == "Gx02", f"{sample} tag={TAG}", out)
+    expected_x02 = order_tag("bingx-x02")
+    expected_x01 = order_tag("bingx-x01")
+    rec("cid-tag", sample.startswith(TAG) and TAG == expected_x02, f"{sample} tag={TAG}", out)
     rec("cid-ours", p.cid_ours(sample) and not p.cid_ours("FOREIGN-1") and not p.cid_ours(""), sample, out)
-    rec("cid-foreign-x01-on-x02-legacy", p.cid_ours("Gx01olegacy12"), "legacy accepted", out)
+    rec("cid-foreign-x01-on-x02-legacy", not p.cid_ours(expected_x01 + "olegacy12"), "foreign lane rejected", out)
     tr = p.parse_track(sample)
     rec("cid-parse-sl", bool(tr and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr), out)
     sl = Pulse.cid(p, "s", set_id="indications:1m:sl1.2:tr0.9:0.3", pack="indications")
-    rec("cid-sl-ind", sl.startswith("Gx02si12"), sl, out)
+    rec("cid-sl-ind", sl.startswith(TAG + "s") and p.cid_ours(sl), sl, out)
 
 
 def api_tests(api: FastBingX, out: List[Tuple[str, bool, str]]) -> Dict[str, Any]:
@@ -548,7 +551,7 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
 def http_tests(out: List[Tuple[str, bool, str]]) -> None:
     code, st = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
     rec("http-stats-vst", code == 200 and st.get("connection") == "bingx-x02", f"{code} conn={st.get('connection')} eq={st.get('equity')}", out)
-    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == "Gx02", str((st.get("engine") or {}).get("trackPrefix")), out)
+    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == TAG, str((st.get("engine") or {}).get("trackPrefix")), out)
     rec("http-gate", isinstance((st.get("coord") or {}).get("gate"), dict), str((st.get("coord") or {}).get("gate", {}).get("allow")), out)
     code, cfg = http_json("http://127.0.0.1:3015/config.json?conn=vst")
     rec("http-config-get", code == 200 and isinstance(cfg, dict), f"{code} keys={len(cfg) if isinstance(cfg, dict) else 0}", out)
@@ -571,6 +574,9 @@ def main() -> int:
     api = None
     if key and secret:
         base = redis("base_url") or "https://open-api-vst.bingx.com"
+        from urllib.parse import urlparse
+        if urlparse(base).scheme != "https" or urlparse(base).hostname != "open-api-vst.bingx.com":
+            raise RuntimeError("VST QA requires the BingX virtual-money demo endpoint")
         api = FastBingX(key, secret, ErrorLog("/tmp/vst-live-qa-err.jsonl"), base=base)
         snap = api_tests(api, out)
         classify_book(api, snap.get("positions") or [], out)

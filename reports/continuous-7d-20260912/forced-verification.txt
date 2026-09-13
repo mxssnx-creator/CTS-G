@@ -1,0 +1,21 @@
+test_adaptation_cannot_pool_unrelated_configs (__main__.ForcedTests.test_adaptation_cannot_pool_unrelated_configs) ... ok
+test_all_eligible_per_symbol_and_kind_throughput_first (__main__.ForcedTests.test_all_eligible_per_symbol_and_kind_throughput_first) ... ok
+test_complete_coverage_without_signals (__main__.ForcedTests.test_complete_coverage_without_signals) ... ok
+test_exact_grid (__main__.ForcedTests.test_exact_grid) ... ok
+test_forced_cli (__main__.ForcedTests.test_forced_cli) ... ok
+test_forced_symbols_are_mandatory_not_duplicate (__main__.ForcedTests.test_forced_symbols_are_mandatory_not_duplicate) ... ok
+test_holdout_loss_vetoes_training_profit (__main__.ForcedTests.test_holdout_loss_vetoes_training_profit) ... ok
+test_no_entry_candle_lookahead (__main__.ForcedTests.test_no_entry_candle_lookahead) ... ok
+test_positive_baseline_and_costs (__main__.ForcedTests.test_positive_baseline_and_costs) ... ok
+test_recent_pf_and_drawdown_are_explicit_diagnostics (__main__.ForcedTests.test_recent_pf_and_drawdown_are_explicit_diagnostics) ... ok
+test_roundtrip_partial_dedupe_and_missing_history (__main__.ForcedTests.test_roundtrip_partial_dedupe_and_missing_history) ... ok
+test_stop_first_when_both_touched (__main__.ForcedTests.test_stop_first_when_both_touched) ... ok
+test_stop_gap_not_optimistic (__main__.ForcedTests.test_stop_gap_not_optimistic) ... ok
+test_strict_pf_and_input_validation (__main__.ForcedTests.test_strict_pf_and_input_validation) ... ok
+test_throughput_does_not_count_duplicate_partials (__main__.ForcedTests.test_throughput_does_not_count_duplicate_partials) ... ok
+test_vst_only_and_own_candidate_gate (__main__.ForcedTests.test_vst_only_and_own_candidate_gate) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.083s
+
+OK

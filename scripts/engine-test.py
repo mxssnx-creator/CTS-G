@@ -115,6 +115,7 @@ def overlay_test() -> None:
         rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is True)
         rec(f"{name}-maxlev", ov.get("useMaxLeverage", True) is not False)
         rec(f"{name}-controls", ov.get("controlOrders", True) is True)
+        rec(f"{name}-overall-controls", ov.get("controlOrdersOverall", True) is True)
         rec(f"{name}-per-config-controls-on", ov.get("controlOrdersPerConfig", False) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
         rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
@@ -127,7 +128,7 @@ def overlay_test() -> None:
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
@@ -135,8 +136,8 @@ def overlay_test() -> None:
     rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
     rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
-    rec("x02-all", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
-    rec("default-50-cap", int(x01.get("symbolCap") or 0) == 50 and int(x02.get("symbolCap") or 0) == 50)
+    rec("x02-test-universe-20", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 20)
+    rec("x01-unlimited-symbols", int(x01.get("symbolCap") or 0) == 0)
     rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
@@ -401,7 +402,7 @@ def coord_test() -> None:
     base_st = next((s for s in book_ax.by_idx if s.kind == "base"), None)
     rec("coord-base-index", base_st is not None and bool((book_ax._ids_by_kind or {}).get("base")), str(len((book_ax._ids_by_kind or {}).get("base") or [])))
     if base_st is not None:
-        base_st.last15_n = 15
+        base_st.last15_n = book_ax.eval_need()
         base_st.last15_ratio = 1.4
     c_base = Coordinator()
     agg = c_base.coordinate_base_sets(book_ax)
@@ -413,7 +414,7 @@ def coord_test() -> None:
 
 
 def stage_min_pf_test() -> None:
-    """Stage PF floors follow the shared +1× PositionCost (1.10) default unless overridden."""
+    """Every stage follows one overall Cost-PF floor, >1.02 by default."""
     from coord_engine import Coordinator, recent_closed_rows
     from position_cost import POSITIVE_PF
 
@@ -432,7 +433,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.06}}}},
             {"baseMinPf": 1.05, "mainMinPf": 1.08, "realMinPf": 1.1})
     rec("stage-pf-overlay-wins",
-        c2.stage_min_pf == {"base": 1.05, "main": 1.08, "real": 1.10},
+        c2.stage_min_pf == {"base": 1.05, "main": 1.05, "real": 1.05},
         str(c2.stage_min_pf))
 
     # 3) strategies.main.<stage> used when no overlay key
@@ -442,7 +443,7 @@ def stage_min_pf_test() -> None:
                                      "real": {"min_profit_factor": 1.15}}}},
             {})
     rec("stage-pf-strategies-fallback",
-        c3.stage_min_pf == {"base": 1.05, "main": 1.07, "real": 1.15},
+        c3.stage_min_pf == {"base": 1.15, "main": 1.15, "real": 1.15},
         str(c3.stage_min_pf))
     rec("stage-pf-real-canonical", abs(c3.min_pf - 1.15) < 1e-9, str(c3.min_pf))
 
@@ -520,16 +521,16 @@ def stage_engine_calc_test() -> None:
         + [{"t": 2000 + i * 60, "pnl": 0.01, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(5)]
     )
     book._score_one(st)
-    rec("set-stage-pf-reported", st.base_pf > 1.0 and st.main_pf > 1.0 and st.real_pf > 1.0,
+    rec("set-stage-skips-below-base", st.base_pf > 1.0 and st.main_pf == 0.0 and st.real_pf == 0.0,
         f"b={st.base_pf} m={st.main_pf} r={st.real_pf}")
     rec("set-stage-windows-differ", abs(st.base_pf - st.main_pf) > 1e-4, f"b={st.base_pf} m={st.main_pf}")
     rec("set-stage-ddt-nonzero", st.max_dd_s >= 0.0 and st.dd_episodes >= 0, f"ddt={st.max_dd_s} ep={st.dd_episodes}")
     snap = book.snapshot()
     row = next((r for r in (snap.get("rows") or []) if r.get("id") == st.id), {})
-    rec("set-intern-validated", bool(row.get("validated")) and float(row.get("last15Ratio") or 0) >= 1.0
+    rec("set-intern-shared-floor", not bool(row.get("validated")) and float(row.get("last15Ratio") or 0) < 1.20
         and not bool(row.get("realQualified")),
         f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
-    rec("set-eval-windows-present", bool((row.get("evaluationWindows") or {}).get("last15")),
+    rec("set-eval-windows-skipped-below-base", not row and not st.evaluation_windows,
         str(list((row.get("evaluationWindows") or {}).keys())[:4]))
     rec_m = book.stage_record(st, "main")
     rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
@@ -1656,8 +1657,11 @@ def block_calc_test() -> None:
         p.save_open_book = lambda: None
         p.cid = lambda kind="o", pos=None, **kw: f"GTEST{len(p.api.posts)}"
         p.ok = lambda r: r.get("code") == 0
-        st = SimpleNamespace(last15_ratio=set_ratio, last15_n=set_n)
-        p.sets = SimpleNamespace(sets={}, pick_any=lambda pack, side=None: st)
+        from set_engine import SetBook, SetState
+        st = SetState(id="parent-config",pack="general",tf="1m",sl_ratio=.6,trail_key="",trail_arm=0,trail_give=0,last15_ratio=set_ratio,last15_n=set_n)
+        p.sets = SetBook()
+        p.sets.min_samples = 8
+        p.sets.sets = {st.id: st}
         p.score = lambda sym: (1, "t", 0.9)
         p.indications = SimpleNamespace(best=lambda s: None, primary=lambda s: None)
         p.contracts = {"TST-USDT": Contract("TST-USDT", 0.0001, 0.0001, 4, 2, 1.0, 100)}
@@ -1681,7 +1685,7 @@ def block_calc_test() -> None:
         p.open = {"TST-USDT": pt.Position(
             symbol="TST-USDT", side="LONG", qty=0.05 + confirmed, entry=100.0,
             opened_at=time.time() - 600, sl=99.0, tp=101.0, peak=100.0,
-            set_id="", pack="general")}
+            set_id=st.id, pack="general")}
         ln = p.block.register_parent("TST-USDT", "LONG", 0.05, 100.0)
         ln.satisfied = dict(satisfied or {})
         ln.confirmed_add = confirmed
@@ -1716,7 +1720,7 @@ def block_calc_test() -> None:
     # 4c) cold default 1.2: count 1 gate is min(defaultMinPF, 1.12) -> emits
     pC = mk_trader(1.2, 1.0, 3)
     pC.maybe_block_adds()
-    rec("block-cold-count1-emits", len(pC.api.posts) == 1,
+    rec("block-cold-count1-unproven", len(pC.api.posts) == 0,
         f"posts={pC.api.posts}")
 
     # 4d) disabled book / disabled strategy -> never emits
@@ -1839,12 +1843,12 @@ def block_calc_test() -> None:
             "SHORT": {"last15_ratio": 0.7, "last15_n": 12},
         },
     )
-    pI.sets.pick_any = lambda pack, side=None: st_split
+    pI.sets.sets["parent-config"] = st_split
     posL = pI.open["TST-USDT"]
     rec("block-intern-long-lifts", abs(pI.block_intern_pf(posL) - 1.4) < 1e-9, str(pI.block_intern_pf(posL)))
     posS = pt.Position(symbol="TST-USDT", side="SHORT", qty=0.05, entry=100.0,
                        opened_at=time.time() - 600, sl=101.0, tp=99.0, peak=100.0, set_id="", pack="general")
-    rec("block-intern-short-floor", abs(pI.block_intern_pf(posS) - 1.2) < 1e-9, str(pI.block_intern_pf(posS)))
+    rec("block-intern-unassigned-unproven", pI.block_intern_pf(posS) == 0.0, str(pI.block_intern_pf(posS)))
 
     # book cap uses sequential extra (3×) not the 1+2+3 sum (6×)
     pCap = object.__new__(pt.Pulse)
@@ -1957,8 +1961,8 @@ def set_orders_test() -> None:
     sts: List[SetState] = []
     for i, (pack, sl, stp) in enumerate(specs):
         sid = make_set_id(pack, sl, "", stp)
-        st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, trail_key="0.3:0.1",
-                      trail_arm=0.3, trail_give=0.1, step=stp, tp_pct=0.0045 + i * 0.001, idx=i)
+        st = SetState(id=sid, pack=pack, tf="1m", sl_ratio=sl, trail_key="",
+                      trail_arm=0., trail_give=0., step=stp, tp_pct=0.0045 + i * 0.001, idx=i)
         st.last15_ratio = 1.5
         st.last15_n = 12
         # This fixture represents already scored/validated Base rows.  The
@@ -2146,12 +2150,12 @@ def set_orders_test() -> None:
         and p.closed[0].set_id == stA.id and p.closed[1].set_id == stB.id
         and p.closed[0].client_id == entry_cids[0] and p.closed[1].client_id == entry_cids[1],
         f"w={p.wins} l={p.losses} closed={len(p.closed)}")
-    snap = {r["id"]: r for r in book.snapshot().get("rows", [])}
-    rec("setord-snapshot-per-set",
-        snap.get(stA.id, {}).get("liveN") == 1 and snap.get(stB.id, {}).get("liveN") == 1
-        and snap.get(stC.id, {}).get("liveN") == 0
+    snap = {r["id"]: r for r in book.live_overview().get("rows", [])}
+    rec("setord-exchange-stats-per-set",
+        snap.get(stA.id, {}).get("n") == 1 and snap.get(stB.id, {}).get("n") == 1
         and abs(snap.get(stA.id, {}).get("last15Ratio", 0) - 1.3) < 1e-6,
-        str({k: (v.get("liveN"), v.get("last15Ratio")) for k, v in snap.items()})[:140])
+        str({k: (v.get("n"), v.get("last15Ratio")) for k, v in snap.items()})[:140])
+    rec("setord-unproven-not-system-results", book.snapshot().get("rows") == [], "Base not yet qualified")
     p.live_pos_keys = {"CCC-USDT:LONG"}
     sim_n, _sim_u = p.sim_stats()
     p.live_pos_keys = set()
@@ -2174,8 +2178,10 @@ def set_orders_test() -> None:
     p2 = mk_pulse(fx2)
     p2.place("DDD-USDT", 1, "gen:gamma", 0.9)
     fx2_entries = [b for (path, b) in fx2.posts if path == ORDER and b.get("type") == "MARKET"]
-    rec("setord-no-ctrl-scratches",
-        "DDD-USDT" not in p2.open and len(fx2_entries) == 2 and not fx2.orders,
+    p2_pos = next(iter(p2.open.values()), None)
+    rec("setord-no-ctrl-keeps-confirmed-entry",
+        p2_pos is not None and p2_pos.symbol == "DDD-USDT" and len(fx2_entries) == 1 and not fx2.orders
+        and not (p2_pos.sl_oid or p2_pos.tp_oid),
         f"open={list(p2.open)} market_posts={len(fx2_entries)} live_ctrl={len(fx2.orders)}")
 
 
@@ -2478,15 +2484,15 @@ def strict_gate_test() -> None:
         and p3.entry_sense("AAA-USDT", 1, "gen:ema+", 0.9, "general") == "set-gate",
         f"pick={loser_book.pick_any('general')}")
 
-    # 4) per-kind indication gate
+    # 4) representative kind statistics cannot override the exact risk Set
     ind_book = mk_book(winner=True)  # by_idx[0] = indications:sl0.6:st3 winner
     p4 = mk_trader(ind_book)
     ind_book.ind_live["move"] = loss_rows()[:12]
     ind_book.ind_live["state"] = win_rows()[:12]
     p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="move")
-    rec("strict-ind-loser-kind-blocked",
-        p4.entry_sense("AAA-USDT", 1, "ind:move:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") == "ind-gate",
-        "move kind gated")
+    rec("strict-ind-loser-kind-cannot-block-own-winner",
+        p4.entry_sense("AAA-USDT", 1, "ind:move:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
+        "own Set remains qualified despite representative move loss")
     p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
     rec("strict-ind-winner-kind-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
@@ -2500,9 +2506,9 @@ def strict_gate_test() -> None:
     ind_book.ind_live["state"] = loss_rows()[:12]
     ind_book.ind_live["signals"] = win_rows()[:12]
     p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="state")
-    rec("strict-ind-state-loser-blocked",
-        p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") == "ind-gate",
-        "state kind gated")
+    rec("strict-ind-state-loser-cannot-block-own-winner",
+        p4.entry_sense("AAA-USDT", 1, "ind:state:tf_combined:0.80:a3:bingx-1m", 0.9, "indications") is None,
+        "own Set remains qualified despite representative state loss")
     p4.indications.match = lambda s, r: SimpleNamespace(direction="long", kind="signals")
     rec("strict-ind-signals-runs",
         p4.entry_sense("AAA-USDT", 1, "ind:signals:direct_tf:0.90:a1:bingx-1m", 0.9, "indications") is None,
@@ -2514,7 +2520,7 @@ def strict_gate_test() -> None:
     ind_book.by_idx[0].hist = []
     ind_book._score_one(ind_book.by_idx[0])
     rec("strict-ind-unproven-pack-closed",
-        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") == "ind-gate",
+        p4.entry_sense("AAA-USDT", 1, "ind:common:ta:0.70:a1:ta", 0.9, "indications") == "set-gate",
         f"{p4.entry_sense('AAA-USDT', 1, 'ind:common:ta:0.70:a1:ta', 0.9, 'indications')}")
 
     # 5) place() never posts without a validated + profitable set
@@ -2610,11 +2616,11 @@ def strict_gate_test() -> None:
     pos_c = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
                         sl=99.0, tp=101.0, peak=100.0,
                         set_id=strong_book.by_idx[1].id, pack="indications")
-    rec("strict-block-pf-cold-floor", abs(p7.block_intern_pf(pos_c) - 1.2) < 1e-9,
+    rec("strict-block-pf-cold-unproven", p7.block_intern_pf(pos_c) == 0.0,
         f"intern={p7.block_intern_pf(pos_c)}")
     strong_book.by_idx[0].hist = loss_rows()
     strong_book._score_one(strong_book.by_idx[0])
-    rec("strict-block-pf-loser-floor", abs(p7.block_intern_pf(pos_w) - 1.2) < 1e-9,
+    rec("strict-block-pf-loser-unproven", p7.block_intern_pf(pos_w) == 0.0,
         f"intern={p7.block_intern_pf(pos_w)}")
     # legacy (strict off): warm ratio lifts even below 8 samples? no — legacy
     # floors cold sets; warm ratio is used as-is (old behavior preserved)
@@ -2623,7 +2629,7 @@ def strict_gate_test() -> None:
     p7.sets = legacy_sets
     pos_l = pt.Position(symbol="T", side="LONG", qty=1.0, entry=100.0, opened_at=1.0,
                         sl=99.0, tp=101.0, peak=100.0, set_id="", pack="general")
-    rec("legacy-block-pf-unchanged", abs(p7.block_intern_pf(pos_l) - 1.5) < 1e-9,
+    rec("legacy-block-unassigned-no-borrow", p7.block_intern_pf(pos_l) == 0.0,
         f"intern={p7.block_intern_pf(pos_l)}")
 
 
@@ -2711,13 +2717,21 @@ def process_guard_test() -> None:
         path = "/openApi/swap/v2/quote/klines"
         calls = []
         api._http = lambda method, url: calls.append((method, url)) or {"code": 0, "data": []}
+        # Exercise the real async dispatch even without optional HTTPX locally.
+        import asyncio
+        from types import SimpleNamespace
+        async def rate_limited_get(url):
+            calls.append(("GET", url))
+            return SimpleNamespace(status_code=200, headers={},
+                                   content=b'{"code":100410,"msg":"frequency limit"}')
+        api.bridge.client = SimpleNamespace(get=rate_limited_get)
+        api.bridge.gather = lambda reqs, timeout=4.2: asyncio.run(api.bridge._gather(reqs))
         api.path_cd[path] = time.time() + 30.0
         cooled = api.public(path, {"symbol": "BTC-USDT"})
         rec("public-cooldown-no-request", cooled.get("cooled") is True and not calls, str(cooled))
         rows = api.gather_public([(path, {"symbol": "ETH-USDT"})])
         rec("async-cooldown-no-request", rows and rows[0][2].get("cooled") is True and not calls, str(rows))
         api.path_cd[path] = 0.0
-        api.bridge.gather = lambda reqs, timeout=4.2: [(p, e, {"code": 100410, "msg": "frequency limit"}) for p, e in reqs]
         api.gather_public([(path, {"symbol": "SOL-USDT"})])
         rec("async-rate-trip-propagates", api.stats["rl"] == 1 and api.path_cd[path] > time.time(), str(api.snapshot()))
         rec("suppression-accounting", api.stats["publicSuppressed"] == 1 and api.stats["asyncSuppressed"] == 1 and api.stats["rest"] == 1, str(api.stats))
@@ -2802,7 +2816,7 @@ def process_guard_test() -> None:
     rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
     rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
     rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 0)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
@@ -2845,7 +2859,12 @@ def process_guard_test() -> None:
     rec("hist-replay-workers-one", chunker._replay_worker_count(1, _Norm()) == 1, str(chunker._replay_worker_count(1, _Norm())))
     rec("hist-trim-keep-hist", "keep_hist" in trader)
     rec("hist-no-abort-critical", "already and self.load.last_budget.level == \"critical\"" not in trader)
-    rec("hist-score-edges", "score=is_first or not pending" in trader)
+    # Verify middle-slice qualification behavior rather than matching source text.
+    import unittest
+    from test_continuous_real_live import ContinuousTests
+    slice_result = unittest.TestResult()
+    ContinuousTests("test_middle_history_slices_publish_qualification").run(slice_result)
+    rec("hist-score-each-slice", slice_result.wasSuccessful(), str(slice_result.failures + slice_result.errors))
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
     rec("replay-blas-pin", "def pin_compute_threads" in set_src)

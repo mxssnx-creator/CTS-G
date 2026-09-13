@@ -293,6 +293,7 @@ export type LiveStats = {
     exchangeOwnOpen?: number;
     exchangePositionGroups?: number;
     entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
     activeSetCap?: number;
     activeSetUnlimited?: boolean;
     foreignPositionCount?: number;
@@ -316,8 +317,14 @@ export type LiveStats = {
   losses: number;
   winRate: number;
   openCount: number;
+  realPositionCount?: number;
+  realPositionGroupCount?: number;
+  realOrderCount?: number;
   logicalPositionCount?: number;
   exchangeOpenCount?: number;
+  livePositionCount?: number;
+  liveOrderCount?: number;
+  liveTotalOrderCount?: number;
   exchangePositionGroupCount?: number;
   simOpenCount?: number;
   simUPnl?: number;
@@ -519,6 +526,7 @@ export type LiveStats = {
       activeCount?: number;
       validatedCount?: number;
       entryCandidateCount?: number;
+    entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
       entryCandidateCap?: number;
       histFills?: number;
       liveFills?: number;
@@ -638,7 +646,13 @@ export type LiveStats = {
     drawdownPct?: number;
     pnlPct?: number;
     openCount: number;
+    realPositionCount?: number;
+    realPositionGroupCount?: number;
+    realOrderCount?: number;
     exchangeOpenCount?: number;
+    livePositionCount?: number;
+    liveOrderCount?: number;
+    liveTotalOrderCount?: number;
     simOpenCount?: number;
     simUPnl?: number;
     wins: number;
@@ -674,7 +688,12 @@ export type LiveStats = {
     pfCost?: number;
     controlsOk?: number;
     controlsMissing?: number;
-    controlsSecurity?: number;
+  controlsSecurity?: number;
+  controlPairsOk?: number;
+  controlPairsExpected?: number;
+  controlPairsMissing?: number;
+  controlMemberOk?: number;
+  controlMemberMissing?: number;
     entryPolicy?: string;
     executionEvidence?: LiveStats["executionEvidence"];
     symbolCount?: number;
@@ -1100,7 +1119,13 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     errors: lane.errors,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
+    realPositionCount: lane.realPositionCount,
+    realPositionGroupCount: lane.realPositionGroupCount,
+    realOrderCount: lane.realOrderCount,
     exchangeOpenCount: lane.exchangeOpenCount,
+    livePositionCount: lane.livePositionCount,
+    liveOrderCount: lane.liveOrderCount,
+    liveTotalOrderCount: lane.liveTotalOrderCount,
     simOpenCount: lane.simOpenCount,
     simUPnl: lane.simUPnl,
     open,

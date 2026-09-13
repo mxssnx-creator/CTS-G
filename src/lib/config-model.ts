@@ -15,7 +15,7 @@ export const PULSE_SYMBOLS = [
   "KAS-USDT",
 ] as const;
 
-export const DEFAULT_SYMBOL_COUNT = 50;
+export const DEFAULT_SYMBOL_COUNT = 0;
 export const MAX_SYMBOLS = 0; // 0 = unlimited
 
 export const SYMBOL_SORTS = [
@@ -115,7 +115,7 @@ export const SL_TP_STEP = 0.1;
 
 import { normalizeSystemSettings } from "./system-settings.ts";
 
-export const PF_MIN = 1.05;
+export const PF_MIN = 1.02;
 export const PF_MAX = 1.35;
 export const PF_STEP = 0.01;
 
@@ -198,6 +198,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   minimumEquity: number;
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
+  controlOrdersOverall: boolean;
   normalExecutionEnabled: boolean;
   entryPolicy: EntryPolicy;
   entryPolicyMaxCandidates: number;
@@ -316,7 +317,9 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   histWarmup: number;
   histRefreshS: number;
   setPfWindow: number;
+  baseEvalPosCount?: number;
   setDeactN: number;
+  controlMinTrades: number;
   setMinPf: number;
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
@@ -376,10 +379,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minimumEquity: 0.2,
   controlOrders: true,
   controlOrdersPerConfig: true,
+  controlOrdersOverall: true,
   normalExecutionEnabled: true,
   entryPolicy: "permissive-bounded",
   entryPolicyMaxCandidates: 0,
-  entryPolicyMinLiveSamples: 8,
+  entryPolicyMinLiveSamples: 0,
   blockActiveMinLevel: 0,
   blockActive: true,
   blockEnabled: true,
@@ -399,7 +403,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: 1.10,
+  dcaMinPf: 1.02,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
@@ -413,10 +417,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   prevPosWindow: 25,
   prevPosMinCount: 5,
-  minPf: 1.10,
-  baseMinPf: 1.10,
-  mainMinPf: 1.10,
-  realMinPf: 1.10,
+  minPf: 1.02,
+  baseMinPf: 1.02,
+  mainMinPf: 1.02,
+  realMinPf: 1.02,
   positionCostPct: 0.10,
   positionCostFallbackPct: 0.10,
   // Prefer measured exchange fees. The manual PositionCost remains the
@@ -495,13 +499,15 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 420,
+  histLookbackBars: 2880,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 3600,
-  setPfWindow: 15,
+  setPfWindow: 30,
+  baseEvalPosCount: 30,
   setDeactN: 25,
-  setMinPf: 1.10,
+  controlMinTrades: 0,
+  setMinPf: 1.02,
   setMaxDdTimeS: 57600,
   setAutoDeact: true,
   // Live negative-result deactivation is an explicit safety policy, not an
@@ -509,7 +515,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setLiveNegativeDeact: false,
   setUseHistoricGate: true,
   setStrictGate: true,
-  setMinSamples: 8,
+  setMinSamples: 30,
   setReactivate: true,
   setMaxActive: 0,
   setMinStep: 1,
@@ -530,7 +536,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 15,
   exitDeactN: 25,
-  exitMinPf: 1.10,
+  exitMinPf: 1.02,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -558,6 +564,7 @@ export type CtsSettings = {
   strategyBaseTrailingVariants?: string[];
   control_orders?: boolean | number | string;
   controlOrdersPerConfig?: boolean | number | string;
+  controlOrdersOverall?: boolean | number | string;
   control_orders_per_config?: boolean | number | string;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
@@ -655,11 +662,13 @@ export type CtsSettings = {
   histRefreshS?: number;
   setPfWindow?: number;
   setDeactN?: number;
+  controlMinTrades?: number;
   setMinPf?: number;
   setMaxDdTimeS?: number;
   setAutoDeact?: boolean;
   setUseHistoricGate?: boolean;
   setStrictGate?: boolean;
+  baseEvalPosCount?: number;
   setMinSamples?: number;
   setReactivate?: boolean;
   setMaxActive?: number;
@@ -754,6 +763,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailArmPct: arm,
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
+    controlOrdersOverall: bool(cts.controlOrdersOverall, true),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
       true,
@@ -771,7 +781,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     const candidateCap = Math.round(num(live?.entryPolicyMaxCandidates ?? cts.entryPolicyMaxCandidates, 0));
     return candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
   })(),
-  entryPolicyMinLiveSamples: Math.max(5, Math.min(25, Math.round(num(live?.entryPolicyMinLiveSamples ?? cts.entryPolicyMinLiveSamples, 8)))),
+  entryPolicyMinLiveSamples: Math.max(0, Math.min(25, Math.round(num(live?.entryPolicyMinLiveSamples ?? cts.entryPolicyMinLiveSamples, 0)))),
   blockActiveMinLevel: num(cts.blockActiveMinLevel, 0),
     blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
@@ -798,10 +808,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
     prevPosWindow: num(live?.prevPosWindow ?? cts.prevPosWindow ?? cts.prev_pos_window, 25),
     prevPosMinCount: num(live?.prevPosMinCount ?? cts.prevPosMinCount ?? cts.prev_pos_min_count, 5),
-  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.10), 1.10),
-  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.10), 1.10),
-  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.10), 1.10),
-  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.10), 1.10),
+  minPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.02), 1.02),
+  baseMinPf: normalizePf(num((cts.strategies as { main?: { base?: { min_profit_factor?: number } } } | undefined)?.main?.base?.min_profit_factor, 1.02), 1.02),
+  mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, 1.02), 1.02),
+  realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.02), 1.02),
 
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.10),
     positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.10),
@@ -874,19 +884,21 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
     histEnabled: bool(cts.histEnabled, true),
-    histLookbackBars: num(cts.histLookbackBars, 420),
+    histLookbackBars: num(cts.histLookbackBars, 2880),
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
     histRefreshS: num(cts.histRefreshS, 3600),
-    setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
+    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
+    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setDeactN: num(cts.setDeactN, 25),
-    setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.10),
+    controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
+    setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.02),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),
-    setMinSamples: num(cts.setMinSamples, 8),
+    setMinSamples: num(cts.setMinSamples, 30),
     setReactivate: bool(cts.setReactivate, true),
     setMaxActive: num(cts.setMaxActive, 0),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 1),
@@ -934,7 +946,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.setMinStep = Math.max(1, Math.min(30, Math.round(num(out.setMinStep, 1))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(30, Math.round(num(out.setStepMax, 30))));
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
-    out[key] = normalizePf(out[key], 1.1);
+    out[key] = normalizePf(out.minPf, 1.02);
   }
   out.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.maxDdTimeS, 57600) / 600) * 600));
   out.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.setMaxDdTimeS, 57600) / 600) * 600));
@@ -1030,8 +1042,11 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
       : [1, 2, 3, 4, 5, 6],
   };
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
-    next[key] = normalizePf(next[key], 1.1);
+    next[key] = normalizePf(next.minPf, 1.02);
   }
+  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 30))));
+  next.setPfWindow = next.baseEvalPosCount;
+  next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
   next.slMinPct = Math.max(.15, Math.min(3, num(next.slMinPct, .15)));
   next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
   next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));
@@ -1065,11 +1080,12 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
+  next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
   const candidateCap = Math.round(num(next.entryPolicyMaxCandidates, 0));
   next.entryPolicyMaxCandidates = candidateCap <= 0 ? 0 : Math.max(2, Math.min(32, candidateCap));
-  next.entryPolicyMinLiveSamples = Math.max(5, Math.min(25, Math.round(num(next.entryPolicyMinLiveSamples, 8))));
+  next.entryPolicyMinLiveSamples = Math.max(0, Math.min(25, Math.round(num(next.entryPolicyMinLiveSamples, 0))));
   next.symbolsDynamic = next.symbolsDynamic !== false;
 
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));

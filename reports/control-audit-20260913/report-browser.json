@@ -1,0 +1,15 @@
+{
+  "checks": [
+    {
+      "width": 1440,
+      "tables": 7,
+      "horizontalOverflow": false
+    },
+    {
+      "width": 390,
+      "tables": 7,
+      "horizontalOverflow": false
+    }
+  ],
+  "errors": []
+}

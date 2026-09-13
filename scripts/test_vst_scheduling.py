@@ -1,4 +1,5 @@
 """Offline regressions from observed VST bans and long entry cycles."""
+import os
 import pathlib
 import sys
 import unittest
@@ -8,12 +9,42 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server" / "pulse"))
 import bingx_fast
 import pulse_trader as trader
+from indication_engine import ExtraBook
 from vst_readonly_probe import validate_base, snapshot
 
 ORDER = "/openApi/swap/v2/trade/order"
 
 
 class VstSchedulingTests(unittest.TestCase):
+    def test_clients_ignore_ambient_socks_proxy(self):
+        """Import/startup must not depend on optional socksio availability."""
+        with patch.dict(
+            os.environ,
+            {
+                "ALL_PROXY": "socks5://127.0.0.1:9",
+                "HTTPS_PROXY": "socks5://127.0.0.1:9",
+                "HTTP_PROXY": "socks5://127.0.0.1:9",
+                "all_proxy": "socks5://127.0.0.1:9",
+                "https_proxy": "socks5://127.0.0.1:9",
+                "http_proxy": "socks5://127.0.0.1:9",
+            },
+        ):
+            extra = ExtraBook()
+            api = trader.FastBingX(
+                "",
+                "",
+                SimpleNamespace(path="", write=lambda *args, **kwargs: None),
+                base="https://example.invalid",
+            )
+            self.assertIsNotNone(extra.http)
+            self.assertIsNotNone(api.http)
+            if api.http is not None:
+                api.http.close()
+            if api.bridge.loop is not None:
+                api.bridge.loop.call_soon_threadsafe(api.bridge.loop.stop)
+            if extra.http is not None:
+                extra.http.close()
+
     def test_probe_refuses_non_vst_and_credential_bearing_urls(self):
         self.assertEqual(validate_base("https://open-api-vst.bingx.com/"), "https://open-api-vst.bingx.com")
         for base in ["https://open-api.bingx.com", "http://open-api-vst.bingx.com",
@@ -65,6 +96,159 @@ class VstSchedulingTests(unittest.TestCase):
         with patch.object(bingx_fast.time, "time", return_value=1_788_598_800):
             a._trip(ORDER, {"code": 100410, "msg": "rate limited"})
             self.assertEqual(a.order_retry_after(), 8)
+
+    def test_batch_deadline_blocks_single_orders_for_full_duration(self):
+        a = self.api()
+        now = 1_788_598_800
+        batch = '/openApi/swap/v2/trade/batchOrders'
+        a.buckets = {'order': SimpleNamespace(take=lambda: self.fail('must not spend a token'))}
+        with patch.object(bingx_fast.time, 'time', return_value=now):
+            a._trip(batch, {'code':'109429', 'msg':f'retry after time: {(now+480)*1000}'})
+        with patch.object(bingx_fast.time, 'time', return_value=now+100):
+            self.assertFalse(a._take('order', ORDER))
+            self.assertFalse(a._take('order', batch))
+            self.assertAlmostEqual(a.order_retry_after(), 380.4, delta=1e-6)
+
+    def test_http_retry_after_seconds_and_date(self):
+        from email.utils import formatdate
+        now = 1_788_598_800
+        for header in ('120', formatdate(now+120, usegmt=True)):
+            a = self.api()
+            with patch.object(bingx_fast.time, 'time', return_value=now):
+                a._trip(ORDER, {'code':429, 'retryAfter':header})
+                self.assertAlmostEqual(a.order_retry_after(), 120.4, delta=1e-6)
+
+    def test_http_429_keeps_retry_after_even_without_json(self):
+        import io
+        from urllib.error import HTTPError
+        a = self.api(); a.key = 'offline'; a.base = 'https://example.invalid'
+        error = HTTPError(a.base, 429, 'Too Many Requests', {'Retry-After':'120'}, io.BytesIO(b'busy'))
+        def fail(*args, **kwargs): raise error
+        a._opener = SimpleNamespace(open=fail)
+        result = a._http('POST', ORDER)
+        self.assertEqual(result['code'], 429)
+        self.assertEqual(result['retryAfter'], '120')
+
+    def test_success_envelope_with_throttled_batch_item_blocks_followup_orders(self):
+        a = self.api(); a.stats['rest'] = 0
+        a._take = lambda *args: True
+        a._next_ts = lambda: 1
+        a._sign = lambda params: 'offline'
+        a._http = lambda *args: {'code':0, 'data':{'orders':[
+            {'code':0, 'orderId':'accepted'}, {'code':109429, 'msg':'rate limit'}]}}
+        with patch.object(bingx_fast.time, 'time', return_value=100):
+            result = a.post('/openApi/swap/v2/trade/batchOrders')
+            self.assertEqual(result['data']['orders'][0]['orderId'], 'accepted')
+            self.assertEqual(a.order_retry_after(), 8)
+
+    def test_request_latency_records_transport_time_separately(self):
+        a=self.api();a.stats.update(rest=0,err=0)
+        a._take=lambda *args:True;a._next_ts=lambda:1;a._sign=lambda params:''
+        a._http=lambda *args:{'code':0,'data':{}}
+        with patch.object(bingx_fast.time,'perf_counter',side_effect=[1.,1.004]):
+            a.post(ORDER,{'symbol':'X-USDT'})
+        metric=a.request_latency()['POST '+ORDER]
+        self.assertEqual(metric,{'samples':1,'p50':4.,'p95':4.,'max':4.})
+
+    def test_restart_restores_active_venue_deadline_without_network(self):
+        import tempfile, pathlib, json
+        a = self.api()
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder)/'errors-x02.jsonl'
+            path.write_text(json.dumps(dict(kind='rate-limit', t=1000, wait=480, path='/openApi/swap/v2/trade/batchOrders'))+'\n')
+            a.err.path = str(path)
+            with patch.object(bingx_fast.time, 'time', return_value=1200):
+                a._restore_retry_deadlines()
+                self.assertGreaterEqual(a.order_retry_after(),280)
+            b = self.api(); b.err.path = str(pathlib.Path(folder)/'errors-x01.jsonl')
+            b._restore_retry_deadlines()
+            self.assertEqual(b.cooldown_until,0)
+
+    def test_pooled_transport_preserves_signed_json_and_never_retries_timeout(self):
+        import httpx
+        import urllib.parse
+        a=self.api();a.base='https://example.test';a.secret='test-secret'
+        params={'batchOrders':'[{"quantity":0.01,"stopPrice":100.25,"clientOrderID":"a +/&?"}]','timestamp':'123'}
+        target='/openApi/swap/v2/trade/batchOrders?'+a._sign(params)
+        seen=[]
+        def send(request):
+            seen.append(request.url.raw_path)
+            return httpx.Response(200,json={'code':0})
+        with httpx.Client(transport=httpx.MockTransport(send)) as client:
+            a.http=client
+            self.assertEqual(a._http('POST',target)['code'],0)
+        self.assertEqual(seen,[target.encode()])
+        def timeout(request):
+            seen.append(request.url.raw_path)
+            raise httpx.ReadTimeout('unknown acknowledgement')
+        with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+            a.http=client
+            self.assertEqual(a._http('POST',target)['code'],-1)
+        self.assertEqual(len(seen),2)
+
+    def test_batch_quantity_is_json_number_without_mutating_retry_intent(self):
+        a = self.api(); bodies = []
+        a.post = lambda path, body: bodies.append(bingx_fast.loads(body['batchOrders'])) or {'code':0}
+        orders = [{'clientOrderID':'same-id', 'quantity':'0.010', 'stopPrice':'100.25', 'type':'STOP_MARKET'}]
+        a.batch_place(orders)
+        self.assertIsInstance(bodies[0][0]['quantity'], float)
+        self.assertEqual(bodies[0][0]['quantity'], .01)
+        self.assertEqual(bodies[0][0]['clientOrderID'], 'same-id')
+        self.assertEqual(orders[0]['quantity'], '0.010')
+        self.assertEqual(bodies[0][0]['stopPrice'],100.25)
+        self.assertIsInstance(bodies[0][0]['stopPrice'],float)
+        self.assertEqual(orders[0]['stopPrice'],'100.25')
+        for bad in ('NaN','Infinity','-1','0'):
+            with self.assertRaises(ValueError): a.batch_place([{'quantity':bad}])
+        self.assertEqual(len(bodies),1)
+
+    def test_large_batch_submits_all_inputs_in_chunks_of_five(self):
+        a = self.api(); calls = []
+        orders = [{'clientOrderID':str(i)} for i in range(12)]
+        def post(path, body):
+            rows = bingx_fast.loads(body['batchOrders']); calls.append(rows)
+            return {'code':0, 'data':{'orders':[dict(r, code=0, orderId=r['clientOrderID']) for r in rows]}}
+        a.post = post
+        result = a.batch_place(orders)
+        self.assertEqual([len(c) for c in calls], [5,5,2])
+        self.assertEqual([r['clientOrderID'] for r in result['data']['orders']], [str(i) for i in range(12)])
+        self.assertTrue(result['complete'])
+
+    def test_async_public_admission_is_per_request_and_keeps_http_deadline(self):
+        import asyncio
+        from collections import deque
+        bridge = bingx_fast.AsyncBridge.__new__(bingx_fast.AsyncBridge)
+        bridge.lat = deque(); admitted = []; sent = []; responses = []
+        def admit(path):
+            admitted.append(path)
+            return path != '/cooled'
+        async def get(url):
+            self.assertIn(url, admitted)
+            sent.append(url)
+            return SimpleNamespace(status_code=429, content=b'busy', headers={'Retry-After':'90'})
+        bridge.before_request = admit
+        bridge.on_response = lambda path, body: responses.append((path, body))
+        bridge.client = SimpleNamespace(get=get)
+        rows = asyncio.run(bridge._gather([('/one',{}),('/cooled',{}),('/two',{})]))
+        self.assertEqual(sorted(sent), ['/one','/two'])
+        self.assertTrue(rows[1][2]['cooled'])
+        self.assertTrue(all(body['code'] == 429 and body['retryAfter'] == '90' for _,body in responses))
+
+    def test_batch_cooldown_retains_pending_without_resubmitting_accepted(self):
+        a = self.api(); calls = []
+        orders = [{'clientOrderID':str(i)} for i in range(12)]
+        def post(path, body):
+            rows = bingx_fast.loads(body['batchOrders']); calls.append(rows)
+            if len(calls) == 2: return {'code':101209, 'msg':'cooling', 'cooled':True}
+            return {'code':0, 'data':{'orders':[dict(r, code=0, orderId=r['clientOrderID']) for r in rows]}}
+        a.post = post
+        result = a.batch_place(orders)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(result['data']['orders']), 12)
+        self.assertEqual(result['pendingIndexes'], list(range(5,12)))
+        self.assertFalse(result['complete'])
+        self.assertTrue(all(r['code'] == 0 for r in result['data']['orders'][:5]))
+        self.assertTrue(all(not r['submitted'] for r in result['data']['orders'][5:]))
 
     def test_rate_limit_rechecked_after_token_wait(self):
         a = self.api()

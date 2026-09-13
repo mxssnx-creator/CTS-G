@@ -24,6 +24,28 @@ class ClientOrderIds(unittest.TestCase):
                 self.assertTrue(all(len(cid) == 32 for cid in ids))
                 self.assertTrue(all(p.parse_track(cid)['group_token'] == 'r048075' for cid in ids))
 
+    def test_unindexed_baseline_controls_and_closes_never_borrow_a_catalog_set(self):
+        p=self.pulse()
+        def forbidden_lookup(idx):raise AssertionError('An unindexed lane cannot borrow catalog evidence')
+        p.sets=SimpleNamespace(get_idx=forbidden_lookup)
+        pos=SimpleNamespace(set_id='forced:BCH-USDT:signals:SHORT:tp0.40:sl0.40:key',pack='indications',
+            set_idx=-1,execution_lane='normal:independent-baseline',control_group_key='lane:baseline',
+            control_range_key='sl0040-tp0040')
+        for tag in ('Gx02','G123456x02'):
+            with patch.object(pt,'TAG',tag):
+                for kind in ('u','v','s','t','c'):
+                    ids=[p.cid(kind,pos=pos) for _ in range(100)]
+                    self.assertEqual(len(set(ids)),100)
+                    for cid in ids:
+                        self.assertEqual(len(cid),32)
+                        parsed=p.parse_track(cid)
+                        self.assertEqual(parsed['idx'],-1)
+                        self.assertEqual(parsed['set_id'],'')
+                        self.assertEqual(parsed['group_token'],pt.control_group_token(pos.control_group_key,pos.control_range_key))
+                entry=p.cid('o',set_id=pos.set_id,pack=pos.pack)
+                self.assertEqual(p.parse_track(entry)['idx'],-1)
+                self.assertEqual(p.parse_track(entry)['set_id'],'')
+
     def test_scope_identity_rejects_cross_lane_and_symbol_inference(self):
         own = {"system_id": "cts-g", "connection": "bingx-x01", "tracking_scope": tracking_scope("bingx-x01"), "client_id": "Gx01oabc"}
         foreign = {**own, "tracking_scope": tracking_scope("bingx-x02"), "client_id": "Gx02oabc"}

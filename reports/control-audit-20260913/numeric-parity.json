@@ -1,0 +1,293 @@
+{
+  "groups": [
+    {
+      "group": "BCH-USDT_active_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_active_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_break_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_break_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_common_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_common_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_direction_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_direction_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_move_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_move_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_signals_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_signals_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_state_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_state_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_trend_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "BCH-USDT_trend_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_active_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_active_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_break_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_break_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_common_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_common_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_direction_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_direction_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_move_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_move_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_signals_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_signals_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_state_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_state_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_trend_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "SOL-USDT_trend_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_active_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_active_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_break_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_break_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_common_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_common_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_direction_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_direction_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_move_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_move_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_signals_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_signals_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_state_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_state_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_trend_LONG",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    },
+    {
+      "group": "XRP-USDT_trend_SHORT",
+      "digestUnchanged": true,
+      "positiveUnchanged": true,
+      "strictUnchanged": true
+    }
+  ],
+  "all48Unchanged": true
+}

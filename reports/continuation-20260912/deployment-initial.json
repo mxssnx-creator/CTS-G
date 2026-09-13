@@ -1,0 +1,12 @@
+{
+  "revision": "e4969b8444b65daa6d078879d6491d7b2d72fbc6",
+  "release": "/opt/cts-gx-releases/e4969b8444b6",
+  "backup": "/var/backups/cts-gx/continuous-1789228506",
+  "restarted": [
+    "cts-gx-pulse@bingx-x02.service",
+    "cts-gx-pulse-http.service",
+    "cts-gx-desk.service"
+  ],
+  "x01ProcessUnchanged": true,
+  "execution": "VST_DEMO"
+}
