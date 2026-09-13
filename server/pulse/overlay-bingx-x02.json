@@ -91,6 +91,7 @@
   "leverage": 150,
   "loadPartial": true,
   "mainMinPf": 1.02,
+  "maxRealSets": 0,
   "maxDdTimeS": 57600,
   "maxOpen": 0,
   "maxPerGroup": 0,
@@ -194,6 +195,8 @@
   "stratGeneral": true,
   "stratIndications": true,
   "stratTrailing": true,
+  "strategyLiveSetsCeiling": 0,
+  "strategyRealSetsSafetyCeiling": 0,
   "symbolCap": 20,
   "symbolSort": "vol1h",
   "symbols": [

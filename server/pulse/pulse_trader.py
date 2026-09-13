@@ -388,6 +388,8 @@ _TRANSIENT_API = (
     "parameter quantity",
     "order size must be less",
     "available amount",
+    "negative account assets",
+    "order size",
     "minimum order amount",
     "minimum size per order",
     "stop loss price should",
@@ -1397,6 +1399,12 @@ class Pulse:
             return False
         if pos is None:
             return True
+        # The overall-control coordinator uses a synthetic proxy carrying the
+        # widest member range.  It must remain aggregate even though the proxy
+        # also has non-zero SL/TP percentages; otherwise the proxy would send
+        # quantity-matched controls and defeat closePosition protection.
+        if bool(getattr(pos, "_overall_proxy", False)):
+            return False
         # Persisted positions without a group identity are legacy aggregate
         # state. Newly created positions carry effective SL/TP percentages
         # before their stable group key is assigned by prepare_position_group().
@@ -5564,6 +5572,55 @@ class Pulse:
                         )
                         self.did_io = True
                         msg = str(r.get("msg") or "")
+            if not self.ok(r) and c is not None:
+                # BingX can reject an otherwise legal target when several
+                # fills are settling at once (102201 / negative account
+                # assets, insufficient margin, or an available-amount
+                # race).  One smaller, explicitly bounded retry lets the
+                # independent Set proceed without enlarging exposure or
+                # hammering the venue.  Ambiguous timeouts are intentionally
+                # excluded because the first order may already exist.
+                low_retry = str(msg or r.get("msg") or "").lower()
+                reduce_retry = any(
+                    token in low_retry
+                    for token in (
+                        "negative account assets",
+                        "insufficient margin",
+                        "order size must be less",
+                        "available amount",
+                        "maximum position",
+                    )
+                )
+                if reduce_retry:
+                    floor_qty = self.min_order_qty(c, px)
+                    room_notional = min(
+                        max(0.0, float(max_book or 0.0)) * 0.98,
+                        max(0.0, float(self.avail_notional(c) or 0.0)) * 0.95,
+                    )
+                    retry_qty = self.round_qty(c, min(max(0.0, qty * 0.5), room_notional / max(px, 1e-12)))
+                    if retry_qty < floor_qty:
+                        retry_qty = floor_qty
+                    retry_margin = retry_qty * px / max(1, lev)
+                    if (
+                        retry_qty > 0
+                        and retry_qty + max(float(getattr(c, "step", 0) or 0), 1e-12) < qty
+                        and retry_qty * px <= room_notional * 1.001
+                        and retry_margin <= max(0.0, float(self.available or 0.0)) * 0.90
+                    ):
+                        qty = retry_qty
+                        pending_meta["venueRiskRetry"] = True
+                        pending_meta["venueRiskRetryReason"] = short_api_msg(msg or r.get("msg") or "")
+                        self._remember_pending(
+                            kind="entry", cid=cid, symbol=sym, side=side,
+                            requested_qty=qty, group_key=pending_group_key,
+                            metadata=pending_meta,
+                        )
+                        r = self.api.post(
+                            "/openApi/swap/v2/trade/order",
+                            _entry_body(qty, cid),
+                        )
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
@@ -5801,9 +5858,12 @@ class Pulse:
             if self.missing_controls(pos):
                 self.ensure_controls(pos)
             if self.missing_controls(pos):
-                log(f"OPEN scratch no-ctrl {sym}")
-                self.close_pos(pos, avg, "no-ctrl")
-                return
+                # Venue controls are retried by priority_controls().  A
+                # transient price/position/rate-limit rejection must not
+                # immediately flatten a confirmed market fill and destroy
+                # the independent Set lane.  The existing bounded safety
+                # path still flattens a completely bare position after 300s.
+                log(f"OPEN pending-controls {sym} {side}", every=12.0, key=f"pending-ctrl:{sym}:{side}")
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
         self.ensure_strategy_lanes(pos)
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
@@ -6071,9 +6131,6 @@ class Pulse:
             else:
                 self.losses += 1
                 self.consec_loss += 1
-                if self.consec_loss >= 8:
-                    self.cooldown["__book__"] = time.time() + 120
-                    self.consec_loss = 4
             try:
                 self.variants.on_close(rec)
             except Exception:
@@ -6149,8 +6206,6 @@ class Pulse:
             self.ban_sym(pos.symbol, clear_open=False)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
         else:
-            if self.consec_loss >= 4:
-                log("pause new entries 120s after cold streak", every=30.0, key="partial-cold-streak")
             self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
             self.remove_position(pos)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
