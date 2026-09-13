@@ -107,6 +107,17 @@ class OverallTests(unittest.TestCase):
         self.assertNotEqual(pos.tp_oid,old[1])
         self.assertEqual(len(p.api.orders),2)
 
+    def test_success_with_unrecognized_envelope_keeps_intent_until_queried(self):
+        p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
+        pos=next(iter(p.open.values()));pos.qty*=2
+        post=p.api.post
+        def changed_envelope(path,body):
+            result=post(path,body)
+            return {'code':0,'data':{'newOrder':result['data']}}
+        with patch.object(p.api,'post',side_effect=changed_envelope):overall.ensure(p,pos)
+        self.assertIn('sl',pos.overall_replace_intents)
+        self.assertEqual(len(p.api.orders),2)
+
     def test_accepted_replace_with_lost_response_is_recovered_without_duplicate(self):
         p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
         pos=next(iter(p.open.values()));pos.qty*=2

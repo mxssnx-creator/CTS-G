@@ -3594,7 +3594,7 @@ class Pulse:
             client_id=cid,
             detail="cancel order" if self.ok(r) else str(r.get("msg") or "cancel failed"),
         )
-        already_absent = str(r.get("code")) == "109421" and "order" in str(r.get("msg") or "").lower() and "not exist" in str(r.get("msg") or "").lower()
+        already_absent = str(r.get("code")) in ("109400", "109421") and "order not exist" in str(r.get("msg") or "").lower()
         if self.ok(r) or already_absent:
             self.record_event("cancellation", stable_key(cancel_key, "completed"), status="confirmed", symbol=symbol, order_id=order_id, client_id=cid, detail="order cancelled")
             self._oo_cache.pop(symbol, None)
@@ -4486,7 +4486,7 @@ class Pulse:
     def replace_sl(self, pos: Position, new_sl: float) -> bool:
         """Install a tighter stop without leaving a position unprotected.
 
-        BingX has no atomic cancel/replace route. Place the replacement first
+        The individual-order path places the replacement first
         and cancel old protection only after a distinct order id is confirmed.
         A failed update preserves the old stop; the event loop can retry it.
         """

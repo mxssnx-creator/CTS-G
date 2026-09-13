@@ -109,6 +109,27 @@ def replace_existing(pulse, proxy, rows, signature):
         old_oid = next((getattr(p,field,'') for p in rows if getattr(p,field,'')), '')
         intent = next((p.overall_replace_intents.get(kind) for p in rows if p.overall_replace_intents.get(kind)),None)
         response = None
+        if not intent:
+            matches = [o for o in pulse.list_orders(proxy.symbol)
+                if pulse._order_matches_position(o,proxy)
+                and o.get('status') == 'NEW'
+                and o.get('type') == ('STOP_MARKET' if kind == 'sl' else 'TAKE_PROFIT_MARKET')
+                and abs(float(o.get('origQty') or o.get('quantity') or 0)-proxy.qty) < 1e-9
+                and float(o.get('executedQty') or 0) == 0]
+            if len(matches) == 1:
+                order = matches[0]
+                recovered = str(order['orderId'])
+                binding = {p.client_id:p.qty for p in rows}
+                for p in rows:
+                    prior = getattr(p,field,'')
+                    if prior and prior != recovered:p.retired_control_ids=sorted(set(p.retired_control_ids)|{prior})
+                    setattr(p,field,recovered);setattr(p,'sec_'+field,recovered)
+                    setattr(p,attr,list(leg_sig));p.overall_controls=True
+                rows[0].overall_bindings[recovered]=binding
+                setattr(proxy,field,recovered)
+                setattr(proxy,kind,float(order.get('stopPrice') or price))
+                pulse.save_open_book()
+                continue
         if intent:
             # Recover an ambiguous response before any resubmission. The
             # accepted order's client ID and original member sizes are fixed.
@@ -119,7 +140,7 @@ def replace_existing(pulse, proxy, rows, signature):
             if pulse.ok(found) and found_oid and pulse.cid_ours(pulse.order_cid(found_order)) and pulse.order_cid(found_order).lower() == intent['body']['clientOrderId'].lower():
                 response = {'code':0,'data':{'cancelResult':'SUCCESS','newOrderResult':'SUCCESS','newOrderId':found_oid}}
             else:
-                absent = str(found.get('code')) == '109421' and 'not exist' in str(found.get('msg') or '').lower()
+                absent = str(found.get('code')) in ('109400','109421') and 'not exist' in str(found.get('msg') or '').lower()
                 prior = pulse.api.get('/openApi/swap/v2/trade/order',{'symbol':proxy.symbol,'orderId':intent['body']['cancelOrderId']}) if absent else {}
                 prior_data = prior.get('data') or {}
                 prior_order = prior_data.get('order',prior_data) if isinstance(prior_data,dict) else {}
@@ -146,10 +167,11 @@ def replace_existing(pulse, proxy, rows, signature):
         if not confirmed:
             # Explicit rejections can be rebuilt; transport uncertainty keeps
             # its exact pending intent for reconciliation.
-            if response.get('code') not in (-1,'-1',None):
+            if response.get('code') not in (0,'0',-1,'-1',None):
                 for p in rows:p.overall_replace_intents.pop(kind,None)
                 pulse.save_open_book()
-            if isinstance(data,dict) and data.get('cancelResult') == 'SUCCESS':
+            absent = str(response.get('code')) in ('109400','109421') and 'order not exist' in str(response.get('msg') or '').lower()
+            if absent or (isinstance(data,dict) and data.get('cancelResult') == 'SUCCESS'):
                 for p in rows:
                     for f in FIELDS:
                         if getattr(p,f,'') == old_oid:setattr(p,f,'')
@@ -172,6 +194,7 @@ def replace_existing(pulse, proxy, rows, signature):
             setattr(p,attr,list(leg_sig))
             p.overall_controls = True
         setattr(proxy,field,new_oid)
+        setattr(proxy,kind,float(body.get('stopPrice') or price))
         pulse._oo_cache.pop('*',None)
         pulse.save_open_book()
         if leg_sig != [signature[0],signature[1 if kind=='sl' else 2]]:
