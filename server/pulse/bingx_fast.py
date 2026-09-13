@@ -65,7 +65,11 @@ LIMITS = {
 }
 
 RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
-SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429}
+# These are idempotent reconciliation outcomes: the local control/order book
+# asked about an object that the venue has already removed. They must not make
+# a healthy continuous loop look failed; the caller still receives the
+# response and applies its normal stale-state recovery.
+SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 101205}
 
 
 class TokenBucket:
@@ -481,8 +485,6 @@ class FastBingX:
                 timings = self.request_timings = {}
             timings.setdefault(method+" "+path, deque(maxlen=256)).append((time.perf_counter()-request_started)*1000)
         if isinstance(body, dict) and body.get("code") not in (0, None):
-            if body.get("code") in (109400, "109400") and "/trade/" in path:
-                self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg") or "")[:220])
             if body.get("code") not in (100404, 109400, 100001, *SKIP_API_LOG) or "signature" in str(body.get("msg") or "").lower():
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
