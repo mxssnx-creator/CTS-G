@@ -1119,6 +1119,11 @@ class SetBook:
         self._hist_total = 0
         self._hist_counts: Dict[str, Dict[str, int]] = {}
         self._hist_set_signature: Tuple[str, ...] = ()
+        # Separate replay-input changes from threshold-only score changes so
+        # a PF/evaluation edit does not discard an otherwise complete replay.
+        self.replay_required = True
+        self.score_refresh_required = False
+        self._score_settings_signature: Tuple[Any, ...] = ()
         self._running = False
         self._snap_cache: Optional[Dict[str, Any]] = None
         self._snap_ts = 0.0
@@ -1191,6 +1196,12 @@ class SetBook:
             self._processing_set_ids = set(getattr(self, "_processing_set_ids", ()) or ())
         if not isinstance(getattr(self, "_processing_reasons", None), dict):
             self._processing_reasons = {}
+        if not hasattr(self, "replay_required"):
+            self.replay_required = True
+        if not hasattr(self, "score_refresh_required"):
+            self.score_refresh_required = False
+        if not hasattr(self, "_score_settings_signature"):
+            self._score_settings_signature = ()
 
     def _invalidate_entry_cache(self) -> None:
         """Advance the entry-read generation without racing score workers."""
@@ -1323,6 +1334,8 @@ class SetBook:
         # must not report live processing flags from the source lane.
         clone._processing_set_ids = set()
         clone._processing_reasons = {}
+        clone.replay_required = False
+        clone.score_refresh_required = False
         return clone
 
     def load(
@@ -1534,6 +1547,12 @@ class SetBook:
         # caller explicitly opts into the deferred bootstrap.
         if rebuild:
             self._rebuild_sets()
+        else:
+            # Initial Pulse startup publishes the catalog separately.  The
+            # published catalog must request a first replay, but has no
+            # threshold-only refresh pending yet.
+            self.replay_required = not bool(self._hist_set_signature)
+            self.score_refresh_required = False
 
     def eval_need(self) -> int:
         """Required completed Base samples; default is the full last-30 window."""
@@ -1589,6 +1608,56 @@ class SetBook:
         if ids:
             return list(ids)
         return [st.id for st in self.by_idx if st.pack == pack]
+
+    def _replay_signature(self, next_sets: Dict[str, SetState]) -> Tuple[Any, ...]:
+        """Return inputs that change historic evidence, not just Set IDs."""
+        return (
+            tuple(next_sets),
+            round(float(self.sl_min), 12),
+            round(float(self.sl_max), 12),
+            round(float(self.tp_min), 12),
+            round(float(self.tp_max), 12),
+            round(float(self.cost_pct), 12),
+            json.dumps(self.ind_settings, sort_keys=True, default=str),
+            int(self.lookback),
+            int(self.evaluation_bars),
+            bool(self.exact_replay_window),
+            int(self.min_bars),
+            int(self.warmup),
+            int(self.hist_time_bars),
+            round(float(self.scratch_s), 6),
+            round(float(self.scratch_min), 12),
+            int(self.cooldown_bars),
+            round(float(self.tp_pct), 12),
+            bool(self.ignore_tp),
+            bool(self.hist_honor_tp),
+            bool(self.hist_block),
+            bool(self.hist_dca),
+            round(float(self.block_vr), 12),
+            int(self.block_stack),
+            round(float(self.block_max_multiplier), 12),
+            tuple(self.block_counts),
+            tuple(round(float(x), 12) for x in self.dca_dist),
+            tuple(round(float(x), 12) for x in self.dca_mult),
+        )
+
+    def _score_signature(self) -> Tuple[Any, ...]:
+        """Return settings that alter score/qualification, not replay data."""
+        return (
+            int(self.pf_n),
+            int(self.deact_n),
+            round(float(self.min_pf), 12),
+            tuple(sorted((str(k), round(float(v), 12)) for k, v in self.stage_min_pf.items())),
+            round(float(self.real_min_pf), 12),
+            int(self.main_eval),
+            int(self.real_eval),
+            round(float(self.max_dd_s), 6),
+            bool(self.auto_deact),
+            bool(self.live_negative_deact),
+            bool(self.reactivate),
+            bool(self.strict_gate),
+            int(self.max_active),
+        )
 
     def _rebuild_sets(self) -> None:
         keep = {sid: st for sid, st in self.sets.items()}
@@ -1660,23 +1729,29 @@ class SetBook:
         self.sets = next_sets
         self.by_idx = by_idx
         self._reindex()
+        signature = self._replay_signature(next_sets)
+        replay_changed = signature != self._hist_set_signature
+        score_signature = self._score_signature()
+        score_changed = score_signature != self._score_settings_signature
+        self.replay_required = bool(replay_changed)
+        self.score_refresh_required = bool(not replay_changed and score_changed)
+        self._score_settings_signature = score_signature
         # Rebind unresolved live lineages to the new Set objects without
         # changing their entry-selection gate.
         self._apply_processing_flags()
         for st in by_idx:
             st.parent_set_id = st.id if st.kind == "base" else make_set_id(st.pack, st.sl_ratio, "", st.step)
-            st.stage = "Base"
-            st.stage_qualified = ""
             st.position_cost_pct = self.cost_pct
-            st.axis_key = ""
-            st.relative_count = 1
-            st.volume_ratio = 1.0
-            st.indication_kind = "" if st.pack != "indications" else "signals"
-            st.strategy_adjustments = {}
+            if replay_changed:
+                st.stage = "Base"
+                st.stage_qualified = ""
+                st.axis_key = ""
+                st.relative_count = 1
+                st.volume_ratio = 1.0
+                st.indication_kind = "" if st.pack != "indications" else "signals"
+                st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
-        signature = (tuple(next_sets), self.sl_min, self.sl_max, self.tp_min, self.tp_max,
-                     json.dumps(self.ind_settings, sort_keys=True))
-        if signature != self._hist_set_signature:
+        if replay_changed:
             self._hist_set_signature = signature
             self._hist_seen.clear()
             self._hist_total = 0
@@ -1880,6 +1955,8 @@ class SetBook:
 
     def trim_tapes(self, hist_cap: int = 96, live_cap: int = 80, bar_cap: int = 180) -> int:
         n = 0
+        # ``recent_direction_rows`` balances the cap across LONG/SHORT. Keep
+        # two windows so last-75 evaluation still retains 75 rows per side.
         evidence = 2 * max(75, self.pf_n, self.deact_n, self.main_eval, self.real_eval)
         hc = max(evidence, int(hist_cap or HIST_CAP))
         lc = max(evidence, int(live_cap or HIST_CAP))
@@ -4516,7 +4593,20 @@ class SetBook:
 
         gated = bool(self.enabled and self.use_historic_gate and self.progress.ready)
         if not gated:
-            return [state for state in rows if side_active(state)]
+            result = [state for state in rows if side_active(state)]
+            if not isinstance(getattr(self, "entry_gate_stats", None), dict):
+                self.entry_gate_stats = {}
+            self.entry_gate_stats[f"{pack}/{want_side if use_side else 'any'}"] = {
+                "rows": len(rows),
+                "passed": len(result),
+                "need": int(self.eval_need()),
+                "pfFloor": round(float(self.real_min_pf or 1.0), 6),
+                "ready": bool(self.progress.ready),
+                "phase": str(getattr(self.progress, "phase", "") or ""),
+                "replayPct": round(float(getattr(self.progress, "pct", 0.0) or 0.0), 1),
+                "deferred": bool(self.enabled and self.use_historic_gate and not self.progress.ready),
+            }
+            return result
 
         need = self.eval_need()
         floor = max(1.0, float(self.real_min_pf or 1.0))
@@ -4558,6 +4648,8 @@ class SetBook:
             "need": int(need),
             "pfFloor": round(float(floor), 6),
             "maxDdS": round(float(self.max_dd_s or 0.0), 1),
+            "ready": bool(self.progress.ready),
+            "phase": str(getattr(self.progress, "phase", "") or ""),
             **rejected,
             "t": round(time.time(), 3),
         }
@@ -4677,7 +4769,9 @@ class SetBook:
         """Revalidate the exact selected object at the submission boundary."""
         if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
             return False
-        if self.use_historic_gate and not self.progress.ready:
+        if self.use_historic_gate and (
+            not self.progress.ready or self.progress.phase == "score-refresh"
+        ):
             return False
         if st.deact_reason == "selection limit":
             return False
