@@ -64,6 +64,16 @@ try {
     await input.fill('5');
     assert.equal(await input.inputValue(), '5');
   }
+  await page.getByTestId('section-controls').click();
+  const overall = page.getByRole('button', {name:'Overall SL/TP by symbol and direction'});
+  assert.ok(await overall.count());
+  await overall.click();
+  await overall.click();
+  const overallSaved = page.waitForResponse(r => r.url().includes('/config.json') && r.request().method() === 'POST');
+  await page.getByRole('button', {name:'Save to VST',exact:true}).click();
+  await overallSaved;
+  assert.equal((saved.at(-1).overlay || saved.at(-1)).controlOrdersOverall, true);
+  await page.screenshot({path: root+'/overall-control-settings.png'});
   const result = { ok: true, checked: 'control default0 and saved5/0, single PF control, all stage aliases, Base default30 and saved75, DCA/Exit deactivation5',
                    exchangeAccess: false, pageErrors: errors, optionalExternalResourcesStubbed: true };
   writeFileSync(root + '/settings-contract.json', JSON.stringify(result, null, 2));
