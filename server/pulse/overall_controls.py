@@ -12,6 +12,18 @@ from position_cost import row_fee_usdt
 FIELDS = ('sl_oid', 'tp_oid', 'sec_sl_oid', 'sec_tp_oid')
 
 
+def venue_order_cooling(pulse):
+    """Return whether the shared venue order endpoint is cooling down."""
+    retry_after = getattr(getattr(pulse, 'api', None), 'order_retry_after', None)
+    if not callable(retry_after):
+        return False
+    try:
+        remaining = float(retry_after())
+        return math.isfinite(remaining) and remaining > 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def cleanup_state(pulse):
     if not hasattr(pulse, '_overall_cleanup'):
         # The open-book path is connection-scoped, including in test fixtures.
@@ -261,6 +273,19 @@ def ensure(pulse, pos):
         rows = members(pulse, pos)
         if not rows:
             return False
+        # Overall controls are quantity-matched proxy orders. Older releases
+        # persisted close_position=True on each member from the legacy
+        # aggregate path, which made the book claim semantics absent from the
+        # actual request payload. Normalize the member state first.
+        state_changed = False
+        for member in rows:
+            if bool(getattr(member, 'close_position', True)):
+                member.close_position = False
+                state_changed = True
+        if state_changed:
+            pulse.save_open_book()
+        if venue_order_cooling(pulse):
+            return False
         drain_retired(pulse,rows)
         key = (pos.symbol, pos.side)
         cache = getattr(pulse, '_overall_pairs', None)
@@ -313,6 +338,8 @@ def ensure(pulse, pos):
             for p in rows
         )
         proxy.qty, proxy.entry = qty, entry
+        proxy.close_position = False
+        proxy.member_count = len(rows)
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry
         proxy.sl, proxy.tp = low, high

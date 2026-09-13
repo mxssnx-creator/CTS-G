@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh CTS-G pulse resource policy
+Documentation=https://github.com/mxssnx-creator/CTS-G
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+RandomizedDelaySec=15s
+Persistent=true
+Unit=grok-resources.service
+
+[Install]
+WantedBy=timers.target

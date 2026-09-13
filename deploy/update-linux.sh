@@ -100,6 +100,7 @@ sync_pulse_tree
 ensure_python_deps
 npm_install_desk
 install_units
+apply_dynamic_resources
 enforce_retention
 
 if [[ "$NO_RESTART" -eq 1 ]]; then

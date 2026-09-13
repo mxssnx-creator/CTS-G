@@ -2996,10 +2996,11 @@ class Pulse:
     def control_event_fields(self, pos: Optional[Position]) -> Dict[str, Any]:
         if pos is None:
             return {}
+        overall = bool(getattr(pos, "_overall_proxy", False)) or overall_controls.enabled(self, pos)
         return {
             "control_group_key": str(getattr(pos, "control_group_key", "") or ""),
             "control_range_key": str(getattr(pos, "control_range_key", "") or "aggregate"),
-            "control_mode": "per-config" if self.per_config_controls(pos) else "aggregate",
+            "control_mode": "overall" if overall else ("per-config" if self.per_config_controls(pos) else "aggregate"),
             "member_count": max(1, int(getattr(pos, "member_count", 1) or 1)),
         }
 
@@ -3931,6 +3932,9 @@ class Pulse:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         c = self.contracts.get(pos.symbol)
         tick = 10 ** -(c.pprec if c else 4)
+        # Keep the configured member distance intact. If the venue rejects a
+        # fast-moving trigger, the retry loop refreshes the quote and widens
+        # the attempted price without changing the Set's normal range.
         pad = max(8 * tick, hi * 0.0020)
         price = float(price or 0)
         if is_sl:
@@ -4025,9 +4029,11 @@ class Pulse:
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
         if not self.exchange_position_active(pos) and not getattr(pos, "_overall_exchange_verified", False):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
-        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
-            return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
+        if (time.time() < self.ctrl_skip.get("__order_cap__", 0)
+                or self._controls_waiting_for_position(pos)
+                or overall_controls.venue_order_cooling(self)):
+            return have_this
         quantity_matched = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
         scope = self.position_key(pos) if quantity_matched else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
@@ -4377,6 +4383,8 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """Install one complete protection pair without exceeding venue batch quotas."""
+        if overall_controls.venue_order_cooling(self):
+            return
         if overall_controls.enabled(self, pos):
             return overall_controls.ensure(self,pos)
         previous_shared = {getattr(pos,f,"") for f in overall_controls.FIELDS}-{ "" } if getattr(pos,"overall_controls",False) else set()
@@ -10782,7 +10790,11 @@ class Pulse:
                     "secTpOid": getattr(p, "sec_tp_oid", ""),
                     "controls": p.controls_ok,
                     "overall": bool(getattr(p, "overall", True)),
-                    "closePosition": bool(getattr(p, "close_position", True)),
+                    "closePosition": (
+                        False
+                        if (overall_controls.enabled(self, p) or bool(getattr(p, "overall_controls", False)))
+                        else bool(getattr(p, "close_position", True))
+                    ),
                     "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if exchange_own_open >= 0 else None,
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
