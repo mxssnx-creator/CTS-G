@@ -23,7 +23,7 @@ def run(*args):
 def profile_patch(current, defaults, keep_existing=False):
     patch = {k: current.get(k, v) if keep_existing else v for k, v in defaults.items()}
     # The control-off rollout explicitly changes these two user requirements.
-    for key in ("controlMinTrades", "symbolCap"):
+    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates"):
         patch[key] = defaults[key]
     return patch
 

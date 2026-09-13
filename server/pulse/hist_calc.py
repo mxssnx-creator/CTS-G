@@ -1512,7 +1512,7 @@ def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tup
     book.bars[sym] = bars
     try:
         prepared = book.prepare_replay_signals(sym, now)
-        forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, control_n=_HIST_WORKER_CONTROL_N)
+        forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=_HIST_WORKER_CONTROL_N)
         return sym, len(bars), prepared, forced, (time.perf_counter() - started) * 1000.0
     finally:
         book.bars.pop(sym, None)
@@ -1615,7 +1615,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
         for key, rows in local_strat.items():
             if len(rows) > 2400:
                 local_strat[key] = rows[-2400:]
-        forced = evaluate_forced_symbol(str(sym), bars, book.ind_settings, now, cost_pct=book.cost_pct, control_n=_HIST_WORKER_CONTROL_N)
+        forced = evaluate_forced_symbol(str(sym), bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=_HIST_WORKER_CONTROL_N)
         return (
             str(sym),
             int(nbar),
@@ -1667,7 +1667,7 @@ def run_forced_calc(body: Dict[str, Any], persist: bool = True, *, on_progress=N
         def item(sym, bars, src, done, total):
             if should_cancel and should_cancel():
                 raise RuntimeError("Forced calculation superseded or stopped")
-            results.append(evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, control_n=opt["controlMinTrades"]))
+            results.append(evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=opt["controlMinTrades"]))
             sources[sym] = "historical-market" if src == "live" else src
             job.update(phase="replay", pct=round(done / total * 95, 1),
                        detail=f"{done}/{total} forced symbols", forcedConfigs=forced_summary(results, sources, now))

@@ -113,7 +113,7 @@ def execute(task):
         trainpf=1+.1*np.divide(metrics[:,16],metrics[:,8],out=np.zeros(len(POLICIES)),where=metrics[:,8]>0)
         testpf=1+.1*np.divide(metrics[:,19],metrics[:,10],out=np.zeros(len(POLICIES)),where=metrics[:,10]>0)
         assessed=rule.masks(metrics);q=assessed['qualified'];training=assessed['training']
-        strict_qualified+=int((training & (metrics[:,10]>=8) & (metrics[:,11]>1e-12) & (testpf>POSITIVE_PF+1e-9)).sum())*multiplicity
+        strict_qualified+=int((training & (metrics[:,8]>=8) & (metrics[:,10]>=8) & (metrics[:,11]>1e-12) & (testpf>POSITIVE_PF+1e-9)).sum())*multiplicity
         training_qualified+=int(training.sum())*multiplicity
         for name,mask in assessed['states'].items():states[name]=states.get(name,0)+int(mask.sum())*multiplicity
         for (control_n,control_pf) in sensitivity:

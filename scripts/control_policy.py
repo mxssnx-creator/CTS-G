@@ -18,14 +18,14 @@ METRICS = ('n','wins','net','cost','gain','loss','maxDd','maxDdtBars',
 
 @dataclass(frozen=True)
 class ControlRule:
-    training_n: int = 8
+    training_n: int = 0
     control_n: int = CONTROL_MIN_TRADES
     training_pf: float = POSITIVE_PF
     control_pf: float = CONTROL_MIN_PF
 
     def __post_init__(self):
-        for n,minimum in ((self.training_n,1),(self.control_n,0)):
-            if type(n) is not int or n<minimum:raise ValueError('Training count must be positive; control count can be zero (off)')
+        for n,minimum in ((self.training_n,0),(self.control_n,0)):
+            if type(n) is not int or n<minimum:raise ValueError('Additional sample counts must be nonnegative')
         if not math.isfinite(self.training_pf) or self.training_pf<POSITIVE_PF:
             raise ValueError('Training PF cannot undercut the Base minimum')
         if not math.isfinite(self.control_pf) or self.control_pf<1.0:
@@ -39,7 +39,7 @@ class ControlRule:
         if m.ndim!=2 or m.shape[1]!=len(METRICS) or not np.all(np.isfinite(m[:,[8,9,16]])):
             raise ValueError('Expected finite training results')
         pf=1+.1*np.divide(m[:,16],m[:,8],out=np.zeros(len(m)),where=m[:,8]>0)
-        return (m[:,8]>=self.training_n) & (m[:,9]>1e-12) & (pf>self.training_pf+1e-9)
+        return ((m[:,8]>0) & (m[:,8]>=self.training_n)) & (m[:,9]>1e-12) & (pf>self.training_pf+1e-9)
 
     def masks(self, metrics):
         m=np.asarray(metrics,dtype=float)
@@ -47,7 +47,7 @@ class ControlRule:
             raise ValueError('Expected finite 20-column result vectors')
         train_pf=1+.1*np.divide(m[:,16],m[:,8],out=np.zeros(len(m)),where=m[:,8]>0)
         control_pf=1+.1*np.divide(m[:,19],m[:,10],out=np.zeros(len(m)),where=m[:,10]>0)
-        sample=m[:,8]>=self.training_n
+        sample=(m[:,8]>0) & (m[:,8]>=self.training_n)
         positive=m[:,9]>1e-12
         training=sample & positive & (train_pf>self.training_pf+1e-9)
         complete=m[:,10]>=self.control_n

@@ -16,15 +16,46 @@ from pulse_trader import Pulse
 
 class ForcedTests(unittest.TestCase):
     def row(self, **overrides):
-        return {"id": "forced:XRP:signals:LONG:test", "symbol": "XRP-USDT", "indication": "signals",
+        result = {"id": "forced:XRP:signals:LONG:test", "symbol": "XRP-USDT", "indication": "signals",
                 "direction": "LONG", "tpPct": .4, "slPct": .1, "pf": 1.2, "trainPf": 1.3,
                 "holdoutPf": 1.1, "trainN": 20, "holdoutN": 10, "maxDrawdownR": 2,
-                "evidenceVersion": 2, "trainingWindowsOk": True, "trainingMaxDrawdownR": 2,
+                "evidenceVersion": 3, "trainingWindowsOk": True, "trainingMaxDrawdownR": 2,
                 "tradesPerHour": 4, "source": "historical-market", "eligible": True, **overrides}
+        pf = result.get("trainPfExact", result["trainPf"])
+        result["trainingResults"] = [pf * .001, -.001] if result["trainN"] else []
+        result["trainingCostPct"] = .15
+        return result
 
     def replay(self, bars, signals=None, **kwargs):
         return forced._replay(bars, signals or [(1, .9)] * len(bars), 1, .4, .1, 0,
                               100000, kwargs.get("cost", .15), 8, 1.05, 6, control_n=kwargs.get("control_n", 0))
+
+    def test_no_extra_minimum_and_own_last_n_window(self):
+        row = self.row(trainN=7)
+        self.assertTrue(forced.valid_candidate(row))
+        row["trainingResults"] = [-.02] + [.001]*5
+        self.assertTrue(forced.valid_candidate(row, last_n=5))
+        self.assertFalse(forced.valid_candidate(row, last_n=30))
+        metric = forced.training_window(row, 30)
+        self.assertEqual(metric["trainingUsedN"], 6)
+        self.assertFalse(metric["trainingWindowComplete"])
+        self.assertFalse(forced.valid_candidate(self.row(trainN=0)))
+
+    def test_batches_eventually_visit_700_independent_candidates(self):
+        p = object.__new__(Pulse)
+        p.klines = {"XRP-USDT": [[100]*5]*65}
+        rows = [self.row(id=str(i)) for i in range(700)]
+        p._forced_data = lambda: {"rows": rows}
+        accepted = set()
+        p._forced_entry_allowed = lambda row, *args: row["id"] not in accepted
+        p.place = lambda *args, **kw: accepted.add(kw["forced_row"]["id"])
+        with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,"ind:signals")]):
+            # Use the actual tag from the registry, avoiding a fabricated signal.
+            from set_engine import IND_TAG_KIND
+            tag = next(k for k,v in IND_TAG_KIND.items() if v == "signals")
+            with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,tag)]):
+                for _ in range(4): p.maybe_forced_entries()
+        self.assertEqual(len(accepted),700)
 
     def test_exact_grid(self):
         self.assertEqual(len(forced.TP_GRID) * len(forced.SL_GRID), 81)
@@ -52,8 +83,8 @@ class ForcedTests(unittest.TestCase):
         self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.3))
         for field in ("pf", "trainPf", "holdoutPf"):
             self.assertFalse(forced.valid_candidate(self.row(**{field: float("nan")})))
-        for changes in ({"source": "synth"}, {"trainN": 7}, {"slPct": .12}, {"trainingMaxDrawdownR": 7},
-                        {"trainPf":1.05}, {"trainingWindowsOk":False}, {"evidenceVersion":1}):
+        for changes in ({"source": "synth"}, {"trainN": 0}, {"slPct": .12},
+                        {"trainPf":1.05}, {"evidenceVersion":1}):
             self.assertFalse(forced.valid_candidate(self.row(**changes)))
         losing_control=self.row(holdoutN=0,holdoutPf=0,pf=0,maxDrawdownR=100,eligible=False)
         self.assertTrue(forced.valid_candidate(losing_control))
