@@ -4110,6 +4110,17 @@ class Pulse:
         if callable(retry_after) and retry_after() > 0:
             return True
         sets = getattr(self, "sets", None)
+        # ``permissive-bounded`` is the VST rollout policy: each Set still
+        # has to pass its own Base -> Main -> Real/PF/DD-time checks in
+        # SetBook.entry_sets()/execution_allowed(), but a long multi-symbol
+        # replay must not hold already-qualified Sets hostage behind the
+        # aggregate progress.ready flag. Strict production lanes retain the
+        # historical readiness boundary.
+        partial_set_entries = bool(
+            sets is not None
+            and str(getattr(sets, "entry_policy", "strict") or "strict").strip().lower()
+            == "permissive-bounded"
+        )
         if (
             sets is not None
             and bool(getattr(sets, "enabled", False))
@@ -4119,6 +4130,7 @@ class Pulse:
                 or bool(getattr(self, "_hist_score_refresh_requested", False))
                 or str(getattr(getattr(sets, "progress", None), "phase", "")) == "score-refresh"
             )
+            and not partial_set_entries
         ):
             # DCA and Block adds are new orders too; management and protective
             # controls use separate paths and remain available during startup.
@@ -7307,9 +7319,11 @@ class Pulse:
             self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
             # A replay-input change cannot inherit completion claims from the
             # previous catalog or symbol universe.
-            # A persisted/partial snapshot may still carry ready=true. Clear it
-            # before this new universe is replayed so the historic entry gate
-            # cannot publish incomplete Set directions as live candidates.
+            # Do not let a persisted/partial snapshot expose the historic
+            # entry gate while this new universe is still being replayed.  A
+            # stale ready flag marks every independent Set direction as
+            # eligible for the strict path before its own evidence exists and
+            # can leave the dispatch matrix at zero until the next full run.
             self.sets.progress.ready = False
             self.sets.progress.stale = False
             self._hist_score_refresh_requested = False
