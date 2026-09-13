@@ -111,9 +111,12 @@ class ReplayIndicationTests(unittest.TestCase):
                 for sid, rows in expected_hist.items():
                     self.assertEqual([dict(r) for r in actual_hist[sid]],
                                      [{k:v for k,v in dict(r).items() if k != 'strategy'}
-                                      for r in engine.recent_direction_rows(rows, engine.HIST_CAP)], sid)
+                                      for r in engine.recent_direction_rows(rows, engine.REPLAY_HIST_CAP)], sid)
                     for side in ('LONG','SHORT'):
-                        self.assertGreaterEqual(sum(r['side']==side for r in actual_hist[sid]), 75)
+                        self.assertGreaterEqual(
+                            sum(r['side']==side for r in actual_hist[sid]),
+                            engine.REPLAY_HIST_CAP // 2,
+                        )
                 self.assertEqual(actual_strategy, expected_strategy)
                 self.assertTrue(any('LONG' in p and 'bar ' in p for p in progress))
                 self.assertTrue(any('SHORT' in p and 'bar ' in p for p in progress))
