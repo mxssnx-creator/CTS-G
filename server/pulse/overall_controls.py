@@ -145,7 +145,17 @@ def replace_existing(pulse, proxy, rows, signature):
                 prior_data = prior.get('data') or {}
                 prior_order = prior_data.get('order',prior_data) if isinstance(prior_data,dict) else {}
                 if not (pulse.ok(prior) and prior_order.get('status') == 'NEW' and str(prior_order.get('orderId')) == str(intent['body']['cancelOrderId'])):
-                    return False  # Unresolved acknowledgement; keep polling.
+                    # Both sides of the old replacement are gone. Retaining
+                    # this intent would poll the same 109421 forever and
+                    # prevent a clean replacement from being created.
+                    for p in rows:
+                        p.overall_replace_intents.pop(kind, None)
+                        if getattr(p, field, '') == old_oid:
+                            setattr(p, field, '')
+                        if getattr(p, 'sec_' + field, '') == old_oid:
+                            setattr(p, 'sec_' + field, '')
+                    pulse.save_open_book()
+                    return False
                 response = pulse.api.post('/openApi/swap/v1/trade/cancelReplace',intent['body'])
             body = intent['body'];old_oid = str(body['cancelOrderId'])
             leg_sig = intent['signature']
