@@ -452,10 +452,32 @@ def slim_for_ui(st: dict) -> dict:
         historic["rows"] = historic["rows"][:40]
         out["historic"] = historic
     sets = dict(out.get("sets") or {})
-    if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
-        sets = dict(sets)
-        sets["rowCount"] = len(sets["rows"])
-        sets["rows"] = sets["rows"][:40]
+    if sets:
+        nested_cov = dict(sets.get("coverage") or {})
+        if nested_cov:
+            qualified = nested_cov.get("qualifiedParentIds")
+            if isinstance(qualified, dict):
+                counts = {}
+                sample = {}
+                for stage, ids in qualified.items():
+                    if isinstance(ids, list):
+                        counts[str(stage)] = len(ids)
+                        sample[str(stage)] = ids[:64]
+                    else:
+                        sample[str(stage)] = ids
+                nested_cov["qualifiedParentIdCounts"] = counts
+                nested_cov["qualifiedParentIds"] = sample
+            elif isinstance(qualified, list) and len(qualified) > 128:
+                nested_cov["qualifiedParentIdCount"] = len(qualified)
+                nested_cov["qualifiedParentIds"] = qualified[:128]
+            processing_ids = nested_cov.get("processingSetIds")
+            if isinstance(processing_ids, list) and len(processing_ids) > 256:
+                nested_cov["processingSetIdCount"] = len(processing_ids)
+                nested_cov["processingSetIds"] = processing_ids[:256]
+            sets["coverage"] = nested_cov
+        if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
+            sets["rowCount"] = len(sets["rows"])
+            sets["rows"] = sets["rows"][:40]
         out["sets"] = sets
     lev = out.get("leverageMap")
     if isinstance(lev, dict) and len(lev) > 40:

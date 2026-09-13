@@ -20,7 +20,15 @@ class OverallTests(unittest.TestCase):
                 p.api.orders.pop(old);p.api.n+=1;oid=str(p.api.n)
                 p.api.orders[oid]=dict(body,orderId=oid,clientOrderID=body['clientOrderId'])
                 return {'code':0,'data':{'cancelResult':'SUCCESS','newOrderResult':'SUCCESS','newOrderId':oid}}
-            return post(path,body)
+            result = post(path,body)
+            if path.endswith('/trade/order') and str(body.get('type') or '').upper() in {
+                'STOP_MARKET', 'TAKE_PROFIT_MARKET', 'STOP', 'TAKE_PROFIT'
+            } and result.get('code') == 0:
+                row = (result.get('data') or {}).get('order') or {}
+                oid = str(row.get('orderId') or row.get('orderID') or '')
+                if oid:
+                    p.api.orders[oid] = dict(body, orderId=oid, origQty=body.get('quantity'))
+            return result
         p.api.post=call
         return p
 
@@ -49,6 +57,7 @@ class OverallTests(unittest.TestCase):
         self.assertEqual(len({r.set_id for r in rows}),2)
         self.assertEqual(len({r.sl_oid for r in rows}),1)
         self.assertEqual(len({r.tp_oid for r in rows}),1)
+        self.assertEqual(len(p.api.batches),0)
         p._overall_cleanup_next = 0
         overall.drain_retired(p,rows)
         self.assertEqual(len(p.api.orders),2)

@@ -1105,7 +1105,18 @@ class ExtraBook:
         self.cool: Dict[str, float] = {}
         self._lock = RLock()
         self._inflight: set[str] = set()
-        self.http = httpx.Client(timeout=2.2, headers={"User-Agent": "grok-x01-pulse/ind"}) if httpx else None
+        # Exchange/indicator requests are direct service traffic.  Do not let
+        # an ambient SOCKS/HTTP proxy supplied by a hosting shell change the
+        # import/startup contract (or require the optional socksio package).
+        self.http = (
+            httpx.Client(
+                timeout=2.2,
+                headers={"User-Agent": "grok-x01-pulse/ind"},
+                trust_env=False,
+            )
+            if httpx
+            else None
+        )
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ind-x")
         self.cache_max = 48

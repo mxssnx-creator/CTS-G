@@ -289,6 +289,10 @@ class FastBingX:
                 timeout=httpx.Timeout(2.0, connect=1.0),
                 headers={"User-Agent": UA, "X-BX-APIKEY": key},
                 http2=False,
+                # The exchange client must not inherit a process-wide proxy;
+                # proxy settings can be SOCKS URLs without socksio installed
+                # and are unrelated to BingX connectivity.
+                trust_env=False,
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30),
             )
         self.request_timings: Dict[str, Deque[float]] = {}
@@ -699,6 +703,7 @@ class AsyncBridge:
             timeout=httpx.Timeout(3.0, connect=1.4),
             headers=self.headers,
             http2=False,
+            trust_env=False,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=20),
         )
         self.ok = True
