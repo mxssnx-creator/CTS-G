@@ -13187,7 +13187,11 @@ class Pulse:
         )
         if reconcile_due:
             self._cycle_step("reconcile", self.adopt_exchange_positions)
-            self._reconcile_retry_at = time.monotonic() + 5.0 if self.recon_pending else 0.0
+            self._reconcile_retry_at = (
+                time.monotonic() + 5.0
+                if bool(getattr(self, "recon_pending", False))
+                else 0.0
+            )
         self._sync_set_processing()
         unprotected = self._cycle_step("controls", self.priority_controls)
         if self.cycle % 8 == 0:
