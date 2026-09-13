@@ -81,3 +81,18 @@ results; intra-position drawdown is not measured by this policy sweep.
 
 The report passed desktop and mobile browser checks with 135 table rows,
 no page errors and no page-level horizontal overflow.
+
+## Deployment verification
+
+Runtime revision `d424a5106820be831494aa7fbdda76fed4761e69` was installed on
+X02 VST and prepared for stopped X01. Both persisted profiles are identical
+for processing settings: PF 1.02, Base 30, deactivation 25, 2-day history,
+20 symbols and zero logical caps. Mainnet PID remains 0 and STOP is preserved.
+
+The two post-restart snapshots show cycle 364 → 471 and replay progress
+3/20 → 4/20 symbols in approximately 30 seconds, with zero reported errors.
+Both existing logical VST positions have protective controls and reconcile to
+one owned exchange position group (`openParity=match`). The initial history
+build is still in progress in these snapshots, so no new qualified entry count
+is claimed. Subsequent market eligibility and actual fills must be observed;
+700 fake-exchange admissions are not 700 remote fills.
