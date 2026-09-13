@@ -1,5 +1,8 @@
 # Control off and architecture audit · 13 September 2026
 
+Historical checkpoint with training minimum eight. Superseded by
+[training minimum zero audit](../training-audit-20260913/README.md).
+
 User instruction: `controlMinTrades: 0` is the default. This disables only the
 additional chronological holdout admission test. Each exact Set still needs
 its own positive training evidence, entry-time Base/Main/Real PF, and the
