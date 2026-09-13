@@ -75,6 +75,68 @@ def cgroup_memory_limit_mb() -> float:
     return 0.0
 
 
+def _cgroup_paths(v2_name: str, v1_name: str) -> List[str]:
+    """Return compatible cgroup v2/v1 paths without assuming one layout."""
+    paths: List[str] = []
+    try:
+        with open("/proc/self/cgroup") as f:
+            for line in f:
+                parts = line.strip().split(":", 2)
+                if len(parts) != 3:
+                    continue
+                rel = parts[2].lstrip("/")
+                if rel:
+                    paths.append(os.path.join("/sys/fs/cgroup", rel, v2_name))
+                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory", v1_name))
+    except Exception:
+        pass
+    paths.extend((os.path.join("/sys/fs/cgroup", v2_name),
+                  os.path.join("/sys/fs/cgroup", "memory", v1_name)))
+    seen = set()
+    result = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def cgroup_memory_current_mb() -> float:
+    """Return current cgroup usage, including reclaimable cache."""
+    for path in _cgroup_paths("memory.current", "memory.usage_in_bytes"):
+        try:
+            with open(path) as handle:
+                raw = handle.read().strip()
+            if raw and raw.lower() not in ("max", "infinity"):
+                value = float(raw)
+                if value >= 0:
+                    return value / 1048576.0
+        except Exception:
+            continue
+    return 0.0
+
+
+def cgroup_memory_events() -> Dict[str, int]:
+    """Read cumulative cgroup pressure/OOM counters when available."""
+    for path in _cgroup_paths("memory.events", "memory.oom_control"):
+        try:
+            result: Dict[str, int] = {}
+            with open(path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) != 2:
+                        continue
+                    try:
+                        result[parts[0]] = max(0, int(parts[1]))
+                    except (TypeError, ValueError):
+                        continue
+            if result:
+                return result
+        except Exception:
+            continue
+    return {}
+
+
 def malloc_trim() -> bool:
     """Give freed heap pages back to the OS. Python GC alone will not."""
     try:
@@ -202,6 +264,10 @@ class Budget:
     do_gc: bool = False
     stats_full: bool = True
     warm_s: float = 0.32
+    entry_batch: int = 256
+    entry_budget_ms: float = 500.0
+    cycle_yield_s: float = 0.02
+    memory_headroom_mb: float = 0.0
     shed: List[str] = field(default_factory=list)
 
 
@@ -212,7 +278,12 @@ class LoadGovernor:
         self.soft_mb = 0.0  # 0 = scale with universe
         self.hard_mb = 0.0
         self.cgroup_mb = cgroup_memory_limit_mb()
+        self.cgroup_current_mb = 0.0
+        self.cgroup_headroom_mb = 0.0
+        self.cgroup_events: Dict[str, int] = {}
+        self.cgroup_event_delta: Dict[str, int] = {}
         self.level = "normal"
+        self.raw_level = "normal"
         self.rss = 0.0
         self.rss_peak = 0.0
         self.hot_ms = 0.0
@@ -233,6 +304,10 @@ class LoadGovernor:
         self._host_avail_override: Optional[float] = None
         self.host_avail_mb = 0.0
         self.host_total_mb = 0.0
+        self._cgroup_current_override: Optional[float] = None
+        self._level_down_streak = 0
+        self._last_level_change = 0.0
+        self.safety_partial = False
 
     def configure(self, ov: Optional[Dict[str, Any]] = None) -> None:
         ov = ov or {}
@@ -247,6 +322,8 @@ class LoadGovernor:
 
     def soft_limit(self, n_sym: int) -> float:
         if self.soft_mb > 0:
+            if self.cgroup_mb > 0:
+                return min(self.soft_mb, max(256.0, self.cgroup_mb - 256.0))
             return self.soft_mb
         base = 90.0 + max(0, n_sym) * 0.35
         if self.cgroup_mb > 0:
@@ -258,6 +335,8 @@ class LoadGovernor:
 
     def hard_limit(self, n_sym: int) -> float:
         if self.hard_mb > 0:
+            if self.cgroup_mb > 0:
+                return min(self.hard_mb, max(512.0, self.cgroup_mb - 64.0))
             return self.hard_mb
         base = 140.0 + max(0, n_sym) * 0.55
         if self.cgroup_mb > 0:
@@ -280,12 +359,35 @@ class LoadGovernor:
     ) -> Budget:
         rss = float(rss_mb if rss_mb is not None else globals()["rss_mb"]())
         with self.lock:
+            # The limit is effectively static for a service lifetime. Do not
+            # overwrite an operator/test-provided limit on every observation;
+            # current usage and headroom are sampled below and are the dynamic
+            # signals that drive the governor.
+            if self.cgroup_mb <= 0:
+                try:
+                    measured = cgroup_memory_limit_mb()
+                    if measured > 0:
+                        self.cgroup_mb = measured
+                except Exception:
+                    pass
             try:
-                measured = cgroup_memory_limit_mb()
-                if measured > 0:
-                    self.cgroup_mb = measured
+                current = (
+                    self._cgroup_current_override
+                    if self._cgroup_current_override is not None
+                    else cgroup_memory_current_mb()
+                )
+                self.cgroup_current_mb = max(0.0, float(current or 0.0))
             except Exception:
-                pass
+                self.cgroup_current_mb = 0.0
+            try:
+                events = cgroup_memory_events()
+                self.cgroup_event_delta = {
+                    key: max(0, int(value) - int(self.cgroup_events.get(key, 0)))
+                    for key, value in events.items()
+                }
+                self.cgroup_events = dict(events)
+            except Exception:
+                self.cgroup_event_delta = {}
             self.n_sym = int(n_sym)
             self.n_open = int(n_open)
             self.hot_ms = float(hot_ms)
@@ -293,6 +395,8 @@ class LoadGovernor:
             self.hist_busy = bool(hist_busy)
             self.kline_ban = bool(kline_ban)
             self.rss = rss
+            usage = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
+            self.cgroup_headroom_mb = max(0.0, self.cgroup_mb - usage) if self.cgroup_mb > 0 else 0.0
             if rss > self.rss_peak:
                 self.rss_peak = rss
             if cycle_overrun:
@@ -324,8 +428,29 @@ class LoadGovernor:
         host_avail = self._host_avail()
         host_critical = host_avail > 0 and host_avail < HOST_CRITICAL_MB
         host_pressure = host_avail > 0 and host_avail < HOST_PRESSURE_MB
+        pressure_rss = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
+        cgroup_near_max = bool(
+            self.cgroup_mb > 0
+            and self.cgroup_headroom_mb <= max(96.0, self.cgroup_mb * 0.025)
+        )
+        cgroup_pressure = bool(
+            self.cgroup_mb > 0
+            and self.cgroup_headroom_mb <= max(192.0, self.cgroup_mb * 0.08)
+        )
+        cgroup_event_pressure = any(
+            self.cgroup_event_delta.get(key, 0) > 0
+            for key in ("high", "max", "oom", "oom_kill", "oom_group_kill")
+        )
+        safety_override = bool(
+            cycle_overrun
+            or host_critical
+            or host_pressure
+            or cgroup_pressure
+            or cgroup_event_pressure
+        )
+        self.safety_partial = bool(self.partial or safety_override)
 
-        if not self.partial:
+        if not self.partial and not safety_override:
             return Budget(
                 level="normal",
                 rss_mb=round(rss, 1),
@@ -344,6 +469,10 @@ class LoadGovernor:
                 do_gc=False,
                 stats_full=n <= 48,
                 warm_s=0.32,
+                entry_batch=256,
+                entry_budget_ms=500.0,
+                cycle_yield_s=0.02,
+                memory_headroom_mb=round(self.cgroup_headroom_mb, 1),
             )
 
         level = "idle"
@@ -351,16 +480,53 @@ class LoadGovernor:
         # can actually produce fills. A 34k-set catalog regularly exceeds
         # SCAN_S without being short of RAM.
         small_book = n <= 64
-        if rss >= crit or (cycle_overrun and rss >= hard) or host_critical:
+        if (pressure_rss >= crit or (cycle_overrun and pressure_rss >= hard)
+                or host_critical or cgroup_near_max
+                or self.cgroup_event_delta.get("oom_kill", 0) > 0
+                or self.cgroup_event_delta.get("oom_group_kill", 0) > 0):
             level = "critical"
-        elif rss >= hard or (cycle_overrun and rss >= soft) or (self.hist_busy and self.warm_ms > 420) or host_pressure:
+        elif (pressure_rss >= hard or (cycle_overrun and pressure_rss >= soft)
+              or (self.hist_busy and self.warm_ms > 420) or host_pressure
+              or cgroup_pressure or cgroup_event_pressure):
             level = "overload"
-        elif rss >= soft or self.warm_ms > 280 or self.hot_ms > 180 or n > 80:
+        elif (pressure_rss >= soft or self.warm_ms > 280 or self.hot_ms > 180
+              or n > 80):
             level = "busy"
         elif n > 0:
             level = "normal"
 
-        b = Budget(level=level, rss_mb=round(rss, 1))
+        # Repeated compute overruns are a scheduling signal even when RSS is
+        # healthy. They reduce optional work on the next cycle and keep a
+        # catalog-heavy lane from monopolising live controls.
+        if self.overrun_n >= 2 and LEVEL_RANK[level] < LEVEL_RANK["busy"]:
+            level = "busy"
+        if self.overrun_n >= 5 and LEVEL_RANK[level] < LEVEL_RANK["overload"]:
+            level = "overload"
+        self.raw_level = level
+
+        # Move up immediately for safety. Move down only after three calm
+        # observations so a reclaim burst cannot make the budget flap.
+        current_rank = LEVEL_RANK.get(self.level, LEVEL_RANK["normal"])
+        target_rank = LEVEL_RANK[level]
+        if target_rank > current_rank:
+            self.level = level
+            self._level_down_streak = 0
+            self._last_level_change = time.monotonic()
+        elif target_rank < current_rank:
+            self._level_down_streak += 1
+            if self._level_down_streak >= 3:
+                self.level = level
+                self._level_down_streak = 0
+                self._last_level_change = time.monotonic()
+        else:
+            self._level_down_streak = 0
+        level = self.level
+
+        b = Budget(
+            level=level,
+            rss_mb=round(rss, 1),
+            memory_headroom_mb=round(self.cgroup_headroom_mb, 1),
+        )
         if level == "critical":
             b.scan_chunk = max(4, min(8, n_open + 4))
             b.kline_batch = 2
@@ -380,13 +546,16 @@ class LoadGovernor:
             # max. An unread cgroup plus a 2GiB catalog used to freeze hist
             # forever at "load critical".
             if self.cgroup_mb > 0:
-                b.hist_run = rss < self.cgroup_mb * 0.90
+                b.hist_run = self.cgroup_headroom_mb >= max(192.0, self.cgroup_mb * 0.06)
             else:
                 b.hist_run = rss < CATALOG_HARD_FLOOR_MB + 200.0
             b.kline_rest = not self.hist_busy
             b.do_gc = True
             b.stats_full = False
             b.warm_s = 0.55
+            b.entry_batch = 32
+            b.entry_budget_ms = 100.0
+            b.cycle_yield_s = 0.12
             shed = ["extra", "tf15m", "tf5m", "fat-stats"]
             if not b.hist_run:
                 shed.append("hist")
@@ -401,11 +570,14 @@ class LoadGovernor:
             b.tf_5m = True
             b.tf_15m = False
             b.extra_sources = False
-            b.hist_run = rss < hard
+            b.hist_run = pressure_rss < hard and not cgroup_near_max
             b.kline_rest = not self.hist_busy
             b.do_gc = True
             b.stats_full = False
             b.warm_s = 0.48
+            b.entry_batch = 64
+            b.entry_budget_ms = 180.0
+            b.cycle_yield_s = 0.08
             shed = ["extra", "tf15m", "fat-stats"]
             if not b.hist_run:
                 shed.append("hist")
@@ -428,6 +600,9 @@ class LoadGovernor:
             b.do_gc = rss >= soft or n > 200
             b.stats_full = n <= 40
             b.warm_s = 0.45
+            b.entry_batch = 128
+            b.entry_budget_ms = 300.0
+            b.cycle_yield_s = 0.04
             if not b.tf_15m:
                 shed.append("tf15m")
             if not b.extra_sources:
@@ -450,6 +625,9 @@ class LoadGovernor:
             b.do_gc = False
             b.stats_full = n <= 48
             b.warm_s = 0.32
+            b.entry_batch = 256
+            b.entry_budget_ms = 500.0
+            b.cycle_yield_s = 0.02
             if not b.stats_full:
                 shed.append("fat-stats")
 
@@ -490,7 +668,7 @@ class LoadGovernor:
             else:
                 floor_chunk = 4
             b.hist_chunk = max(int(b.hist_chunk or 1), floor_chunk)
-            if not (self.cgroup_mb > 0 and rss >= self.cgroup_mb * 0.92):
+            if not (self.cgroup_mb > 0 and self.cgroup_headroom_mb < max(192.0, self.cgroup_mb * 0.06)):
                 b.hist_run = True
                 if "hist" in shed:
                     shed.remove("hist")
@@ -513,7 +691,7 @@ class LoadGovernor:
         if not names:
             return [], 0
         take = max(1, int(chunk or 1))
-        if take >= len(names) or not self.partial:
+        if take >= len(names) or not self.safety_partial:
             return list(names), 0
         out: List[str] = []
         seen = set()
@@ -581,6 +759,11 @@ class LoadGovernor:
             "softMb": round(self.soft_limit(self.n_sym), 1),
             "hardMb": round(self.hard_limit(self.n_sym), 1),
             "cgroupMb": round(self.cgroup_mb, 1),
+            "cgroupCurrentMb": round(self.cgroup_current_mb, 1),
+            "memoryHeadroomMb": round(self.cgroup_headroom_mb, 1),
+            "cgroupEvents": dict(self.cgroup_events),
+            "cgroupEventDelta": dict(self.cgroup_event_delta),
+            "rawLevel": self.raw_level,
             "scanChunk": int(b.scan_chunk),
             "histChunk": int(b.hist_chunk),
             "klineBatch": int(b.kline_batch),
@@ -593,9 +776,13 @@ class LoadGovernor:
             "doGc": bool(b.do_gc),
             "statsFull": bool(b.stats_full),
             "partial": bool(self.partial),
+            "safetyPartial": bool(self.safety_partial),
             "trimmed": int(self.trimmed),
             "gcN": int(self.gc_n),
             "overrunN": int(self.overrun_n),
+            "entryBatch": int(b.entry_batch),
+            "entryBudgetMs": round(float(b.entry_budget_ms), 1),
+            "cycleYieldS": round(float(b.cycle_yield_s), 3),
             "shed": list(self.shed)[:8],
             "hotMs": round(self.hot_ms, 1),
             "warmMs": round(self.warm_ms, 1),
@@ -682,6 +869,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("load-host-mem-readable", avail >= 0 and total >= 0, f"avail={avail:.0f} total={total:.0f}"))
     g_book = LoadGovernor()
     g_book.cgroup_mb = 3840.0
+    g_book._cgroup_current_override = 900.0
     g_book._host_avail_override = 4096.0
     g_book.overrun_n = 20
     b_book = g_book.observe(n_sym=25, n_open=0, hot_ms=12000, warm_ms=80, rss_mb=1864.0, cycle_overrun=True)
@@ -697,12 +885,45 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ))
     g8 = LoadGovernor()
     g8.cgroup_mb = 3840.0
+    g8._cgroup_current_override = 400.0
     g8._host_avail_override = 4096.0
     b8 = g8.observe(n_sym=8, n_open=0, hot_ms=40, warm_ms=40, rss_mb=400.0)
     out.append((
         "load-eight-book-one-slice",
         int(b8.hist_chunk) == 8 and b8.hist_run and int(b8.lookback) >= 240,
         f"chunk={b8.hist_chunk} look={b8.lookback} level={b8.level}",
+    ))
+    gd = LoadGovernor()
+    gd.cgroup_mb = 4096.0
+    gd._host_avail_override = 8192.0
+    gd._cgroup_current_override = 1000.0
+    calm = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
+    gd._cgroup_current_override = 3975.0
+    tight = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
+    out.append((
+        "load-headroom-adapts",
+        calm.memory_headroom_mb > 2500 and tight.level == "critical" and tight.memory_headroom_mb < 200,
+        f"calmHeadroom={calm.memory_headroom_mb} tightHeadroom={tight.memory_headroom_mb} level={tight.level}",
+    ))
+    gd._cgroup_current_override = 1000.0
+    for _ in range(3):
+        recovered = gd.observe(n_sym=8, n_open=0, hot_ms=20, warm_ms=20, rss_mb=500.0)
+    out.append((
+        "load-level-hysteresis",
+        recovered.level == "normal" and gd._level_down_streak == 0,
+        f"level={recovered.level} down={gd._level_down_streak}",
+    ))
+    gs = LoadGovernor()
+    gs.cgroup_mb = 4096.0
+    gs._host_avail_override = 8192.0
+    gs._cgroup_current_override = 4085.0
+    gs.configure({"loadPartial": False})
+    bs = gs.observe(n_sym=200, n_open=0, rss_mb=500.0)
+    kept, _ = gs.scan_window([str(i) for i in range(200)], [], bs.scan_chunk, 0)
+    out.append((
+        "load-safety-overrides-full-mode",
+        bs.level == "critical" and gs.safety_partial and len(kept) <= bs.scan_chunk,
+        f"level={bs.level} safetyPartial={gs.safety_partial} chunk={bs.scan_chunk} kept={len(kept)}",
     ))
     return out
 

@@ -143,14 +143,15 @@ class MissingPositionControls(unittest.TestCase):
             self.assertEqual(self.batches,[])
             self.assertEqual(len(self.p.open),250)
             self.assertTrue(self.p.recon_pending)
-            # Other sides and symbols retain independent protection admission.
+            # A stale-position response is endpoint-wide: do not replay
+            # another invalid control for a different group during the pause.
             self.p.place_ctrl(self.position('short','SHORT'),'sl',101.)
             self.p.place_ctrl(self.position('other',symbol='Y-USDT'),'sl',99.)
-            self.assertEqual(len(self.posts),3)
+            self.assertEqual(len(self.posts),1)
         self.response={'code':0,'data':{'orderId':'restored-sl'}}
         with patch.object(pt.time, 'time', return_value=161.):
             self.assertEqual(self.p.place_ctrl(positions[0],'sl',99.),'restored-sl')
-            self.assertEqual(len(self.posts),4)
+            self.assertEqual(len(self.posts),2)
 
     def test_batch_missing_position_does_not_fall_back_or_cancel_existing_controls(self):
         pos=self.position('base')
@@ -262,7 +263,7 @@ class AggregateLaneControls(unittest.TestCase):
         self.assertFalse(self.p.occupying('XRP-USDT', 'LONG', 'general', execution_lane='lane-b'))
         self.assertFalse(self.p.occupying('XRP-USDT', 'SHORT', 'general', execution_lane='lane-a'))
 
-    def test_aggregate_range_widens_and_payload_is_quantity_free(self):
+    def test_aggregate_range_widens_and_payload_has_required_quantity(self):
         first = self.position(sl=.004, tp=.006, lane='lane-a')
         second = self.position(sl=.009, tp=.012, lane='lane-b')
         self.p.prepare_position_group(first)
@@ -275,7 +276,7 @@ class AggregateLaneControls(unittest.TestCase):
         self.assertAlmostEqual(tp, 101.2, places=2)
         body = self.p._ctrl_body(first, 'sl', sl)
         self.assertEqual(body.get('closePosition'), 'true')
-        self.assertNotIn('quantity', body)
+        self.assertAlmostEqual(float(body.get('quantity')), first.qty)
         self.assertTrue(self.p.cid('u', pos=first).startswith(pt.TAG + 'ua'))
 
     def test_strategy_prefixes_keep_general_trailing_and_block_lanes_independent(self):

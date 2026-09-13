@@ -297,9 +297,9 @@ class VstSchedulingTests(unittest.TestCase):
         self.assertEqual(list(p.entry_candidate_window([])), [])
         self.assertEqual(list(p.entry_candidate_window(rows)), [2, 3, 4, 5, 0, 1])
 
-    def test_only_pending_empty_startup_snapshot_gets_second_read(self):
+    def test_only_pending_empty_startup_snapshot_is_retried_by_main_loop(self):
         for pending, streak, detail, expected in [
-            (True, 1, "pending empty exchange read 1/2", 2),
+            (True, 1, "pending empty exchange read 1/2", 1),
             (False, 0, "confirmed", 1),
             (False, 1, "adopt failed", 1),
             (True, 0, "pending other", 1),

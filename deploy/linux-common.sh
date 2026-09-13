@@ -585,7 +585,7 @@ start_stack() {
 enforce_retention() {
   if [[ -x "$CTS_G_ROOT/deploy/retention.sh" ]]; then
     "$CTS_G_ROOT/deploy/retention.sh" --once >/dev/null 2>&1 || warn "retention pass failed"
-    ok "runtime retention (last 1000 lines / 8 MiB per file)"
+    ok "runtime retention (logs last 1000 lines; errors last 500 / 8 MiB per file)"
   else
     warn "retention helper missing at $CTS_G_ROOT/deploy/retention.sh"
   fi
