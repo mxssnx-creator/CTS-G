@@ -7465,7 +7465,9 @@ class Pulse:
             "normalExecutionEnabled": self.normal_execution_enabled,
             "entryPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
-            "entryPolicyMinLiveSamples": int(getattr(self.sets, "entry_policy_min_live_samples", self.sets.eval_need()) or self.sets.eval_need()),
+            "entryPolicyMinLiveSamples": int(
+                getattr(self.sets, "entry_policy_min_live_samples", 0)
+            ),
             "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
