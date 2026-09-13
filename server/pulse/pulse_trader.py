@@ -4125,16 +4125,20 @@ class Pulse:
         now = time.time()
         shared_checked = set()
         for pos in list(self.open.values()):
+            if overall_controls.enabled(self,pos) and (pos.symbol,pos.side) not in shared_checked:
+                # Run group migration before the member-level exchange snapshot
+                # guard. The shared proxy checks the symbol+direction exchange
+                # quantity itself; a stale first member must not prevent the
+                # other valid members from receiving one common pair.
+                overall_controls.ensure(self,pos)
+                shared_checked.add((pos.symbol,pos.side))
+            elif not overall_controls.enabled(self,pos) and getattr(pos,"overall_controls",False):
+                self.ensure_controls(pos)
             if not self.exchange_position_active(pos):
                 # System-only positions are still evaluated and reported, but
                 # their missing exchange controls are not a live protection
                 # defect because no venue position exists for this side.
                 continue
-            if overall_controls.enabled(self,pos) and (pos.symbol,pos.side) not in shared_checked:
-                overall_controls.ensure(self,pos)
-                shared_checked.add((pos.symbol,pos.side))
-            elif not overall_controls.enabled(self,pos) and getattr(pos,"overall_controls",False):
-                self.ensure_controls(pos)
             px = self.px.get(pos.symbol) or pos.entry
             scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             need = self.missing_controls(pos)
