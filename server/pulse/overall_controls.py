@@ -259,6 +259,10 @@ def ensure(pulse, pos):
             return
         proxy = copy(pos)
         proxy._overall_proxy = True
+        proxy._overall_exchange_verified = any(
+            float(getattr(p,'exchange_qty',0) or 0) > 0 or pulse.exchange_position_active(p)
+            for p in rows
+        )
         proxy.qty, proxy.entry = qty, entry
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry

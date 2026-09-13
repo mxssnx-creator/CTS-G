@@ -4194,7 +4194,7 @@ class Pulse:
         if overall_controls.enabled(self, pos):
             return overall_controls.ensure(self,pos)
         previous_shared = {getattr(pos,f,"") for f in overall_controls.FIELDS}-{ "" } if getattr(pos,"overall_controls",False) else set()
-        if not self.exchange_position_active(pos):
+        if not self.exchange_position_active(pos) and not getattr(pos,"_overall_exchange_verified",False):
             return
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return
