@@ -510,8 +510,8 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               <dt>Scan</dt>
               <dd className="text-right text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>
-              <dd className={`text-right ${(l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"}`}>
-                {l.controlsOk ?? 0}/{l.openCount}
+              <dd className={`text-right ${(l.controlPairsMissing ?? l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"}`} title={l.controlPairsExpected != null ? `Overall-Paare; Member: ${l.controlMemberOk ?? l.controlsOk ?? 0}/${l.openCount}` : undefined}>
+                {l.controlPairsExpected != null ? `${l.controlPairsOk ?? 0}/${l.controlPairsExpected}` : `${l.controlsOk ?? 0}/${l.openCount}`}
               </dd>
               <dt>Symbols</dt>
               <dd className="text-right text-fg">{l.symbolCount ?? "—"}</dd>
