@@ -50,7 +50,7 @@ try:
 except Exception:
     _ws = None
 
-from storage_paths import append_bounded_line, retain_last_lines
+from storage_paths import append_bounded_line, retain_last_lines, read_jsonl
 
 BASE = "https://open-api.bingx.com"
 WS_URL = "wss://open-api-swap.bingx.com/swap-market"
@@ -307,6 +307,30 @@ class FastBingX:
         self.bridge.on_response = self._trip
         self._ts_lock = threading.Lock()
         self._last_ts = 0
+        self._restore_retry_deadlines()
+
+    def _restore_retry_deadlines(self):
+        """A service update must not reset an active venue retry deadline."""
+        path = getattr(self.err, "path", "")
+        if not path:
+            return
+        now = time.time()
+        for row in read_jsonl(path):
+            if row.get("kind") != "rate-limit":
+                continue
+            try:
+                endpoint = str(row.get("path") or "")
+                at, wait = float(row["t"]), float(row["wait"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not endpoint.startswith("/openApi/") or not all(math.isfinite(v) for v in (at, wait)):
+                continue
+            until = at + max(0, wait) + .5  # serialized timestamp/wait rounding
+            if until <= now:
+                continue
+            self.path_cd[endpoint] = max(self.path_cd.get(endpoint, 0), until)
+            shared = until if self._lane(endpoint, "POST") == "order" else min(until, at+12.5)
+            self.cooldown_until = max(self.cooldown_until, shared)
 
     def _next_ts(self) -> int:
         """BingX rejects bursts that reuse the same millisecond timestamp."""
