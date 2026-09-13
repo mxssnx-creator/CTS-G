@@ -110,6 +110,19 @@ class VstSchedulingTests(unittest.TestCase):
             self.assertEqual(result['data']['orders'][0]['orderId'], 'accepted')
             self.assertEqual(a.order_retry_after(), 8)
 
+    def test_batch_quantity_is_json_number_without_mutating_retry_intent(self):
+        a = self.api(); bodies = []
+        a.post = lambda path, body: bodies.append(bingx_fast.loads(body['batchOrders'])) or {'code':0}
+        orders = [{'clientOrderID':'same-id', 'quantity':'0.010', 'stopPrice':'100.25', 'type':'STOP_MARKET'}]
+        a.batch_place(orders)
+        self.assertIsInstance(bodies[0][0]['quantity'], float)
+        self.assertEqual(bodies[0][0]['quantity'], .01)
+        self.assertEqual(bodies[0][0]['clientOrderID'], 'same-id')
+        self.assertEqual(orders[0]['quantity'], '0.010')
+        for bad in ('NaN','Infinity','-1','0'):
+            with self.assertRaises(ValueError): a.batch_place([{'quantity':bad}])
+        self.assertEqual(len(bodies),1)
+
     def test_large_batch_submits_all_inputs_in_chunks_of_five(self):
         a = self.api(); calls = []
         orders = [{'clientOrderID':str(i)} for i in range(12)]

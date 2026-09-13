@@ -6,6 +6,7 @@ import gzip
 import hmac
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -515,6 +516,19 @@ class FastBingX:
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
+        # Query parameters are strings for single orders; nested batch JSON
+        # requires a numeric quantity (venue 109400 otherwise). Copy inputs
+        # so retry intents and client IDs remain unchanged.
+        normalized = []
+        for raw in orders:
+            row = dict(raw)
+            if "quantity" in row:
+                quantity = float(row["quantity"])
+                if not math.isfinite(quantity) or quantity <= 0:
+                    raise ValueError("Batch quantity must be finite and positive")
+                row["quantity"] = quantity
+            normalized.append(row)
+        orders = normalized
         path = "/openApi/swap/v2/trade/batchOrders"
         if len(orders) <= 5:
             return self.post(path, {"batchOrders": dumps(orders)})
