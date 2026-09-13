@@ -54,6 +54,22 @@ def http_json(url: str, data: Any = None, method: str = "GET") -> Tuple[int, Any
         return 0, {"error": str(e)}
 
 
+def runtime_snapshot() -> Dict[str, Any]:
+    """Read the snapshot from the release, then the live sidecar."""
+    path = os.path.join(DIR, "stats-bingx-x02.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        if isinstance(value, dict):
+            return value
+    except (OSError, ValueError, TypeError):
+        pass
+    code, value = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
+    if code == 200 and isinstance(value, dict):
+        return value
+    raise RuntimeError(f"runtime stats unavailable http={code}")
+
+
 def run_units(out: List[Tuple[str, bool, str]]) -> None:
     for fn, tag in (
         (sets_self_test, "set"),
@@ -377,9 +393,8 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
     p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
 
-    st = {}
     try:
-        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st = runtime_snapshot()
     except Exception as e:
         rec("hc-stats", False, str(e), out)
         return
@@ -478,7 +493,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
     rec("hc-foreign-untouched", not lost, f"before={len(foreign_before)} after={len(foreign_after)} lost={len(lost)}", out)
 
     try:
-        st2 = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st2 = runtime_snapshot()
         logical = int(st2.get("logicalPositionCount") or st2.get("openCount") or 0)
         exch = int(st2.get("exchangePositionGroupCount") or -1)
         rec("hc-recon", exch < 0 or logical >= exch, f"logical={logical} exch={exch}", out)
@@ -488,9 +503,8 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
 
 def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     """Engine book vs live BingX positions and control orders. Not simulated."""
-    st = {}
     try:
-        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st = runtime_snapshot()
     except Exception as e:
         rec("recon-stats", False, str(e), out)
         return
@@ -525,7 +539,7 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     oo = api.get("/openApi/swap/v2/trade/openOrders")
     orders = (oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else oo.get("data")
     orders = orders if isinstance(orders, list) else []
-    ours = [o for o in orders if str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower().startswith(("gx02", "gx01"))]
+    ours = [o for o in orders if Pulse.cid_ours(None, str(o.get("clientOrderID") or o.get("clientOrderId") or ""))]
     rec("recon-orders", oo.get("code") in (0, None, 100410, 100421), f"ours={len(ours)} all={len(orders)}", out)
     missing_ctrl = []
     for b in book:
