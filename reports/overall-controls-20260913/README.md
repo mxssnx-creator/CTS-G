@@ -49,3 +49,15 @@ Its fake-exchange throughput is not live execution speed. Mainnet remains
 stopped; runtime activation and latency verification target VST only.
 The prior seven-day strategy report remains valid because this change does
 not change historical strategy calculations or their input data.
+
+Measured offline: 500 confirmed logical positions across 20 synthetic symbols,
+20 shared protection pairs, 10.3835 seconds (48.15 positions/second), per-position
+median 20.155 ms and p95 39.886 ms. Includes local book persistence and simulated
+exchange acknowledgements; excludes network and venue rate waiting. An earlier
+run with deep-copy book serialization took 86.9036 seconds. These sequential
+measurements are diagnostic, not a controlled hardware or venue benchmark.
+
+Verification before VST rollout: 394 Python regression tests passed; 12 focused
+overall-control tests and 22 scheduling/transport tests passed. Typecheck and
+production build passed. Desktop/mobile dev and production browser checks had
+no console/page errors or horizontal overflow.

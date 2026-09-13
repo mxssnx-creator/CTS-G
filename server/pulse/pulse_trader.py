@@ -32,7 +32,7 @@ from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLO
 from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
-from bingx_fast import FastBingX, ErrorLog
+from bingx_fast import FastBingX, ErrorLog, dumps as fast_json_dumps
 from modules import resolve as resolve_modules
 from position_cost import (
     last_n_cost_pf,
@@ -2192,10 +2192,13 @@ class Pulse:
                 while key in blob:
                     key = f"{base}:{suffix}"
                     suffix += 1
-                blob[key] = asdict(pos)
+                # Encode the dataclass fields directly: deep-copying every
+                # retained order binding on every acknowledgement is quadratic
+                # overhead with large independent Set books.
+                blob[key] = {name: getattr(pos,name) for name in Position.__dataclass_fields__}
             tmp = OPEN_PATH + ".tmp"
             with open(tmp, "w") as f:
-                json.dump(blob, f)
+                f.write(fast_json_dumps(blob))
             os.replace(tmp, OPEN_PATH)
         except Exception:
             pass

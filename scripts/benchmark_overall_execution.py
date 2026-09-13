@@ -1,6 +1,5 @@
 """No-network execution benchmark; never represents exchange fill latency."""
 import contextlib
-import faulthandler
 import io
 import json
 import pathlib
@@ -12,7 +11,6 @@ import test_all_valid_entries as harness
 import overall_controls
 from test_overall_controls import OverallTests
 
-faulthandler.dump_traceback_later(30)
 h=OverallTests()
 try:
     p=h.pulse(25)
@@ -45,5 +43,4 @@ try:
     target=pathlib.Path(sys.argv[1]);target.parent.mkdir(parents=True,exist_ok=True)
     target.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 finally:
-    faulthandler.cancel_dump_traceback_later()
     h.doCleanups()
