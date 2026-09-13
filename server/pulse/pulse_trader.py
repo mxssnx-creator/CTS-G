@@ -5010,7 +5010,7 @@ class Pulse:
         pf = float(view.get("last15_ratio") or 0)
         net = float(view.get("net_avg", getattr(chosen, "expectancy", 0)) or 0)
         ddt = float(view.get("max_dd_s") or 0)
-        if (not chosen.active or n < max(8, self.sets.eval_need()) or
+        if (not chosen.active or n < self.sets.eval_need() or
                 not math.isfinite(pf) or pf < self.sets.real_min_pf or
                 not math.isfinite(net) or net <= 0 or
                 not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
@@ -5126,7 +5126,8 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         pack = "indications" if str(reason).startswith("ind:") else "general"
-        execution_lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
+        lane_set = SimpleNamespace(id=forced_row["id"]) if forced_row is not None else selected_set
+        execution_lane = self.execution_lane_key(pack, reason, lane_set, execution_strategy)
         if execution_lane and normal_allowed and any(
                 self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
                 and getattr(p, "strategy", "") != "block"

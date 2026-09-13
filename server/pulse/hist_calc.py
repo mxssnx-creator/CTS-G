@@ -888,7 +888,7 @@ def rank_tuple(row: Dict[str, Any]) -> Tuple:
     dd = float(row.get("maxDdS") or 0)
     sl = float(row.get("slRatio") or 9)
     exp = float(row.get("expectancy") or 0)
-    validated = n >= 8 and is_positive_pf(pf)
+    validated = n > 0 and is_positive_pf(pf)
     return (0 if validated else 1, -pf, dd, sl, -exp, -int(row.get("n") or 0))
 
 
@@ -948,7 +948,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "classicPf": float(g("classic_all", st.classic_all) or 0),
         "active": bool(g("active", st.active)),
         "deactReason": st.deact_reason if not want else "",
-        "validated": n15 >= 8 and is_positive_pf(pf),
+        "validated": n15 > 0 and is_positive_pf(pf),
         "lowSl": st.sl_ratio <= 0.6 + 1e-9 or st.kind == "trail",
         "costSubtracted": True,
         "bySide": by_side_pub,
@@ -1017,7 +1017,7 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 seq, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1082,7 +1082,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
                 "costSubtracted": True,
                 "evaluationWindows": evaluation_windows(
                     stail, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1096,7 +1096,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 bounded, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1166,7 +1166,7 @@ def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
     dd = float((blob.get("max_dd_s") if blob is not None else st.max_dd_s) or 0)
     exp = float((blob.get("expectancy") if blob is not None else st.expectancy) or 0)
     sl = float(st.sl_ratio or 9)
-    validated = n15 >= 8 and is_positive_pf(pf)
+    validated = n15 > 0 and is_positive_pf(pf)
     low_sl = sl <= 0.6 + 1e-9 or st.kind == "trail"
     return (0 if validated else 1, -pf, dd, sl, -exp, -n), validated, low_sl, n
 
@@ -1258,7 +1258,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
                 "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
                 "evaluationWindows": evaluation_windows(
                     stail, cost, required_samples=need, ordered=True, simple=True
                 ),
@@ -1272,7 +1272,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 tail, cost, required_samples=need, ordered=True, simple=True
@@ -2682,7 +2682,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-trail-off", not any(r.get("kind") == "trail" for r in (off.get("rows") or [])), str(off.get("coverage")))
     rec("calc-trail-off-base", any(r.get("kind") == "base" for r in (off.get("rows") or [])))
 
-    # Ranking: validated (pf>=1, n>=8) sorts ahead of losers; among equals lower DD / lower SL wins
+    # Ranking: validated (positive configured-window PF, n>0) sorts ahead of losers; among equals lower DD / lower SL wins
     a = {"last15Ratio": 1.2, "last15N": 12, "maxDdS": 400, "slRatio": 0.6, "expectancy": 0.01, "n": 20}
     b = {"last15Ratio": 0.7, "last15N": 12, "maxDdS": 10, "slRatio": 0.3, "expectancy": -0.01, "n": 20}
     c = {"last15Ratio": 1.2, "last15N": 12, "maxDdS": 80, "slRatio": 0.3, "expectancy": 0.01, "n": 20}

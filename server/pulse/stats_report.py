@@ -300,7 +300,7 @@ def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str,
         sw["direction"] = d
         by_side[d] = sw
     w["bySide"] = by_side
-    w["validated"] = int(w.get("n") or 0) >= 8 and float(w.get("pf") or 0) + 1e-9 >= 1.0
+    w["validated"] = int(w.get("n") or 0) > 0 and float(w.get("pf") or 0) + 1e-9 >= 1.0
     return w
 
 

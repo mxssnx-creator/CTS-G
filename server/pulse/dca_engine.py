@@ -256,11 +256,11 @@ class DcaBook:
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
             active = False
             reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
-        elif pc["count"] >= min(8, self.pf_n) and not clears_pf(pc["ratio"], self.min_pf):
+        elif pc["count"] >= self.pf_n and not clears_pf(pc["ratio"], self.min_pf):
             active = False
             reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
         else:
-            if not active and avg_r >= 0 and (pc["count"] < 8 or clears_pf(pc["ratio"], self.min_pf)):
+            if not active and avg_r >= 0 and (pc["count"] < self.pf_n or clears_pf(pc["ratio"], self.min_pf)):
                 active = True
                 reason = ""
         pc["last25AvgR"] = round(avg_r, 4)
