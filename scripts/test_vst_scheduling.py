@@ -1,4 +1,5 @@
 """Offline regressions from observed VST bans and long entry cycles."""
+import os
 import pathlib
 import sys
 import unittest
@@ -8,12 +9,42 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server" / "pulse"))
 import bingx_fast
 import pulse_trader as trader
+from indication_engine import ExtraBook
 from vst_readonly_probe import validate_base, snapshot
 
 ORDER = "/openApi/swap/v2/trade/order"
 
 
 class VstSchedulingTests(unittest.TestCase):
+    def test_clients_ignore_ambient_socks_proxy(self):
+        """Import/startup must not depend on optional socksio availability."""
+        with patch.dict(
+            os.environ,
+            {
+                "ALL_PROXY": "socks5://127.0.0.1:9",
+                "HTTPS_PROXY": "socks5://127.0.0.1:9",
+                "HTTP_PROXY": "socks5://127.0.0.1:9",
+                "all_proxy": "socks5://127.0.0.1:9",
+                "https_proxy": "socks5://127.0.0.1:9",
+                "http_proxy": "socks5://127.0.0.1:9",
+            },
+        ):
+            extra = ExtraBook()
+            api = trader.FastBingX(
+                "",
+                "",
+                SimpleNamespace(path="", write=lambda *args, **kwargs: None),
+                base="https://example.invalid",
+            )
+            self.assertIsNotNone(extra.http)
+            self.assertIsNotNone(api.http)
+            if api.http is not None:
+                api.http.close()
+            if api.bridge.loop is not None:
+                api.bridge.loop.call_soon_threadsafe(api.bridge.loop.stop)
+            if extra.http is not None:
+                extra.http.close()
+
     def test_probe_refuses_non_vst_and_credential_bearing_urls(self):
         self.assertEqual(validate_base("https://open-api-vst.bingx.com/"), "https://open-api-vst.bingx.com")
         for base in ["https://open-api.bingx.com", "http://open-api-vst.bingx.com",
