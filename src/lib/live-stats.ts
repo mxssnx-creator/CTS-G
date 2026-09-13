@@ -676,7 +676,12 @@ export type LiveStats = {
     pfCost?: number;
     controlsOk?: number;
     controlsMissing?: number;
-    controlsSecurity?: number;
+  controlsSecurity?: number;
+  controlPairsOk?: number;
+  controlPairsExpected?: number;
+  controlPairsMissing?: number;
+  controlMemberOk?: number;
+  controlMemberMissing?: number;
     entryPolicy?: string;
     executionEvidence?: LiveStats["executionEvidence"];
     symbolCount?: number;

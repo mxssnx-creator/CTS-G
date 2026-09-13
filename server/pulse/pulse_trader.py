@@ -4132,6 +4132,13 @@ class Pulse:
                 # other valid members from receiving one common pair.
                 overall_controls.ensure(self,pos)
                 shared_checked.add((pos.symbol,pos.side))
+            # Overall protection owns the complete symbol/direction group.
+            # Do not fall through into the per-config fallback below: that
+            # path can interpret one migrating member as an unprotected
+            # standalone position and repeatedly submit an impossible
+            # below-minimum close on the exchange.
+            if overall_controls.enabled(self,pos):
+                continue
             elif not overall_controls.enabled(self,pos) and getattr(pos,"overall_controls",False):
                 self.ensure_controls(pos)
             if not self.exchange_position_active(pos):
@@ -10202,6 +10209,17 @@ class Pulse:
             control_mode = "overall"
         pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
         expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
+        overall_group_rows: Dict[Tuple[str, str], List[Any]] = {}
+        if control_mode == "overall":
+            for row in self.open.values():
+                overall_group_rows.setdefault((row.symbol, row.side), []).append(row)
+        overall_pair_ok = 0
+        if control_mode == "overall":
+            for rows in overall_group_rows.values():
+                pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
+                if len(pairs) == 1 and next(iter(pairs)) != ("", ""):
+                    overall_pair_ok += 1
+        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -10695,12 +10713,14 @@ class Pulse:
                 "mode": control_mode,
                 "pairCount": expected_control_pairs,
                 "expectedPairs": expected_control_pairs,
-                "protectedPairs": len({(p.sl_oid,p.tp_oid) for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid}) if overall_controls.enabled(self) else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
-                "pairGaps": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
+                "protectedPairs": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "pairGaps": overall_pair_gaps if control_mode == "overall" else sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "aggregatePairCount": expected_control_pairs if control_mode in ("aggregate", "overall") else 0,
                 "logicalPositionCap": MAX_OPEN,
                 "groupCount": pair_count,
-                "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "protectedGroups": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "memberProtected": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "memberMissing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
                 "groups": [
                     {
