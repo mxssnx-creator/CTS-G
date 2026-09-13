@@ -175,6 +175,15 @@ def replace_existing(pulse, proxy, rows, signature):
         new_oid = str(data.get('newOrderId') or '') if isinstance(data,dict) else ''
         confirmed = pulse.ok(response) and data.get('cancelResult') == 'SUCCESS' and data.get('newOrderResult') == 'SUCCESS' and new_oid
         if not confirmed:
+            defer_missing = getattr(pulse, '_defer_missing_position_controls', None)
+            if callable(defer_missing) and defer_missing(proxy, response):
+                # A stale/absent exchange position is shared by every Set in
+                # this symbol+direction.  Do not let each member resubmit the
+                # same cancel/replace request until reconciliation catches up.
+                if not hasattr(pulse, '_overall_replace_next'):
+                    pulse._overall_replace_next = {}
+                pulse._overall_replace_next[(proxy.symbol, proxy.side)] = time.monotonic() + 90
+                return False
             # Explicit rejections can be rebuilt; transport uncertainty keeps
             # its exact pending intent for reconciliation.
             if response.get('code') not in (0,'0',-1,'-1',None):
