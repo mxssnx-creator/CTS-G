@@ -311,7 +311,7 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": close_s, "positionSide": side,
-                "stopPrice": sl_px, "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": sl_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "s", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
             },
         )
@@ -320,7 +320,7 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": close_s, "positionSide": side,
-                "stopPrice": tp_px, "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": tp_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "t", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
             },
         )
@@ -444,7 +444,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "s", set_id=set_id, pack="general"),
             },
         )
@@ -452,7 +452,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "t", set_id=set_id, pack="general"),
             },
         )

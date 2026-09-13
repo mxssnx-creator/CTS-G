@@ -165,7 +165,7 @@ def controls_test() -> None:
     rec("oid-extract", extract_oid({"code": 0, "data": {"order": {"orderId": "99"}}}) == "99")
     rec("oid-extract-nested-sl", extract_oid({"data": {"stopLoss": {"orderId": "55"}}}) == "55")
     sl_close = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=True, with_qty=True)
-    rec("sl-no-qty-with-close", "quantity" not in sl_close and sl_close.get("closePosition") == "true", str(sl_close))
+    rec("sl-qty-with-close", sl_close.get("quantity") == "1.2" and sl_close.get("closePosition") == "true", str(sl_close))
     rec("sl-type-stop-mkt", sl_close.get("type") == "STOP_MARKET")
     rec("sl-close-side", sl_close.get("side") == "SELL" and sl_close.get("positionSide") == "LONG")
     sl_qty = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=False, with_qty=True)
@@ -173,7 +173,7 @@ def controls_test() -> None:
     sl_stop = ctrl_payload("SOL-USDT", "LONG", "sl", "140.0", "1.2", "Gx01uabc", close_pos=False, with_qty=True, otype="STOP")
     rec("sl-stop-has-price", sl_stop.get("price") == "140.0" and sl_stop.get("stopPrice") == "140.0", str(sl_stop))
     tp_close = ctrl_payload("SOL-USDT", "LONG", "tp", "160.0", "1.2", "Gx01vabc", close_pos=True, with_qty=False)
-    rec("tp-close-no-qty", "quantity" not in tp_close and tp_close.get("type") == "TAKE_PROFIT_MARKET")
+    rec("tp-close-with-qty", tp_close.get("quantity") == "1.2" and tp_close.get("closePosition") == "true" and tp_close.get("type") == "TAKE_PROFIT_MARKET")
     short_sl = ctrl_payload("SOL-USDT", "SHORT", "sl", "160.0", "1.2", "Gx01uabc", close_pos=True, with_qty=False)
     rec("short-sl-buy", short_sl.get("side") == "BUY")
     att = tpsl_attach_json("140.0", "160.0")
@@ -190,6 +190,8 @@ def controls_test() -> None:
     rec("err-px", ctrl_err_kind("the trigger price cannot be greater than current price") == "px")
     rec("err-exists", ctrl_err_kind("order already exists") == "exists")
     rec("err-qty-close", ctrl_err_kind("quantity and closePosition cannot be sent together") == "qty_close")
+    rec("err-missing-qty", ctrl_err_kind("quantity or stopPrice is must") == "qty")
+    rec("err-required-qty", ctrl_err_kind("parameter quantity is required") == "qty")
     rec("no-reduce-only", "reduceOnly" not in sl_close and "reduceOnly" not in tp_close)
     lo_s, hi_s = sl_bounds("SHORT", 100.0, 100.0, 100.0, 100.6, 0.01)
     rec("sl-short-window", lo_s > 100.0 and hi_s < 100.6 and lo_s < hi_s, f"lo={lo_s} hi={hi_s}")
@@ -197,7 +199,7 @@ def controls_test() -> None:
     lo_p, hi_p = sl_bounds("LONG", 101.0, 101.0, 100.0, 100.4, 0.01)
     rec("sl-lock-room", lo_p > 100.0 and hi_p < 101.0 and lo_p < hi_p, f"lo={lo_p} hi={hi_p}")
     rec("x01-dca-multi", len(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("dcaStepDistancesPct") or []) >= 2)
-    rec("payload-never-mix", "quantity" not in sl_close or "closePosition" not in sl_close)
+    rec("payload-close-requires-qty", sl_close.get("quantity") == "1.2" and sl_close.get("closePosition") == "true")
     rec("attach-keys", set(att) >= {"stopLoss", "takeProfit"})
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
@@ -1341,15 +1343,16 @@ def phantom_recon_test() -> None:
             tracking_scope=pt.TRACKING_SCOPE,
         )
 
-    # 1) first empty read: glitch guard arms, book untouched, exchange count visible
+    # 1) first empty read: glitch guard arms; book/count remain unconfirmed
     p = mk([])
     p.open["AAA-USDT"] = pos("AAA-USDT", age=3600)
     p.open["BBB-USDT"] = pos("BBB-USDT", age=3600)
     p.adopt_exchange_positions()
     rec("phantom-skip-first-empty", len(p.open) == 2 and p._empty_rest_streak == 1,
         f"book={len(p.open)} streak={p._empty_rest_streak}")
-    rec("phantom-count-visible", p.exchange_open_count == 0,
-        f"exchange_open_count={p.exchange_open_count}")
+    rec("phantom-count-pending",
+        p.exchange_open_count == -1 and p.exchange_position_snapshot_pending,
+        f"exchange_open_count={p.exchange_open_count} pending={p.exchange_position_snapshot_pending}")
 
     # 2) second consecutive empty read: confirmed flat -> phantoms dropped
     p.adopt_exchange_positions()
@@ -2365,7 +2368,7 @@ def grouped_control_test() -> None:
     p.prepare_position_group(aggregate, legacy=True)
     rec("group-legacy-disables-key", not p.per_config_controls(aggregate) and aggregate.control_range_key == "aggregate")
     legacy_payload = ctrl_payload("AAA-USDT", "LONG", "sl", "99", "1", "legacy", close_pos=True, with_qty=True)
-    rec("group-legacy-close-position", legacy_payload.get("closePosition") == "true" and "quantity" not in legacy_payload)
+    rec("group-legacy-close-position", legacy_payload.get("closePosition") == "true" and legacy_payload.get("quantity") == "1")
 
 
 def strict_gate_test() -> None:

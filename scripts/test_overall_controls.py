@@ -20,6 +20,10 @@ class OverallTests(unittest.TestCase):
                 p.api.orders.pop(old);p.api.n+=1;oid=str(p.api.n)
                 p.api.orders[oid]=dict(body,orderId=oid,clientOrderID=body['clientOrderId'])
                 return {'code':0,'data':{'cancelResult':'SUCCESS','newOrderResult':'SUCCESS','newOrderId':oid}}
+            if (path.endswith('/trade/order') and
+                    str(body.get('type') or '').upper() in {'STOP_MARKET', 'TAKE_PROFIT_MARKET'} and
+                    not body.get('quantity')):
+                return {'code':110422,'msg':'quantity is required for stop orders'}
             result = post(path,body)
             if path.endswith('/trade/order') and str(body.get('type') or '').upper() in {
                 'STOP_MARKET', 'TAKE_PROFIT_MARKET', 'STOP', 'TAKE_PROFIT'
@@ -32,7 +36,7 @@ class OverallTests(unittest.TestCase):
         p.api.post=call
         return p
 
-    def test_overall_proxy_uses_close_position_controls(self):
+    def test_overall_proxy_uses_quantity_matched_controls(self):
         from copy import copy
         p = self.pulse(1)
         row = next(iter(p.open.values()), None)
@@ -46,8 +50,8 @@ class OverallTests(unittest.TestCase):
         proxy.tp_pct = .02
         self.assertFalse(p.per_config_controls(proxy))
         body = p._ctrl_body(proxy, 'sl', proxy.sl)
-        self.assertEqual(body.get('closePosition'), 'true')
-        self.assertNotIn('quantity', body)
+        self.assertNotIn('closePosition', body)
+        self.assertAlmostEqual(float(body.get('quantity')), proxy.qty)
 
     def test_multiple_sets_share_pair_but_keep_own_lots_and_targets(self):
         p=self.pulse()
@@ -62,8 +66,8 @@ class OverallTests(unittest.TestCase):
         overall.drain_retired(p,rows)
         self.assertEqual(len(p.api.orders),2)
         for body in p.api.orders.values():
-            self.assertEqual(body.get('closePosition'),'true')
-            self.assertNotIn('quantity',body)
+            self.assertNotIn('closePosition', body)
+            self.assertGreater(float(body.get('quantity') or 0), 0)
         before=len(p.api.batches)
         for r in rows:p.ensure_controls(r)
         self.assertEqual(len(p.api.batches),before)
@@ -127,6 +131,15 @@ class OverallTests(unittest.TestCase):
             overall.ensure(p,pos)
         self.assertEqual((pos.sl_oid,pos.tp_oid),('',old_tp))
         self.assertNotIn('overall replacement 0', str(getattr(p,'last_error','')))
+
+    def test_priority_controls_reports_a_live_group_when_pair_creation_fails(self):
+        p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
+        pos=next(iter(p.open.values()))
+        pos.sl_oid=pos.tp_oid=pos.sec_sl_oid=pos.sec_tp_oid=''
+        pos.controls_ok=False
+        p._overall_pairs={}
+        with patch.object(p.api,'post',return_value={'code':1,'msg':'venue unavailable'}):
+            self.assertEqual(p.priority_controls(),1)
 
     def test_second_leg_failure_keeps_first_confirmed_and_retries_only_missing_leg(self):
         p=self.pulse(1);p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
