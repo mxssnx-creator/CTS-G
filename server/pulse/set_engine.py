@@ -1166,9 +1166,9 @@ class SetBook:
         # hands admission back to the live evidence gates at the sample floor.
         self.entry_policy = ENTRY_POLICY_STRICT
         self.entry_policy_max_candidates = 0
-        # No additional fixed live-sample hurdle. Independent Set
-        # PF/sample and stage gates remain authoritative; this value only
-        # controls optional cold-candidate preference in permissive mode.
+        # No additional fixed live-sample hurdle.  Independent Set PF/sample
+        # and stage gates remain authoritative; this value only controls the
+        # optional cold-candidate preference in permissive mode.
         self.entry_policy_min_live_samples = 0
         # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
@@ -4782,9 +4782,15 @@ class SetBook:
         """Revalidate the exact selected object at the submission boundary."""
         if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
             return False
+        # VST's permissive-bounded rollout admits a Set as soon as that
+        # Set's own Base -> Main -> Real/PF/DD-time evidence is current. The
+        # aggregate replay flag only describes catalog completeness; it must
+        # not veto an independently qualified Set while other symbols are
+        # still being scored. Strict lanes keep the aggregate boundary.
+        partial_set_entries = self._entry_policy_is_permissive()
         if self.use_historic_gate and (
             not self.progress.ready or self.progress.phase == "score-refresh"
-        ):
+        ) and not partial_set_entries:
             return False
         if st.deact_reason == "selection limit":
             return False
