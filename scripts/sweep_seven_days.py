@@ -21,13 +21,15 @@ import numpy as np
 from replay_five_days import replay
 from fetch_historic_window import validate
 from set_engine import IND_KINDS, IND_TAG_KIND, indication_kind_votes
+from position_cost import POSITIVE_PF
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 POLICIES=np.array(list(itertools.product(range(5,76,5),range(5,26,5),(1,3,5,7,9),(1,5,10),(0,1,2))),dtype=np.int32)
 STAGE_WINDOWS=((5,3),(10,5),(15,10))
 POLICIES=np.array([(*p[:4],*STAGE_WINDOWS[p[4]]) for p in POLICIES],dtype=np.int32)
 POLICY_KEYS=('lastN','deactivationN','maxDdtHours','recalcAfterCloses','mainN','realN')
-METRICS=('n','wins','net','cost','gain','loss','maxDd','maxDdtBars','trainN','trainNet','testN','testNet','disabled','costRSum')
+METRICS=('n','wins','net','cost','gain','loss','maxDd','maxDdtBars','trainN','trainNet','testN','testNet','disabled','costRSum',
+         'trainGain','trainLoss','trainCostRSum','testGain','testLoss','testCostRSum')
 
 
 def configs():
@@ -45,12 +47,12 @@ def configs():
     return out
 
 
-def kernel(path):
+def kernel(path, min_pf=POSITIVE_PF):
     lib=ctypes.CDLL(str(path))
     arr=np.ctypeslib.ndpointer(flags='C_CONTIGUOUS')
-    lib.sweep.argtypes=[ctypes.c_int,arr,arr,arr,arr,ctypes.c_int,arr,ctypes.c_int,ctypes.c_int,arr]
+    lib.sweep.argtypes=[ctypes.c_int,arr,arr,arr,arr,ctypes.c_int,arr,ctypes.c_int,ctypes.c_int,ctypes.c_double,arr]
     lib.sweep.restype=None
-    return lib.sweep
+    return lambda *args: lib.sweep(*args[:-1],float(min_pf),args[-1])
 
 
 def prepare(path,out):
@@ -90,7 +92,7 @@ def execute(task):
     if len(events):
         events=events[np.lexsort((events[:,1],events[:,0]))]
     offsets=np.searchsorted(events[:,0],np.arange(n+1)) if len(events) else np.zeros(n+1,dtype=int)
-    fn=kernel(lib);metrics=np.zeros((len(POLICIES),14));summary=np.zeros((len(POLICIES),7))
+    fn=kernel(lib);metrics=np.zeros((len(POLICIES),len(METRICS)));summary=np.zeros((len(POLICIES),13))
     top=[];best_train=None;positive=0;traded=0;qualified=0;ever_positive=0;unique_results=hashlib.sha256()
     by_strategy={};split=60+int((len(bars)-60)*.7)
     for i,cfg in enumerate(unique):
@@ -103,7 +105,9 @@ def execute(task):
         unique_results.update(metrics.tobytes())
         pos=metrics[:,2]>1e-12;has=metrics[:,0]>0
         costpf=np.divide(metrics[:,13],metrics[:,0],out=np.zeros(len(POLICIES)),where=has)*.1+1
-        q=(metrics[:,8]>=8)&(metrics[:,10]>=8)&(metrics[:,9]>0)&(metrics[:,11]>0)&(costpf>1.05+1e-9)
+        trainpf=1+.1*np.divide(metrics[:,16],metrics[:,8],out=np.zeros(len(POLICIES)),where=metrics[:,8]>0)
+        testpf=1+.1*np.divide(metrics[:,19],metrics[:,10],out=np.zeros(len(POLICIES)),where=metrics[:,10]>0)
+        q=(metrics[:,8]>=8)&(metrics[:,10]>=8)&(metrics[:,9]>0)&(metrics[:,11]>0)&(trainpf>POSITIVE_PF+1e-9)&(testpf>POSITIVE_PF+1e-9)
         positive+=int(pos.sum())*multiplicity;traded+=int(has.sum())*multiplicity;qualified+=int(q.sum())*multiplicity
         ever_positive+=int(pos.any())*multiplicity
         st=by_strategy.setdefault(cfg['strategy'],dict(tested=0,positive=0,qualified=0))
@@ -111,6 +115,7 @@ def execute(task):
         summary[:,0]+=pos*multiplicity;summary[:,1]+=has*multiplicity;summary[:,2]+=q*multiplicity
         summary[:,3]+=metrics[:,9]*multiplicity;summary[:,4]+=metrics[:,11]*multiplicity
         summary[:,5]+=metrics[:,8]*multiplicity;summary[:,6]+=metrics[:,10]*multiplicity
+        summary[:,7:13]+=metrics[:,14:20]*multiplicity
         # Keep a bounded, deterministic review table; every result still
         # contributes to exact counters and the full-matrix digest above.
         candidate_ids=np.flatnonzero(has)
@@ -152,15 +157,40 @@ def render(results,out,signature):
     for sym in ('BCH-USDT','SOL-USDT','XRP-USDT'):
         group=[r for r in results if r['symbol']==sym]
         summary.append(dict(symbol=sym,groups=len(group),**{key:sum(r[key] for r in group) for key in ('tested','positive','traded','qualified','positiveConfigs')}))
-    accepted_defaults=[r for r in train if r['metrics']['trainNet']>0 and r['metrics']['testN']>=8 and r['metrics']['testNet']>0 and r['costPf']>1.05]
-    default_decision=dict(selection="training-only with independent holdout check",accepted=accepted_defaults,
-                          applied=False,reason="No training-selected winner clears the independent holdout; preserve requested Base last30 and two-day defaults.")
-    payload=dict(defaultDecision=default_decision,signature=signature,configs=cfg,policies=pol,best=best,trainingChoices=train,summary=summary,
+    def segment(m, name):
+        n=m[name+'N']; gain=m[name+'Gain']; loss=m[name+'Loss']
+        return dict(n=int(n),net=m[name+'Net'],costPf=1+.1*m[name+'CostRSum']/n if n else None,
+                    classicPf=gain/loss if loss>1e-12 else None)
+    for row in best+train:
+        row['training']=segment(row['metrics'],'train');row['holdout']=segment(row['metrics'],'test')
+    accepted_defaults=[r for r in train if all(r[k]['n']>=8 and r[k]['net']>0 and r[k]['costPf']>POSITIVE_PF+1e-9 for k in ('training','holdout'))]
+    # Fixed training-only rule recorded in run-provenance.json before reading
+    # holdout: best mean training net with >=100 training trades per symbol.
+    symbol_policies={sym:sum((np.asarray(r['summary']) for r in results if r['symbol']==sym),np.zeros((len(pol),13))) for sym in ('BCH-USDT','SOL-USDT','XRP-USDT')}
+    aggregate=sum(symbol_policies.values()); eligible=np.logical_and.reduce([a[:,5]>=100 for a in symbol_policies.values()])
+    ids=np.flatnonzero(eligible)
+    selected=int(max(ids,key=lambda i:(aggregate[i,3]/aggregate[i,5],-int(i)))) if len(ids) else None
+    policy_evidence=[]
+    if selected is not None:
+        for sym,arr in symbol_policies.items():
+            a=arr[selected]
+            policy_evidence.append(dict(symbol=sym,trainN=int(a[5]),trainNet=float(a[3]),trainCostPf=float(1+.1*a[9]/a[5]),
+                testN=int(a[6]),testNet=float(a[4]),testCostPf=float(1+.1*a[12]/a[6]) if a[6] else None,
+                testClassicPf=float(a[10]/a[11]) if a[11]>0 else None))
+    global_ok=bool(policy_evidence) and all(r['trainNet']>0 and r['trainCostPf']>POSITIVE_PF and r['testN']>=30 and r['testNet']>0 and r['testCostPf']>POSITIVE_PF for r in policy_evidence)
+    default_decision=dict(selection="training-only with chronological holdout check",accepted=accepted_defaults,
+        globalPolicy=pol[selected] if selected is not None else None,globalPolicyIndex=selected,
+        globalEvidence=policy_evidence,globalValidated=global_ok,applied=False,
+        retained=dict(lastN=30,deactivationN=25,historyDays=2,minPf=POSITIVE_PF,symbols=20,axis=False),
+        reason="No validated universal improvement; retain Base 30 and deactivation 25." if not global_ok else "Candidate passed the declared check; requires explicit default application with matching runtime semantics.")
+    actual_path=out/'vst-results-before.json'
+    actual=json.loads(actual_path.read_text()) if actual_path.exists() else None
+    payload=dict(actualVstResults=actual,reportSourceSha256=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),defaultDecision=default_decision,signature=signature,configs=cfg,policies=pol,best=best,trainingChoices=train,summary=summary,
                  groups=[{k:v for k,v in r.items() if k not in ('top','summary')} for r in results])
     (out/'summary.json').write_text(json.dumps(payload,separators=(',',':')))
     def table(headers,rows):
         return '<div class="scroll"><table><thead><tr>'+''.join('<th>'+html.escape(h)+'</th>' for h in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table></div>'
-    totals=table(['Symbol','Gruppen','Getestete Varianten','Mit Trades','Netto positiv','Beide Abschnitte positiv / PF > 1,05','Positive Risikokonfigurationen'],
+    totals=table(['Symbol','Gruppen','Getestete Varianten','Mit Trades','Netto positiv','Beide Abschnitte ≥8 Trades / netto+ / PF > 1,02','Positive Risikokonfigurationen'],
                  [[s[k] for k in ('symbol','groups','tested','traded','positive','qualified','positiveConfigs')] for s in summary])
     def best_table(rows):
         body=[]
@@ -170,20 +200,29 @@ def render(results,out,signature):
               f"{c.get('trailArmPct',0):.1f} / {c.get('trailGivePct',0):.1f} · TP {'an' if c['honorTp'] else 'aus'}",
               f"{c['levels']} / {c['incrementPct']} / {c['volumeRatio']}",p['lastN'],p['deactivationN'],p['maxDdtHours'],p['recalcAfterCloses'],f"{p['mainN']}/{p['realN']}",
               int(m['n']),f"{r['costPf']:.4f}",f"{classic:.3f}" if classic is not None else '∞' if m['gain'] else '—',
-              f"{m['net']*100:.3f}",f"{m['cost']*100:.3f}",f"{m['maxDd']*100:.3f}",f"{m['maxDdtBars']/60:.2f}",f"{m['trainNet']*100:.3f}",f"{m['testNet']*100:.3f}"])
-        return table(['Symbol','Indikation','Seite','Strategie','TP-Schritt','TP / SL %','Trailing Arm / Give %','Stufen / Abstand % / Add-Ratio','Last N','Deact N','DDT h','Recalc N','Main/Real N','Trades','CTS Cost-PF','Klassischer PF','Netto pp','Kosten pp','DD pp','DDT max h','Training pp','Kontrolle pp'],body)
-    content=f'''<!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CTS-G · 7 Tage · kontinuierliche Set-Auswertung</title>
-<style>body{{background:#10151c;color:#e6edf4;margin:0;font:14px/1.5 system-ui}}main{{max-width:1600px;margin:auto;padding:24px}}h1{{font-size:30px}}section{{background:#19232e;border:1px solid #344758;border-radius:12px;margin:20px 0;padding:20px}}table{{border-collapse:collapse;white-space:nowrap;width:100%}}th,td{{padding:9px 12px;text-align:right;border-bottom:1px solid #344758}}th{{color:#96caeb}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto;max-height:720px}}p{{max-width:1150px}}code{{color:#a3d8f7}}</style><main>
+              f"{m['net']*100:.3f}",f"{m['cost']*100:.3f}",f"{m['maxDd']*100:.3f}",f"{m['maxDdtBars']/60:.2f}",int(m["trainN"]),f"{m['trainNet']*100:.3f}",f"{1+.1*m['trainCostRSum']/m['trainN']:.4f}" if m["trainN"] else "—",int(m["testN"]),f"{m['testNet']*100:.3f}",f"{1+.1*m['testCostRSum']/m['testN']:.4f}" if m["testN"] else "—"])
+        return table(['Symbol','Indikation','Seite','Strategie','TP-Schritt','TP / SL %','Trailing Arm / Give %','Stufen / Abstand % / Add-Ratio','Last N','Deact N','DDT h','Recalc N','Main/Real N','Trades','CTS Cost-PF','Klassischer PF','Netto pp','Kosten pp','DD pp','DDT max h','Training Trades','Training pp','Training CTS-PF','Kontrolle Trades','Kontrolle pp','Kontrolle CTS-PF'],body)
+    global_table=table(['Symbol','Training Trades','Training netto pp','Training CTS-PF','Kontrolle Trades','Kontrolle netto pp','Kontrolle CTS-PF','Kontrolle klassischer PF'],
+        [[r['symbol'],r['trainN'],round(r['trainNet']*100,3),round(r['trainCostPf'],4),r['testN'],round(r['testNet']*100,3),round(r['testCostPf'],4) if r['testCostPf'] is not None else '—',round(r['testClassicPf'],4) if r['testClassicPf'] is not None else '—'] for r in policy_evidence])
+    actual_section='<p>Für diesen Lauf wurde kein VST-Journal erfasst.</p>'
+    if actual:
+        a=actual['lastSevenDays']
+        actual_section=table(['Abgeschlossene Demo-Trades','Netto VST-Einheiten','Klassischer PF','CTS Cost-PF','Gemessene Kosten / Trades','Erster / letzter Abschluss (Unix)'],
+          [[a['trades'],round(a['netDemoUnits'],6),a['classicPf'],a['ctsCostPf'],f"{a['measuredCostSamples']} / {a['trades']}",f"{a['firstClose']} / {a['lastClose']}"]])
+        actual_section+=f"<p>Erfasst: {html.escape(actual['capturedAt'])}. Nur bestätigte vollständige X02-Demo-Abschlüsse aus dem gespeicherten Journal. Fehlende Zeiträume werden nicht rekonstruiert. Lokale unbestätigte Abschlüsse und Mainnet sind ausgeschlossen; Kostenschätzungen bleiben durch die Zahl gemessener Kosten sichtbar.</p>"
+    content=f''' <!doctype html><html lang="de"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CTS-G · 7 Tage · kontinuierliche Set-Auswertung</title>
+<style>body{{background:#10151c;color:#e6edf4;margin:0;font:14px/1.5 system-ui}}main{{max-width:1600px;margin:auto;padding:24px}}h1{{font-size:30px}}section{{background:#19232e;border:1px solid #344758;border-radius:12px;margin:20px 0;padding:20px}}table{{border-collapse:collapse;white-space:nowrap;width:100%}}th,td{{padding:9px 12px;text-align:right;border-bottom:1px solid #344758}}th{{color:#96caeb}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto;max-height:720px}}p{{max-width:1150px;overflow-wrap:anywhere}}code{{color:#a3d8f7}}</style><main>
 <h1>CTS-G · 7 Tage · Base → Main → Real</h1><p>04.09.2026 00:00 bis 11.09.2026 00:00 UTC · BCH, SOL, XRP · Axis aus.</p>
 <section><h2>Vollständigkeit und Resultate</h2>{totals}<p>„Varianten“ sind alternative, unabhängige Set-/Policy-/Richtungsversuche. Ihre Gewinne ergeben keine gemeinsame Kontorendite. Jede getestete Variante zählt, auch ohne Trade. Gleichwertige Preisparameter werden berechnet und auf alle angeforderten IDs abgebildet.</p></section>
 <section><h2>Exakte Testmatrix</h2><p>Je Symbol acht Projektindikationen × LONG/SHORT × {len(cfg):,} Risikokonfigurationen × {len(pol):,} Policies. Last-N: 5–75 in Schritten von 5; Deactivation: 5–25 in Schritten von 5; DDT: 1/3/5/7/9 Stunden; neue Bewertung nach 1/5/10 zusätzlichen Abschlüssen; Main/Real-Fenster 5/3, 10/5, 15/10. Alle kartesischen Kombinationen dieser Werte.</p>
 <p>TP-Schritte 1–30 × 0,10 % mit effektivem TP-Floor 0,30 %; SL 0,20/0,40/0,60/0,80 %. Normal; 25 Trailing-Paare (Arm 0,3–1,5 Schritt 0,3, Give 0,1–0,5 Schritt 0,1), jeweils TP an/aus; Block 1–6 mit Add-Ratio 0,25 und Auslösung +0,20 %; DCA 1–3 Stufen × Abstand 0,05/0,10/0,20 %, Add-Ratio 0,25. Block/DCA verwenden feste TP/SL; Kombinationen mit Trailing sind ein gesondertes, hier nicht geprüftes Modell.</p></section>
 <section><h2>Beste 50 beobachtete Varianten</h2><p>Explorative Rangliste nach dem Gesamtlauf. Beide Teilfenster positiv zuerst, danach Netto. Alle Parameter stehen je Zeile.</p>{best_table(best[:50])}</section>
 <section><h2>Auswahl ausschließlich aus Training, danach Kontrolle</h2><p>Je Symbol/Indikation/Seite: höchstes Trainings-Netto mit mindestens acht Trainingsabschlüssen. Die Kontrollperiode verändert diese Auswahl nicht. Ein negativer Kontrollwert wird vollständig ausgewiesen.</p>{best_table(train)}</section>
-<section><h2>Entscheidung zu Defaults</h2><p>{len(accepted_defaults)} nur anhand des Trainings ausgewählte Gewinner erfüllen den unabhängigen Kontrolltest (mindestens acht Abschlüsse, netto positiv, Gesamt-Cost-PF über 1,05). Deshalb wird kein explorativer Gesamtlauf-Gewinner als bewährter Live-Default ausgegeben. Die angeforderten Defaults bleiben: Base letzte 30 Positionen, Historie zwei Tage, gemeinsame PF-Schwelle 1,05, Achsen aus und keine logischen Mengenlimits.</p></section>
+<section><h2>Entscheidung zu Defaults</h2><p>{len(accepted_defaults)} nur anhand des Trainings ausgewählte Gewinner erfüllen den Kontrolltest: in jedem Abschnitt mindestens acht Abschlüsse, Netto &gt; 0 und CTS Cost-PF &gt; 1,02. Der zeitlich spätere Kontrollabschnitt ist kein statistisch unabhängiger neuer Markt. Die allgemeinen Defaults bleiben Base 30, Deaktivierung 25, Historie zwei Tage, PF-Schwelle 1,02, 20 VST-Symbole, Achsen aus und keine logischen Mengenlimits.</p><p>Zusätzliche gemeinsame Fensterwahl: höchstes mittleres Trainings-Netto mit mindestens 100 Trainingsabschlüssen je Symbol. Gewählte Policy: {html.escape(json.dumps(default_decision['globalPolicy']))}. Nach Auswahl verlangt die Kontrolle mindestens 30 Abschlüsse und positives Netto/PF &gt; 1,02 je Symbol; auch das Training muss positiv sein. Bestanden: {'ja' if global_ok else 'nein'}. Diese Summen vergleichen gleich gewichtete alternative Versuchsspuren; sie sind keine gemeinsam handelbare Kontorendite.</p>{global_table}<p>Es erfolgt keine erneute Auswahl anhand der Kontrollperiode.</p></section>
 <section><h2>Beste Variante je Symbol und Indikation</h2>{best_table([dict(symbol=r['symbol'],kind=r['kind'],direction=r['direction'],**r['top'][0]) for r in results if r['top']])}</section>
+<section><h2>Bestätigte VST-Demo-Ergebnisse vor dem Update</h2>{actual_section}</section>
 <section><h2>Rechenmodell und Aussagegrenzen</h2><p>Öffentliche, auf lückenlose Zeitstempel und OHLCV geprüfte BingX-Kerzen, 60 Minuten Vorlauf. Signale nach Kerzenschluss; vorhandene SL vor TP, Stop-Gaps zum schlechteren Open, kein Wiedereinstieg in der Exit-Kerze. Trailing-Änderung gilt ab der nächsten Kerze. Additionen ändern Menge, Durchschnittseinstand und Ausführungskosten. Jede Ausführung zahlt 0,05 % des ausgeführten Notionals, einfacher Roundtrip ungefähr 0,10 %. Keine Funding-/Orderbuch-/Latenzrekonstruktion.</p>
-<p>Basis-Shadow-Positionen werden kontinuierlich berechnet. Eine Eröffnung ist nur erlaubt, wenn frühere Abschlüsse in Base, Main und Real jeweils CTS Cost-PF > 1,05 ergeben. CTS Cost-PF = 1 + 0,10 × Durchschnitt(Netto / individuelle Ausführungskosten); klassischer PF = positive Nettoergebnisse / Betrag negativer Nettoergebnisse. Ein Abschluss der aktuellen Kerze kann deren Eröffnung nicht freigeben. Nach einem negativen Mittel der letzten Deactivation-N zugelassenen Abschlüsse bleibt die Policy für diese Sitzung deaktiviert; ihr Shadow-Set sammelt weiter.</p>
+<p>Basis-Shadow-Positionen werden kontinuierlich berechnet. Eine Eröffnung ist nur erlaubt, wenn frühere Abschlüsse in Base, Main und Real jeweils CTS Cost-PF > 1,02 ergeben. CTS Cost-PF = 1 + 0,10 × Durchschnitt(Netto / individuelle Ausführungskosten); klassischer PF = positive Nettoergebnisse / Betrag negativer Nettoergebnisse. Ein Abschluss der aktuellen Kerze kann deren Eröffnung nicht freigeben. Nach einem negativen Mittel der letzten Deactivation-N zugelassenen Abschlüsse bleibt die Policy für diese Sitzung deaktiviert; ihr Shadow-Set sammelt weiter.</p>
 <p>DD/DDT der Policy beruhen auf abgeschlossenen Ergebnissen; offene Verluste innerhalb einer Position sind darin nicht enthalten. Die DDT-Schwelle am Eingang nutzt den bis dahin bekannten Shadow-Verlauf. Am 70/30-Split und Ende werden verbleibende Positionen mit Kosten geschlossen. Netto/Kosten/DD in Prozentpunkten des ursprünglichen Parent-Notionals, keine Kontorendite. Die Suche prüft die hier angegebene endliche Matrix und belegt keine reale Exchange-Ausführung.</p>
 <p>Signatur: <code>{signature}</code>. Alle Gruppen besitzen einen SHA256 über sämtliche vollständigen Ergebnisvektoren; Rohereignisse und Quellkerzen sind reproduzierbar. Der HTML-Bericht zeigt die besten Varianten, Summen und die Auswahl aus Training.</p></section></main></html>'''
     (out/'cts-g-seven-days.html').write_text(content)
@@ -195,8 +234,20 @@ def main():
     out=pathlib.Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True)
     files=['scripts/policy_sweep.cpp','scripts/sweep_seven_days.py','scripts/replay_five_days.py','server/pulse/indication_engine.py','server/pulse/set_engine.py']
     signature=hashlib.sha256(b''.join((ROOT/f).read_bytes() for f in files)).hexdigest()
-    if a.report_only:results=[json.loads(gzip.decompress(x.read_bytes())) for x in out.glob('*.json.gz')]
+    # Reporting changes never relabel the computation that produced a group.
+    # Verify the calculation AST and dependencies against the saved manifest.
+    import ast
+    tree=ast.parse(pathlib.Path(__file__).read_text())
+    tree.body=[n for n in tree.body if not (isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in ('main','render')) and not isinstance(n,ast.If)]
+    calc=ast.dump(tree,include_attributes=False).encode()+b''.join((ROOT/f).read_bytes() for f in files if f!='scripts/sweep_seven_days.py')+(ROOT/'server/pulse/position_cost.py').read_bytes()
+    fingerprint=hashlib.sha256(calc).hexdigest();manifest=out/'run-provenance.json'
+    if a.report_only:
+        provenance=json.loads(manifest.read_text())
+        if provenance['calculationFingerprint']!=fingerprint:raise ValueError('Calculation sources changed; rerun the sweep')
+        signature=provenance['signature']
+        results=[json.loads(gzip.decompress(x.read_bytes())) for x in out.glob('*.json.gz')]
     else:
+        manifest.write_text(json.dumps(dict(signature=signature,calculationFingerprint=fingerprint,sources={f:hashlib.sha256((ROOT/f).read_bytes()).hexdigest() for f in files}),indent=2)+'\n')
         lib=out/'policy_sweep.so';subprocess.run(['g++','-O3','-std=c++17','-shared','-fPIC',str(ROOT/'scripts/policy_sweep.cpp'),'-o',str(lib)],check=True)
         sources=[prepare(pathlib.Path(a.data)/(s+'-USDT.json'),out) for s in ('BCH','SOL','XRP')]
         if len({(s['start'],s['end']) for s in sources})!=1:raise ValueError('Different symbol periods')

@@ -273,7 +273,7 @@ class AllValidEntries(unittest.TestCase):
         trailing.trail_key = '0.3:0.1'
         book.by_idx[2].last15_n = 7
         book.by_idx[2].active = True
-        book.by_idx[3].last15_ratio = 1.05
+        book.by_idx[3].last15_ratio = 1.02
         book.by_idx[3].active = True
         base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
         entry_ids = {state.id for state in book.entry_sets('general', 'LONG')}
@@ -325,7 +325,7 @@ class AllValidEntries(unittest.TestCase):
         state.deact_reason = 'live PF gate'
         self.assertTrue(state.processing_active)
         self.assertIn(state.id, book.processing_set_ids())
-        row = next(item for item in book.snapshot(full=True)['rows'] if item['id'] == state.id)
+        row = next(item for item in book.snapshot(full=True)['processingRows'] if item['id'] == state.id)
         self.assertTrue(row['processingActive'])
         self.assertEqual(row['processingReason'], 'pending-entry')
 

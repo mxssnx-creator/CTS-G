@@ -4673,19 +4673,9 @@ class Pulse:
             want = 1 if ind.direction == "long" else -1
             if want != direction:
                 return "ind-mismatch"
-            # Indication gate: under the strict gate (default) a kind runs
-            # only while it is validated + profitable — or, if unproven, only
-            # while the indications pack has a validated + profitable set.
-            try:
-                bits = str(reason).split(":")
-                ind_kind = bits[1] if len(bits) > 1 and bits[0] == "ind" else ""
-                if not ind_kind:
-                    ind_kind = str(getattr(ind, "kind", "") or "")
-                gate = getattr(self.sets, "indication_ok", None)
-                if self.sets.enabled and callable(gate) and not gate(ind_kind, "LONG" if direction > 0 else "SHORT"):
-                    return "ind-gate"
-            except Exception:
-                pass
+            # Kind-wide statistics describe a representative risk range.
+            # The exact selected Set below owns the executable PF decision;
+            # a different range must neither block nor qualify this Set.
         side_name = "LONG" if direction > 0 else "SHORT"
         if selected_set is not None:
             return None if self.sets.execution_allowed(selected_set, pack, side_name) else "set-gate"
@@ -5019,7 +5009,7 @@ class Pulse:
                 not math.isfinite(net) or net <= 0 or
                 not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
             return reject("reference sample/PF/net/DD qualification failed")
-        rows = self.strategy_closes()
+        rows = self.config_strategy_closes(chosen.id, side, execution_lane, "block")
         consec = 0
         for row in reversed(rows):
             if row.pnl >= 0:
@@ -5027,10 +5017,10 @@ class Pulse:
             consec += 1
         allow, reasons, _ = self.coord.gate(rows, consec, intern={"pf": pf, "n": n})
         if not allow:
-            return reject("overall coordination: " + "; ".join(reasons))
-        live_pf = self.live_recent_pf(side, n=8)
+            return reject("config coordination: " + "; ".join(reasons))
+        live_pf = self.live_recent_pf(side, n=8, rows=rows)
         if live_pf is not None and (not math.isfinite(live_pf) or live_pf + 1e-9 < self.coord.min_pf):
-            return reject(f"overall live PF below {self.coord.min_pf:.2f}")
+            return reject(f"config live PF below {self.coord.min_pf:.2f}")
         anchors = getattr(self, "_block_reference_anchors", None)
         if anchors is None:
             anchors = self._block_reference_anchors = ContinuationBook()
@@ -5062,7 +5052,7 @@ class Pulse:
         for count in sorted(self.block.counts):
             if count < max(1, min_level) or count > getattr(self.block, "max_stack", 6):
                 continue
-            allowed, cap, _, _ = self._coord_add_state(count=count)
+            allowed, cap, _, _ = self._coord_add_state(count=count, set_id=chosen.id, side=side, execution_lane=execution_lane, strategy="block")
             formula = self.block.formula(reference_qty, count)
             if not allowed or count > cap or pf < formula["blockMinPF"]:
                 continue
@@ -7429,57 +7419,50 @@ class Pulse:
         }
 
     def block_intern_pf(self, pos: Position) -> float:
-        """intern PF feeding the Block count gates for this parent position.
+        """Measured PF of this parent Set/side, never a floor or a sibling."""
+        st = self.sets.sets.get(pos.set_id) if pos.set_id else None
+        if st is None:
+            return 0.0
+        view = self.sets._side_view(st, pos.side)
+        if not self.sets._base_metrics_ok(view):
+            return 0.0
+        return float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
 
-        Floor follows the BlockBook defaultMinPF (CTS strategies.main.real
-        stage), never a hardcoded constant. Under the strict gate (default)
-        only a VALIDATED (last15_n >= max(minSamples, 8)) AND PROFITABLE
-        (cost-adjusted PF >= 1.00) set may lift the floor — unproven or losing
-        sets keep the CTS default. Legacy mode keeps the old soft behavior.
-        """
-        floor_pf = float(getattr(self.block, "default_min_pf", 1.2) or 1.2)
-        intern_pf = floor_pf
-        try:
-            side = str(getattr(pos, "side", "") or "")
-            st = self.sets.sets.get(pos.set_id) if pos.set_id else None
-            if st is None:
-                try:
-                    st = self.sets.pick_any(pos.pack or "indications", side=side) or self.sets.pick_any("general", side=side)
-                except TypeError:
-                    st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
-            if st is not None:
-                blob = {}
-                side_u = (side or "").upper()
-                raw_side = getattr(st, "by_side", None) or {}
-                if side_u and isinstance(raw_side, dict):
-                    blob = raw_side.get(side_u) or {}
-                if blob:
-                    ratio = float(blob.get("last15_ratio") or 0.0)
-                    n = int(blob.get("last15_n") or 0)
-                else:
-                    ratio = float(getattr(st, "last15_ratio", 0.0) or 0.0)
-                    n = int(getattr(st, "last15_n", 0) or 0)
-                if getattr(self.sets, "strict_gate", False):
-                    need = max(int(getattr(self.sets, "min_samples", 8) or 8), 8)
-                    if n >= need and ratio + 1e-9 >= 1.0:
-                        # Validated + profitable: the set governs, but never
-                        # below the CTS real-stage floor.
-                        intern_pf = max(ratio, floor_pf)
-                else:
-                    intern_pf = ratio or floor_pf
-                    if n < 8:
-                        intern_pf = max(intern_pf, floor_pf)
-        except Exception:
-            intern_pf = floor_pf
-        return intern_pf
+    def config_strategy_closes(self, set_id, side, execution_lane="", strategy=""):
+        """Confirmed round trips of one Set, side and execution variant."""
+        source = getattr(self, "closed", None)
+        # Closed records are appended or the complete list is replaced. Build
+        # the connection's index once per publication, not once per candidate.
+        token = (id(source), len(source), id(source[0]) if source else 0, id(source[-1]) if source else 0,
+                 self.max_book_notional()) if source is not None else None
+        cached = getattr(self, "_config_close_index", None)
+        if token is not None and cached and cached[0] == token:
+            index = cached[1]
+        else:
+            index = {}
+            for row in completed_roundtrips(self.strategy_closes()):
+                if int(row.get("member_count") or 1) != 1:
+                    continue
+                key = (str(row.get("trail_set_id") or row.get("set_id") or ""), str(row.get("side") or "").upper())
+                index.setdefault(key, []).append(row)
+            if token is not None:
+                self._config_close_index = (token, index)
+        rows = []
+        for row in index.get((str(set_id), str(side).upper()), ()):
+            if execution_lane and row.get("execution_lane") != execution_lane:
+                continue
+            if strategy and str(row.get("strategy") or "core") != strategy:
+                continue
+            rows.append(SimpleNamespace(**row))
+        return rows
 
-    def _coord_add_state(self, count: Optional[int] = None) -> Tuple[bool, int, float, List[str]]:
+    def _coord_add_state(self, count: Optional[int] = None, *, set_id="", side="", execution_lane="", strategy="") -> Tuple[bool, int, float, List[str]]:
         """Axis count-pos gate for additional strategies. Returns (allow, stack_cap, last_pf, reasons)."""
         stack = int(getattr(self.block, "max_stack", 3) or 3)
         coord = getattr(self, "coord", None)
         if coord is None or not callable(getattr(coord, "add_gate", None)):
             return True, stack, 1.0, []
-        rows = self.strategy_closes()
+        rows = self.config_strategy_closes(set_id, side, execution_lane, strategy) if set_id else self.strategy_closes()
         consec = 0
         for c in reversed(rows):
             pnl = float(getattr(c, "pnl", 0) or 0)
@@ -7493,12 +7476,20 @@ class Pulse:
             intern = {"pf": float(m.get("internPf") or 0), "n": float(m.get("internN") or 0)}
         except Exception:
             intern = {}
+        if set_id:
+            st = self.sets.sets.get(set_id)
+            view = self.sets._side_view(st, side) if st else {}
+            if not self.sets._base_metrics_ok(view):
+                return False, stack, 0.0, ["config Base qualification"]
+            intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
         tape = None
         if count is not None:
             try:
                 tape = list((self.block.count_tape or {}).get(int(count)) or [])
             except Exception:
                 tape = None
+        if set_id and count is not None:
+            tape = [row.pnl for row in rows if str(getattr(row, "axis_key", "")) == f"block-active:{count}"]
         allow, reasons, metrics = self.coord.add_gate(rows, consec, intern=intern, count=count, count_tape=tape)
         last_pf = float((metrics or {}).get("lastPf") or (metrics or {}).get("last15Ratio") or 1.0)
         stack = int(getattr(self.block, "max_stack", 3) or 3)
@@ -7513,13 +7504,7 @@ class Pulse:
             return
         if self.available <= 0:
             return
-        allow_add, stack_cap, last_pf, add_reasons = self._coord_add_state()
-        if not allow_add:
-            if time.time() - self.skip_log.get("add-gate", 0) > 45:
-                log("COORD add-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-add", quiet=True)
-                self.skip_log["add-gate"] = time.time()
-            # Overall pause/last must not freeze other Block counts; per-count
-            # add_gate still runs inside the lane loop.
+        stack_cap = int(getattr(self.block, "max_stack", 6) or 6)
         if time.time() - self.block_last_emit < max(12.0, STAGGER_S * 8):
             return
         if os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
@@ -7567,6 +7552,8 @@ class Pulse:
             # intern PF comes from block_intern_pf: under the strict gate only
             # a validated + profitable set lifts the CTS real-stage floor.
             intern_pf = self.block_intern_pf(pos)
+            if intern_pf <= 0:
+                continue
             d, why, conf = self.score(pos.symbol)
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:
@@ -7609,7 +7596,7 @@ class Pulse:
                 continue
             # Live book losing → don't pyramid more size.
             try:
-                live_pf = self.live_recent_pf(pos.side, n=8)
+                live_pf = self.live_recent_pf(pos.side, n=8, rows=self.config_strategy_closes(pos.set_id, pos.side, getattr(pos, "execution_lane", ""), "block"))
                 if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
                     continue
             except Exception:
@@ -7619,7 +7606,7 @@ class Pulse:
             if not row:
                 continue
             count_n = int(row.get("blockCount") or 0)
-            ok_n, _, _, why_n = self._coord_add_state(count=count_n)
+            ok_n, _, _, why_n = self._coord_add_state(count=count_n, set_id=pos.set_id, side=pos.side, execution_lane=getattr(pos, "execution_lane", ""), strategy="block")
             if not ok_n:
                 self.block.pause_count(lane, count_n, 90)
                 if time.time() - self.skip_log.get(f"add-n:{count_n}", 0) > 45:
@@ -7799,15 +7786,15 @@ class Pulse:
                 f"minPF={row['blockMinPF']:.3f} {row['setKey']}"
             )
 
-    def live_recent_pf(self, side: Optional[str] = None, n: int = 8) -> Optional[float]:
+    def live_recent_pf(self, side: Optional[str] = None, n: int = 8, *, rows=None) -> Optional[float]:
         """Cost-net PF of last-3h live closes. None until enough recent samples."""
-        rows = list(self.closed or [])
+        rows = list(self.closed or []) if rows is None else list(rows)
         if side:
             want = str(side).upper()
             rows = [c for c in rows if str(getattr(c, "side", "") or "").upper() == want]
         rows = recent_closed_rows(rows)
         rows = rows[-max(5, int(n or 8)) :]
-        if len(rows) < 5:
+        if len(rows) < max(5, int(n or 8)):
             return None
         try:
             pc = last_n_cost_pf(rows, len(rows), self.position_cost_pct)
@@ -7821,15 +7808,6 @@ class Pulse:
             return
         if self.entries_blocked():
             return
-        live_pf = self.live_recent_pf(n=8)
-        if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
-            return
-        allow_add, _, _, add_reasons = self._coord_add_state()
-        if not allow_add:
-            if time.time() - self.skip_log.get("dca-add-gate", 0) > 45:
-                log("COORD dca-gate " + "; ".join(add_reasons)[:160], every=45.0, key="coord-dca", quiet=True)
-                self.skip_log["dca-add-gate"] = time.time()
-            return
         if time.time() - getattr(self, "dca_last_emit", 0) < 0.35:
             return
         emitted = 0
@@ -7840,6 +7818,16 @@ class Pulse:
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
+                continue
+            if not pos.set_id or pos.set_id not in self.sets.sets:
+                continue
+            lane_key = getattr(pos, "execution_lane", "")
+            allow_add, _, _, _ = self._coord_add_state(set_id=pos.set_id, side=pos.side, execution_lane=lane_key, strategy="dca")
+            if not allow_add:
+                continue
+            own = self.config_strategy_closes(pos.set_id, pos.side, lane_key, "dca")
+            live_pf = self.live_recent_pf(pos.side, n=8, rows=own)
+            if live_pf is not None and not clears_pf(live_pf, self.coord.min_pf):
                 continue
             group_scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             if self._pending_add_open(pos, "dca"):
@@ -7872,7 +7860,7 @@ class Pulse:
             lane = self.dca.lanes.get(self.dca_lane_key(pos))
             parent = float(getattr(lane, "parent_qty", 0) or 0)
             seed = parent if parent > 0 else pos.qty
-            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key)
+            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key, evidence=[vars(row) for row in own])
             if not row:
                 continue
             c = self.contracts.get(pos.symbol)

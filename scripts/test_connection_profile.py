@@ -20,12 +20,12 @@ class ConnectionProfileTests(unittest.TestCase):
         self.assertEqual(live['profilePatch'], processing_profile())
         self.assertNotIn('api_key', str(live))
         self.assertFalse(live['activationPerformed'])
-        self.assertEqual(live['changes']['minPf'], {'previous':1.26, 'proposed':1.05})
+        self.assertEqual(live['changes']['minPf'], {'previous':1.26, 'proposed':1.02})
 
     def test_profile_defaults_and_independent_returns(self):
         p = processing_profile()
         for key in ('minPf','baseMinPf','mainMinPf','realMinPf','setMinPf','dcaMinPf','exitMinPf'):
-            self.assertEqual(p[key],1.05)
+            self.assertEqual(p[key],1.02)
         for key in ('maxOpen','maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
             self.assertEqual(p[key],0)
         self.assertEqual(p['histLookbackBars'],2880)
@@ -33,7 +33,7 @@ class ConnectionProfileTests(unittest.TestCase):
         self.assertEqual(p['symbolCap'],20)
         self.assertTrue(p['controlOrdersPerConfig'])
         p['minPf']=999
-        self.assertEqual(processing_profile()['minPf'],1.05)
+        self.assertEqual(processing_profile()['minPf'],1.02)
 
     def test_endpoints_default_to_their_own_connection(self):
         self.assertEqual(connection_endpoint('bingx-x01'),'https://open-api.bingx.com')

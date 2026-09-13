@@ -26,7 +26,7 @@ try {
   await Promise.all([page.waitForRequest(r => r.url().includes('/connections.json')), page.goto(process.argv[2] || 'http://127.0.0.1:8081/settings')]);
   await page.getByTestId('section-profit').click();
   const pf = page.locator('label').filter({ hasText: 'Overall minimum PF' }).locator('input[type=number]');
-  assert.equal(await pf.inputValue(), '1.05');
+  assert.equal(await pf.inputValue(), '1.02');
   await pf.fill('1.2');
   await page.screenshot({ path: root + '/overall-pf-settings.png' });
   await page.getByTestId('section-sets').click();

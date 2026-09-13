@@ -10,7 +10,7 @@ from sweep_seven_days import kernel
 
 def oracle(entry, close, net, cost, policy, end, split):
     window, deact, hours, cadence, main, real = policy
-    r = np.zeros(14)
+    r = np.zeros(20)
     checked = -1
     valid = False
     disabled = False
@@ -23,7 +23,7 @@ def oracle(entry, close, net, cost, policy, end, split):
             continue
         if checked < 0 or len(past) - checked >= cadence:
             checked = len(past)
-            valid = all(1 + .1 * np.mean([net[k]/cost[k] for k in past[-n:]]) > 1.05 + 1e-9
+            valid = all(1 + .1 * np.mean([net[k]/cost[k] for k in past[-n:]]) > 1.02 + 1e-9
                         for n in (window, main, real))
         shadow = high = 0.
         dd = None
@@ -42,6 +42,8 @@ def oracle(entry, close, net, cost, policy, end, split):
         r[13] += v/cost[j]
         offset = 8 if close[j] < split else 10
         r[offset:offset+2] += [1, v]
+        col = 14 if close[j] < split else 17
+        r[col:col+3] += [max(0,v),max(0,-v),v/cost[j]]
         equity += v
         if equity >= peak - 1e-12:
             if underwater is not None:
@@ -74,7 +76,7 @@ class PolicySweepTests(unittest.TestCase):
         cls.tmp.cleanup()
 
     def run_kernel(self, entry, close, net, cost, policies):
-        result = np.zeros((len(policies), 14))
+        result = np.zeros((len(policies), 20))
         args = [np.ascontiguousarray(x, dtype=t) for x, t in
                 ((entry, np.int32), (close, np.int32), (net, float), (cost, float))]
         self.fn(len(entry), *args, len(policies), np.array(policies, dtype=np.int32), int(close[-1]+60), 450, result)

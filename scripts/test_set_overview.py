@@ -18,23 +18,26 @@ def state(index=0, **values):
     return SetState(**{**base, **values})
 
 
-def tape(gross=.003, **values):
+def tape(gross=.003, n=15, **values):
     return [dict(t=1_800_000_000 + i * 60, symbol="X-USDT", side="LONG", pnl_pct=gross,
-                 pnl=gross - .001, hold_s=60, reason="tp", **values) for i in range(15)]
+                 pnl=gross - .001, hold_s=60, reason="tp", **values) for i in range(n)]
 
 
-def book(states):
+def book(states, window=15):
     out = SetBook()
     out.cost_pct = .10
     out.by_idx = states
     out.sets = {st.id: st for st in states}
+    out.pf_n = out.min_samples = window
+    for st in states:
+        out._score_one(st)
     return out
 
 
 class SetOverviewTests(unittest.TestCase):
     def test_each_range_and_family_survives_the_global_preview_cap(self):
-        states = [state(i) for i in range(500)]
-        states += [state(500, tp_pct=.012), state(501, kind="trail", trail_key="0.3:0.1")]
+        states = [state(i, hist=tape()) for i in range(500)]
+        states += [state(500, tp_pct=.012, hist=tape()), state(501, kind="trail", trail_key="0.3:0.1", hist=tape())]
         result = build_overview(book(states))
         self.assertEqual(sum(group["setCount"] for group in result["groups"]), 502)
         self.assertEqual({row["tpRange"] for row in result["rows"]}, {"0.3000", "1.2000"})
@@ -43,12 +46,12 @@ class SetOverviewTests(unittest.TestCase):
         json.dumps(result, allow_nan=False)
 
     def test_system_and_exchange_have_their_own_pf_and_sample_counts(self):
-        st = state(hist=tape(.004), live=tape(-.002, exchange_confirmed=True, strategy="core"))
+        st = state(hist=tape(.008, n=30), live=tape(-.002, exchange_confirmed=True, strategy="core"))
         st.live += tape(.04, exchange_confirmed=False)
         st.live += tape(.04, exchange_confirmed=True, partial=True)
-        result = build_overview(book([st]))
+        result = build_overview(book([st], window=30))
         rows = {row["scope"]: row for row in result["rows"]}
-        self.assertEqual(rows["system"]["n"], 15)
+        self.assertEqual(rows["system"]["n"], 30)
         self.assertEqual(rows["exchange"]["n"], 15)
         self.assertGreater(rows["system"]["last15Ratio"], 1.1)
         self.assertLess(rows["exchange"]["last15Ratio"], 1.)
@@ -83,7 +86,7 @@ class SetOverviewTests(unittest.TestCase):
             self.assertEqual(compact[key], original[key])
         self.assertNotIn("pnl", compact)
         b = book([])
-        b.strategy_hist["block"] = [compact]
+        b.strategy_hist["block"] = [slim_hist_row(dict(original, t=original['t']+60*i)) for i in range(15)]
         row = build_overview(b)["rows"][0]
         self.assertEqual((row["indicationKind"], row["strategyType"], row["tpRange"]), ("general", "block", "0.3000"))
 
@@ -93,7 +96,7 @@ class SetOverviewTests(unittest.TestCase):
         b.ind_hist["trend"] = tape(ind_kind="trend")
         b.strategy_hist["dca"] = tape(strategy="dca")
         result = build_overview(b)
-        self.assertTrue(all(row["tpRange"] == "unknown" and row["tpPct"] is None for row in result["rows"]))
+        self.assertEqual(result["rows"], [])
 
     def test_disabled_axis_excludes_history_and_exchange_from_overview(self):
         st = state(live=tape(exchange_confirmed=True, strategy="core", axis_key="last:5"))
@@ -105,14 +108,17 @@ class SetOverviewTests(unittest.TestCase):
     def test_axis_pf_uses_its_window_without_fabricating_other_metrics(self):
         st = state(hist=tape(.03))
         axis = [{"parentSetId": st.id, "axisKey": "prev:5", "pf": .92, "closedN": 5, "qualified": False}]
-        row = next(row for row in build_overview(book([st]), axis)["rows"] if row["strategyType"] == "axis")
-        self.assertEqual((row["last15Ratio"], row["n"]), (.92, 5))
+        b = book([st])
+        self.assertFalse(any(row['strategyType']=='axis' for row in build_overview(b, axis)['rows']))
+        axis[0].update(pf=1.12, qualified=True)
+        row = next(row for row in build_overview(b, axis)["rows"] if row["strategyType"] == "axis")
+        self.assertEqual((row["last15Ratio"], row["n"]), (1.12, 5))
         self.assertIsNone(row["maxDdS"])
-        self.assertFalse(row["active"])
+        self.assertTrue(row["active"])
 
     def test_overall_keeps_desk_results_separate_and_adds_counts(self):
         first = build_overview(book([state(hist=tape(.004))]))
-        second = build_overview(book([state(hist=tape(-.002))]))
+        second = build_overview(book([state(hist=tape(.003))]))
         before = copy.deepcopy(first)
         result = merge_overviews([("Live", first), ("VST demo", second)])
         self.assertEqual(result["groups"][0]["setCount"], 2)

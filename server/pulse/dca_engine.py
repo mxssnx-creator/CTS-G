@@ -241,28 +241,33 @@ class DcaBook:
     def drop(self, symbol: str, side: str, group_key: str = "") -> None:
         self.lanes.pop(self.key(symbol, side, group_key), None)
 
-    def score(self) -> Dict[str, Any]:
-        pc = last_n_cost_pf(self.closes, self.pf_n, self.cost_pct)
+    def score(self, rows=None) -> Dict[str, Any]:
+        scoped = rows is not None
+        rows = self.closes if rows is None else rows
+        active, reason = (True, "") if scoped else (self.active, self.deact_reason)
+        pc = last_n_cost_pf(rows, self.pf_n, self.cost_pct)
         # Restored/API tapes may be newest-first; deactivation must always use
         # the chronological latest window, just like the PF gate.
-        ordered = sorted(self.closes, key=lambda row: float(row.get("t") or 0) if isinstance(row, dict) else float(getattr(row, "t", 0) or 0))
+        ordered = sorted(rows, key=lambda row: float(row.get("t") or 0) if isinstance(row, dict) else float(getattr(row, "t", 0) or 0))
         last25 = ordered[-self.deact_n :]
         avg_r = 0.0
         if last25:
             avg_r = sum(signed_result_r(float(r.get("pnl_pct") or 0), self.cost_pct) for r in last25) / len(last25)
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
-            self.active = False
-            self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
+            active = False
+            reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
         elif pc["count"] >= min(8, self.pf_n) and not clears_pf(pc["ratio"], self.min_pf):
-            self.active = False
-            self.deact_reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
+            active = False
+            reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
         else:
-            if not self.active and avg_r >= 0 and (pc["count"] < 8 or clears_pf(pc["ratio"], self.min_pf)):
-                self.active = True
-                self.deact_reason = ""
+            if not active and avg_r >= 0 and (pc["count"] < 8 or clears_pf(pc["ratio"], self.min_pf)):
+                active = True
+                reason = ""
         pc["last25AvgR"] = round(avg_r, 4)
-        pc["active"] = self.active
-        pc["deactReason"] = self.deact_reason
+        pc["active"] = active
+        pc["deactReason"] = reason
+        if not scoped:
+            self.active, self.deact_reason = active, reason
         return pc
 
     def due(
@@ -274,11 +279,12 @@ class DcaBook:
         px: float,
         now: Optional[float] = None,
         group_key: str = "",
+        evidence=None,
     ) -> Optional[Dict[str, Any]]:
         if not self.enabled:
             return None
-        self.score()
-        if not self.active:
+        decision = self.score(evidence)
+        if not decision["active"]:
             self.skips += 1
             return None
         now = now or time.time()
