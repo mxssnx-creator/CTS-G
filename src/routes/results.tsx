@@ -339,6 +339,8 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <HealthMetric label="Open positions" value={open} />
+        <HealthMetric label="Real / Live positions" value={`${stats?.realPositionCount ?? stats?.openCount ?? 0} / ${stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"}`} />
+        <HealthMetric label="Real / Live orders" value={`${stats?.realOrderCount ?? stats?.openCount ?? 0} / ${stats?.liveOrderCount ?? "—"}`} />
         <HealthMetric label="SL + TP protected" value={`${protectedCount}/${open}`} good={missing === 0} />
         <HealthMetric label="Control groups" value={Number(controls?.groupCount ?? controls?.groups?.length ?? 0)} />
         <HealthMetric label="Reconciliation" value={stats?.coverage?.recon?.pending ? "pending" : stats?.coverage?.recon?.ok === false ? "review" : "ok"} good={stats?.coverage?.recon?.ok !== false && !stats?.coverage?.recon?.pending} />

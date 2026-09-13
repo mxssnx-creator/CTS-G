@@ -465,24 +465,28 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
             </p>
             <p className="mt-1 text-xs text-muted">System equity · wallet {l.walletEquity != null ? fmt(l.walletEquity, 2) : "—"}</p>
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
-              <dt>Real</dt>
-              <dd className="text-right text-fg" title="Engine book — valid system entries">
-                {l.openCount}
+              <dt>Real pos</dt>
+              <dd className="text-right text-fg" title="Internal config/set position lanes; groups are unique symbol+direction">
+                {l.realPositionCount ?? l.openCount} <span className="text-muted">({l.realPositionGroupCount ?? "—"} groups)</span>
               </dd>
-              <dt>Live</dt>
+              <dt>Live pos</dt>
               <dd
                 className={`text-right ${
                   typeof l.exchangeOpenCount === "number" &&
                   l.exchangeOpenCount >= 0 &&
-                  l.exchangeOpenCount !== l.openCount
+                  l.exchangeOpenCount !== (l.livePositionCount ?? l.exchangeOpenCount)
                     ? "text-danger"
                     : "text-fg"
                 }`}
-                title="Indeed live open on the exchange (reconcile)"
+                title="Exchange-owned aggregate position groups; compare with Real groups, not config lanes"
               >
-                {typeof l.exchangeOpenCount === "number" && l.exchangeOpenCount >= 0
-                  ? l.exchangeOpenCount
+                {typeof (l.livePositionCount ?? l.exchangeOpenCount) === "number" && (l.livePositionCount ?? l.exchangeOpenCount)! >= 0
+                  ? (l.livePositionCount ?? l.exchangeOpenCount)
                   : "—"}
+              </dd>
+              <dt>Orders R/L</dt>
+              <dd className="text-right text-fg" title="Real = internal logical lanes; Live = exchange-owned open orders">
+                {l.realOrderCount ?? l.openCount} / {typeof l.liveOrderCount === "number" && l.liveOrderCount >= 0 ? l.liveOrderCount : "—"}
               </dd>
               <dt>Sim</dt>
               <dd

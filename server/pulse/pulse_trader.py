@@ -10129,6 +10129,11 @@ class Pulse:
             for p in self.open.values()
             if self.position_is_ours(p) and float(p.qty or 0) > 0
         })
+        # Keep internal/config lanes separate from exchange aggregates.  The
+        # exchange reports one position group per symbol+side, while the
+        # engine can track many independent config/set lanes in that group.
+        live_order_count = int(getattr(self, "exchange_order_own_count", -1) or -1)
+        live_total_order_count = int(getattr(self, "exchange_order_total_count", -1) or -1)
         if exchange_own_open < 0:
             open_parity = "pending"
         elif exchange_own_open == internal_position_groups:
@@ -10148,6 +10153,12 @@ class Pulse:
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act.get("unrealized") or 0), 4),
             "internalOpen": internal_open,
+            "realPositionCount": internal_open,
+            "realPositionGroupCount": internal_position_groups,
+            "realOrderCount": internal_open,
+            "livePositionCount": exchange_own_open,
+            "liveOrderCount": live_order_count,
+            "liveTotalOrderCount": live_total_order_count,
             "internalPositionGroups": internal_position_groups,
             "exchangeOpen": exchange_total_open,
             "exchangeOwnOpen": exchange_own_open,
@@ -10267,10 +10278,16 @@ class Pulse:
             "winRate": round(wr, 1),
             "openCount": len(self.open),
             "logicalPositionCount": len(self.open),
+            "realPositionCount": internal_open,
+            "realPositionGroupCount": internal_position_groups,
+            "realOrderCount": internal_open,
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
             "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
+            "livePositionCount": exchange_own_open,
+            "liveOrderCount": live_order_count,
+            "liveTotalOrderCount": live_total_order_count,
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,

@@ -2898,6 +2898,9 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
       <p className="mt-1 text-muted">
         {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
       </p>
+      <p className="mt-1 text-muted">
+        Real positions {stats?.realPositionCount ?? stats?.openCount ?? 0} ({stats?.realPositionGroupCount ?? "—"} groups) · Live positions {stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · Orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}
+      </p>
       {groups.length ? (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
           {groups.slice(0, 12).map((group) => {
@@ -2971,6 +2974,7 @@ function LiveApplied({
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
         <span>controls {controlMode} · {controlPairs} SL+TP pairs · {controlGroups} groups</span>
+        <span>positions R/L {stats?.realPositionCount ?? stats?.openCount ?? 0}/{stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}</span>
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F
