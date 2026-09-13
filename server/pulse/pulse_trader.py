@@ -2503,15 +2503,19 @@ class Pulse:
                 pos.control_group_key,
                 getattr(pos, "control_range_key", ""),
             )
-        if idx >= 1000 or (pos is not None and getattr(pos, "execution_lane", "")):
-            if idx < 0 or idx >= 36 ** 4:
+        if idx >= 1000 or (idx < 0 and set_id) or (pos is not None and getattr(pos, "execution_lane", "")):
+            if idx >= 36 ** 4:
                 raise ValueError("Set index cannot be encoded in client order ID")
-            value, encoded = idx, ""
+            # Historical baseline/recovered lanes need protective and close
+            # orders even when they are outside the current catalog. The w
+            # marker cannot resolve to an unrelated index-zero strategy.
+            marker = "w" if idx < 0 else "v"
+            value, encoded = max(0, idx), ""
             for _ in range(4):
                 value, digit = divmod(value, 36)
                 encoded = (string.digits + string.ascii_lowercase)[digit] + encoded
             fingerprint = hashlib.sha256(set_id.encode()).hexdigest()[:3]
-            prefix = f"{TAG}{kind}v{encoded}{fingerprint}{group_token.ljust(8, '0')}"
+            prefix = f"{TAG}{kind}{marker}{encoded}{fingerprint}{group_token.ljust(8, '0')}"
             return prefix + client_order_nonce(prefix, 32 - len(prefix))
         prefix = f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{group_token}"
         # Preserve parser offsets and the complete group token. Use all space
@@ -2540,14 +2544,14 @@ class Pulse:
         low = s.lower()
         tag = TAG.lower()
         rest = s[len(TAG):] if low.startswith(tag) else s
-        if rest[1:2] == "v":
+        if rest[1:2] in ("v", "w"):
             if len(rest) < 18:
                 return None
             try:
-                idx = int(rest[2:6], 36)
+                idx = int(rest[2:6], 36) if rest[1:2] == "v" else -1
             except ValueError:
                 return None
-            st_obj = self.sets.get_idx(idx) if hasattr(self, "sets") else None
+            st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
             if st_obj is not None and hashlib.sha256(st_obj.id.encode()).hexdigest()[:3] != rest[6:9]:
                 st_obj = None
             token = "" if rest[9:17] == "00000000" else rest[9:17]
