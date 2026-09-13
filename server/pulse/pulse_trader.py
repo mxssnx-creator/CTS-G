@@ -25,7 +25,8 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
-from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
+from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, select_best as select_forced
+from validation_policy import control_min_trades
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
 from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from entry_dispatch import EntryMatrix
@@ -62,6 +63,7 @@ from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR,
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
+from hist_calc import run_forced_calc, forced_path
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import (
     redis_key,
@@ -7339,6 +7341,7 @@ class Pulse:
             "histRefreshS": self.sets.refresh_s,
             "setPfWindow": self.sets.pf_n,
             "setDeactN": self.sets.deact_n,
+            "controlMinTrades": control_min_trades(self.overlay.get("controlMinTrades")),
             "setMinPf": self.sets.min_pf,
             "setMaxDdTimeS": self.sets.max_dd_s,
             "setAutoDeact": self.sets.auto_deact,
@@ -8318,20 +8321,35 @@ class Pulse:
 
     def _forced_data(self) -> Dict[str, Any]:
         now = time.time()
-        if now - getattr(self, "_forced_read_at", 0) < 30:
+        policy = (control_min_trades(getattr(self, "overlay", {}).get("controlMinTrades")), self.coord.min_pf)
+        if now - getattr(self, "_forced_read_at", 0) < 30 and policy == getattr(self, "_forced_cache_policy", None):
             return getattr(self, "_forced_cache", {})
         self._forced_read_at = now
+        self._forced_cache_policy = policy
         self._forced_cache = {}
-        path = os.path.join(DIR, "forced-configs.json")
+        path = forced_path(CONN_SHORT)
         try:
             if os.path.getsize(path) > MAX_RETAINED_FILE_BYTES:
                 return {}
             with open(path, encoding="utf-8") as stream:
                 blob = json.load(stream)
-            if not isinstance(blob, dict) or not blob.get("baselineOnly"):
+            if (not isinstance(blob, dict) or not blob.get("baselineOnly")
+                    or blob.get("version") != 2 or blob.get("connection") != CONN_SHORT):
                 return {}
             if not 0 <= now - float(blob.get("updatedAt") or 0) <= 3 * 3600:
                 return {}
+            # Reclassify existing exact Set evidence when the optional rule
+            # changes. Do not replay unchanged candles or retain the old
+            # holdout filter's reduced candidate list.
+            rows = []
+            for group in blob.get("matrix", []):
+                for raw in group.get("rows", []):
+                    row = dict(raw, source=(blob.get("sourceBySymbol") or {}).get(group["symbol"], "unknown"))
+                    if valid_candidate(row, policy[1], control_n=policy[0]):
+                        rows.append(dict(row, eligible=True, status="candidate", controlMinTrades=policy[0],
+                                         controlChecked=bool(policy[0]), controlPassed=True if policy[0] else None,
+                                         controlStatus="passed" if policy[0] else "disabled"))
+            blob.update(rows=select_forced(rows), controlMinTrades=policy[0], selectedCount=len(rows), eligibleCount=len(rows))
             self._forced_cache = blob
         except (OSError, ValueError, TypeError):
             pass
@@ -8343,7 +8361,7 @@ class Pulse:
             return False
         if not getattr(self.sets, "live_test_mode", False) or not getattr(self, "control_orders", True):
             return False
-        if (not valid_candidate(row, self.coord.min_pf) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
+        if (not valid_candidate(row, self.coord.min_pf, control_n=control_min_trades(getattr(self, "overlay", {}).get("controlMinTrades"))) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
             return False
         if not any(r.get("id") == row.get("id") for r in self._forced_data().get("rows", [])):
             return False
@@ -11010,6 +11028,38 @@ class Pulse:
             self._hist_request_seen = run_id
         return request
 
+    def _hist_run_forced(self, request: Dict[str, Any]) -> None:
+        """Consume the baseline request on the existing history worker."""
+        run_id = str(request["runId"])
+        self._hist_active_run_id = run_id
+        self._hist_request_seen = run_id
+        overlay = dict(getattr(self, "overlay", {}))
+        overlay.update(request.get("overlay") or {})
+        if "controlMinTrades" in request:
+            overlay["controlMinTrades"] = control_min_trades(request["controlMinTrades"])
+        def stopped():
+            status = read_hist_job(CONN_SHORT)
+            return status.get("runId") == run_id and status.get("phase") == "stopped"
+        def publish(job):
+            # A newer queued request keeps its own status until consumed.
+            if not self._hist_request_changed() and not stopped():
+                write_hist_job(dict(job, runId=run_id, generation=request.get("generation", 0), shared=True), CONN_SHORT)
+        def cancelled():
+            return (self._hist_stop.is_set() or self._hist_request_changed() or stopped()
+                    or any(os.path.exists(p) for p in (PAUSE_PATH, STOP_PATH, STOP_ALL)))
+        publish(dict(phase="fetch", pct=0, detail="Forced baseline · shared history worker", forcedOnly=True))
+        try:
+            job = run_forced_calc(dict(request, overlay=overlay), persist=False,
+                                  on_progress=publish, should_cancel=cancelled)
+            matrix = job.pop("_forcedMatrix", [])
+            self._hist_request_check_ts = 0  # read the newest generation before publishing
+            if job.get("ready") and not cancelled():
+                atomic_write(forced_path(CONN_SHORT), dict(job["forcedConfigs"], matrix=matrix, connection=CONN_SHORT))
+                self._forced_read_at = 0
+            publish(job)
+        finally:
+            self._hist_active_run_id = ""
+
     def _hist_write_status(self, book: Optional[SetBook] = None, *, progress_only: bool = False, **values: Any) -> None:
         current = book or self.sets
         with self.state_guard():
@@ -12158,6 +12208,9 @@ class Pulse:
                 if not manual and not hourly_due:
                     wait_s = min(max(float(self._hist_next_hourly_at or now + 5.0) - now, 0.25), 10.0)
                     self._hist_wake.wait(timeout=wait_s)
+                    continue
+                if manual and request.get("forcedOnly"):
+                    self._hist_run_forced(request)
                     continue
                 mode = str(request.get("mode") or ("initial" if not ready else "hourly"))
                 run_id = str(request.get("runId") or f"{CONN_SHORT}:{int(now * 1000)}")

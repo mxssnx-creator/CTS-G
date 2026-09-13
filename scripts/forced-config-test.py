@@ -19,11 +19,12 @@ class ForcedTests(unittest.TestCase):
         return {"id": "forced:XRP:signals:LONG:test", "symbol": "XRP-USDT", "indication": "signals",
                 "direction": "LONG", "tpPct": .4, "slPct": .1, "pf": 1.2, "trainPf": 1.3,
                 "holdoutPf": 1.1, "trainN": 20, "holdoutN": 10, "maxDrawdownR": 2,
+                "evidenceVersion": 2, "trainingWindowsOk": True, "trainingMaxDrawdownR": 2,
                 "tradesPerHour": 4, "source": "historical-market", "eligible": True, **overrides}
 
     def replay(self, bars, signals=None, **kwargs):
         return forced._replay(bars, signals or [(1, .9)] * len(bars), 1, .4, .1, 0,
-                              100000, kwargs.get("cost", .15), 8, 1.02, 6)
+                              100000, kwargs.get("cost", .15), 8, 1.05, 6, control_n=kwargs.get("control_n", 0))
 
     def test_exact_grid(self):
         self.assertEqual(len(forced.TP_GRID) * len(forced.SL_GRID), 81)
@@ -45,14 +46,24 @@ class ForcedTests(unittest.TestCase):
         self.assertGreater(result["avgDdS"], 0)
         self.assertEqual(result["avgDdS"], result["maxDdS"])
 
-    def test_strict_pf_and_input_validation(self):
+    def test_strict_training_and_optional_control_validation(self):
         self.assertTrue(forced.valid_candidate(self.row()))
-        self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.15))
+        self.assertTrue(forced.valid_candidate(self.row(), min_pf=1.15))
+        self.assertFalse(forced.valid_candidate(self.row(), min_pf=1.3))
         for field in ("pf", "trainPf", "holdoutPf"):
-            self.assertFalse(forced.valid_candidate(self.row(**{field: 1.05})))
             self.assertFalse(forced.valid_candidate(self.row(**{field: float("nan")})))
-        for changes in ({"source": "synth"}, {"trainN": 7}, {"holdoutN": 7}, {"slPct": .12}, {"maxDrawdownR": 7}):
+        for changes in ({"source": "synth"}, {"trainN": 7}, {"slPct": .12}, {"trainingMaxDrawdownR": 7},
+                        {"trainPf":1.05}, {"trainingWindowsOk":False}, {"evidenceVersion":1}):
             self.assertFalse(forced.valid_candidate(self.row(**changes)))
+        losing_control=self.row(holdoutN=0,holdoutPf=0,pf=0,maxDrawdownR=100,eligible=False)
+        self.assertTrue(forced.valid_candidate(losing_control))
+        self.assertFalse(forced.valid_candidate(losing_control,control_n=5))
+        self.assertFalse(forced.valid_candidate(self.row(holdoutN=4),control_n=5))
+        self.assertTrue(forced.valid_candidate(self.row(holdoutN=5),control_n=5))
+
+    def test_reporting_rounding_cannot_change_the_exact_training_gate(self):
+        self.assertTrue(forced.valid_candidate(self.row(trainPf=1.05,trainPfExact=1.0500004)))
+        self.assertFalse(forced.valid_candidate(self.row(trainPf=1.050001,trainPfExact=1.05)))
 
     def test_all_eligible_per_symbol_and_kind_throughput_first(self):
         rows = [self.row(id=f"{sym}:{kind}:{i}", symbol=sym, indication=kind, tradesPerHour=i)
@@ -81,13 +92,40 @@ class ForcedTests(unittest.TestCase):
 
     def test_no_entry_candle_lookahead(self):
         bars = [[100, 102, 99, 100, 1]] + [[100, 100, 100, 100, 1]] * 5
-        self.assertEqual(self.replay(bars, [(1, .9)] + [(0, 0)] * 5)["n"], 0)
+        result=self.replay(bars, [(1, .9)] + [(0, 0)] * 5)
+        self.assertEqual(result["n"], 1)
+        self.assertEqual(result["boundaryCloses"], 1)
+        self.assertAlmostEqual(result["netPct"], -.15)
 
     def test_holdout_loss_vetoes_training_profit(self):
-        result = self.replay([[100, 100.6, 99.99, 100, 1]] * 84 + [[100, 100, 99, 100, 1]] * 36)
+        result = self.replay([[100, 100.6, 99.99, 100, 1]] * 84 + [[100, 100, 99, 100, 1]] * 36, control_n=8)
         self.assertGreater(result["trainPf"], 1.02)
         self.assertFalse(result["eligible"])
         self.assertEqual(result["holdoutPf"], 0)
+
+    def test_disabled_control_cannot_veto_via_whole_period_pf_drawdown_or_windows(self):
+        training=[[100, 100.6, 99.99, 100, 1]] * 84
+        bad=self.replay(training+[[100,100,90,100,1]]*36)
+        good=self.replay(training+[[100,100.6,99.99,100,1]]*36)
+        self.assertTrue(bad["eligible"])
+        self.assertTrue(good["eligible"])
+        self.assertFalse(bad["controlChecked"])
+        self.assertIsNone(bad["controlPassed"])
+        self.assertEqual(bad["holdoutPf"],0)
+        self.assertGreater(bad["maxDrawdownR"],6)
+        self.assertEqual(bad["trainingMaxDrawdownR"],0)
+        self.assertEqual(bad["evaluationWindows"],good["evaluationWindows"])
+        self.assertEqual(bad["evaluationWindowScope"],"training")
+
+    def test_split_and_end_realize_open_losses_and_costs_once(self):
+        bars=[[100,100,100,100,1] for _ in range(10)]
+        bars[6]=[100,100,99.96,99.96,1]
+        bars[9]=[100,100,99.95,99.95,1]
+        signals=[(1,.9) if i in (0,7) else (0,0) for i in range(10)]
+        r=self.replay(bars,signals)
+        self.assertEqual((r["trainN"],r["holdoutN"],r["boundaryCloses"],r["splitCensored"],r["openUnresolved"]),(1,1,2,0,0))
+        self.assertAlmostEqual(r["netPct"],-.39)
+        self.assertEqual(r["pf"],0)
 
     def test_complete_coverage_without_signals(self):
         with patch.object(forced, "indication_kind_votes", return_value=[]):

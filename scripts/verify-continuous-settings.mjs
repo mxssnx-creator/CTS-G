@@ -30,6 +30,18 @@ try {
   await pf.fill('1.2');
   await page.screenshot({ path: root + '/overall-pf-settings.png' });
   await page.getByTestId('section-sets').click();
+  const control = page.locator('label').filter({ hasText: 'Control trades · holdout' }).locator('input[type=number]');
+  assert.equal(await control.inputValue(), '0');
+  for (const value of ['5', '0']) {
+    await control.fill(value);
+    const applied = page.waitForResponse(r => r.url().includes('/config.json') && r.request().method() === 'POST');
+    await page.getByRole('button', { name: 'Save to VST', exact: true }).click();
+    await applied;
+    const payload = saved.at(-1);
+    assert.equal((payload.overlay || payload).controlMinTrades, Number(value));
+  }
+  await control.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: root + '/control-off-settings.png' });
   const base = page.locator('label').filter({ hasText: 'Base evaluation · last positions' }).locator('input[type=number]');
   assert.equal(await base.inputValue(), '30');
   await base.fill('75');
@@ -42,6 +54,7 @@ try {
   for (const key of ['minPf','baseMinPf','mainMinPf','realMinPf','setMinPf','dcaMinPf','exitMinPf']) assert.equal(overlay[key], 1.2, key);
   assert.equal(overlay.setPfWindow, 75);
   assert.equal(overlay.setMinSamples, 75);
+  assert.equal(overlay.controlMinTrades, 0);
   assert.deepEqual(errors, []);
   await page.screenshot({ path: root + '/base-evaluation-settings.png' });
   for (const [section, label] of [['exits', 'Exit deact N'], ['dca', 'DCA deact N']]) {
@@ -51,7 +64,7 @@ try {
     await input.fill('5');
     assert.equal(await input.inputValue(), '5');
   }
-  const result = { ok: true, checked: 'single PF control, all stage aliases, Base default30 and saved75, DCA/Exit deactivation5',
+  const result = { ok: true, checked: 'control default0 and saved5/0, single PF control, all stage aliases, Base default30 and saved75, DCA/Exit deactivation5',
                    exchangeAccess: false, pageErrors: errors, optionalExternalResourcesStubbed: true };
   writeFileSync(root + '/settings-contract.json', JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));

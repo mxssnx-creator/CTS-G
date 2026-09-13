@@ -14,6 +14,7 @@ import math
 from typing import Any, Dict, List, Sequence
 
 from position_cost import evaluation_windows, last_n_cost_pf
+from validation_policy import CONTROL_MIN_PF, control_min_trades
 from set_engine import BAR_S, IND_KINDS, IND_TAG_KIND, indication_kind_votes
 
 FORCED_SYMBOLS = ("XRP-USDT", "BCH-USDT", "SOL-USDT")
@@ -48,27 +49,31 @@ def select_best(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for i, row in enumerate(sorted(groups[key], key=rank_key)[:TOP_N or None])]
 
 
-def valid_candidate(row: Dict[str, Any], min_pf: float = MIN_PF) -> bool:
+def valid_candidate(row: Dict[str, Any], min_pf: float = MIN_PF, *, control_n: int = 0) -> bool:
     """Fail closed before a historical row can enter the VST trial lane."""
     try:
-        metrics = [float(row[k]) for k in ("pf", "trainPf", "holdoutPf", "maxDrawdownR")]
-        return bool(row.get("eligible") and row.get("source") == "historical-market"
+        metrics = [float(row.get(k + "Exact", row[k])) for k in ("pf", "trainPf", "holdoutPf", "trainingMaxDrawdownR")]
+        need = control_min_trades(control_n)
+        return bool(row.get("evidenceVersion") == 2 and row.get("source") == "historical-market"
                     and row.get("symbol") in FORCED_SYMBOLS and row.get("indication") in IND_KINDS
                     and row.get("direction") in ("LONG", "SHORT")
                     and all(math.isfinite(v) for v in metrics)
-                    and min(metrics[:3]) > max(MIN_PF, float(min_pf)) and 0 <= metrics[3] <= 6
-                    and int(row["trainN"]) >= 8 and int(row["holdoutN"]) >= 8
+                    and metrics[1] > max(MIN_PF, float(min_pf)) and 0 <= metrics[3] <= 6
+                    and row.get("trainingWindowsOk") is True and int(row["trainN"]) >= 8
+                    and (not need or (int(row["holdoutN"]) >= need and metrics[2] > CONTROL_MIN_PF))
                     and float(row["tpPct"]) in TP_GRID and float(row["slPct"]) in SL_GRID)
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
 
-def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, floor, dd_limit):
+def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, floor, dd_limit,
+            *, control_n=0):
     """One independent lane. Fixed 80-close tape; full-period exact totals.
 
     Enter at the signal candle close; exits start on the next candle.
     Gaps through a stop fill at the worse open; ambiguous TP+SL uses SL.
-    Reset at the 70/30 split so no training position leaks into holdout.
+    Close at the 70/30 split and end, charging costs for every open position.
+    Only training evidence admits a lane when the optional control is off.
     """
     nbar = len(bars)
     split = warmup + int((nbar - warmup) * .7)
@@ -76,36 +81,41 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
     entry = 0.0
     entered = 0
     gp = gl = train_gp = train_gl = test_gp = test_gl = 0.0
-    n = train_n = test_n = censored = 0
+    n = train_n = test_n = boundary_closes = 0
     equity = peak = drawdown = hold_sum = 0.0
     dd_start = None
     dd_total = dd_max = 0.0
     dd_episodes = 0
+    train_equity = train_peak = train_dd = 0.0
     tape: deque = deque(maxlen=MAX_TAPE)
+    train_tape: deque = deque(maxlen=MAX_TAPE)
     for i in range(warmup, nbar):
-        if i == split and entry:
-            censored += 1
-            entry = 0.0
         op, hi, lo, close = (float(v) for v in bars[i][:4])
         if not all(math.isfinite(v) and v > 0 for v in (op, hi, lo, close)):
             continue
+        boundary = i in (split-1, nbar-1)
         if entry:
             stop = entry * (1 - side * sl)
             target = entry * (1 + side * tp)
             hit_sl = lo <= stop if side == 1 else hi >= stop
             hit_tp = hi >= target if side == 1 else lo <= target
-            if hit_sl or hit_tp:
-                px = (min(op, stop) if side == 1 else max(op, stop)) if hit_sl else target
+            if hit_sl or hit_tp or boundary:
+                px = ((min(op, stop) if side == 1 else max(op, stop)) if hit_sl else
+                      target if hit_tp else close)
                 raw = side * (px - entry) / entry
                 net = raw - cost
                 gain, loss = max(0.0, net), max(0.0, -net)
                 gp += gain
                 gl += loss
                 n += 1
+                boundary_closes += int(boundary and not (hit_sl or hit_tp))
                 if i < split:
                     train_n += 1
                     train_gp += gain
                     train_gl += loss
+                    train_equity += net
+                    train_peak = max(train_peak, train_equity)
+                    train_dd = max(train_dd, train_peak - train_equity)
                 else:
                     test_n += 1
                     test_gp += gain
@@ -126,13 +136,15 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
                 tape.append({"t": now - (nbar - 1 - i) * BAR_S, "pnl": net,
                              "pnl_pct": raw, "costPct": cost_pct,
                              "hold_s": (i - entered) * BAR_S})
+                if i < split:
+                    train_tape.append(tape[-1])
                 entry = 0.0
                 # No exit-bar re-entry: conservatively avoid artificial churn.
                 continue
         direction, conf = signals[i]
-        if not entry and direction == side and conf >= .58:
+        if not boundary and not entry and direction == side and conf >= .58:
             entry, entered = close, i
-    windows = evaluation_windows(list(tape), cost_pct, required_samples=need)
+    windows = evaluation_windows(list(train_tape), cost_pct, required_samples=need)
     # Diagnostic windows are separate from the eligibility policy. A partial
     # window remains partial; never label 7 closes as a last-8 PF.
     recent = evaluation_windows(list(tape), cost_pct, windows=(8, 25, 75), required_samples=need)
@@ -146,14 +158,25 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
                      for m in windows.values() if m["n"] >= m["requiredSamples"])
     pf, train_pf, test_pf = _pf(gp, gl), _pf(train_gp, train_gl), _pf(test_gp, test_gl)
     dd_r = drawdown / max(sl + cost, 1e-12)
-    enough = train_n >= need and test_n >= need
-    eligible = enough and min(pf, train_pf, test_pf) > floor and windows_ok and dd_r <= dd_limit
-    reason = ("candidate" if eligible else "insufficient-samples" if not enough else
-              "baseline-pf" if min(pf, train_pf, test_pf) <= floor else
-              "negative-window" if not windows_ok else "drawdown-limit")
+    train_dd_r = train_dd / max(sl + cost, 1e-12)
+    control_n = control_min_trades(control_n)
+    training_ok = train_n >= need and train_pf > floor and windows_ok and train_dd_r <= dd_limit
+    control_ok = test_n >= control_n and test_pf > CONTROL_MIN_PF if control_n else None
+    eligible = training_ok and (not control_n or control_ok)
+    reason = ("candidate" if eligible else "insufficient-training" if train_n < need else
+              "training-pf" if train_pf <= floor else "negative-training-window" if not windows_ok else
+              "training-drawdown" if train_dd_r > dd_limit else
+              "insufficient-control" if test_n < control_n else "control-pf")
     hours = max(BAR_S, (nbar - warmup) * BAR_S) / 3600
-    return {"n": n, "trainN": train_n, "holdoutN": test_n,
+    return {"evidenceVersion": 2, "n": n, "trainN": train_n, "holdoutN": test_n,
+            "trainingEligible": training_ok, "trainingWindowsOk": windows_ok,
+            "trainingMaxDrawdownR": round(train_dd_r, 6),
+            "trainingMaxDrawdownRExact": train_dd_r,
+            "controlMinTrades": control_n, "controlMinPf": CONTROL_MIN_PF,
+            "controlChecked": bool(control_n), "controlPassed": control_ok,
+            "controlStatus": "disabled" if not control_n else "passed" if control_ok else "failed",
             "pf": round(pf, 6), "trainPf": round(train_pf, 6), "holdoutPf": round(test_pf, 6),
+            "trainPfExact": train_pf, "holdoutPfExact": test_pf,
             "costRatio": last_n_cost_pf(list(tape), 15, cost_pct)["ratio"],
             "netPct": round((gp - gl) * 100, 6), "netAvgPct": round((gp - gl) * 100 / max(1, n), 6),
             "maxDrawdownR": round(dd_r, 6), "tradesPerHour": round(n / hours, 6),
@@ -161,13 +184,14 @@ def _replay(bars, signals, side, tp_pct, sl_pct, warmup, now, cost_pct, need, fl
             "recentPf": recent, "ddEpisodes": dd_episodes,
             "avgDdS": round(dd_total / dd_episodes, 2) if dd_episodes else 0.0,
             "maxDdS": round(dd_max, 2),
-            "splitCensored": censored, "eligible": eligible, "status": reason,
-            "evaluationWindows": windows}
+            "splitCensored": 0, "boundaryCloses": boundary_closes, "eligible": eligible, "status": reason,
+            "evaluationWindows": windows, "evaluationWindowScope": "training"}
 
 
 def evaluate_symbol(symbol: str, bars: Sequence[Sequence[float]], settings: Dict[str, Any],
                     now: float, *, cost_pct: float = .15, required_samples: int = 8,
-                    min_pf: float = MIN_PF, max_drawdown_r: float = 6.0) -> Dict[str, Any]:
+                    min_pf: float = MIN_PF, max_drawdown_r: float = 6.0,
+                    control_n: int = 0) -> Dict[str, Any]:
     if symbol not in FORCED_SYMBOLS:
         return {"symbol": symbol, "rows": [], "best": [], "completed": 0}
     need = max(8, int(required_samples))
@@ -190,7 +214,7 @@ def evaluate_symbol(symbol: str, bars: Sequence[Sequence[float]], settings: Dict
             for tp in TP_GRID:
                 for sl in SL_GRID:
                     metrics = _replay(bars, signals[kind], side, tp, sl, warmup, now,
-                                      cost_pct, need, floor, max_drawdown_r)
+                                      cost_pct, need, floor, max_drawdown_r, control_n=control_n)
                     rows.append({"id": f"forced:{symbol}:{kind}:{direction}:tp{tp:.2f}:sl{sl:.2f}:{settings_key}",
                                  "symbol": symbol, "indication": kind, "direction": direction,
                                  "tpPct": tp, "slPct": sl, "slRatio": round(sl / tp, 8),
@@ -201,7 +225,8 @@ def evaluate_symbol(symbol: str, bars: Sequence[Sequence[float]], settings: Dict
     return {"symbol": symbol, "rows": compact, "best": best, "completed": len(rows),
             "eligibleCount": sum(bool(r["eligible"]) for r in rows), "settings": settings,
             "settingsKey": settings_key, "bars": len(bars), "requiredSamples": need,
-            "minPf": floor, "maxDrawdownR": max_drawdown_r, "costPct": cost_pct}
+            "minPf": floor, "maxDrawdownR": max_drawdown_r, "costPct": cost_pct,
+            "controlMinTrades": control_min_trades(control_n), "controlMinPf": CONTROL_MIN_PF}
 
 
 def summary(results: Sequence[Dict[str, Any]], sources: Dict[str, str], now: float) -> Dict[str, Any]:
@@ -210,10 +235,13 @@ def summary(results: Sequence[Dict[str, Any]], sources: Dict[str, str], now: flo
             for result in results for row in result.get("best", [])]
     completed = sum(int(r.get("completed", 0)) for r in results)
     requested = len(FORCED_SYMBOLS) * len(IND_KINDS) * 2 * len(TP_GRID) * len(SL_GRID)
-    return {"version": 1, "symbols": list(FORCED_SYMBOLS), "tpGrid": list(TP_GRID), "slGrid": list(SL_GRID),
+    controls = sorted({control_min_trades(r.get("controlMinTrades")) for r in results})
+    return {"version": 2, "symbols": list(FORCED_SYMBOLS), "tpGrid": list(TP_GRID), "slGrid": list(SL_GRID),
             "minPf": MIN_PF, "pfDefinition": "net-gross-profit / net-gross-loss",
             "baselineOnly": True, "additionalStrategies": [], "topPerSymbolIndication": TOP_N,
-            "requiredSamplesPerSplit": 8, "split": "70/30 chronological; reset at split",
+            "trainingMinTrades": 8, "controlMinTrades": controls[0] if len(controls)==1 else 0,
+            "controlPolicies": controls, "controlMinPf": CONTROL_MIN_PF,
+            "split": "70/30 chronological; open positions closed with costs at split and end",
             "sourceBySymbol": sources, "costSource": "configured-replay-cost",
             "priority": "positive PF + windows + drawdown, then trades/hour, lower SL",
             "requested": requested, "completed": completed,

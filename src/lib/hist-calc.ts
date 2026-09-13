@@ -141,6 +141,7 @@ export type ForcedConfigSummary = {
   coveragePct?: number; selectedCount?: number; eligibleCount?: number;
   minPf?: number; updatedAt?: number; baselineOnly?: boolean; mainnetReady?: boolean;
   connection?: string; trialMode?: boolean;
+  controlMinTrades?: number; controlMinPf?: number; trainingMinTrades?: number;
 };
 
 export type HistCalcTimings = {

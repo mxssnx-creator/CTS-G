@@ -25,3 +25,7 @@
   its own evidence. Only Base-qualified Sets enter downstream calculations
   and system result statistics. Continue Base checks when evidence changes;
   retain rejected Sets and actual exchange accounting for ongoing tracking.
+- User instruction, 2026-09-13: additional chronological control/holdout
+  admission defaults to `controlMinTrades: 0` (off). Keep actual control
+  results visible. Zero must not disable per-Set Base/Main/Real evaluation,
+  cost accounting, TP/SL protection or venue rate limits.
