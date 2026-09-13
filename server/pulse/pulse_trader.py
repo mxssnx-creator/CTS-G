@@ -11023,16 +11023,32 @@ class Pulse:
         run_id = str(request.get("runId") or "")
         if not run_id or run_id == self._hist_request_seen:
             return {}
+        if request.get("forcedOnly"):
+            try:
+                with open(forced_path(CONN_SHORT), encoding="utf-8") as stream:
+                    completed = json.load(stream)
+                if (completed.get("version") == 2 and completed.get("connection") == CONN_SHORT
+                        and completed.get("requestRunId") == run_id):
+                    self._hist_request_seen = run_id
+                    return {}  # completed baseline survives a worker restart
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         self._hist_latest_request_id = run_id
         if consume:
             self._hist_request_seen = run_id
         return request
 
+    def _hist_begin_request(self, request: Dict[str, Any], run_id: str) -> None:
+        """Automatic runs never un-consume the durable manual request."""
+        self._hist_active_run_id = run_id
+        if request:
+            self._hist_latest_request_id = run_id
+            self._hist_request_seen = run_id
+
     def _hist_run_forced(self, request: Dict[str, Any]) -> None:
         """Consume the baseline request on the existing history worker."""
         run_id = str(request["runId"])
-        self._hist_active_run_id = run_id
-        self._hist_request_seen = run_id
+        self._hist_begin_request(request, run_id)
         overlay = dict(getattr(self, "overlay", {}))
         overlay.update(request.get("overlay") or {})
         if "controlMinTrades" in request:
@@ -11054,7 +11070,8 @@ class Pulse:
             matrix = job.pop("_forcedMatrix", [])
             self._hist_request_check_ts = 0  # read the newest generation before publishing
             if job.get("ready") and not cancelled():
-                atomic_write(forced_path(CONN_SHORT), dict(job["forcedConfigs"], matrix=matrix, connection=CONN_SHORT))
+                atomic_write(forced_path(CONN_SHORT), dict(job["forcedConfigs"], matrix=matrix,
+                                                         connection=CONN_SHORT, requestRunId=run_id))
                 self._forced_read_at = 0
             publish(job)
         finally:
@@ -12296,10 +12313,7 @@ class Pulse:
                 start, end = self._history_bounds(lookback)
                 catalog_generation = int(getattr(self, "_sets_generation", 0) or 0)
                 self._hist_active_request = dict(request)
-                self._hist_active_run_id = run_id
-                self._hist_latest_request_id = run_id
-                if run_id:
-                    self._hist_request_seen = run_id
+                self._hist_begin_request(request, run_id)
                 with self.state_guard():
                     progress = book.progress
                     progress.phase = "initial" if mode == "initial" else "backfill"

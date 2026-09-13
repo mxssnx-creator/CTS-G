@@ -19,7 +19,9 @@ configuration IDs × 3,375 policies per group = **1,283,040,000 alternatives**.
 | XRP | 6,917,887 | 76,502 | 575 | 550 |
 | Total | 36,431,963 | 2,963,600 | 14,310 | 13,990 |
 
-These are alternative simulations, not an additive portfolio, simultaneous
+Different parameter combinations, including disabled TP variants, can produce
+identical trade tapes. The unique-parameter count is not a count of statistically
+independent outcomes. These are alternative simulations, not an additive portfolio, simultaneous
 orders or confirmed exchange trades. The additional training criterion is at
 least eight admitted closes, positive net and CTS cost PF > 1.02. Each risk
 configuration chooses its own policy solely from qualifying training data;
@@ -51,6 +53,7 @@ Existing remote user settings are preserved during this targeted rollout.
 | Split and terminal accounting | Open baseline positions were discarded at the split/end. | Close at the boundary price with costs; count once, never re-enter on that boundary. Admission uses unrounded evidence. Two open losing trades now both appear in totals. |
 | Expensive sweep reuse | Matching code alone could reuse results from changed source candles. | Verify source SHA, period, symbol and rule. Computation dependencies are fingerprinted separately from report formatting. |
 | Queued baseline job | The shared runtime consumed the request as normal history work and never executed its baseline calculation. | Execute it on the existing history worker; maintain progress, preserve the main Set book, observe stop/supersession, and keep newer requests queued. |
+| Automatic refresh after manual work | An automatic run overwrote the consumed manual request ID and replayed that same request repeatedly. | Preserve the consumed ID across automatic runs and acknowledge a completed baseline across restarts. Remote end-to-end test exposed this; dedicated queue regressions cover both paths. |
 | Connection evidence | Baseline files used one shared filename. | Versioned, connection-specific files and provenance checks; no X01/X02 evidence borrowing. |
 | Rule change and cache | A formerly filtered shortlist could stay filtered after control was disabled. | Reclassify every stored exact Set from its existing scalar training evidence; no candle replay for a threshold-only change. |
 | Release configuration | Applying all installation defaults would overwrite newer remote edits. | Targeted rollout preserves explicit settings, changing the requested control default and 20-symbol test selection. |
@@ -66,7 +69,7 @@ unrelated to the optional historical control-trade count.
 - Engine: 410/410.
 - Independent Python suite: 369/369 before the additional deployment-preservation
   regression and stop regression; the added 8-test connection-profile suite and
-  5-test forced-queue suite also pass. GitHub CI verifies the final 371 tests.
+  7-test forced-queue suite also pass. GitHub CI verifies the final 373 tests.
 - JavaScript/TypeScript: 262 passed, four intentional skips, zero failures.
 - Release contract: 15/15; Typecheck and production build pass.
 - Dev and production browser checks: desktop/mobile, no console errors, no page

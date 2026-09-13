@@ -29,6 +29,35 @@ class ForcedQueueTests(unittest.TestCase):
         p._hist_request_changed=lambda:False
         return p
 
+    def test_automatic_refresh_does_not_requeue_consumed_manual_work(self):
+        p=self.pulse()
+        # Use the real coalescing check, including its throttled branch.
+        del p._hist_request_changed
+        request={'runId':'manual:4'}
+        p._hist_begin_request(request,'manual:4')
+        p._hist_begin_request({},'automatic:5')
+        with patch.object(pt,'read_hist_request',return_value=request):
+            self.assertFalse(p._hist_request_changed())
+            self.assertFalse(p._hist_request_changed())
+            self.assertEqual(p._hist_new_request(consume=False),{})
+        p._hist_request_check_ts=0
+        with patch.object(pt,'read_hist_request',return_value={'runId':'manual:6'}):
+            self.assertTrue(p._hist_request_changed())
+            self.assertEqual(p._hist_new_request(consume=False)['runId'],'manual:6')
+        self.assertEqual(p._hist_request_seen,'manual:4')
+
+    def test_completed_baseline_stays_consumed_after_restart_in_its_own_connection(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=pathlib.Path(d)/'baseline.json'
+            completed={'version':2,'connection':'bingx-x02','requestRunId':'manual:4'}
+            path.write_text(json.dumps(completed))
+            p=self.pulse();p._hist_request_seen=''
+            with patch.object(pt,'CONN_SHORT','bingx-x02'),patch.object(pt,'forced_path',return_value=str(path)), \
+                 patch.object(pt,'read_hist_request',return_value={'runId':'manual:4','forcedOnly':True}):
+                self.assertEqual(p._hist_new_request(consume=False),{})
+                p._hist_request_seen='';completed['connection']='bingx-x01';path.write_text(json.dumps(completed))
+                self.assertEqual(p._hist_new_request(consume=False)['runId'],'manual:4')
+
     def test_queued_baseline_is_processed_with_saved_zero_and_does_not_change_main_book(self):
         p=self.pulse();book=p.sets=object()
         request=dict(runId='x02:7',generation=7,forcedOnly=True,hours=24)
