@@ -170,6 +170,12 @@ def replace_existing(pulse, proxy, rows, signature):
                 response = pulse.api.post('/openApi/swap/v1/trade/cancelReplace',body)
             else:
                 created = pulse.place_ctrl(proxy,'sec-'+kind,price)
+                # place_ctrl() returns an empty id when the venue rejected or
+                # deferred the request.  Do not manufacture a successful
+                # cancel/replace envelope: that masks the real reason and
+                # leaves the shared pair looking protected without an order.
+                if not created:
+                    return False
                 response = {'code':0,'data':{'cancelResult':'SUCCESS','newOrderResult':'SUCCESS','newOrderId':created}}
         data = response.get('data') or {}
         new_oid = str(data.get('newOrderId') or '') if isinstance(data,dict) else ''
