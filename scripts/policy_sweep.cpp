@@ -5,9 +5,10 @@
 
 extern "C" void sweep(int n, const int* entry, const int* close, const double* net,
                       const double* cost, int np, const int* policies, int endbar,
-                      int split, double* out) {
+                      int split, double min_pf, double* out) {
   // Columns: N, win, net, costs, gain, loss, maxDD, maxDDTbars,
   // trainN, trainNet, testN, testNet, disabled, admitted cost ratios sum.
+  // Extra columns: train gain/loss/cost-R sum, test gain/loss/cost-R sum.
   std::vector<double> sums(n+1), ratios(n+1);
   std::vector<int> available(n), age(n);
   double eq=0, peak=0; int ddstart=-1, a=0;
@@ -27,7 +28,7 @@ extern "C" void sweep(int n, const int* entry, const int* close, const double* n
     const int* pol=policies+p*6;
     const int window=pol[0], deact=pol[1], maxage=pol[2]*60, cadence=pol[3];
     const int mn=pol[4],rn=pol[5];
-    double* r=out+p*14;
+    double* r=out+p*20;
     double live=0, high=0, tail=0;int underwater=-1, count=0, checked=-1;
     bool valid=false,disabled=false;
     std::vector<double> recent(deact,0);
@@ -38,7 +39,8 @@ extern "C" void sweep(int n, const int* entry, const int* close, const double* n
       // crossing the selected cadence publish a new evaluation.
       if(checked<0 || seen-checked>=cadence){
         checked=seen;
-        auto ok=[&](int k){return (1.+.1*(ratios[seen]-ratios[seen-k])/k)>1.05+1e-9;};
+        auto ok=[&](int k){double pf=1.+.1*(ratios[seen]-ratios[seen-k])/k;
+          return pf>1.02+1e-9 && pf+1e-9>=min_pf;};
         valid=ok(window)&&ok(mn)&&ok(rn);
       }
       if(!valid || age[j]>maxage || disabled)continue;
@@ -48,6 +50,8 @@ extern "C" void sweep(int n, const int* entry, const int* close, const double* n
       r[0]++;r[1]+=v>0;r[2]+=v;r[3]+=cost[j];r[4]+=std::max(0.,v);r[5]+=std::max(0.,-v);
       r[13]+=v/std::max(cost[j],1e-12);
       if(close[j]<split){r[8]++;r[9]+=v;}else{r[10]++;r[11]+=v;}
+      int col=close[j]<split?14:17;
+      r[col]+=std::max(0.,v);r[col+1]+=std::max(0.,-v);r[col+2]+=v/std::max(cost[j],1e-12);
       if(live>=high-1e-12){
         if(underwater>=0)r[7]=std::max(r[7],double(close[j]-underwater));
         high=std::max(high,live);underwater=-1;

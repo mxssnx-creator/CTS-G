@@ -115,7 +115,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(report["foreignRealized"], 8)
         self.assertEqual({row["symbol"] for row in report["open"]}, {"OWN-USDT"})
         self.assertEqual(report["pfCost"]["n"], 30)
-        self.assertEqual(report["pfCost"]["minPf"], 1.05)
+        self.assertEqual(report["pfCost"]["minPf"], 1.02)
 
         live, vst = lane("bingx-x01", 100, 130), lane("bingx-x02", 200, 240)
         live.update(logicalPositionCount=700, pfCost={"n": 75, "minPf": 1.2})
@@ -130,13 +130,13 @@ class StatisticsTests(unittest.TestCase):
         from stats_report import build, render_html
         rows = [dict(t=i, symbol="TEST-USDT", side="LONG", qty=1, entry=100,
                      pnl=.30, pnl_pct=.003, hold_s=60) for i in range(75)]
-        def report(n, floor=1.05, tape=None):
+        def report(n, floor=1.02, tape=None):
             return build({"closed": rows if tape is None else tape,
                           "pfCost": {"n": n, "minPf": floor}})
         self.assertFalse(report(30, tape=rows[:29])["costAccounting"]["pass"])
         self.assertTrue(report(30, tape=rows[:30])["costAccounting"]["pass"])
-        boundary = report(30, tape=[dict(row, pnl=.05, pnl_pct=.0015) for row in rows])["costAccounting"]
-        self.assertAlmostEqual(boundary["currentWindow"]["ratio"], 1.05)
+        boundary = report(30, tape=[dict(row, pnl=.05, pnl_pct=.0012) for row in rows])["costAccounting"]
+        self.assertAlmostEqual(boundary["currentWindow"]["ratio"], 1.02)
         self.assertFalse(boundary["pass"])
         self.assertFalse(report(30, floor=1.35)["costAccounting"]["pass"])
         blob = report(75, floor=1.2)

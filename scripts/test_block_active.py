@@ -142,7 +142,8 @@ class BlockActiveTests(unittest.TestCase):
 
     def test_loss_blocks_only_its_own_count(self):
         self.p.strategy_closes = lambda: [NS(parent_set_id=self.st.id, axis_key='block-active:1',
-                                              symbol='X-USDT', side='LONG', pnl=-1)]
+            set_id=self.st.id, strategy='block', client_id='count-1', t=50, qty=1, entry=100,
+            exchange_confirmed=True, symbol='X-USDT', side='LONG', pnl=-1, pnl_pct=-.009)]
         self.assertEqual(self.plan()['blockCount'], 2)
 
     def test_restart_stale_reverse_and_reversal_restart_observation(self):

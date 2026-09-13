@@ -15,18 +15,18 @@ from dca_engine import DcaBook
 from exit_engine import ExitBook
 
 class DynamicCostPolicyTests(unittest.TestCase):
-    def test_additional_engines_share_floor_and_reject_exact_105(self):
+    def test_additional_engines_share_floor_and_reject_exact_102(self):
         dca, exits, coord = DcaBook(), ExitBook(), Coordinator()
-        for floor in (1.05, 1.2):
+        for floor in (1.02, 1.2):
             settings = {'minPf':floor, 'dcaMinPf':1.35, 'exitMinPf':1.35, 'setDeactN':5}
             dca.load(settings); exits.load(settings); coord.load({}, settings)
             self.assertEqual([dca.min_pf, exits.min_pf, coord.min_pf], [floor]*3)
             self.assertEqual((dca.deact_n, exits.deact_n), (5, 5))
         dca.load({}); exits.load({}); coord.load({}, {'axisLastEnabled':True})
-        rows = [dict(t=i, pnl=.05, pnl_pct=.0015) for i in range(15)]
+        rows = [dict(t=i, pnl=.05, pnl_pct=.0012) for i in range(15)]
         dca.closes = rows
         result = dca.score()
-        self.assertAlmostEqual(result['ratio'], 1.05)
+        self.assertAlmostEqual(result['ratio'], 1.02)
         self.assertGreater(result['last25AvgR'], 0)
         self.assertFalse(result['active'])
         lane = exits.lanes['peak']; lane.rows = rows
@@ -45,10 +45,10 @@ class DynamicCostPolicyTests(unittest.TestCase):
         self.assertEqual(effective_position_cost_pct([])['costPct'],.1)
         b=SetBook();b.load({});c=Coordinator();c.load({},{})
         self.assertEqual(b.max_dd_s,57600)
-        self.assertEqual(b.stage_min_pf,dict(base=1.05,main=1.05,real=1.05))
-        self.assertEqual(c.min_pf,1.05)
+        self.assertEqual(b.stage_min_pf,dict(base=1.02,main=1.02,real=1.02))
+        self.assertEqual(c.min_pf,1.02)
         h=overlay_from_options(parse_options({}))
-        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(1.05,57600,.1))
+        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(1.02,57600,.1))
 
     def test_measured_cost_propagates_to_all_calculators(self):
         p=pt.Pulse.__new__(pt.Pulse);p.manual_position_cost_pct=.1

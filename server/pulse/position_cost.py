@@ -16,16 +16,16 @@ POSITION_COST_PCT_DEFAULT = 0.10
 RATIO_BASE = 1.0
 RATIO_SCALE = 0.10
 # User-facing PF controls share one contract across UI, overlay, and workers.
-PF_MIN = 1.05
+PF_MIN = 1.02
 PF_MAX = 1.35
 PF_STEP = 0.01
 RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 30
-# Validation requires strictly more than +0.5× PositionCost net.
+# Validation requires strictly more than +0.2× PositionCost net.
 # A higher configured floor is shared by every stage.
-POSITIVE_PF = 1.05
+POSITIVE_PF = 1.02
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -183,7 +183,7 @@ def _is_simple_historic_row(row: Any) -> bool:
     # independent catalog within its memory ceiling.  It exposes the same
     # Mapping/attribute fields as the legacy dict row, so classify it by the
     # shared row contract instead of requiring a concrete dict.
-    if _row_value(row, "pnl_pct") is None:
+    if not isinstance(row, Mapping) or _row_value(row, "pnl_pct") is None:
         return False
     if any(_row_value(row, key) is not None for key in (
         "position_cost_pct", "positionCostPct", "cost_pct", "fee_total", "feeTotal",
@@ -254,7 +254,7 @@ def effective_position_cost_pct(rows: Sequence[Any], fallback: float = POSITION_
 
 
 def normalize_pf(value: Any, fallback: float) -> float:
-    """Clamp a configured PF floor without changing the requested 0.02 step."""
+    """Clamp a configured PF floor at the shared 0.01 precision."""
     try:
         parsed = float(value)
     except Exception:
@@ -492,7 +492,7 @@ def r_from_ratio(ratio: float) -> float:
 
 
 def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
-    """Strictly above the 1.05 Base floor and at least the configured floor."""
+    """Strictly above the 1.02 Base floor and at least the configured floor."""
     return clears_pf(ratio, floor)
 
 

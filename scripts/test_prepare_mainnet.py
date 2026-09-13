@@ -36,7 +36,7 @@ class PrepareMainnetTests(unittest.TestCase):
             self.assertEqual(stop.stat().st_mtime_ns,stamp)
             current = json.loads(overlay.read_text())
             self.assertEqual(current['marginMode'],'isolated')
-            self.assertEqual(current['minPf'],1.05)
+            self.assertEqual(current['minPf'],1.02)
             self.assertEqual(current['symbolCap'],20)
             self.assertEqual(current['baseEvalPosCount'],30)
             self.assertTrue(all(not any(x in c for x in ('start','restart','enable')) for c in calls))

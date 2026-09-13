@@ -54,7 +54,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.05, key);
+      assert.equal(value[key], 1.02, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);

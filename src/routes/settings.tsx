@@ -239,7 +239,7 @@ function SettingsPage() {
       const next = { ...o, [k]: v };
       if (["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"].includes(k)) {
         for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-          next[key] = normalizePf(Number(v), 1.05);
+          next[key] = normalizePf(Number(v), 1.02);
       }
       if (k === "setPfWindow" || k === "baseEvalPosCount") {
         next.baseEvalPosCount = Number(v); next.setPfWindow = Number(v); next.setMinSamples = Number(v);
@@ -1223,7 +1223,7 @@ function SettingsPage() {
                   min={PF_MIN}
                   max={PF_MAX}
                   step={PF_STEP}
-                  hint={`Shared by Base, Main, Real, DCA and exits. Default requires PF > 1.05. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
+                  hint={`Shared by Base, Main, Real, DCA and exits. Default requires PF > 1.02. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
                   onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
                 />
                 <Slider

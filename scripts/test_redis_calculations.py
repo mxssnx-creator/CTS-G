@@ -140,7 +140,7 @@ class RedisCalculationTests(unittest.TestCase):
         book._score_all()
         book.auto_deact = True; book.strict_gate = True; book.min_pf = 99
         book._score_all()
-        self.assertEqual(self.cache.status()['hits'],1)
+        self.assertEqual(self.cache.status()['misses'],2)
         pure=copy.deepcopy(book); pure._score_all()
         self.assertEqual(asdict(book.by_idx[0]),asdict(pure.by_idx[0]))
 

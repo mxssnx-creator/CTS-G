@@ -1,0 +1,16 @@
+{
+  "signature": "9c27ac814b979b193a46265dc21f7d4beb9a5775973c17ce1ea99f46b5ecca88",
+  "calculationFingerprint": "41386723e125be3ddd5f6c7d455dc810b0c44724c31a1b08151a433a11459102",
+  "sources": {
+    "scripts/policy_sweep.cpp": "2bb4bb851f1c324dc38c57d5e72162bb6687cc68a1b67b0391c00ba2978c6efa",
+    "scripts/sweep_seven_days.py": "4cb6c10d97bed89d70161325a486566507049b2f6b8eb4ba341771a0902645f4",
+    "scripts/replay_five_days.py": "1f463be2eb1d0588fb1a4b8e73f37ffed186967ac51fabe68689059be75054ed",
+    "server/pulse/indication_engine.py": "65ef331d54a235d224e1a093d8c399064a6f99ef5861490d932f49698e2caca9",
+    "server/pulse/set_engine.py": "f4795a8aa9ea26d46814fb3c31e25c575ae48e34f42efe68bdc14ace5857ec5e"
+  },
+  "selectionRule": {
+    "global": "Select the single policy with maximum training net / training trades across all 48 groups, minimum 100 training trades in each symbol; tie-break lower policy index. Research alternatives are equally weighted; this is not a portfolio.",
+    "validation": "After fixing the training winner, require at least 30 holdout trades, positive holdout net, and holdout CTS cost-PF > 1.02 separately in BCH, SOL and XRP. Do not reselect using holdout.",
+    "lane": "Existing runner selects max training net per symbol / indication / direction, minimum 8 training closes. Holdout requires 8 closes, positive net and CTS cost-PF > 1.02 separately."
+  }
+}

@@ -40,15 +40,15 @@ class ContinuousTests(AllValidEntries):
         self.assertTrue(st.by_side['LONG']['active'])
         self.assertEqual([st],b.entry_sets('general','LONG'))
 
-    def test_base_requires_30_and_strictly_above_105(self):
+    def test_base_requires_30_and_strictly_above_102(self):
         b=self.book(1);b.pf_n=b.min_samples=30;st=b.by_idx[0]
         st.hist=self.tape(29);b._score_one(st)
         self.assertFalse(st.stage_ledger['base'])
         st.hist=self.tape();b._score_one(st)
         self.assertTrue(st.stage_ledger['real'])
-        view=dict(st.by_side['LONG'],base_pf=1.05)
+        view=dict(st.by_side['LONG'],base_pf=1.02)
         self.assertFalse(b._real_metrics_ok(view))
-        view.update(base_pf=1.3,main_pf=1.04)
+        view.update(base_pf=1.3,main_pf=1.01)
         self.assertFalse(b._real_metrics_ok(view))
 
     def test_identical_evidence_reuses_score_changed_content_rescores(self):

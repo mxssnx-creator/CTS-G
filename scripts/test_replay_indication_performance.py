@@ -293,6 +293,8 @@ class ReplayIndicationTests(unittest.TestCase):
         dict_metrics = book._fast_historic_metrics([dict(row) for row in rows], ordered=True)
         self.assertEqual(compact_metrics["last15_n"], dict_metrics["last15_n"])
         self.assertAlmostEqual(compact_metrics["last15_ratio"], dict_metrics["last15_ratio"], places=6)
+        self.assertEqual(book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"], {})
+        book.pf_n = book.min_samples = 15
         self.assertEqual(len(book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"]), 6)
 
     def test_prepared_frame_matches_public_vote_wrapper(self):
@@ -528,9 +530,9 @@ class HistoricScoreBundleTests(unittest.TestCase):
         sample.hist = list(tape)
         book._score_one(sample)
         self.assertEqual(sample.n, 24)
-        self.assertEqual(set(sample.evaluation_windows), {f"last{n}" for n in EVALUATION_WINDOWS})
-        # Stage windows follow one independent direction, not a mixed tape.
-        self.assertEqual(sample.evaluation_windows["last15"]["n"], 12)
+        # Twelve closes per direction cannot meet the default last-30 Base gate.
+        self.assertEqual(sample.evaluation_windows, {})
+        self.assertFalse(sample.stage_ledger["base"])
         self.assertIn("LONG", sample.by_side)
         self.assertIn("SHORT", sample.by_side)
         ranked = _rank_set_rows(book)
