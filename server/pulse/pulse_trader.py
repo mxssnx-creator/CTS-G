@@ -3893,7 +3893,7 @@ class Pulse:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
-        if not self.exchange_position_active(pos):
+        if not self.exchange_position_active(pos) and not getattr(pos, "_overall_exchange_verified", False):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
@@ -3923,10 +3923,10 @@ class Pulse:
             ]
         else:
             forms = [
-                {"close_pos": False, "with_qty": True, "otype": market_type},
                 {"close_pos": True, "with_qty": False, "otype": market_type},
-                {"close_pos": False, "with_qty": True, "otype": limit_type},
+                {"close_pos": False, "with_qty": True, "otype": market_type},
                 {"close_pos": True, "with_qty": False, "otype": limit_type},
+                {"close_pos": False, "with_qty": True, "otype": limit_type},
             ]
         r: Dict[str, Any] = {}
         msg = ""
@@ -4236,7 +4236,7 @@ class Pulse:
         return str(o.get("type") or "") in TP_TYPES
 
     def place_ctrl_pair(self, pos: Position) -> None:
-        """One HTTP batch: overall SL + TP. Fallback to two single posts."""
+        """Install one complete protection pair without exceeding venue batch quotas."""
         if overall_controls.enabled(self, pos):
             return overall_controls.ensure(self,pos)
         previous_shared = {getattr(pos,f,"") for f in overall_controls.FIELDS}-{ "" } if getattr(pos,"overall_controls",False) else set()
@@ -4259,6 +4259,25 @@ class Pulse:
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
+        # BingX applies a separate hard quota to /trade/batchOrders.  Overall
+        # controls are already grouped by symbol+direction, so two ordinary
+        # order calls are both sufficient and recoverable without tripping the
+        # batch endpoint for every open group.  The normal token bucket still
+        # paces each call and the venue's closePosition validation remains in
+        # place inside place_ctrl().
+        if getattr(pos, "_overall_proxy", False):
+            pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
+            if pos.sl_oid:
+                pos.sl = want_sl
+            pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
+            if pos.tp_oid:
+                pos.tp = want_tp
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+            pos.overall = pos.controls_ok
+            pos.close_position = True
+            pos.ctrl_qty = pos.qty
+            pos.ctrl_verified = pos.controls_ok
+            return
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
@@ -10526,7 +10545,7 @@ class Pulse:
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),
-                    "controlMode": "per-config" if self.per_config_controls(p) else "aggregate",
+                    "controlMode": "overall" if overall_controls.enabled(self, p) else ("per-config" if self.per_config_controls(p) else "aggregate"),
                     "controlGroupKey": getattr(p, "control_group_key", "") or f"aggregate:{p.symbol}:{p.side}",
                     "controlGroupToken": control_group_token(
                         getattr(p, "control_group_key", ""),
