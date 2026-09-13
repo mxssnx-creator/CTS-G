@@ -317,8 +317,14 @@ export type LiveStats = {
   losses: number;
   winRate: number;
   openCount: number;
+  realPositionCount?: number;
+  realPositionGroupCount?: number;
+  realOrderCount?: number;
   logicalPositionCount?: number;
   exchangeOpenCount?: number;
+  livePositionCount?: number;
+  liveOrderCount?: number;
+  liveTotalOrderCount?: number;
   exchangePositionGroupCount?: number;
   simOpenCount?: number;
   simUPnl?: number;
@@ -640,7 +646,13 @@ export type LiveStats = {
     drawdownPct?: number;
     pnlPct?: number;
     openCount: number;
+    realPositionCount?: number;
+    realPositionGroupCount?: number;
+    realOrderCount?: number;
     exchangeOpenCount?: number;
+    livePositionCount?: number;
+    liveOrderCount?: number;
+    liveTotalOrderCount?: number;
     simOpenCount?: number;
     simUPnl?: number;
     wins: number;
@@ -1107,7 +1119,13 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     errors: lane.errors,
     winRate: lane.wins + lane.losses ? (lane.wins / (lane.wins + lane.losses)) * 100 : 0,
     openCount: lane.openCount,
+    realPositionCount: lane.realPositionCount,
+    realPositionGroupCount: lane.realPositionGroupCount,
+    realOrderCount: lane.realOrderCount,
     exchangeOpenCount: lane.exchangeOpenCount,
+    livePositionCount: lane.livePositionCount,
+    liveOrderCount: lane.liveOrderCount,
+    liveTotalOrderCount: lane.liveTotalOrderCount,
     simOpenCount: lane.simOpenCount,
     simUPnl: lane.simUPnl,
     open,
