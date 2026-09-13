@@ -287,6 +287,7 @@ class FastBingX:
                 http2=False,
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=30),
             )
+        self.request_timings: Dict[str, Deque[float]] = {}
         self.px: Dict[str, float] = {}
         self.chg: Dict[str, float] = {}
         self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
@@ -308,6 +309,15 @@ class FastBingX:
         self._ts_lock = threading.Lock()
         self._last_ts = 0
         self._restore_retry_deadlines()
+
+    def request_latency(self):
+        result = {}
+        for key,tape in list(getattr(self,"request_timings",{}).items()):
+            values = sorted(list(tape))
+            if values:
+                result[key] = {"samples":len(values),"p50":round(values[len(values)//2],2),
+                    "p95":round(values[min(len(values)-1,math.ceil(len(values)*.95)-1)],2),"max":round(values[-1],2)}
+        return result
 
     def _restore_retry_deadlines(self):
         """A service update must not reset an active venue retry deadline."""
@@ -365,7 +375,7 @@ class FastBingX:
                 pass
 
     def _lane(self, path: str, method: str) -> str:
-        if "/trade/order" in path or "/trade/batchOrders" in path or "/trade/closePosition" in path:
+        if "/trade/order" in path or "/trade/batchOrders" in path or "/trade/closePosition" in path or "/trade/cancelReplace" in path:
             return "order"
         if path.startswith("/openApi/swap") and method != "PUBLIC":
             if "/quote/" in path:
@@ -392,6 +402,10 @@ class FastBingX:
         if now < gate:
             return False
         w = self.buckets[lane].take()
+        if path.endswith("/cancelReplace") or (lane == "order" and path.endswith("/trade/order")):
+            if not hasattr(self,"_replace_bucket"):
+                self._replace_bucket = TokenBucket(1.8,1.0)
+            w += self._replace_bucket.take()
         self.stats["wait"] += w
         # Another worker may receive a venue ban while this worker waits for
         # its token. Recheck without submitting a request inside that ban.
@@ -411,6 +425,8 @@ class FastBingX:
         except (TypeError, ValueError):
             pass
         msg = str(body.get("msg") or "")
+        if code == 109421 and "order" in msg.lower() and "not exist" in msg.lower():
+            return
         if code not in RATE_CODES and "rate limit" not in msg.lower() and "100410" not in msg and "frequency limit" not in msg.lower():
             return
         self.stats["rl"] += 1
@@ -452,12 +468,18 @@ class FastBingX:
         qs = self._sign(params)
         url = f"{path}?{qs}"
         self.stats["rest"] += 1
+        request_started = time.perf_counter()
         try:
             body = self._http(method, url)
         except Exception as e:
             self.stats["err"] += 1
             self.err.write("http", method=method, path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
+        finally:
+            timings = getattr(self, "request_timings", None)
+            if timings is None:
+                timings = self.request_timings = {}
+            timings.setdefault(method+" "+path, deque(maxlen=256)).append((time.perf_counter()-request_started)*1000)
         if isinstance(body, dict) and body.get("code") not in (0, None):
             if body.get("code") in (109400, "109400") and "/trade/" in path:
                 self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg") or "")[:220])
@@ -475,11 +497,31 @@ class FastBingX:
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def _http(self, method: str, url: str) -> Dict[str, Any]:
-        # Always urllib for signed query strings. httpx re-encodes `?` params and
-        # BingX then reports "signature mismatch" on burst entries with attach JSON.
+        # Submit the already-signed raw target without a params= round-trip.
+        # This retains HMAC bytes while reusing the existing HTTP connection.
         import urllib.request
         import urllib.error
         full = url if url.startswith("http") else self.base + url
+        if httpx is not None and getattr(self,"http",None) is not None:
+            try:
+                target = httpx.URL(full)
+                request = self.http.build_request(method,target,content=b"" if method not in ("GET","DELETE") else None,timeout=5)
+                if request.url.raw_path != target.raw_path:
+                    return {"code":-1,"msg":"signed request target changed","error":True}
+                response = self.http.send(request)
+                try:
+                    body = loads(response.content)
+                except Exception:
+                    body = {"code":response.status_code,"msg":"non-JSON response","error":True}
+                if response.status_code == 429:
+                    if not isinstance(body,dict):body={}
+                    body.update(code=429,error=True)
+                    if response.headers.get("Retry-After"):
+                        body["retryAfter"] = response.headers["Retry-After"]
+                return body
+            except Exception as e:
+                # Never replay a possibly accepted order through another client.
+                return {"code":-1,"msg":type(e).__name__,"error":True}
         req = urllib.request.Request(
             full,
             method=method,
@@ -541,16 +583,17 @@ class FastBingX:
         if not orders:
             return {"code": 0, "data": {"orders": []}}
         # Query parameters are strings for single orders; nested batch JSON
-        # requires a numeric quantity (venue 109400 otherwise). Copy inputs
+        # requires numeric quantities and prices (venue 109400 otherwise). Copy inputs
         # so retry intents and client IDs remain unchanged.
         normalized = []
         for raw in orders:
             row = dict(raw)
-            if "quantity" in row:
-                quantity = float(row["quantity"])
-                if not math.isfinite(quantity) or quantity <= 0:
-                    raise ValueError("Batch quantity must be finite and positive")
-                row["quantity"] = quantity
+            for key in ("quantity", "price", "stopPrice"):
+                if key in row:
+                    value = float(row[key])
+                    if not math.isfinite(value) or value <= 0:
+                        raise ValueError(f"Batch {key} must be finite and positive")
+                    row[key] = value
             normalized.append(row)
         orders = normalized
         path = "/openApi/swap/v2/trade/batchOrders"
@@ -623,6 +666,7 @@ class FastBingX:
             "asyncP50": round(self.stats.get("asyncP50", 0.0), 1),
             "errors": self.err.recent(8),
             "errorN": self.err.n,
+            "requestLatencyMs": self.request_latency(),
         }
 
 

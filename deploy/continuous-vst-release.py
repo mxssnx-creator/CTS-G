@@ -22,8 +22,8 @@ def run(*args):
 
 def profile_patch(current, defaults, keep_existing=False):
     patch = {k: current.get(k, v) if keep_existing else v for k, v in defaults.items()}
-    # The control-off rollout explicitly changes these two user requirements.
-    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates"):
+    # Explicit rollout requirements; preserve other current user settings.
+    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates", "controlOrdersPerConfig", "controlOrdersOverall", "controlOrders"):
         patch[key] = defaults[key]
     return patch
 
@@ -46,7 +46,7 @@ def main():
     backup = pathlib.Path('/var/backups/cts-gx') / ('continuous-' + str(int(time.time())))
     backup.mkdir(parents=True, mode=0o700)
     data = pathlib.Path('/var/lib/cts-gx')
-    for name in ('overlay-bingx-x02.json', 'open-bingx-x02.json', 'pending-bingx-x02.json'):
+    for name in ('overlay-bingx-x02.json', 'open-bingx-x02.json', 'pending-bingx-x02.json', 'open-bingx-x02.json.controls'):
         if (data/name).exists():
             shutil.copy2(data/name, backup/name)
     if not release.exists():

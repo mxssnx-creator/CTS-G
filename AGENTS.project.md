@@ -34,3 +34,8 @@
   Baseline admission uses each Set's configured Base Last-N window, with
   actual available close counts reported explicitly; an empty tape is not
   positive evidence. Preserve venue rate limits and protective orders.
+
+- User instruction, 2026-09-13: enable shared overall exchange protection by
+  symbol and direction, while retaining independent internal Set lots and
+  confirmed partial-fill accounting. `controlOrdersOverall` selects shared
+  protection; `controlOrdersPerConfig` remains true for internal lot identity.

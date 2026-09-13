@@ -31,7 +31,7 @@ def processing_profile():
                   symbolCap=20, axisPrevEnabled=False, axisLastEnabled=False,
                   axisContEnabled=False, axisPauseEnabled=False, normalExecutionEnabled=True,
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
-                  controlOrdersPerConfig=True)
+                  controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
         result[key] = 1.02
     return result

@@ -544,7 +544,7 @@ function SettingsPage() {
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
                     <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
-                    <Toggle label="Individual SL/TP per configuration" hint={overlay.controlOrdersPerConfig ? "ON · quantity-matched pair per config/range" : "OFF · one common close-position pair per symbol + direction"} on={overlay.controlOrdersPerConfig} onChange={(v) => patch("controlOrdersPerConfig", v)} />
+                    <Toggle label="Overall SL/TP by symbol and direction" hint="Shared exchange protection; each Set keeps its own targets and fills." on={overlay.controlOrdersOverall} onChange={(v) => patch("controlOrdersOverall", v)} />
                   </Grid>
                 </div>
               </div>
@@ -2166,7 +2166,7 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Hedge-safe TP/SL protection · independent quantity-matched pair per logical configuration by default">
+            <Card title="Control orders" hint="Shared quantity-matched SL/TP by symbol and direction · independent Set targets and fills">
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
@@ -2174,10 +2174,10 @@ function SettingsPage() {
                   onChange={(v) => patch("controlOrders", v)}
                 />
                 <Toggle
-                  label="Individual controls per configuration/order"
-                  hint="ON = quantity-matched pair per logical config/range; OFF = one common close-position pair per symbol/direction"
-                  on={overlay.controlOrdersPerConfig}
-                  onChange={(v) => patch("controlOrdersPerConfig", v)}
+                  label="Overall SL/TP by symbol and direction"
+                  hint="ON = shared protection for the own total quantity; individual Set targets and fills stay separate"
+                  on={overlay.controlOrdersOverall}
+                  onChange={(v) => patch("controlOrdersOverall", v)}
                 />
               </div>
               <Grid>
@@ -2186,14 +2186,14 @@ function SettingsPage() {
                 <KV k="CTS SL cost ratios" v={arrJoin(cts?.activeStopLossPositionCostRatios, "2, 3, 5")} />
                 <KV k="CTS TP multipliers" v={arrJoin(cts?.activeTakeProfitMultipliers, "1.25, 1.5, 1")} />
                 <KV k="CTS control_orders" v={bool(cts?.control_orders, true) ? "1" : "0"} />
-                <KV k="Applied control mode" v={overlay.controlOrdersPerConfig ? "PER-CONFIG RANGE" : "AGGREGATE"} />
+                <KV k="Applied control mode" v={overlay.controlOrdersOverall ? "OVERALL · SYMBOL / DIRECTION" : "PER-CONFIG RANGE"} />
                 <KV k="Working type" v="MARK_PRICE" />
               </Grid>
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
-                {overlay.controlOrdersPerConfig
-                  ? "Each symbol + direction + normalized SL/TP range receives its own quantity-matched TP/SL pair. Identical ranges merge by quantity and weighted entry, while Set lineage stays attached."
-                  : "Controls use one common close-position SL + TP per symbol and hedge direction. The pair widens to the highest effective merged member range; turn on individual mode for quantity-matched pairs per config/range."}
+                {overlay.controlOrdersOverall
+                  ? "One exchange SL/TP pair protects the total own quantity for each symbol and direction. The system manages each Set’s targets and trailing separately and allocates confirmed partial fills to the bound positions."
+                  : "Each independent configuration has its own quantity-matched exchange SL/TP pair."}
               </p>
             </Card>
           )}
@@ -2886,7 +2886,7 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
   const missing = groups.filter((group) => !group.protected);
   const ok = c?.ok ?? open.filter((p) => p.controls).length;
   const sec = c?.security ?? open.filter((p) => p.secSlOid && p.secTpOid).length;
-  const mode = c?.mode ?? (stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
+  const mode = c?.mode ?? (stats?.pulse?.controlOrdersOverall ? "overall" : stats?.pulse?.controlOrdersPerConfig === false ? "aggregate" : "per-config");
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-3 font-mono text-xs" data-testid="controls-live">
       <div className="flex flex-wrap justify-between gap-2">
@@ -2926,7 +2926,7 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
           ))}
         </div>
       ) : (
-        <p className="mt-2 text-muted">{mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
+        <p className="mt-2 text-muted">{mode === "overall" ? "Each symbol and direction shares protection for its own total quantity; Set targets and fills stay independent" : mode === "aggregate" ? "Every symbol + direction has one common close-position SL + TP pair" : "Every logical group has quantity-matched SL + TP protection"}</p>
       )}
     </div>
   );
@@ -2946,7 +2946,7 @@ function LiveApplied({
   const p = (stats?.pulse ?? {}) as PulseOverlay & Record<string, unknown>;
   const v = stats?.variants;
   const controls = stats?.coverage?.controls;
-  const controlMode = controls?.mode ?? (overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
+  const controlMode = controls?.mode ?? (overlay.controlOrdersOverall ? "overall" : overlay.controlOrdersPerConfig ? "per-config" : "aggregate");
   const controlGroups = controls?.groupCount ?? stats?.openCount ?? 0;
   const controlPairs = controls?.pairCount ?? (overlay.controlOrders ? controlGroups : 0);
   const sl = v?.slRatio ?? p.slToTpRatio ?? overlay.slToTpRatio;
