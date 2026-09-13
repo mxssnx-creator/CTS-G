@@ -12,6 +12,36 @@ from set_engine import SetBook, synth_trend
 
 
 class ServerSnapshotMergeTests(unittest.TestCase):
+    def test_threshold_reload_preserves_replay_and_replay_input_reload_invalidates_it(self):
+        settings = {
+            'stratGeneral': True,
+            'stratIndications': False,
+            'stratTrailing': False,
+            'slToTpRatios': [.4],
+            'setMinStep': 3,
+            'setStepMax': 3,
+            'baseEvalPosCount': 30,
+            'setMinPf': 1.04,
+        }
+        book = SetBook()
+        book.load(settings)
+        book.progress.ready = True
+        book.progress.coordination_complete = True
+        book.progress.watermark = {'X-USDT': 123}
+        book.load(dict(settings))
+        self.assertFalse(book.replay_required)
+        self.assertFalse(book.score_refresh_required)
+        self.assertTrue(book.progress.ready)
+        book.load({**settings, 'setMinPf': 1.08})
+        self.assertFalse(book.replay_required)
+        self.assertTrue(book.score_refresh_required)
+        self.assertTrue(book.progress.ready)
+        self.assertEqual(book.progress.watermark, {'X-USDT': 123})
+        book.load({**settings, 'histLookbackBars': 240})
+        self.assertTrue(book.replay_required)
+        self.assertFalse(book.score_refresh_required)
+        self.assertFalse(book.progress.ready)
+
     def test_first_scored_batch_admits_only_qualified_rows_and_reports_remaining(self):
         for workers in (1, 2):
             with self.subTest(workers=workers):
@@ -35,7 +65,9 @@ class ServerSnapshotMergeTests(unittest.TestCase):
                     self.assertFalse(book.entry_sets('general', 'SHORT'))
                 p._hist_write_status = observe
                 p._score_committed(book, 1, [s.id for s in book.by_idx])
-                self.assertEqual(observed[0][:5], ('score',32,90,True,32))
+                # Scoring a first batch does not publish a fresh catalog as
+                # ready before the complete frozen run has been scored.
+                self.assertEqual(observed[0][:5], ('score',32,90,False,32))
                 self.assertIn('remaining 58',observed[0][-1])
                 self.assertEqual(observed[-1][:5], ('score',90,90,True,90))
                 self.assertIn('remaining 0',observed[-1][-1])
