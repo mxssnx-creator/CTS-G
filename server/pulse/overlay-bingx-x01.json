@@ -47,7 +47,7 @@
   "drawdownHaltPct": 0,
   "entryPolicy": "permissive-bounded",
   "entryPolicyMaxCandidates": 0,
-  "entryPolicyMinLiveSamples": 8,
+  "entryPolicyMinLiveSamples": 0,
   "exitAutoDeact": true,
   "exitBeBuffer": 0.04,
   "exitBestOf": true,

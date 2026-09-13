@@ -1166,7 +1166,10 @@ class SetBook:
         # hands admission back to the live evidence gates at the sample floor.
         self.entry_policy = ENTRY_POLICY_STRICT
         self.entry_policy_max_candidates = 0
-        self.entry_policy_min_live_samples = self.pf_n
+        # No additional fixed live-sample hurdle.  Independent Set PF/sample
+        # and stage gates remain authoritative; this value only controls the
+        # optional cold-candidate preference in permissive mode.
+        self.entry_policy_min_live_samples = 0
         # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
         self.live_test_candidates = 0
@@ -1423,12 +1426,14 @@ class SetBook:
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(75, int(ov.get("setMinSamples") or self.pf_n)))
         try:
-            self.entry_policy_min_live_samples = max(
-                5,
-                min(25, int(ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples") or self.eval_need())),
-            )
+            raw_live_samples = ov.get("entryPolicyMinLiveSamples")
+            if raw_live_samples is None:
+                raw_live_samples = ov.get("liveTestMinSamples")
+            if raw_live_samples is None:
+                raw_live_samples = 0
+            self.entry_policy_min_live_samples = max(0, min(25, int(raw_live_samples)))
         except Exception:
-            self.entry_policy_min_live_samples = self.eval_need()
+            self.entry_policy_min_live_samples = 0
         self.live_test_min_samples = self.entry_policy_min_live_samples
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (configured Last-N fills) AND
@@ -4599,7 +4604,12 @@ class SetBook:
                     return bool(blob.get("active"))
             return bool(state.active)
 
-        gated = bool(self.enabled and self.use_historic_gate and self.progress.ready)
+        # A permissive replay may publish qualified Sets before the aggregate
+        # catalog is complete.  That does not make the aggregate ``ready``
+        # flag a qualification bypass: every direction still needs its own
+        # Base -> Main -> Real sample/PF/DD-time evidence.  Only a disabled
+        # historic gate keeps the legacy active-row fallback.
+        gated = bool(self.enabled and self.use_historic_gate)
         if not gated:
             result = [state for state in rows if side_active(state)]
             if not isinstance(getattr(self, "entry_gate_stats", None), dict):
@@ -4617,7 +4627,7 @@ class SetBook:
             return result
 
         need = self.eval_need()
-        floor = max(1.0, float(self.real_min_pf or 1.0))
+        floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
         result: List[SetState] = []
         rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
         for state in rows:
@@ -4658,6 +4668,7 @@ class SetBook:
             "maxDdS": round(float(self.max_dd_s or 0.0), 1),
             "ready": bool(self.progress.ready),
             "phase": str(getattr(self.progress, "phase", "") or ""),
+            "deferred": bool(not self.progress.ready),
             **rejected,
             "t": round(time.time(), 3),
         }
@@ -4690,7 +4701,7 @@ class SetBook:
             round(float(self.cost_pct or 0.0), 12),
             str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
             int(getattr(self, "entry_policy_max_candidates", 0) or 0),
-            int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need()),
+            max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0)),
         )
 
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
@@ -4717,7 +4728,7 @@ class SetBook:
             )
         )
         if self._entry_policy_is_permissive() and rows:
-            min_live = int(getattr(self, "entry_policy_min_live_samples", self.eval_need()) or self.eval_need())
+            min_live = max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0))
             warm = [state for state in rows if len(filter_side(state.evaluation_live(), normalized_side)) >= min_live]
             warm_ids = {state.id for state in warm}
             cold = [state for state in rows if state.id not in warm_ids]
@@ -4753,8 +4764,9 @@ class SetBook:
         )
 
     def _base_metrics_ok(self, view: Dict[str, Any]) -> bool:
+        base_floor = self.stage_min_pf.get("base", self.min_pf)
         return bool(int(view.get("base_n", view.get("last15_n", 0)) or 0) >= self.eval_need()
-                    and clears_pf(view.get("base_pf", view.get("last15_ratio")), self.min_pf)
+                    and clears_pf(view.get("base_pf", view.get("last15_ratio")), base_floor)
                     and view.get("ddOk", True)
                     and 0 <= finite(view.get("max_dd_s", 0), -1) <= self.max_dd_s)
 
@@ -4764,12 +4776,15 @@ class SetBook:
         _, main_n, real_n = self._stage_window_ns()
         n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
         pf = float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
+        base_floor = self.stage_min_pf.get("base", self.min_pf)
+        main_floor = self.stage_min_pf.get("main", self.min_pf)
+        real_floor = self.stage_min_pf.get("real", self.real_min_pf)
         return bool(
-            n >= self.eval_need() and clears_pf(pf, self.min_pf)
+            n >= self.eval_need() and clears_pf(pf, base_floor)
             and int(view.get("main_n", n) or 0) >= main_n
-            and clears_pf(view.get("main_pf", pf), self.min_pf)
+            and clears_pf(view.get("main_pf", pf), main_floor)
             and int(view.get("real_n", n) or 0) >= real_n
-            and clears_pf(view.get("real_pf", pf), self.min_pf)
+            and clears_pf(view.get("real_pf", pf), real_floor)
             and 0 <= float(view.get("max_dd_s", 0) or 0) <= self.max_dd_s
         )
 
@@ -4777,9 +4792,15 @@ class SetBook:
         """Revalidate the exact selected object at the submission boundary."""
         if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
             return False
+        # VST's permissive-bounded rollout admits a Set as soon as that
+        # Set's own Base -> Main -> Real/PF/DD-time evidence is current. The
+        # aggregate replay flag only describes catalog completeness; it must
+        # not veto an independently qualified Set while other symbols are
+        # still being scored. Strict lanes keep the aggregate boundary.
+        partial_set_entries = self._entry_policy_is_permissive()
         if self.use_historic_gate and (
             not self.progress.ready or self.progress.phase == "score-refresh"
-        ):
+        ) and not partial_set_entries:
             return False
         if st.deact_reason == "selection limit":
             return False

@@ -24,6 +24,23 @@ class OverallTests(unittest.TestCase):
         p.api.post=call
         return p
 
+    def test_overall_proxy_uses_close_position_controls(self):
+        from copy import copy
+        p = self.pulse(1)
+        row = next(iter(p.open.values()), None)
+        if row is None:
+            p.place('X-USDT', 1, 'trend', .9, selected_set=p.sets.by_idx[0])
+            row = next(iter(p.open.values()))
+        proxy = copy(row)
+        proxy._overall_proxy = True
+        proxy.control_group_key = ''
+        proxy.sl_pct = .01
+        proxy.tp_pct = .02
+        self.assertFalse(p.per_config_controls(proxy))
+        body = p._ctrl_body(proxy, 'sl', proxy.sl)
+        self.assertEqual(body.get('closePosition'), 'true')
+        self.assertNotIn('quantity', body)
+
     def test_multiple_sets_share_pair_but_keep_own_lots_and_targets(self):
         p=self.pulse()
         for st in p.sets.by_idx:p.place('X-USDT',1,'trend',.9,selected_set=st)
@@ -36,8 +53,8 @@ class OverallTests(unittest.TestCase):
         overall.drain_retired(p,rows)
         self.assertEqual(len(p.api.orders),2)
         for body in p.api.orders.values():
-            self.assertAlmostEqual(float(body['quantity']),sum(r.qty for r in rows))
-            self.assertNotIn('closePosition',body)
+            self.assertEqual(body.get('closePosition'),'true')
+            self.assertNotIn('quantity',body)
         before=len(p.api.batches)
         for r in rows:p.ensure_controls(r)
         self.assertEqual(len(p.api.batches),before)

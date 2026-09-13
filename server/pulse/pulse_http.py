@@ -1873,7 +1873,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "validatedSetCount": sets.get("validatedCount"),
                 "histFills": sets.get("histFills"),
                 "entryPolicy": pulse.get("entryPolicy") or sets.get("entryPolicy"),
-                "entryPolicyMinLiveSamples": pulse.get("entryPolicyMinLiveSamples") or sets.get("entryPolicyMinLiveSamples"),
+                "entryPolicyMinLiveSamples": (
+                    pulse.get("entryPolicyMinLiveSamples")
+                    if pulse.get("entryPolicyMinLiveSamples") is not None
+                    else sets.get("entryPolicyMinLiveSamples")
+                ),
                 "statsAgeS": progress_stats.get("statsAgeS"),
                 "stale": bool(progress_stats.get("stale")),
             })
@@ -1907,7 +1911,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "normalExecutionEnabled": ov.get("normalExecutionEnabled"),
                 "entryPolicy": ov.get("entryPolicy") or ("permissive-bounded" if ov.get("liveTestMode") else "strict"),
                 "entryPolicyMaxCandidates": entry_candidate_cap,
-                "entryPolicyMinLiveSamples": ov.get("entryPolicyMinLiveSamples") or ov.get("liveTestMinSamples"),
+                "entryPolicyMinLiveSamples": (
+                    ov.get("entryPolicyMinLiveSamples")
+                    if ov.get("entryPolicyMinLiveSamples") is not None
+                    else ov.get("liveTestMinSamples")
+                ),
                 "controlOrders": ov.get("controlOrders"),
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
                 "dcaEnabled": ov.get("dcaEnabled"),

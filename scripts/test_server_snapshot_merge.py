@@ -72,6 +72,29 @@ class ServerSnapshotMergeTests(unittest.TestCase):
                 self.assertEqual(observed[-1][:5], ('score',90,90,True,90))
                 self.assertIn('remaining 0',observed[-1][-1])
 
+    def test_permissive_vst_admits_independently_qualified_set_before_catalog_ready(self):
+        book = SetBook()
+        book.load({
+            'entryPolicy': 'permissive-bounded',
+            'stratGeneral': True,
+            'stratIndications': False,
+            'stratTrailing': False,
+            'slToTpRatios': [.6],
+            'setMinStep': 3,
+            'setStepMax': 3,
+            'baseEvalPosCount': 30,
+            'setMinPf': 1.02,
+        })
+        state = next(st for st in book.by_idx if st.pack == 'general' and st.kind == 'base')
+        state.hist = [dict(t=1000 + i * 60, symbol='X-USDT', side='LONG',
+                           pnl_pct=.004, hold_s=60) for i in range(30)]
+        book._score_one(state)
+        book.progress.phase = 'score'
+        book.progress.ready = False
+        admitted = book.entry_sets('general', 'LONG')
+        self.assertIn(state, admitted)
+        self.assertTrue(book.execution_allowed(state, 'general', 'LONG'))
+
     def test_scoring_status_keeps_live_progress_without_rebuilding_catalog(self):
         book = SetBook(); book.progress.phase = 'score'; book.progress.ready = True
         book.progress.sets_done = 32; book.progress.sets_total = 90

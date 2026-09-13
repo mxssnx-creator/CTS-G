@@ -158,6 +158,61 @@ class AllValidEntries(unittest.TestCase):
         seen = {book.pick('general', 'base', 'LONG').id for _ in range(40)}
         self.assertEqual(len(seen), 40)
 
+    def test_permissive_partial_set_reaches_submission_gate_before_catalog_ready(self):
+        book = self.book(1)
+        book.entry_policy = 'permissive-bounded'
+        book.progress.ready = False
+        p = self.pulse(book)
+        selected = book.by_idx[0]
+
+        self.assertIsNone(
+            p.entry_sense('X-USDT', 1, 'gen:trend', .9, 'general', selected_set=selected)
+        )
+        p.place('X-USDT', 1, 'gen:trend', .9, selected_set=selected)
+        self.assertEqual(len(p.api.posts), 1)
+        self.assertEqual(next(iter(p.open.values())).set_id, selected.id)
+
+    def test_partial_replay_filters_each_set_independently_before_catalog_ready(self):
+        book = self.book(2)
+        book.entry_policy = 'permissive-bounded'
+        book.progress.ready = False
+        book.by_idx[1].last15_n = 0
+        book.by_idx[1].last15_ratio = 0.0
+        book._invalidate_entry_cache()
+        self.assertEqual(
+            [book.by_idx[0].id],
+            [row.id for row in book.entry_sets('general', 'LONG')],
+        )
+
+    def test_zero_live_sample_setting_does_not_restore_a_hidden_hurdle(self):
+        book = self.book(1)
+        book.entry_policy = 'permissive-bounded'
+        book.entry_policy_min_live_samples = 0
+        book.live_test_min_samples = 0
+        self.assertEqual([book.by_idx[0].id], [row.id for row in book.entry_sets('general', 'LONG')])
+
+    def test_venue_margin_rejection_retries_once_with_bounded_smaller_entry(self):
+        class RiskRetryExchange(Exchange):
+            def __init__(self):
+                super().__init__()
+                self.market_calls = 0
+
+            def post(self, path, body):
+                if body.get('type') == 'MARKET':
+                    self.market_calls += 1
+                    if self.market_calls == 1:
+                        self.posts.append(dict(body))
+                        return {'code': 102201, 'msg': 'negative account assets'}
+                return super().post(path, body)
+
+        p = self.pulse(self.book(1))
+        p.api = RiskRetryExchange()
+        p.place('X-USDT', 1, 'gen:venue-risk', .9, selected_set=p.sets.by_idx[0])
+        market = [body for body in p.api.posts if body.get('type') == 'MARKET']
+        self.assertEqual(len(market), 2)
+        self.assertGreater(float(market[0]['quantity']), float(market[1]['quantity']))
+        self.assertEqual(len(p.open), 1)
+
     def test_entry_sets_cache_reuses_stable_eligibility_and_invalidates_on_score(self):
         book = self.book(12)
         with patch.object(book, '_validated_entry_rows', wraps=book._validated_entry_rows) as scan:
@@ -248,7 +303,7 @@ class AllValidEntries(unittest.TestCase):
         p.coord = NS(gate=lambda *a, **k: (True, [], {}), slot_cap=lambda *a: 10**9,
                      pick_rearrange=lambda *a: None)
         p.score = lambda s: (1, 'trend', .9)
-        p.maybe_forced_entries = Mock(); p.avail_notional = lambda: 1000
+        p.maybe_forced_entries = Mock(); p.avail_notional = lambda *a, **k: 1000
         return p
 
     def indication(self, **changes):

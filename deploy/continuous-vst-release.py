@@ -23,7 +23,7 @@ def run(*args):
 def profile_patch(current, defaults, keep_existing=False):
     patch = {k: current.get(k, v) if keep_existing else v for k, v in defaults.items()}
     # Explicit rollout requirements; preserve other current user settings.
-    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates", "controlOrdersPerConfig", "controlOrdersOverall", "controlOrders"):
+    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates", "entryPolicyMinLiveSamples", "controlOrdersPerConfig", "controlOrdersOverall", "controlOrders"):
         patch[key] = defaults[key]
     return patch
 

@@ -388,6 +388,8 @@ _TRANSIENT_API = (
     "parameter quantity",
     "order size must be less",
     "available amount",
+    "negative account assets",
+    "order size",
     "minimum order amount",
     "minimum size per order",
     "stop loss price should",
@@ -1397,6 +1399,12 @@ class Pulse:
             return False
         if pos is None:
             return True
+        # The overall-control coordinator uses a synthetic proxy carrying the
+        # widest member range.  It must remain aggregate even though the proxy
+        # also has non-zero SL/TP percentages; otherwise the proxy would send
+        # quantity-matched controls and defeat closePosition protection.
+        if bool(getattr(pos, "_overall_proxy", False)):
+            return False
         # Persisted positions without a group identity are legacy aggregate
         # state. Newly created positions carry effective SL/TP percentages
         # before their stable group key is assigned by prepare_position_group().
@@ -4096,6 +4104,15 @@ class Pulse:
         has_tp = bool(real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")))
         return not (has_sl and has_tp)
 
+    def partial_set_entries_allowed(self) -> bool:
+        """Whether individually qualified Sets may enter during partial replay."""
+        sets = getattr(self, "sets", None)
+        return bool(
+            sets is not None
+            and str(getattr(sets, "entry_policy", "strict") or "strict").strip().lower()
+            == "permissive-bounded"
+        )
+
     def entries_blocked(self) -> bool:
         """Entry-only admission for venue cooldown and the first boot seconds.
         A leftover/ghost missing SL/TP must never stop the rest of the book —
@@ -4110,6 +4127,13 @@ class Pulse:
         if callable(retry_after) and retry_after() > 0:
             return True
         sets = getattr(self, "sets", None)
+        # ``permissive-bounded`` is the VST rollout policy: each Set still
+        # has to pass its own Base -> Main -> Real/PF/DD-time checks in
+        # SetBook.entry_sets()/execution_allowed(), but a long multi-symbol
+        # replay must not hold already-qualified Sets hostage behind the
+        # aggregate progress.ready flag. Strict production lanes retain the
+        # historical readiness boundary.
+        partial_set_entries = self.partial_set_entries_allowed()
         if (
             sets is not None
             and bool(getattr(sets, "enabled", False))
@@ -4119,6 +4143,7 @@ class Pulse:
                 or bool(getattr(self, "_hist_score_refresh_requested", False))
                 or str(getattr(getattr(sets, "progress", None), "phase", "")) == "score-refresh"
             )
+            and not partial_set_entries
         ):
             # DCA and Block adds are new orders too; management and protective
             # controls use separate paths and remain available during startup.
@@ -4741,10 +4766,13 @@ class Pulse:
         if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
-                getattr(self.sets, "progress", None), "ready", False):
+                getattr(self.sets, "progress", None), "ready", False) and not (
+                    selected_set is not None and self.partial_set_entries_allowed()
+                ):
             # A live tape can qualify a Set before the first complete historic
-            # snapshot.  The initial run is still the safety boundary: keep
-            # protective/reconciliation lanes alive, but do not open entries.
+            # snapshot. Strict lanes keep the initial-run boundary, while VST's
+            # permissive policy admits only the exact Set that already passed
+            # execution_allowed() below.
             return "historic-gate"
         if pack == "indications":
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
@@ -5190,9 +5218,12 @@ class Pulse:
         if self.entries_blocked():
             return
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
-                getattr(self.sets, "progress", None), "ready", False):
-            # Keep forced/demo and direct callers behind the same initial
-            # historic publication boundary as normal signal entries.
+                getattr(self.sets, "progress", None), "ready", False) and not (
+                    selected_set is not None and self.partial_set_entries_allowed()
+                ):
+            # Keep strict/forced/direct callers behind the initial historic
+            # boundary. A selected Set in the permissive VST lane has already
+            # passed the exact execution_allowed() check in entry_sense().
             return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
             return
@@ -5541,6 +5572,55 @@ class Pulse:
                         )
                         self.did_io = True
                         msg = str(r.get("msg") or "")
+            if not self.ok(r) and c is not None:
+                # BingX can reject an otherwise legal target when several
+                # fills are settling at once (102201 / negative account
+                # assets, insufficient margin, or an available-amount
+                # race).  One smaller, explicitly bounded retry lets the
+                # independent Set proceed without enlarging exposure or
+                # hammering the venue.  Ambiguous timeouts are intentionally
+                # excluded because the first order may already exist.
+                low_retry = str(msg or r.get("msg") or "").lower()
+                reduce_retry = any(
+                    token in low_retry
+                    for token in (
+                        "negative account assets",
+                        "insufficient margin",
+                        "order size must be less",
+                        "available amount",
+                        "maximum position",
+                    )
+                )
+                if reduce_retry:
+                    floor_qty = self.min_order_qty(c, px)
+                    room_notional = min(
+                        max(0.0, float(max_book or 0.0)) * 0.98,
+                        max(0.0, float(self.avail_notional(c) or 0.0)) * 0.95,
+                    )
+                    retry_qty = self.round_qty(c, min(max(0.0, qty * 0.5), room_notional / max(px, 1e-12)))
+                    if retry_qty < floor_qty:
+                        retry_qty = floor_qty
+                    retry_margin = retry_qty * px / max(1, lev)
+                    if (
+                        retry_qty > 0
+                        and retry_qty + max(float(getattr(c, "step", 0) or 0), 1e-12) < qty
+                        and retry_qty * px <= room_notional * 1.001
+                        and retry_margin <= max(0.0, float(self.available or 0.0)) * 0.90
+                    ):
+                        qty = retry_qty
+                        pending_meta["venueRiskRetry"] = True
+                        pending_meta["venueRiskRetryReason"] = short_api_msg(msg or r.get("msg") or "")
+                        self._remember_pending(
+                            kind="entry", cid=cid, symbol=sym, side=side,
+                            requested_qty=qty, group_key=pending_group_key,
+                            metadata=pending_meta,
+                        )
+                        r = self.api.post(
+                            "/openApi/swap/v2/trade/order",
+                            _entry_body(qty, cid),
+                        )
+                        self.did_io = True
+                        msg = str(r.get("msg") or "")
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
@@ -5778,9 +5858,12 @@ class Pulse:
             if self.missing_controls(pos):
                 self.ensure_controls(pos)
             if self.missing_controls(pos):
-                log(f"OPEN scratch no-ctrl {sym}")
-                self.close_pos(pos, avg, "no-ctrl")
-                return
+                # Venue controls are retried by priority_controls().  A
+                # transient price/position/rate-limit rejection must not
+                # immediately flatten a confirmed market fill and destroy
+                # the independent Set lane.  The existing bounded safety
+                # path still flattens a completely bare position after 300s.
+                log(f"OPEN pending-controls {sym} {side}", every=12.0, key=f"pending-ctrl:{sym}:{side}")
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
         self.ensure_strategy_lanes(pos)
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
@@ -6048,9 +6131,6 @@ class Pulse:
             else:
                 self.losses += 1
                 self.consec_loss += 1
-                if self.consec_loss >= 8:
-                    self.cooldown["__book__"] = time.time() + 120
-                    self.consec_loss = 4
             try:
                 self.variants.on_close(rec)
             except Exception:
@@ -6126,8 +6206,6 @@ class Pulse:
             self.ban_sym(pos.symbol, clear_open=False)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
         else:
-            if self.consec_loss >= 4:
-                log("pause new entries 120s after cold streak", every=30.0, key="partial-cold-streak")
             self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
             self.remove_position(pos)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
@@ -7307,6 +7385,13 @@ class Pulse:
             self._sets_generation = int(getattr(self, "_sets_generation", 0) or 0) + 1
             # A replay-input change cannot inherit completion claims from the
             # previous catalog or symbol universe.
+            # Do not let a persisted/partial snapshot expose the historic
+            # entry gate while this new universe is still being replayed.  A
+            # stale ready flag marks every independent Set direction as
+            # eligible for the strict path before its own evidence exists and
+            # can leave the dispatch matrix at zero until the next full run.
+            self.sets.progress.ready = False
+            self.sets.progress.stale = False
             self._hist_score_refresh_requested = False
             self._hist_last_published_watermark = {}
             self._hist_replay_retry = set()
@@ -7460,7 +7545,9 @@ class Pulse:
             "normalExecutionEnabled": self.normal_execution_enabled,
             "entryPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryPolicyMaxCandidates": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
-            "entryPolicyMinLiveSamples": int(getattr(self.sets, "entry_policy_min_live_samples", self.sets.eval_need()) or self.sets.eval_need()),
+            "entryPolicyMinLiveSamples": int(
+                getattr(self.sets, "entry_policy_min_live_samples", 0)
+            ),
             "blockActiveMinLevel": self.block_active_min_level,
             "blockActive": self.block_active,
             "stratGeneral": self.strat_general,
@@ -7493,7 +7580,9 @@ class Pulse:
             "setLiveNegativeDeact": bool(getattr(self.sets, "live_negative_deact", False)),
             "liveTestMode": bool(getattr(self.sets, "live_test_mode", False)),
             "liveTestCandidates": int(getattr(self.sets, "live_test_candidates", 0) or 0),
-            "liveTestMinSamples": int(getattr(self.sets, "live_test_min_samples", self.sets.eval_need()) or self.sets.eval_need()),
+            "liveTestMinSamples": int(
+                getattr(self.sets, "live_test_min_samples", 0)
+            ),
             "effectiveMinStep": int(getattr(self.sets, "min_step", 1) or 1),
             "configuredMinStep": int(getattr(self.sets, "min_step_cfg", 1) or 1),
             "preferMinimalRange": bool(

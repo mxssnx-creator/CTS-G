@@ -2177,8 +2177,10 @@ def set_orders_test() -> None:
     p2 = mk_pulse(fx2)
     p2.place("DDD-USDT", 1, "gen:gamma", 0.9)
     fx2_entries = [b for (path, b) in fx2.posts if path == ORDER and b.get("type") == "MARKET"]
-    rec("setord-no-ctrl-scratches",
-        "DDD-USDT" not in p2.open and len(fx2_entries) == 2 and not fx2.orders,
+    p2_pos = next(iter(p2.open.values()), None)
+    rec("setord-no-ctrl-keeps-confirmed-entry",
+        p2_pos is not None and p2_pos.symbol == "DDD-USDT" and len(fx2_entries) == 1 and not fx2.orders
+        and not (p2_pos.sl_oid or p2_pos.tp_oid),
         f"open={list(p2.open)} market_posts={len(fx2_entries)} live_ctrl={len(fx2.orders)}")
 
 

@@ -31,6 +31,10 @@ class ConnectionProfileTests(unittest.TestCase):
         self.assertEqual(p['histLookbackBars'],2880)
         self.assertEqual(p['baseEvalPosCount'],30)
         self.assertEqual(p['symbolCap'],20)
+        self.assertTrue(p['symbolsAll'])
+        self.assertTrue(p['symbolsDynamic'])
+        for key in ('maxRealSets','strategyLiveSetsCeiling','strategyRealSetsSafetyCeiling'):
+            self.assertEqual(p[key],0)
         self.assertTrue(p['controlOrdersPerConfig'])
         p['minPf']=999
         self.assertEqual(processing_profile()['minPf'],1.02)

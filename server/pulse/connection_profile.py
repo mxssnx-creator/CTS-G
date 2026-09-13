@@ -27,8 +27,14 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
     result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
-                  maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0,
-                  symbolCap=20, axisPrevEnabled=False, axisLastEnabled=False,
+                  maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
+                  # X02 intentionally scans the ranked top-20 book.  The
+                  # wildcard selects the exchange universe before the cap;
+                  # it must not be mistaken for an unlimited live universe.
+                  symbolsAll=True, symbolsDynamic=True, symbolCap=20,
+                  maxRealSets=0, strategyLiveSetsCeiling=0,
+                  strategyRealSetsSafetyCeiling=0,
+                  axisPrevEnabled=False, axisLastEnabled=False,
                   axisContEnabled=False, axisPauseEnabled=False, normalExecutionEnabled=True,
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
                   controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
