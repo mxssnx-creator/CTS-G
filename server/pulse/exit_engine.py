@@ -98,7 +98,7 @@ class ExitBook:
         self.pf_n = 15
         self.deact_n = 25
         self.min_pf = POSITIVE_PF
-        self.min_samples = 8
+        self.min_samples = self.pf_n
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.lanes: Dict[str, LaneScore] = {k: LaneScore(key=k) for k in LANES}
@@ -127,7 +127,7 @@ class ExitBook:
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(5, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = shared_pf_settings(ov)["minPf"]
-        self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
+        self.min_samples = max(5, int(ov.get("exitMinSamples") or self.pf_n))
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
         self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
         if self.cost_pct > 2:

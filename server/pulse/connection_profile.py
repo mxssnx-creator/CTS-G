@@ -26,7 +26,7 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
 
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
-    result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25,
+    result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
                   maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0,
                   symbolCap=20, axisPrevEnabled=False, axisLastEnabled=False,
                   axisContEnabled=False, axisPauseEnabled=False, normalExecutionEnabled=True,

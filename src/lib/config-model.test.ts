@@ -145,3 +145,16 @@ test("execution switches survive merge and save normalization independently", ()
 test("an explicit unlimited Set selection remains a user choice", () => {
   assert.equal(overlayFromCts({}, { setMaxActive: 0 }).setMaxActive, 0);
 });
+
+
+test("Control holdout defaults off and preserves zero independently of PF and last-N", () => {
+  assert.equal(DEFAULT_OVERLAY.controlMinTrades, 0);
+  assert.equal(overlayFromCts({}).controlMinTrades, 0);
+  for (const controlMinTrades of [0, 5, 25, 100]) {
+    const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
+    assert.equal(value.controlMinTrades, controlMinTrades);
+    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.minPf, 1.02);
+    assert.equal(value.controlOrdersPerConfig, true);
+  }
+});

@@ -318,6 +318,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   setPfWindow: number;
   baseEvalPosCount?: number;
   setDeactN: number;
+  controlMinTrades: number;
   setMinPf: number;
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
@@ -503,6 +504,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setPfWindow: 30,
   baseEvalPosCount: 30,
   setDeactN: 25,
+  controlMinTrades: 0,
   setMinPf: 1.02,
   setMaxDdTimeS: 57600,
   setAutoDeact: true,
@@ -657,6 +659,7 @@ export type CtsSettings = {
   histRefreshS?: number;
   setPfWindow?: number;
   setDeactN?: number;
+  controlMinTrades?: number;
   setMinPf?: number;
   setMaxDdTimeS?: number;
   setAutoDeact?: boolean;
@@ -884,6 +887,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setDeactN: num(cts.setDeactN, 25),
+    controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, 1.02),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
     setAutoDeact: bool(cts.setAutoDeact, true),
@@ -1038,6 +1042,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   }
   next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 30))));
   next.setPfWindow = next.baseEvalPosCount;
+  next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
   next.slMinPct = Math.max(.15, Math.min(3, num(next.slMinPct, .15)));
   next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
   next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));

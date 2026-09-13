@@ -1,0 +1,22 @@
+{
+  "signature": "2aaa117e629b6f40b37d4bcb8985916af8bdaa54c845220c8d3ad9cc1ad4a1c9",
+  "sources": {
+    "scripts/policy_sweep.cpp": "2bb4bb851f1c324dc38c57d5e72162bb6687cc68a1b67b0391c00ba2978c6efa",
+    "scripts/control_policy.py": "eba6f5ded62ea06e6451820aa62c33142246f3d377ed28f4907dd3d7818a150a",
+    "scripts/replay_five_days.py": "1f463be2eb1d0588fb1a4b8e73f37ffed186967ac51fabe68689059be75054ed",
+    "server/pulse/indication_engine.py": "65ef331d54a235d224e1a093d8c399064a6f99ef5861490d932f49698e2caca9",
+    "server/pulse/set_engine.py": "f4795a8aa9ea26d46814fb3c31e25c575ae48e34f42efe68bdc14ace5857ec5e",
+    "server/pulse/position_cost.py": "d9f5e92b4e564fe2e12f23537787d80dc3ddf341b62d83f6260bc32ee53fa1b1",
+    "server/pulse/block_engine.py": "d9567969fba9b74e830645f3c5b48368d29d428adf98dde69f3ffc2484bb8dde",
+    "server/pulse/validation_policy.py": "5300c42c44785fbfbdccbe2c2515e05d03e01f68cbd3debb8ad5aa21a9117097"
+  },
+  "numpy": "2.3.5",
+  "controlRule": {
+    "training_n": 0,
+    "control_n": 0,
+    "training_pf": 1.02,
+    "control_pf": 1.0
+  },
+  "selection": "Each risk Set chooses its policy by training net among training-qualified policies, independently. Holdout never changes that selection.",
+  "controlDataPreviouslyInspected": true
+}

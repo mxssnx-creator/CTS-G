@@ -835,7 +835,7 @@ class StageRecord:
     gross_ev: float = 0.0
     confidence: float = 0.0
     uncertainty: float = 1.0
-    required_samples: int = 8
+    required_samples: int = 0
     insufficient_sample: bool = True
     axis_key: str = ""
     relative_count: int = 1
@@ -1153,11 +1153,11 @@ class SetBook:
         # hands admission back to the live evidence gates at the sample floor.
         self.entry_policy = ENTRY_POLICY_STRICT
         self.entry_policy_max_candidates = 0
-        self.entry_policy_min_live_samples = 8
+        self.entry_policy_min_live_samples = self.pf_n
         # Compatibility aliases remain visible to older dashboards.
         self.live_test_mode = False
         self.live_test_candidates = 0
-        self.live_test_min_samples = 8
+        self.live_test_min_samples = self.pf_n
 
     def __getstate__(self) -> Dict[str, Any]:
         """Return a copy-safe state for isolated historic replays.
@@ -1410,7 +1410,7 @@ class SetBook:
             self.entry_policy_min_live_samples = self.eval_need()
         self.live_test_min_samples = self.entry_policy_min_live_samples
         self.reactivate = bool(ov.get("setReactivate", True))
-        # Strict gate (default ON): only VALIDATED (last-N fills >= 8) AND
+        # Strict gate (default ON): only VALIDATED (configured Last-N fills) AND
         # PROFITABLE (cost-adjusted PF >= 1.10 = +1× PositionCost) + DDt under
         # the cap may drive live orders. Cold/unproven sets keep collecting.
         self.strict_gate = bool(ov.get("setStrictGate", True))
@@ -1538,13 +1538,13 @@ class SetBook:
     def eval_need(self) -> int:
         """Required completed Base samples; default is the full last-30 window."""
         try:
-            ms = int(self.min_samples or 8)
+            ms = int(self.min_samples or self.pf_n)
         except Exception:
-            ms = 8
+            ms = PF_N_DEFAULT
         try:
-            pf = int(self.pf_n or 15)
+            pf = int(self.pf_n or PF_N_DEFAULT)
         except Exception:
-            pf = 15
+            pf = PF_N_DEFAULT
         return max(5, min(ms, pf))
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
@@ -1789,7 +1789,7 @@ class SetBook:
         # legacy/off mode keeps the normal deactivation tape independent.
         window = max(50, self.deact_n, self.optimization_n) if self.additional_coordination else max(self.deact_n, 15)
         rows = all_rows[-window:]
-        if len(rows) < 8:
+        if not rows:
             self.optimization_stats = {
                 "n": len(rows),
                 "positive": sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0),
@@ -4718,7 +4718,7 @@ class SetBook:
                 return True
             return self.pick_any(pack, side=side) is not None
         fills = sum(s.n for s in self.sets.values())
-        if fills < 8 or not self.progress.ready:
+        if not fills or not self.progress.ready:
             return True
         return self.pick_any(pack, side=side) is not None
 

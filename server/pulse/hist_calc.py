@@ -47,6 +47,7 @@ from set_engine import (
     pin_compute_threads,
     synth_trend,
 )
+from validation_policy import control_min_trades
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
@@ -329,6 +330,10 @@ def _connection_id(connection: Optional[str] = None) -> str:
     return "".join(ch for ch in raw if ch.isalnum() or ch in "._-") or "bingx-x02"
 
 
+def forced_path(connection: Optional[str] = None) -> str:
+    return path_for(f"forced-configs-{_connection_id(connection)}.json")
+
+
 def job_path(connection: Optional[str] = None) -> str:
     env = (os.environ.get("CTS_HIST_CALC_PATH") or "").strip()
     if env and connection in (None, ""):
@@ -522,6 +527,7 @@ def default_options() -> Dict[str, Any]:
 def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body = body if isinstance(body, dict) else {}
     opt = default_options()
+    opt["controlMinTrades"] = control_min_trades(body.get("controlMinTrades"))
     raw_hours = body.get("hours")
     if raw_hours is None and body.get("lookback") is not None:
         try:
@@ -813,6 +819,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setPfWindow": int(opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
         "setMinSamples": int(opt.get("setMinSamples") or opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
         "setMinPf": POSITIVE_PF,
+        "controlMinTrades": control_min_trades(opt.get("controlMinTrades")),
         "setMaxDdTimeS": 57600,
         "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 1),
@@ -881,7 +888,7 @@ def rank_tuple(row: Dict[str, Any]) -> Tuple:
     dd = float(row.get("maxDdS") or 0)
     sl = float(row.get("slRatio") or 9)
     exp = float(row.get("expectancy") or 0)
-    validated = n >= 8 and is_positive_pf(pf)
+    validated = n > 0 and is_positive_pf(pf)
     return (0 if validated else 1, -pf, dd, sl, -exp, -int(row.get("n") or 0))
 
 
@@ -941,7 +948,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "classicPf": float(g("classic_all", st.classic_all) or 0),
         "active": bool(g("active", st.active)),
         "deactReason": st.deact_reason if not want else "",
-        "validated": n15 >= 8 and is_positive_pf(pf),
+        "validated": n15 > 0 and is_positive_pf(pf),
         "lowSl": st.sl_ratio <= 0.6 + 1e-9 or st.kind == "trail",
         "costSubtracted": True,
         "bySide": by_side_pub,
@@ -1010,7 +1017,7 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 seq, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1075,7 +1082,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
                 "n": len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
                 "costSubtracted": True,
                 "evaluationWindows": evaluation_windows(
                     stail, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1089,7 +1096,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "last15N": int(pf["count"]),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 bounded, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1159,7 +1166,7 @@ def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
     dd = float((blob.get("max_dd_s") if blob is not None else st.max_dd_s) or 0)
     exp = float((blob.get("expectancy") if blob is not None else st.expectancy) or 0)
     sl = float(st.sl_ratio or 9)
-    validated = n15 >= 8 and is_positive_pf(pf)
+    validated = n15 > 0 and is_positive_pf(pf)
     low_sl = sl <= 0.6 + 1e-9 or st.kind == "trail"
     return (0 if validated else 1, -pf, dd, sl, -exp, -n), validated, low_sl, n
 
@@ -1251,7 +1258,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
                 "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
                 "evaluationWindows": evaluation_windows(
                     stail, cost, required_samples=need, ordered=True, simple=True
                 ),
@@ -1265,7 +1272,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 tail, cost, required_samples=need, ordered=True, simple=True
@@ -1453,6 +1460,7 @@ def pipeline_symbols(
 
 
 _HIST_WORKER_BOOK: Optional[SetBook] = None
+_HIST_WORKER_CONTROL_N = 0
 
 
 def replay_pool_workers(
@@ -1479,7 +1487,8 @@ def replay_pool_workers(
 
 def _init_replay_worker(overlay: Dict[str, Any]) -> None:
     """Build one reusable catalog per process instead of once per tile."""
-    global _HIST_WORKER_BOOK
+    global _HIST_WORKER_BOOK, _HIST_WORKER_CONTROL_N
+    _HIST_WORKER_CONTROL_N = control_min_trades((overlay or {}).get("controlMinTrades"))
     pin_compute_threads(1)
     book = SetBook()
     book.load(dict(overlay or {}))
@@ -1503,7 +1512,7 @@ def _prepare_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tup
     book.bars[sym] = bars
     try:
         prepared = book.prepare_replay_signals(sym, now)
-        forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct)
+        forced = evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=_HIST_WORKER_CONTROL_N)
         return sym, len(bars), prepared, forced, (time.perf_counter() - started) * 1000.0
     finally:
         book.bars.pop(sym, None)
@@ -1606,7 +1615,7 @@ def _replay_symbol_worker(payload: Tuple[str, List[List[float]], float]) -> Tupl
         for key, rows in local_strat.items():
             if len(rows) > 2400:
                 local_strat[key] = rows[-2400:]
-        forced = evaluate_forced_symbol(str(sym), bars, book.ind_settings, now, cost_pct=book.cost_pct)
+        forced = evaluate_forced_symbol(str(sym), bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=_HIST_WORKER_CONTROL_N)
         return (
             str(sym),
             int(nbar),
@@ -1636,15 +1645,17 @@ def coverage_counter(requested: int, completed: int, skipped: int = 0, failed: i
     }
 
 
-def run_forced_calc(body: Dict[str, Any], persist: bool = True) -> Dict[str, Any]:
+def run_forced_calc(body: Dict[str, Any], persist: bool = True, *, on_progress=None, should_cancel=None) -> Dict[str, Any]:
     """Focused forced sweep; same public data path, no full-catalog allocation."""
     opt = parse_options(body)
+    extra = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
+    opt["controlMinTrades"] = control_min_trades(extra.get("controlMinTrades", opt["controlMinTrades"]))
     now = time.time()
     results: List[Dict[str, Any]] = []
     sources: Dict[str, str] = {}
     book = SetBook()
     # Only construct one normal Set to obtain the shared indication settings.
-    book.load({"stratGeneral": False, "stratIndications": True, "stratTrailing": False,
+    book.load({**extra, "stratGeneral": False, "stratIndications": True, "stratTrailing": False,
                "slToTpRatios": [.6], "setMinStep": 1, "setStepMax": 1})
     job: Dict[str, Any] = {"phase": "fetch", "pct": 0, "detail": "Forced baseline sweep",
                            "options": opt, "startedAt": now, "forcedOnly": True,
@@ -1654,20 +1665,26 @@ def run_forced_calc(body: Dict[str, Any], persist: bool = True) -> Dict[str, Any
         _write_pid()
     try:
         def item(sym, bars, src, done, total):
-            results.append(evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct))
+            if should_cancel and should_cancel():
+                raise RuntimeError("Forced calculation superseded or stopped")
+            results.append(evaluate_forced_symbol(sym, bars, book.ind_settings, now, cost_pct=book.cost_pct, last_n=book.pf_n, control_n=opt["controlMinTrades"]))
             sources[sym] = "historical-market" if src == "live" else src
             job.update(phase="replay", pct=round(done / total * 95, 1),
                        detail=f"{done}/{total} forced symbols", forcedConfigs=forced_summary(results, sources, now))
             if persist:
                 _atomic_write(job_path(), job)
+            if on_progress:
+                on_progress(dict(job))
         source = pipeline_symbols(list(FORCED_SYMBOLS), hours_to_bars(opt["hours"]), bool(body.get("synth")), 2, item)
         result = forced_summary(results, sources, now)
         job.update(phase="ready", pct=100, ready=True, source=source, forcedConfigs=result,
                    detail=f"{result['completed']}/{result['requested']} baseline configs · {result['selectedCount']} selected",
                    elapsedMs=round((time.time() - now) * 1000, 1), finishedAt=time.time())
         if persist:
-            _atomic_write(path_for("forced-configs.json"), {**result, "matrix": results})
+            _atomic_write(forced_path(), {**result, "connection": _connection_id(), "matrix": results})
             _atomic_write(job_path(), job)
+        else:
+            job["_forcedMatrix"] = results
         return job
     except Exception:
         job.update(phase="error", error=traceback.format_exc()[-400:], detail="Forced calculation failed")
@@ -2314,7 +2331,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
         })
         job.pop("_lastWrite", None)
         if persist:
-            _atomic_write(path_for("forced-configs.json"), {**job["forcedConfigs"], "matrix": forced_results})
+            _atomic_write(forced_path(), {**job["forcedConfigs"], "connection": _connection_id(), "matrix": forced_results})
             _atomic_write(job_path(), job)
         return job
     except Exception:
@@ -2665,7 +2682,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("calc-trail-off", not any(r.get("kind") == "trail" for r in (off.get("rows") or [])), str(off.get("coverage")))
     rec("calc-trail-off-base", any(r.get("kind") == "base" for r in (off.get("rows") or [])))
 
-    # Ranking: validated (pf>=1, n>=8) sorts ahead of losers; among equals lower DD / lower SL wins
+    # Ranking: validated (positive configured-window PF, n>0) sorts ahead of losers; among equals lower DD / lower SL wins
     a = {"last15Ratio": 1.2, "last15N": 12, "maxDdS": 400, "slRatio": 0.6, "expectancy": 0.01, "n": 20}
     b = {"last15Ratio": 0.7, "last15N": 12, "maxDdS": 10, "slRatio": 0.3, "expectancy": -0.01, "n": 20}
     c = {"last15Ratio": 1.2, "last15N": 12, "maxDdS": 80, "slRatio": 0.3, "expectancy": 0.01, "n": 20}

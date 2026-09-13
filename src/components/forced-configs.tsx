@@ -50,12 +50,13 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
         <span>{data?.completed ?? 0} / {data?.requested ?? 3888} combinations</span>
         <span>{data?.coveragePct ?? 0}% coverage</span>
         <span>{rows.length} selected</span>
-        <span>Net classic PF &gt; 1.05 · shared overall threshold at admission</span>
+        <span>Training classic PF &gt; 1.05 · shared threshold at admission</span>
+        <span>Control trades: {data?.controlMinTrades ?? 0} · {(data?.controlMinTrades ?? 0) === 0 ? "holdout gate off" : "holdout gate on"}</span>
         <span>{live?.trialMode ? "VST trial lane on" : "Live lane not enabled"}</span>
       </div>
       <p className="text-xs leading-relaxed text-muted">
         Baseline only: no Block, DCA, trailing or early-exit strategy. Fees are deducted. Each candidate must pass training,
-        the later 30% holdout, recent windows and drawdown limits. Historical throughput is not live throughput.
+        its own training windows and drawdown limit. The later 30% holdout is reported; its admission gate defaults to 0 (off). Historical throughput is not live throughput.
         VST requires its own confirmed roundtrips; positive observations do not automatically enable mainnet.
       </p>
       {busy ? <p role="status" className="text-sm text-muted">{job?.detail || "Starting…"}</p> : null}
@@ -75,7 +76,7 @@ export function ForcedConfigsPanel({ live }: { live?: ForcedConfigSummary }) {
                 <td className="px-3 py-3 font-mono">{row.tpPct.toFixed(2)} / {row.slPct.toFixed(2)}</td>
                 <td className="px-3 py-3 font-mono">{row.slRatio.toFixed(3)}</td>
                 <td className="px-3 py-3">{row.trainN} / {row.holdoutN}</td>
-                <td className="px-3 py-3 font-mono text-primary">{row.pf.toFixed(3)} / {row.holdoutPf.toFixed(3)}</td>
+                <td className="px-3 py-3 font-mono">{row.pf.toFixed(3)} / {row.holdoutPf.toFixed(3)}</td>
                 <td className="px-3 py-3 font-mono">{row.costRatio.toFixed(3)}</td>
                 <td className="px-3 py-3 font-mono">{row.tradesPerHour.toFixed(2)}</td>
                 <td className="px-3 py-3 font-mono">{row.maxDrawdownR.toFixed(2)}</td>

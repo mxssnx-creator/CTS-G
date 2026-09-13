@@ -227,5 +227,6 @@
   "useLivePositionCosts": true,
   "useMaxLeverage": true,
   "volWeight": 0.3,
-  "volumeFactor": 1
+  "volumeFactor": 1,
+  "controlMinTrades": 0
 }

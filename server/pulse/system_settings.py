@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import json
 from position_cost import shared_pf_settings
+from validation_policy import control_min_trades
 from pathlib import Path
 
 # name: default, minimum, maximum, integer. Zero memory limits mean automatic.
@@ -34,6 +35,7 @@ def calculation_overlay(overlay, cts=None):
     use this boundary before building/rebuilding any coordination catalog.
     """
     result = shared_pf_settings(overlay)
+    result["controlMinTrades"] = control_min_trades(result.get("controlMinTrades"))
     result.setdefault("histLookbackBars", 2880)
     result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
     result["setPfWindow"] = result["baseEvalPosCount"]

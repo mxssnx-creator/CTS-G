@@ -1514,6 +1514,15 @@ function SettingsPage() {
                   onChange={(v) => patch("histRefreshS", v)}
                 />
                 <Slider
+                  label="Control trades · holdout"
+                  value={overlay.controlMinTrades}
+                  min={0}
+                  max={75}
+                  step={1}
+                  hint="Default 0 = off. Later control results stay visible; training validates each Set independently."
+                  onChange={(v) => patch("controlMinTrades", Math.round(v))}
+                />
+                <Slider
                   label="Base evaluation · last positions"
                   value={overlay.setPfWindow}
                   min={5}

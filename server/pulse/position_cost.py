@@ -594,7 +594,7 @@ def evaluation_windows(
     rows: Sequence[Any],
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
     windows: Sequence[int] = EVALUATION_WINDOWS,
-    required_samples: int = 8,
+    required_samples: int = 0,
     *,
     ordered: bool = False,
     simple: Optional[bool] = None,
@@ -667,7 +667,7 @@ def _classic_pf(values: Sequence[float], fallback: float = 0.0) -> float:
 def cost_aware_metrics(
     rows: Sequence[Any],
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
-    required_samples: int = 8,
+    required_samples: int = 0,
 ) -> Dict[str, Any]:
     """Return gross/net PF and EV from one shared closed sample.
 

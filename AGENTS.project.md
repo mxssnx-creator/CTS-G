@@ -25,3 +25,12 @@
   its own evidence. Only Base-qualified Sets enter downstream calculations
   and system result statistics. Continue Base checks when evidence changes;
   retain rejected Sets and actual exchange accounting for ongoing tracking.
+- User instruction, 2026-09-13: additional chronological control/holdout
+  admission defaults to `controlMinTrades: 0` (off). Keep actual control
+  results visible. Zero must not disable per-Set Base/Main/Real evaluation,
+  cost accounting, TP/SL protection or venue rate limits.
+
+- User instruction, 2026-09-13: additional fixed training minimum is zero.
+  Baseline admission uses each Set's configured Base Last-N window, with
+  actual available close counts reported explicitly; an empty tape is not
+  positive evidence. Preserve venue rate limits and protective orders.

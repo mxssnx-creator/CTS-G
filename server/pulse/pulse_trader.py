@@ -25,7 +25,8 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
-from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate
+from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
+from validation_policy import control_min_trades
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
 from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from entry_dispatch import EntryMatrix
@@ -62,6 +63,7 @@ from storage_paths import MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR,
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
+from hist_calc import run_forced_calc, forced_path
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import (
     redis_key,
@@ -2501,15 +2503,19 @@ class Pulse:
                 pos.control_group_key,
                 getattr(pos, "control_range_key", ""),
             )
-        if idx >= 1000 or (pos is not None and getattr(pos, "execution_lane", "")):
-            if idx < 0 or idx >= 36 ** 4:
+        if idx >= 1000 or (idx < 0 and set_id) or (pos is not None and getattr(pos, "execution_lane", "")):
+            if idx >= 36 ** 4:
                 raise ValueError("Set index cannot be encoded in client order ID")
-            value, encoded = idx, ""
+            # Historical baseline/recovered lanes need protective and close
+            # orders even when they are outside the current catalog. The w
+            # marker cannot resolve to an unrelated index-zero strategy.
+            marker = "w" if idx < 0 else "v"
+            value, encoded = max(0, idx), ""
             for _ in range(4):
                 value, digit = divmod(value, 36)
                 encoded = (string.digits + string.ascii_lowercase)[digit] + encoded
             fingerprint = hashlib.sha256(set_id.encode()).hexdigest()[:3]
-            prefix = f"{TAG}{kind}v{encoded}{fingerprint}{group_token.ljust(8, '0')}"
+            prefix = f"{TAG}{kind}{marker}{encoded}{fingerprint}{group_token.ljust(8, '0')}"
             return prefix + client_order_nonce(prefix, 32 - len(prefix))
         prefix = f"{TAG}{kind}{p}{sl}{tr}{st}{ix}{group_token}"
         # Preserve parser offsets and the complete group token. Use all space
@@ -2538,14 +2544,14 @@ class Pulse:
         low = s.lower()
         tag = TAG.lower()
         rest = s[len(TAG):] if low.startswith(tag) else s
-        if rest[1:2] == "v":
+        if rest[1:2] in ("v", "w"):
             if len(rest) < 18:
                 return None
             try:
-                idx = int(rest[2:6], 36)
+                idx = int(rest[2:6], 36) if rest[1:2] == "v" else -1
             except ValueError:
                 return None
-            st_obj = self.sets.get_idx(idx) if hasattr(self, "sets") else None
+            st_obj = self.sets.get_idx(idx) if idx >= 0 and hasattr(self, "sets") else None
             if st_obj is not None and hashlib.sha256(st_obj.id.encode()).hexdigest()[:3] != rest[6:9]:
                 st_obj = None
             token = "" if rest[9:17] == "00000000" else rest[9:17]
@@ -5004,7 +5010,7 @@ class Pulse:
         pf = float(view.get("last15_ratio") or 0)
         net = float(view.get("net_avg", getattr(chosen, "expectancy", 0)) or 0)
         ddt = float(view.get("max_dd_s") or 0)
-        if (not chosen.active or n < max(8, self.sets.eval_need()) or
+        if (not chosen.active or n < self.sets.eval_need() or
                 not math.isfinite(pf) or pf < self.sets.real_min_pf or
                 not math.isfinite(net) or net <= 0 or
                 not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
@@ -5120,7 +5126,8 @@ class Pulse:
             return
         side = "LONG" if direction > 0 else "SHORT"
         pack = "indications" if str(reason).startswith("ind:") else "general"
-        execution_lane = self.execution_lane_key(pack, reason, selected_set, execution_strategy)
+        lane_set = SimpleNamespace(id=forced_row["id"]) if forced_row is not None else selected_set
+        execution_lane = self.execution_lane_key(pack, reason, lane_set, execution_strategy)
         if execution_lane and normal_allowed and any(
                 self.execution_lane_matches(getattr(p, "execution_lane", ""), execution_lane)
                 and getattr(p, "strategy", "") != "block"
@@ -7237,6 +7244,7 @@ class Pulse:
             "entrySelectionPolicy": str(getattr(self.sets, "entry_policy", "strict")),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
             "processingSetCount": len(getattr(self.sets, "_processing_set_ids", set()) or set()),
             "targetNotional": TARGET_NOTIONAL,
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
@@ -7339,6 +7347,7 @@ class Pulse:
             "histRefreshS": self.sets.refresh_s,
             "setPfWindow": self.sets.pf_n,
             "setDeactN": self.sets.deact_n,
+            "controlMinTrades": control_min_trades(self.overlay.get("controlMinTrades")),
             "setMinPf": self.sets.min_pf,
             "setMaxDdTimeS": self.sets.max_dd_s,
             "setAutoDeact": self.sets.auto_deact,
@@ -8318,20 +8327,36 @@ class Pulse:
 
     def _forced_data(self) -> Dict[str, Any]:
         now = time.time()
-        if now - getattr(self, "_forced_read_at", 0) < 30:
+        policy = (control_min_trades(getattr(self, "overlay", {}).get("controlMinTrades")), self.coord.min_pf, int(getattr(self, "overlay", {}).get("baseEvalPosCount") or 30))
+        if now - getattr(self, "_forced_read_at", 0) < 30 and policy == getattr(self, "_forced_cache_policy", None):
             return getattr(self, "_forced_cache", {})
         self._forced_read_at = now
+        self._forced_cache_policy = policy
         self._forced_cache = {}
-        path = os.path.join(DIR, "forced-configs.json")
+        path = forced_path(CONN_SHORT)
         try:
             if os.path.getsize(path) > MAX_RETAINED_FILE_BYTES:
                 return {}
             with open(path, encoding="utf-8") as stream:
                 blob = json.load(stream)
-            if not isinstance(blob, dict) or not blob.get("baselineOnly"):
+            if (not isinstance(blob, dict) or not blob.get("baselineOnly")
+                    or blob.get("version") != 3 or blob.get("connection") != CONN_SHORT):
                 return {}
             if not 0 <= now - float(blob.get("updatedAt") or 0) <= 3 * 3600:
                 return {}
+            # Reclassify existing exact Set evidence when the optional rule
+            # changes. Do not replay unchanged candles or retain the old
+            # holdout filter's reduced candidate list.
+            rows = []
+            for group in blob.get("matrix", []):
+                for raw in group.get("rows", []):
+                    row = dict(raw, source=(blob.get("sourceBySymbol") or {}).get(group["symbol"], "unknown"))
+                    row.update(training_window(row, policy[2]))
+                    if valid_candidate(row, policy[1], control_n=policy[0], last_n=policy[2]):
+                        rows.append(dict(row, eligible=True, status="candidate", controlMinTrades=policy[0],
+                                         controlChecked=bool(policy[0]), controlPassed=True if policy[0] else None,
+                                         controlStatus="passed" if policy[0] else "disabled"))
+            blob.update(rows=select_forced(rows), controlMinTrades=policy[0], selectedCount=len(rows), eligibleCount=len(rows), trainingMinTrades=0)
             self._forced_cache = blob
         except (OSError, ValueError, TypeError):
             pass
@@ -8343,7 +8368,7 @@ class Pulse:
             return False
         if not getattr(self.sets, "live_test_mode", False) or not getattr(self, "control_orders", True):
             return False
-        if (not valid_candidate(row, self.coord.min_pf) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
+        if (not valid_candidate(row, self.coord.min_pf, control_n=control_min_trades(getattr(self, "overlay", {}).get("controlMinTrades")), last_n=int(getattr(self, "overlay", {}).get("baseEvalPosCount") or 30)) or row.get("symbol") != sym or row.get("direction") != side or conf < .58):
             return False
         if not any(r.get("id") == row.get("id") for r in self._forced_data().get("rows", [])):
             return False
@@ -8351,28 +8376,34 @@ class Pulse:
         if any(p.set_id == row["id"] for p in self.open.values()):
             return False
         tape = completed_roundtrips([c for c in self.closed if c.set_id == row["id"]])
-        recent = last_n_cost_pf(tape, 15, self.position_cost_pct)
-        if len(tape) >= 8 and (recent["classicPf"] <= max(FORCED_MIN_PF, self.coord.min_pf) or recent["netAvg"] <= 0):
-            return False
-        if len(tape) >= 3 and all(float(c.get("pnl") or 0) < 0 for c in tape[-3:]):
+        recent = last_n_cost_pf(tape, int(getattr(self, "overlay", {}).get("baseEvalPosCount") or 30), self.position_cost_pct)
+        if tape and (recent["classicPf"] <= max(FORCED_MIN_PF, self.coord.min_pf) or recent["netAvg"] <= 0):
             return False
         return True
 
     def maybe_forced_entries(self) -> None:
-        if time.time() - getattr(self, "_forced_emit_at", 0) < 5:
+        if getattr(self, "halted", False):
             return
-        self._forced_emit_at = time.time()
         blob = self._forced_data()
         candidates = blob.get("rows") or []
         if not candidates:
+            self._forced_entry_queue = {"eligible": 0, "examined": 0, "attempted": 0, "opened": 0, "failed": 0, "updatedAt": time.time()}
             return
+        queue = self._forced_entry_queue = dict(eligible=len(candidates), examined=0, attempted=0, opened=0, failed=0, updatedAt=time.time(), scope="baseline-batch")
         cursor = getattr(self, "_forced_cursor", 0) % len(candidates)
         self._forced_cursor = cursor + 1
         # Rotate all qualified candidates without a high-PF row monopolizing
         # the lane. Signal computation is shared by symbol for this cycle.
         votes_by_symbol = {}
         settings = {r["symbol"]: r.get("settings", {}) for r in blob.get("matrix", [])}
-        for row in candidates[cursor:] + candidates[:cursor]:
+        settings_budget = getattr(self, "system_settings", {})
+        deadline = time.monotonic() + max(.05, min(2.0, SCAN_S, settings_budget.get("systemEntryBudgetMs", 500) / 1000))
+        for offset in range(min(len(candidates), int(settings_budget.get("systemEntryBatch", 256)))):
+            if time.monotonic() >= deadline or getattr(self, "halted", False):
+                break
+            row = candidates[(cursor + offset) % len(candidates)]
+            queue["examined"] += 1
+            self._forced_cursor = (cursor + offset + 1) % len(candidates)
             sym = row["symbol"]
             if sym not in votes_by_symbol:
                 bars = (self.klines.get(sym) or [])[-61:-1]
@@ -8381,8 +8412,16 @@ class Pulse:
             d, conf = votes_by_symbol[sym].get(row["indication"], (0, 0))
             side = "LONG" if d > 0 else "SHORT"
             if d and self._forced_entry_allowed(row, sym, side, conf):
-                self.place(sym, d, f"ind:{row['indication']}:forced-baseline", conf, forced_row=row)
-                break  # one request per cycle; normal safety limits still apply
+                queue["attempted"] += 1
+                before = len(getattr(self, "open", {}))
+                try:
+                    self.place(sym, d, f"ind:{row['indication']}:forced-baseline", conf, forced_row=row)
+                except Exception as exc:
+                    queue["failed"] += 1
+                    self.errors = getattr(self, "errors", 0) + 1
+                    self.last_error = f"baseline entry {sym}: {type(exc).__name__}: {str(exc)[:140]}"
+                queue["opened"] += max(0, len(getattr(self, "open", {}))-before)
+                # Cursor advances even on failure; the Set remains available next cycle.
 
     def _forced_snapshot(self) -> Dict[str, Any]:
         blob = self._forced_data()
@@ -10035,6 +10074,7 @@ class Pulse:
             "activeSetCount": int(sets_snap.get("activeCount") or 0),
             "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
             "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
             "activeSetCap": int(getattr(self.sets, "max_active", 0) or 0),
             "activeSetUnlimited": int(getattr(self.sets, "max_active", 0) or 0) <= 0,
             "progressPhase": phase,
@@ -10530,6 +10570,7 @@ class Pulse:
                 "validatedCount": int(scov.get("validatedCount") or 0),
                 "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
                 "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
+            "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
                 "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
                 "histFills": sum(s.n for s in self.sets.sets.values()),
                 "liveFills": int(live_ov.get("fills") or 0),
@@ -11005,10 +11046,59 @@ class Pulse:
         run_id = str(request.get("runId") or "")
         if not run_id or run_id == self._hist_request_seen:
             return {}
+        if request.get("forcedOnly"):
+            try:
+                with open(forced_path(CONN_SHORT), encoding="utf-8") as stream:
+                    completed = json.load(stream)
+                if (completed.get("version") == 3 and completed.get("connection") == CONN_SHORT
+                        and completed.get("requestRunId") == run_id):
+                    self._hist_request_seen = run_id
+                    return {}  # completed baseline survives a worker restart
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         self._hist_latest_request_id = run_id
         if consume:
             self._hist_request_seen = run_id
         return request
+
+    def _hist_begin_request(self, request: Dict[str, Any], run_id: str) -> None:
+        """Automatic runs never un-consume the durable manual request."""
+        self._hist_active_run_id = run_id
+        if request:
+            self._hist_latest_request_id = run_id
+            self._hist_request_seen = run_id
+
+    def _hist_run_forced(self, request: Dict[str, Any]) -> None:
+        """Consume the baseline request on the existing history worker."""
+        run_id = str(request["runId"])
+        self._hist_begin_request(request, run_id)
+        overlay = dict(getattr(self, "overlay", {}))
+        overlay.update(request.get("overlay") or {})
+        if "controlMinTrades" in request:
+            overlay["controlMinTrades"] = control_min_trades(request["controlMinTrades"])
+        def stopped():
+            status = read_hist_job(CONN_SHORT)
+            return status.get("runId") == run_id and status.get("phase") == "stopped"
+        def publish(job):
+            # A newer queued request keeps its own status until consumed.
+            if not self._hist_request_changed() and not stopped():
+                write_hist_job(dict(job, runId=run_id, generation=request.get("generation", 0), shared=True), CONN_SHORT)
+        def cancelled():
+            return (self._hist_stop.is_set() or self._hist_request_changed() or stopped()
+                    or any(os.path.exists(p) for p in (PAUSE_PATH, STOP_PATH, STOP_ALL)))
+        publish(dict(phase="fetch", pct=0, detail="Forced baseline · shared history worker", forcedOnly=True))
+        try:
+            job = run_forced_calc(dict(request, overlay=overlay), persist=False,
+                                  on_progress=publish, should_cancel=cancelled)
+            matrix = job.pop("_forcedMatrix", [])
+            self._hist_request_check_ts = 0  # read the newest generation before publishing
+            if job.get("ready") and not cancelled():
+                atomic_write(forced_path(CONN_SHORT), dict(job["forcedConfigs"], matrix=matrix,
+                                                         connection=CONN_SHORT, requestRunId=run_id))
+                self._forced_read_at = 0
+            publish(job)
+        finally:
+            self._hist_active_run_id = ""
 
     def _hist_write_status(self, book: Optional[SetBook] = None, *, progress_only: bool = False, **values: Any) -> None:
         current = book or self.sets
@@ -12159,6 +12249,9 @@ class Pulse:
                     wait_s = min(max(float(self._hist_next_hourly_at or now + 5.0) - now, 0.25), 10.0)
                     self._hist_wake.wait(timeout=wait_s)
                     continue
+                if manual and request.get("forcedOnly"):
+                    self._hist_run_forced(request)
+                    continue
                 mode = str(request.get("mode") or ("initial" if not ready else "hourly"))
                 run_id = str(request.get("runId") or f"{CONN_SHORT}:{int(now * 1000)}")
                 run_generation = int(request.get("generation") or (int(getattr(self, "_sets_generation", 0) or 0) + 1))
@@ -12243,10 +12336,7 @@ class Pulse:
                 start, end = self._history_bounds(lookback)
                 catalog_generation = int(getattr(self, "_sets_generation", 0) or 0)
                 self._hist_active_request = dict(request)
-                self._hist_active_run_id = run_id
-                self._hist_latest_request_id = run_id
-                if run_id:
-                    self._hist_request_seen = run_id
+                self._hist_begin_request(request, run_id)
                 with self.state_guard():
                     progress = book.progress
                     progress.phase = "initial" if mode == "initial" else "backfill"

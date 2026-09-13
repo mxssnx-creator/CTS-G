@@ -5,6 +5,7 @@ Run as the server administrator with a full commit SHA present in /opt/cts-g.
 Runtime state stays in /var/lib/cts-gx; X01 keeps its existing service and code.
 """
 import json
+import argparse
 import pathlib
 import re
 import runpy
@@ -19,8 +20,20 @@ def run(*args):
     return subprocess.check_output(args, text=True).strip()
 
 
+def profile_patch(current, defaults, keep_existing=False):
+    patch = {k: current.get(k, v) if keep_existing else v for k, v in defaults.items()}
+    # The control-off rollout explicitly changes these two user requirements.
+    for key in ("controlMinTrades", "symbolCap", "maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates"):
+        patch[key] = defaults[key]
+    return patch
+
+
 def main():
-    revision = sys.argv[1]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("revision")
+    parser.add_argument("--keep-existing-settings", action="store_true")
+    args = parser.parse_args()
+    revision = args.revision
     if not re.fullmatch(r'[a-f0-9]{40}', revision):
         raise SystemExit('A full immutable commit SHA is required')
     if run('git', '-C', '/opt/cts-g', 'rev-parse', revision) != revision:
@@ -66,7 +79,7 @@ def main():
     overlay = data/'overlay-bingx-x02.json'
     settings = json.loads(overlay.read_text()) if overlay.exists() else {}
     profile = runpy.run_path(str(release/'server/pulse/connection_profile.py'))
-    settings.update(profile['processing_profile']())
+    settings.update(profile_patch(settings, profile['processing_profile'](), args.keep_existing_settings))
     temporary = overlay.with_suffix('.continuous.tmp')
     temporary.write_text(json.dumps(settings, indent=2) + '\n')
     temporary.replace(overlay)
