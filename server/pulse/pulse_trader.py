@@ -1464,6 +1464,9 @@ class Pulse:
         # widest member range. It remains outside the per-config identity
         # scheme, while place_ctrl() treats that proxy as quantity-matched so
         # it cannot close unrelated same-side exposure.
+        # widest member range.  It must remain aggregate even though the proxy
+        # also has non-zero SL/TP percentages; otherwise the proxy would send
+        # quantity-matched controls and defeat closePosition protection.
         if bool(getattr(pos, "_overall_proxy", False)):
             return False
         # Persisted positions without a group identity are legacy aggregate
@@ -4019,6 +4022,11 @@ class Pulse:
             float(self.ctrl_skip.get("__stale_position__", 0.0) or 0.0),
             now + 30.0,
         )
+        # A freshly filled aggregate position can be invisible to the venue
+        # for a few seconds.  Sixty seconds leaves the whole group visibly
+        # unprotected while new Sets keep arriving; retry soon, but through
+        # the normal paced order path and one bounded reconciliation.
+        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = time.time() + 8.0
         self.recon_pending = True
         self._reconcile_retry_at = min(float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0), time.monotonic())
         return True
@@ -4028,6 +4036,8 @@ class Pulse:
         is_sec = str(kind).lower() in ("u", "v", "sec-sl", "sec-tp", "sec_sl", "sec_tp")
         cid_ch = "u" if (is_sec and is_sl) else ("v" if is_sec else ("s" if is_sl else "t"))
         if not self.exchange_position_active(pos) and not getattr(pos, "_overall_exchange_verified", False):
+            return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
+        if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         if (time.time() < self.ctrl_skip.get("__order_cap__", 0)
@@ -4063,6 +4073,9 @@ class Pulse:
             forms = [
                 {"close_pos": True, "with_qty": True, "otype": market_type},
                 {"close_pos": False, "with_qty": True, "otype": market_type},
+                {"close_pos": True, "with_qty": False, "otype": market_type},
+                {"close_pos": False, "with_qty": True, "otype": market_type},
+                {"close_pos": True, "with_qty": False, "otype": limit_type},
                 {"close_pos": False, "with_qty": True, "otype": limit_type},
             ]
         r: Dict[str, Any] = {}
@@ -4317,6 +4330,8 @@ class Pulse:
                         for member in group_rows
                 ):
                     miss += 1
+                overall_controls.ensure(self,pos)
+                shared_checked.add((pos.symbol,pos.side))
             # Overall protection owns the complete symbol/direction group.
             # Do not fall through into the per-config fallback below: that
             # path can interpret one migrating member as an unprotected
@@ -4425,6 +4440,7 @@ class Pulse:
             # The proxy is quantity-matched so it cannot close unrelated
             # same-side exposure if the exchange contains another owner.
             pos.close_position = False
+            pos.close_position = True
             pos.ctrl_qty = pos.qty
             pos.ctrl_verified = pos.controls_ok
             return
@@ -10542,6 +10558,11 @@ class Pulse:
         if live_order_count < 0 and live_total_order_count >= 0 and foreign_order_count >= 0:
             live_order_count = max(0, live_total_order_count - foreign_order_count)
         if position_snapshot_pending or bool(getattr(self, "recon_pending", False)):
+        live_order_count = int(getattr(self, "exchange_order_own_count", -1) or -1)
+        live_total_order_count = int(getattr(self, "exchange_order_total_count", -1) or -1)
+        if live_order_count < 0 and live_total_order_count >= 0:
+            live_order_count = max(0, live_total_order_count - int(getattr(self, "foreign_open_order_count", 0) or 0))
+        if exchange_own_open < 0:
             open_parity = "pending"
         elif exchange_own_open == internal_position_groups:
             open_parity = "match"
@@ -10702,6 +10723,13 @@ class Pulse:
             "liveTotalOrderCount": live_total_order_count,
             "livePositionSnapshotPending": position_snapshot_pending,
             "liveOrderSnapshotPending": order_snapshot_pending,
+            "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
+            "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
+            "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
+            "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
+            "livePositionCount": exchange_own_open,
+            "liveOrderCount": live_order_count,
+            "liveTotalOrderCount": live_total_order_count,
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
@@ -13431,6 +13459,7 @@ class Pulse:
         # contains many positions and each repair encounters venue cooldowns.
         reconcile_due = (
             (self.cycle == 1 and time.monotonic() >= float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0))
+            self.cycle == 1
             or self.cycle % 25 == 0
             or (
                 bool(getattr(self, "recon_pending", False))

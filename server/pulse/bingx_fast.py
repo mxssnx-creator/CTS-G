@@ -137,6 +137,7 @@ class ErrorLog:
                 append_bounded_line(self.path, line, max_lines=MAX_ERROR_LOG_LINES)
                 self._writes += 1
                 if self._writes % 80 == 0:
+                if self.n % 80 == 0:
                     self._rotate()
             except Exception:
                 pass

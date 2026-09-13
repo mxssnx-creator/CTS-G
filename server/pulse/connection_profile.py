@@ -32,6 +32,9 @@ def processing_profile():
                   # stable high-count processing; Set, position and order
                   # counts remain unlimited. The wildcard still selects the
                   # exchange universe before the ranked test cap.
+                  # X02 intentionally scans the ranked top-20 book.  The
+                  # wildcard selects the exchange universe before the cap;
+                  # it must not be mistaken for an unlimited live universe.
                   symbolsAll=True, symbolsDynamic=True, symbolCap=20,
                   maxRealSets=0, strategyLiveSetsCeiling=0,
                   strategyRealSetsSafetyCeiling=0,
