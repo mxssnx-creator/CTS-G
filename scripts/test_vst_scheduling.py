@@ -110,6 +110,15 @@ class VstSchedulingTests(unittest.TestCase):
             self.assertEqual(result['data']['orders'][0]['orderId'], 'accepted')
             self.assertEqual(a.order_retry_after(), 8)
 
+    def test_request_latency_records_transport_time_separately(self):
+        a=self.api();a.stats.update(rest=0,err=0)
+        a._take=lambda *args:True;a._next_ts=lambda:1;a._sign=lambda params:''
+        a._http=lambda *args:{'code':0,'data':{}}
+        with patch.object(bingx_fast.time,'perf_counter',side_effect=[1.,1.004]):
+            a.post(ORDER,{'symbol':'X-USDT'})
+        metric=a.request_latency()['POST '+ORDER]
+        self.assertEqual(metric,{'samples':1,'p50':4.,'p95':4.,'max':4.})
+
     def test_restart_restores_active_venue_deadline_without_network(self):
         import tempfile, pathlib, json
         a = self.api()
@@ -124,6 +133,28 @@ class VstSchedulingTests(unittest.TestCase):
             b._restore_retry_deadlines()
             self.assertEqual(b.cooldown_until,0)
 
+    def test_pooled_transport_preserves_signed_json_and_never_retries_timeout(self):
+        import httpx
+        import urllib.parse
+        a=self.api();a.base='https://example.test';a.secret='test-secret'
+        params={'batchOrders':'[{"quantity":0.01,"stopPrice":100.25,"clientOrderID":"a +/&?"}]','timestamp':'123'}
+        target='/openApi/swap/v2/trade/batchOrders?'+a._sign(params)
+        seen=[]
+        def send(request):
+            seen.append(request.url.raw_path)
+            return httpx.Response(200,json={'code':0})
+        with httpx.Client(transport=httpx.MockTransport(send)) as client:
+            a.http=client
+            self.assertEqual(a._http('POST',target)['code'],0)
+        self.assertEqual(seen,[target.encode()])
+        def timeout(request):
+            seen.append(request.url.raw_path)
+            raise httpx.ReadTimeout('unknown acknowledgement')
+        with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+            a.http=client
+            self.assertEqual(a._http('POST',target)['code'],-1)
+        self.assertEqual(len(seen),2)
+
     def test_batch_quantity_is_json_number_without_mutating_retry_intent(self):
         a = self.api(); bodies = []
         a.post = lambda path, body: bodies.append(bingx_fast.loads(body['batchOrders'])) or {'code':0}
@@ -133,6 +164,9 @@ class VstSchedulingTests(unittest.TestCase):
         self.assertEqual(bodies[0][0]['quantity'], .01)
         self.assertEqual(bodies[0][0]['clientOrderID'], 'same-id')
         self.assertEqual(orders[0]['quantity'], '0.010')
+        self.assertEqual(bodies[0][0]['stopPrice'],100.25)
+        self.assertIsInstance(bodies[0][0]['stopPrice'],float)
+        self.assertEqual(orders[0]['stopPrice'],'100.25')
         for bad in ('NaN','Infinity','-1','0'):
             with self.assertRaises(ValueError): a.batch_place([{'quantity':bad}])
         self.assertEqual(len(bodies),1)

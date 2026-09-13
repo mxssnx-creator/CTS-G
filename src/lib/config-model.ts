@@ -198,6 +198,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   minimumEquity: number;
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
+  controlOrdersOverall: boolean;
   normalExecutionEnabled: boolean;
   entryPolicy: EntryPolicy;
   entryPolicyMaxCandidates: number;
@@ -378,6 +379,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   minimumEquity: 0.2,
   controlOrders: true,
   controlOrdersPerConfig: true,
+  controlOrdersOverall: true,
   normalExecutionEnabled: true,
   entryPolicy: "permissive-bounded",
   entryPolicyMaxCandidates: 0,
@@ -562,6 +564,7 @@ export type CtsSettings = {
   strategyBaseTrailingVariants?: string[];
   control_orders?: boolean | number | string;
   controlOrdersPerConfig?: boolean | number | string;
+  controlOrdersOverall?: boolean | number | string;
   control_orders_per_config?: boolean | number | string;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
@@ -760,6 +763,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailArmPct: arm,
     trailGivePct: give,
     controlOrders: bool(cts.control_orders, true),
+    controlOrdersOverall: bool(cts.controlOrdersOverall, true),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
       true,
@@ -1076,6 +1080,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
+  next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
   const candidateCap = Math.round(num(next.entryPolicyMaxCandidates, 0));

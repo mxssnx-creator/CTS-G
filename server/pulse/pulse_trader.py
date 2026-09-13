@@ -25,6 +25,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 from urllib.parse import urlparse
+import overall_controls
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
@@ -878,6 +879,16 @@ class Position:
     connection: str = ""
     tracking_scope: str = ""
     overall: bool = True
+    overall_controls: bool = False
+    overall_qty: float = 0.0
+    overall_signature: List[float] = field(default_factory=list)
+    overall_sl_signature: List[float] = field(default_factory=list)
+    overall_tp_signature: List[float] = field(default_factory=list)
+    overall_bindings: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    overall_replace_intents: Dict[str, Any] = field(default_factory=dict)
+    retired_control_ids: List[str] = field(default_factory=list)
+    overall_sl: float = 0.0
+    overall_tp: float = 0.0
     close_position: bool = True
     ctrl_qty: float = 0.0
     sec_sl_oid: str = ""
@@ -993,6 +1004,7 @@ class Pulse:
         self.exchange_order_total_count = -1
         self.exchange_order_foreign_count = -1
         self.control_orders_per_config = True
+        self.control_orders_overall = False
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
@@ -3527,7 +3539,11 @@ class Pulse:
         oid = str(order_id or "")
         if not oid:
             return False
+        if oid in overall_controls.cleanup_state(self):
+            return True
         for p in self.open.values():
+            if oid in set(getattr(p,"retired_control_ids",[])):
+                return True
             if oid in (
                 str(p.sl_oid or ""),
                 str(p.tp_oid or ""),
@@ -3575,7 +3591,8 @@ class Pulse:
             client_id=cid,
             detail="cancel order" if self.ok(r) else str(r.get("msg") or "cancel failed"),
         )
-        if self.ok(r):
+        already_absent = str(r.get("code")) == "109421" and "order" in str(r.get("msg") or "").lower() and "not exist" in str(r.get("msg") or "").lower()
+        if self.ok(r) or already_absent:
             self.record_event("cancellation", stable_key(cancel_key, "completed"), status="confirmed", symbol=symbol, order_id=order_id, client_id=cid, detail="order cancelled")
             self._oo_cache.pop(symbol, None)
             self._oo_cache.pop("*", None)
@@ -3616,6 +3633,8 @@ class Pulse:
     ) -> None:
         if pos is not None and not self.position_is_ours(pos):
             return
+        if pos is not None and not getattr(pos,"_overall_proxy",False) and (overall_controls.enabled(self, pos) or getattr(pos,"overall_controls",False)) and any(p is not pos for p in overall_controls.members(self,pos)):
+            return  # A single Set must never cancel its siblings' shared pair.
         keep = keep or set()
         seen: set[str] = set()
         for o in self.list_orders(symbol):
@@ -3745,6 +3764,10 @@ class Pulse:
         return price < lo * 0.9985
 
     def desired_sl_tp(self, pos: Position) -> Tuple[float, float, float, float]:
+        if getattr(pos, "_overall_proxy", False):
+            sl = self.clamp_ctrl_price(pos, "sl", pos.sl)
+            tp = self.clamp_ctrl_price(pos, "tp", pos.tp)
+            return sl, tp, sl, tp
         sl, tp = self.security_prices(pos)
         sec_sl, sec_tp = self.max_range_prices(pos)
         # Aggregate mode has one common pair for the whole symbol/direction;
@@ -4092,16 +4115,23 @@ class Pulse:
 
     def priority_controls(self) -> int:
         """Overall SL/TP first. Returns how many positions are still unprotected."""
+        overall_controls.drain_cleanup(self)
         if not getattr(self, "control_orders", True):
             return 0
         miss = 0
         now = time.time()
+        shared_checked = set()
         for pos in list(self.open.values()):
             if not self.exchange_position_active(pos):
                 # System-only positions are still evaluated and reported, but
                 # their missing exchange controls are not a live protection
                 # defect because no venue position exists for this side.
                 continue
+            if overall_controls.enabled(self,pos) and (pos.symbol,pos.side) not in shared_checked:
+                overall_controls.ensure(self,pos)
+                shared_checked.add((pos.symbol,pos.side))
+            elif not overall_controls.enabled(self,pos) and getattr(pos,"overall_controls",False):
+                self.ensure_controls(pos)
             px = self.px.get(pos.symbol) or pos.entry
             scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
             need = self.missing_controls(pos)
@@ -4154,6 +4184,9 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """One HTTP batch: overall SL + TP. Fallback to two single posts."""
+        if overall_controls.enabled(self, pos):
+            return overall_controls.ensure(self,pos)
+        previous_shared = {getattr(pos,f,"") for f in overall_controls.FIELDS}-{ "" } if getattr(pos,"overall_controls",False) else set()
         if not self.exchange_position_active(pos):
             return
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
@@ -4259,8 +4292,19 @@ class Pulse:
         pos.close_position = not self.per_config_controls(pos)
         pos.ctrl_qty = pos.qty
         pos.ctrl_verified = pos.controls_ok
+        if previous_shared and pos.controls_ok and pos.sl_oid not in previous_shared and pos.tp_oid not in previous_shared:
+            pos.overall_controls = False
+            pos.retired_control_ids = sorted(set(getattr(pos,"retired_control_ids",[])) | previous_shared)
+            self.save_open_book()
+            overall_controls.drain_retired(self,overall_controls.members(self,pos))
 
     def ensure_controls(self, pos: Position) -> None:
+        if overall_controls.enabled(self, pos):
+            return overall_controls.ensure(self,pos)
+        if getattr(pos,"overall_controls",False) and not getattr(pos,"_overall_proxy",False):
+            return self.place_ctrl_pair(pos)
+        if getattr(pos,"retired_control_ids",[]):
+            overall_controls.drain_retired(self,overall_controls.members(self,pos))
         if not self.position_is_ours(pos):
             return
         if not self.exchange_position_active(pos):
@@ -4443,6 +4487,14 @@ class Pulse:
         and cancel old protection only after a distinct order id is confirmed.
         A failed update preserves the old stop; the event loop can retry it.
         """
+        if overall_controls.enabled(self,pos):
+            proposed = float(new_sl)
+            if not math.isfinite(proposed) or proposed <= 0:
+                return False
+            pos.sl = max(pos.sl,proposed) if pos.side == "LONG" else min(pos.sl,proposed)
+            overall_controls.ensure(self,pos)
+            self.save_open_book()
+            return True
         now = time.time()
         scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if now < self.ctrl_skip.get(f"sync:{scope}", 0):
@@ -6004,7 +6056,7 @@ class Pulse:
             # A partially executed close must leave a fresh, quantity-matched
             # protection pair for the remainder. This is deliberately scoped
             # to this logical group and cannot cancel another group's orders.
-            if getattr(self, "control_orders", True):
+            if getattr(self, "control_orders", True) and not getattr(self, "_overall_applying_fill", False):
                 try:
                     self.cancel_controls(pos.symbol, pos=pos)
                 except Exception:
@@ -6029,6 +6081,8 @@ class Pulse:
                 pass
         if close_cid:
             self.seen_fill_cids.add(close_cid)
+        if getattr(pos,"overall_controls",False):
+            overall_controls.closed_member(self,pos)
         if skip:
             self.remove_position(pos)
             self.ban_sym(pos.symbol, clear_open=False)
@@ -6040,6 +6094,11 @@ class Pulse:
             self.remove_position(pos)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self.save_open_book()
+        if getattr(pos,"overall_controls",False) and not getattr(self,"_overall_applying_fill",False):
+            siblings = overall_controls.members(self,pos)
+            if siblings:
+                overall_controls.ensure(self,siblings[0])
+            overall_controls.drain_cleanup(self)
         self._stats_force = True
         return True
 
@@ -7083,6 +7142,7 @@ class Pulse:
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
         self.control_orders = _bool_setting(ov.get("controlOrders", cts.get("control_orders", True)), True)
+        self.control_orders_overall = _bool_setting(ov.get("controlOrdersOverall", False), False)
         control_orders_per_config = _bool_setting(
             ov.get(
                 "controlOrdersPerConfig",
@@ -7131,7 +7191,7 @@ class Pulse:
         elif self.strat_block and ov.get("blockEnabled", True):
             self.block.enabled = True
         self.control_orders = _bool_setting(self.mods.get("exec.controls", self.control_orders), self.control_orders)
-        self._set_control_mode(control_orders_per_config)
+        self._set_control_mode(control_orders_per_config or self.control_orders_overall)
         for position in list(self.open.values()):
             try:
                 self.ensure_strategy_lanes(position)
@@ -7268,6 +7328,7 @@ class Pulse:
             "staggerS": STAGGER_S,
             "controlOrders": getattr(self, "control_orders", True),
             "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
+            "controlOrdersOverall": bool(getattr(self, "control_orders_overall", False)),
             "blockEnabled": self.block.enabled,
             "blockMaxStack": self.block.max_stack,
             "blockVolumeRatio": self.block.volume_ratio,
@@ -9615,6 +9676,10 @@ class Pulse:
         if not math.isfinite(executed) or executed <= 0 or px <= 0:
             return False
         old = self.pending_orders.get(cid) or {}
+        if overall_controls.enabled(self) or (old.get("metadata") or {}).get("overall_members") or any(oid in getattr(p,"overall_bindings",{}) for p in self.open.values()):
+            applied = overall_controls.sync_fill(self,order,cid,oid,executed,px,track)
+            if applied is not None:
+                return applied
         meta = dict(old.get("metadata") or {})
         if meta.get("confirmed_control_fill"):
             if real_oid(old.get("order_id")) != oid:
@@ -10116,7 +10181,10 @@ class Pulse:
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
         pulse_view = self.pulse_snapshot()
         control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
+        if overall_controls.enabled(self):
+            control_mode = "overall"
+        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
+        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -10352,7 +10420,10 @@ class Pulse:
 
     def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        expected_control_pairs = len(self.open) if bool(getattr(self, "control_orders", True)) else 0
+        if overall_controls.enabled(self):
+            control_mode = "overall"
+        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
+        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
@@ -10607,11 +10678,11 @@ class Pulse:
                 "mode": control_mode,
                 "pairCount": expected_control_pairs,
                 "expectedPairs": expected_control_pairs,
-                "protectedPairs": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "protectedPairs": len({(p.sl_oid,p.tp_oid) for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid}) if overall_controls.enabled(self) else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "pairGaps": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
-                "aggregatePairCount": expected_control_pairs if control_mode == "aggregate" else 0,
+                "aggregatePairCount": expected_control_pairs if control_mode in ("aggregate", "overall") else 0,
                 "logicalPositionCap": MAX_OPEN,
-                "groupCount": len(self.open),
+                "groupCount": pair_count,
                 "protectedGroups": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
                 "groups": [
