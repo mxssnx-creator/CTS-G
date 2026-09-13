@@ -4096,6 +4096,15 @@ class Pulse:
         has_tp = bool(real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")))
         return not (has_sl and has_tp)
 
+    def partial_set_entries_allowed(self) -> bool:
+        """Whether individually qualified Sets may enter during partial replay."""
+        sets = getattr(self, "sets", None)
+        return bool(
+            sets is not None
+            and str(getattr(sets, "entry_policy", "strict") or "strict").strip().lower()
+            == "permissive-bounded"
+        )
+
     def entries_blocked(self) -> bool:
         """Entry-only admission for venue cooldown and the first boot seconds.
         A leftover/ghost missing SL/TP must never stop the rest of the book —
@@ -4116,11 +4125,7 @@ class Pulse:
         # replay must not hold already-qualified Sets hostage behind the
         # aggregate progress.ready flag. Strict production lanes retain the
         # historical readiness boundary.
-        partial_set_entries = bool(
-            sets is not None
-            and str(getattr(sets, "entry_policy", "strict") or "strict").strip().lower()
-            == "permissive-bounded"
-        )
+        partial_set_entries = self.partial_set_entries_allowed()
         if (
             sets is not None
             and bool(getattr(sets, "enabled", False))
@@ -4753,10 +4758,13 @@ class Pulse:
         if self.occupying(sym, side, pack, execution_lane=lane):
             return "slot-taken"
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
-                getattr(self.sets, "progress", None), "ready", False):
+                getattr(self.sets, "progress", None), "ready", False) and not (
+                    selected_set is not None and self.partial_set_entries_allowed()
+                ):
             # A live tape can qualify a Set before the first complete historic
-            # snapshot.  The initial run is still the safety boundary: keep
-            # protective/reconciliation lanes alive, but do not open entries.
+            # snapshot. Strict lanes keep the initial-run boundary, while VST's
+            # permissive policy admits only the exact Set that already passed
+            # execution_allowed() below.
             return "historic-gate"
         if pack == "indications":
             if not (self.strat_ind and bool(self.indications.settings.get("enabled"))):
@@ -5202,9 +5210,12 @@ class Pulse:
         if self.entries_blocked():
             return
         if self.sets.enabled and self.sets.use_historic_gate and not getattr(
-                getattr(self.sets, "progress", None), "ready", False):
-            # Keep forced/demo and direct callers behind the same initial
-            # historic publication boundary as normal signal entries.
+                getattr(self.sets, "progress", None), "ready", False) and not (
+                    selected_set is not None and self.partial_set_entries_allowed()
+                ):
+            # Keep strict/forced/direct callers behind the initial historic
+            # boundary. A selected Set in the permissive VST lane has already
+            # passed the exact execution_allowed() check in entry_sense().
             return
         if self.halted or os.path.exists(STOP_PATH) or os.path.exists(PAUSE_PATH) or os.path.exists(STOP_ALL):
             return
