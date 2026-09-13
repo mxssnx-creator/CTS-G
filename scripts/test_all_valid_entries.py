@@ -158,6 +158,20 @@ class AllValidEntries(unittest.TestCase):
         seen = {book.pick('general', 'base', 'LONG').id for _ in range(40)}
         self.assertEqual(len(seen), 40)
 
+    def test_permissive_partial_set_reaches_submission_gate_before_catalog_ready(self):
+        book = self.book(1)
+        book.entry_policy = 'permissive-bounded'
+        book.progress.ready = False
+        p = self.pulse(book)
+        selected = book.by_idx[0]
+
+        self.assertIsNone(
+            p.entry_sense('X-USDT', 1, 'gen:trend', .9, 'general', selected_set=selected)
+        )
+        p.place('X-USDT', 1, 'gen:trend', .9, selected_set=selected)
+        self.assertEqual(len(p.api.posts), 1)
+        self.assertEqual(next(iter(p.open.values())).set_id, selected.id)
+
     def test_entry_sets_cache_reuses_stable_eligibility_and_invalidates_on_score(self):
         book = self.book(12)
         with patch.object(book, '_validated_entry_rows', wraps=book._validated_entry_rows) as scan:
