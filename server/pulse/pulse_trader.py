@@ -10476,6 +10476,16 @@ class Pulse:
             control_mode = "overall"
         pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
         expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
+        overall_pair_ok = 0
+        if control_mode == "overall":
+            groups: Dict[Tuple[str, str], List[Any]] = {}
+            for row in self.open.values():
+                groups.setdefault((row.symbol, row.side), []).append(row)
+            for rows in groups.values():
+                pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
+                if len(pairs) == 1 and next(iter(pairs), ("", "")) != ("", ""):
+                    overall_pair_ok += 1
+        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
