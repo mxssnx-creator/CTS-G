@@ -3,7 +3,10 @@
 `controlOrdersOverall=true` shares quantity-matched protection by symbol and
 hedge direction. `controlOrdersPerConfig=true` preserves independent internal
 Set lots, target/trailing prices, evaluation evidence and realized results.
-No closePosition order includes unrelated same-side exposure.
+Overall controls deliberately omit `closePosition`, so a same-side foreign
+position cannot be closed by a shared CTS-G control. BingX's swap API requires
+`quantity` on stop/take-profit orders; the legacy aggregate fallback therefore
+sends `closePosition=true` together with its explicit quantity.
 
 Each order is bound to its original client IDs and quantities. Cumulative
 exchange quantities, prices and fees are allocated to those lots only.

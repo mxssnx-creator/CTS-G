@@ -20,6 +20,7 @@
   "blockProfitFactorRatio": 1.25,
   "blockVolumeRatio": 1,
   "controlOrders": true,
+  "controlOrdersOverall": true,
   "controlOrdersPerConfig": true,
   "cooldownS": 9,
   "coordOptimizationN": 150,

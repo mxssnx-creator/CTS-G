@@ -38,6 +38,7 @@ class PrepareMainnetTests(unittest.TestCase):
             self.assertEqual(current['marginMode'],'isolated')
             self.assertEqual(current['minPf'],1.02)
             self.assertEqual(current['symbolCap'],20)
+            self.assertTrue(current['controlOrdersOverall'])
             self.assertEqual(current['baseEvalPosCount'],30)
             self.assertTrue(all(not any(x in c for x in ('start','restart','enable')) for c in calls))
 

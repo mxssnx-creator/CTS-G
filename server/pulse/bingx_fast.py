@@ -13,7 +13,7 @@ import time
 import traceback
 import urllib.parse
 from email.utils import parsedate_to_datetime
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 try:
@@ -102,23 +102,41 @@ class ErrorLog:
         self.lock = threading.Lock()
         self.ring: Deque[Dict[str, Any]] = deque(maxlen=80)
         self.n = 0
-        self._last: Dict[str, float] = {}
+        self._writes = 0
+        self._last: "OrderedDict[str, float]" = OrderedDict()
+        self._kind_counts: "OrderedDict[str, int]" = OrderedDict()
+        self._code_counts: "OrderedDict[str, int]" = OrderedDict()
+
+    @staticmethod
+    def _bump(mapping: "OrderedDict[str, int]", key: str, limit: int = 64) -> None:
+        mapping[key] = int(mapping.get(key, 0)) + 1
+        mapping.move_to_end(key)
+        while len(mapping) > limit:
+            mapping.popitem(last=False)
 
     def write(self, kind: str, **kw: Any) -> None:
         rec = {"t": round(time.time(), 3), "kind": kind}
         rec.update(kw)
         self.ring.appendleft(rec)
         self.n += 1
+        self._bump(self._kind_counts, str(kind or "unknown"))
+        if kw.get("code") is not None:
+            self._bump(self._code_counts, str(kw.get("code")))
         if kind in ("api", "rate-limit", "ws-session"):
             key = kind + str(kw.get("code") or kw.get("msg") or "")[:48]
             now = time.time()
             if now - self._last.get(key, 0.0) < 8.0:
                 return
             self._last[key] = now
+            self._last.move_to_end(key)
+            while len(self._last) > 256:
+                self._last.popitem(last=False)
         line = dumps(rec) + "\n"
         with self.lock:
             try:
                 append_bounded_line(self.path, line, max_lines=MAX_ERROR_LOG_LINES)
+                self._writes += 1
+                if self._writes % 80 == 0:
                 if self.n % 80 == 0:
                     self._rotate()
             except Exception:
@@ -131,7 +149,17 @@ class ErrorLog:
             pass
 
     def recent(self, n: int = 12) -> List[Dict[str, Any]]:
-        return list(self.ring)[:n]
+        return list(self.ring)[:max(0, min(80, int(n or 0)))]
+
+    def summary(self) -> Dict[str, Any]:
+        """Return bounded error totals without exposing an unbounded key map."""
+        return {
+            "total": int(self.n),
+            "written": int(self._writes),
+            "byKind": dict(self._kind_counts),
+            "byCode": dict(self._code_counts),
+            "dedupKeys": len(self._last),
+        }
 
 
 class PriceHub:
@@ -487,7 +515,10 @@ class FastBingX:
             timings = getattr(self, "request_timings", None)
             if timings is None:
                 timings = self.request_timings = {}
-            timings.setdefault(method+" "+path, deque(maxlen=256)).append((time.perf_counter()-request_started)*1000)
+            timing_key = method + " " + path
+            if timing_key not in timings and len(timings) >= 128:
+                timings.pop(next(iter(timings)), None)
+            timings.setdefault(timing_key, deque(maxlen=256)).append((time.perf_counter()-request_started)*1000)
         if isinstance(body, dict) and body.get("code") not in (0, None):
             if body.get("code") not in (100404, 109400, 100001, *SKIP_API_LOG) or "signature" in str(body.get("msg") or "").lower():
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
@@ -672,6 +703,7 @@ class FastBingX:
             "asyncP50": round(self.stats.get("asyncP50", 0.0), 1),
             "errors": self.err.recent(8),
             "errorN": self.err.n,
+            "errorSummary": self.err.summary(),
             "requestLatencyMs": self.request_latency(),
         }
 
@@ -687,12 +719,13 @@ class AsyncBridge:
         self.ok = False
         self.loop = None
         self.client = None
+        self.thread: Optional[threading.Thread] = None
         if asyncio is None or httpx is None:
             return
         self.loop = asyncio.new_event_loop()
         self.ready = threading.Event()
-        t = threading.Thread(target=self._run, name="bx-async", daemon=True)
-        t.start()
+        self.thread = threading.Thread(target=self._run, name="bx-async", daemon=True)
+        self.thread.start()
         self.ready.wait(2.5)
 
     def _run(self) -> None:
@@ -708,7 +741,32 @@ class AsyncBridge:
         )
         self.ok = True
         self.ready.set()
-        self.loop.run_forever()
+        try:
+            self.loop.run_forever()
+        finally:
+            try:
+                if self.client is not None and not self.client.is_closed:
+                    self.loop.run_until_complete(self.client.aclose())
+            except Exception:
+                pass
+            self.ok = False
+            try:
+                self.loop.close()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Stop the async transport and close its loop without leaking sockets."""
+        loop = self.loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except RuntimeError:
+            return
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
 
     def latency(self) -> float:
         if not self.lat:

@@ -401,6 +401,18 @@ class StatisticsTests(unittest.TestCase):
         governor.configure({"rssSoftMb":0, "rssHardMb":0})
         self.assertEqual((governor.soft_mb, governor.hard_mb), (0,0))
 
+    def test_error_log_dedup_and_summaries_are_bounded(self):
+        from bingx_fast import ErrorLog
+        with tempfile.NamedTemporaryFile() as handle:
+            errors = ErrorLog(handle.name)
+            for i in range(700):
+                errors.write("api", code=100000 + i, msg=f"unique-{i}")
+            self.assertLessEqual(len(errors._last), 256)
+            self.assertLessEqual(len(errors._kind_counts), 64)
+            self.assertLessEqual(len(errors._code_counts), 64)
+            self.assertEqual(errors.summary()["total"], 700)
+            self.assertLessEqual(os.path.getsize(handle.name), 8 * 1024 * 1024)
+
     def test_redis_health_reports_bounded_database_breakdown_and_ops_rate(self):
         raw = "\n".join([
             "used_memory:1048576",

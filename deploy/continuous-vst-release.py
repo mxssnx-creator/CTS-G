@@ -70,6 +70,7 @@ def main():
         # oneshot at the same immutable release, otherwise a new error-log
         # policy would not be applied until the next full installer run.
         'cts-gx-retention.service': (f'{release}/deploy/retention.sh --once', release, False),
+        'cts-gx-resources.service': (f'{python} -O {release}/deploy/dynamic-resources.py --name cts-gx --root /opt/cts-gx --apply', release, False),
     }
     for unit, (command, cwd, demo) in units.items():
         drop = pathlib.Path('/etc/systemd/system') / (unit + '.d')
@@ -80,6 +81,28 @@ def main():
         target.write_text('[Service]\nEnvironmentFile=/etc/cts-gx/continuous-release.env\n'
                           f'WorkingDirectory={cwd}\nExecStart=\nExecStart={command}\n'
                           + ('Environment=CTS_VST_ONLY=1\n' if demo else ''))
+    resource_unit = pathlib.Path('/etc/systemd/system/cts-gx-resources.service')
+    resource_timer = pathlib.Path('/etc/systemd/system/cts-gx-resources.timer')
+    for path in (resource_unit, resource_timer):
+        if path.exists():
+            shutil.copy2(path, backup/path.name)
+    resource_unit.write_text(
+        '[Unit]\nDescription=CTS-GX dynamic pulse resource policy\nAfter=local-fs.target\n\n'
+        '[Service]\nType=oneshot\n'
+        'EnvironmentFile=-/etc/cts-gx/cts-g.env\n'
+        f'WorkingDirectory={release}\n'
+        f'ExecStart={python} -O {release}/deploy/dynamic-resources.py --name cts-gx --root /opt/cts-gx --apply\n'
+        'Nice=10\nPrivateTmp=true\nTimeoutStartSec=30\n'
+        'StandardOutput=append:/var/log/cts-gx/resources.log\n'
+        'StandardError=append:/var/log/cts-gx/resources.err.log\n'
+        'SyslogIdentifier=cts-gx-resources\n'
+    )
+    resource_timer.write_text(
+        '[Unit]\nDescription=Refresh CTS-GX pulse resource policy\n\n'
+        '[Timer]\nOnBootSec=2min\nOnUnitActiveSec=60s\n'
+        'RandomizedDelaySec=15s\nPersistent=true\n'
+        'Unit=cts-gx-resources.service\n\n[Install]\nWantedBy=timers.target\n'
+    )
     overlay = data/'overlay-bingx-x02.json'
     settings = json.loads(overlay.read_text()) if overlay.exists() else {}
     profile = runpy.run_path(str(release/'server/pulse/connection_profile.py'))
@@ -88,6 +111,7 @@ def main():
     temporary.write_text(json.dumps(settings, indent=2) + '\n')
     temporary.replace(overlay)
     run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'cts-gx-resources.timer')
     run('systemctl', '--no-block', 'restart', *units)
     current_live_pid = run('systemctl', 'show', 'cts-gx-pulse@bingx-x01.service', '-p', 'MainPID', '--value')
     if current_live_pid != old_live_pid:

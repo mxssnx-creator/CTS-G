@@ -48,4 +48,46 @@ class SnapshotValidation(unittest.TestCase):
         self.assertEqual(confirmed_external_close_delta(7, 8), 0)
         self.assertEqual(confirmed_external_close_delta(10, 7, 1), 0)
 
+    def test_empty_open_order_snapshot_is_pending_before_confirming_zero(self):
+        p = Pulse.__new__(Pulse)
+        responses = iter([
+            {"code": 0, "data": {"orders": [{"symbol": "XRP-USDT", "clientOrderId": "Gx02o-test"}]}},
+            {"code": 0, "data": {"orders": []}},
+            {"code": 0, "data": {"orders": []}},
+        ])
+        p.api = SimpleNamespace(path_cd={}, get=lambda _path: next(responses))
+        p.open = {"own": object()}
+        p._oo_cache = {}
+        p._empty_order_streak = 0
+        p._order_est = 0
+        p._order_est_known = False
+        p._note_foreign_activity = lambda: None
+        p.ok = lambda row: row.get("code") == 0
+        p.order_is_ours = lambda row: True
+
+        p.list_orders()
+        self.assertEqual(p.exchange_order_own_count, 1)
+        p._oo_cache["*"] = (0.0, p._oo_cache["*"][1])
+        p.list_orders()
+        self.assertEqual(p.exchange_order_own_count, -1)
+        self.assertTrue(p.exchange_order_snapshot_pending)
+        p._oo_cache["*"] = (0.0, p._oo_cache["*"][1])
+        p.list_orders()
+        self.assertEqual(p.exchange_order_own_count, 0)
+        self.assertEqual(p.exchange_order_total_count, 0)
+        self.assertFalse(p.exchange_order_snapshot_pending)
+
+    def test_pending_entry_is_ownership_proof_during_position_propagation(self):
+        p = Pulse.__new__(Pulse)
+        cid = "Gx02o-pending"
+        p.pending_orders = {
+            cid: {"kind": "entry", "symbol": "SOL-USDT", "side": "LONG",
+                  "requested_qty": 2.0, "filled_qty": 0.0, "updated_at": 10.0}
+        }
+        self.assertTrue(p.pending_entry_owns("SOL-USDT", "LONG"))
+        row = p.pending_entry_for("SOL-USDT", "LONG")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["symbol"], "SOL-USDT")
+        self.assertFalse(p.pending_entry_owns("SOL-USDT", "SHORT"))
+
 if __name__=='__main__':unittest.main()

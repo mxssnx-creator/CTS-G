@@ -19,6 +19,7 @@ os.environ.setdefault("PULSE_CONN", "bingx-x02")
 
 from bingx_fast import FastBingX, ErrorLog
 from pulse_trader import Pulse, TAG, CONN_SHORT, redis_hget, BASE
+from runtime_scope import order_tag
 from set_engine import self_test as sets_self_test
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
@@ -51,6 +52,22 @@ def http_json(url: str, data: Any = None, method: str = "GET") -> Tuple[int, Any
             return e.code, {"error": str(e)}
     except Exception as e:
         return 0, {"error": str(e)}
+
+
+def runtime_snapshot() -> Dict[str, Any]:
+    """Read the snapshot from the release, then the live sidecar."""
+    path = os.path.join(DIR, "stats-bingx-x02.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        if isinstance(value, dict):
+            return value
+    except (OSError, ValueError, TypeError):
+        pass
+    code, value = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
+    if code == 200 and isinstance(value, dict):
+        return value
+    raise RuntimeError(f"runtime stats unavailable http={code}")
 
 
 def run_units(out: List[Tuple[str, bool, str]]) -> None:
@@ -106,13 +123,15 @@ def cid_tests(out: List[Tuple[str, bool, str]]) -> None:
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
     p.parse_track = lambda c: Pulse.parse_track(p, c)
     sample = Pulse.cid(p, "o", set_id="general:1m:sl0.6:tr0.3:0.1", pack="general")
-    rec("cid-tag", sample.startswith(TAG) and TAG == "Gx02", f"{sample} tag={TAG}", out)
+    expected_x02 = order_tag("bingx-x02")
+    expected_x01 = order_tag("bingx-x01")
+    rec("cid-tag", sample.startswith(TAG) and TAG == expected_x02, f"{sample} tag={TAG}", out)
     rec("cid-ours", p.cid_ours(sample) and not p.cid_ours("FOREIGN-1") and not p.cid_ours(""), sample, out)
-    rec("cid-foreign-x01-on-x02-legacy", p.cid_ours("Gx01olegacy12"), "legacy accepted", out)
+    rec("cid-foreign-x01-on-x02-legacy", not p.cid_ours(expected_x01 + "olegacy12"), "foreign lane rejected", out)
     tr = p.parse_track(sample)
     rec("cid-parse-sl", bool(tr and abs(float(tr.get("sl") or 0) - 0.6) < 1e-9), str(tr), out)
     sl = Pulse.cid(p, "s", set_id="indications:1m:sl1.2:tr0.9:0.3", pack="indications")
-    rec("cid-sl-ind", sl.startswith("Gx02si12"), sl, out)
+    rec("cid-sl-ind", sl.startswith(TAG + "s") and p.cid_ours(sl), sl, out)
 
 
 def api_tests(api: FastBingX, out: List[Tuple[str, bool, str]]) -> Dict[str, Any]:
@@ -308,7 +327,7 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": close_s, "positionSide": side,
-                "stopPrice": sl_px, "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": sl_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "s", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
             },
         )
@@ -317,7 +336,7 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": close_s, "positionSide": side,
-                "stopPrice": tp_px, "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": tp_px, "workingType": "MARK_PRICE", "closePosition": "true", "quantity": qty,
                 "clientOrderID": Pulse.cid(p, "t", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0),
             },
         )
@@ -374,9 +393,8 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
     p.cid = lambda *a, **k: Pulse.cid(p, *a, **k)
     p.cid_ours = lambda c: Pulse.cid_ours(p, c)
 
-    st = {}
     try:
-        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st = runtime_snapshot()
     except Exception as e:
         rec("hc-stats", False, str(e), out)
         return
@@ -441,7 +459,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "STOP_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": round(price * 0.994, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
                 "clientOrderID": Pulse.cid(p, "s", set_id=set_id, pack="general"),
             },
         )
@@ -449,7 +467,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
             "/openApi/swap/v2/trade/order",
             {
                 "symbol": sym, "type": "TAKE_PROFIT_MARKET", "side": "SELL", "positionSide": "LONG",
-                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true",
+                "stopPrice": round(price * 1.008, 6), "workingType": "MARK_PRICE", "closePosition": "true", "quantity": _qty,
                 "clientOrderID": Pulse.cid(p, "t", set_id=set_id, pack="general"),
             },
         )
@@ -475,7 +493,7 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
     rec("hc-foreign-untouched", not lost, f"before={len(foreign_before)} after={len(foreign_after)} lost={len(lost)}", out)
 
     try:
-        st2 = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st2 = runtime_snapshot()
         logical = int(st2.get("logicalPositionCount") or st2.get("openCount") or 0)
         exch = int(st2.get("exchangePositionGroupCount") or -1)
         rec("hc-recon", exch < 0 or logical >= exch, f"logical={logical} exch={exch}", out)
@@ -485,9 +503,8 @@ def high_count_acceptance(api: FastBingX, out: List[Tuple[str, bool, str]]) -> N
 
 def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     """Engine book vs live BingX positions and control orders. Not simulated."""
-    st = {}
     try:
-        st = json.load(open(os.path.join(DIR, "stats-bingx-x02.json")))
+        st = runtime_snapshot()
     except Exception as e:
         rec("recon-stats", False, str(e), out)
         return
@@ -522,7 +539,7 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
     oo = api.get("/openApi/swap/v2/trade/openOrders")
     orders = (oo.get("data") or {}).get("orders") if isinstance(oo.get("data"), dict) else oo.get("data")
     orders = orders if isinstance(orders, list) else []
-    ours = [o for o in orders if str(o.get("clientOrderID") or o.get("clientOrderId") or "").lower().startswith(("gx02", "gx01"))]
+    ours = [o for o in orders if Pulse.cid_ours(None, str(o.get("clientOrderID") or o.get("clientOrderId") or ""))]
     rec("recon-orders", oo.get("code") in (0, None, 100410, 100421), f"ours={len(ours)} all={len(orders)}", out)
     missing_ctrl = []
     for b in book:
@@ -548,7 +565,7 @@ def recon_live(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
 def http_tests(out: List[Tuple[str, bool, str]]) -> None:
     code, st = http_json("http://127.0.0.1:3015/stats.json?conn=vst")
     rec("http-stats-vst", code == 200 and st.get("connection") == "bingx-x02", f"{code} conn={st.get('connection')} eq={st.get('equity')}", out)
-    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == "Gx02", str((st.get("engine") or {}).get("trackPrefix")), out)
+    rec("http-prefix", (st.get("engine") or {}).get("trackPrefix") == TAG, str((st.get("engine") or {}).get("trackPrefix")), out)
     rec("http-gate", isinstance((st.get("coord") or {}).get("gate"), dict), str((st.get("coord") or {}).get("gate", {}).get("allow")), out)
     code, cfg = http_json("http://127.0.0.1:3015/config.json?conn=vst")
     rec("http-config-get", code == 200 and isinstance(cfg, dict), f"{code} keys={len(cfg) if isinstance(cfg, dict) else 0}", out)

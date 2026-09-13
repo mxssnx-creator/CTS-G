@@ -12,6 +12,18 @@ from position_cost import row_fee_usdt
 FIELDS = ('sl_oid', 'tp_oid', 'sec_sl_oid', 'sec_tp_oid')
 
 
+def venue_order_cooling(pulse):
+    """Return whether the shared venue order endpoint is cooling down."""
+    retry_after = getattr(getattr(pulse, 'api', None), 'order_retry_after', None)
+    if not callable(retry_after):
+        return False
+    try:
+        remaining = float(retry_after())
+        return math.isfinite(remaining) and remaining > 0.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def cleanup_state(pulse):
     if not hasattr(pulse, '_overall_cleanup'):
         # The open-book path is connection-scoped, including in test fixtures.
@@ -246,42 +258,79 @@ def verify_pair(pulse,rows,current):
 
 
 def ensure(pulse, pos):
+    """Ensure one complete quantity-matched pair for a symbol/side group.
+
+    Return ``True`` only when both legs are confirmed or a persisted complete
+    pair is still valid. A rejected, cooling, or incomplete request returns
+    ``False`` so the caller can keep the live protection gap visible.
+    """
     if not getattr(pulse, 'control_orders', True) or getattr(pulse, '_overall_applying_fill', False):
-        return
+        return False
     lock = getattr(pulse, '_overall_control_lock', None)
     if lock is None:
         lock = pulse._overall_control_lock = threading.RLock()
     with lock:
         rows = members(pulse, pos)
         if not rows:
-            return
+            return False
+        # Overall controls are quantity-matched proxy orders. Older releases
+        # persisted close_position=True on each member from the legacy
+        # aggregate path, which made the book claim semantics absent from the
+        # actual request payload. Normalize the member state first.
+        state_changed = False
+        for member in rows:
+            if bool(getattr(member, 'close_position', True)):
+                member.close_position = False
+                state_changed = True
+        if state_changed:
+            pulse.save_open_book()
+        if venue_order_cooling(pulse):
+            return False
         drain_retired(pulse,rows)
         key = (pos.symbol, pos.side)
         cache = getattr(pulse, '_overall_pairs', None)
         if cache is None:
             cache = pulse._overall_pairs = {}
         qty = sum(p.qty for p in rows)
-        entry = sum(p.qty*p.entry for p in rows)/qty
+        if not math.isfinite(float(qty)) or qty <= 0:
+            return False
+        try:
+            entry = sum(float(p.qty) * float(p.entry) for p in rows) / qty
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+            return False
+        if not math.isfinite(entry) or entry <= 0:
+            return False
         # The common exchange orders are an outer protection boundary. Each
         # member's exact SL/TP/trailing remains managed by the system.
-        low = min(p.sl for p in rows if p.sl > 0)
-        high = max(p.tp for p in rows if p.tp > 0)
+        def positive(value):
+            try:
+                number = float(value or 0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) and number > 0 else None
+
+        sl_values = [value for p in rows if (value := positive(getattr(p, 'sl', 0))) is not None]
+        tp_values = [value for p in rows if (value := positive(getattr(p, 'tp', 0))) is not None]
+        if not sl_values or not tp_values:
+            return False
+        low = min(sl_values)
+        high = max(tp_values)
         if pos.side == 'SHORT':
-            low = max(p.sl for p in rows if p.sl > 0)
-            high = min(p.tp for p in rows if p.tp > 0)
+            low = max(sl_values)
+            high = min(tp_values)
         signature = (round(qty,12), round(low,12), round(high,12))
         current = cache.get(key)
         if current:
             verify_pair(pulse,rows,current)
         if current and current['signature'] == signature and all(p.sl_oid == current['sl'] and p.tp_oid == current['tp'] for p in rows):
-            return
+            return True
         # On restart, persisted shared IDs are valid only when every member
         # agrees and the recorded total quantity still matches.
         if not current and all(getattr(p,'overall_controls',False) and p.sl_oid and p.tp_oid
                 and p.sl_oid == rows[0].sl_oid and p.tp_oid == rows[0].tp_oid
                 and tuple(getattr(p,'overall_signature',[])) == signature for p in rows):
             cache[key] = dict(signature=signature, sl=rows[0].sl_oid, tp=rows[0].tp_oid,verify_after=time.monotonic()+15)
-            return
+            return True
         proxy = copy(pos)
         proxy._overall_proxy = True
         proxy._overall_exchange_verified = any(
@@ -289,6 +338,8 @@ def ensure(pulse, pos):
             for p in rows
         )
         proxy.qty, proxy.entry = qty, entry
+        proxy.close_position = False
+        proxy.member_count = len(rows)
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry
         proxy.sl, proxy.tp = low, high
@@ -306,7 +357,7 @@ def ensure(pulse, pos):
         existing_pair = any(p.sl_oid or p.tp_oid for p in rows)
         if existing_pair:
             if not replace_existing(pulse,proxy,rows,signature):
-                return
+                return False
         else:
             pulse.place_ctrl_pair(proxy)
         if not (proxy.sl_oid and proxy.tp_oid):
@@ -315,7 +366,7 @@ def ensure(pulse, pos):
                 if not pulse.cancel_order(pos.symbol,oid):
                     rows[0].retired_control_ids = sorted(set(rows[0].retired_control_ids) | {oid})
             pulse.save_open_book()
-            return
+            return False
         cache[key] = dict(signature=signature,sl=proxy.sl_oid,tp=proxy.tp_oid,verify_after=time.monotonic()+15)
         bindings = {}
         for p in rows:
@@ -340,6 +391,7 @@ def ensure(pulse, pos):
         # Install first, retire only known old own IDs after confirmation.
         pulse.save_open_book()
         drain_retired(pulse,rows)
+        return True
 
 
 def sync_fill(pulse, order, cid, oid, executed, px, track):

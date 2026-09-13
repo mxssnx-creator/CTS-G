@@ -182,6 +182,15 @@ def _sf(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _known_count(v: Any, default: int = -1) -> int:
+    """Parse a count while preserving a confirmed zero as a known value."""
+    try:
+        value = int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if value >= 0 else default
+
+
 def _bool_setting(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -514,7 +523,13 @@ def ctrl_payload(
     otype: str = "",
     working: str = "MARK_PRICE",
 ) -> Dict[str, Any]:
-    """BingX rejects quantity + closePosition together. Never mix them."""
+    """Build a BingX swap stop/take-profit payload.
+
+    The swap API requires ``quantity`` for stop/take-profit orders, including
+    a market order carrying ``closePosition=true``.  ``closePosition`` is only
+    valid for the market stop/take-profit variants; limit fallbacks remain
+    quantity-matched.
+    """
     is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
     close_side = "SELL" if str(side).upper() == "LONG" else "BUY"
     if not otype:
@@ -528,9 +543,10 @@ def ctrl_payload(
         "workingType": working or "MARK_PRICE",
         "clientOrderID": cid,
     }
-    if close_pos:
+    market_control = otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+    if close_pos and market_control:
         body["closePosition"] = "true"
-    elif with_qty and str(qty):
+    if str(qty) and (with_qty or close_pos):
         body["quantity"] = str(qty)
     if otype in ("STOP", "TAKE_PROFIT"):
         body["price"] = str(stop_px)
@@ -624,7 +640,15 @@ def ctrl_err_kind(msg: str) -> str:
         return "exists"
     if "quantity" in m and "closeposition" in compact:
         return "qty_close"
-    if "quantity or stopprice is must" in compact or "parameterquantity" in compact:
+    # BingX returns variants such as "quantity or stopPrice is must" and
+    # "parameter quantity is required" when the control size is absent.  A
+    # missing quantity is repairable by the next payload form; classifying it
+    # as a price error used to stop the fallback loop before an order existed.
+    if ("quantityorstoppriceismust" in compact or
+            "parameterquantity" in compact or
+            ("quantity" in m and any(word in m for word in ("required", "must", "needed", "empty", "invalid")))):
+        return "qty"
+    if "stopprice" in compact and any(word in m for word in ("required", "must", "needed", "empty", "invalid")):
         return "px"
     if "insufficient liquidity" in m:
         return "liq"
@@ -1005,6 +1029,9 @@ class Pulse:
         self.exchange_order_own_count = -1
         self.exchange_order_total_count = -1
         self.exchange_order_foreign_count = -1
+        self.exchange_order_snapshot_pending = True
+        self.exchange_order_snapshot_at = 0.0
+        self.exchange_order_snapshot_detail = "not-read"
         self.control_orders_per_config = True
         self.control_orders_overall = False
         self.closed: Deque[Closed] = deque(maxlen=80)
@@ -1065,6 +1092,11 @@ class Pulse:
         self.cycle_busy = False
         self.cycle_wait_ms = 0.0
         self.cycle_overrun = False
+        self.cycle_slow = False
+        self.overrun_streak = 0
+        self.io_slow_streak = 0
+        self.loop_error_streak = 0
+        self.last_cycle_progress_at = time.monotonic()
         self.universe: List[Dict[str, Any]] = []
         self.last_uni = 0.0
         self.vol1h: Dict[str, float] = {}
@@ -1152,6 +1184,7 @@ class Pulse:
         self.recon_pending = False
         self.recon_detail = "pending"
         self.exchange_open_count = -1  # -1 = not yet read from exchange
+        self.exchange_position_snapshot_pending = True
         self._empty_rest_streak = 0
         self.live_pos_keys: Optional[set] = None  # None = exchange truth unknown
         self._load_trade_history()
@@ -1295,6 +1328,34 @@ class Pulse:
             return False
         return self._bind_position_scope(pos)
 
+    def pending_entry_for(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
+        """Return the newest unresolved own entry intent for a symbol/side.
+
+        A market order can be accepted and filled before it appears in either
+        the open-order or fills endpoint.  The durable client id is then the
+        only ownership proof available during that reconciliation window.
+        """
+        symbol_u = str(symbol or "").upper()
+        side_u = str(side or "").upper()
+        candidates: List[Dict[str, Any]] = []
+        for cid, row in (getattr(self, "pending_orders", {}) or {}).items():
+            if not isinstance(row, dict) or not self.cid_ours(cid):
+                continue
+            kind = str(row.get("kind") or "entry").strip().lower()
+            if kind not in {"entry", "o"}:
+                continue
+            if str(row.get("symbol") or "").upper() != symbol_u:
+                continue
+            if str(row.get("side") or "").upper() != side_u:
+                continue
+            candidates.append(row)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda row: _sf(row.get("updated_at") or row.get("updatedAt")))
+
+    def pending_entry_owns(self, symbol: str, side: str) -> bool:
+        return self.pending_entry_for(symbol, side) is not None
+
     def row_is_ours(self, row: Any) -> bool:
         if not isinstance(row, dict) or row.get("ours") is False:
             return False
@@ -1400,6 +1461,9 @@ class Pulse:
         if pos is None:
             return True
         # The overall-control coordinator uses a synthetic proxy carrying the
+        # widest member range. It remains outside the per-config identity
+        # scheme, while place_ctrl() treats that proxy as quantity-matched so
+        # it cannot close unrelated same-side exposure.
         # widest member range.  It must remain aggregate even though the proxy
         # also has non-zero SL/TP percentages; otherwise the proxy would send
         # quantity-matched controls and defeat closePosition protection.
@@ -2935,10 +2999,11 @@ class Pulse:
     def control_event_fields(self, pos: Optional[Position]) -> Dict[str, Any]:
         if pos is None:
             return {}
+        overall = bool(getattr(pos, "_overall_proxy", False)) or overall_controls.enabled(self, pos)
         return {
             "control_group_key": str(getattr(pos, "control_group_key", "") or ""),
             "control_range_key": str(getattr(pos, "control_range_key", "") or "aggregate"),
-            "control_mode": "per-config" if self.per_config_controls(pos) else "aggregate",
+            "control_mode": "overall" if overall else ("per-config" if self.per_config_controls(pos) else "aggregate"),
             "member_count": max(1, int(getattr(pos, "member_count", 1) or 1)),
         }
 
@@ -2958,10 +3023,10 @@ class Pulse:
         if ledger is None:
             return {"eventCount": 0, "parity": "pending", "source": "committed-event-ledger"}
         exchange_open = getattr(self, "exchange_open_count", -1)
-        try:
-            exchange_open = int(exchange_open)
-        except Exception:
+        if bool(getattr(self, "exchange_position_snapshot_pending", False)):
             exchange_open = -1
+        else:
+            exchange_open = _known_count(exchange_open)
         owned_positions = [p for p in (getattr(self, "open", {}) or {}).values() if self.position_is_ours(p)]
         owned_closed = [c for c in (getattr(self, "closed", ()) or ()) if self.row_is_ours(asdict(c))]
         return ledger.summary(
@@ -2970,7 +3035,10 @@ class Pulse:
             exchange_open=exchange_open,
             internal_closed=len(owned_closed),
             pending_count=len(getattr(self, "pending_orders", {}) or {}),
-            reconciliation_pending=bool(getattr(self, "recon_pending", False)),
+            reconciliation_pending=(
+                bool(getattr(self, "recon_pending", False))
+                or bool(getattr(self, "exchange_position_snapshot_pending", False))
+            ),
         )
 
     def ingest_ws_px(self) -> int:
@@ -3518,32 +3586,83 @@ class Pulse:
         return sum(1 for p in self.open.values() if self.group_of(p.symbol) == g)
 
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        hit = self._oo_cache.get("*")
+        cache = getattr(self, "_oo_cache", None)
+        if not isinstance(cache, dict):
+            cache = self._oo_cache = {}
+        hit = cache.get("*")
         now = time.time()
+        confirmed = False
+        pending = True
+        detail = "unavailable"
         if hit and now - hit[0] < 12.0:
             rows = hit[1]
-        elif self.api.path_cd.get("/openApi/swap/v2/trade/openOrders", 0) > now:
+            pending = bool(getattr(self, "exchange_order_snapshot_pending", True))
+            confirmed = not pending
+            detail = "cache-confirmed" if confirmed else "cache-pending"
+        elif getattr(self.api, "path_cd", {}).get("/openApi/swap/v2/trade/openOrders", 0) > now:
             rows = hit[1] if hit else []
+            self._empty_order_streak = 0
+            detail = "rate-limit cooldown"
         else:
-            r = self.api.get("/openApi/swap/v2/trade/openOrders")
+            try:
+                r = self.api.get("/openApi/swap/v2/trade/openOrders")
+            except Exception as exc:
+                r = {"code": -1, "msg": f"{type(exc).__name__}: {exc}"}
             if not self.ok(r):
                 rows = hit[1] if hit else []
+                self._empty_order_streak = 0
+                detail = str(r.get("msg") or r.get("code") or "open orders failed")[:120]
             else:
                 data = r.get("data") or {}
                 orders = data.get("orders") if isinstance(data, dict) else data
                 rows = orders if isinstance(orders, list) else []
-                # Empty REST while we hold positions is lag/rate-limit, not a flat book.
-                if rows or not self.open:
-                    self._oo_cache["*"] = (now, rows)
+                open_book = getattr(self, "open", {}) or {}
+                # Empty REST while we hold positions needs a second confirmed
+                # read. Keep the previous rows available for control repair,
+                # but never publish them as current live-order counts while
+                # the venue snapshot is ambiguous.
+                if rows or not open_book:
+                    cache["*"] = (now, list(rows))
                     self._order_est = len(rows)
                     self._order_est_known = True
+                    self._empty_order_streak = 0 if rows else max(2, int(getattr(self, "_empty_order_streak", 0) or 0) + 1)
+                    confirmed = True
+                    pending = False
+                    detail = "confirmed"
                 else:
                     rows = hit[1] if hit else []
-        self.exchange_order_total_count = len(rows)
-        self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
-        self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
-        self.foreign_open_order_count = self.exchange_order_foreign_count
-        if self.exchange_order_foreign_count > 0:
+                    self._empty_order_streak = int(getattr(self, "_empty_order_streak", 0) or 0) + 1
+                    if self._empty_order_streak >= 2:
+                        # Two successful empty snapshots are sufficient to
+                        # distinguish a truly unprotected position from one
+                        # transiently missing from the open-order endpoint.
+                        rows = []
+                        cache["*"] = (now, [])
+                        self._order_est = 0
+                        self._order_est_known = True
+                        confirmed = True
+                        pending = False
+                        detail = "confirmed empty"
+                    else:
+                        confirmed = False
+                        pending = True
+                        detail = f"pending empty snapshot {self._empty_order_streak}/2"
+        if confirmed:
+            self.exchange_order_total_count = len(rows)
+            self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
+            self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
+            self.foreign_open_order_count = self.exchange_order_foreign_count
+            self.exchange_order_snapshot_at = now
+        else:
+            # Cached rows remain usable for idempotent cancellation/repair, but
+            # stale data is not allowed to inflate the live-order dashboard.
+            self.exchange_order_total_count = -1
+            self.exchange_order_own_count = -1
+            self.exchange_order_foreign_count = -1
+            self.foreign_open_order_count = -1
+        self.exchange_order_snapshot_pending = bool(pending)
+        self.exchange_order_snapshot_detail = detail[:120]
+        if confirmed and self.exchange_order_foreign_count > 0:
             self._note_foreign_activity()
         if symbol:
             return [o for o in rows if str(o.get("symbol") or "") == symbol]
@@ -3816,6 +3935,9 @@ class Pulse:
         is_sl = str(kind).lower() in ("sl", "s", "u", "sec-sl", "sec_sl")
         c = self.contracts.get(pos.symbol)
         tick = 10 ** -(c.pprec if c else 4)
+        # Keep the configured member distance intact. If the venue rejects a
+        # fast-moving trigger, the retry loop refreshes the quote and widens
+        # the attempted price without changing the Set's normal range.
         pad = max(8 * tick, hi * 0.0020)
         price = float(price or 0)
         if is_sl:
@@ -3858,7 +3980,8 @@ class Pulse:
 
     def _controls_waiting_for_position(self, pos: Position) -> bool:
         now = time.time()
-        return (now < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
+        return (now < self.ctrl_skip.get("__stale_position__", 0)
+                or now < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
                 or now < self.ctrl_skip.get(self._control_minimum_key(pos), 0))
 
     def _control_minimum_key(self, pos: Position) -> str:
@@ -3885,6 +4008,20 @@ class Pulse:
         # symbol+direction. Alternate payloads/prices cannot repair absence.
         # Keep the book and existing protection until reconciliation confirms
         # exchange truth; stop sibling sets from exhausting the venue budget.
+        # A stale-position response counts against the venue's shared order
+        # endpoint even when the exchange did not create an order.  A short
+        # endpoint-wide pause prevents each symbol/direction from repeating
+        # the same invalid request and reaching BingX's 20-in-480s ban.  The
+        # normal reconciliation/replay threads continue while controls wait.
+        now = time.time()
+        self.ctrl_skip[f"flat:{pos.symbol}:{pos.side}"] = max(
+            float(self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0.0) or 0.0),
+            now + 45.0,
+        )
+        self.ctrl_skip["__stale_position__"] = max(
+            float(self.ctrl_skip.get("__stale_position__", 0.0) or 0.0),
+            now + 30.0,
+        )
         # A freshly filled aggregate position can be invisible to the venue
         # for a few seconds.  Sixty seconds leaves the whole group visibly
         # unprotected while new Sets keep arriving; retry soon, but through
@@ -3903,7 +4040,12 @@ class Pulse:
         if time.time() < self.ctrl_skip.get("__order_cap__", 0) or self._controls_waiting_for_position(pos):
             return real_oid(pos.sl_oid if is_sl else pos.tp_oid)
         have_this = real_oid(pos.sl_oid if is_sl else pos.tp_oid)
-        scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
+        if (time.time() < self.ctrl_skip.get("__order_cap__", 0)
+                or self._controls_waiting_for_position(pos)
+                or overall_controls.venue_order_cooling(self)):
+            return have_this
+        quantity_matched = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
+        scope = self.position_key(pos) if quantity_matched else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
@@ -3918,16 +4060,19 @@ class Pulse:
             return have_this
         market_type = "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"
         limit_type = "STOP" if is_sl else "TAKE_PROFIT"
-        # A range group is quantity-matched. It must never fall back to
-        # closePosition=true because that would close another range group on
-        # the same symbol and side.
-        if self.per_config_controls(pos):
+        # Range groups and the synthetic overall proxy are always
+        # quantity-matched. A closePosition order is allowed only for the
+        # legacy aggregate path, where the whole symbol+side is intentionally
+        # one control scope.
+        if quantity_matched:
             forms = [
                 {"close_pos": False, "with_qty": True, "otype": market_type},
                 {"close_pos": False, "with_qty": True, "otype": limit_type},
             ]
         else:
             forms = [
+                {"close_pos": True, "with_qty": True, "otype": market_type},
+                {"close_pos": False, "with_qty": True, "otype": market_type},
                 {"close_pos": True, "with_qty": False, "otype": market_type},
                 {"close_pos": False, "with_qty": True, "otype": market_type},
                 {"close_pos": True, "with_qty": False, "otype": limit_type},
@@ -3953,8 +4098,6 @@ class Pulse:
                     pos.symbol, pos.side, "sl" if is_sl else "tp", px_s, qty_s, cid,
                     close_pos=bool(form["close_pos"]), with_qty=bool(form["with_qty"]), otype=str(form["otype"]),
                 )
-                if "quantity" in body and body.get("closePosition"):
-                    body.pop("quantity", None)
                 control_key = stable_key(CONN_SHORT, "control", cid, kind, px_s)
                 self.record_event(
                     "control_request",
@@ -4169,11 +4312,24 @@ class Pulse:
         now = time.time()
         shared_checked = set()
         for pos in list(self.open.values()):
-            if overall_controls.enabled(self,pos) and (pos.symbol,pos.side) not in shared_checked:
+            group_key = (pos.symbol, pos.side)
+            if overall_controls.enabled(self,pos) and group_key not in shared_checked:
                 # Run group migration before the member-level exchange snapshot
                 # guard. The shared proxy checks the symbol+direction exchange
                 # quantity itself; a stale first member must not prevent the
                 # other valid members from receiving one common pair.
+                group_rows = overall_controls.members(self, pos)
+                ensured = overall_controls.ensure(self,pos)
+                shared_checked.add(group_key)
+                # Overall.ensure() is deliberately boolean: a group with no
+                # confirmed pair is still a live protection gap even when the
+                # venue is cooling or the request was rejected.
+                if not ensured and any(
+                        self.exchange_position_active(member) or
+                        bool(getattr(member, "_overall_exchange_verified", False))
+                        for member in group_rows
+                ):
+                    miss += 1
                 overall_controls.ensure(self,pos)
                 shared_checked.add((pos.symbol,pos.side))
             # Overall protection owns the complete symbol/direction group.
@@ -4242,6 +4398,8 @@ class Pulse:
 
     def place_ctrl_pair(self, pos: Position) -> None:
         """Install one complete protection pair without exceeding venue batch quotas."""
+        if overall_controls.venue_order_cooling(self):
+            return
         if overall_controls.enabled(self, pos):
             return overall_controls.ensure(self,pos)
         previous_shared = {getattr(pos,f,"") for f in overall_controls.FIELDS}-{ "" } if getattr(pos,"overall_controls",False) else set()
@@ -4279,6 +4437,9 @@ class Pulse:
                 pos.tp = want_tp
             pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             pos.overall = pos.controls_ok
+            # The proxy is quantity-matched so it cannot close unrelated
+            # same-side exposure if the exchange contains another owner.
+            pos.close_position = False
             pos.close_position = True
             pos.ctrl_qty = pos.qty
             pos.ctrl_verified = pos.controls_ok
@@ -4545,7 +4706,7 @@ class Pulse:
     def _ctrl_body(self, pos: Position, kind: str, price: float) -> Dict[str, Any]:
         price = self.clamp_ctrl_price(pos, kind, price)
         c = self.contracts.get(pos.symbol)
-        grouped = self.per_config_controls(pos)
+        grouped = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
         return ctrl_payload(
             pos.symbol,
             pos.side,
@@ -4656,8 +4817,6 @@ class Pulse:
                 "positionSide": pos.side,
             }
             body.update(extra)
-            if "quantity" in body and body.get("closePosition"):
-                body.pop("quantity", None)
             try:
                 r = self.api.post("/openApi/swap/v2/trade/order", body)
             except Exception as exc:
@@ -5935,7 +6094,7 @@ class Pulse:
         Returns (sim_count, sim_unrealized_pnl); count -1 while the exchange
         truth is unknown (no successful adopt read yet)."""
         keys = getattr(self, "live_pos_keys", None)
-        if keys is None:
+        if keys is None or bool(getattr(self, "exchange_position_snapshot_pending", False)):
             return -1, 0.0
         n = 0
         upnl = 0.0
@@ -5966,6 +6125,10 @@ class Pulse:
         if keys is None:
             # No complete exchange snapshot yet: preserve the existing startup
             # behavior and let the entry path attach protection immediately.
+            return True
+        if bool(getattr(self, "exchange_position_snapshot_pending", False)):
+            # A failed or guarded snapshot is not proof that the venue is flat.
+            # Keep existing protection/close paths alive until a complete read.
             return True
         key = f"{pos.symbol}:{pos.side}"
         if key in keys:
@@ -8291,6 +8454,33 @@ class Pulse:
             from load_engine import Budget
             return Budget()
 
+    def _entry_window_limits(self) -> Tuple[int, float]:
+        """Combine operator entry settings with the live load budget."""
+        settings = getattr(self, "system_settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+        try:
+            configured_batch = max(1, int(settings.get("systemEntryBatch", 256)))
+        except (TypeError, ValueError, OverflowError):
+            configured_batch = 256
+        try:
+            configured_ms = float(settings.get("systemEntryBudgetMs", 500))
+        except (TypeError, ValueError, OverflowError):
+            configured_ms = 500.0
+        if not math.isfinite(configured_ms):
+            configured_ms = 500.0
+        governor_budget = getattr(getattr(self, "load", None), "last_budget", None)
+        try:
+            dynamic_batch = max(1, int(getattr(governor_budget, "entry_batch", configured_batch)))
+        except (TypeError, ValueError, OverflowError):
+            dynamic_batch = configured_batch
+        try:
+            dynamic_ms = max(50.0, float(getattr(governor_budget, "entry_budget_ms", configured_ms)))
+        except (TypeError, ValueError, OverflowError):
+            dynamic_ms = configured_ms
+        scan_s = max(0.05, float(globals().get("SCAN_S", 5.0) or 5.0))
+        return min(configured_batch, dynamic_batch), max(0.05, min(2.0, scan_s, configured_ms / 1000.0, dynamic_ms / 1000.0))
+
     def _hist_peer_path(self) -> str:
         return os.path.join(DIR, "hist-busy.json")
 
@@ -8660,9 +8850,9 @@ class Pulse:
         # the lane. Signal computation is shared by symbol for this cycle.
         votes_by_symbol = {}
         settings = {r["symbol"]: r.get("settings", {}) for r in blob.get("matrix", [])}
-        settings_budget = getattr(self, "system_settings", {})
-        deadline = time.monotonic() + max(.05, min(2.0, SCAN_S, settings_budget.get("systemEntryBudgetMs", 500) / 1000))
-        for offset in range(min(len(candidates), int(settings_budget.get("systemEntryBatch", 256)))):
+        entry_batch, entry_budget_s = self._entry_window_limits()
+        deadline = time.monotonic() + entry_budget_s
+        for offset in range(min(len(candidates), entry_batch)):
             if time.monotonic() >= deadline or getattr(self, "halted", False):
                 break
             row = candidates[(cursor + offset) % len(candidates)]
@@ -8938,7 +9128,16 @@ class Pulse:
             else:
                 skipped += 1
             room = self.avail_notional()
-            burst = 16 if MAX_OPEN <= 0 else 6  # unlimited: no order-count throttle
+            budget = getattr(getattr(self, "load", None), "last_budget", None)
+            level = str(getattr(budget, "level", "normal") or "normal")
+            default_burst = 32 if MAX_OPEN <= 0 else 6  # unlimited: no order-count cap
+            burst_by_level = {"normal": default_burst, "busy": 16, "overload": 8, "critical": 4}
+            burst = burst_by_level.get(level, default_burst)
+            if budget is not None:
+                try:
+                    burst = min(burst, max(1, int(getattr(budget, "entry_batch", burst)) // 8))
+                except (TypeError, ValueError, OverflowError):
+                    pass
             if room < 8:
                 burst = 1
             if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
@@ -8982,9 +9181,9 @@ class Pulse:
         if not ranked:
             return
         start = int(getattr(self, "_entry_cursor", 0) or 0) % len(ranked)
-        settings = getattr(self, "system_settings", {})
-        deadline = time.monotonic() + max(0.05, min(2.0, SCAN_S, settings.get("systemEntryBudgetMs", 500) / 1000))
-        for offset in range(min(len(ranked), int(settings.get("systemEntryBatch", 256)))):
+        entry_batch, entry_budget_s = self._entry_window_limits()
+        deadline = time.monotonic() + entry_budget_s
+        for offset in range(min(len(ranked), entry_batch)):
             if offset and time.monotonic() >= deadline:
                 break
             index = (start + offset) % len(ranked)
@@ -9156,23 +9355,30 @@ class Pulse:
         return recovered
 
     def reconcile_startup_positions(self) -> None:
-        """Confirm a boot-time empty snapshot before repairing persisted IDs."""
+        """Start reconciliation without double-confirming a transient empty read."""
         self.adopt_exchange_positions()
         if (getattr(self, "recon_pending", False)
                 and int(getattr(self, "_empty_rest_streak", 0) or 0) == 1
                 and str(getattr(self, "recon_detail", "")).startswith("pending empty exchange read")):
-            self.adopt_exchange_positions()
+            # Let the normal cycle retry after a short delay. An immediate
+            # second request can hit the same transient empty page and turn a
+            # real open position into a confirmed phantom at startup.
+            self._reconcile_retry_at = time.monotonic() + 5.0
 
     def adopt_exchange_positions(self) -> None:
         """Refresh OUR book only. Ignore any exchange position/order without our tracking id."""
         request_key = stable_key(CONN_SHORT, "positions", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
         self.record_event("exchange_request", request_key, status="pending", detail="positions", metadata={"path": "/openApi/swap/v2/user/positions"})
         self.did_io = True
-        r = self.api.get("/openApi/swap/v2/user/positions")
+        try:
+            r = self.api.get("/openApi/swap/v2/user/positions")
+        except Exception as exc:
+            r = {"code": -1, "msg": f"{type(exc).__name__}: {exc}"}
         if not self.ok(r):
             self.record_event("exchange_response", stable_key(request_key, "response"), status="error", code=r.get("code"), detail=str(r.get("msg") or "positions failed"))
             self.recon_ok = False
-            self.recon_pending = False
+            self.recon_pending = True
+            self.exchange_position_snapshot_pending = True
             self._empty_rest_streak = 0
             self.recon_detail = f"adopt {(r.get('msg') or r.get('code'))}"[:120]
             return
@@ -9182,7 +9388,8 @@ class Pulse:
             # not advance absence counters or mutate ownership from a partial
             # payload: that could discard our still-open protected position.
             self.recon_ok = False
-            self.recon_pending = False
+            self.recon_pending = True
+            self.exchange_position_snapshot_pending = True
             self.recon_detail = "positions payload malformed"
             self._empty_rest_streak = 0
             self.record_event("error", stable_key(request_key, "payload"), status="error", code=r.get("code"), detail="positions payload malformed")
@@ -9214,13 +9421,6 @@ class Pulse:
                 "trackingScope": TRACKING_SCOPE,
             },
         )
-        self.exchange_total_open_count = live_n
-        # The raw exchange set is diagnostic only. ``live_pos_keys`` is always
-        # narrowed to exact system-owned keys before controls or system stats use it.
-        self.live_pos_keys = set()
-        self.exchange_open_count = 0
-        self.exchange_own_open_count = 0
-        self.recon_pending = False
         if live_n == 0 and self.open:
             # Glitch guard: one empty REST page must never wipe the book — but a
             # CONFIRMED flat exchange (2 consecutive empty reads, ~50 cycles apart)
@@ -9231,12 +9431,22 @@ class Pulse:
             if self._empty_rest_streak < 2:
                 self.recon_pending = True
                 self.recon_ok = True
+                self.exchange_position_snapshot_pending = True
                 self.recon_detail = f"pending empty exchange read {self._empty_rest_streak}/2"
                 log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
                 return
             log(f"ADOPT flat-exchange confirmed streak={self._empty_rest_streak} book={len(self.open)}")
+            self.exchange_position_snapshot_pending = False
         else:
             self._empty_rest_streak = 0
+            self.exchange_position_snapshot_pending = False
+        self.exchange_total_open_count = live_n
+        # The raw exchange set is diagnostic only. ``live_pos_keys`` is always
+        # narrowed to exact system-owned keys before controls or system stats use it.
+        self.live_pos_keys = set()
+        self.exchange_open_count = 0
+        self.exchange_own_open_count = 0
+        self.recon_pending = False
         live = set()
         foreign = set()
         self.exchange_qty = {}
@@ -9271,7 +9481,7 @@ class Pulse:
             px = float(p.get("avgPrice") or p.get("entryPrice") or self.px.get(sym) or 0)
             qty = abs(amt)
             candidates = self.positions_for(sym, side)
-            ours = candidates[0] if candidates else None
+            pending_entry = self.pending_entry_for(sym, side)
             live_lev = 0
             try:
                 live_lev = int(float(p.get("leverage") or 0))
@@ -9288,6 +9498,7 @@ class Pulse:
                     and (candidate.client_id and self.cid_ours(candidate.client_id) or candidate.sl_oid or candidate.tp_oid)
                     for candidate in candidates
                 )
+                or pending_entry is not None
             )
             if not tagged and not owned:
                 exchange_key = f"{sym}:{side}"
@@ -9441,6 +9652,8 @@ class Pulse:
             )
             track = self.parse_track(self.order_cid(identity_tag)) if identity_tag else {}
             track = track or {}
+            if not track and pending_entry:
+                track = self.parse_track(str(pending_entry.get("client_id") or "")) or {}
             sl_ratio = float(track.get("sl") or self.variants.current_sl())
             trail_key, trail_arm, trail_give = self.variants.current_trail()
             if track.get("trail"):
@@ -9454,7 +9667,9 @@ class Pulse:
             )
             sl = px * (1 - sl_pct) if side == "LONG" else px * (1 + sl_pct)
             tp = px * (1 + tp_pct) if side == "LONG" else px * (1 - tp_pct)
-            cid = (self.order_cid(tagged[0]) if tagged else "") or self.cid("o")
+            cid = (self.order_cid(tagged[0]) if tagged else "") or str(
+                (pending_entry or {}).get("client_id") or ""
+            ) or self.cid("o")
             set_id = str(track.get("set_id") or "")
             pack = str(track.get("pack") or ("indications" if set_id.startswith("ind") else "general"))
             rec_pos = Position(
@@ -9473,11 +9688,35 @@ class Pulse:
                 volume_ratio=float(track.get("volume_ratio") or 1.0),
                 ind_kind=str(track.get("ind_kind") or ""),
             )
+            if pending_entry:
+                pending_meta = pending_entry.get("metadata") if isinstance(pending_entry.get("metadata"), dict) else {}
+                # The pending intent is stronger lineage evidence than a
+                # newly generated fallback CID. Restore fields that are not
+                # recoverable from the compact exchange client id.
+                rec_pos.execution_lane = str(pending_meta.get("execution_lane") or "")
+                rec_pos.strategy = str(pending_meta.get("strategy") or rec_pos.strategy or "core")
+                rec_pos.set_id = str(pending_meta.get("set_id") or rec_pos.set_id or "")
+                rec_pos.parent_set_id = str(pending_meta.get("parent_set_id") or rec_pos.parent_set_id or rec_pos.set_id)
+                rec_pos.axis_key = str(pending_meta.get("axis_key") or rec_pos.axis_key or "")
+                rec_pos.relative_count = int(pending_meta.get("relative_count") or rec_pos.relative_count or 1)
+                rec_pos.volume_ratio = float(pending_meta.get("volume_ratio") or rec_pos.volume_ratio or 1.0)
+                rec_pos.pending_qty = max(
+                    0.0,
+                    _sf(pending_entry.get("requested_qty")) - qty,
+                )
             # Without persisted lineage/range metadata, recovery remains an
             # aggregate group; never invent a quantity-matched pair from an
             # ambiguous legacy control order.
             self.prepare_position_group(rec_pos, legacy=True)
             self.open[self.position_key(rec_pos)] = rec_pos
+            if pending_entry:
+                requested = max(0.0, _sf(pending_entry.get("requested_qty")))
+                pending_entry["filled_qty"] = max(_sf(pending_entry.get("filled_qty")), qty)
+                pending_entry["updated_at"] = time.time()
+                if requested <= qty + 1e-12:
+                    self._clear_pending(cid)
+                else:
+                    self._save_pending_orders()
             self.ensure_strategy_lanes(rec_pos)
             rec_pos.sl, rec_pos.tp = self.security_prices(rec_pos)
             log(f"RECOVER {sym} {side} qty={qty} cid={cid}", every=20.0, key=f"rec:{sym}")
@@ -10298,10 +10537,11 @@ class Pulse:
                 "complete": bool(historic_snap.get("coordinationComplete")),
             }
         config_evidence = self._config_evidence_snapshot()
+        position_snapshot_pending = bool(getattr(self, "exchange_position_snapshot_pending", False))
         exchange_own_raw = getattr(self, "exchange_own_open_count", -1)
-        exchange_total_raw = getattr(self, "exchange_open_count", -1)
-        exchange_own_open = int(exchange_own_raw) if exchange_own_raw is not None else -1
-        exchange_total_open = int(exchange_total_raw) if exchange_total_raw is not None else -1
+        exchange_total_raw = getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))
+        exchange_own_open = -1 if position_snapshot_pending else _known_count(exchange_own_raw)
+        exchange_total_open = -1 if position_snapshot_pending else _known_count(exchange_total_raw)
         internal_open = int(len(self.open))
         internal_position_groups = len({
             (p.symbol, p.side)
@@ -10311,6 +10551,13 @@ class Pulse:
         # Keep internal/config lanes separate from exchange aggregates.  The
         # exchange reports one position group per symbol+side, while the
         # engine can track many independent config/set lanes in that group.
+        order_snapshot_pending = bool(getattr(self, "exchange_order_snapshot_pending", False))
+        live_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_own_count", -1))
+        live_total_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_total_count", -1))
+        foreign_order_count = _known_count(getattr(self, "foreign_open_order_count", -1))
+        if live_order_count < 0 and live_total_order_count >= 0 and foreign_order_count >= 0:
+            live_order_count = max(0, live_total_order_count - foreign_order_count)
+        if position_snapshot_pending or bool(getattr(self, "recon_pending", False)):
         live_order_count = int(getattr(self, "exchange_order_own_count", -1) or -1)
         live_total_order_count = int(getattr(self, "exchange_order_total_count", -1) or -1)
         if live_order_count < 0 and live_total_order_count >= 0:
@@ -10340,6 +10587,10 @@ class Pulse:
             "livePositionCount": exchange_own_open,
             "liveOrderCount": live_order_count,
             "liveTotalOrderCount": live_total_order_count,
+            "livePositionSnapshotPending": position_snapshot_pending,
+            "liveOrderSnapshotPending": order_snapshot_pending,
+            "liveOrderSnapshotAt": float(getattr(self, "exchange_order_snapshot_at", 0.0) or 0.0),
+            "liveOrderSnapshotDetail": str(getattr(self, "exchange_order_snapshot_detail", "") or ""),
             "internalPositionGroups": internal_position_groups,
             "exchangeOpen": exchange_total_open,
             "exchangeOwnOpen": exchange_own_open,
@@ -10349,6 +10600,7 @@ class Pulse:
             "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
             "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
             "openParity": open_parity,
+            "positionSnapshotPending": position_snapshot_pending,
             "realStage": dict(stage_rows.get("real") or {}) if isinstance(stage_rows, dict) else {},
             "setCount": int(sets_snap.get("setCount") or 0),
             "validatedSetCount": int(sets_snap.get("validatedCount") or 0),
@@ -10462,6 +10714,15 @@ class Pulse:
             "realPositionCount": internal_open,
             "realPositionGroupCount": internal_position_groups,
             "realOrderCount": internal_open,
+            "exchangeOpenCount": exchange_own_open,
+            "exchangePositionGroupCount": exchange_own_open,
+            "exchangeOwnOpenCount": exchange_own_open,
+            "exchangeTotalOpenCount": exchange_total_open,
+            "livePositionCount": exchange_own_open,
+            "liveOrderCount": live_order_count,
+            "liveTotalOrderCount": live_total_order_count,
+            "livePositionSnapshotPending": position_snapshot_pending,
+            "liveOrderSnapshotPending": order_snapshot_pending,
             "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
             "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
             "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
@@ -10557,8 +10818,12 @@ class Pulse:
                     "secTpOid": getattr(p, "sec_tp_oid", ""),
                     "controls": p.controls_ok,
                     "overall": bool(getattr(p, "overall", True)),
-                    "closePosition": bool(getattr(p, "close_position", True)),
-                    "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
+                    "closePosition": (
+                        False
+                        if (overall_controls.enabled(self, p) or bool(getattr(p, "overall_controls", False)))
+                        else bool(getattr(p, "close_position", True))
+                    ),
+                    "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if exchange_own_open >= 0 else None,
                     "foreignQty": round(float(getattr(p, "foreign_qty", 0.0) or 0.0), 8),
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),
@@ -10625,6 +10890,11 @@ class Pulse:
                 "activeStage": getattr(self, "_active_cycle_stage", ""),
                 "activeStageMs": round((time.perf_counter() - self._active_stage_at) * 1000.0, 1) if getattr(self, "_active_cycle_stage", "") else 0.0,
                 "cycleWallOverrun": self.last_scan_ms > SCAN_S * 1000.0,
+                "cycleSlow": bool(getattr(self, "cycle_slow", False)),
+                "overrunStreak": int(getattr(self, "overrun_streak", 0) or 0),
+                "ioSlowStreak": int(getattr(self, "io_slow_streak", 0) or 0),
+                "loopErrorStreak": int(getattr(self, "loop_error_streak", 0) or 0),
+                "progressAgeS": round(max(0.0, time.monotonic() - float(getattr(self, "last_cycle_progress_at", time.monotonic()) or time.monotonic())), 3),
                 "warmMs": round(self.warm_ms, 1),
                 "asyncP50": snap.get("asyncP50"),
                 "asyncN": snap.get("asyncN"),
@@ -10914,7 +11184,7 @@ class Pulse:
             "controls": {
                 "open": len(self.open),
                 "logicalOpen": len(self.open),
-                "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
+                "exchangePositionGroups": -1 if bool(getattr(self, "exchange_position_snapshot_pending", False)) else _known_count(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
                 "ok": sum(1 for p in self.open.values() if p.controls_ok and p.sl_oid and p.tp_oid),
                 "missing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "security": sum(1 for p in self.open.values() if getattr(p, "sec_sl_oid", "") and getattr(p, "sec_tp_oid", "")),
@@ -10940,7 +11210,7 @@ class Pulse:
                         "slPct": round(float(getattr(p, "aggregate_sl_pct", getattr(p, "sl_pct", 0.0)) or 0.0) * 100, 3),
                         "tpPct": round(float(getattr(p, "aggregate_tp_pct", getattr(p, "tp_pct", 0.0)) or 0.0) * 100, 3),
                         "qty": float(p.qty or 0),
-                        "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if self.exchange_open_count >= 0 else None,
+                        "exchangeQty": round(float(getattr(p, "exchange_qty", 0.0) or 0.0), 8) if _known_count(getattr(self, "exchange_own_open_count", -1)) >= 0 and not bool(getattr(self, "exchange_position_snapshot_pending", False)) else None,
                     "pendingQty": round(float(getattr(p, "pending_qty", 0.0) or 0.0), 8),
                     "pendingCloseQty": round(float(getattr(p, "pending_close_qty", 0.0) or 0.0), 8),
                         "memberCount": int(getattr(p, "member_count", 1) or 1),
@@ -10955,7 +11225,7 @@ class Pulse:
                     for p in self.open.values()
                 ],
             },
-            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)), "detail": self.recon_detail, "logicalOpen": len(self.open), "exchangeOpen": int(getattr(self, "exchange_open_count", -1)), "exchangePositionGroups": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))), "simOpen": sim_n},
+            "recon": {"ok": self.recon_ok, "pending": bool(getattr(self, "recon_pending", False)) or bool(getattr(self, "exchange_position_snapshot_pending", False)), "detail": self.recon_detail, "logicalOpen": len(self.open), "exchangeOpen": -1 if bool(getattr(self, "exchange_position_snapshot_pending", False)) else _known_count(getattr(self, "exchange_open_count", -1)), "exchangePositionGroups": -1 if bool(getattr(self, "exchange_position_snapshot_pending", False)) else _known_count(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))), "simOpen": sim_n},
             "activity": activity,
             "events": activity.get("tail") or [],
             "px": sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0),
@@ -13120,7 +13390,17 @@ class Pulse:
         self.last_scan_ms = (time.perf_counter() - started) * 1000.0
         self.last_scan_cpu_ms = (time.thread_time() - cpu_started) * 1000.0
         self.last_scan_io = bool(self.did_io)
-        self.cycle_overrun = self.last_scan_ms > SCAN_S * 1000.0 and not (self.did_io or self.hist_busy)
+        self.cycle_slow = self.last_scan_ms > SCAN_S * 1000.0
+        self.cycle_overrun = self.cycle_slow and not (self.did_io or self.hist_busy)
+        if self.cycle_overrun:
+            self.overrun_streak = min(32, int(getattr(self, "overrun_streak", 0) or 0) + 1)
+        else:
+            self.overrun_streak = max(0, int(getattr(self, "overrun_streak", 0) or 0) - 2)
+        if self.cycle_slow and self.last_scan_io:
+            self.io_slow_streak = min(32, int(getattr(self, "io_slow_streak", 0) or 0) + 1)
+        else:
+            self.io_slow_streak = max(0, int(getattr(self, "io_slow_streak", 0) or 0) - 1)
+        self.last_cycle_progress_at = time.monotonic()
         self.last_cycle_stages = dict(self._cycle_stage_ms)
 
     def _one_cycle(self) -> None:
@@ -13178,6 +13458,7 @@ class Pulse:
         # local controls. Waiting for cycle 25 can take hours when a stale book
         # contains many positions and each repair encounters venue cooldowns.
         reconcile_due = (
+            (self.cycle == 1 and time.monotonic() >= float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0))
             self.cycle == 1
             or self.cycle % 25 == 0
             or (
@@ -13315,9 +13596,11 @@ class Pulse:
                     self._one_cycle()
                 if getattr(self, "runtime", None):
                     self.runtime.note_success()
+                self.loop_error_streak = 0
             except Exception:
                 if getattr(self, "runtime", None):
                     self.runtime.note_failure()
+                self.loop_error_streak = min(8, int(getattr(self, "loop_error_streak", 0) or 0) + 1)
                 self.errors += 1
                 self.last_error = traceback.format_exc()[-400:]
                 log("LOOP " + self.last_error)
@@ -13332,13 +13615,29 @@ class Pulse:
                 sd_notify("WATCHDOG=1")
                 wall = time.perf_counter() - t0
                 remain = SCAN_S - wall
-                self.cycle_wait_ms = max(0.0, remain) * 1000.0
+                budget = getattr(getattr(self, "load", None), "last_budget", None)
+                try:
+                    governor_yield = max(0.02, min(0.75, float(getattr(budget, "cycle_yield_s", 0.02))))
+                except (TypeError, ValueError, OverflowError):
+                    governor_yield = 0.02
+                try:
+                    error_yield = min(0.8, 0.05 * (2 ** min(4, int(getattr(self, "loop_error_streak", 0) or 0))))
+                except (TypeError, ValueError, OverflowError):
+                    error_yield = 0.05
+                try:
+                    overrun_yield = min(0.75, governor_yield * (1 + min(4, int(getattr(self, "overrun_streak", 0) or 0))))
+                except (TypeError, ValueError, OverflowError):
+                    overrun_yield = governor_yield
+                tail_yield = max(governor_yield, error_yield, overrun_yield)
+                self.cycle_wait_ms = (max(0.0, remain) if remain > 0 else tail_yield) * 1000.0
                 self.cycle_busy = False
             if remain > 0:
                 self._wait_wake(remain)
             else:
-                # Yield so hist/warm/ctrl threads run instead of busy-spinning.
-                time.sleep(0.02)
+                # A repeated overrun still processes controls/entries on every
+                # pass, but yields with an adaptive tail delay so warm/history
+                # workers and the watchdog cannot be starved by a tight loop.
+                self._wait_wake(tail_yield)
 
 
 def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:
