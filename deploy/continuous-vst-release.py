@@ -66,6 +66,10 @@ def main():
         'cts-gx-pulse@bingx-x02.service': (f'{python} -O {release}/server/pulse/pulse_trader.py', release/'server/pulse', True),
         'cts-gx-pulse-http.service': (f'{python} {release}/server/pulse/pulse_http.py', release/'server/pulse', False),
         'cts-gx-desk.service': (f'{release}/deploy/cts-g-desk.sh', release, False),
+        # Retention is a systemd timer on the persistent checkout. Point its
+        # oneshot at the same immutable release, otherwise a new error-log
+        # policy would not be applied until the next full installer run.
+        'cts-gx-retention.service': (f'{release}/deploy/retention.sh --once', release, False),
     }
     for unit, (command, cwd, demo) in units.items():
         drop = pathlib.Path('/etc/systemd/system') / (unit + '.d')
