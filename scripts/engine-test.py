@@ -44,6 +44,8 @@ from pulse_trader import (
     SL_TYPES,
     TP_TYPES,
     order_fill_qty,
+    adopt_venue_minimum,
+    parse_stop_bound,
     normalize_control_pct,
     control_range_key,
     parse_control_range,
@@ -118,28 +120,30 @@ def overlay_test() -> None:
         rec(f"{name}-overall-controls", ov.get("controlOrdersOverall", True) is True)
         rec(f"{name}-per-config-controls-on", ov.get("controlOrdersPerConfig", False) is True)
         rec(f"{name}-ind", ov.get("stratIndications", True) is True)
-        rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca", "dcaEnabled")))
+        rec(f"{name}-strategy-lanes", all(ov.get(k, True) is True for k in ("stratGeneral", "stratIndications", "stratTrailing", "stratBlock", "stratDca")))
+        rec(f"{name}-dca-off", ov.get("dcaEnabled") is False)
         rec(f"{name}-modules", all((ov.get("modules") or {}).get(k, True) is True for k in ("strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls")))
         rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
+        rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
         rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
-    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 0, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
-    rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
-    rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 0, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
+    rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
+    rec("x01-multi-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
     rec("x01-block-multi", int(x01.get("blockMaxStack") or 0) == 3, str(x01.get("blockMaxStack")))
     rec("x01-dca-unlim", int(x01.get("dcaMaxSteps") or 0) == 4, str(x01.get("dcaMaxSteps")))
     rec("x01-set-unlimited", int(x01.get("setMaxActive") or 0) == 0, str(x01.get("setMaxActive")))
     rec("x01-entry-candidates-unlimited", int(x01.get("entryPolicyMaxCandidates") or 0) == 0, str(x01.get("entryPolicyMaxCandidates")))
     rec("x02-entry-candidates-unlimited", int(x02.get("entryPolicyMaxCandidates") or 0) == 0, str(x02.get("entryPolicyMaxCandidates")))
-    rec("x02-test-universe-20", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 20)
-    rec("x01-unlimited-symbols", int(x01.get("symbolCap") or 0) == 0)
-    rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
-    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 0 and int(x02.get("maxOpen") or 0) == 0)
+    rec("x02-test-universe-20", x02.get("symbolsAll") is True and int(x02.get("symbolCap") or 0) == 50)
+    rec("x01-unlimited-symbols", int(x01.get("symbolCap") or 0) == 50)
+    rec("open-cap-unlimited", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
+    rec("open-unlimited", int(x01.get("maxOpen") or 0) == 100 and int(x02.get("maxOpen") or 0) == 100)
     rec("x02-unlim-stack", int(x02.get("blockMaxStack") or 0) == 3 and int(x02.get("dcaMaxSteps") or 0) == 4)
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
@@ -192,6 +196,12 @@ def controls_test() -> None:
     rec("err-qty-close", ctrl_err_kind("quantity and closePosition cannot be sent together") == "qty_close")
     rec("err-missing-qty", ctrl_err_kind("quantity or stopPrice is must") == "qty")
     rec("err-required-qty", ctrl_err_kind("parameter quantity is required") == "qty")
+    c_min = Contract("AMEMECOIN-USDT", 1.0, 0.01, 2, 4, 2.0, 50)
+    rec("min-qty-the-amount-asset", adopt_venue_minimum(c_min, "The minimum order amount is 37.88 AMEMECOIN.") == "qty" and abs(c_min.min_qty - 37.88) < 1e-9, str(c_min.min_qty))
+    c_bare = Contract("ALCH-USDT", 1.0, 0.01, 2, 4, 2.0, 50)
+    rec("min-qty-bare-amount", adopt_venue_minimum(c_bare, "minimum order amount is 57.43") == "qty" and abs(c_bare.min_qty - 57.43) < 1e-9, str(c_bare.min_qty))
+    rec("stop-bound-lt", parse_stop_bound("The stop loss price should be less than 0.123") == ("lt", 0.123), str(parse_stop_bound("The stop loss price should be less than 0.123")))
+    rec("stop-bound-gt", parse_stop_bound("take profit price should be greater than 1.5")[0] == "gt", str(parse_stop_bound("take profit price should be greater than 1.5")))
     rec("no-reduce-only", "reduceOnly" not in sl_close and "reduceOnly" not in tp_close)
     lo_s, hi_s = sl_bounds("SHORT", 100.0, 100.0, 100.0, 100.6, 0.01)
     rec("sl-short-window", lo_s > 100.0 and hi_s < 100.6 and lo_s < hi_s, f"lo={lo_s} hi={hi_s}")
@@ -204,7 +214,7 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
-    rec("unlimited-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
+    rec("unlimited-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
     rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
 
@@ -350,11 +360,15 @@ def unlimited_test() -> None:
     d.load({"dcaEnabled": True, "dcaMaxSteps": 0, "dcaCooldownSeconds": 0, "dcaStepDistancesPct": [0.5, 1], "dcaStepVolumeMultipliers": [1.5, 2]})
     rec("dca-unlim-engine", d.max_steps == 2 and not d.unlimited(), str(d.max_steps))
     rec("coord-unlim-already", True)
-    sized = BlockBook("/tmp/block-vr1.json", {"variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0, "defaultMinPF": 1.1})
+    sized = BlockBook("/tmp/block-vr1.json", {"variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0, "blockCounts": [1], "defaultMinPF": 1.1})
     f1 = sized.formula(10.0, 1)
     rec("block-n1-is-1x-parent", abs(f1["volumeIncrement"] - 1.0) < 1e-9 and abs(f1["targetAddQty"] - 10.0) < 1e-9, str(f1))
-    f3 = sized.formula(10.0, 3)
+    shared = BlockBook("/tmp/block-vr1-stack.json", {"variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0, "defaultMinPF": 1.1})
+    rec("block-vr1-stack3-shares-live", abs(shared.effective_volume_ratio() - (1.0 / 3.0)) < 1e-12, str(shared.effective_volume_ratio()))
+    f3 = shared.formula(10.0, 3)
     rec("block-n3-total-capped-2x", abs(f3["volumeIncrement"] - 1.0) < 1e-9 and abs(f3["targetAddQty"] - 10.0) < 1e-9, str(f3))
+    rec("block-n1-n2-n3-nonzero-steps", all(shared.step_qty(10.0, n) > 1e-12 for n in (1, 2, 3)),
+        str([shared.step_qty(10.0, n) for n in (1, 2, 3)]))
     lane1 = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     pick1 = sized.pick_emit(sized.evaluate_counts(lane1, live_n=1, intern_pf=1.5))
     rec(
@@ -396,6 +410,9 @@ def coord_test() -> None:
     c3 = Coordinator()
     c3.load({}, {"mainEvalPosCount": 7, "realEvalPosCount": 4, "posCountsVolumeRatio": 0.1})
     rec("coord-eval-from-overlay", c3.main_eval == 7 and c3.real_eval == 4, f"{c3.main_eval}/{c3.real_eval}")
+    c_reload = Coordinator()
+    c_reload.load({}, {"mainEvalPosCount": 9, "realEvalPosCount": 5, "realMinPf": 1.2, "axisLastEnabled": False, "axisPrevEnabled": False, "axisContEnabled": False, "axisPauseEnabled": False})
+    rec("coord-reload-applies-instantly", c_reload.main_eval == 9 and c_reload.real_eval == 5 and abs(float(c_reload.min_pf) - 1.2) < 1e-9, f"{c_reload.main_eval}/{c_reload.real_eval}/{c_reload.min_pf}")
     rec("coord-vol-ratio-overlay", abs(c3.pos_count_vol_ratio - 0.1) < 1e-9, str(c3.pos_count_vol_ratio))
     rec("coord-snap-countpos", bool((c3.snapshot().get("countPos") or {}).get("addGate")), str(c3.snapshot().get("countPos")))
     from set_engine import SetBook
@@ -551,6 +568,26 @@ def stage_engine_calc_test() -> None:
     windows = evaluation_windows([{"t": i, "pnl_pct": 0.002, "pnl": 0} for i in range(15)], POSITION_COST_PCT_DEFAULT)
     rec("eval-windows-last15", abs(float((windows.get("last15") or {}).get("pf") or 0) - 1.1) < 1e-6,
         str((windows.get("last15") or {}).get("pf")))
+    from position_cost import overall_last_pos_eval, POSITIVE_PF as _POS_PF
+    gate = SetBook()
+    gate.load({"setPfWindow": 30, "setMinSamples": 8, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False})
+    mixed_last = (
+        [{"t": 1000 + i * 60, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG"} for i in range(20)]
+        + [{"t": 3000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG"} for i in range(30)]
+    )
+    ok_ov, reason_ov, win_ov = gate._live_windows_ok(mixed_last, minimum_pf=_POS_PF)
+    ov_pf = float((win_ov.get("overall") or {}).get("pf") or 0.0)
+    named50 = float((win_ov.get("last50") or {}).get("pf") or 0.0)
+    rec(
+        "overall-last-pos-gate-ignores-named-windows",
+        ok_ov and ov_pf + 1e-9 >= _POS_PF and named50 + 1e-9 < _POS_PF,
+        f"ok={ok_ov} overall={ov_pf:.3f} last50={named50:.3f} {reason_ov}",
+    )
+    rec(
+        "overall-last-pos-eval-matches-gate",
+        abs(float(overall_last_pos_eval(mixed_last, 30, POSITION_COST_PCT_DEFAULT)["ratio"]) - ov_pf) < 1e-6,
+        f"eval={overall_last_pos_eval(mixed_last, 30, POSITION_COST_PCT_DEFAULT)['ratio']} gate={ov_pf}",
+    )
 
 
 def always_start_test() -> None:
@@ -1037,6 +1074,13 @@ def progression_continuity_test() -> None:
         rec("prog-start-resumes-cycle", (not p3.halted) and p3.halt_reason is None and p3.cycle == 1,
             f"halted={p3.halted} reason={p3.halt_reason} cycle={p3.cycle}")
         rm(pt.RESET_EQ_PATH)
+
+        p_cfg = stub()
+        hits: List[int] = []
+        p_cfg.maybe_reload_config = lambda: hits.append(int(p_cfg.cycle))  # type: ignore[method-assign]
+        p_cfg._one_cycle()
+        p_cfg._one_cycle()
+        rec("config-reload-every-cycle", hits == [0, 1], str(hits))
 
         # Rapid stop/start/pause flags vs cycle: never halted without a file.
         p4 = stub()
@@ -1533,6 +1577,19 @@ def block_calc_test() -> None:
     rec("block-formula-minpf",
         abs(calculate_block_minimum_profit_factor(1.2, 1.1, 4.5) - 1.99) < 1e-9,
         str(calculate_block_minimum_profit_factor(1.2, 1.1, 4.5)))
+    from block_engine import cost_pf_from_net_fracs
+    from position_cost import INTERN_PF, POSITIVE_PF
+    rec("block-cost-pf-1R", abs(cost_pf_from_net_fracs([0.001] * 8) - POSITIVE_PF) < 1e-9,
+        str(cost_pf_from_net_fracs([0.001] * 8)))
+    rec("block-intern-not-real-floor", INTERN_PF + 1e-9 < POSITIVE_PF, f"{INTERN_PF} vs {POSITIVE_PF}")
+    intern_book = BlockBook(os.path.join(tmp, "block-intern.json"), {
+        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 0.25,
+        "blockProfitFactorRatio": 1.1, "defaultMinPF": POSITIVE_PF})
+    intern_lane = BlockLane(symbol="AAA-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
+    rec("block-intern-1.00-no-emit",
+        intern_book.pick_emit(intern_book.evaluate_counts(intern_lane, live_n=1, intern_pf=INTERN_PF)) is None)
+    rec("block-real-1.10-emits-n1",
+        intern_book.pick_emit(intern_book.evaluate_counts(intern_lane, live_n=1, intern_pf=POSITIVE_PF)) is not None)
 
     # 2) coverage blob exposes ALL counts (unlimited -> full preview window)
     def mk_cov(stack: int):
@@ -1813,10 +1870,9 @@ def block_calc_test() -> None:
         return {"code": 101400, "msg": "minimum order amount is 0.5"}
     pRetry.api.post = reject_minimum
     pRetry.maybe_block_adds()
-    rec("block-minimum-retry-never-exceeds-approved-portion",
-        len(pRetry.api.posts) == 1 and not pRetry.pending_orders
-        and pRetry.block.lanes["TST-USDT:LONG"].confirmed_add == 0,
-        f"requests={len(pRetry.api.posts)}")
+    rec("block-minimum-retries-to-venue-min",
+        len(pRetry.api.posts) >= 2 and abs(float(pRetry.api.posts[-1][1]["quantity"]) - 0.5) < 1e-9,
+        f"requests={len(pRetry.api.posts)} last={pRetry.api.posts[-1][1].get('quantity') if pRetry.api.posts else None}")
     pRound = mk_trader(1.2, 1.5, 12)
     pRound.cap_order_qty = lambda c, px, qty, cap=None: qty * 1.05
     pRound.maybe_block_adds()
@@ -2819,8 +2875,34 @@ def process_guard_test() -> None:
     rec("http-heal-stuck", "heal-stuck" in http_src and "HEAL-TRIM-" in http_src)
     rec("http-stamp-load", 'out["loadLevel"]' in http_src and "engine" in http_src)
     rec("http-slim-variants", "variants.pop(\"rows\"" in http_src or "variants.pop('rows'" in http_src)
-    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 0)
+    rec("default-symbol-cap-const", int(getattr(pt, "DEFAULT_SYMBOL_CAP", 0) or 0) == 50)
     rec("hist-progress-total-ignores-watermark", "len(getattr(self, \"_hist_last_published_watermark\"" not in trader)
+    rec("hist-progress-no-reset-zero", "if not ready:\n                        progress.symbols_done = 0" not in trader)
+    rec("hist-merge-total-not-one", "progress.symbols_total = max(1, int(progress_total or 0))" not in trader)
+    rec("ctrl-attach-not-flatten", "CTRL flatten unprotected" not in trader)
+    close_src = trader.split("def close_pos", 1)[-1].split("def manage", 1)[0]
+    rec(
+        "close-keeps-sl-until-fill",
+        "market_close(pos)" in close_src
+        and close_src.find("self.market_close(pos)") < close_src.find("self.cancel_controls"),
+        "cancel-before-close" if "cancel_controls" in close_src[: close_src.find("market_close")] else "ok",
+    )
+    rec("ind-enter-recorded", 'record_outcome(str(ind_kind), "entered")' in trader)
+    block_src = open(os.path.join(DIR, "block_engine.py"), encoding="utf-8").read()
+    rec(
+        "block-ratio-splits-stack",
+        "def shared_block_volume_ratio" in block_src
+        and "def effective_volume_ratio" in block_src
+        and "extra / float(n)" in block_src
+        and "effective_volume_ratio()" in block_src,
+    )
+    rec("block-events-tagged", 'strategy="block"' in trader and "block add n=" in trader)
+    rec(
+        "signals-kind-not-defaulted",
+        'st.pack != "indications" else "signals"' not in open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read(),
+    )
+    rec("hist-partial-publish-wired", "self._hist_can_publish_partial(valid, completed_syms, pending_symbols)" in trader)
+    rec("high-value-general-from-ind", "gen:high-value" in trader)
     rec("hist-scan-cap-helper", "def _capped_scan_names" in trader)
     rec("hist-cap-no-stomp", "self.symbol_cap = use_cap" not in trader)
     rec("hist-tick-bars-scan-only", "if px <= 0 or s not in scan:" in trader)
@@ -2868,7 +2950,18 @@ def process_guard_test() -> None:
     slice_result = unittest.TestResult()
     ContinuousTests("test_middle_history_slices_publish_qualification").run(slice_result)
     rec("hist-score-each-slice", slice_result.wasSuccessful(), str(slice_result.failures + slice_result.errors))
+    rec("ctrl-px-widens-not-abort", "for extra in extras:" in trader and "if px_failed:" in trader)
+    rec("size-qty-rounds-up-to-floor", "q = self.round_qty_up(c, max(want_n / px, floor))" in trader)
+    rec("raise-to-min-qty-helper", "def raise_to_min_qty" in trader)
+    rec("entry-min-qty-retries", "raise_to_min_qty" in trader.split("def _entry_body", 1)[-1][:4000] or "min_tries" in trader)
+    one_cycle = trader.split("def _one_cycle", 1)[-1].split("def _watchdog_loop", 1)[0]
+    rec("config-reload-not-throttled", "maybe_reload_config" in one_cycle and "cycle % 8" not in one_cycle)
+    watch = trader.split("def _ctrl_watch_loop", 1)[-1].split("def _cycle_step", 1)[0]
+    rec("overlay-watch-wakes", "OVERLAY_PATH" in watch and 'kind = "config"' in watch)
+    rec("coord-refresh-after-save", "def _refresh_coordination" in trader and "self._refresh_coordination()" in trader)
+    rec("config-rank-only-on-universe", "rank_needed" in trader and "A settings" in trader)
     set_src = open(os.path.join(DIR, "set_engine.py"), encoding="utf-8").read()
+    rec("entry-cap-applies-when-min-live-zero", "A zero live-sample floor makes every row" in set_src)
     rec("replay-pool-else", "if w <= 1 or len(names) <= 1:" in set_src and "Keep at most one worker" in set_src)
     rec("replay-blas-pin", "def pin_compute_threads" in set_src)
     rec("replay-progress-no-preset", "self.progress.symbols_done = i" not in set_src.split("def replay_all", 1)[-1].split("def _commit_hist", 1)[0])
@@ -2945,6 +3038,9 @@ def main() -> int:
     from test_block_contract import BlockContractTests
     block_contract = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(BlockContractTests))
     rec("unit-block-contract", block_contract.wasSuccessful(), f"n={block_contract.testsRun}")
+    from test_block_calculations import BlockCalculationTests
+    block_calc = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(BlockCalculationTests))
+    rec("unit-block-calculations", block_calc.wasSuccessful(), f"n={block_calc.testsRun}")
     from test_vst_scheduling import VstSchedulingTests
     scheduling = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(VstSchedulingTests))
     rec("unit-vst-scheduling", scheduling.wasSuccessful(), f"n={scheduling.testsRun}")

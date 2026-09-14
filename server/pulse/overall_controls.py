@@ -216,7 +216,8 @@ def replace_existing(pulse, proxy, rows, signature):
                 pulse.save_open_book()
             if not hasattr(pulse,'_overall_replace_next'):pulse._overall_replace_next={}
             pulse._overall_replace_next[(proxy.symbol,proxy.side)] = time.monotonic()+15
-            pulse.last_error = 'overall replacement '+str(response.get('code'))+' '+str(response.get('msg') or '')[:120]
+            if not pulse.ok(response):
+                pulse.last_error = 'overall replacement '+str(response.get('code'))+' '+str(response.get('msg') or '')[:120]
             return False
         binding = intent['binding']
         for p in rows:
@@ -312,7 +313,32 @@ def ensure(pulse, pos):
         sl_values = [value for p in rows if (value := positive(getattr(p, 'sl', 0))) is not None]
         tp_values = [value for p in rows if (value := positive(getattr(p, 'tp', 0))) is not None]
         if not sl_values or not tp_values:
-            return False
+            desired = getattr(pulse, 'desired_sl_tp', None)
+            security = getattr(pulse, 'security_prices', None)
+            for p in rows:
+                sl_px = tp_px = 0.0
+                if callable(desired):
+                    try:
+                        sl_px, tp_px, _, _ = desired(p)
+                    except Exception:
+                        sl_px = tp_px = 0.0
+                if (sl_px <= 0 or tp_px <= 0) and callable(security):
+                    try:
+                        sec_sl, sec_tp = security(p)
+                        sl_px = sl_px or sec_sl
+                        tp_px = tp_px or sec_tp
+                    except Exception:
+                        pass
+                if sl_px > 0:
+                    sl_values.append(sl_px)
+                    if positive(getattr(p, 'sl', 0)) is None:
+                        p.sl = sl_px
+                if tp_px > 0:
+                    tp_values.append(tp_px)
+                    if positive(getattr(p, 'tp', 0)) is None:
+                        p.tp = tp_px
+            if not sl_values or not tp_values:
+                return False
         low = min(sl_values)
         high = max(tp_values)
         if pos.side == 'SHORT':

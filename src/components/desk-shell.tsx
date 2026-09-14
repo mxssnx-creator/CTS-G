@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Blocks, LayoutDashboard, LineChart, Pause, Play, Square, SlidersHorizontal } from "lucide-react";
+import { Blocks, ChartSpline, LayoutDashboard, LineChart, Pause, Play, Square, SlidersHorizontal } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useConnection } from "@/components/connection-provider";
 import { postControl, type ConnType } from "@/lib/connections";
@@ -25,20 +25,25 @@ export function DeskShell({
   const onResults = path.startsWith("/results");
   const onSettings = path.startsWith("/settings");
   const onSystem = path.startsWith("/system");
+  const onSweep = path.startsWith("/step-sweep");
   const title = onSettings
     ? "Settings & config"
     : onResults
       ? "Results"
       : onSystem
         ? "System"
-        : "Pulse desk";
+        : onSweep
+          ? "24h step sweep"
+          : "Pulse desk";
   const sub = onSettings
     ? "Per-connection CTS + overlay — Live and VST stay independent"
     : onResults
       ? "Closed tape, equity path, symbol and exit breakdown"
       : onSystem
         ? "Generic core · exchange / strategy / risk slots · extend without rewriting the loop"
-        : "Independent desks in parallel · pick Overall, Live or VST";
+        : onSweep
+          ? "Historic 24h sim · 5 most volatile · TP steps 3–12"
+          : "Independent desks in parallel · pick Overall, Live or VST";
   const types: { id: ConnType; label: string; hint: string }[] = [
     { id: "overall", label: "Overall", hint: "all" },
     { id: "live", label: "Live", hint: "USDT" },
@@ -112,6 +117,7 @@ export function DeskShell({
             <nav className="flex flex-wrap rounded-radius border border-border bg-surface p-1">
               <NavLink to="/" on={onDesk} icon={<LayoutDashboard className="size-4" />} label="Desk" />
               <NavLink to="/results" on={onResults} icon={<LineChart className="size-4" />} label="Results" />
+              <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="24h steps" />
               <NavLink to="/system" on={onSystem} icon={<Blocks className="size-4" />} label="System" />
               <NavLink to="/settings" on={onSettings} icon={<SlidersHorizontal className="size-4" />} label="Settings" />
             </nav>

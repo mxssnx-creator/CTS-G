@@ -8,6 +8,15 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from position_cost import (
+    INTERN_PF,
+    POSITION_COST_PCT_DEFAULT,
+    POSITIVE_PF,
+    cost_as_frac,
+    normalize_position_cost_pct,
+    ratio_from_r,
+)
+
 BLOCK_COUNT_MIN = 1
 BLOCK_COUNT_PREVIEW = 6
 BLOCK_EVAL_N = 6
@@ -75,6 +84,31 @@ def calculate_block_max_additional_ratio(
     return min(cap - 1.0, calculate_block_volume_increment_ratio(max_stack, volume_ratio))
 
 
+def shared_block_volume_ratio(
+    volume_ratio: float,
+    live_count: int,
+    extra_cap: float = 1.0,
+) -> float:
+    """Share the extra-size budget when count 1 would consume the whole cap.
+
+    Absolute target remains ``min(extra_cap, n × ratio)``. When the configured
+    ratio already saturates the extra cap at n=1, later live counts would have
+    stepQty=0. Split the extra evenly across live counts so each enabled rung
+    can emit, while the 2× parent cap is unchanged.
+    """
+    vr = clamp(finite_number(volume_ratio, BLOCK_VOL_RATIO_DEFAULT), BLOCK_VOL_RATIO_MIN, BLOCK_VOL_RATIO_MAX)
+    extra = max(0.0, finite_number(extra_cap, 1.0))
+    try:
+        n = max(1, int(live_count or 0))
+    except Exception:
+        n = 1
+    if n > 1 and extra > 0 and vr + 1e-12 >= extra:
+        # Effective split may sit below the configured slider floor; the floor
+        # applies to user input, not the derived per-count share.
+        return extra / float(n)
+    return vr
+
+
 def normalize_block_counts(value: Any) -> List[int]:
     if not isinstance(value, (list, tuple)):
         return list(range(1, BLOCK_EVAL_N + 1))
@@ -94,6 +128,23 @@ def calculate_block_minimum_profit_factor(
 
 def calculate_block_effective_minimum_profit_factor(configured: float, normal: float) -> float:
     return max(configured if configured > 0 else 0.0, normal if normal > 0 else 0.0)
+
+
+def cost_pf_from_net_fracs(samples: Optional[List[float]], cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """PositionCost ratio from cost-net fractions. Intern 1.00 != real 1.10.
+
+    ``samples`` are already cost-net fractions (0.001 = +0.10% net). Cost is
+    the CTS percent convention (0.10 = 0.10%); legacy fractions ≤ 0.02 are
+    accepted via ``cost_as_frac``.
+    """
+    vals = [float(x) for x in (samples or []) if x is not None]
+    if not vals:
+        return 0.0
+    cost_frac = cost_as_frac(normalize_position_cost_pct(cost_pct))
+    if cost_frac <= 1e-15:
+        return 0.0
+    avg_r = sum(v / cost_frac for v in vals) / len(vals)
+    return float(ratio_from_r(avg_r))
 
 
 @dataclass
@@ -156,7 +207,8 @@ class BlockBook:
         self.pause_ratio = max(0, int(finite_number(cfg.get("blockPauseCountRatio", 1) or 1, 1.0)))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
-        self.default_min_pf = float(cfg.get("defaultMinPF", 1.25) or 1.25)
+        self.default_min_pf = float(cfg.get("defaultMinPF", POSITIVE_PF) or POSITIVE_PF)
+        self.cost_pct = max(1e-9, float(cfg.get("positionCostPct", POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT))
         self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
         self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
         self.lanes: Dict[str, BlockLane] = {}
@@ -168,6 +220,17 @@ class BlockBook:
         """Return a stable lane key, optionally scoped to one logical range group."""
         base = f"{symbol}:{side}"
         return f"{base}:group:{group_key}" if group_key else base
+
+    def live_counts(self) -> List[int]:
+        """Enabled counts that may actually emit under the live stack cap."""
+        return [n for n in self.counts if n <= self.max_stack]
+
+    def extra_cap(self) -> float:
+        return max(0.0, float(self.max_volume_multiplier) - 1.0)
+
+    def effective_volume_ratio(self) -> float:
+        """Configured ratio, shared across live counts when n=1 would eat the cap."""
+        return shared_block_volume_ratio(self.volume_ratio, len(self.live_counts()), self.extra_cap())
 
     def load(self) -> None:
         if not os.path.exists(self.path):
@@ -371,7 +434,7 @@ class BlockBook:
 
     def cumulative_target(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> float:
         return max(0.0, finite_number(base_qty)) * calculate_block_max_additional_ratio(
-            count, self.volume_ratio, self.max_volume_multiplier
+            count, self.effective_volume_ratio(), self.max_volume_multiplier
         )
 
     def formula(self, base_qty: float, count: int, lane: Optional[BlockLane] = None) -> Dict[str, float]:
@@ -381,7 +444,7 @@ class BlockBook:
         target_add = self.cumulative_target(base_qty, n, lane)
         target_block = float(base_qty) + target_add
         inc = (target_add / float(base_qty)) if float(base_qty) > 0 else 0.0
-        min_pf = calculate_block_minimum_profit_factor(self.default_min_pf, self.pf_ratio, max(self.volume_ratio, inc))
+        min_pf = calculate_block_minimum_profit_factor(self.default_min_pf, self.pf_ratio, inc)
         return {
             "volumeIncrement": inc,
             "stepQty": step,
@@ -394,25 +457,17 @@ class BlockBook:
     def normal_pf(self, lane: BlockLane) -> float:
         ring = [x for x in lane.parent_pf_ring if x is not None][-self.window :]
         if len(ring) < 1:
-            # Parent is already live/qualified; inherit stage coordinate (CTS cold start).
-            return self.default_min_pf
-        # PositionCost-style: wins/losses ratio of +pnl vs -pnl magnitudes
-        gp = sum(x for x in ring if x > 0)
-        gl = abs(sum(x for x in ring if x < 0))
-        if gl <= 0:
-            return 2.0 if gp > 0 else 1.0
-        return gp / gl
+            # Parent is already live/qualified; inherit the real-stage floor.
+            return float(self.default_min_pf or POSITIVE_PF)
+        return cost_pf_from_net_fracs(ring, self.cost_pct)
 
     def observed_pf(self, lane: BlockLane, count: int) -> Tuple[float, int]:
         ring = (lane.pf_ring.get(count) or [])[-self.window :]
         if not ring:
             return self.normal_pf(lane), 0
-        gp = sum(x for x in ring if x > 0)
-        gl = abs(sum(x for x in ring if x < 0))
-        pf = (gp / gl) if gl > 0 else (2.0 if gp > 0 else 1.0)
-        return pf, len(ring)
+        return cost_pf_from_net_fracs(ring, self.cost_pct), len(ring)
 
-    def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = 1.0) -> Dict[str, Any]:
+    def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = INTERN_PF) -> Dict[str, Any]:
         # Gate against the same cumulative target used by the order planner.
         # This keeps PF coordination honest when a loss-held factor changes the
         # actual volume target; count × configured ratio would understate it.
@@ -422,13 +477,16 @@ class BlockBook:
         normal = self.normal_pf(lane)
         observed, n = self.observed_pf(lane, count)
         cold = n < self.min_samples
-        intern = float(intern_pf or 1.0)
+        intern = float(intern_pf or 0.0)
+        real_floor = float(self.default_min_pf or POSITIVE_PF)
         if cold:
-            observed = intern if intern > 0 else 1.0
-            effective = configured if count > 1 else float(self.default_min_pf or 1.25)
-            passes = observed + 1e-9 >= effective
+            # intern 1.00 is cost-neutral only. Extra size needs the real floor.
+            observed = intern if intern > 0 else INTERN_PF
+            effective = configured if count > 1 else real_floor
+            passes = observed + 1e-9 >= effective and observed + 1e-9 >= real_floor
         else:
             effective = calculate_block_effective_minimum_profit_factor(configured, normal)
+            effective = max(effective, real_floor)
             passes = observed + 1e-9 >= effective
         return {
             "coldStart": cold,
@@ -439,7 +497,7 @@ class BlockBook:
             "effectiveMinimumProfitFactor": effective,
             "passesProfitFactor": passes,
             "comparisonAvailable": not cold,
-            "internPf": round(intern, 4),
+            "internPf": round(intern if intern > 0 else INTERN_PF, 4),
         }
 
     def unlimited(self) -> bool:
@@ -486,7 +544,7 @@ class BlockBook:
                 lane.satisfied[c] = True
         self.save()
 
-    def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = 1.0, stack_cap: Optional[int] = None) -> List[Dict[str, Any]]:
+    def evaluate_counts(self, lane: BlockLane, live_n: int, intern_pf: float = INTERN_PF, stack_cap: Optional[int] = None) -> List[Dict[str, Any]]:
         """Evaluate all six independently; order selection remains serialized."""
         rows = []
         if not self.enabled or not lane.active or lane.base_qty <= 0:
@@ -585,7 +643,7 @@ class BlockBook:
                 block_count=n,
                 quantity=filled,
                 base_quantity=lane.base_qty,
-                volume_ratio=self.volume_ratio,
+                volume_ratio=self.effective_volume_ratio(),
                 volume_increment_ratio=f["volumeIncrement"],
                 target_additional_quantity=f["targetAddQty"],
                 confirmed_additional_quantity_before=before,
@@ -649,7 +707,7 @@ class BlockBook:
         for lane in self.lanes.values():
             if not lane.active and not lane.legs:
                 continue
-            rows = self.evaluate_counts(lane, live_n=1 if lane.active else 0, intern_pf=1.2)
+            rows = self.evaluate_counts(lane, live_n=1 if lane.active else 0, intern_pf=float(self.default_min_pf or POSITIVE_PF))
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
@@ -683,6 +741,7 @@ class BlockBook:
                 ],
             })
         catalog = []
+        vr_eff = self.effective_volume_ratio()
         for n in self._eval_range():
             f = self.formula(1.0, n)
             avg, n_avg = self.count_avg(n)
@@ -706,7 +765,8 @@ class BlockBook:
             "evalN": int(self.eval_n or BLOCK_EVAL_N),
             "countN": len(catalog),
             "allCounts": catalog,
-            "volumeRatio": self.volume_ratio,
+            "volumeRatio": vr_eff,
+            "configuredVolumeRatio": self.volume_ratio,
             "maxVolumeMultiplier": self.max_volume_multiplier,
             "enabledCounts": self.counts,
             "profitFactorRatio": self.pf_ratio,
@@ -740,6 +800,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-parse-set", parse_block_count("xrp-usdt:short#block:set:3") == 3)
     rec("blk-parse-plain", parse_block_count("aaa:long#block:1") == 1)
     rec("blk-parse-none", parse_block_count("general:1m:sl0.6") is None)
+    rec("blk-share-n1-eats-cap", abs(shared_block_volume_ratio(1.0, 3, 1.0) - (1.0 / 3.0)) < 1e-12)
+    rec("blk-share-preview-not-stack", abs(shared_block_volume_ratio(1.0, 6, 1.0) - (1.0 / 6.0)) < 1e-12)
+    rec("blk-share-keeps-025", abs(shared_block_volume_ratio(0.25, 6, 1.0) - 0.25) < 1e-12)
+    rec("blk-share-single-keeps", abs(shared_block_volume_ratio(1.0, 1, 1.0) - 1.0) < 1e-12)
 
     b = BlockBook(os.path.join(tmp, "main.json"), {
         "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 0.25,
@@ -748,6 +812,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     })
     rec("blk-zero-remap", BlockBook(os.path.join(tmp, "z.json"), {"blockMaxStack": 0}).max_stack == 6)
     rec("blk-not-unlimited", not b.unlimited())
+    rec("blk-025-not-shared", abs(b.effective_volume_ratio() - 0.25) < 1e-12, str(b.effective_volume_ratio()))
 
     long = b.register_parent("SOL-USDT", "LONG", 10.0, 100.0)
     short = b.register_parent("SOL-USDT", "SHORT", 8.0, 100.0)
@@ -817,8 +882,27 @@ def self_test() -> List[Tuple[str, bool, str]]:
     lane4.pf_ring[2] = [0.003] * 8
     lane4.parent_pf_ring = [0.003] * 8
     d_win = b.pf_decision(lane4, 2, intern_pf=1.0)
-    rec("blk-warm-win-passes", d_win["passesProfitFactor"] is True and d_win["observedProfitFactor"] >= 1.0,
+    rec("blk-warm-win-passes", d_win["passesProfitFactor"] is True and d_win["observedProfitFactor"] + 1e-9 >= POSITIVE_PF,
         str(d_win))
+
+    intern_lane = BlockLane(symbol="INTERN-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
+    d_intern = b.pf_decision(intern_lane, 1, intern_pf=INTERN_PF)
+    rec("blk-intern-1.00-not-real", d_intern["passesProfitFactor"] is False and d_intern["coldStart"] is True,
+        str(d_intern))
+    d_real = b.pf_decision(intern_lane, 1, intern_pf=POSITIVE_PF)
+    rec("blk-real-1.10-n1-cold", d_real["passesProfitFactor"] is True and d_real["coldStart"] is True,
+        str(d_real))
+    cost_lane = BlockLane(symbol="COST-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
+    cost_lane.pf_ring[1] = [0.001] * 8  # +0.10% net = +1.0R at 0.10% cost → 1.10
+    cost_lane.parent_pf_ring = [0.001] * 8
+    d_eq = b.pf_decision(cost_lane, 1, intern_pf=INTERN_PF)
+    rec("blk-cost-pf-1R-is-1.10", abs(d_eq["observedProfitFactor"] - POSITIVE_PF) < 1e-9 and d_eq["passesProfitFactor"] is True,
+        str(d_eq))
+    rec("blk-default-min-is-real", abs(float(b.default_min_pf) - POSITIVE_PF) < 1e-9, str(b.default_min_pf))
+    rec("blk-cost-pf-matches-r", abs(cost_pf_from_net_fracs([0.001] * 5) - POSITIVE_PF) < 1e-9)
+    rec("blk-cost-pf-015", abs(cost_pf_from_net_fracs([0.0015] * 5, 0.15) - POSITIVE_PF) < 1e-9,
+        str(cost_pf_from_net_fracs([0.0015] * 5, 0.15)))
+    rec("blk-cost-pf-empty", cost_pf_from_net_fracs([]) == 0.0)
 
     # PF gates must use the same cumulative target as volume planning when a
     # loss-held factor changes a rung; count×ratio would understate the gate.
@@ -829,6 +913,42 @@ def self_test() -> List[Tuple[str, bool, str]]:
     held_decision = b.pf_decision(held_lane, 2, intern_pf=1.5)
     rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - 1.055) < 1e-9,
         str(held_decision))
+    rec("blk-formula-minpf-is-inc",
+        abs(b.formula(10.0, 2)["blockMinPF"] - held_decision["configuredMinimumProfitFactor"]) < 1e-9)
+
+    # Overlay-like vr=1 / stack=3 must share extra so n=2,3 have non-zero step.
+    ov = BlockBook(os.path.join(tmp, "ov.json"), {
+        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0,
+        "blockProfitFactorRatio": 1.1, "defaultMinPF": POSITIVE_PF,
+    })
+    rec("blk-ov-share-live-3", abs(ov.effective_volume_ratio() - (1.0 / 3.0)) < 1e-12
+        and ov.volume_ratio == 1.0, str(ov.effective_volume_ratio()))
+    steps = [ov.step_qty(10.0, n) for n in range(1, 4)]
+    rec("blk-ov-all-live-steps", all(s > 1e-12 for s in steps) and abs(sum(steps) - 10.0) < 1e-9,
+        str(steps))
+    rec("blk-ov-n3-hits-2x", abs(ov.formula(10.0, 3)["targetBlockQty"] - 20.0) < 1e-9,
+        str(ov.formula(10.0, 3)))
+    rec("blk-ov-n4-not-live", ov.formula(10.0, 4)["stepQty"] == 0.0 or 4 not in ov.live_counts())
+    lane_ov = ov.register_parent("OV-USDT", "LONG", 10.0, 100.0)
+    filled = 0.0
+    for n in (1, 2, 3):
+        pick_n = ov.pick_emit(ov.evaluate_counts(lane_ov, live_n=1, intern_pf=1.5))
+        rec(f"blk-ov-seq-n{n}", pick_n is not None and int(pick_n["blockCount"]) == n
+            and abs(float(pick_n["requestedAddQty"]) - (10.0 / 3.0)) < 1e-9,
+            f"n={pick_n and pick_n.get('blockCount')} qty={pick_n and pick_n.get('requestedAddQty')}")
+        if pick_n:
+            ov.record_fill(lane_ov, pick_n, float(pick_n["requestedAddQty"]), f"ov{n}", f"o{n}")
+            filled += float(pick_n["requestedAddQty"])
+    rec("blk-ov-seq-2x", abs(filled - 10.0) < 1e-9 and abs(lane_ov.base_qty + lane_ov.confirmed_add - 20.0) < 1e-9
+        and ov.next_unsatisfied(lane_ov) is None, f"add={lane_ov.confirmed_add}")
+
+    # vr=2 / 6 counts: share extra/6, never exceed 2×, every live step > 0.
+    fat = BlockBook(os.path.join(tmp, "fat.json"), {
+        "blockMaxStack": 6, "blockVolumeRatio": 2.0, "defaultMinPF": POSITIVE_PF,
+    })
+    rec("blk-fat-share-6", abs(fat.effective_volume_ratio() - (1.0 / 6.0)) < 1e-12, str(fat.effective_volume_ratio()))
+    rec("blk-fat-all-steps", all(fat.step_qty(12.0, n) > 1e-12 for n in range(1, 7))
+        and abs(fat.formula(12.0, 6)["targetBlockQty"] - 24.0) < 1e-9)
 
     # parent close isolates sides + stores cost-net fraction
     b.on_parent_close("SOL-USDT", "LONG", 1.5, pnl_pct=0.0015)
@@ -846,6 +966,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     snap = b.snapshot()
     rec("blk-snap-6", int(snap.get("countN") or 0) == 6 and int(snap.get("evalN") or 0) == 6, str(snap.get("countN")))
     rec("blk-snap-live-flag", sum(1 for c in snap.get("allCounts") or [] if c.get("liveStack")) == 3)
+    rec("blk-snap-configured-ratio", abs(float(snap.get("configuredVolumeRatio") or 0) - 0.25) < 1e-12)
 
     scale_lane = BlockLane(symbol="SC-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     scale_lane.pf_ring[1] = [-0.01] * 1
@@ -876,6 +997,26 @@ def self_test() -> List[Tuple[str, bool, str]]:
     live_req = [r for r in cap_rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0]
     rec("blk-stack-cap-1", all(int(r["blockCount"]) == 1 for r in live_req) and len(live_req) >= 1, str([(r["blockCount"], r.get("requestedAddQty")) for r in live_req]))
     rec("blk-stack-cap-evals-6", sum(1 for r in cap_rows if r.get("kind") == "regular") == 6, str(sum(1 for r in cap_rows if r.get("kind") == "regular")))
+
+    # Merge parent grows the sizing anchor, not confirmed adds.
+    merged = BlockBook(os.path.join(tmp, "merge.json"), {"blockMaxStack": 3, "blockVolumeRatio": 0.25, "defaultMinPF": POSITIVE_PF})
+    m_lane = merged.register_parent("MRG-USDT", "LONG", 10.0, 100.0)
+    merged.merge_parent("MRG-USDT", "LONG", 5.0, 110.0)
+    rec("blk-merge-qty", abs(m_lane.base_qty - 15.0) < 1e-12 and abs(m_lane.confirmed_add) < 1e-12)
+    rec("blk-merge-entry", abs(m_lane.base_entry - ((100.0 * 10 + 110.0 * 5) / 15.0)) < 1e-9, str(m_lane.base_entry))
+    rec("blk-merge-targets-scale", abs(merged.formula(m_lane.base_qty, 1)["targetAddQty"] - 3.75) < 1e-9)
+
+    # minPF for vr>cap uses the capped increment, not the raw ratio.
+    wide = BlockBook(os.path.join(tmp, "wide.json"), {
+        "blockMaxStack": 1, "blockVolumeRatio": 2.0, "blockCounts": [1],
+        "blockProfitFactorRatio": 1.1, "defaultMinPF": POSITIVE_PF,
+    })
+    rec("blk-wide-inc-capped", abs(wide.formula(10.0, 1)["volumeIncrement"] - 1.0) < 1e-12)
+    rec("blk-wide-minpf-uses-inc", abs(wide.formula(10.0, 1)["blockMinPF"] - 1.11) < 1e-9,
+        str(wide.formula(10.0, 1)["blockMinPF"]))
+    rec("blk-wide-pf-matches-formula",
+        abs(wide.pf_decision(BlockLane("W", "LONG", 10.0, 1.0), 1, intern_pf=1.5)["configuredMinimumProfitFactor"]
+            - wide.formula(10.0, 1)["blockMinPF"]) < 1e-12)
     return out
 
 

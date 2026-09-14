@@ -2137,7 +2137,24 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self._json({"ok": False, "detail": str(exc)[:160]}, 400)
             return
-        self._json({"ok": True, "overlay": cur, "conn": conn})
+        dest = os.path.join(DIR, f"overlay-{resolve_conn(conn)}.json")
+        try:
+            applied_at = os.path.getmtime(dest)
+        except Exception:
+            applied_at = time.time()
+        self._json({
+            "ok": True,
+            "overlay": cur,
+            "conn": conn,
+            "appliedAt": applied_at,
+            "reload": "queued",
+            "symbolCap": cur.get("symbolCap"),
+            "maxOpen": cur.get("maxOpen"),
+            "normalExecutionEnabled": cur.get("normalExecutionEnabled"),
+            "controlOrders": cur.get("controlOrders"),
+            "dcaEnabled": cur.get("dcaEnabled"),
+            "blockActive": cur.get("blockActive"),
+        })
 
 
 def heal_loop() -> None:

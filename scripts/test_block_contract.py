@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server" / "pulse"))
-from block_engine import BlockBook, calculate_block_volume_multiplier, normalize_block_counts
+from block_engine import BlockBook, BlockLane, calculate_block_volume_multiplier, normalize_block_counts
 from set_engine import SetBook
 import pulse_trader as trader
 
@@ -38,15 +38,55 @@ class BlockContractTests(unittest.TestCase):
             for ratio in [.05, .1, .15, .25, .4, .8, 1, 2]:
                 for cap in [1, 1.1, 1.5, 2]:
                     b = self.book(blockVolumeRatio=ratio, blockMaxVolumeMultiplier=cap)
+                    vr = b.effective_volume_ratio()
+                    extra = max(0.0, cap - 1)
                     lane = b.register_parent("XRP-USDT", "LONG", base, 1)
                     lane.held_factor = {n: float(n) for n in range(1, 7)}
+                    prev = 0.0
                     for count in range(1, 7):
                         with self.subTest(base=base, ratio=ratio, cap=cap, count=count):
                             f = b.formula(base, count, lane)
-                            self.assertAlmostEqual(f["targetBlockQty"], base * (1 + min(count * ratio, cap - 1)))
-                            self.assertLessEqual(f["targetBlockQty"], base * 2 + 1e-10)
+                            self.assertAlmostEqual(f["targetBlockQty"], base * (1 + min(count * vr, extra)))
+                            self.assertLessEqual(f["targetBlockQty"], base * cap + 1e-10)
                             self.assertGreaterEqual(f["stepQty"], 0)
+                            self.assertAlmostEqual(f["targetAddQty"], prev + f["stepQty"])
+                            if count in b.live_counts() and ratio + 1e-12 >= extra > 0 and len(b.live_counts()) > 1:
+                                self.assertGreater(f["stepQty"], 0)
+                            prev = f["targetAddQty"]
                     b.lanes.clear()  # Each grid cell has an independent parent.
+
+    def test_overlay_ratio_one_shares_live_stack_not_preview(self):
+        b = self.book(blockMaxStack=3, blockVolumeRatio=1.0)
+        self.assertAlmostEqual(b.effective_volume_ratio(), 1 / 3)
+        self.assertEqual(b.volume_ratio, 1.0)
+        self.assertEqual(b.live_counts(), [1, 2, 3])
+        steps = [b.step_qty(9, n) for n in range(1, 4)]
+        self.assertTrue(all(s > 0 for s in steps))
+        self.assertAlmostEqual(sum(steps), 9)
+        self.assertAlmostEqual(b.formula(9, 3)["targetBlockQty"], 18)
+        dead = [b.step_qty(9, n) for n in range(4, 7)]
+        self.assertTrue(all(abs(s) < 1e-12 or n not in b.live_counts() for n, s in zip(range(4, 7), dead)))
+
+    def test_default_quarter_ratio_is_not_rewritten(self):
+        b = self.book(blockMaxStack=6, blockVolumeRatio=.25)
+        self.assertAlmostEqual(b.effective_volume_ratio(), .25)
+        self.assertAlmostEqual(b.formula(4, 4)["targetBlockQty"], 8)
+        self.assertAlmostEqual(b.step_qty(4, 5), 0)
+        self.assertAlmostEqual(b.step_qty(4, 6), 0)
+
+    def test_position_cost_pf_uses_book_cost_and_never_intern(self):
+        from position_cost import INTERN_PF, POSITIVE_PF, cost_as_frac
+        b = self.book(positionCostPct=0.15, defaultMinPF=POSITIVE_PF)
+        lane = BlockLane("PF-USDT", "LONG", 10, 100)
+        one_r = cost_as_frac(0.15)
+        lane.pf_ring[1] = [one_r] * 8
+        lane.parent_pf_ring = [one_r] * 8
+        d = b.pf_decision(lane, 1, intern_pf=INTERN_PF)
+        self.assertAlmostEqual(d["observedProfitFactor"], POSITIVE_PF)
+        self.assertTrue(d["passesProfitFactor"])
+        cold = b.pf_decision(BlockLane("C", "LONG", 10, 100), 1, intern_pf=INTERN_PF)
+        self.assertFalse(cold["passesProfitFactor"])
+        self.assertTrue(cold["coldStart"])
 
     def test_partial_fills_only_request_remaining_target(self):
         b = self.book(blockCounts=[4])

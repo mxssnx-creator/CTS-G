@@ -7,6 +7,8 @@ import {
   overlayFromCts,
   rankedSymbolCap,
   syncOverlayFlags,
+  blockTable,
+  sharedBlockVolumeRatio,
 } from "./config-model.ts";
 
 test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
@@ -54,7 +56,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.02, key);
+      assert.equal(value[key], 1.1, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -89,15 +91,15 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   assert.equal(value.setMaxDdTimeS, 57600);
 });
 
-test("new and legacy settings default to unlimited logical positions, independent lanes and unlimited symbols", () => {
+test("new and legacy settings default to ranked 50, 100 opens, independent lanes", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
     assert.equal(value.setMaxActive, 0);
-    assert.equal(value.maxOpen, 0);
+    assert.equal(value.maxOpen, 100);
     assert.equal(value.controlOrdersPerConfig, true);
     assert.equal(value.entryPolicyMaxCandidates, 0);
-    assert.equal(value.dcaEnabled, true);
+    assert.equal(value.dcaEnabled, false);
     assert.equal(value.stratDca, true);
     assert.equal(value.modules?.["strategy.dca"], true);
     assert.equal(value.stratGeneral, true);
@@ -110,9 +112,14 @@ test("new and legacy settings default to unlimited logical positions, independen
     for (const key of ["strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls"] as const) {
       assert.equal(value.modules?.[key], true, key);
     }
-    assert.equal(value.symbolCap, 0);
-    assert.equal(isUnlimitedSymbolBook(value), true);
+    assert.equal(value.symbolCap, DEFAULT_SYMBOL_COUNT);
+    assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
+    assert.equal(value.minPf, 1.1);
+    assert.equal(value.baseMinPf, 1.1);
+    assert.equal(value.histLookbackBars, 2880);
+    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.setMinStep, 1);
   }
 });
 
@@ -154,7 +161,22 @@ test("Control holdout defaults off and preserves zero independently of PF and la
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
     assert.equal(value.baseEvalPosCount, 30);
-    assert.equal(value.minPf, 1.02);
+    assert.equal(value.minPf, 1.1);
     assert.equal(value.controlOrdersPerConfig, true);
   }
+});
+
+test("Block table shares overlay ratio 1.0 across the live stack, not the 6-count preview", () => {
+  assert.equal(sharedBlockVolumeRatio(1, 3, 1), 1 / 3);
+  assert.equal(sharedBlockVolumeRatio(0.25, 6, 1), 0.25);
+  const rows = blockTable(1, 1.1, 1.1, 1, 3, 2, [1, 2, 3, 4, 5, 6]);
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((row) => row.step > 0));
+  assert.equal(Math.round(rows[0].inc * 1e9) / 1e9, Math.round((1 / 3) * 1e9) / 1e9);
+  assert.equal(rows[2].tot, 2);
+  const quarter = blockTable(0.25, 1.1, 1.1, 1, 6, 2);
+  assert.equal(quarter[0].tot, 1.25);
+  assert.equal(quarter[3].tot, 2);
+  assert.equal(quarter[5].tot, 2);
+  assert.equal(quarter[4].step, 0);
 });

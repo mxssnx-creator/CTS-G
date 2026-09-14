@@ -102,11 +102,12 @@ class ContinuousTests(AllValidEntries):
                 b.by_idx[0].hist=self.tape()
                 if score:b._score_pair((b.by_idx[0],None))
             if names==['SOL-USDT']:
+                if score:b._score_pair((b.by_idx[0],None))
                 self.assertTrue(b.by_idx[0].stage_ledger['real'])
             return True
         p._replay_sets_isolated=publish
         self.assertTrue(p._hist_replay_chunked(['XRP-USDT','BCH-USDT','SOL-USDT'],False,3))
-        self.assertEqual(scores,[True,True,True])
+        self.assertEqual(scores,[True,False,True])
 
     def test_deactivation_uses_exact_window(self):
         b=self.book(1);b.deact_n=5;st=b.by_idx[0]

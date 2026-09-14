@@ -395,8 +395,8 @@ function SettingsPage() {
   };
   const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, DEFAULT_OVERLAY.realMinPf);
   const table = useMemo(
-    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1, 0, overlay.blockMaxVolumeMultiplier),
-    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, overlay.blockMaxVolumeMultiplier],
+    () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1, overlay.blockMaxStack, overlay.blockMaxVolumeMultiplier, overlay.blockCounts),
+    [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, overlay.blockMaxStack, overlay.blockMaxVolumeMultiplier, overlay.blockCounts],
   );
 
   const onSave = async (target = conn) => {
@@ -416,7 +416,12 @@ function SettingsPage() {
       dirtyRef.current = false;
       setDirty(false);
       if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
-      setSaveMsg(`${r.detail} · historic calculation remains manual`);
+      setSaveMsg(`${r.detail} · coordinations rebound`);
+      try {
+        window.dispatchEvent(new Event("pulse:control"));
+      } catch {
+        /* ignore */
+      }
     }
   };
 

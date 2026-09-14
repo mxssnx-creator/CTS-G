@@ -381,11 +381,17 @@ class LoadGovernor:
                 self.cgroup_current_mb = 0.0
             try:
                 events = cgroup_memory_events()
-                self.cgroup_event_delta = {
-                    key: max(0, int(value) - int(self.cgroup_events.get(key, 0)))
-                    for key, value in events.items()
-                }
-                self.cgroup_events = dict(events)
+                if not self.cgroup_events:
+                    # Historical OOM counters from a prior process in this
+                    # cgroup are a baseline, not a fresh kill this cycle.
+                    self.cgroup_events = dict(events)
+                    self.cgroup_event_delta = {key: 0 for key in events}
+                else:
+                    self.cgroup_event_delta = {
+                        key: max(0, int(value) - int(self.cgroup_events.get(key, 0)))
+                        for key, value in events.items()
+                    }
+                    self.cgroup_events = dict(events)
             except Exception:
                 self.cgroup_event_delta = {}
             self.n_sym = int(n_sym)
@@ -796,6 +802,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     g = LoadGovernor()
     g._host_avail_override = 8192.0
+    g.cgroup_mb = 4096.0
+    g._cgroup_current_override = 42.0
     b = g.observe(n_sym=12, n_open=1, hot_ms=40, warm_ms=70, rss_mb=42.0)
     out.append(("load-level-calm", b.level in ("idle", "normal"), f"level={b.level} chunk={b.scan_chunk}"))
     out.append(("load-chunk-fits", b.scan_chunk >= 8 and b.scan_chunk <= 12, f"chunk={b.scan_chunk}"))

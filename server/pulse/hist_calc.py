@@ -921,6 +921,13 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
             for d, v in raw.items()
             if isinstance(v, dict)
         }
+    windows = dict(g("evaluation_windows", getattr(st, "evaluation_windows", {})) or {})
+    if not windows:
+        windows = evaluation_windows(
+            getattr(st, "hist", None) or [],
+            float(getattr(st, "position_cost_pct", 0) or 0.1),
+            ordered=False,
+        )
     return {
         "id": st.id if not want else f"{st.id}:{want.lower()}",
         "kind": st.kind,
@@ -937,7 +944,7 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
         "last15Ratio": round(pf, 4),
         "last15N": n15,
         "last15R": round(float(g("last15_r", st.last15_r) or 0), 4),
-        "evaluationWindows": dict(g("evaluation_windows", getattr(st, "evaluation_windows", {})) or {}),
+        "evaluationWindows": windows,
         "last25AvgR": round(float(g("last25_avg_r", st.last25_avg_r) or 0), 4),
         "maxDdS": float(g("max_dd_s", st.max_dd_s) or 0),
         "avgDdS": float(g("avg_dd_s", st.avg_dd_s) or 0),
@@ -1024,6 +1031,210 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
             ),
         }
     return out
+
+
+def step_metric_blob(
+    seq: Sequence[Any],
+    book: SetBook,
+    *,
+    n_total: int,
+    set_count: int = 0,
+    validated_sets: int = 0,
+) -> Dict[str, Any]:
+    """Cost-net PF / DDT blob used by step and range-count rollups."""
+    cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0)
+    need = book.eval_need()
+    tail = last_n_chrono(seq, cap, ordered=True)
+    pf = last_n_cost_pf(tail, book.pf_n, book.cost_pct, ordered=True, simple=True)
+    nets = [row_net_pnl(r, book.cost_pct) for r in tail]
+    wins = sum(1 for x in nets if x > 0)
+    decided = sum(1 for x in nets if x != 0)
+    dd = drawdown_time_by_symbol(tail, ordered=True) if tail else {"maxS": 0.0, "avgS": 0.0, "maxDepth": 0.0}
+    max_dd = float(dd.get("maxS") or 0)
+    ratio = float(pf["ratio"] or 0)
+    pf_dd = ratio / max(0.05, (max_dd / 3600.0) + 0.05)
+    return {
+        "n": int(n_total),
+        "sets": int(set_count),
+        "validatedSets": int(validated_sets),
+        "pf": round(ratio, 4),
+        "classicPf": round(float(pf.get("classicPf") or 0), 4),
+        "netAvg": round(float(pf.get("netAvg") or 0), 6),
+        "last15N": int(pf["count"]),
+        "maxDdS": round(max_dd, 1),
+        "avgDdS": round(float(dd.get("avgS") or 0), 1),
+        "maxDepth": round(float(dd.get("maxDepth") or 0), 6),
+        "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
+        "validated": int(pf["count"]) > 0 and is_positive_pf(ratio),
+        "pfDdRatio": round(pf_dd, 4),
+        "costSubtracted": True,
+        "lastPosWindow": int(book.pf_n or 15),
+        "evaluationWindows": evaluation_windows(
+            tail, book.cost_pct, required_samples=need, ordered=True, simple=True
+        ),
+    }
+
+
+def step_rollup(book: SetBook) -> Dict[str, Any]:
+    """Independent TP-step books plus cumulative 3..N range-count listings."""
+    cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0)
+    steps = [int(s) for s in (getattr(book, "steps", None) or [])] or sorted({int(st.step) for st in book.by_idx})
+    by_parts: Dict[int, List[Any]] = {s: [] for s in steps}
+    by_n: Dict[int, int] = {s: 0 for s in steps}
+    by_sets: Dict[int, int] = {s: 0 for s in steps}
+    by_valid: Dict[int, int] = {s: 0 for s in steps}
+    by_dd: Dict[int, float] = {s: 0.0 for s in steps}
+    by_side_parts: Dict[int, Dict[str, List[Any]]] = {s: {"LONG": [], "SHORT": []} for s in steps}
+    by_sym_parts: Dict[int, Dict[str, List[Any]]] = {s: {} for s in steps}
+    by_sl_parts: Dict[Tuple[int, float], List[Any]] = {}
+    listings: Dict[int, List[Dict[str, Any]]] = {s: [] for s in steps}
+
+    for st in book.by_idx:
+        step = int(st.step)
+        if step not in by_parts:
+            by_parts[step] = []
+            by_n[step] = 0
+            by_sets[step] = 0
+            by_valid[step] = 0
+            by_dd[step] = 0.0
+            by_side_parts[step] = {"LONG": [], "SHORT": []}
+            by_sym_parts[step] = {}
+            listings[step] = []
+        by_sets[step] += 1
+        by_n[step] += int(st.n or 0)
+        by_dd[step] = max(by_dd.get(step, 0.0), float(st.max_dd_s or 0))
+        n15 = int(st.last15_n or 0)
+        pf = float(st.last15_ratio or 0)
+        if n15 > 0 and is_positive_pf(pf):
+            by_valid[step] += 1
+        hist = list(st.hist or [])
+        if hist:
+            by_parts[step].append(hist)
+            sl_key = (step, round(float(st.sl_ratio or 0), 2))
+            by_sl_parts.setdefault(sl_key, []).append(hist)
+            for row in hist:
+                side = str(row.get("side") or row.get("direction") or "")
+                if side:
+                    key = "LONG" if side[0] in "Ll" else ("SHORT" if side[0] in "Ss" else "")
+                    if key:
+                        bucket = by_side_parts[step][key]
+                        bucket.append(row)
+                        if len(bucket) > cap * 4:
+                            by_side_parts[step][key] = last_n_chrono(bucket, cap)
+                sym = str(row.get("symbol") or "")
+                if sym:
+                    sb = by_sym_parts[step].setdefault(sym, [])
+                    sb.append(row)
+                    if len(sb) > cap * 4:
+                        by_sym_parts[step][sym] = last_n_chrono(sb, cap)
+        listings[step].append({
+            "id": st.id,
+            "pack": st.pack,
+            "kind": st.kind,
+            "slRatio": round(float(st.sl_ratio or 0), 2),
+            "trailKey": st.trail_key or "",
+            "n": int(st.n or 0),
+            "pf": round(pf, 4),
+            "last15N": n15,
+            "maxDdS": round(float(st.max_dd_s or 0), 1),
+            "wr": round(float(st.wr or 0), 1),
+            "netAvg": round(float(st.expectancy or 0), 6),
+            "validated": n15 > 0 and is_positive_pf(pf),
+        })
+
+    by_step: Dict[str, Any] = {}
+    seq_by_step: Dict[int, List[Any]] = {}
+    for step in sorted(by_parts):
+        seq = _bounded_tape(by_parts[step], cap)
+        seq_by_step[step] = seq
+        blob = step_metric_blob(
+            seq, book, n_total=by_n[step], set_count=by_sets[step], validated_sets=by_valid[step],
+        )
+        blob["maxDdS"] = round(max(float(blob.get("maxDdS") or 0), float(by_dd.get(step) or 0)), 1)
+        need = book.eval_need()
+        eligible = [r for r in listings[step] if int(r.get("last15N") or 0) >= need]
+        if eligible:
+            mean_pf = sum(float(r.get("pf") or 0) for r in eligible) / len(eligible)
+            blob["tailPf"] = blob["pf"]
+            blob["pf"] = round(mean_pf, 4)
+            blob["validated"] = is_positive_pf(mean_pf)
+        blob["pfDdRatio"] = round(float(blob.get("pf") or 0) / max(0.05, (float(blob["maxDdS"]) / 3600.0) + 0.05), 4)
+        cost = float(book.cost_pct or 0.10)
+        if cost > 0.05:
+            cost = cost / 100.0
+        tp = round(float(step) * cost * 100.0, 4)
+        ranked = sorted(
+            listings[step],
+            key=lambda r: (0 if r["validated"] else 1, -float(r["pf"]), float(r["maxDdS"]), -int(r["n"])),
+        )
+        by_side: Dict[str, Any] = {}
+        for d in DIRECTIONS:
+            raw = by_side_parts[step].get(d) or []
+            sub = last_n_chrono(raw, cap)
+            if not raw:
+                continue
+            by_side[d] = step_metric_blob(sub, book, n_total=len(raw))
+        by_sym: List[Dict[str, Any]] = []
+        for sym, rows in by_sym_parts[step].items():
+            sub = last_n_chrono(rows, cap)
+            item = step_metric_blob(sub, book, n_total=len(rows))
+            item["symbol"] = sym
+            by_sym.append(item)
+        by_sym.sort(key=lambda r: (0 if r["validated"] else 1, -r["pf"], r["maxDdS"]))
+        by_step[str(step)] = {
+            **blob,
+            "step": step,
+            "tpPct": tp,
+            "bySide": by_side,
+            "bySymbol": by_sym,
+            "listings": ranked[:24],
+            "listingCount": len(ranked),
+        }
+
+    heatmap: List[Dict[str, Any]] = []
+    for (step, sl), parts in sorted(by_sl_parts.items()):
+        seq = _bounded_tape(parts, cap)
+        cell = step_metric_blob(seq, book, n_total=sum(len(p) for p in parts), set_count=len(parts))
+        cell["step"] = step
+        cell["slRatio"] = sl
+        heatmap.append(cell)
+
+    ranges: List[Dict[str, Any]] = []
+    if steps:
+        lo = min(steps)
+        for hi in steps:
+            parts = [seq_by_step[s] for s in steps if lo <= s <= hi and seq_by_step.get(s)]
+            seq = _bounded_tape(parts, cap) if parts else []
+            blob = step_metric_blob(
+                seq,
+                book,
+                n_total=sum(by_n.get(s, 0) for s in steps if lo <= s <= hi),
+                set_count=sum(by_sets.get(s, 0) for s in steps if lo <= s <= hi),
+                validated_sets=sum(by_valid.get(s, 0) for s in steps if lo <= s <= hi),
+            )
+            included = [s for s in steps if lo <= s <= hi]
+            step_pfs = [float((by_step.get(str(s)) or {}).get("pf") or 0) for s in included]
+            blob["tailPf"] = blob.get("pf")
+            if step_pfs:
+                blob["pf"] = round(sum(step_pfs) / len(step_pfs), 4)
+                blob["validated"] = is_positive_pf(blob["pf"])
+            blob["maxDdS"] = round(max((by_dd.get(s) or 0) for s in included) if included else 0.0, 1)
+            blob["pfDdRatio"] = round(float(blob.get("pf") or 0) / max(0.05, (float(blob["maxDdS"]) / 3600.0) + 0.05), 4)
+            blob.update({
+                "minStep": lo,
+                "stepMax": hi,
+                "stepCount": hi - lo + 1,
+                "label": f"{lo}–{hi}" if hi != lo else str(lo),
+                "steps": included,
+            })
+            ranges.append(blob)
+
+    return {
+        "steps": [int(s) for s in sorted(by_parts)],
+        "byStep": by_step,
+        "ranges": ranges,
+        "heatmap": heatmap,
+    }
 
 
 def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]] = None, strat: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
@@ -2252,6 +2463,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 by_sym = sym_fut.result()
                 by_dir = dir_fut.result()
                 by_strat = strat_fut.result()
+        by_step = step_rollup(book)
         rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
         listings = catalog_listings(book, ranked, symbols)
         evaluation_summary = {
@@ -2291,6 +2503,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "bySymbol": by_sym,
             "byDirection": by_dir,
             "byStrategy": by_strat,
+            "byStep": by_step,
             "listings": listings,
             "index": listings.get("indexById") or {},
             "kinds": kinds,

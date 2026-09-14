@@ -30,6 +30,7 @@ from position_cost import (
     evaluation_windows,
     is_positive_pf,
     last_n_cost_pf,
+    overall_last_pos_eval,
     normalize_pf,
     signed_result_r,
     snap_ratio,
@@ -50,7 +51,13 @@ from position_cost import (
     filter_side,
 )
 from contracts import AXES, INDICATION_KINDS, VOLUME_RATIO_UNIT, stable_key
-from block_engine import calculate_block_max_additional_ratio, clamp_stack, finite_number, normalize_block_counts
+from block_engine import (
+    calculate_block_max_additional_ratio,
+    clamp_stack,
+    finite_number,
+    normalize_block_counts,
+    shared_block_volume_ratio,
+)
 from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -85,7 +92,7 @@ PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 30
-LOOKBACK_DEFAULT = 2880
+LOOKBACK_DEFAULT = 3000  # 50 hours of 1m bars
 LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
@@ -94,7 +101,7 @@ FEE_PCT = 0.001  # round-trip, matches live close_pos
 # is treated as an empirical result; live VST evidence decides which step is
 # eventually preferred for live selection.
 STEP_MIN = 1
-STEP_LIVE_MIN = 1
+STEP_LIVE_MIN = 7
 STEP_MAX = 30
 # Keep enough recent fills for the 5/10/15/25/50/75 evaluation windows while
 # retaining a hard per-set memory bound.  trim_hist distributes this cap over
@@ -1464,6 +1471,10 @@ class SetBook:
         self.block_stack = clamp_stack(ov.get("blockMaxStack"))
         self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
         self.block_counts = normalize_block_counts(ov.get("blockCounts"))
+        live_block = [n for n in self.block_counts if n <= self.block_stack]
+        self.block_vr = shared_block_volume_ratio(
+            self.block_vr, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
+        )
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         opt = float(ov.get("exitOptSlPct") or 0.30)
@@ -1761,7 +1772,7 @@ class SetBook:
                 st.axis_key = ""
                 st.relative_count = 1
                 st.volume_ratio = 1.0
-                st.indication_kind = "" if st.pack != "indications" else "signals"
+                st.indication_kind = ""
                 st.strategy_adjustments = {}
         self.progress.sets_total = len(self.sets)
         if replay_changed:
@@ -1837,25 +1848,40 @@ class SetBook:
         *,
         minimum_pf: float = POSITIVE_PF,
     ) -> Tuple[bool, str, Dict[str, Dict[str, Any]]]:
-        """Require every sufficiently sampled live window to clear its floor.
+        """Gate live promotion on the overall last-position eval only.
 
-        A short positive tail cannot hide a longer negative tail.  Windows
-        that do not yet have the configured sample minimum remain explicitly
-        cold and do not veto an otherwise valid candidate.
+        Named last5/10/15/25/50/75 windows stay attached as diagnostics. A
+        partial last50/last75 (or a cold last5) must not veto a qualified
+        overall last-N tape (``pf_n`` / ``baseEvalPosCount``).
         """
         ordered = sorted((r for r in rows if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
         need = self.eval_need()
+        overall_n = max(need, int(self.pf_n or need))
         windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
-        checked = 0
-        for name, metric in windows.items():
-            n = int(metric.get("n") or 0)
-            if n < need:
-                continue
-            checked += 1
-            pf = float(metric.get("pf") or 0.0)
-            if pf + 1e-9 < float(minimum_pf):
-                return False, f"live {name} PF {pf:.2f}<{float(minimum_pf):.2f}", windows
-        return True, "" if checked else "cold", windows
+        overall = overall_last_pos_eval(ordered, overall_n, self.cost_pct, ordered=True)
+        n = int(overall.get("count") or 0)
+        pf = float(overall.get("ratio") or 1.0)
+        windows["overall"] = {
+            "requestedN": overall_n,
+            "n": n,
+            "available": n >= overall_n,
+            "requiredSamples": need,
+            "validated": n >= need and is_positive_pf(pf),
+            "pf": round(pf, 4),
+            "classicPf": float(overall.get("classicPf") or 0.0),
+            "avgR": float(overall.get("avgR") or 0.0),
+            "netAvg": float(overall.get("netAvg") or 0.0),
+            "netPct": float(overall.get("netPct") or 0.0),
+            "costPct": float(overall.get("costPct") or self.cost_pct),
+            "costSamples": int(overall.get("costSamples") or 0),
+            "costSubtracted": True,
+            "scope": "overall-last-pos",
+        }
+        if n < need:
+            return True, "cold", windows
+        if pf + 1e-9 < float(minimum_pf):
+            return False, f"live last{overall_n} PF {pf:.2f}<{float(minimum_pf):.2f}", windows
+        return True, "", windows
 
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
         """Derive the preferred minimum from actual per-Set live evidence.
@@ -1863,9 +1889,10 @@ class SetBook:
         The global tape is diagnostic only.  A negative aggregate cannot make
         the engine invent a step threshold, and a positive aggregate cannot
         promote every Set.  A step becomes preferred only when one or more
-        independently tagged Sets at that step have enough live samples, a
-        positive cost-net window at every available horizon, and the normal
-        real-stage PF floor on the primary window.
+        independently tagged Sets at that step have enough live samples and a
+        positive overall last-position eval (configured ``pf_n``), plus the
+        normal real-stage PF floor on that same overall window. Named last5
+        .. last75 horizons remain visible and never veto the overall last-pos.
         """
         floor = self.min_step_cfg
         self.optimization_stats: Dict[str, Any] = getattr(self, "optimization_stats", {}) or {}
@@ -1918,9 +1945,10 @@ class SetBook:
             if len(tape) < self.eval_need():
                 continue
             ok, reason, windows = self._live_windows_ok(tape, minimum_pf=POSITIVE_PF)
-            last15 = windows.get("last15") or {}
-            primary_pf = float(last15.get("pf") or 0.0)
-            promoted = bool(ok and int(last15.get("n") or 0) >= self.eval_need() and primary_pf + 1e-9 >= self.real_min_pf)
+            overall = windows.get("overall") or {}
+            primary_n = int(overall.get("n") or 0)
+            primary_pf = float(overall.get("pf") or 0.0)
+            promoted = bool(ok and primary_n >= self.eval_need() and primary_pf + 1e-9 >= self.real_min_pf)
             if promoted:
                 promoted_steps.append(step)
             candidates.append({
@@ -1928,6 +1956,8 @@ class SetBook:
                 "setId": key[1], "symbol": key[2], "side": key[3], "strategy": key[4],
                 "n": len(tape),
                 "last15Pf": round(primary_pf, 4),
+                "overallLastPosPf": round(primary_pf, 4),
+                "overallLastPosN": primary_n,
                 "windowPf": {name: round(float(metric.get("pf") or 0.0), 4) for name, metric in windows.items()},
                 "windowsOk": bool(ok),
                 "status": "promoted" if promoted else (reason or "not-promoted"),
@@ -2447,11 +2477,23 @@ class SetBook:
                 k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
                 for k in keys
             }
-        # A merge represents a completed replacement for every Set for the
-        # named symbols, including Sets with zero fills. Use the full catalog
-        # exactly once at commit time; the replay workers themselves remain
-        # sparse and do not allocate/scan empty buckets.
-        states = self.by_idx if (not merge or names) else []
+        # First-pass unique symbols only touch Sets that filled. Replays of
+        # the same symbols also touch prior owners so zero-fill replacements
+        # still clear stale rows. Walking the whole 34k catalog is a no-op
+        # for everyone else and held the live lock far too long.
+        if merge and names:
+            name_set = set(names)
+            touched = set(hist)
+            if hist_symbol_counts is not None:
+                touched.update(str(sid) for sid in hist_symbol_counts)
+            if score_set:
+                touched.update(score_set)
+            for sid, counts in self._hist_counts.items():
+                if name_set.intersection(counts):
+                    touched.add(sid)
+            states = [self.sets[sid] for sid in touched if sid in self.sets]
+        else:
+            states = self.by_idx if (not merge or names) else []
         for st in states:
             # A bounded replay may commit one configuration slice at a time.
             # Do not treat a not-yet-replayed set as an empty result or erase
@@ -2764,10 +2806,11 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
-                config_frame = indication_frame.window(lo, i + 1)
-                for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
-                    key = row.kind + "|" + row.mode
-                    kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
+                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True):
+                    config_frame = indication_frame.window(lo, i + 1)
+                    for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
+                        key = row.kind + "|" + row.mode
+                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
             if on_step and i % 50 == 0:
                 on_step()
                 time.sleep(0)
@@ -3462,28 +3505,13 @@ class SetBook:
             "costSource": "manual-fallback",
             "costSamples": 0,
         }
-        dd = drawdown_time_by_symbol(ordered, ordered=True)
+        dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+        if sample >= required:
+            dd = drawdown_time_by_symbol(ordered, ordered=True)
         base_ok = sample >= required and clears_pf(last15["ratio"], self.min_pf) and float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
+        # Named last5..last75 stay off the hist score hot path. Overall last-pos
+        # (pf_n) already gated base_ok; published rows attach windows lazily.
         windows: Dict[str, Dict[str, Any]] = {}
-        for requested in EVALUATION_WINDOWS if base_ok else ():
-            metric = self._fast_historic_pf_from_gross(gross, requested, cost_pct, cost_frac)
-            count = int(metric["count"])
-            required_window = max(1, min(int(requested), required))
-            windows[f"last{requested}"] = {
-                "requestedN": int(requested),
-                "n": count,
-                "available": count >= int(requested),
-                "requiredSamples": required_window,
-                "validated": count >= required_window and clears_pf(metric["ratio"], self.min_pf),
-                "pf": round(float(metric["ratio"]), 4),
-                "classicPf": float(metric["classicPf"]),
-                "avgR": float(metric["avgR"]),
-                "netAvg": float(metric["netAvg"]),
-                "netPct": float(metric["netPct"]),
-                "costPct": float(metric["costPct"]),
-                "costSamples": int(metric["costSamples"]),
-                "costSubtracted": True,
-            }
         last25_n = min(self.deact_n, n_rows)
         if last25_n:
             last25_slice = ordered[-last25_n:]
@@ -3605,7 +3633,7 @@ class SetBook:
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
         base_ok = validated and dd_ok
-        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True) if base_ok else {}
+        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
         # Named diagnostic windows use the same global threshold, too.
         for metric in windows.values():
             metric["validated"] = int(metric["n"]) >= int(metric["requiredSamples"]) and clears_pf(metric["pf"], self.min_pf)
@@ -4724,19 +4752,45 @@ class SetBook:
         rows = tuple(
             sorted(
                 self._validated_entry_rows(pack, side=normalized_side),
-                key=lambda s: (s.idx, s.id),
+                key=lambda s: (
+                    -float(s.last15_ratio or 0),
+                    float(s.max_dd_s or 0),
+                    int(s.step or 0),
+                    float(s.sl_ratio or 0),
+                    s.idx,
+                    s.id,
+                ),
             )
         )
         if self._entry_policy_is_permissive() and rows:
             min_live = max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0))
-            warm = [state for state in rows if len(filter_side(state.evaluation_live(), normalized_side)) >= min_live]
-            warm_ids = {state.id for state in warm}
-            cold = [state for state in rows if state.id not in warm_ids]
-            if cold:
-                cold.sort(key=lambda state: (-float(state.last15_ratio or 0), float(state.max_dd_s or 0), state.idx, state.id))
-                candidate_cap = int(getattr(self, "entry_policy_max_candidates", 0) or 0)
-                admitted_cold = cold if candidate_cap <= 0 else cold[:candidate_cap]
-                rows = tuple(sorted(warm + admitted_cold, key=lambda s: (s.idx, s.id)))
+            candidate_cap = int(getattr(self, "entry_policy_max_candidates", 0) or 0)
+            if min_live <= 0:
+                # A zero live-sample floor makes every row "warm". Still apply
+                # the candidate cap to the PF-first list so the dispatcher
+                # cannot explode into the full catalog.
+                if candidate_cap > 0:
+                    rows = tuple(rows[:candidate_cap])
+            else:
+                warm = [state for state in rows if len(filter_side(state.evaluation_live(), normalized_side)) >= min_live]
+                warm_ids = {state.id for state in warm}
+                cold = [state for state in rows if state.id not in warm_ids]
+                if cold:
+                    cold.sort(key=lambda state: (-float(state.last15_ratio or 0), float(state.max_dd_s or 0), state.idx, state.id))
+                    admitted_cold = cold if candidate_cap <= 0 else cold[:candidate_cap]
+                    # Keep PF-first order so the live dispatcher spends burst
+                    # budget on high-value Sets instead of catalog index order.
+                    rows = tuple(sorted(
+                        warm + admitted_cold,
+                        key=lambda s: (
+                            -float(s.last15_ratio or 0),
+                            float(s.max_dd_s or 0),
+                            int(s.step or 0),
+                            float(s.sl_ratio or 0),
+                            s.idx,
+                            s.id,
+                        ),
+                    ))
         # A concurrent live fill/replay publication may have advanced the
         # epoch while this scan ran. In that case discard the result; the next
         # caller will rebuild against the newer state.
@@ -5323,7 +5377,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     bal = last_n_balanced(mixed_sym, 15)
     out.append(("set-last-n-chrono-newest", all(r["symbol"] == "B" for r in chrono), str({r["symbol"] for r in chrono})))
     out.append(("set-last-n-balanced-mix", {r["symbol"] for r in bal} == {"A", "B"}, str({r["symbol"] for r in bal})))
-    out.append(("set-positive-pf-floor", _PP == 1.02 and (not _is_pos(1.02)) and _is_pos(1.021), f"floor={_PP}"))
+    out.append(("set-positive-pf-floor", _PP == 1.10 and (not _is_pos(1.02)) and _is_pos(1.10), f"floor={_PP}"))
     live_usdt = {"t": 1, "pnl": 9.0, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     hist_frac = {"t": 2, "pnl": 0.0015, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     out.append((
@@ -6106,6 +6160,20 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-stage-record-cost-pf", abs(rec_m.net_pf - sst.main_pf) < 1e-9 and rec_m.net_pf < 20 and rec_m.net_pf > 1.0, f"net={rec_m.net_pf} main={sst.main_pf} classic={sst.net_pf}"))
     out.append(("set-stage-record-ddt", rec_m.ddt_s == sst.max_dd_s and rec_r.ddt_s == sst.max_dd_s, f"ddt={rec_m.ddt_s} max={sst.max_dd_s}"))
     out.append(("set-stage-record-real-pf", abs(rec_r.net_pf - sst.real_pf) < 1e-9, f"net={rec_r.net_pf} real={sst.real_pf}"))
+    # Named last50/last75 must not veto a qualified overall last-N tape.
+    gate = SetBook()
+    gate.load({"setPfWindow": 30, "setMinSamples": 8, "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False})
+    losers = [{"t": 1000 + i * 60, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(20)]
+    winners = [{"t": 3000 + i * 60, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(30)]
+    mixed_last = losers + winners
+    ok_overall, reason_overall, win_overall = gate._live_windows_ok(mixed_last, minimum_pf=POSITIVE_PF)
+    last50_pf = float((win_overall.get("last50") or {}).get("pf") or 0.0)
+    overall_pf = float((win_overall.get("overall") or {}).get("pf") or 0.0)
+    out.append((
+        "set-overall-last-pos-not-blocked-by-named-windows",
+        ok_overall and overall_pf + 1e-9 >= POSITIVE_PF and last50_pf + 1e-9 < POSITIVE_PF,
+        f"ok={ok_overall} overall={overall_pf:.3f} last50={last50_pf:.3f} reason={reason_overall}",
+    ))
     return out
 
 

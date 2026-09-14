@@ -37,7 +37,6 @@ class OverallTests(unittest.TestCase):
         return p
 
     def test_overall_proxy_uses_quantity_matched_controls(self):
-    def test_overall_proxy_uses_close_position_controls(self):
         from copy import copy
         p = self.pulse(1)
         row = next(iter(p.open.values()), None)
@@ -79,8 +78,6 @@ class OverallTests(unittest.TestCase):
         with patch.object(p, 'place_ctrl', return_value='') as place_ctrl:
             self.assertFalse(overall.ensure(p, pos))
         place_ctrl.assert_not_called()
-        self.assertEqual(body.get('closePosition'), 'true')
-        self.assertNotIn('quantity', body)
 
     def test_multiple_sets_share_pair_but_keep_own_lots_and_targets(self):
         p=self.pulse()
@@ -97,8 +94,6 @@ class OverallTests(unittest.TestCase):
         for body in p.api.orders.values():
             self.assertNotIn('closePosition', body)
             self.assertGreater(float(body.get('quantity') or 0), 0)
-            self.assertEqual(body.get('closePosition'),'true')
-            self.assertNotIn('quantity',body)
         before=len(p.api.batches)
         for r in rows:p.ensure_controls(r)
         self.assertEqual(len(p.api.batches),before)

@@ -36,6 +36,7 @@ from bingx_fast import FastBingX, ErrorLog, dumps as fast_json_dumps
 from modules import resolve as resolve_modules
 from position_cost import (
     last_n_cost_pf,
+    overall_last_pos_eval,
     evaluation_windows,
     completed_roundtrips,
     accumulate_close,
@@ -162,7 +163,7 @@ CONFIG_EVIDENCE_PATH = os.path.join(DIR, f"config-evidence-{CONN_SHORT}.json")
 
 UNIVERSE_PATH = os.path.join(DIR, "universe.json")
 MAX_SYMBOLS = 0  # 0 = unlimited hard ceiling
-DEFAULT_SYMBOL_CAP = 0
+DEFAULT_SYMBOL_CAP = 50
 SYMBOLS = [
     "SOL-USDT", "XRP-USDT", "HYPE-USDT", "JUP-USDT", "ETC-USDT", "TRX-USDT",
     "DOGE-USDT", "APT-USDT", "ENA-USDT", "LDO-USDT", "1000PEPE-USDT", "KAS-USDT",
@@ -670,9 +671,10 @@ def adopt_venue_minimum(contract: Any, msg: str) -> str:
         return ""
     text = " ".join(str(msg or "").split())
     # BingX uses this form for a base-asset lot minimum, e.g.:
-    # ``minimum order amount is 304.1 FONE``.
+    # ``The minimum order amount is 37.88 AMEMECOIN.``
     amount = re.search(
-        r"\bminimum\s+order\s+amount\s+is\s+([0-9]+(?:\.[0-9]+)?)\s+([A-Z][A-Z0-9_-]*)\b",
+        r"\bminimum\s+(?:order\s+)?(?:amount|size|qty|quantity)\s+(?:per\s+order\s+)?is\s+"
+        r"([0-9]+(?:\.[0-9]+)?)\s+([A-Z][A-Z0-9_-]*)\b",
         text,
         re.I,
     )
@@ -680,6 +682,41 @@ def adopt_venue_minimum(contract: Any, msg: str) -> str:
         try:
             value = float(amount.group(1))
             if math.isfinite(value) and value > 0:
+                contract.min_qty = max(float(getattr(contract, "min_qty", 0) or 0), value)
+                return "qty"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    # Bare number with no unit is still a base-asset floor:
+    # ``minimum order amount is 0.5``.
+    bare = re.search(
+        r"\bminimum\s+(?:order\s+)?(?:amount|size|qty|quantity)\s+(?:per\s+order\s+)?is\s+"
+        r"([0-9]+(?:\.[0-9]+)?)\b",
+        text,
+        re.I,
+    )
+    if bare:
+        try:
+            value = float(bare.group(1))
+            tail = text[bare.end():bare.end() + 12].strip().upper()
+            if math.isfinite(value) and value > 0 and not tail.startswith("USDT"):
+                contract.min_qty = max(float(getattr(contract, "min_qty", 0) or 0), value)
+                return "qty"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    less = re.search(
+        r"\b(?:cannot be less than|must be (?:at least|>=)|not less than)\s+"
+        r"([0-9]+(?:\.[0-9]+)?)\s*([A-Z][A-Z0-9_-]*)?",
+        text,
+        re.I,
+    )
+    if less:
+        try:
+            value = float(less.group(1))
+            unit = str(less.group(2) or "").upper()
+            if math.isfinite(value) and value > 0:
+                if unit == "USDT":
+                    contract.min_usdt = max(float(getattr(contract, "min_usdt", 0) or 0), value)
+                    return "usdt"
                 contract.min_qty = max(float(getattr(contract, "min_qty", 0) or 0), value)
                 return "qty"
         except (TypeError, ValueError, OverflowError):
@@ -701,6 +738,44 @@ def adopt_venue_minimum(contract: Any, msg: str) -> str:
         except (TypeError, ValueError, OverflowError):
             pass
     return ""
+
+
+def parse_stop_bound(msg: str) -> Tuple[str, float]:
+    """Return ('lt'|'gt', px) when the venue names an accepted stop bound."""
+    text = " ".join(str(msg or "").split())
+    m = re.search(
+        r"(?:should be|must be|cannot be)\s+"
+        r"(less(?: than)?|lower(?: than)?|below|greater(?: than)?|higher(?: than)?|above)\s+"
+        r"(?:than\s+)?([0-9]+(?:\.[0-9]+)?)",
+        text,
+        re.I,
+    )
+    if m:
+        try:
+            value = float(m.group(2))
+        except (TypeError, ValueError, OverflowError):
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            word = str(m.group(1) or "").lower()
+            side = "lt" if any(k in word for k in ("less", "lower", "below")) else "gt"
+            return side, value
+    m2 = re.search(
+        r"(?:current|latest|mark|last)\s+price[^\d]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        text,
+        re.I,
+    )
+    if m2 and any(k in text.lower() for k in ("stop loss", "take profit", "trigger")):
+        try:
+            value = float(m2.group(1))
+        except (TypeError, ValueError, OverflowError):
+            value = 0.0
+        if math.isfinite(value) and value > 0:
+            low = text.lower()
+            if "less" in low or "lower" in low or "below" in low:
+                return "lt", value
+            if "greater" in low or "higher" in low or "above" in low:
+                return "gt", value
+    return "", 0.0
 
 
 _LOG_N = 0
@@ -1200,7 +1275,7 @@ class Pulse:
             "blockPauseCountRatio": 1,
             "blockActiveRealEnabled": True,
             "blockActiveLiveEnabled": True,
-            "defaultMinPF": 1.2,
+            "defaultMinPF": POSITIVE_PF,
             "prevPosMinCount": 5,
             "prevPosWindow": 25,
         })
@@ -1869,6 +1944,20 @@ class Pulse:
             q = float(f"{(n + c.step):.{c.qprec}f}")
         return q
 
+    def raise_to_min_qty(self, c: Optional[Contract], px: float, qty: float, msg: str = "") -> float:
+        """Always raise size to the venue min. Never shrink a legal lot."""
+        q = max(0.0, float(qty or 0.0))
+        if c is None:
+            return q
+        if msg:
+            adopt_venue_minimum(c, msg)
+        floor = self.min_order_qty(c, px) if px > 0 else self.round_qty_up(c, max(q, float(c.min_qty or 0)))
+        bumped = self.round_qty_up(c, max(q, floor))
+        if msg and bumped <= q + 1e-12:
+            step = max(float(getattr(c, "step", 0) or 0), 0.0)
+            bumped = self.round_qty_up(c, max(q + step, q * 1.05, floor))
+        return bumped
+
     def min_order_qty(self, c: Contract, px: float) -> float:
         """Exchange min lot and min USDT, rounded up to step."""
         if px <= 0:
@@ -2033,12 +2122,18 @@ class Pulse:
 
     def fmt_qty(self, c: Optional[Contract], q: float) -> str:
         q = float(q or 0)
-        p = max(0, int(c.qprec if c else 6))
+        if q <= 0:
+            return "0"
+        if c is not None:
+            q = self.round_qty_up(c, q)
+            p = max(0, int(c.qprec))
+        else:
+            p = 6
         s = f"{q:.{p}f}"
-        if q > 0 and float(s) <= 0:
-            for p2 in range(p + 1, 12):
+        if q > 0 and float(s) + 1e-15 < q:
+            for p2 in range(p, 12):
                 s = f"{q:.{p2}f}"
-                if float(s) > 0:
+                if float(s) + 1e-15 >= q:
                     break
         return s
 
@@ -2133,6 +2228,8 @@ class Pulse:
             return 0.0
         floor = self.min_order_qty(c, px)
         if floor <= 0:
+            floor = max(float(c.step or 0), 0.0)
+        if floor <= 0:
             return 0.0
         floor_n = floor * px
         room = self.avail_notional(c)
@@ -2142,10 +2239,10 @@ class Pulse:
         want_n = min(target_n, room)
         if want_n < floor_n:
             want_n = floor_n
-        q = self.round_qty(c, want_n / px)
+        q = self.round_qty_up(c, max(want_n / px, floor))
         if q < floor:
-            return 0.0
-        if q * px > room * 1.02:
+            q = self.round_qty_up(c, floor)
+        if q <= 0 or q * px > room * 1.02:
             return 0.0
         # Final sanity: an entry may never exceed 2× the configured target
         # (exchange min-lot floor excepted) — catches corrupt sizing upstream.
@@ -2757,7 +2854,7 @@ class Pulse:
             "axis_key": "",
             "relative_count": 1,
             "volume_ratio": 1.0,
-            "ind_kind": "signals" if pack == "indications" else "",
+            "ind_kind": str(getattr(st_obj, "indication_kind", "") or "") if st_obj is not None else "",
             "group_token": group_token,
             "control_range_key": control_range_key,
             "control_sl_bp": control_sl_bp,
@@ -4052,7 +4149,7 @@ class Pulse:
             self.refresh_px_one(pos.symbol)
         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", price)
         c = self.contracts.get(pos.symbol)
-        qty_s = self.fmt_qty(c, pos.qty)
+        qty_s = self.fmt_qty(c, self.raise_to_min_qty(c, max(self.px.get(pos.symbol) or 0, pos.entry or 0), pos.qty))
         px_s = self.fmt_px(c, price)
         if float(px_s or 0) <= 0:
             log(f"CTRL SKIP {kind} {pos.symbol} stopPrice=0", every=20.0, key=f"cskip:{pos.symbol}:px0")
@@ -4082,9 +4179,16 @@ class Pulse:
         msg = ""
         oid = ""
         refreshed_quote = False
-        for extra in (0.0, 0.006, 0.012):
+        extras = (0.0, 0.002, 0.004, 0.008, 0.012, 0.018, 0.028, 0.040)
+        for extra in extras:
             px_try = price
             if extra:
+                refresh = getattr(self, "refresh_px_one", None)
+                if callable(refresh):
+                    try:
+                        refresh(pos.symbol)
+                    except Exception:
+                        pass
                 m = max(self.px.get(pos.symbol) or 0, self.last_px.get(pos.symbol) or 0, pos.entry)
                 if is_sl:
                     px_try = m * (1.0 + extra) if pos.side == "SHORT" else m * (1.0 - extra)
@@ -4092,6 +4196,7 @@ class Pulse:
                     px_try = m * (1.0 - extra) if pos.side == "SHORT" else m * (1.0 + extra)
                 px_try = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
             px_s = self.fmt_px(c, px_try)
+            px_failed = False
             for form in forms:
                 cid = self.cid(cid_ch, pos=pos)
                 body = ctrl_payload(
@@ -4137,10 +4242,22 @@ class Pulse:
                     return ""
                 if not self.ok(r) and self._defer_missing_position_controls(pos, r):
                     return have_this
-                if not self.ok(r) and self._defer_minimum_controls(pos, r):
-                    return have_this
                 msg = str(r.get("msg") or "")
                 kind_err = ctrl_err_kind(msg)
+                if not self.ok(r) and kind_err == "qty":
+                    mark_now = max(self.px.get(pos.symbol) or 0, pos.entry or 0)
+                    bumped = self.raise_to_min_qty(c, mark_now, max(float(pos.qty or 0), float(qty_s or 0)), msg)
+                    new_s = self.fmt_qty(c, bumped)
+                    if new_s != qty_s and float(new_s or 0) > float(qty_s or 0):
+                        qty_s = new_s
+                        continue
+                    if quantity_matched:
+                        # Position is below the venue floor: close the whole
+                        # group instead of oversizing a reduce-only stop.
+                        form["close_pos"] = True
+                        continue
+                if not self.ok(r) and self._defer_minimum_controls(pos, r):
+                    return have_this
                 if self.ok(r):
                     oid = extract_oid(r)
                     if oid:
@@ -4214,10 +4331,20 @@ class Pulse:
                                 price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", price)
                             except Exception:
                                 pass
-                    self.ctrl_skip[scope] = time.time() + 45
+                    bound_dir, bound_px = parse_stop_bound(msg)
+                    if bound_px > 0:
+                        tick = 10 ** -(c.pprec if c else 4)
+                        if bound_dir == "lt":
+                            px_try = min(px_try if px_try > 0 else bound_px, bound_px - max(tick, bound_px * 0.001))
+                        else:
+                            px_try = max(px_try, bound_px + max(tick, bound_px * 0.001))
+                        price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
+                    px_failed = True
                     break
             if oid:
                 break
+            if px_failed:
+                continue
         if not oid:
             short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
@@ -4234,7 +4361,11 @@ class Pulse:
                 self.ctrl_skip[scope] = time.time() + 60
             return ""
         pos.overall = True
-        pos.ctrl_qty = pos.qty
+        pos.ctrl_qty = max(float(pos.qty or 0), float(qty_s or 0) or float(pos.qty or 0))
+        if is_sl:
+            pos.sl = price
+        else:
+            pos.tp = price
         if is_sec:
             if is_sl:
                 pos.sec_sl = price
@@ -4360,13 +4491,7 @@ class Pulse:
                 continue
             if self.missing_controls(pos):
                 miss += 1
-                age = time.time() - float(pos.opened_at or 0)
-                bare = not (pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
-                if bare and age > 300.0 and time.time() >= self.ctrl_skip.get("__order_cap__", 0):
-                    log(f"CTRL flatten unprotected {pos.symbol} age={age:.0f}s group={scope[:16]}")
-                    self.close_pos(pos, px or pos.entry, "no-ctrl")
-                else:
-                    self.bump("ctrl")
+                self.bump("ctrl")
             else:
                 self.ctrl_skip[f"legal:{scope}"] = now + 8.0
         return miss
@@ -4431,16 +4556,15 @@ class Pulse:
         if getattr(pos, "_overall_proxy", False):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
-                pos.sl = want_sl
+                pos.sl = float(getattr(pos, "sl", 0) or want_sl)
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
-                pos.tp = want_tp
+                pos.tp = float(getattr(pos, "tp", 0) or want_tp)
             pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             pos.overall = pos.controls_ok
             # The proxy is quantity-matched so it cannot close unrelated
             # same-side exposure if the exchange contains another owner.
             pos.close_position = False
-            pos.close_position = True
             pos.ctrl_qty = pos.qty
             pos.ctrl_verified = pos.controls_ok
             return
@@ -4513,18 +4637,26 @@ class Pulse:
             kind = self._cid_kind(o)
             if typ in SL_TYPES or kind in ("u", "s"):
                 pos.sl_oid = pos.sec_sl_oid = oid
-                pos.sl = want_sl
+                try:
+                    accepted = float(o.get("stopPrice") or o.get("price") or want_sl)
+                except (TypeError, ValueError):
+                    accepted = want_sl
+                pos.sl = accepted if accepted > 0 else want_sl
             elif typ in TP_TYPES or kind in ("v", "t"):
                 pos.tp_oid = pos.sec_tp_oid = oid
-                pos.tp = want_tp
+                try:
+                    accepted = float(o.get("stopPrice") or o.get("price") or want_tp)
+                except (TypeError, ValueError):
+                    accepted = want_tp
+                pos.tp = accepted if accepted > 0 else want_tp
         if not real_oid(pos.sl_oid) and not self._controls_waiting_for_position(pos):
             pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
             if pos.sl_oid:
-                pos.sl = want_sl
+                pos.sl = float(getattr(pos, "sl", 0) or want_sl)
         if not real_oid(pos.tp_oid) and not self._controls_waiting_for_position(pos):
             pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
             if pos.tp_oid:
-                pos.tp = want_tp
+                pos.tp = float(getattr(pos, "tp", 0) or want_tp)
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         pos.overall = pos.controls_ok
         pos.close_position = not self.per_config_controls(pos)
@@ -4841,17 +4973,11 @@ class Pulse:
             if kind == "qty_close":
                 continue
             if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
-                # Unlearnable venue floor (BingX VST reports "0 USDT"): the
-                # remainder cannot be closed at this size, so cool the symbol
-                # down instead of retrying every fallback form.
+                c = self.contracts.get(pos.symbol)
+                adopt_venue_minimum(c, msg)
                 px_now = self.px.get(pos.symbol) or pos.entry
                 if requested_qty * max(px_now, 0.0) < 0.02:
                     # Economically dust: below the venue close floor forever.
-                    # Retire it locally (write-off) instead of looping the
-                    # flatten path against an uncloseable remainder. Also
-                    # untag our orders on the symbol: adopt re-imports any
-                    # exchange position our tagged orders still claim, which
-                    # would resurrect the dust and loop the close forever.
                     self.dust_retired.add(f"{pos.symbol}:{pos.side}")
                     try:
                         for o in self.our_orders(pos.symbol):
@@ -4871,10 +4997,8 @@ class Pulse:
                     })
                     log(f"CLOSE DUST-WRITEOFF {pos.symbol} qty={requested_qty} px={px_now}", key=f"dust:{pos.symbol}")
                     return True, px_now
-                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 120.0)
-                self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
-                log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=30.0, key=f"close-skip:{pos.symbol}")
-                return False, self.px.get(pos.symbol) or pos.entry
+                # Remainder below lot: the next fallback form uses closePosition.
+                continue
             if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
                 self._last_close_result.update({
@@ -5427,6 +5551,18 @@ class Pulse:
                 and getattr(p, "strategy", "") != "block"
                 for p in self.positions_for(sym, side)):
             return
+        # High-value / preferMinimalRange: one normal/trailing config per
+        # symbol+side+pack. Block/DCA remain extra lanes on the same group.
+        if (
+            normal_allowed
+            and getattr(self.sets, "prefer_minimal_range", False)
+            and any(
+                getattr(p, "pack", "") == pack
+                and str(getattr(p, "strategy", "") or "") != "block"
+                for p in self.positions_for(sym, side)
+            )
+        ):
+            return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
                 str(pending.get("kind") or "entry") == "entry"
@@ -5679,7 +5815,7 @@ class Pulse:
                 "type": "MARKET",
                 "side": order_side,
                 "positionSide": side,
-                "quantity": order_qty,
+                "quantity": self.fmt_qty(c, order_qty) if c is not None else order_qty,
                 "clientOrderID": order_cid,
             }
             body.update(attach)
@@ -5729,32 +5865,35 @@ class Pulse:
                 )
                 self.did_io = True
                 msg = str(r.get("msg") or "")
-            if not execution_plan and not self.ok(r) and c is not None:
-                minimum_kind = adopt_venue_minimum(c, msg)
-                if minimum_kind:
-                    # A venue floor is an allowed exception to the normal
-                    # target cap, but it still must fit the available margin
-                    # and the per-position book cap. Never enlarge an order
-                    # beyond the exchange's own reported minimum.
-                    max_book = max(max_book, self.min_order_qty(c, px) * px)
-                    retry_qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
-                    retry_room = self.avail_notional(c)
+            if not self.ok(r) and c is not None:
+                min_tries = 0
+                while min_tries < 3 and not self.ok(r):
+                    msg = str(r.get("msg") or "")
+                    kind_min = ctrl_err_kind(msg)
+                    code = str(r.get("code") or "")
+                    if kind_min != "qty" and "minimum" not in msg.lower() and code not in ("101400", "101401"):
+                        break
+                    retry_qty = self.raise_to_min_qty(c, px, qty, msg)
+                    if retry_qty <= qty + 1e-12:
+                        retry_qty = self.round_qty_up(c, max(retry_qty + float(c.step or 0), retry_qty * 1.05))
+                    if retry_qty <= qty + 1e-12:
+                        break
                     retry_margin = retry_qty * px / max(1, lev)
-                    if (retry_qty > 0 and retry_qty * px <= max_book * 1.02
-                            and retry_qty * px <= retry_room * 1.02
-                            and retry_margin <= max(0.0, float(self.available or 0)) * 0.95):
-                        qty = retry_qty
-                        self._remember_pending(
-                            kind="entry", cid=cid, symbol=sym, side=side,
-                            requested_qty=qty, group_key=pending_group_key,
-                            metadata=pending_meta,
-                        )
-                        r = self.api.post(
-                            "/openApi/swap/v2/trade/order",
-                            _entry_body(qty, cid),
-                        )
-                        self.did_io = True
-                        msg = str(r.get("msg") or "")
+                    if retry_margin > max(0.0, float(self.available or 0)) * 1.05:
+                        break
+                    qty = retry_qty
+                    min_tries += 1
+                    self._remember_pending(
+                        kind="entry", cid=cid, symbol=sym, side=side,
+                        requested_qty=qty, group_key=pending_group_key,
+                        metadata=pending_meta,
+                    )
+                    r = self.api.post(
+                        "/openApi/swap/v2/trade/order",
+                        _entry_body(self.fmt_qty(c, qty), cid),
+                    )
+                    self.did_io = True
+                    msg = str(r.get("msg") or "")
             if not self.ok(r) and c is not None:
                 # BingX can reject an otherwise legal target when several
                 # fills are settling at once (102201 / negative account
@@ -5816,12 +5955,9 @@ class Pulse:
                     self.cooldown[sym] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
                 if "minimum size" in low or "minimum order amount" in low:
-                    # The venue rejected the size as below its floor and the
-                    # floor could not be learned (BingX VST reports "0 USDT").
-                    # Retrying the same size only burns the request budget, so
-                    # cool the symbol down instead of treating it as transient.
-                    self.cooldown[sym] = time.time() + 120.0
-                    self.cooldown["__book__"] = time.time() + 20.0
+                    # Floor already retried via raise_to_min_qty. Cool briefly
+                    # so a later cycle can use the learned contract.min_qty.
+                    self.cooldown[sym] = time.time() + 20.0
                     self._clear_pending(cid)
                     log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
                     return
@@ -6049,6 +6185,11 @@ class Pulse:
                 log(f"OPEN pending-controls {sym} {side}", every=12.0, key=f"pending-ctrl:{sym}:{side}")
         self.signals.append({"t": time.time(), "symbol": sym, "side": side, "reason": pos.reason, "px": avg, "qty": filled})
         self.ensure_strategy_lanes(pos)
+        if str(ind_kind or "") in INDICATION_KINDS:
+            try:
+                self.indications.record_outcome(str(ind_kind), "entered")
+            except Exception:
+                pass
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
         self._stats_force = True
 
@@ -6440,11 +6581,10 @@ class Pulse:
                 price=px,
                 detail=f"close {reason}",
             )
-            try:
-                self.cancel_controls(pos.symbol, pos=pos)
-            except Exception:
-                pass
-            self._order_est = max(0, int(getattr(self, "_order_est", 0) or 0) - 2)
+            # Keep SL/TP live until the market close is actually filled.
+            # Cancelling first leaves a naked position when BingX rejects
+            # the flatten (102201 / min-qty / already-flat). Leftover
+            # stops are retired after a confirmed fill.
             ok, exit_px = self.market_close(pos)
             close_result = dict(getattr(self, "_last_close_result", {}) or {})
             close_cid = str(close_result.get("cid") or self.cid("c", pos=pos))
@@ -6475,6 +6615,8 @@ class Pulse:
                 self.record_event("error", stable_key(close_key, "error"), status="error", symbol=pos.symbol, side=pos.side, client_id=pos.client_id, detail="close failed")
                 if getattr(self, "control_orders", True):
                     try:
+                        if overall_controls.enabled(self, pos):
+                            overall_controls.ensure(self, pos)
                         self.ensure_controls(pos)
                     except Exception:
                         pass
@@ -6528,6 +6670,10 @@ class Pulse:
             if filled_qty + 1e-12 >= requested_qty:
                 self._clear_pending(close_cid)
                 self.seen_fill_cids.add(close_cid)
+                try:
+                    self.cancel_controls(pos.symbol, pos=pos)
+                except Exception:
+                    pass
             else:
                 pos.pending_close_qty = max(0.0, requested_qty - filled_qty)
                 self._remember_pending(
@@ -6900,11 +7046,13 @@ class Pulse:
             if not tape:
                 continue
             windows = evaluation_windows(tape, self.position_cost_pct, required_samples=need)
-            usable = [metric for metric in windows.values() if int(metric.get("n") or 0) >= need]
-            windows_ok = bool(usable) and all(float(metric.get("pf") or 0.0) >= 1.0 for metric in usable)
-            primary = windows.get("last15") or {}
-            pf = float(primary.get("pf") or 0.0)
-            promoted_flag = bool(len(tape) >= need and windows_ok and pf + 1e-9 >= real_floor)
+            overall = overall_last_pos_eval(tape, max(need, int(getattr(self.sets, "pf_n", 0) or need)), self.position_cost_pct)
+            overall_n = int(overall.get("count") or 0)
+            pf = float(overall.get("ratio") or 0.0)
+            # Intern overall last-pos (>=1.0) is the gate. Named last5..last75
+            # stay diagnostic and must not block promotion.
+            windows_ok = overall_n >= need and pf + 1e-9 >= 1.0
+            promoted_flag = bool(windows_ok and pf + 1e-9 >= real_floor)
             promoted += int(promoted_flag)
             stamps = sorted(_sf(row.get("t"), 0.0) for row in tape)
             span_h = max(1.0 / 60.0, (stamps[-1] - stamps[0]) / 3600.0) if len(stamps) > 1 else 0.0
@@ -6919,6 +7067,8 @@ class Pulse:
                     )},
                     "n": len(tape),
                     "pf": round(pf, 4),
+                    "overallLastPosN": overall_n,
+                    "overallLastPosPf": round(pf, 4),
                     "evaluationWindows": windows,
                     "windowsOk": windows_ok,
                     "promoted": promoted_flag,
@@ -7142,6 +7292,7 @@ class Pulse:
             getattr(self, "sets", None),
             getattr(self, "dca", None),
             getattr(self, "exits", None),
+            getattr(self, "block", None),
         ):
             if component is not None and hasattr(component, "cost_pct"):
                 component.cost_pct = cost
@@ -7241,6 +7392,7 @@ class Pulse:
         global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         previous_symbols = tuple(SYMBOLS)
+        previous_overlay = dict(getattr(self, "overlay", None) or {})
         previous_ready = bool(getattr(getattr(self, "sets", None), "progress", None) and self.sets.progress.ready)
         previous_generation = int(getattr(self, "_sets_generation", 0) or 0)
         cts = dump_cts_settings()
@@ -7371,7 +7523,7 @@ class Pulse:
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.strat_general = True
-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
@@ -7404,18 +7556,42 @@ class Pulse:
                 if self.symbol_cap > 0 and len(cleaned) >= self.symbol_cap:
                     break
         self.overlay_wild = bool(wild)
-        if wild:
-            extra = load_contracts(None)
-            names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
-            names.sort()
-            if names:
-                SYMBOLS[:] = names[: self.symbol_cap] if self.symbol_cap > 0 else names
-                self.contracts.update(extra)
-        elif cleaned:
-            SYMBOLS[:] = cleaned[: self.symbol_cap] if self.symbol_cap > 0 else cleaned
+        prev_ov = previous_overlay
+
+        def _cap(raw: Any) -> int:
+            try:
+                return max(0, int(raw))
+            except Exception:
+                return DEFAULT_SYMBOL_CAP
+
+        rank_needed = bool(initial)
+        if not rank_needed:
+            rank_needed = (
+                bool(ov.get("symbolsDynamic", True)) != bool(prev_ov.get("symbolsDynamic", True))
+                or coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
+                != coerce_symbol_sort(prev_ov.get("symbolSort") or prev_ov.get("symbolsSort") or "vol1h")
+                or _cap(ov.get("symbolCap")) != _cap(prev_ov.get("symbolCap"))
+                or bool(ov.get("symbolsAll")) != bool(prev_ov.get("symbolsAll"))
+            )
+        if rank_needed:
+            if wild:
+                extra = load_contracts(None)
+                names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
+                names.sort()
+                if names:
+                    SYMBOLS[:] = names[: self.symbol_cap] if self.symbol_cap > 0 else names
+                    self.contracts.update(extra)
+            elif cleaned:
+                SYMBOLS[:] = cleaned[: self.symbol_cap] if self.symbol_cap > 0 else cleaned
+        elif previous_symbols:
+            SYMBOLS[:] = list(previous_symbols)
         self.ensure_contracts()
+        # Ranked-book membership is part of the history boundary. A settings
+        # save that did not change cap/sort/dynamic/list must not reshuffle
+        # the 50-symbol book and reset hist to 0/50.
         try:
-            self.apply_dynamic_symbols(force=True)
+            if rank_needed:
+                self.apply_dynamic_symbols(force=True)
         except Exception:
             pass
         if not initial:
@@ -7447,6 +7623,12 @@ class Pulse:
         self.block.max_volume_multiplier = max(1.0, min(2.0, finite_number(
             ov.get("blockMaxVolumeMultiplier", cts.get("blockMaxVolumeMultiplier")), 2.0)))
         self.block.counts = normalize_block_counts(ov.get("blockCounts", cts.get("blockCounts")))
+        # Keep the configured ratio. BlockBook.effective_volume_ratio() shares
+        # extra size across live stack counts when n=1 would consume the cap.
+        try:
+            self.block.cost_pct = max(1e-9, float(self.position_cost_pct or POSITION_COST_PCT_DEFAULT))
+        except Exception:
+            self.block.cost_pct = POSITION_COST_PCT_DEFAULT
         self.block.pf_ratio = max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, b_pfr))
         self.block.pause_ratio = max(0, b_pause)
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
@@ -7547,7 +7729,7 @@ class Pulse:
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
             self.strat_ind = True
-        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
+        self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", True))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
                 ax.enabled = False
@@ -7575,7 +7757,7 @@ class Pulse:
         # Selection and live processing have different lifetimes. Rebind all
         # unresolved persisted/open lineages after config reload so a Set that
         # lost eligibility is still managed until its order/position closes.
-        self._sync_set_processing()
+        self._refresh_coordination()
         # A history worker may have captured the previous SetBook while this
         # reload was in progress.  Increment only after the complete catalog
         # and its dependent strategy settings are installed so that stale
@@ -7643,10 +7825,42 @@ class Pulse:
             mt = os.path.getmtime(OVERLAY_PATH)
         except Exception:
             mt = 0.0
-        if mt and mt != self.overlay_mtime:
-            self.apply_live_config()
-            if hasattr(self.api, "hub"):
-                self.api.hub.set_symbols(list(SYMBOLS))
+        prev = float(getattr(self, "overlay_mtime", 0.0) or 0.0)
+        if not mt or mt == prev:
+            return
+        if prev <= 0.0 and getattr(self, "sets", None) is None:
+            # Stubs and pre-init Pulse objects must not load the checkout overlay.
+            return
+        self.apply_live_config()
+        api = getattr(self, "api", None)
+        if api is not None and hasattr(api, "hub"):
+            api.hub.set_symbols(list(SYMBOLS))
+
+    def _refresh_coordination(self) -> None:
+        """Rebind live lineages and Base coordination after a settings save."""
+        self._axis_ui = None
+        self._axis_ui_ts = 0.0
+        try:
+            self._sync_set_processing()
+        except Exception:
+            pass
+        coord = getattr(self, "coord", None)
+        book = getattr(self, "sets", None)
+        if coord is None or book is None:
+            return
+        try:
+            snap = book.axis_variants(coord) if callable(getattr(book, "axis_variants", None)) else None
+            if isinstance(snap, dict):
+                last = getattr(coord, "last", None)
+                if not isinstance(last, dict):
+                    last = {}
+                    coord.last = last
+                last["base"] = {k: v for k, v in snap.items() if k != "rows"}
+                last["updatedAt"] = time.time()
+                self._axis_ui = dict(last["base"])
+                self._axis_ui_ts = time.monotonic()
+        except Exception:
+            pass
 
     def pulse_snapshot(self) -> Dict[str, Any]:
         strategy_lanes = {
@@ -7855,14 +8069,14 @@ class Pulse:
         }
 
     def block_intern_pf(self, pos: Position) -> float:
-        """Measured PF of this parent Set/side, never a floor or a sibling."""
+        """Real-stage PF of this parent Set/side. Intern 1.00 is not extra size."""
         st = self.sets.sets.get(pos.set_id) if pos.set_id else None
         if st is None:
             return 0.0
         view = self.sets._side_view(st, pos.side)
-        if not self.sets._base_metrics_ok(view):
+        if not self.sets._real_metrics_ok(view):
             return 0.0
-        return float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
+        return float(view.get("real_pf", view.get("last15_ratio", 0)) or 0)
 
     def config_strategy_closes(self, set_id, side, execution_lane="", strategy=""):
         """Confirmed round trips of one Set, side and execution variant."""
@@ -7915,9 +8129,14 @@ class Pulse:
         if set_id:
             st = self.sets.sets.get(set_id)
             view = self.sets._side_view(st, side) if st else {}
-            if not self.sets._base_metrics_ok(view):
-                return False, stack, 0.0, ["config Base qualification"]
-            intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
+            if str(strategy or "") == "block":
+                if not self.sets._real_metrics_ok(view):
+                    return False, stack, 0.0, ["config Real qualification"]
+                intern = {"pf": view.get("real_pf", view.get("last15_ratio", 0)), "n": view.get("real_n", view.get("last15_n", 0))}
+            else:
+                if not self.sets._base_metrics_ok(view):
+                    return False, stack, 0.0, ["config Base qualification"]
+                intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
         tape = None
         if count is not None:
             try:
@@ -7989,6 +8208,14 @@ class Pulse:
             # a validated + profitable set lifts the CTS real-stage floor.
             intern_pf = self.block_intern_pf(pos)
             if intern_pf <= 0:
+                kind = str(getattr(pos, "ind_kind", "") or "")
+                if kind:
+                    try:
+                        blob = self.sets.ind_stats(kind, pos.side)
+                        intern_pf = float(blob.get("pf") or 0) if int(blob.get("n") or 0) > 0 else 0.0
+                    except Exception:
+                        intern_pf = 0.0
+            if intern_pf <= 0:
                 continue
             d, why, conf = self.score(pos.symbol)
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
@@ -8054,9 +8281,12 @@ class Pulse:
             if not c or px <= 0:
                 continue
             parent = float(lane.base_qty or 0) or self.size_qty(c, px)
-            inc = float(row.get("volumeIncrement") or max(1.0, int(row["blockCount"]) * self.block.volume_ratio))
+            inc = float(row.get("volumeIncrement") or 0.0)
             raw = float(row.get("requestedAddQty") or 0)
-            leftover = max(0.0, parent * inc - float(lane.confirmed_add or 0))
+            target = float(row.get("targetAddQty") or 0)
+            if target <= 0 and parent > 0 and inc > 0:
+                target = parent * inc
+            leftover = max(0.0, target - float(lane.confirmed_add or 0))
             raw = min(raw, leftover) if leftover > 0 else 0.0
             if raw <= 0:
                 continue
@@ -8094,6 +8324,23 @@ class Pulse:
             order_side = "BUY" if pos.side == "LONG" else "SELL"
             cid = self.cid("b", pos=pos)
             block_group_key = self.logical_group_key(pos)
+            block_key = stable_key(CONN_SHORT, "block", cid, pos.symbol, pos.side, count_n)
+            self.record_event(
+                "entry_intent",
+                stable_key(block_key, "intent"),
+                status="selected",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                parent_set_id=pos.parent_set_id,
+                axis_key=f"block-active:{count_n}",
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy="block",
+                client_id=cid,
+                qty=qty,
+                price=px,
+                detail=f"block add n={count_n}",
+            )
             self._remember_pending(
                 kind="block",
                 cid=cid,
@@ -8121,6 +8368,21 @@ class Pulse:
                     "trail_key": pos.trail_key,
                 },
             )
+            self.record_event(
+                "exchange_request",
+                stable_key(block_key, "request"),
+                status="pending",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy="block",
+                client_id=cid,
+                qty=qty,
+                price=px,
+                detail=f"block add n={count_n}",
+                metadata={"path": "/openApi/swap/v2/trade/order", "blockCount": count_n},
+            )
             r = self.api.post(
                 "/openApi/swap/v2/trade/order",
                 {
@@ -8135,13 +8397,10 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
-                if adopt_venue_minimum(c, msg):
-                    qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
-                    # A venue minimum must never enlarge an approved target,
-                    # book cap or available-margin allocation on retry.
-                    if (qty > leftover + 1e-12 or qty * px > add_cap + 1e-9
-                            or (pos.qty + qty) * px > self.max_book_notional() + 1e-9
-                            or qty * px / max(1, self.leverage_for(c)) > self.available * 0.38):
+                if adopt_venue_minimum(c, msg) or ctrl_err_kind(msg) == "qty" or "minimum" in msg.lower():
+                    qty = self.raise_to_min_qty(c, px, qty, msg)
+                    if (qty * px / max(1, self.leverage_for(c)) > self.available * 0.95
+                            or (pos.qty + qty) * px > self.max_book_notional() * 1.08):
                         self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                         self._clear_pending(cid)
                         continue
@@ -8156,7 +8415,7 @@ class Pulse:
                             "type": "MARKET",
                             "side": order_side,
                             "positionSide": pos.side,
-                            "quantity": qty,
+                            "quantity": self.fmt_qty(c, qty),
                             "clientOrderID": cid,
                         },
                     )
@@ -8206,6 +8465,21 @@ class Pulse:
             row["emitted"] = 1
             self.block.record_fill(lane, row, filled, cid, oid)
             self._apply_position_fill(pos, filled, avg, order_id=oid, source="block")
+            self.record_event(
+                "exchange_response",
+                stable_key(block_key, "response"),
+                status="confirmed",
+                symbol=pos.symbol,
+                side=pos.side,
+                set_id=pos.set_id,
+                indication_kind=getattr(pos, "ind_kind", ""),
+                strategy="block",
+                client_id=cid,
+                order_id=oid,
+                qty=filled,
+                price=avg,
+                detail=f"block add n={count_n} filled",
+            )
             actual_margin = (filled * avg) / max(1, self.leverage_for(c))
             self.available = max(0.0, self.available - actual_margin)
             if filled + 1e-12 >= qty:
@@ -8364,13 +8638,12 @@ class Pulse:
             self.did_io = True
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
-                if adopt_venue_minimum(c, msg):
-                    retry_qty = self.round_qty_up(c, max(qty, self.min_order_qty(c, px)))
+                if adopt_venue_minimum(c, msg) or ctrl_err_kind(msg) == "qty" or "minimum" in msg.lower():
+                    retry_qty = self.raise_to_min_qty(c, px, qty, msg)
                     retry_margin = retry_qty * px / max(1, self.leverage_for(c))
-                    if (retry_qty > 0 and retry_qty <= seed * 2.55
-                            and retry_qty * px <= add_cap * 1.02
-                            and (pos.qty + retry_qty) * px <= self.max_book_notional() * 1.02
-                            and retry_margin <= self.available * 0.38):
+                    if (retry_qty > 0
+                            and (pos.qty + retry_qty) * px <= self.max_book_notional() * 1.08
+                            and retry_margin <= self.available * 0.95):
                         qty = retry_qty
                         self._remember_pending(
                             kind="dca", cid=cid, symbol=pos.symbol, side=pos.side,
@@ -8383,7 +8656,7 @@ class Pulse:
                                 "type": "MARKET",
                                 "side": order_side,
                                 "positionSide": pos.side,
-                                "quantity": qty,
+                                "quantity": self.fmt_qty(c, qty),
                                 "clientOrderID": cid,
                             },
                         )
@@ -9019,6 +9292,26 @@ class Pulse:
                 if d == 0:
                     continue
                 candidates[(s, d, "general")] = (conf, s, d, f"gen:{why}")
+            # High-value: Real-qualified general Sets are idle when score() is
+            # flat. Reuse same-side indication timing so hist winners actually
+            # reach EntryMatrix instead of stalling behind an empty general lane.
+            if self.sets.enabled and callable(getattr(self.sets, "entry_sets", None)):
+                for pack_side, want in (("LONG", 1), ("SHORT", -1)):
+                    try:
+                        gens = self.sets.entry_sets("general", side=pack_side)
+                    except Exception:
+                        gens = []
+                    if not gens:
+                        continue
+                    for (s, d, why), row in list(candidates.items()):
+                        if d != want or (s, d, "general") in candidates:
+                            continue
+                        if not str(why).startswith("ind:"):
+                            continue
+                        conf = float(row[0] or 0.0)
+                        if conf < 0.50:
+                            continue
+                        candidates[(s, d, "general")] = (conf, s, d, "gen:high-value")
         ranked = sorted(candidates.values(), reverse=True)
         anchors = getattr(self, "_block_reference_anchors", {})
         current_sides = {(row[1], "LONG" if row[2] > 0 else "SHORT") for row in ranked}
@@ -10504,6 +10797,17 @@ class Pulse:
         cov = self._coverage_blob(set_snapshot=sets_snap)
         activity = self.event_summary()
         ind_snap = self.indications.snapshot()
+        kind_stats = ind_snap.get("kindStats") or {}
+        live_kind: Dict[str, int] = {}
+        for pos in self.open.values():
+            kind = str(getattr(pos, "ind_kind", "") or "").strip().lower()
+            if kind:
+                live_kind[kind] = live_kind.get(kind, 0) + 1
+        for kind, n_live in live_kind.items():
+            row = kind_stats.get(kind)
+            if isinstance(row, dict):
+                row["entered"] = max(int(row.get("entered") or 0), int(n_live))
+                row["processed"] = True
         budget = getattr(self.load, "last_budget", None)
         effective_tfs = effective_indication_timeframes(self.tf_on, budget)
         configured_combined = bool(ind_snap.get("tfCombined", True))
@@ -10558,11 +10862,6 @@ class Pulse:
         if live_order_count < 0 and live_total_order_count >= 0 and foreign_order_count >= 0:
             live_order_count = max(0, live_total_order_count - foreign_order_count)
         if position_snapshot_pending or bool(getattr(self, "recon_pending", False)):
-        live_order_count = int(getattr(self, "exchange_order_own_count", -1) or -1)
-        live_total_order_count = int(getattr(self, "exchange_order_total_count", -1) or -1)
-        if live_order_count < 0 and live_total_order_count >= 0:
-            live_order_count = max(0, live_total_order_count - int(getattr(self, "foreign_open_order_count", 0) or 0))
-        if exchange_own_open < 0:
             open_parity = "pending"
         elif exchange_own_open == internal_position_groups:
             open_parity = "match"
@@ -12001,6 +12300,7 @@ class Pulse:
                         or int(getattr(self, "_sets_generation", 0) or 0) != generation):
                     break
                 size = self._hist_replay_chunk_size(len(pending))
+                is_first_chunk = first
                 if first and len(pending) > 8:
                     size = min(size, 4)
                 first = False
@@ -12010,11 +12310,11 @@ class Pulse:
                 self.hist_busy = True
                 self._hist_peer_touch()
                 try:
-                    # Each published slice changes evidence. Re-evaluate its
-                    # affected IDs; the content cache reuses unchanged inputs.
-                    # Deferring middle slices hides new winners until the end
-                    # of an unlimited universe and leaves losing sets active.
-                    ok = self._replay_sets_isolated(chunk, ready, total, score=True, completed_symbols=run_completed)
+                    # Score the first slice (bootstrap entries) and the last
+                    # (final evidence). Middle slices compact without a 34k-set
+                    # rescore so a 50-symbol book stays under MemoryHigh.
+                    score_slice = is_first_chunk or not pending
+                    ok = self._replay_sets_isolated(chunk, ready, total, score=score_slice, completed_symbols=run_completed)
                 finally:
                     self.hist_busy = False
                 if not ok:
@@ -12231,9 +12531,12 @@ class Pulse:
             book.progress.bars_total = 0
             book.progress.sets_done = 0
             book.progress.sets_total = len(book.sets)
-            book.progress.symbols_done = 0
             symbols = list(SYMBOLS)
             book.progress.symbols_total = len(symbols)
+            try:
+                book.progress.symbols_done = min(int(book.progress.symbols_done or 0), len(symbols))
+            except Exception:
+                pass
             book.progress.elapsed_ms = 0.0
             limit = str(book.lookback)
         reqs = [("/openApi/swap/v2/quote/klines", {"symbol": s, "interval": "1m", "limit": limit}) for s in symbols]
@@ -12343,9 +12646,14 @@ class Pulse:
                         "invalid_symbols", "missing_symbols", "gapped_symbols", "stale", "deferred_reason"):
                 setattr(progress, key, copy.deepcopy(getattr(run_progress, key)))
             seen = run_completed | (set(replay_book._hist_seen) & set(names))
-            progress.symbols_total = max(1, int(progress_total or 0))
-            progress.symbols_done = min(len(seen), progress.symbols_total)
-            progress.pct = 35.0 + 60.0 * progress.symbols_done / progress.symbols_total
+            frozen_total = max(
+                int(progress_total or 0),
+                int(getattr(run_progress, "symbols_total", 0) or 0),
+                len(names) or 0,
+            )
+            progress.symbols_total = frozen_total
+            progress.symbols_done = min(len(seen), frozen_total) if frozen_total else len(seen)
+            progress.pct = 35.0 + 60.0 * (progress.symbols_done / frozen_total if frozen_total else 0.0)
             progress.ready = bool(already) or bool(source.progress.ready) or bool(progress.ready)
             progress.coordination_complete = False  # only the durable publisher completes the full run
             return progress
@@ -12430,24 +12738,26 @@ class Pulse:
                 if replay_book.progress.phase == "error":
                     source.progress = merge_progress()
                     return False
-                wanted = set(names)
-                # The replay clone publishes only non-empty tapes. The
-                # SetBook merge receives the completed symbol names and
-                # clears stale rows for every omitted Set without retaining a
-                # second full ``set_id -> []`` map under the live lock.
                 incoming = {}
                 affected = set()
-                # An empty replacement still removes prior evidence. Score
-                # every affected Set, including rows outside the newest 12.
-                for sid, current in source.sets.items():
-                    if any(str(row.get("symbol") or "") in wanted for row in current.hist):
-                        affected.add(sid)
-                for sid, target in replay_book.sets.items():
-                    tape = target.hist
-                    if not tape:
+                # Only Sets that produced fills this slice need merge+score.
+                # Scanning every catalog tape for symbol membership held the
+                # live lock for tens of seconds and starved controls.
+                counts = getattr(replay_book, "_hist_counts", {}) or {}
+                for sid, rec in counts.items():
+                    if not rec:
                         continue
-                    incoming[sid] = list(tape)
-                    if any(str(row.get("symbol") or "") in wanted for row in tape):
+                    target = replay_book.sets.get(sid)
+                    tape = target.hist if target is not None else None
+                    if tape:
+                        incoming[str(sid)] = list(tape)
+                    affected.add(str(sid))
+                if not affected:
+                    for sid, target in replay_book.sets.items():
+                        tape = target.hist
+                        if not tape:
+                            continue
+                        incoming[sid] = list(tape)
                         affected.add(sid)
                 source._commit_hist(
                     incoming,
@@ -12591,6 +12901,7 @@ class Pulse:
                     book._score_pair(pair)
                 if not publish_scored(min(i + 32, total)):
                     return
+                time.sleep(0)
         else:
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="set-score") as pool:
                 for start in range(0, len(todo), 32):
@@ -12601,6 +12912,7 @@ class Pulse:
                     list(pool.map(book._score_pair, book.score_pairs(states)))
                     if not publish_scored(min(start + 32, total)):
                         return
+                    time.sleep(0)
         with self.state_guard():
             if self.sets is book and int(getattr(self, "_sets_generation", 0) or 0) == generation:
                 book._cap_active()
@@ -12983,15 +13295,12 @@ class Pulse:
                     progress.stale = bool(ready)
                     progress.deferred_reason = ""
                     progress.symbols_total = len(valid)
-                    # Keep the last published count while the book is already
-                    # live so the UI does not flash 0/25 on every hourly run.
-                    if not ready:
-                        progress.symbols_done = 0
-                    else:
-                        try:
-                            progress.symbols_done = max(int(progress.symbols_done or 0), 0)
-                        except Exception:
-                            pass
+                    # Never flash 0/N. Keep prior coverage; only clamp to the frozen total.
+                    try:
+                        prior_done = int(progress.symbols_done or 0)
+                    except Exception:
+                        prior_done = 0
+                    progress.symbols_done = min(max(prior_done, 0), len(valid) or prior_done)
                     progress.bars_total = len(valid) * lookback
                     progress.bars_done = 0
                     progress.sets_total = len(book.sets)
@@ -13166,7 +13475,12 @@ class Pulse:
                     # symbols remain pending. Keep the historical gate closed
                     # until the frozen universe is complete; a previously
                     # live book is allowed to stay ready while it refreshes.
-                    progress.ready = bool(already_ready or not pending_symbols)
+                    completed_syms = [symbol for symbol in valid if symbol not in pending_symbols]
+                    progress.ready = bool(
+                        already_ready
+                        or not pending_symbols
+                        or self._hist_can_publish_partial(valid, completed_syms, pending_symbols)
+                    )
                     if not pending_symbols:
                         progress.last_complete_run = complete_at
                         progress.error = ""
@@ -13361,15 +13675,17 @@ class Pulse:
 
     def _ctrl_watch_loop(self) -> None:
         """Event-based control coordination: any create/delete/touch of the
-        control files (STOP / PAUSE / STOP_ALL / reset-eq) wakes the main
-        loop immediately instead of waiting out the scan cadence."""
+        control files (STOP / PAUSE / STOP_ALL / reset-eq) or overlay
+        wakes the main loop immediately instead of waiting out the scan cadence."""
         last: Dict[str, float] = {}
-        paths = (STOP_PATH, PAUSE_PATH, STOP_ALL, RESET_EQ_PATH)
+        paths = (STOP_PATH, PAUSE_PATH, STOP_ALL, RESET_EQ_PATH, OVERLAY_PATH, CTS_PATH)
         while True:
             try:
                 snap = ctrl_mtimes(paths)
                 if last and snap != last:
-                    self.bump("ctrl")
+                    kind = "config" if (snap.get(OVERLAY_PATH) != last.get(OVERLAY_PATH)
+                                        or snap.get(CTS_PATH) != last.get(CTS_PATH)) else "ctrl"
+                    self.bump(kind)
                 last = snap
             except Exception:
                 pass
@@ -13407,6 +13723,9 @@ class Pulse:
         self._cycle_stage_ms = {}
         self.did_io = False
         sd_notify("WATCHDOG=1")
+        # Overlay saves must bind before halt/entry/block so the same cycle
+        # trades and coordinates with the settings the desk just wrote.
+        self._cycle_step("config", self.maybe_reload_config)
         paused = os.path.exists(PAUSE_PATH)
         stopped = os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
         if stopped:
@@ -13459,7 +13778,6 @@ class Pulse:
         # contains many positions and each repair encounters venue cooldowns.
         reconcile_due = (
             (self.cycle == 1 and time.monotonic() >= float(getattr(self, "_reconcile_retry_at", 0.0) or 0.0))
-            self.cycle == 1
             or self.cycle % 25 == 0
             or (
                 bool(getattr(self, "recon_pending", False))
@@ -13475,8 +13793,6 @@ class Pulse:
             )
         self._sync_set_processing()
         unprotected = self._cycle_step("controls", self.priority_controls)
-        if self.cycle % 8 == 0:
-            self._cycle_step("config", self.maybe_reload_config)
         if self.cycle % 220 == 0:
             self.pool.submit(self.set_leverage)
         self._cycle_step("manage", self.manage)

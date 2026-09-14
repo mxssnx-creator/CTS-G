@@ -23,9 +23,10 @@ RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 30
-# Validation requires strictly more than +0.2× PositionCost net.
-# A higher configured floor is shared by every stage.
-POSITIVE_PF = 1.02
+# Real-edge floor: +1× PositionCost net. Intern/cost-neutral stays 1.00 and
+# must never be treated as this real floor (or vice versa).
+POSITIVE_PF = 1.10
+INTERN_PF = 1.0
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -277,7 +278,8 @@ def shared_pf_settings(overlay):
 
 
 def clears_pf(value, floor=POSITIVE_PF):
-    return finite(value) > POSITIVE_PF + 1e-9 and finite(value) + 1e-9 >= finite(floor, POSITIVE_PF)
+    """Admit at/above the requested floor. Intern 1.00 is cost-neutral, not real."""
+    return finite(value) + 1e-9 >= 1.0 and finite(value) + 1e-9 >= finite(floor, POSITIVE_PF)
 SL_TP_MIN = 0.1
 SL_TP_MAX = 3.0
 SL_TP_STEP = 0.1
@@ -492,7 +494,7 @@ def r_from_ratio(ratio: float) -> float:
 
 
 def is_positive_pf(ratio: Any, floor: float = POSITIVE_PF) -> bool:
-    """Strictly above the 1.02 Base floor and at least the configured floor."""
+    """Real-edge admission at the configured floor (default +1× PositionCost)."""
     return clears_pf(ratio, floor)
 
 
@@ -590,6 +592,23 @@ def last_n_cost_pf(
     }
 
 
+def overall_last_pos_eval(
+    rows: Sequence[Any],
+    n: int = LAST_N_DEFAULT,
+    cost_pct: float = POSITION_COST_PCT_DEFAULT,
+    *,
+    ordered: bool = False,
+    simple: Optional[bool] = None,
+) -> Dict[str, float]:
+    """Canonical overall last-position PF/EV for one tape.
+
+    Named last5/10/15/25/50/75 windows are diagnostic only. Qualification,
+    promotion, and live gates use this overall last-N (typically ``pf_n`` /
+    ``baseEvalPosCount``), not every named horizon.
+    """
+    return last_n_cost_pf(rows, n, cost_pct, ordered=ordered, simple=simple)
+
+
 def evaluation_windows(
     rows: Sequence[Any],
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
@@ -599,13 +618,18 @@ def evaluation_windows(
     ordered: bool = False,
     simple: Optional[bool] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Return the shared last-position-N PF/EV view for one independent tape.
+    """Return named last-position-N PF/EV views for one independent tape.
 
     Every window is calculated from the same timestamp-normalized tape and
     deducts the measured row cost once, falling back to the configured manual
     cost.  ``available`` distinguishes a real N-sample window from a cold
     tape; ``validated`` is a positive-PF/sample signal and is deliberately
     independent from any strategy-specific minimum PF floor.
+
+    These named horizons are diagnostic. Callers that admit, promote, or
+    deactivate a Set must use ``overall_last_pos_eval`` (the configured
+    last-N / ``pf_n``) so a partial last50/last75 cannot veto a qualified
+    overall last-position tape.
     """
     if ordered:
         seq = [row for row in rows if row is not None]

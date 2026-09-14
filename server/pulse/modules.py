@@ -42,7 +42,7 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
     if "blockEnabled" in overlay:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
     if "dcaEnabled" in overlay or "stratDca" in overlay:
-        flags["strategy.dca"] = bool(overlay.get("dcaEnabled", overlay.get("stratDca", True)))
+        flags["strategy.dca"] = bool(overlay.get("stratDca", True))
     if "controlOrders" in overlay:
         flags["exec.controls"] = bool(overlay["controlOrders"])
     if "rearrange" in overlay:
