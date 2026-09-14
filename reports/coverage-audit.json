@@ -1,0 +1,283 @@
+{
+  "wallS": 85.029,
+  "pass": 24,
+  "fail": 0,
+  "failed": [],
+  "job": {
+    "phase": "ready",
+    "replayMode": "oneshot",
+    "workers": 2,
+    "rowCount": 14040,
+    "validatedCount": 2169,
+    "product": 4680,
+    "relative": {
+      "sets": 4680,
+      "ranked": 4680,
+      "validated": 885,
+      "packs": {
+        "indications": 2340,
+        "general": 2340
+      },
+      "kinds": {
+        "trail": 4500,
+        "base": 180
+      }
+    },
+    "symbols": {
+      "requested": 11,
+      "started": 11,
+      "completed": 11,
+      "skipped": 0,
+      "failed": 0,
+      "coveragePct": 100.0
+    },
+    "sets": {
+      "requested": 51480,
+      "started": 51480,
+      "completed": 51480,
+      "skipped": 0,
+      "failed": 0,
+      "coveragePct": 100.0
+    },
+    "tasks": {
+      "requested": 11,
+      "started": 11,
+      "completed": 11,
+      "skipped": 0,
+      "failed": 0,
+      "coveragePct": 100.0
+    }
+  },
+  "rows": [
+    {
+      "name": "ready",
+      "ok": true,
+      "detail": "ready"
+    },
+    {
+      "name": "replay-oneshot",
+      "ok": true,
+      "detail": "oneshot"
+    },
+    {
+      "name": "symbols-complete",
+      "ok": true,
+      "detail": {
+        "requested": 11,
+        "started": 11,
+        "completed": 11,
+        "skipped": 0,
+        "failed": 0,
+        "coveragePct": 100.0
+      }
+    },
+    {
+      "name": "sets-complete",
+      "ok": true,
+      "detail": {
+        "requested": 51480,
+        "started": 51480,
+        "completed": 51480,
+        "skipped": 0,
+        "failed": 0,
+        "coveragePct": 100.0
+      }
+    },
+    {
+      "name": "evaluations-complete",
+      "ok": true,
+      "detail": {
+        "requested": 51480,
+        "started": 51480,
+        "completed": 51480,
+        "skipped": 0,
+        "failed": 0,
+        "coveragePct": 100.0
+      }
+    },
+    {
+      "name": "tasks-complete",
+      "ok": true,
+      "detail": {
+        "requested": 11,
+        "started": 11,
+        "completed": 11,
+        "skipped": 0,
+        "failed": 0,
+        "coveragePct": 100.0
+      }
+    },
+    {
+      "name": "bars-complete",
+      "ok": true,
+      "detail": {
+        "requested": 990,
+        "started": 990,
+        "completed": 990,
+        "skipped": 0,
+        "failed": 0,
+        "coveragePct": 100.0
+      }
+    },
+    {
+      "name": "product-indexed",
+      "ok": true,
+      "detail": 4680
+    },
+    {
+      "name": "sl-tp-cover",
+      "ok": true,
+      "detail": {
+        "slTpCover": true,
+        "trailSlTpCover": true,
+        "slCover": true,
+        "trailCover": true
+      }
+    },
+    {
+      "name": "independent-axes",
+      "ok": true,
+      "detail": {
+        "independentConfigs": true,
+        "independentDirection": true,
+        "independentStrategy": true,
+        "independentIndication": true
+      }
+    },
+    {
+      "name": "listings-ranked-complete",
+      "ok": true,
+      "detail": {
+        "ranked": 4680,
+        "product": 4680
+      }
+    },
+    {
+      "name": "listings-index-complete",
+      "ok": true,
+      "detail": 4680
+    },
+    {
+      "name": "listings-relative",
+      "ok": true,
+      "detail": {
+        "sets": 4680,
+        "ranked": 4680,
+        "validated": 885,
+        "packs": {
+          "indications": 2340,
+          "general": 2340
+        },
+        "kinds": {
+          "trail": 4500,
+          "base": 180
+        }
+      }
+    },
+    {
+      "name": "by-direction",
+      "ok": true,
+      "detail": [
+        "LONG",
+        "SHORT"
+      ]
+    },
+    {
+      "name": "by-strategy-packs",
+      "ok": true,
+      "detail": [
+        "base",
+        "block",
+        "block:signals",
+        "core",
+        "dca",
+        "general",
+        "general:base",
+        "general:trail",
+        "indications",
+        "indications:base",
+        "indications:trail",
+        "trail"
+      ]
+    },
+    {
+      "name": "by-symbol",
+      "ok": true,
+      "detail": 11
+    },
+    {
+      "name": "winner",
+      "ok": true,
+      "detail": "indications:1m:sl0.1:tr1.2:0.1:st10:short"
+    },
+    {
+      "name": "kinds",
+      "ok": true,
+      "detail": [
+        "active",
+        "break",
+        "common",
+        "direction",
+        "move",
+        "signals",
+        "state",
+        "trend"
+      ]
+    },
+    {
+      "name": "row-windows",
+      "ok": true,
+      "detail": {
+        "ok": 120,
+        "n": 120
+      }
+    },
+    {
+      "name": "row-last15-identity",
+      "ok": true,
+      "detail": {
+        "ok": 120,
+        "n": 120
+      }
+    },
+    {
+      "name": "book-pf-identity",
+      "ok": true,
+      "detail": {
+        "checked": 312,
+        "mismatch": 0,
+        "sets": 312,
+        "fills": 29455
+      }
+    },
+    {
+      "name": "book-listings",
+      "ok": true,
+      "detail": {
+        "sets": 312,
+        "ranked": 312,
+        "validated": 0,
+        "active": 0,
+        "packs": {
+          "indications": 156,
+          "general": 156
+        },
+        "kinds": {
+          "base": 12,
+          "trail": 300
+        },
+        "symbolsSeen": 8
+      }
+    },
+    {
+      "name": "book-progress-coverage",
+      "ok": true,
+      "detail": "29455 hist fills \u00b7 coverage 8/8"
+    },
+    {
+      "name": "book-cover-replay",
+      "ok": true,
+      "detail": 8
+    }
+  ]
+}

@@ -1942,6 +1942,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "controlOrdersPerConfig": ov.get("controlOrdersPerConfig"),
                 "dcaEnabled": ov.get("dcaEnabled"),
                 "blockActive": ov.get("blockActive"),
+                "blockOverall": ov.get("blockOverall"),
             })
             return
         if path in ("/stats.json", "/live-stats.json"):
@@ -2154,6 +2155,7 @@ class Handler(SimpleHTTPRequestHandler):
             "controlOrders": cur.get("controlOrders"),
             "dcaEnabled": cur.get("dcaEnabled"),
             "blockActive": cur.get("blockActive"),
+            "blockOverall": cur.get("blockOverall"),
         })
 
 

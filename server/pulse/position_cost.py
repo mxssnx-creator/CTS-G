@@ -30,7 +30,7 @@ INTERN_PF = 1.0
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
-EVALUATION_WINDOWS = (5, 10, 15, 25, 50, 75)
+EVALUATION_WINDOWS = (5, 10, 15, 25, 30, 50, 75)
 
 
 def _row_value(row: Any, *keys: str) -> Any:
@@ -530,7 +530,7 @@ def last_n_cost_pf(
     if use_simple:
         cost = normalize_position_cost_pct(cost_pct)
         cost_frac = cost_as_frac(cost)
-        gross_values = [finite(row.get("pnl_pct")) for row in window]
+        gross_values = [finite(_row_value(row, "pnl_pct")) for row in window]
         net_values = [value - cost_frac for value in gross_values]
         count = len(gross_values)
         avg_r = sum(signed_result_r(value, cost) for value in gross_values) / count if count else 0.0
@@ -834,7 +834,7 @@ if __name__ == "__main__":
     n = last_n_cost_pf([{"pnl_pct": 0.003, "pnl": 0.0015}] * 10, 10, 0.15)
     assert n["costSubtracted"] and abs(n["netAvg"] - 0.0015) < 1e-9
     windows = evaluation_windows([{"t": i, "pnl_pct": 0.003, "pnl": 0.0015} for i in range(80)], 0.15)
-    assert set(windows) == {"last5", "last10", "last15", "last25", "last50", "last75"}
+    assert set(windows) == {"last5", "last10", "last15", "last25", "last30", "last50", "last75"}
     assert windows["last75"]["n"] == 75 and windows["last75"]["available"]
     print("position_cost ok")
     rows = [{"pnl_pct": 0.003, "pnl": 1.0}] * 15

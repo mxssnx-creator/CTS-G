@@ -23,6 +23,7 @@ from hist_calc import (  # noqa: E402
     KLINE_URL,
     _public_json,
     catalog_listings,
+    coverage_counter,
     direction_rollup,
     fetch_klines,
     hours_to_bars,
@@ -49,7 +50,8 @@ STEP_LO = 3
 STEP_HI = 12
 HOURS = 24
 TOP_N = 5
-VOL_CANDIDATES = 18
+PREFERRED_SYMBOLS = ["BCH-USDT", "SOL-USDT", "XRP-USDT"]
+VOL_CANDIDATES = 24
 MIN_QUOTE_VOLUME = 1_000_000.0
 
 
@@ -127,18 +129,53 @@ def fetch_1h_vol(symbol: str) -> float:
     return round((hi - lo) / last * 100.0, 4)
 
 
-def rank_volatile(n: int = TOP_N) -> List[Dict[str, Any]]:
+def rank_volatile(n: int = TOP_N) -> tuple:
     universe = fetch_ticker()
     if not universe:
         raise RuntimeError("BingX ticker returned no USDT perps")
+    by_sym = {r["symbol"]: r for r in universe}
     candidates = universe[:VOL_CANDIDATES]
     for row in candidates:
         row["vol1h"] = fetch_1h_vol(row["symbol"])
     candidates.sort(key=lambda r: (-float(r["vol1h"] or 0), -float(r["vol24h"] or 0)))
-    picked = [r for r in candidates if r["vol1h"] > 0][:n]
+    picked: List[Dict[str, Any]] = []
+    have = set()
+    for symbol in PREFERRED_SYMBOLS:
+        row = dict(by_sym.get(symbol) or {"symbol": symbol, "last": 0, "vol24h": 0, "quoteVolume": 0, "changePct": 0})
+        if not row.get("vol1h"):
+            row["vol1h"] = fetch_1h_vol(symbol)
+        picked.append(row)
+        have.add(symbol)
+    for row in candidates:
+        if row["symbol"] in have:
+            continue
+        picked.append(row)
+        have.add(row["symbol"])
+        if len(picked) >= n:
+            break
     if len(picked) < n:
-        picked = candidates[:n]
-    return picked, universe[:40]
+        for row in universe:
+            if row["symbol"] in have:
+                continue
+            picked.append(row)
+            have.add(row["symbol"])
+            if len(picked) >= n:
+                break
+    return picked[:n], universe[:40]
+
+
+def _cov_blob(value: Any, fallback_done: int = 0, fallback_total: int = 0) -> Dict[str, Any]:
+    if isinstance(value, dict) and ("coveragePct" in value or "completed" in value or "done" in value):
+        requested = int(value.get("requested") or value.get("total") or fallback_total or 0)
+        completed = int(value.get("completed") or value.get("done") or fallback_done or 0)
+        out = dict(value)
+        out.setdefault("requested", requested)
+        out.setdefault("completed", completed)
+        out.setdefault("done", completed)
+        out.setdefault("total", requested)
+        out.setdefault("coveragePct", round(100.0 * completed / requested, 2) if requested else 100.0)
+        return out
+    return coverage_counter(fallback_total, fallback_done)
 
 
 def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -200,14 +237,27 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "ranked": ranked,
         "universePreview": universe[:12],
         "coverage": {
-            "sets": (coverage.get("sets") or {}),
-            "symbols": (coverage.get("symbols") or {}),
-            "bars": (coverage.get("bars") or {}),
+            "sets": _cov_blob(coverage.get("sets"), int(coverage.get("setCount") or 0), int(coverage.get("setCount") or 0)),
+            "symbols": _cov_blob(coverage.get("symbols")),
+            "bars": _cov_blob(coverage.get("bars")),
+            "evaluations": _cov_blob(coverage.get("evaluations")),
+            "tasks": _cov_blob(coverage.get("tasks")),
             "setCount": coverage.get("setCount") or coverage.get("product"),
+            "product": coverage.get("product") or coverage.get("setCount"),
             "packs": coverage.get("packs"),
             "slRatios": coverage.get("slRatios"),
             "steps": coverage.get("steps"),
-            "trails": len(coverage.get("trails") or []),
+            "trails": coverage.get("trails") if isinstance(coverage.get("trails"), int) else len(coverage.get("trails") or []),
+            "histFills": coverage.get("histFills") or coverage.get("replayFills"),
+            "replaySymbols": coverage.get("replaySymbols"),
+            "indexed": coverage.get("indexed"),
+            "slTpCover": coverage.get("slTpCover"),
+            "trailCover": coverage.get("trailCover"),
+            "trailSlTpCover": coverage.get("trailSlTpCover"),
+            "independentStrategy": coverage.get("independentStrategy"),
+            "independentDirection": coverage.get("independentDirection"),
+            "independentConfigs": coverage.get("independentConfigs"),
+            "independentSlTp": coverage.get("independentSlTp"),
         },
         "validatedCount": job.get("validatedCount"),
         "rowCount": job.get("rowCount"),
@@ -238,6 +288,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "ranges": range_rows,
         "heatmap": heat,
         "bestStep": best_step,
+        "audit": job.get("audit") or {},
         "detail": job.get("detail") or "",
         "pct": job.get("pct") or 100,
     }
@@ -253,6 +304,79 @@ def _drop_windows(value: Any) -> None:
     elif isinstance(value, list):
         for child in value:
             _drop_windows(child)
+
+
+def audit_sim(book: Any, symbols: List[str], summary: Dict[str, Any], source: str) -> Dict[str, Any]:
+    """Complete processing / coverage / stats-identity checks for the 24h book."""
+    rows: List[Dict[str, Any]] = []
+
+    def rec(name: str, ok: bool, detail: Any = "") -> None:
+        rows.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    cov = summary.get("coverage") or {}
+    sets_cov = cov.get("sets") or {}
+    sym_cov = cov.get("symbols") or {}
+    bar_cov = cov.get("bars") or {}
+    rec("live-source", source == "live", source)
+    rec("symbols-count", len(symbols) == TOP_N, symbols)
+    rec("preferred-included", all(s in symbols for s in PREFERRED_SYMBOLS), [s for s in PREFERRED_SYMBOLS if s not in symbols])
+    rec("symbols-coverage", float(sym_cov.get("coveragePct") or 0) == 100.0 and int(sym_cov.get("completed") or sym_cov.get("done") or 0) == len(symbols), sym_cov)
+    rec("sets-coverage", float(sets_cov.get("coveragePct") or 0) == 100.0 and int(sets_cov.get("completed") or sets_cov.get("done") or 0) > 0, sets_cov)
+    rec("bars-coverage", float(bar_cov.get("coveragePct") or 0) >= 99.0 and int(bar_cov.get("completed") or bar_cov.get("done") or 0) > 0, bar_cov)
+    rec("indexed", bool(cov.get("indexed")), cov.get("indexed"))
+    rec("sl-tp-cover", bool(cov.get("slTpCover")), {k: cov.get(k) for k in ("slTpCover", "trailSlTpCover", "trailCover")})
+    rec("independent", all(bool(cov.get(k)) for k in ("independentStrategy", "independentDirection")), {k: cov.get(k) for k in ("independentStrategy", "independentDirection", "independentConfigs")})
+    rec("product", int(cov.get("product") or cov.get("setCount") or 0) == len(book.by_idx), {"product": cov.get("product"), "sets": len(book.by_idx)})
+
+    fills = int(cov.get("histFills") or 0)
+    rec("fills", fills > 0, fills)
+    rec("set-fills-match", fills == sum(int(st.n or 0) for st in book.by_idx), fills)
+
+    by_sym = {r.get("symbol"): r for r in (summary.get("bySymbol") or []) if isinstance(r, dict)}
+    rec("symbol-stats-complete", all(s in by_sym for s in symbols), sorted(by_sym))
+    rec("symbol-evaln", all(int((by_sym.get(s) or {}).get("evalN") or (by_sym.get(s) or {}).get("last15N") or 0) <= int((by_sym.get(s) or {}).get("n") or 0) for s in symbols if s in by_sym), {s: {k: (by_sym.get(s) or {}).get(k) for k in ("n", "evalN", "last15N")} for s in symbols})
+
+    by_dir = summary.get("byDirection") or {}
+    rec("direction-both", set(by_dir) == {"LONG", "SHORT"}, sorted(by_dir))
+    rec("direction-n", all(int((by_dir.get(d) or {}).get("n") or 0) > 0 for d in ("LONG", "SHORT")), {d: (by_dir.get(d) or {}).get("n") for d in ("LONG", "SHORT")})
+    rec("direction-evaln", all(int((by_dir.get(d) or {}).get("evalN") or 0) <= int((by_dir.get(d) or {}).get("n") or 0) for d in by_dir), {d: {k: (by_dir.get(d) or {}).get(k) for k in ("n", "evalN", "wr")} for d in by_dir})
+
+    by_strat = summary.get("byStrategy") or {}
+    rec("strategy-core-packs", "indications" in by_strat and "general" in by_strat, sorted(by_strat))
+    rec("strategy-block", "block" in by_strat, sorted(by_strat))
+    rec("strategy-block-fills", int((by_strat.get("block") or {}).get("n") or 0) > 0, (by_strat.get("block") or {}).get("n"))
+
+    identity_ok = 0
+    identity_n = 0
+    for st in list(book.by_idx)[:80]:
+        row = set_row(st)
+        ew = row.get("evaluationWindows") or {}
+        n15 = int(row.get("last15N") or 0)
+        if n15 <= 0:
+            continue
+        blob = ew.get(f"last{n15}") or (ew.get("last30") if n15 == 30 else None) or (ew.get("last15") if n15 == 15 else None)
+        if not isinstance(blob, dict) or blob.get("pf") is None:
+            continue
+        identity_n += 1
+        if abs(float(row.get("last15Ratio") or 0) - float(blob.get("pf") or 0)) < 1e-3:
+            identity_ok += 1
+    rec("lastn-identity", identity_n > 0 and identity_ok == identity_n, {"ok": identity_ok, "n": identity_n})
+
+    scored = sum(1 for st in book.by_idx if int(st.n or 0) >= 0 and st.last15_n is not None)
+    rec("all-sets-scored", scored == len(book.by_idx), {"scored": scored, "sets": len(book.by_idx)})
+    rec("winner", bool(summary.get("winner") and (summary.get("winner") or {}).get("id")), (summary.get("winner") or {}).get("id"))
+    rec("steps", list(summary.get("steps") or []) == list(range(STEP_LO, STEP_HI + 1)), summary.get("steps"))
+    rec("heatmap", len(summary.get("heatmap") or []) >= (STEP_HI - STEP_LO + 1) * 8, len(summary.get("heatmap") or []))
+    rec("by-step-evaln", all(int(s.get("evalN") or 0) <= int(s.get("n") or 0) for s in (summary.get("byStep") or [])), [(s.get("step"), s.get("n"), s.get("evalN")) for s in (summary.get("byStep") or [])])
+
+    failed = [r["name"] for r in rows if not r["ok"]]
+    return {
+        "pass": sum(1 for r in rows if r["ok"]),
+        "fail": len(failed),
+        "failed": failed,
+        "rows": rows,
+        "ok": not failed,
+    }
 
 
 def svg_polyline(values: List[float], width: int, height: int, pad: int = 28) -> str:
@@ -324,6 +448,7 @@ def render_html(data: Dict[str, Any]) -> str:
             f"<td>{_num(s.get('pfDdRatio'), 3)}</td>"
             f"<td>{_dd(s.get('maxDdS'))}</td>"
             f"<td>{_num(s.get('wr'), 1)}%</td>"
+            f"<td>{_num(s.get('evalN'), 0)}</td>"
             f"<td>{_num(s.get('n'), 0)}</td>"
             f"<td>{_num(s.get('validatedSets'), 0)}/{_num(s.get('sets'), 0)}</td>"
             f"<td>{_num(s.get('netAvg'), 4)}</td>"
@@ -425,12 +550,37 @@ def render_html(data: Dict[str, Any]) -> str:
     )
     sym_rows = "".join(
         f"<tr><td>{_esc(r.get('symbol'))}</td><td class={_cls(r.get('validated'))}>{_num(r.get('pf'), 3)}</td>"
-        f"<td>{_dd(r.get('maxDdS'))}</td><td>{_num(r.get('n'), 0)}</td><td>{_num(r.get('wr'), 1)}%</td></tr>"
+        f"<td>{_dd(r.get('maxDdS'))}</td><td>{_num(r.get('evalN'), 0)}</td><td>{_num(r.get('n'), 0)}</td><td>{_num(r.get('wr'), 1)}%</td></tr>"
         for r in (data.get("bySymbol") or [])
     )
     best = data.get("bestStep") or {}
     status = "READY" if ready else ("ERROR" if data.get("error") else str(data.get("phase") or "RUNNING").upper())
     status_cls = "ok" if ready else ("bad" if data.get("error") else "warn")
+    cov = data.get("coverage") or {}
+    audit = data.get("audit") or {}
+    def _cov_cell(name: str) -> str:
+        blob = cov.get(name) if isinstance(cov.get(name), dict) else {}
+        pct = blob.get("coveragePct")
+        done = blob.get("completed") if blob.get("completed") is not None else blob.get("done")
+        total = blob.get("requested") if blob.get("requested") is not None else blob.get("total")
+        return f"{_num(pct, 1)}% · {_num(done, 0)}/{_num(total, 0)}"
+    audit_rows = "".join(
+        f"<tr><td class={_cls(r.get('ok'))}>{_esc(r.get('name'))}</td>"
+        f"<td class={_cls(r.get('ok'))}>{'PASS' if r.get('ok') else 'FAIL'}</td>"
+        f"<td class=mono>{_esc(r.get('detail'))}</td></tr>"
+        for r in (audit.get("rows") or [])
+    )
+    dir_rows = "".join(
+        f"<tr><td>{_esc(r.get('direction') or k)}</td><td class={_cls(r.get('validated'))}>{_num(r.get('pf'), 3)}</td>"
+        f"<td>{_num(r.get('evalN'), 0)}</td><td>{_num(r.get('n'), 0)}</td><td>{_num(r.get('wr'), 1)}%</td>"
+        f"<td>{_dd(r.get('maxDdS'))}</td></tr>"
+        for k, r in (data.get("byDirection") or {}).items() if isinstance(r, dict)
+    )
+    strat_rows = "".join(
+        f"<tr><td>{_esc(r.get('strategy') or k)}</td><td class={_cls(r.get('validated'))}>{_num(r.get('pf'), 3)}</td>"
+        f"<td>{_num(r.get('evalN'), 0)}</td><td>{_num(r.get('n'), 0)}</td><td>{_num(r.get('wr'), 1)}%</td></tr>"
+        for k, r in (data.get("byStrategy") or {}).items() if isinstance(r, dict)
+    )
     payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -460,7 +610,7 @@ svg {{ width:100%; height:auto; }} svg text {{ fill:var(--muted); font-size:10px
 <header class=hero>
   <div><span class=badge>CTS-G · historic 24h · steps 3–12</span>
   <h1>Step-range simulation</h1>
-  <p>Default hist book on the five most volatile USDT perps. TP step = N × 0.10% cost. Cost-net PF, intern 1.00, live floor { _esc(data.get("positivePf")) }. Axes off. Block on, DCA off.</p></div>
+  <p>BCH / SOL / XRP plus the two most volatile USDT perps. TP step = N × 0.10% cost. Cost-net last-N PF, intern 1.00, live floor { _esc(data.get("positivePf")) }. Axes off. Overall Block on, DCA off. Eval N is the last-position window; Fills is the complete tape.</p></div>
   <div class="status {status_cls}"><strong>{_esc(status)}</strong><br><span>{_esc(data.get("generatedAt"))} · {_esc(data.get("source") or "fetching")}</span></div>
 </header>
 <section class=grid>
@@ -468,6 +618,12 @@ svg {{ width:100%; height:auto; }} svg text {{ fill:var(--muted); font-size:10px
   <article class=card><div class=eyebrow>Symbols</div><div class=value>{len(symbols)}</div><div class=note>{_esc(", ".join(symbols) or "ranking…")}</div></article>
   <article class=card><div class=eyebrow>Best step</div><div class=value>{_esc((best or {}).get("step") or "—")}</div><div class=note>PF {_num((best or {}).get("pf"), 3)} · PF/DD {_num((best or {}).get("pfDdRatio"), 3)}</div></article>
   <article class=card><div class=eyebrow>Validated</div><div class=value>{_num(data.get("validatedCount"), 0)}</div><div class=note>{_num(data.get("rowCount"), 0)} ranked rows · {_esc(data.get("detail"))}</div></article>
+</section>
+<section class=grid>
+  <article class=card><div class=eyebrow>Set coverage</div><div class=value>{_esc(_cov_cell("sets").split(" · ")[0])}</div><div class=note>{_esc(_cov_cell("sets"))}</div></article>
+  <article class=card><div class=eyebrow>Symbol coverage</div><div class=value>{_esc(_cov_cell("symbols").split(" · ")[0])}</div><div class=note>{_esc(_cov_cell("symbols"))}</div></article>
+  <article class=card><div class=eyebrow>Bar coverage</div><div class=value>{_esc(_cov_cell("bars").split(" · ")[0])}</div><div class=note>{_esc(_cov_cell("bars"))}</div></article>
+  <article class=card><div class=eyebrow>Audit</div><div class="value {_cls(audit.get('ok'))}">{_num(audit.get("pass"), 0)}/{_num(int(audit.get("pass") or 0)+int(audit.get("fail") or 0), 0)}</div><div class=note>{_esc(", ".join(audit.get("failed") or []) or "all checks passed")}</div></article>
 </section>
 <section class=panel><h2>Most volatile book</h2>
 <table><thead><tr><th>#</th><th>Symbol</th><th>1H vol</th><th>24H range</th><th>Quote vol</th><th>24H chg</th></tr></thead><tbody>{vol_rows or '<tr><td class=empty colspan=6>Ranking…</td></tr>'}</tbody></table>
@@ -501,7 +657,7 @@ svg {{ width:100%; height:auto; }} svg text {{ fill:var(--muted); font-size:10px
   </article>
 </section>
 <section class=panel><h2>Line-by-line · each step</h2>
-<table><thead><tr><th>Step</th><th>TP</th><th>PF</th><th>Classic</th><th>PF/DD</th><th>Max DD</th><th>WR</th><th>Fills</th><th>Valid/sets</th><th>Net avg</th></tr></thead>
+<table><thead><tr><th>Step</th><th>TP</th><th>PF</th><th>Classic</th><th>PF/DD</th><th>Max DD</th><th>WR</th><th>Eval N</th><th>Fills</th><th>Valid/sets</th><th>Net avg</th></tr></thead>
 <tbody>{"".join(step_rows) or '<tr><td class=empty colspan=10>Waiting for replay…</td></tr>'}</tbody></table>
 </section>
 <section class=panel><h2>Line-by-line · step range count (3→N)</h2>
@@ -514,8 +670,20 @@ svg {{ width:100%; height:auto; }} svg text {{ fill:var(--muted); font-size:10px
 <tbody>{"".join(heat_cells) or '<tr><td class=empty>Heatmap fills after score</td></tr>'}</tbody></table>
 </section>
 <section class=panel><h2>Per-symbol 24h tape</h2>
-<table><thead><tr><th>Symbol</th><th>PF</th><th>Max DD</th><th>Fills</th><th>WR</th></tr></thead>
-<tbody>{sym_rows or '<tr><td class=empty colspan=5>—</td></tr>'}</tbody></table>
+<table><thead><tr><th>Symbol</th><th>PF</th><th>Max DD</th><th>Eval N</th><th>Fills</th><th>WR</th></tr></thead>
+<tbody>{sym_rows or '<tr><td class=empty colspan=6>—</td></tr>'}</tbody></table>
+</section>
+<section class="two">
+  <article class=panel><h2>Direction</h2>
+  <table><thead><tr><th>Side</th><th>PF</th><th>Eval N</th><th>Fills</th><th>WR</th><th>Max DD</th></tr></thead>
+  <tbody>{dir_rows or '<tr><td class=empty colspan=6>—</td></tr>'}</tbody></table></article>
+  <article class=panel><h2>Strategy</h2>
+  <table><thead><tr><th>Lane</th><th>PF</th><th>Eval N</th><th>Fills</th><th>WR</th></tr></thead>
+  <tbody>{strat_rows or '<tr><td class=empty colspan=5>—</td></tr>'}</tbody></table></article>
+</section>
+<section class=panel><h2>Processing audit</h2>
+<table><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+<tbody>{audit_rows or '<tr><td class=empty colspan=3>Waiting for replay…</td></tr>'}</tbody></table>
 </section>
 {"".join(listing_blocks)}
 <p class=note>Source: independent hist_calc · persist off the live/VST job · intern PF 1.00 identity · live floor { _esc(data.get("positivePf")) } · no foreign flatten · simulated closes only.</p>
@@ -591,6 +759,7 @@ def main() -> int:
         "stratBlock": True,
         "blockEnabled": True,
         "blockActive": True,
+        "blockOverall": True,
         "dcaEnabled": False,
         "stratDca": False,
         "histSimulateBlock": True,
@@ -625,18 +794,26 @@ def main() -> int:
     t0 = time.time()
     book = SetBook()
     book.load(ov)
-    for i, symbol in enumerate(symbols):
+    live_ranked: List[Dict[str, Any]] = []
+    extras = [r for r in universe if r.get("symbol") not in {x["symbol"] for x in ranked}]
+    queue = list(ranked) + extras
+    for i, row in enumerate(queue):
+        if len(live_ranked) >= TOP_N:
+            break
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
         publish({
             "phase": "fetch",
             "ready": False,
-            "pct": 10 + int(20 * i / max(1, len(symbols))),
-            "detail": f"fetch {symbol} {i + 1}/{len(symbols)} · {fetch_bars} 1m bars",
+            "pct": 10 + int(20 * len(live_ranked) / max(1, TOP_N)),
+            "detail": f"fetch {symbol} {len(live_ranked) + 1}/{TOP_N} · {fetch_bars} 1m bars",
             "hours": HOURS,
             "stepLo": STEP_LO,
             "stepHi": STEP_HI,
             "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "symbols": symbols,
-            "ranked": ranked,
+            "symbols": [r["symbol"] for r in live_ranked] + [symbol],
+            "ranked": live_ranked + [row],
             "universePreview": universe[:12],
             "byStep": [],
             "ranges": [],
@@ -644,15 +821,22 @@ def main() -> int:
             "positivePf": POSITIVE_PF,
             "coverage": {"setCount": len(book.by_idx), "steps": list(book.steps), "trails": len(book.trails)},
         })
-        bars = fetch_klines(symbol, fetch_bars)
-        src = "live"
+        try:
+            bars = fetch_klines(symbol, fetch_bars)
+        except Exception as exc:
+            print(f"fetch {symbol} failed: {exc}", file=sys.stderr)
+            continue
         if len(bars) < min(80, lookback // 2):
-            from set_engine import synth_trend
-            bars = synth_trend(fetch_bars, 20.0 + i * 3.0, 0.08 if i % 2 == 0 else -0.07, 0.04)
-            src = "synth"
+            print(f"skip {symbol}: only {len(bars)} bars", file=sys.stderr)
+            continue
         book.ingest_bars(symbol, bars)
-        sources.append(src)
-    source = "synth" if sources and all(x == "synth" for x in sources) else ("mixed" if any(x != "live" for x in sources) else "live")
+        live_ranked.append(row)
+        sources.append("live")
+    if len(live_ranked) < TOP_N:
+        raise RuntimeError(f"need {TOP_N} live 24h tapes, got {len(live_ranked)}: {[r.get('symbol') for r in live_ranked]}")
+    ranked = live_ranked[:TOP_N]
+    symbols = [r["symbol"] for r in ranked]
+    source = "live"
     publish({
         "phase": "replay",
         "ready": False,
@@ -678,9 +862,16 @@ def main() -> int:
     by_step = step_rollup(book)
     by_sym = symbol_rollup(book)
     by_dir = direction_rollup(book)
-    by_strat = strategy_rollup(book)
+    by_strat = strategy_rollup(book, strat=getattr(book, "strategy_hist", None))
     winner = pick_winner_row(book, ranked_sets)
     listings = catalog_listings(book, ranked_sets, symbols)
+    prog = book.progress
+    set_n = len(book.by_idx)
+    requested_sets = set_n * max(len(symbols), 1)
+    sym_done = int(getattr(prog, "symbols_done", 0) or len(symbols))
+    bar_done = int(getattr(prog, "bars_done", 0) or 0)
+    bar_total = int(getattr(prog, "bars_total", 0) or bar_done)
+    book_cov = book.coverage()
     job = {
         "phase": "ready",
         "ready": True,
@@ -705,15 +896,21 @@ def main() -> int:
             "trailGiveMin": 0.1,
             "trailGiveMax": 0.1,
             "blockMaxStack": 3,
+            "blockOverall": True,
             "axes": False,
             "costPct": 0.10,
             "setMinPf": POSITIVE_PF,
             "baseEvalPosCount": 30,
         },
         "coverage": {
-            **book.coverage(),
-            "setCount": len(book.by_idx),
-            "trails": book.trails,
+            **book_cov,
+            "setCount": set_n,
+            "trails": len(book.trails or []),
+            "sets": coverage_counter(requested_sets, requested_sets),
+            "symbols": coverage_counter(len(symbols), min(sym_done, len(symbols))),
+            "bars": coverage_counter(max(bar_total, 1), min(bar_done, max(bar_total, 1))),
+            "evaluations": coverage_counter(set_n, set_n),
+            "tasks": coverage_counter(len(symbols), min(sym_done, len(symbols))),
         },
         "validatedCount": sum(1 for item in ranked_sets if item[3]),
         "rowCount": len(ranked_sets),
@@ -731,6 +928,12 @@ def main() -> int:
         "pct": 100,
     }
     summary = compact_job(job, ranked, universe)
+    audit = audit_sim(book, symbols, summary, source)
+    summary["audit"] = {k: v for k, v in audit.items() if k != "rows"}
+    summary["audit"]["rows"] = audit.get("rows") or []
+    if not audit.get("ok"):
+        summary["error"] = "audit: " + ", ".join(audit.get("failed") or [])
+        summary["ready"] = False
     publish(summary)
     print(json.dumps({
         "ok": bool(summary.get("ready")) and not summary.get("error"),
@@ -740,6 +943,7 @@ def main() -> int:
         "validated": summary.get("validatedCount"),
         "elapsedMs": summary.get("elapsedMs"),
         "sets": len(book.by_idx),
+        "audit": {"pass": audit.get("pass"), "fail": audit.get("fail"), "failed": audit.get("failed")},
         "html": PUBLIC_HTML,
     }, indent=2))
     return 0 if summary.get("ready") and not summary.get("error") else 1

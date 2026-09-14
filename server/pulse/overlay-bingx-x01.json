@@ -14,6 +14,7 @@
   "blockActiveLive": true,
   "blockActiveMinLevel": 0,
   "blockActiveReal": true,
+  "blockOverall": true,
   "blockEnabled": true,
   "blockMaxStack": 3,
   "blockPauseCountRatio": 1,

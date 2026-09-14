@@ -19,6 +19,7 @@ export type ConfigPreset = {
 const SHARED: Partial<PulseOverlay> = {
   blockEnabled: true,
   stratBlock: true,
+  blockOverall: true,
   blockMaxStack: 6,
   blockVolumeRatio: 0.25,
   blockProfitFactorRatio: 1.25,

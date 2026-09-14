@@ -1739,11 +1739,16 @@ function SettingsPage() {
                   on={overlay.blockActiveReal}
                   onChange={(v) => patch("blockActiveReal", v)}
                 />
+                <Toggle
+                  label="Overall Block (Real)"
+                  on={overlay.blockOverall !== false}
+                  onChange={(v) => patch("blockOverall", v)}
+                />
                 <Num label="Minimum valid Block level" value={overlay.blockActiveMinLevel} min={0} max={overlay.blockMaxStack || 6} step={1}
                   hint="0 = normal virtual basis (default) · higher = minimum Block count · adjusted quantity only"
                   onChange={(v) => patch("blockActiveMinLevel", Math.max(0, Math.min(overlay.blockMaxStack || 6, Math.trunc(v))))} />
                 </Grid>
-                <p className="text-sm text-muted">Independent of Normal (General). Active observes its qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; its own existing and pending quantities reduce the order. Level 0 uses the normal virtual basis and never makes an unadjusted Block order valid.</p>
+                <p className="text-sm text-muted">Independent of Normal (General). Active observes its qualified reference for at least 45 seconds and 0.2% continuation. Only the Block increment is executed; its own existing and pending quantities reduce the order. Level 0 uses the normal virtual basis and never makes an unadjusted Block order valid. Overall Block (Real) adds on every own open position by symbol and direction, independent of the opening Set, gated at stage Real (PF 1.10). Intern 1.00 is not extra size.</p>
                 </div>
                 <Num
                   label="Max stack"

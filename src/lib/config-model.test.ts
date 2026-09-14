@@ -95,6 +95,7 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.normalExecutionEnabled, true);
     assert.equal(value.blockActive, true);
+    assert.equal(value.blockOverall, true);
     assert.equal(value.setMaxActive, 0);
     assert.equal(value.maxOpen, 100);
     assert.equal(value.controlOrdersPerConfig, true);

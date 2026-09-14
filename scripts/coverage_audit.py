@@ -76,11 +76,19 @@ def main() -> Dict[str, Any]:
         win_n += 1
         if set(ew) >= {"last5", "last15"}:
             win_ok += 1
-        last15 = (ew.get("last15") or {}).get("pf")
-        if last15 is None:
+        last_n = int(r.get("last15N") or 0)
+        blob = None
+        if last_n:
+            blob = ew.get(f"last{last_n}")
+        if blob is None and last_n == 15:
+            blob = ew.get("last15")
+        if blob is None and last_n == 30:
+            blob = ew.get("last30")
+        last_pf = (blob or {}).get("pf") if isinstance(blob, dict) else None
+        if last_pf is None:
             continue
         pf_n += 1
-        if abs(float(r.get("last15Ratio") or 0) - float(last15)) < 1e-3:
+        if abs(float(r.get("last15Ratio") or 0) - float(last_pf)) < 1e-3:
             pf_ok += 1
     rec(rows, "row-windows", win_n > 0 and win_ok == win_n, {"ok": win_ok, "n": win_n})
     rec(rows, "row-last15-identity", pf_n > 0 and pf_ok == pf_n, {"ok": pf_ok, "n": pf_n})

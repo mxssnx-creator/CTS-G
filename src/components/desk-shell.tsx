@@ -217,7 +217,7 @@ function NavLink({
   icon,
   label,
 }: {
-  to: "/" | "/results" | "/settings" | "/system";
+  to: "/" | "/results" | "/settings" | "/step-sweep" | "/system";
   on: boolean;
   icon: ReactNode;
   label: string;

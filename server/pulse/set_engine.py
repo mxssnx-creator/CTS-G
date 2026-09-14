@@ -3510,8 +3510,24 @@ class SetBook:
             dd = drawdown_time_by_symbol(ordered, ordered=True)
         base_ok = sample >= required and clears_pf(last15["ratio"], self.min_pf) and float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
         # Named last5..last75 stay off the hist score hot path. Overall last-pos
-        # (pf_n) already gated base_ok; published rows attach windows lazily.
-        windows: Dict[str, Dict[str, Any]] = {}
+        # (pf_n) already gated base_ok; publish the overall window for identity.
+        windows: Dict[str, Dict[str, Any]] = {
+            f"last{int(self.pf_n or LAST_N_DEFAULT)}": {
+                "requestedN": int(self.pf_n or LAST_N_DEFAULT),
+                "n": int(last15["count"]),
+                "available": int(last15["count"]) >= int(self.pf_n or LAST_N_DEFAULT),
+                "requiredSamples": required,
+                "validated": int(last15["count"]) >= required and clears_pf(float(last15["ratio"]), self.min_pf),
+                "pf": round(float(last15["ratio"]), 4),
+                "classicPf": float(last15.get("classicPf") or 0.0),
+                "avgR": float(last15.get("avgR") or 0.0),
+                "netAvg": float(last15.get("netAvg") or 0.0),
+                "netPct": float(last15.get("netPct") or 0.0),
+                "costPct": cost_pct,
+                "costSamples": 0,
+                "costSubtracted": True,
+            }
+        }
         last25_n = min(self.deact_n, n_rows)
         if last25_n:
             last25_slice = ordered[-last25_n:]
@@ -3633,7 +3649,8 @@ class SetBook:
         dd_s = float(dd["maxS"])
         dd_ok = dd_s <= float(self.max_dd_s or 57600) + 1e-9
         base_ok = validated and dd_ok
-        windows = evaluation_windows(ordered, self.cost_pct, required_samples=need, ordered=True)
+        named = tuple(sorted(set(list(EVALUATION_WINDOWS) + [max(1, int(self.pf_n or LAST_N_DEFAULT))])))
+        windows = evaluation_windows(ordered, self.cost_pct, windows=named, required_samples=need, ordered=True)
         # Named diagnostic windows use the same global threshold, too.
         for metric in windows.values():
             metric["validated"] = int(metric["n"]) >= int(metric["requiredSamples"]) and clears_pf(metric["pf"], self.min_pf)
