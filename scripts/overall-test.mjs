@@ -186,6 +186,13 @@ try {
   else fail("no hist test min pf");
   if (await page.getByTestId("hist-test-start").count()) ok("hist test start");
   else fail("no hist test start");
+  if (await page.getByTestId("hist-test-pause").count()) ok("hist test pause");
+  else fail("no hist test pause");
+  if (await page.getByTestId("hist-test-stop").count()) ok("hist test stop");
+  else fail("no hist test stop");
+  const startLabel = (await page.getByTestId("hist-test-start").innerText().catch(() => "")).trim();
+  if (/^Start$/i.test(startLabel) || /Resume/i.test(startLabel)) ok("hist test start label");
+  else fail("hist test start label " + startLabel);
   const histStatus = await page.getByTestId("hist-test-status").innerText().catch(() => "");
   if (/20h tape · min PF 1\.10 · fill until positive/i.test(histStatus) || /20h/.test(histPanel)) ok("hist test defaults");
   else fail("hist test defaults " + histStatus.slice(0, 80));

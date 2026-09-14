@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Pause, Play, Square } from "lucide-react";
 import {
   blockTable,
   bool,
@@ -52,7 +53,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, histTestIsRunning, histTestStatusLine, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestIsPaused, histTestStartLabel, histTestStatusLine, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -120,7 +121,6 @@ function SettingsPage() {
   const [calcJob, setCalcJob] = useState<HistCalcJob | null>(null);
   const [calcBusy, setCalcBusy] = useState(false);
   const [histTestJob, setHistTestJob] = useState<HistTestJob | null>(null);
-  const [histTestBusy, setHistTestBusy] = useState(false);
   const [presetId, setPresetId] = useState<string | null>(null);
   const [resetAsk, setResetAsk] = useState(false);
   const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
@@ -143,7 +143,6 @@ function SettingsPage() {
     setCalcJob(null);
     setCalcBusy(false);
     setHistTestJob(null);
-    setHistTestBusy(false);
     setDirty(false);
     dirtyRef.current = false;
     setSaveMsg(null);
@@ -235,7 +234,6 @@ function SettingsPage() {
       if (signal.aborted) return;
       histTestJobRef.current = j;
       setHistTestJob(j);
-      if (!histTestIsRunning(j.phase)) setHistTestBusy(false);
     }, () => (histTestIsRunning(histTestJobRef.current?.phase) ? 1200 : document.hidden ? 8000 : 4000));
     return () => poll.stop();
   }, []);
@@ -422,13 +420,12 @@ function SettingsPage() {
 
   const histTestTarget = overlay.symbolCap > 0 ? overlay.symbolCap : HIST_TEST_TARGET_DEFAULT;
 
-  const onStartHistTest = async () => {
-    if (overlay.histTestEnabled === false) return;
-    setHistTestBusy(true);
+  const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
+    if (action === "start" && overlay.histTestEnabled === false) return;
     setSaveMsg(null);
     const hours = clampHistTestHours(overlay.histTestHours, HIST_TEST_HOURS_DEFAULT);
     const minPf = normalizePf(Number(overlay.histTestMinPf || overlay.minPf), POSITIVE_PF);
-    const j = await startHistTest({
+    const payload = {
       hours,
       minPf,
       symbolCap: histTestTarget,
@@ -438,21 +435,17 @@ function SettingsPage() {
         histTestMinPf: minPf,
         symbolCap: histTestTarget,
       },
-    });
+    };
+    const j =
+      action === "stop"
+        ? await stopHistTest()
+        : action === "pause"
+          ? await pauseHistTest()
+          : await startHistTest({ ...payload, action: action === "resume" ? "resume" : "start" });
     histTestJobRef.current = j;
     setHistTestJob(j);
-    if (!histTestIsRunning(j.phase)) setHistTestBusy(false);
-    if (j.phase === "error") setSaveMsg(j.error || j.detail || "Historic test failed to start");
-  };
-
-  const onStopHistTest = async () => {
-    if (!histTestIsRunning(histTestJob?.phase) && !histTestBusy) return;
-    setHistTestBusy(true);
-    const j = await stopHistTest();
-    histTestJobRef.current = j;
-    setHistTestJob(j);
-    setHistTestBusy(false);
-    setSaveMsg(j.error || j.detail || "Historic test stop requested");
+    if (j.phase === "error") setSaveMsg(j.error || j.detail || `Historic test ${action} failed`);
+    else if (action === "stop" || action === "pause") setSaveMsg(j.detail || `Historic test ${action} requested`);
   };
 
   const onApplyPositiveSymbols = () => {
@@ -612,9 +605,7 @@ function SettingsPage() {
               overlay={overlay}
               histTestTarget={histTestTarget}
               histTestJob={histTestJob}
-              histTestBusy={histTestBusy}
-              onStart={() => void onStartHistTest()}
-              onStop={() => void onStopHistTest()}
+              onControl={onHistTestControl}
               onApply={onApplyPositiveSymbols}
               patch={patch}
             />
@@ -2586,22 +2577,34 @@ function TestHistoricCard({
   overlay,
   histTestTarget,
   histTestJob,
-  histTestBusy,
-  onStart,
-  onStop,
+  onControl,
   onApply,
   patch,
 }: {
   overlay: PulseOverlay;
   histTestTarget: number;
   histTestJob: HistTestJob | null;
-  histTestBusy: boolean;
-  onStart: () => void;
-  onStop: () => void;
+  onControl: (action: "start" | "stop" | "pause" | "resume") => Promise<void>;
   onApply: () => void;
   patch: <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => void;
 }) {
   const enabled = overlay.histTestEnabled !== false;
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const paused = histTestIsPaused(histTestJob);
+  const live = histTestIsRunning(histTestJob?.phase) && !paused;
+  const startAction: "start" | "resume" = paused ? "resume" : "start";
+  const anyBusy = Object.values(busy).some(Boolean);
+  const run = async (action: "start" | "stop" | "pause" | "resume") => {
+    if (busy[action]) return;
+    if (action === "start" && !enabled) return;
+    setBusy((b) => ({ ...b, [action]: true }));
+    try {
+      await onControl(action);
+    } finally {
+      setBusy((b) => ({ ...b, [action]: false }));
+    }
+  };
+  const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-40";
   return (
     <div data-testid="test-historic" id="test-historic" className="scroll-mt-4">
       <section className="min-w-0 space-y-4 rounded-radius border-2 border-primary bg-surface p-4">
@@ -2655,24 +2658,38 @@ function TestHistoricCard({
           <KV k="Lookback" v={`${histTestLookbackBars(overlay.histTestHours)} bars`} />
         </Grid>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            data-testid="hist-test-start"
-            disabled={!enabled || histTestBusy || histTestIsRunning(histTestJob?.phase)}
-            onClick={onStart}
-            className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
-          >
-            {histTestIsRunning(histTestJob?.phase) ? "Testing…" : histTestJob?.ready ? "Run again" : "Test Historic"}
-          </button>
-          <button
-            type="button"
-            data-testid="hist-test-stop"
-            disabled={!histTestBusy && !histTestIsRunning(histTestJob?.phase)}
-            onClick={onStop}
-            className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted disabled:opacity-40"
-          >
-            Stop
-          </button>
+          <div className="flex rounded-radius border border-border bg-bg2 p-1" data-testid="hist-test-controls">
+            <button
+              type="button"
+              data-testid="hist-test-start"
+              aria-label={paused ? "Resume historic test" : "Start historic test"}
+              disabled={Boolean(busy[startAction]) || (startAction === "start" && !enabled)}
+              onClick={() => void run(startAction)}
+              className={`${btn} ${live ? "text-muted" : "text-primary"}`}
+            >
+              <Play className="size-4" /> {histTestStartLabel(histTestJob)}
+            </button>
+            <button
+              type="button"
+              data-testid="hist-test-pause"
+              aria-label="Pause historic test"
+              disabled={Boolean(busy.pause)}
+              onClick={() => void run("pause")}
+              className={btn}
+            >
+              <Pause className="size-4" /> Pause
+            </button>
+            <button
+              type="button"
+              data-testid="hist-test-stop"
+              aria-label="Stop historic test"
+              disabled={Boolean(busy.stop)}
+              onClick={() => void run("stop")}
+              className={`${btn} text-danger`}
+            >
+              <Square className="size-4" /> Stop
+            </button>
+          </div>
           {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
             <button
               type="button"
@@ -2686,6 +2703,7 @@ function TestHistoricCard({
           <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">
             Open report
           </a>
+          {anyBusy ? <span className="font-mono text-[10px] text-muted">…</span> : null}
         </div>
         <p className={`text-sm ${histTestJob?.error ? "text-danger" : "text-muted"}`} data-testid="hist-test-status">
           {histTestStatusLine(histTestJob, overlay.histTestHours, overlay.histTestMinPf)}

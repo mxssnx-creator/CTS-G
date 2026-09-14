@@ -52,10 +52,18 @@ OUT_DIR = os.path.join(ROOT, "reports", "hist-test")
 SUMMARY_PATH = os.path.join(OUT_DIR, "summary.json")
 PID_PATH = os.path.join(OUT_DIR, "hist-test.pid")
 STOP_PATH = os.path.join(OUT_DIR, "STOP")
+PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
+
+RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score")
+IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
 
 
 def _stop_file() -> str:
     return os.path.join(OUT_DIR, "STOP")
+
+
+def _pause_file() -> str:
+    return os.path.join(OUT_DIR, "PAUSE")
 
 
 def _pid_file() -> str:
@@ -63,6 +71,7 @@ def _pid_file() -> str:
 
 _LOCK = threading.Lock()
 _STOP = False
+_PAUSE = False
 _THREAD: Optional[threading.Thread] = None
 
 
@@ -106,6 +115,7 @@ def idle_job() -> Dict[str, Any]:
         "detail": f"Ready · {HOURS_DEFAULT}h historic test · fill until positive count",
         "ready": False,
         "running": False,
+        "paused": False,
         "hours": HOURS_DEFAULT,
         "minPf": POSITIVE_PF,
         "targetCount": DEFAULT_TARGET,
@@ -161,12 +171,17 @@ def read_job() -> Dict[str, Any]:
 
 
 def request_stop() -> None:
-    global _STOP
+    global _STOP, _PAUSE
     _STOP = True
+    _PAUSE = False
     try:
         _ensure_dir()
         with open(_stop_file(), "w", encoding="utf-8") as handle:
             handle.write("1")
+    except Exception:
+        pass
+    try:
+        os.remove(_pause_file())
     except Exception:
         pass
 
@@ -186,9 +201,81 @@ def stop_requested() -> bool:
     return os.path.exists(_stop_file())
 
 
+def request_pause() -> None:
+    global _PAUSE, _STOP
+    _PAUSE = True
+    _STOP = False
+    try:
+        _ensure_dir()
+        with open(_pause_file(), "w", encoding="utf-8") as handle:
+            handle.write("1")
+    except Exception:
+        pass
+    try:
+        os.remove(_stop_file())
+    except Exception:
+        pass
+
+
+def clear_pause() -> None:
+    global _PAUSE
+    _PAUSE = False
+    try:
+        os.remove(_pause_file())
+    except Exception:
+        pass
+
+
+def pause_requested() -> bool:
+    if _PAUSE:
+        return True
+    return os.path.exists(_pause_file())
+
+
+def thread_alive() -> bool:
+    return _THREAD is not None and _THREAD.is_alive()
+
+
+def wait_if_paused(on_progress: Optional[Callable[[Dict[str, Any]], None]] = None, snapshot: Optional[Dict[str, Any]] = None) -> None:
+    """Hold a live run at the next checkpoint until Resume or Stop. Idle pause is a flag only."""
+    if not pause_requested() or stop_requested():
+        return
+    blob = dict(snapshot or {})
+    resume_phase = str(blob.get("phase") or blob.get("resumePhase") or "evaluate")
+    if resume_phase not in RUNNING_PHASES:
+        resume_phase = "evaluate"
+    paused_blob = {
+        **blob,
+        "phase": "paused",
+        "paused": True,
+        "running": True,
+        "resumePhase": resume_phase,
+        "detail": str(blob.get("detail") or "historic test paused"),
+    }
+    if on_progress:
+        on_progress(paused_blob)
+    else:
+        current = read_job()
+        current.update(paused_blob)
+        publish(current)
+    while pause_requested() and not stop_requested():
+        time.sleep(0.12)
+
+
 def job_is_running(job: Optional[Dict[str, Any]] = None) -> bool:
+    if thread_alive():
+        return True
     phase = str((job or read_job()).get("phase") or "")
-    return phase in ("queued", "rank", "evaluate", "fetch", "replay", "score")
+    return phase in RUNNING_PHASES
+
+
+def job_is_paused(job: Optional[Dict[str, Any]] = None) -> bool:
+    blob = job if isinstance(job, dict) else read_job()
+    if pause_requested():
+        return True
+    if bool(blob.get("paused")):
+        return True
+    return str(blob.get("phase") or "") == "paused"
 
 
 def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int = STEP_HI) -> Dict[str, Any]:
@@ -340,20 +427,22 @@ def fill_positive(
     rejected: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     for row in queue:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        snapshot = {
+            "phase": "evaluate",
+            "pct": 8 + int(52 * len(selected) / max(1, target)),
+            "detail": f"evaluate {symbol or 'next'} · {len(selected)}/{target} positive",
+            "symbols": [r["symbol"] for r in selected] + ([symbol] if symbol else []),
+            "positive": [r["symbol"] for r in selected],
+            "rejected": [r["symbol"] for r in rejected],
+        }
+        wait_if_paused(on_progress, snapshot)
         if stop_requested() or len(selected) >= target:
             break
-        symbol = str(row.get("symbol") or "").strip().upper()
         if not symbol:
             continue
         if on_progress:
-            on_progress({
-                "phase": "evaluate",
-                "pct": 8 + int(52 * len(selected) / max(1, target)),
-                "detail": f"evaluate {symbol} · {len(selected)}/{target} positive",
-                "symbols": [r["symbol"] for r in selected] + [symbol],
-                "positive": [r["symbol"] for r in selected],
-                "rejected": [r["symbol"] for r in rejected],
-            })
+            on_progress(snapshot)
         try:
             bars = fetch_fn(symbol, fetch_bars)
         except Exception as exc:
@@ -460,6 +549,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "phase": str(job.get("phase") or "ready"),
         "ready": bool(job.get("ready")),
         "running": False,
+        "paused": bool(job.get("paused")) or pause_requested(),
         "error": str(job.get("error") or ""),
         "source": str(job.get("source") or ""),
         "hours": hours,
@@ -561,6 +651,7 @@ def audit_test(book: Any, symbols: List[str], summary: Dict[str, Any], min_pf: f
 
 def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     clear_stop()
+    clear_pause()
     body = body if isinstance(body, dict) else {}
     hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
     min_pf = clamp_min_pf(body.get("minPf") or body.get("histTestMinPf") or (body.get("overlay") or {}).get("histTestMinPf") or POSITIVE_PF)
@@ -584,6 +675,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "pct": 2,
         "ready": False,
         "running": True,
+        "paused": False,
         "detail": f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}",
         "hours": hours,
         "minPf": min_pf,
@@ -605,6 +697,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         blob["positivePf"] = min_pf
         blob["targetCount"] = target
         blob["running"] = True
+        blob["paused"] = pause_requested() and not stop_requested()
         blob["ready"] = False
         publish(blob)
 
@@ -627,6 +720,36 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
     selected = fill["selected"]
+
+    def stopped_job(detail: str = "historic test stopped") -> Dict[str, Any]:
+        names = [r["symbol"] for r in selected]
+        return publish({
+            **seed,
+            "phase": "stopped",
+            "pct": 100 if names else (seed.get("pct") or 0),
+            "ready": False,
+            "running": False,
+            "paused": False,
+            "detail": detail,
+            "symbols": names,
+            "positive": names,
+            "rejected": [{k: v for k, v in r.items() if k != "_bars"} for r in fill["rejected"]],
+            "skipped": fill["skipped"],
+            "fill": {k: v for k, v in fill.items() if k != "selected"},
+            "elapsedMs": round((time.time() - t0) * 1000.0, 1),
+        })
+
+    if stop_requested():
+        return stopped_job()
+    wait_if_paused(progress, {
+        "phase": "replay",
+        "pct": 60,
+        "detail": f"replay {len(selected)} positive · {hours}h tape",
+        "symbols": [r["symbol"] for r in selected],
+        "positive": [r["symbol"] for r in selected],
+    })
+    if stop_requested():
+        return stopped_job()
     if not selected:
         err = {
             **seed,
@@ -634,6 +757,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "pct": 100,
             "ready": False,
             "running": False,
+            "paused": False,
             "error": "no symbol cleared the historic PF floor",
             "detail": f"evaluated {fill['evaluated']} · rejected {len(fill['rejected'])} · skipped {len(fill['skipped'])}",
             "rejected": [{k: v for k, v in r.items() if k != "_bars"} for r in fill["rejected"]],
@@ -743,70 +867,125 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         summary["phase"] = "stopped"
         summary["detail"] = "historic test stopped"
         summary["running"] = False
+        summary["paused"] = False
+    clear_pause()
     return publish(summary)
 
 
 def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Start a new run, or Resume a paused one. Start while already live is a no-op."""
     global _THREAD
     body = dict(body) if isinstance(body, dict) else {}
-    current = read_job()
-    if job_is_running(current):
-        current["ok"] = True
-        current["detail"] = current.get("detail") or "historic test already running"
-        return current
-    clear_stop()
-    hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
-    min_pf = clamp_min_pf(body.get("minPf") or body.get("histTestMinPf") or (body.get("overlay") or {}).get("histTestMinPf") or POSITIVE_PF)
-    target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
-    queued = publish({
-        "ok": True,
-        "phase": "queued",
-        "pct": 1,
-        "ready": False,
-        "running": True,
-        "detail": f"queued · {hours}h · min PF {min_pf:.2f} · fill {target}",
-        "hours": hours,
-        "minPf": min_pf,
-        "positivePf": min_pf,
-        "targetCount": target,
-        "symbols": [],
-        "positive": [],
-        "rejected": [],
-    })
-
-    def worker() -> None:
-        try:
-            run_test(body)
-        except Exception as exc:
-            publish({
-                "ok": False,
-                "phase": "error",
-                "pct": 100,
-                "ready": False,
-                "running": False,
-                "error": f"{type(exc).__name__}: {exc}"[:240],
-                "detail": traceback.format_exc()[-400:],
-                "hours": hours,
-                "minPf": min_pf,
-                "targetCount": target,
-            })
-
     with _LOCK:
+        if thread_alive() and pause_requested():
+            clear_pause()
+            clear_stop()
+            job = read_job()
+            resume_phase = str(job.get("resumePhase") or "evaluate")
+            if resume_phase not in RUNNING_PHASES:
+                resume_phase = "evaluate"
+            job["ok"] = True
+            job["paused"] = False
+            job["running"] = True
+            job["phase"] = resume_phase
+            job["detail"] = "historic test resumed"
+            return publish(job)
+        if thread_alive():
+            current = read_job()
+            current["ok"] = True
+            current["paused"] = False
+            current["running"] = True
+            current["detail"] = current.get("detail") or "historic test already running"
+            return current
+        clear_stop()
+        clear_pause()
+        hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
+        min_pf = clamp_min_pf(body.get("minPf") or body.get("histTestMinPf") or (body.get("overlay") or {}).get("histTestMinPf") or POSITIVE_PF)
+        target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
+        queued = publish({
+            "ok": True,
+            "phase": "queued",
+            "pct": 1,
+            "ready": False,
+            "running": True,
+            "paused": False,
+            "detail": f"queued · {hours}h · min PF {min_pf:.2f} · fill {target}",
+            "hours": hours,
+            "minPf": min_pf,
+            "positivePf": min_pf,
+            "targetCount": target,
+            "symbols": [],
+            "positive": [],
+            "rejected": [],
+        })
+
+        def worker() -> None:
+            try:
+                run_test(body)
+            except Exception as exc:
+                publish({
+                    "ok": False,
+                    "phase": "error",
+                    "pct": 100,
+                    "ready": False,
+                    "running": False,
+                    "paused": False,
+                    "error": f"{type(exc).__name__}: {exc}"[:240],
+                    "detail": traceback.format_exc()[-400:],
+                    "hours": hours,
+                    "minPf": min_pf,
+                    "targetCount": target,
+                })
+
         _THREAD = threading.Thread(target=worker, name="hist-test", daemon=True)
         _THREAD.start()
-    return queued
+        return queued
+
+
+def pause_test() -> Dict[str, Any]:
+    """Pause like the engine bar: always accepted. Live runs wait; idle Start becomes Resume."""
+    request_pause()
+    job = read_job()
+    phase = str(job.get("phase") or "")
+    if phase in RUNNING_PHASES:
+        job["resumePhase"] = phase
+    job["ok"] = True
+    job["paused"] = True
+    job["phase"] = "paused"
+    job["running"] = thread_alive()
+    job["detail"] = "historic test paused"
+    return publish(job)
+
+
+def resume_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resume a paused live worker, or Start a new run if nothing is in flight."""
+    if thread_alive():
+        return start_test(body)
+    job = read_job()
+    was_live = bool(job.get("running")) or str(job.get("resumePhase") or "") in RUNNING_PHASES
+    if was_live:
+        clear_pause()
+        clear_stop()
+        resume_phase = str(job.get("resumePhase") or "evaluate")
+        if resume_phase not in RUNNING_PHASES:
+            resume_phase = "evaluate"
+        job["ok"] = True
+        job["paused"] = False
+        job["running"] = True
+        job["phase"] = resume_phase
+        job["detail"] = "historic test resumed"
+        return publish(job)
+    return start_test(body)
 
 
 def stop_test() -> Dict[str, Any]:
     request_stop()
     job = read_job()
+    job["ok"] = True
     job["running"] = False
-    if job_is_running(job) or str(job.get("phase") or "") in ("queued", "rank", "evaluate", "fetch", "replay", "score"):
-        job["phase"] = "stopped"
-        job["detail"] = "historic test stop requested"
-    else:
-        job.setdefault("phase", "idle")
-        job.setdefault("detail", "historic test idle")
+    job["paused"] = False
+    job["phase"] = "stopped"
+    job["detail"] = "historic test stopped"
     publish(job)
     return job
 
@@ -925,6 +1104,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if result["ok"] else 1
         if token == "--stop":
             print(json.dumps(stop_test()))
+            return 0
+        if token == "--pause":
+            print(json.dumps(pause_test()))
+            return 0
+        if token == "--resume":
+            print(json.dumps(resume_test(body)))
             return 0
         i += 1
     job = run_test(body)
