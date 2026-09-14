@@ -36,6 +36,25 @@ class SettingsPersistence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             with self.assertRaises(ValueError):ph.write_overlay('../../foreign',{'x':1})
             self.assertEqual(list(pathlib.Path(d).iterdir()),[])
+    def test_historic_test_hours_and_min_pf_persist_independently_of_lookback(self):
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            ph.write_overlay('vst',{'histTestHours':48,'histTestMinPf':1.2,'histLookbackBars':2880})
+            value=ph.load_overlay('bingx-x02')
+            self.assertEqual(value['histTestHours'],48)
+            self.assertAlmostEqual(value['histTestMinPf'],1.2)
+            self.assertEqual(value['histLookbackBars'],2880)
+            ph.write_overlay('vst',{'histTestHours':99,'histTestMinPf':0.5})
+            value=ph.load_overlay('bingx-x02')
+            self.assertEqual(value['histTestHours'],64)
+            self.assertAlmostEqual(value['histTestMinPf'],1.02)
+            self.assertEqual(value['histLookbackBars'],2880)
+            self.assertTrue(value.get('histTestEnabled',True))
+            ph.write_overlay('vst',{'histTestEnabled':False})
+            self.assertFalse(ph.load_overlay('bingx-x02')['histTestEnabled'])
+            ph.write_overlay('live',{'histTestHours':8,'histTestMinPf':1.1})
+            live=ph.load_overlay('bingx-x01')
+            self.assertEqual(live['histTestHours'],8)
+            self.assertNotEqual(ph.load_overlay('bingx-x02')['histTestHours'],8)
     def test_sqlite_modes_and_checkpoints_persist_independently_per_lane(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             ph.write_overlay('vst',{'systemSqliteMemory':1,'systemSqliteCheckpointS':3})

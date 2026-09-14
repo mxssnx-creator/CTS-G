@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import json
-from position_cost import shared_pf_settings
+from position_cost import shared_pf_settings, normalize_pf, POSITIVE_PF
 from validation_policy import control_min_trades
 from pathlib import Path
 
@@ -37,6 +37,13 @@ def calculation_overlay(overlay, cts=None):
     result = shared_pf_settings(overlay)
     result["controlMinTrades"] = control_min_trades(result.get("controlMinTrades"))
     result.setdefault("histLookbackBars", 2880)
+    try:
+        hours = int(round(float(result.get("histTestHours", 20))))
+    except (TypeError, ValueError, OverflowError):
+        hours = 20
+    result["histTestHours"] = max(4, min(64, hours))
+    result["histTestMinPf"] = normalize_pf(result.get("histTestMinPf"), POSITIVE_PF)
+    result["histTestEnabled"] = True if result.get("histTestEnabled") is None else bool(result.get("histTestEnabled"))
     result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
     result["setPfWindow"] = result["baseEvalPosCount"]
     result.setdefault("setMinSamples", result["baseEvalPosCount"])

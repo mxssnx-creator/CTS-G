@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
@@ -399,7 +400,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/stats.json", "/stats", "/progress.json", "/progress", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
+        const handled = ["/stats.json", "/stats", "/progress.json", "/progress", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/hist-test.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -601,6 +602,60 @@ function pulseControlPlugin(): Plugin {
                 independent: false,
               });
 
+            return;
+          }
+          if (pathOnly === "/hist-test.json") {
+            const localJob = () => {
+              const dest = join(process.cwd(), "public/hist-test.json");
+              if (existsSync(dest)) {
+                try { return JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>; } catch { /* fall through */ }
+              }
+              return { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.1, ready: false, running: false, independent: true, symbols: [] };
+            };
+            if (method === "GET") {
+              const pulse = await tryPulse("GET", "/hist-test.json");
+              const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+              if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+                jsonRes(res as ServerResponse, pulse.status, pulse.json);
+                return;
+              }
+              jsonRes(res as ServerResponse, 200, localJob());
+              return;
+            }
+            if (method !== "POST") {
+              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+              return;
+            }
+            const raw = await readReqBody(req);
+            const pulse = await tryPulse("POST", "/hist-test.json", raw, 8000);
+            const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+            if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+              jsonRes(res as ServerResponse, pulse.status, pulse.json);
+              return;
+            }
+            let body: Record<string, unknown> = {};
+            try { body = JSON.parse(raw || "{}") as Record<string, unknown>; } catch { body = {}; }
+            const action = String(body.action || "start").toLowerCase();
+            if (action === "stop") {
+              spawn("python3", ["scripts/run_hist_test.py", "--stop"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const job = { ...localJob(), phase: "stopped", running: false, detail: "historic test stop requested" };
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            const hours = Math.max(4, Math.min(64, Math.round(Number(body.hours) || 20)));
+            const minPf = Number(body.minPf || body.histTestMinPf || 1.1);
+            const count = Math.max(1, Math.min(200, Math.round(Number(body.symbolCap || body.targetCount || body.count) || 20)));
+            const queued = {
+              ok: true, phase: "queued", pct: 1, ready: false, running: true, independent: true,
+              hours, minPf, positivePf: minPf, targetCount: count,
+              detail: `queued · ${hours}h · min PF ${minPf} · fill ${count}`,
+              symbols: [],
+            };
+            try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(queued)); } catch { /* ignore */ }
+            spawn("python3", ["scripts/run_hist_test.py", "--hours", String(hours), "--min-pf", String(minPf), "--count", String(count)], {
+              cwd: process.cwd(), detached: true, stdio: "ignore",
+            }).unref();
+            jsonRes(res as ServerResponse, 200, queued);
             return;
           }
           if (pathOnly === "/user-presets.json") {

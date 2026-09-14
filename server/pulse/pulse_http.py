@@ -1849,6 +1849,18 @@ class Handler(SimpleHTTPRequestHandler):
                 rows = []
             self._json({"ok": True, "presets": rows, "system": True, "max": 24})
             return
+        if path in ("/hist-test.json", "/hist-test"):
+            try:
+                from hist_test import read_job, job_is_running
+                blob = read_job()
+                blob["ok"] = True
+                blob["running"] = job_is_running(blob)
+                blob["independent"] = True
+                blob["shared"] = False
+                self._json(blob)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
+            return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
                 from hist_calc import public_presets, read_job
@@ -2102,6 +2114,22 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json({"ok": False, "detail": str(exc)[:160]}, 400)
             except Exception as exc:
                 self._json({"ok": False, "detail": str(exc)[:200]}, 200)
+            return
+        if path in ("/hist-test.json", "/hist-test"):
+            try:
+                from hist_test import start_test, stop_test, read_job, job_is_running
+                action = str((body or {}).get("action") or "start").lower().strip()
+                if action == "stop":
+                    job = stop_test()
+                else:
+                    job = start_test(body if isinstance(body, dict) else {})
+                job["ok"] = True
+                job["running"] = job_is_running(job)
+                job["independent"] = True
+                job["shared"] = False
+                self._json(job)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
             return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:

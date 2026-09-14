@@ -1,0 +1,1 @@
+{"ok":true,"phase":"idle","pct":0,"detail":"Ready \u00b7 20h historic test \u00b7 fill until positive count","ready":false,"running":false,"hours":20,"minPf":1.1,"targetCount":20,"stepLo":3,"stepHi":12,"symbols":[],"positive":[],"rejected":[],"byStep":[],"ranges":[],"heatmap":[],"positivePf":1.1}

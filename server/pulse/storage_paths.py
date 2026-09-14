@@ -44,6 +44,7 @@ _COPY_NAMES = (
     "hist-calc-bingx-x02.json",
     "hist-calc-req-bingx-x01.json",
     "hist-calc-req-bingx-x02.json",
+    "hist-test.json",
     "overlay.json",
     "overlay-bingx-x01.json",
     "overlay-bingx-x02.json",
