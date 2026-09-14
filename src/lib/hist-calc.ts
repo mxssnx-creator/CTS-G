@@ -253,6 +253,9 @@ export type HistCalcJob = {
   ready?: boolean;
   async?: boolean;
   partial?: boolean;
+  running?: boolean;
+  continuous?: boolean;
+  refreshS?: number;
   workers?: number;
   barsHeld?: number;
   independence?: {
@@ -292,13 +295,79 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   coordOptimizationN: 150,
 };
 
-export async function fetchHistCalc(connection?: string): Promise<HistCalcJob> {
+export const CALC_RUNNING_PHASES = [
+  "initial",
+  "hourly",
+  "backfill",
+  "fetch",
+  "replay",
+  "score",
+  "score-refresh",
+  "gap",
+  "incremental",
+  "queued",
+  "partial",
+  "deferred",
+  "paused",
+] as const;
+
+const RUNNING_PHASES = new Set<string>(CALC_RUNNING_PHASES);
+
+export function calcIsRunning(phase?: string | null): boolean {
+  return Boolean(phase && RUNNING_PHASES.has(phase));
+}
+
+export function hasCalcSnapshot(job: HistCalcJob | null | undefined): boolean {
+  if (!job) return false;
+  return Boolean(
+    (job.phase && job.phase !== "idle") ||
+      job.ready ||
+      job.lastCompleteRun ||
+      (job.rows?.length ?? 0) > 0 ||
+      job.winner,
+  );
+}
+
+export function calcPollMs(job: HistCalcJob | null | undefined, hidden = false): number {
+  if (hidden) return 8000;
+  if (calcIsRunning(job?.phase)) return 1200;
+  if (job?.stale || job?.ready || job?.phase === "ready" || (job?.nextRunAt && job.nextRunAt * 1000 > Date.now())) {
+    return 4000;
+  }
+  return 8000;
+}
+
+export function calcStatusLine(job: HistCalcJob | null | undefined, hours = 48): string {
+  if (!job || !job.phase || job.phase === "idle") {
+    return `Ready · ${hours}h tape · start a continuous replay`;
+  }
+  const pct = Math.round(job.pct || 0);
+  const detail = String(job.detail || "").trim();
+  const head = `${job.phase} ${pct}%`;
+  if (calcIsRunning(job.phase)) {
+    return detail ? `${head} · ${detail}` : head;
+  }
+  if (job.nextRunAt) {
+    const when = new Date(job.nextRunAt * 1000).toLocaleTimeString();
+    return detail ? `${head} · next refresh ${when} · ${detail}` : `${head} · next refresh ${when}`;
+  }
+  return detail ? `${head} · ${detail}` : head;
+}
+
+export function calcStartLabel(job: HistCalcJob | null | undefined): string {
+  if (calcIsRunning(job?.phase)) return "Replaying…";
+  if (hasCalcSnapshot(job)) return "Refresh now";
+  return "Start continuous replay";
+}
+
+export async function fetchHistCalc(connection?: string, signal?: AbortSignal): Promise<HistCalcJob> {
   try {
     const query = connection ? `?conn=${encodeURIComponent(connection)}` : "";
-    const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store" });
+    const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store", signal });
     if (!r.ok) return { phase: "idle", pct: 0, detail: `status ${r.status}` };
     return (await r.json()) as HistCalcJob;
   } catch (e) {
+    if (signal?.aborted) return { phase: "idle", pct: 0, detail: "aborted" };
     return { phase: "error", pct: 0, detail: String(e), error: String(e) };
   }
 }
@@ -310,6 +379,9 @@ export async function startHistCalc(
     forcedOnly?: boolean;
     connection?: string;
     overlay?: Record<string, unknown>;
+    continuous?: boolean;
+    mode?: string;
+    refreshS?: number;
   },
 ): Promise<HistCalcJob> {
   try {
@@ -317,10 +389,13 @@ export async function startHistCalc(
       preferMinimalPositive?: boolean;
       minimalPositiveCoordination?: boolean;
     };
+    const continuous = body.continuous !== false && !body.forcedOnly;
     const migrated = {
       ...body,
       preferMinimalRange: body.preferMinimalRange ?? legacy.preferMinimalPositive,
       additionalCoordination: body.additionalCoordination ?? legacy.minimalPositiveCoordination,
+      continuous,
+      mode: body.mode || (continuous ? "hourly" : "manual"),
     };
     const query = body.connection ? `?conn=${encodeURIComponent(body.connection)}` : "";
     const r = await fetch(`/hist-calc.json${query}`, {
