@@ -554,6 +554,43 @@ def ctrl_payload(
     return body
 
 
+def control_order_forms(
+    quantity_matched: bool,
+    *,
+    foreign_qty: float = 0.0,
+    market_type: str,
+    limit_type: str,
+) -> List[Dict[str, Any]]:
+    """Payload forms for one SL/TP placement.
+
+    Quantity-matched overall/range stops omit closePosition first so a same-side
+    foreign lot is never flattened. BingX hedge mode treats that qty STOP as an
+    opening order, so an all-ours group retries with closePosition instead of
+    dying on "order size must be less".
+    """
+    qty_market = {"close_pos": False, "with_qty": True, "otype": market_type}
+    qty_limit = {"close_pos": False, "with_qty": True, "otype": limit_type}
+    close_market = {"close_pos": True, "with_qty": True, "otype": market_type}
+    close_market_no_qty = {"close_pos": True, "with_qty": False, "otype": market_type}
+    if quantity_matched:
+        forms = [qty_market, qty_limit]
+        if float(foreign_qty or 0) <= 1e-12:
+            # Hedge-mode BingX rejects a qty STOP as an opening order
+            # ("order size must be less") and also rejects quantity+closePosition
+            # together. Close the whole ours group with closePosition only.
+            forms.insert(1, close_market_no_qty)
+            forms.insert(2, close_market)
+        return forms
+    return [
+        close_market,
+        qty_market,
+        {"close_pos": True, "with_qty": False, "otype": market_type},
+        qty_market,
+        {"close_pos": True, "with_qty": False, "otype": limit_type},
+        qty_limit,
+    ]
+
+
 def tpsl_attach_json(sl_px: str, tp_px: str) -> Dict[str, str]:
     sl = {"type": "STOP_MARKET", "stopPrice": str(sl_px), "price": str(sl_px), "workingType": "MARK_PRICE"}
     tp = {"type": "TAKE_PROFIT_MARKET", "stopPrice": str(tp_px), "price": str(tp_px), "workingType": "MARK_PRICE"}
@@ -1714,17 +1751,19 @@ class Pulse:
 
     def merge_parent_lanes(self, pos: Position, added_qty: float, entry: float) -> None:
         """Keep Block/DCA parent anchors aligned with an entry merge."""
-        group_key = "" if bool(getattr(self, "block_overall", True)) else self.logical_group_key(pos)
+        overall = bool(getattr(self, "block_overall", True))
+        block_key = "" if overall else self.logical_group_key(pos)
+        dca_key = self.logical_group_key(pos)
         try:
             merge_parent = getattr(self.block, "merge_parent", None)
             if callable(merge_parent):
-                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=group_key)
+                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=block_key)
         except Exception:
             pass
         try:
             merge_parent = getattr(self.dca, "merge_parent", None)
             if callable(merge_parent):
-                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=group_key)
+                merge_parent(pos.symbol, pos.side, added_qty, entry, group_key=dca_key)
         except Exception:
             pass
 
@@ -4170,7 +4209,13 @@ class Pulse:
             self.refresh_px_one(pos.symbol)
         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", price)
         c = self.contracts.get(pos.symbol)
-        qty_s = self.fmt_qty(c, self.raise_to_min_qty(c, max(self.px.get(pos.symbol) or 0, pos.entry or 0), pos.qty))
+        raw_qty = max(0.0, float(pos.qty or 0))
+        exch_qty = max(0.0, float(getattr(pos, "exchange_qty", 0) or 0))
+        if exch_qty > 0 and raw_qty > 0:
+            raw_qty = min(raw_qty, exch_qty)
+        elif exch_qty > 0:
+            raw_qty = exch_qty
+        qty_s = self.fmt_qty(c, self.raise_to_min_qty(c, max(self.px.get(pos.symbol) or 0, pos.entry or 0), raw_qty))
         px_s = self.fmt_px(c, price)
         if float(px_s or 0) <= 0:
             log(f"CTRL SKIP {kind} {pos.symbol} stopPrice=0", every=20.0, key=f"cskip:{pos.symbol}:px0")
@@ -4178,24 +4223,12 @@ class Pulse:
             return have_this
         market_type = "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"
         limit_type = "STOP" if is_sl else "TAKE_PROFIT"
-        # Range groups and the synthetic overall proxy are always
-        # quantity-matched. A closePosition order is allowed only for the
-        # legacy aggregate path, where the whole symbol+side is intentionally
-        # one control scope.
-        if quantity_matched:
-            forms = [
-                {"close_pos": False, "with_qty": True, "otype": market_type},
-                {"close_pos": False, "with_qty": True, "otype": limit_type},
-            ]
-        else:
-            forms = [
-                {"close_pos": True, "with_qty": True, "otype": market_type},
-                {"close_pos": False, "with_qty": True, "otype": market_type},
-                {"close_pos": True, "with_qty": False, "otype": market_type},
-                {"close_pos": False, "with_qty": True, "otype": market_type},
-                {"close_pos": True, "with_qty": False, "otype": limit_type},
-                {"close_pos": False, "with_qty": True, "otype": limit_type},
-            ]
+        forms = control_order_forms(
+            quantity_matched,
+            foreign_qty=float(getattr(pos, "foreign_qty", 0) or 0),
+            market_type=market_type,
+            limit_type=limit_type,
+        )
         r: Dict[str, Any] = {}
         msg = ""
         oid = ""
@@ -4273,9 +4306,8 @@ class Pulse:
                         qty_s = new_s
                         continue
                     if quantity_matched:
-                        # Position is below the venue floor: close the whole
-                        # group instead of oversizing a reduce-only stop.
-                        form["close_pos"] = True
+                        # All-ours groups already have closePosition forms next.
+                        # Mixed/foreign groups must stay quantity-matched.
                         continue
                 if not self.ok(r) and self._defer_minimum_controls(pos, r):
                     return have_this

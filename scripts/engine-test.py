@@ -36,6 +36,7 @@ from pulse_trader import (
     Contract,
     Position,
     ctrl_payload,
+    control_order_forms,
     real_oid,
     extract_oid,
     tpsl_attach_json,
@@ -214,6 +215,17 @@ def controls_test() -> None:
     rec("oid-reject-empty", real_oid("") == "" and real_oid(None) == "")
     rec("oid-reject-exists-case", real_oid("EXISTS") == "")
     rec("ctrl-short-tp-side", ctrl_payload("SOL-USDT", "SHORT", "tp", "90.0", "1", "Gx01vabc", close_pos=True).get("side") == "BUY")
+    rec("err-qty-too-large", ctrl_err_kind("The order size must be less than the available amount") == "qty")
+    rec("forms-matched-ours-close-fallback",
+        control_order_forms(True, foreign_qty=0, market_type="STOP_MARKET", limit_type="STOP")[1]["close_pos"] is True
+        and control_order_forms(True, foreign_qty=0, market_type="STOP_MARKET", limit_type="STOP")[1]["with_qty"] is False)
+    rec("forms-matched-foreign-no-close",
+        all(not f["close_pos"] for f in control_order_forms(True, foreign_qty=1.0, market_type="STOP_MARKET", limit_type="STOP")))
+    rec("forms-legacy-starts-close",
+        control_order_forms(False, foreign_qty=0, market_type="STOP_MARKET", limit_type="STOP")[0]["close_pos"] is True)
+    rec("forms-matched-ours-qty-first",
+        control_order_forms(True, foreign_qty=0, market_type="STOP_MARKET", limit_type="STOP")[0]
+        == {"close_pos": False, "with_qty": True, "otype": "STOP_MARKET"})
     rec("unlimited-open-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 100)
     rec("zero-means-unlimited-code", "if MAX_OPEN <= 0:" in open(os.path.join(DIR, "pulse_trader.py"), encoding="utf-8").read())
 
@@ -549,8 +561,10 @@ def stage_engine_calc_test() -> None:
     rec("set-intern-shared-floor", not bool(row.get("validated")) and float(row.get("last15Ratio") or 0) < 1.20
         and not bool(row.get("realQualified")),
         f"val={row.get('validated')} realQ={row.get('realQualified')} pf={row.get('last15Ratio')}")
-    rec("set-eval-windows-skipped-below-base", not row and not st.evaluation_windows,
-        str(list((row.get("evaluationWindows") or {}).keys())[:4]))
+    rec("set-eval-windows-skipped-below-base",
+        st.main_pf == 0.0 and st.real_pf == 0.0 and not st.stage_qualified
+        and not bool((st.strategy_adjustments or {}).get("main", {}).get("evaluated")),
+        f"stage={st.stage} windows={len(st.evaluation_windows or {})}")
     rec_m = book.stage_record(st, "main")
     rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
         f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")
@@ -2345,6 +2359,7 @@ def grouped_control_test() -> None:
     p.open = {}
     p.control_orders = True
     p.control_orders_per_config = True
+    p.block_overall = False
     p.ctrl_skip = {}
     p._oo_cache = {}
     p.did_io = False

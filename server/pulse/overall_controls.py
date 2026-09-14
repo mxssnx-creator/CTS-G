@@ -366,6 +366,11 @@ def ensure(pulse, pos):
         proxy.qty, proxy.entry = qty, entry
         proxy.close_position = False
         proxy.member_count = len(rows)
+        proxy.foreign_qty = sum(float(getattr(p, "foreign_qty", 0) or 0) for p in rows)
+        proxy.exchange_qty = max(
+            sum(float(getattr(p, "exchange_qty", 0) or 0) for p in rows),
+            float(qty or 0),
+        )
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry
         proxy.sl, proxy.tp = low, high
