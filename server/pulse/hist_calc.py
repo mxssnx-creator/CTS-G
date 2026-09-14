@@ -922,12 +922,28 @@ def set_row(st: Any, side: str = "") -> Dict[str, Any]:
             if isinstance(v, dict)
         }
     windows = dict(g("evaluation_windows", getattr(st, "evaluation_windows", {})) or {})
-    if not windows:
-        windows = evaluation_windows(
-            getattr(st, "hist", None) or [],
-            float(getattr(st, "position_cost_pct", 0) or 0.1),
-            ordered=False,
-        )
+    cost = float(getattr(st, "position_cost_pct", 0) or 0.1)
+    hist_rows = getattr(st, "hist", None) or []
+    if not {"last5", "last15"} <= set(windows):
+        filled = evaluation_windows(hist_rows, cost, ordered=True, simple=True)
+        filled.update(windows)
+        windows = filled
+    if n15 > 0:
+        windows[f"last{n15}"] = {
+            "requestedN": n15,
+            "n": n15,
+            "available": n15 >= n15,
+            "requiredSamples": n15,
+            "validated": n15 > 0 and is_positive_pf(pf),
+            "pf": round(pf, 4),
+            "classicPf": float(g("last15_classic", getattr(st, "last15_classic", 0)) or 0),
+            "avgR": float(g("last15_r", getattr(st, "last15_r", 0)) or 0),
+            "netAvg": float(g("net_avg", getattr(st, "expectancy", 0)) or 0),
+            "netPct": 0.0,
+            "costPct": cost,
+            "costSamples": 0,
+            "costSubtracted": True,
+        }
     return {
         "id": st.id if not want else f"{st.id}:{want.lower()}",
         "kind": st.kind,
@@ -993,7 +1009,11 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
         parts = (st.hist for st in book.by_idx)
     by_dir: Dict[str, List[Dict[str, Any]]] = {"LONG": [], "SHORT": []}
     dir_n = {"LONG": 0, "SHORT": 0}
+    dir_wins = {"LONG": 0, "SHORT": 0}
+    dir_decided = {"LONG": 0, "SHORT": 0}
+    dir_dd = {"LONG": 0.0, "SHORT": 0.0}
     trim_at = max(cap * 2, 32)
+    cost = book.cost_pct
     for rows in parts:
         for row in rows:
             d = str(row.get("side") or row.get("direction") or "")
@@ -1004,25 +1024,36 @@ def direction_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]
                 continue
             by_dir[key].append(row)
             dir_n[key] += 1
+            net = row_net_pnl(row, cost)
+            if net > 0:
+                dir_wins[key] += 1
+            if net != 0:
+                dir_decided[key] += 1
             if len(by_dir[key]) > trim_at:
                 by_dir[key] = last_n_chrono(by_dir[key], cap)
+    for st in book.by_idx:
+        raw = getattr(st, "by_side", None) or {}
+        for d in DIRECTIONS:
+            blob = raw.get(d) if isinstance(raw, dict) else None
+            if isinstance(blob, dict):
+                dir_dd[d] = max(dir_dd[d], float(blob.get("max_dd_s") or 0))
     out: Dict[str, Any] = {}
     need = book.eval_need()
-    win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
     for d in DIRECTIONS:
         seq = last_n_chrono(by_dir.get(d) or [], cap)
         pf = last_n_cost_pf(seq, book.pf_n, book.cost_pct, ordered=True, simple=True)
-        nets = [row_net_pnl(r, book.cost_pct) for r in seq]
-        wins = sum(1 for x in nets if x > 0)
-        decided = sum(1 for x in nets if x != 0)
+        decided = int(dir_decided.get(d) or 0)
+        wins = int(dir_wins.get(d) or 0)
         dd = drawdown_time_by_symbol(seq, ordered=True) if seq else {"maxS": 0.0, "avgS": 0.0}
+        max_dd = max(float(dd.get("maxS") or 0), float(dir_dd.get(d) or 0))
         out[d] = {
             "direction": d,
+            "evalN": int(pf["count"]),
             "n": int(dir_n.get(d) or 0),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
-            "maxDdS": round(float(dd.get("maxS") or 0), 1),
+            "maxDdS": round(max_dd, 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
@@ -1055,6 +1086,7 @@ def step_metric_blob(
     pf_dd = ratio / max(0.05, (max_dd / 3600.0) + 0.05)
     return {
         "n": int(n_total),
+        "evalN": int(pf["count"]),
         "sets": int(set_count),
         "validatedSets": int(validated_sets),
         "pf": round(ratio, 4),
@@ -1081,11 +1113,19 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
     steps = [int(s) for s in (getattr(book, "steps", None) or [])] or sorted({int(st.step) for st in book.by_idx})
     by_parts: Dict[int, List[Any]] = {s: [] for s in steps}
     by_n: Dict[int, int] = {s: 0 for s in steps}
+    by_wins: Dict[int, int] = {s: 0 for s in steps}
+    by_decided: Dict[int, int] = {s: 0 for s in steps}
     by_sets: Dict[int, int] = {s: 0 for s in steps}
     by_valid: Dict[int, int] = {s: 0 for s in steps}
     by_dd: Dict[int, float] = {s: 0.0 for s in steps}
     by_side_parts: Dict[int, Dict[str, List[Any]]] = {s: {"LONG": [], "SHORT": []} for s in steps}
+    by_side_n: Dict[int, Dict[str, int]] = {s: {"LONG": 0, "SHORT": 0} for s in steps}
+    by_side_wins: Dict[int, Dict[str, int]] = {s: {"LONG": 0, "SHORT": 0} for s in steps}
+    by_side_decided: Dict[int, Dict[str, int]] = {s: {"LONG": 0, "SHORT": 0} for s in steps}
     by_sym_parts: Dict[int, Dict[str, List[Any]]] = {s: {} for s in steps}
+    by_sym_n: Dict[int, Dict[str, int]] = {s: {} for s in steps}
+    by_sym_wins: Dict[int, Dict[str, int]] = {s: {} for s in steps}
+    by_sym_decided: Dict[int, Dict[str, int]] = {s: {} for s in steps}
     by_sl_parts: Dict[Tuple[int, float], List[Any]] = {}
     listings: Dict[int, List[Dict[str, Any]]] = {s: [] for s in steps}
 
@@ -1094,11 +1134,19 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
         if step not in by_parts:
             by_parts[step] = []
             by_n[step] = 0
+            by_wins[step] = 0
+            by_decided[step] = 0
             by_sets[step] = 0
             by_valid[step] = 0
             by_dd[step] = 0.0
             by_side_parts[step] = {"LONG": [], "SHORT": []}
+            by_side_n[step] = {"LONG": 0, "SHORT": 0}
+            by_side_wins[step] = {"LONG": 0, "SHORT": 0}
+            by_side_decided[step] = {"LONG": 0, "SHORT": 0}
             by_sym_parts[step] = {}
+            by_sym_n[step] = {}
+            by_sym_wins[step] = {}
+            by_sym_decided[step] = {}
             listings[step] = []
         by_sets[step] += 1
         by_n[step] += int(st.n or 0)
@@ -1113,16 +1161,31 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
             sl_key = (step, round(float(st.sl_ratio or 0), 2))
             by_sl_parts.setdefault(sl_key, []).append(hist)
             for row in hist:
+                net = row_net_pnl(row, book.cost_pct)
+                if net > 0:
+                    by_wins[step] = int(by_wins.get(step) or 0) + 1
+                if net != 0:
+                    by_decided[step] = int(by_decided.get(step) or 0) + 1
                 side = str(row.get("side") or row.get("direction") or "")
                 if side:
                     key = "LONG" if side[0] in "Ll" else ("SHORT" if side[0] in "Ss" else "")
                     if key:
+                        by_side_n[step][key] = int(by_side_n[step].get(key) or 0) + 1
+                        if net > 0:
+                            by_side_wins[step][key] = int(by_side_wins[step].get(key) or 0) + 1
+                        if net != 0:
+                            by_side_decided[step][key] = int(by_side_decided[step].get(key) or 0) + 1
                         bucket = by_side_parts[step][key]
                         bucket.append(row)
                         if len(bucket) > cap * 4:
                             by_side_parts[step][key] = last_n_chrono(bucket, cap)
                 sym = str(row.get("symbol") or "")
                 if sym:
+                    by_sym_n[step][sym] = int(by_sym_n[step].get(sym) or 0) + 1
+                    if net > 0:
+                        by_sym_wins[step][sym] = int(by_sym_wins[step].get(sym) or 0) + 1
+                    if net != 0:
+                        by_sym_decided[step][sym] = int(by_sym_decided[step].get(sym) or 0) + 1
                     sb = by_sym_parts[step].setdefault(sym, [])
                     sb.append(row)
                     if len(sb) > cap * 4:
@@ -1151,6 +1214,9 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
             seq, book, n_total=by_n[step], set_count=by_sets[step], validated_sets=by_valid[step],
         )
         blob["maxDdS"] = round(max(float(blob.get("maxDdS") or 0), float(by_dd.get(step) or 0)), 1)
+        decided = int(by_decided.get(step) or 0)
+        wins = int(by_wins.get(step) or 0)
+        blob["wr"] = round(100.0 * wins / decided, 1) if decided else 0.0
         need = book.eval_need()
         eligible = [r for r in listings[step] if int(r.get("last15N") or 0) >= need]
         if eligible:
@@ -1171,14 +1237,20 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
         for d in DIRECTIONS:
             raw = by_side_parts[step].get(d) or []
             sub = last_n_chrono(raw, cap)
-            if not raw:
+            if not raw and not int(by_side_n.get(step, {}).get(d) or 0):
                 continue
-            by_side[d] = step_metric_blob(sub, book, n_total=len(raw))
+            by_side[d] = step_metric_blob(sub, book, n_total=int(by_side_n.get(step, {}).get(d) or len(raw)))
+            side_decided = int((by_side_decided.get(step) or {}).get(d) or 0)
+            side_wins = int((by_side_wins.get(step) or {}).get(d) or 0)
+            by_side[d]["wr"] = round(100.0 * side_wins / side_decided, 1) if side_decided else 0.0
         by_sym: List[Dict[str, Any]] = []
         for sym, rows in by_sym_parts[step].items():
             sub = last_n_chrono(rows, cap)
-            item = step_metric_blob(sub, book, n_total=len(rows))
+            item = step_metric_blob(sub, book, n_total=int(by_sym_n.get(step, {}).get(sym) or len(rows)))
             item["symbol"] = sym
+            sym_decided = int((by_sym_decided.get(step) or {}).get(sym) or 0)
+            sym_wins = int((by_sym_wins.get(step) or {}).get(sym) or 0)
+            item["wr"] = round(100.0 * sym_wins / sym_decided, 1) if sym_decided else 0.0
             by_sym.append(item)
         by_sym.sort(key=lambda r: (0 if r["validated"] else 1, -r["pf"], r["maxDdS"]))
         by_step[str(step)] = {
@@ -1213,6 +1285,9 @@ def step_rollup(book: SetBook) -> Dict[str, Any]:
                 validated_sets=sum(by_valid.get(s, 0) for s in steps if lo <= s <= hi),
             )
             included = [s for s in steps if lo <= s <= hi]
+            range_decided = sum(int(by_decided.get(s) or 0) for s in included)
+            range_wins = sum(int(by_wins.get(s) or 0) for s in included)
+            blob["wr"] = round(100.0 * range_wins / range_decided, 1) if range_decided else 0.0
             step_pfs = [float((by_step.get(str(s)) or {}).get("pf") or 0) for s in included]
             blob["tailPf"] = blob.get("pf")
             if step_pfs:
@@ -1242,18 +1317,36 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
     cap = max(book.pf_n, max(EVALUATION_WINDOWS), int(getattr(book, "optimization_n", 0) or 0) or 0, 80)
     groups: Dict[str, List[Dict[str, Any]]] = {}
     group_n: Dict[str, int] = {}
+    group_wins: Dict[str, int] = {}
+    group_decided: Dict[str, int] = {}
+    group_dir_n: Dict[str, Dict[str, int]] = {}
+    group_dd: Dict[str, float] = {}
     trim_at = max(cap * 2, 32)
     need = book.eval_need()
     win_n = max(book.pf_n, max(EVALUATION_WINDOWS))
+    cost = book.cost_pct
 
     def add(key: str, rows: Sequence[Dict[str, Any]]) -> None:
         groups.setdefault(key, [])
         group_n.setdefault(key, 0)
+        group_wins.setdefault(key, 0)
+        group_decided.setdefault(key, 0)
+        group_dir_n.setdefault(key, {"LONG": 0, "SHORT": 0})
         if not rows:
             return
         buf = groups[key]
         buf.extend(rows)
         group_n[key] += len(rows)
+        for row in rows:
+            net = row_net_pnl(row, cost)
+            if net > 0:
+                group_wins[key] += 1
+            if net != 0:
+                group_decided[key] += 1
+            d = str(row.get("side") or row.get("direction") or "")
+            dkey = "LONG" if d[:1] in "Ll" else ("SHORT" if d[:1] in "Ss" else "")
+            if dkey:
+                group_dir_n[key][dkey] += 1
         if len(buf) > trim_at:
             groups[key] = last_n_chrono(buf, cap)
 
@@ -1263,6 +1356,9 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         add(st.kind, rows)
         add(f"{st.pack}:{st.kind}", rows)
         add("core", rows)
+        dd_s = float(getattr(st, "max_dd_s", 0) or 0)
+        for key in (st.pack, st.kind, f"{st.pack}:{st.kind}", "core"):
+            group_dd[key] = max(float(group_dd.get(key) or 0), dd_s)
     for key in ("block", "block:signals", "dca"):
         add(key, (strat or {}).get(key) or [])
     if strat:
@@ -1278,19 +1374,19 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             win = max(book.pf_n, min(80, int(group_n.get(key) or len(tape) or 1)))
         bounded = last_n_chrono(tape, max(win, cap))
         pf = last_n_cost_pf(bounded, win, book.cost_pct, ordered=True, simple=True)
-        nets = [row_net_pnl(r, book.cost_pct) for r in bounded]
-        wins = sum(1 for x in nets if x > 0)
-        decided = sum(1 for x in nets if x != 0)
+        decided = int(group_decided.get(key) or 0)
+        wins = int(group_wins.get(key) or 0)
         dd = drawdown_time_by_symbol(bounded, ordered=True) if bounded else {"maxS": 0.0, "avgS": 0.0}
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
             sub = filter_side(bounded, d)
-            if not sub:
+            dir_n = int((group_dir_n.get(key) or {}).get(d) or 0)
+            if not sub and not dir_n:
                 continue
             stail = last_n_chrono(sub, win_n, ordered=True)
             spf = last_n_cost_pf(stail, book.pf_n, book.cost_pct, ordered=True, simple=True)
             by_dir[d] = {
-                "n": len(sub),
+                "n": dir_n or len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
                 "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
@@ -1302,10 +1398,11 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
         out[key] = {
             "strategy": key,
             "n": int(group_n.get(key) or len(tape)),
+            "evalN": int(pf["count"]),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),
-            "maxDdS": round(float(dd.get("maxS") or 0), 1),
+            "maxDdS": round(max(float(dd.get("maxS") or 0), float(group_dd.get(key) or 0)), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
             "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
@@ -1477,6 +1574,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
         out.append({
             "symbol": s,
             "n": int(by_n.get(s) or len(tape)),
+            "evalN": int(pf["count"]),
             "pf": round(float(pf["ratio"]), 4),
             "netAvg": round(float(pf.get("netAvg") or 0), 6),
             "last15N": int(pf["count"]),

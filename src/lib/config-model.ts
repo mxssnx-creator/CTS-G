@@ -218,6 +218,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   blockPauseCountRatio: number;
   blockActiveLive: boolean;
   blockActiveReal: boolean;
+  blockOverall: boolean;
   dcaEnabled: boolean;
   dcaMaxSteps: number;
   dcaCooldownSeconds: number;
@@ -399,6 +400,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockPauseCountRatio: 1,
   blockActiveLive: true,
   blockActiveReal: true,
+  blockOverall: true,
   dcaEnabled: false,
   dcaMaxSteps: 4,
   dcaCooldownSeconds: 30,
@@ -586,6 +588,7 @@ export type CtsSettings = {
   blockActive?: boolean;
   blockActiveLiveEnabled?: boolean;
   blockActiveRealEnabled?: boolean;
+  blockOverall?: boolean;
   dcaEnabled?: boolean;
   variantDcaEnabled?: boolean;
   variant_dca?: boolean;
@@ -790,6 +793,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockActive: bool(cts.blockActive, true),
     blockActiveLive: bool(cts.blockActiveLiveEnabled ?? coord.blockActiveLiveEnabled, true),
     blockActiveReal: bool(cts.blockActiveRealEnabled ?? coord.blockActiveRealEnabled, true),
+    blockOverall: bool(live?.blockOverall ?? cts.blockOverall, true),
     dcaEnabled: bool(live?.dcaEnabled ?? cts.dcaEnabled ?? cts.variantDcaEnabled ?? cts.variant_dca, false),
     dcaMaxSteps: num(cts.dcaMaxSteps ?? coord.dcaMaxSteps, 4),
     dcaCooldownSeconds: num(cts.dcaCooldownSeconds ?? coord.dcaCooldownSeconds, 30),
@@ -1097,6 +1101,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolSort = coerceSymbolSort(next.symbolSort);
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
+  next.blockOverall = bool(next.blockOverall, true);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);
   const candidateCap = Math.round(num(next.entryPolicyMaxCandidates, 0));

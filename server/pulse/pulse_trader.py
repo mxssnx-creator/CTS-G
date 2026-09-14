@@ -1353,6 +1353,7 @@ class Pulse:
         self.strat_dca = True
         self.normal_execution_enabled = True
         self.block_active = True
+        self.block_overall = True
         self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
         self.strat_general = True
@@ -1659,6 +1660,11 @@ class Pulse:
         return self.position_key(pos) if self.per_config_controls(pos) else ""
 
     def block_lane_key(self, pos: Position) -> str:
+        if bool(getattr(self, "block_overall", True)):
+            try:
+                return self.block.key(pos.symbol, pos.side)
+            except TypeError:
+                return f"{pos.symbol}:{pos.side}"
         group_key = self.logical_group_key(pos)
         try:
             return self.block.key(pos.symbol, pos.side, group_key)
@@ -1674,15 +1680,30 @@ class Pulse:
 
     def ensure_strategy_lanes(self, pos: Position) -> None:
         """Rebind Block/DCA state to this logical group after fills or restart."""
-        group_key = self.logical_group_key(pos)
+        overall = bool(getattr(self, "block_overall", True))
+        group_key = "" if overall else self.logical_group_key(pos)
+        core_qty = float(pos.qty or 0)
+        if overall:
+            core_qty = self._block_core_qty(pos.symbol, pos.side) or core_qty
         try:
-            self.block.register_parent(pos.symbol, pos.side, pos.qty, pos.entry, group_key=group_key)
+            if overall:
+                key = self.block.key(pos.symbol, pos.side)
+                lane = self.block.lanes.get(key)
+                if lane and lane.base_qty > 0:
+                    if abs(float(lane.base_qty or 0) - core_qty) > 1e-12 and core_qty > 0:
+                        lane.base_qty = core_qty
+                        lane.active = True
+                        self.block.save()
+                else:
+                    self.block.register_parent(pos.symbol, pos.side, core_qty, pos.entry, group_key="")
+            else:
+                self.block.register_parent(pos.symbol, pos.side, pos.qty, pos.entry, group_key=group_key)
         except TypeError:
             self.block.register_parent(pos.symbol, pos.side, pos.qty, pos.entry)
         except Exception:
             pass
         try:
-            self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry, group_key=group_key)
+            self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry, group_key=self.logical_group_key(pos))
         except TypeError:
             try:
                 self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry)
@@ -1693,7 +1714,7 @@ class Pulse:
 
     def merge_parent_lanes(self, pos: Position, added_qty: float, entry: float) -> None:
         """Keep Block/DCA parent anchors aligned with an entry merge."""
-        group_key = self.logical_group_key(pos)
+        group_key = "" if bool(getattr(self, "block_overall", True)) else self.logical_group_key(pos)
         try:
             merge_parent = getattr(self.block, "merge_parent", None)
             if callable(merge_parent):
@@ -5193,10 +5214,14 @@ class Pulse:
             self.clear_position_controls(pos)
         # Seed the add-on lanes with the pre-fill parent, then merge this
         # confirmed entry delta below. This avoids double-counting a new lane.
-        try:
-            self.ensure_strategy_lanes(pos)
-        except Exception:
-            pass
+        # Block/DCA fills already have a parent lane; re-seeding would treat
+        # confirmed extras as new core and inflate Overall Block basis.
+        fill_source_early = str(source or "").strip().lower()
+        if fill_source_early not in {"block", "dca"}:
+            try:
+                self.ensure_strategy_lanes(pos)
+            except Exception:
+                pass
         old_qty = max(0.0, float(pos.qty or 0.0))
         total = old_qty + add_qty
         if fill_px > 0:
@@ -7522,6 +7547,7 @@ class Pulse:
         self.normal_execution_enabled = ov.get("normalExecutionEnabled", cts.get("normalExecutionEnabled", True)) is True
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
+        self.block_overall = ov.get("blockOverall", cts.get("blockOverall", True)) is not False
         self.strat_general = True
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
@@ -7913,6 +7939,8 @@ class Pulse:
             "blockProfitFactorRatio": self.block.pf_ratio,
             "blockPauseCountRatio": self.block.pause_ratio,
             "blockActiveLive": self.block.active_live,
+            "blockActiveReal": self.block.active_real,
+            "blockOverall": bool(getattr(self, "block_overall", True)),
             "axisPrevEnabled": self.coord.axes["prev"].enabled,
             "axisPrevMaxWindow": self.coord.axes["prev"].max_window,
             "axisLastEnabled": self.coord.axes["last"].enabled,
@@ -8078,6 +8106,97 @@ class Pulse:
             return 0.0
         return float(view.get("real_pf", view.get("last15_ratio", 0)) or 0)
 
+    def _block_core_qty(self, symbol: str, side: str) -> float:
+        """Own parent size for Overall Block: non-block-active lots on this side."""
+        total = 0.0
+        for pos in self.positions_for(symbol, side):
+            axis = str(getattr(pos, "axis_key", "") or "")
+            lineage = [str(x) for x in (getattr(pos, "lineage_axis_keys", None) or [])]
+            if axis.startswith("block-active:") or any(str(k).startswith("block-active:") for k in lineage):
+                continue
+            total += max(0.0, float(getattr(pos, "qty", 0) or 0))
+        try:
+            lane = self.block.lanes.get(self.block.key(symbol, side))
+            extra = float(getattr(lane, "confirmed_add", 0) or 0) if lane else 0.0
+            if extra > 0:
+                total = max(0.0, total - extra)
+        except Exception:
+            pass
+        return total
+
+    def overall_side_closes(self, symbol: str, side: str) -> List[Any]:
+        """Ours round-trips for one physical parent (symbol + direction)."""
+        side_u = str(side or "").upper()
+        want = str(symbol or "").upper()
+        out: List[Any] = []
+        source = list(getattr(self, "closed", None) or [])
+        completed: List[Any] = []
+        try:
+            completed = completed_roundtrips(source)
+        except Exception:
+            completed = []
+        # Confirmed live partials aggregate through completed_roundtrips. Hist
+        # tapes and unit fixtures store already-complete ours closes without
+        # exchange_confirmed/client_id — those must still form the physical
+        # parent tape, otherwise Overall Block Real PF is stuck at 0.
+        use = completed if completed else source
+        for row in use:
+            if isinstance(row, dict):
+                if str(row.get("ours", True)).lower() in ("false", "0"):
+                    continue
+                if int(row.get("member_count") or 1) != 1:
+                    continue
+                if str(row.get("symbol") or "").upper() != want:
+                    continue
+                if str(row.get("side") or "").upper() != side_u:
+                    continue
+                out.append(SimpleNamespace(**row))
+            else:
+                if getattr(row, "ours", True) is False:
+                    continue
+                if int(getattr(row, "member_count", 1) or 1) != 1:
+                    continue
+                if str(getattr(row, "symbol", "") or "").upper() != want:
+                    continue
+                if str(getattr(row, "side", "") or "").upper() != side_u:
+                    continue
+                out.append(row)
+        return out
+
+    def block_overall_real_pf(self, symbol: str, side: str) -> float:
+        """Stage Real PF of the physical parent. Independent of the opening Set."""
+        rows = self.overall_side_closes(symbol, side)
+        lane = None
+        try:
+            lane = self.block.lanes.get(self.block.key(symbol, side))
+        except Exception:
+            lane = None
+        if lane is not None and getattr(lane, "parent_pf_ring", None):
+            extra = list(lane.parent_pf_ring or [])
+            for sample in extra:
+                rows.append(SimpleNamespace(pnl_pct=sample, pnl=sample, t=0.0, side=side, symbol=symbol))
+        need = 3
+        try:
+            need = max(3, int(getattr(self.coord, "real_eval", 3) or 3))
+        except Exception:
+            need = 3
+        if len(rows) < need:
+            return 0.0
+        floor = POSITIVE_PF
+        try:
+            floor = float(getattr(self.coord, "min_pf", POSITIVE_PF) or POSITIVE_PF)
+            floor = float((getattr(self.coord, "stage_min_pf", None) or {}).get("real", floor) or floor)
+        except Exception:
+            pass
+        try:
+            blob = last_n_cost_pf(rows, need, getattr(self, "position_cost_pct", POSITION_COST_PCT_DEFAULT), ordered=True)
+        except Exception:
+            return 0.0
+        ratio = float(blob.get("ratio") or 0)
+        if int(blob.get("count") or 0) < need or not clears_pf(ratio, floor):
+            return 0.0
+        return ratio
+
     def config_strategy_closes(self, set_id, side, execution_lane="", strategy=""):
         """Confirmed round trips of one Set, side and execution variant."""
         source = getattr(self, "closed", None)
@@ -8106,13 +8225,19 @@ class Pulse:
             rows.append(SimpleNamespace(**row))
         return rows
 
-    def _coord_add_state(self, count: Optional[int] = None, *, set_id="", side="", execution_lane="", strategy="") -> Tuple[bool, int, float, List[str]]:
+    def _coord_add_state(self, count: Optional[int] = None, *, set_id="", side="", execution_lane="", strategy="", symbol="") -> Tuple[bool, int, float, List[str]]:
         """Axis count-pos gate for additional strategies. Returns (allow, stack_cap, last_pf, reasons)."""
         stack = int(getattr(self.block, "max_stack", 3) or 3)
         coord = getattr(self, "coord", None)
         if coord is None or not callable(getattr(coord, "add_gate", None)):
             return True, stack, 1.0, []
-        rows = self.config_strategy_closes(set_id, side, execution_lane, strategy) if set_id else self.strategy_closes()
+        overall = bool(getattr(self, "block_overall", True)) and not set_id
+        if set_id:
+            rows = self.config_strategy_closes(set_id, side, execution_lane, strategy)
+        elif overall and symbol:
+            rows = self.overall_side_closes(symbol, side)
+        else:
+            rows = self.strategy_closes()
         consec = 0
         for c in reversed(rows):
             pnl = float(getattr(c, "pnl", 0) or 0)
@@ -8137,6 +8262,8 @@ class Pulse:
                 if not self.sets._base_metrics_ok(view):
                     return False, stack, 0.0, ["config Base qualification"]
                 intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
+        elif overall and symbol and str(strategy or "") == "block":
+            intern = {"pf": self.block_overall_real_pf(symbol, side), "n": len(rows)}
         tape = None
         if count is not None:
             try:
@@ -8186,9 +8313,16 @@ class Pulse:
             live_n_by[lane_key] = live_n_by.get(lane_key, 0) + 1
         emitted = 0
         add_budget = 8 if MAX_OPEN <= 0 else 2
+        seen_parents = set()
+        overall = bool(getattr(self, "block_overall", True))
         for pos in list(self.open.values()):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
+            if overall:
+                parent_id = (str(pos.symbol), str(pos.side))
+                if parent_id in seen_parents:
+                    continue
+                seen_parents.add(parent_id)
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
@@ -8206,8 +8340,11 @@ class Pulse:
             # Parent still valid only if pulse score agrees with side (continuation).
             # intern PF comes from block_intern_pf: under the strict gate only
             # a validated + profitable set lifts the CTS real-stage floor.
-            intern_pf = self.block_intern_pf(pos)
-            if intern_pf <= 0:
+            intern_pf = (
+                self.block_overall_real_pf(pos.symbol, pos.side)
+                if overall else self.block_intern_pf(pos)
+            )
+            if intern_pf <= 0 and not overall:
                 kind = str(getattr(pos, "ind_kind", "") or "")
                 if kind:
                     try:
@@ -8259,7 +8396,12 @@ class Pulse:
                 continue
             # Live book losing → don't pyramid more size.
             try:
-                live_pf = self.live_recent_pf(pos.side, n=8, rows=self.config_strategy_closes(pos.set_id, pos.side, getattr(pos, "execution_lane", ""), "block"))
+                close_rows = (
+                    self.overall_side_closes(pos.symbol, pos.side)
+                    if overall else
+                    self.config_strategy_closes(pos.set_id, pos.side, getattr(pos, "execution_lane", ""), "block")
+                )
+                live_pf = self.live_recent_pf(pos.side, n=8, rows=close_rows)
                 if live_pf is not None and live_pf + 1e-9 < self.coord.min_pf:
                     continue
             except Exception:
@@ -8269,7 +8411,14 @@ class Pulse:
             if not row:
                 continue
             count_n = int(row.get("blockCount") or 0)
-            ok_n, _, _, why_n = self._coord_add_state(count=count_n, set_id=pos.set_id, side=pos.side, execution_lane=getattr(pos, "execution_lane", ""), strategy="block")
+            ok_n, _, _, why_n = self._coord_add_state(
+                count=count_n,
+                set_id="" if overall else pos.set_id,
+                side=pos.side,
+                execution_lane="" if overall else getattr(pos, "execution_lane", ""),
+                strategy="block",
+                symbol=pos.symbol,
+            )
             if not ok_n:
                 self.block.pause_count(lane, count_n, 90)
                 if time.time() - self.skip_log.get(f"add-n:{count_n}", 0) > 45:
@@ -11360,7 +11509,8 @@ class Pulse:
             "executionPolicy": {
                 "normalEnabled": bool(getattr(self, "normal_execution_enabled", False)),
                 "blockActive": bool(getattr(self, "block_active", True)),
-            "targetActiveSets": int(getattr(self.sets, "max_active", 0)),
+                "blockOverall": bool(getattr(self, "block_overall", True)),
+                "targetActiveSets": int(getattr(self.sets, "max_active", 0)),
                 "decision": dict(getattr(self, "_execution_decision", {}) or {}),
             },
             "stageFlow": scov.get("stageFlow") or stage_flow,

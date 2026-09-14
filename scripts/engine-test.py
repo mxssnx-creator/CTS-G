@@ -1742,6 +1742,24 @@ def block_calc_test() -> None:
         p.cap_order_qty = lambda c, px, qty, cap=None: float(qty)
         p.min_order_qty = lambda c, px: float(c.min_qty)
         p.leverage_for = lambda c: 100
+        p.block_overall = True
+        p.coord = SimpleNamespace(
+            min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10},
+            last={}, add_gate=lambda *a, **k: (True, [], {"lastPf": 1.2}),
+            add_stack_cap=lambda stack, pf: stack,
+        )
+        p.closed = []
+        if set_n >= 8:
+            from position_cost import cost_as_frac, normalize_position_cost_pct
+            cost = normalize_position_cost_pct(p.position_cost_pct)
+            frac = cost_as_frac(cost)
+            avg_r = max(0.0, (float(set_ratio) - 1.0) / 0.10)
+            pnl_pct = (avg_r + 1.0) * frac
+            p.closed = [
+                SimpleNamespace(symbol="TST-USDT", side="LONG", pnl=pnl_pct, pnl_pct=pnl_pct,
+                                t=time.time() - i, ours=True, member_count=1)
+                for i in range(int(set_n))
+            ]
         p.open = {"TST-USDT": pt.Position(
             symbol="TST-USDT", side="LONG", qty=0.05 + confirmed, entry=100.0,
             opened_at=time.time() - 600, sl=99.0, tp=101.0, peak=100.0,
@@ -1811,6 +1829,11 @@ def block_calc_test() -> None:
     pS = mk_trader(1.2, 1.5, 12)
     pS.open["TST-USDT"].side = "SHORT"
     pS.px["TST-USDT"] = 99.70
+    pS.closed = [
+        SimpleNamespace(symbol="TST-USDT", side="SHORT", pnl=c.pnl, pnl_pct=c.pnl_pct,
+                        t=c.t, ours=True, member_count=1)
+        for c in pS.closed
+    ]
     pS.block.lanes.clear()
     lnS = pS.block.register_parent("TST-USDT", "SHORT", 0.05, 100.0)
     pS.score = lambda sym: (-1, "t", 0.9)
@@ -1908,6 +1931,20 @@ def block_calc_test() -> None:
     posS = pt.Position(symbol="TST-USDT", side="SHORT", qty=0.05, entry=100.0,
                        opened_at=time.time() - 600, sl=101.0, tp=99.0, peak=100.0, set_id="", pack="general")
     rec("block-intern-unassigned-unproven", pI.block_intern_pf(posS) == 0.0, str(pI.block_intern_pf(posS)))
+
+    pOv = mk_trader(1.2, 1.5, 12)
+    pOv.open["TST-USDT"].set_id = ""
+    pOv.maybe_block_adds()
+    rec("block-overall-unassigned-emits", len(pOv.api.posts) == 1, f"posts={pOv.api.posts}")
+    pLose = mk_trader(1.2, 1.5, 12)
+    pLose.sets.sets["parent-config"].last15_ratio = 0.4
+    pLose.maybe_block_adds()
+    rec("block-overall-ignores-set-loser", len(pLose.api.posts) == 1, f"posts={pLose.api.posts}")
+    pOff = mk_trader(1.2, 1.5, 12)
+    pOff.block_overall = False
+    pOff.open["TST-USDT"].set_id = ""
+    pOff.maybe_block_adds()
+    rec("block-overall-off-unassigned-silent", pOff.api.posts == [], f"posts={pOff.api.posts}")
 
     # book cap uses sequential extra (3×) not the 1+2+3 sum (6×)
     pCap = object.__new__(pt.Pulse)
