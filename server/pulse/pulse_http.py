@@ -1851,10 +1851,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-test.json", "/hist-test"):
             try:
-                from hist_test import read_job, job_is_running
+                from hist_test import read_job, job_is_running, job_is_paused
                 blob = read_job()
                 blob["ok"] = True
                 blob["running"] = job_is_running(blob)
+                blob["paused"] = job_is_paused(blob)
                 blob["independent"] = True
                 blob["shared"] = False
                 self._json(blob)
@@ -2117,14 +2118,19 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-test.json", "/hist-test"):
             try:
-                from hist_test import start_test, stop_test, read_job, job_is_running
+                from hist_test import start_test, stop_test, pause_test, resume_test, read_job, job_is_running, job_is_paused
                 action = str((body or {}).get("action") or "start").lower().strip()
                 if action == "stop":
                     job = stop_test()
+                elif action == "pause":
+                    job = pause_test()
+                elif action == "resume":
+                    job = resume_test(body if isinstance(body, dict) else {})
                 else:
                     job = start_test(body if isinstance(body, dict) else {})
                 job["ok"] = True
                 job["running"] = job_is_running(job)
+                job["paused"] = job_is_paused(job)
                 job["independent"] = True
                 job["shared"] = False
                 self._json(job)

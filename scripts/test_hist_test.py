@@ -83,11 +83,81 @@ class HistTestContract(unittest.TestCase):
                 self.assertEqual(idle["hours"], 20)
                 stopped = ht.stop_test()
                 self.assertFalse(stopped.get("running"))
+                self.assertEqual(stopped.get("phase"), "stopped")
                 self.assertTrue(os.path.exists(public))
                 with open(public, encoding="utf-8") as handle:
                     blob = json.load(handle)
-                self.assertIn(blob.get("phase"), ("idle", "stopped"))
+                self.assertEqual(blob.get("phase"), "stopped")
                 self.assertNotIn("hist-calc", json.dumps(blob))
+
+    def test_pause_resume_stop_match_engine_bar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            public = os.path.join(tmp, "hist-test.json")
+            summary = os.path.join(tmp, "summary.json")
+            sweep = os.path.join(tmp, "step-sweep.json")
+            with patch.object(ht, "PUBLIC_JSON", public), patch.object(ht, "SUMMARY_PATH", summary), patch.object(ht, "PUBLIC_SWEEP", sweep), patch.object(ht, "OUT_DIR", tmp):
+                ht.clear_stop()
+                ht.clear_pause()
+                paused = ht.pause_test()
+                self.assertTrue(paused.get("paused") or paused.get("phase") == "paused")
+                self.assertFalse(paused.get("running"))
+                self.assertTrue(os.path.exists(os.path.join(tmp, "PAUSE")))
+                self.assertTrue(ht.job_is_paused(paused))
+                # Idle pause + Resume starts a new run. Patch start_test's worker away
+                # by using resume_test's idle path: was_live is False, so start_test
+                # would spawn. Instead clear via resume_test after marking live.
+                live = ht.publish({**paused, "running": True, "resumePhase": "evaluate", "phase": "paused", "paused": True})
+                resumed = ht.resume_test()
+                self.assertFalse(resumed.get("paused"))
+                self.assertEqual(resumed.get("phase"), "evaluate")
+                self.assertFalse(os.path.exists(os.path.join(tmp, "PAUSE")))
+                ht.pause_test()
+                stopped = ht.stop_test()
+                self.assertEqual(stopped.get("phase"), "stopped")
+                self.assertFalse(stopped.get("paused"))
+                self.assertFalse(os.path.exists(os.path.join(tmp, "PAUSE")))
+                self.assertTrue(os.path.exists(os.path.join(tmp, "STOP")))
+
+    def test_fill_waits_on_pause_then_resumes(self):
+        import threading
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            public = os.path.join(tmp, "hist-test.json")
+            summary = os.path.join(tmp, "summary.json")
+            sweep = os.path.join(tmp, "step-sweep.json")
+            with patch.object(ht, "PUBLIC_JSON", public), patch.object(ht, "SUMMARY_PATH", summary), patch.object(ht, "PUBLIC_SWEEP", sweep), patch.object(ht, "OUT_DIR", tmp):
+                ht.clear_stop()
+                ht.clear_pause()
+                ht.request_pause()
+                seen = []
+
+                def fetch(symbol, limit):
+                    return [[0, 1, 1, 1, 1, 1]] * 80
+
+                def score(symbol, bars):
+                    seen.append(symbol)
+                    return {"n": 12, "pf": 1.3}
+
+                def worker():
+                    ht.fill_positive(
+                        [{"symbol": "WIN1"}, {"symbol": "WIN2"}],
+                        2,
+                        1.1,
+                        {"histTestHours": 4, "histLookbackBars": 80, "histWarmup": 0},
+                        fetch,
+                        score_fn=score,
+                    )
+
+                thread = threading.Thread(target=worker, name="hist-pause-fill", daemon=True)
+                thread.start()
+                time.sleep(0.35)
+                self.assertEqual(seen, [])
+                ht.clear_pause()
+                thread.join(2.0)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(seen, ["WIN1", "WIN2"])
+                ht.clear_stop()
 
 
 if __name__ == "__main__":

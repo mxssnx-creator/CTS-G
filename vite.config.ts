@@ -610,7 +610,7 @@ function pulseControlPlugin(): Plugin {
               if (existsSync(dest)) {
                 try { return JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>; } catch { /* fall through */ }
               }
-              return { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.1, ready: false, running: false, independent: true, symbols: [] };
+              return { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.1, ready: false, running: false, paused: false, independent: true, symbols: [] };
             };
             if (method === "GET") {
               const pulse = await tryPulse("GET", "/hist-test.json");
@@ -638,7 +638,20 @@ function pulseControlPlugin(): Plugin {
             const action = String(body.action || "start").toLowerCase();
             if (action === "stop") {
               spawn("python3", ["scripts/run_hist_test.py", "--stop"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
-              const job = { ...localJob(), phase: "stopped", running: false, detail: "historic test stop requested" };
+              const job = { ...localJob(), phase: "stopped", running: false, paused: false, detail: "historic test stopped" };
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            if (action === "pause") {
+              spawn("python3", ["scripts/run_hist_test.py", "--pause"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const job = { ...localJob(), phase: "paused", running: Boolean(localJob().running), paused: true, detail: "historic test paused" };
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            if (action === "resume") {
+              spawn("python3", ["scripts/run_hist_test.py", "--resume"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const prev = localJob();
+              const job = { ...prev, phase: String(prev.resumePhase || prev.phase || "evaluate"), running: true, paused: false, detail: "historic test resumed" };
               jsonRes(res as ServerResponse, 200, job);
               return;
             }
@@ -646,7 +659,7 @@ function pulseControlPlugin(): Plugin {
             const minPf = Number(body.minPf || body.histTestMinPf || 1.1);
             const count = Math.max(1, Math.min(200, Math.round(Number(body.symbolCap || body.targetCount || body.count) || 20)));
             const queued = {
-              ok: true, phase: "queued", pct: 1, ready: false, running: true, independent: true,
+              ok: true, phase: "queued", pct: 1, ready: false, running: true, paused: false, independent: true,
               hours, minPf, positivePf: minPf, targetCount: count,
               detail: `queued · ${hours}h · min PF ${minPf} · fill ${count}`,
               symbols: [],
