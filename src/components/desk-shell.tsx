@@ -3,12 +3,15 @@ import { Blocks, ChartSpline, LayoutDashboard, LineChart, Pause, Play, Square, S
 import { useState, type ReactNode } from "react";
 import { useConnection } from "@/components/connection-provider";
 import { postControl, type ConnType } from "@/lib/connections";
+import { engineDotClass, engineStatusLabel } from "@/lib/status-tone";
 
 export function DeskShell({
   children,
   live,
   mode,
   paused,
+  halted,
+  alive,
   statsType,
   statsId,
 }: {
@@ -16,6 +19,8 @@ export function DeskShell({
   live?: boolean;
   mode?: string;
   paused?: boolean;
+  halted?: boolean;
+  alive?: boolean;
   statsType?: string;
   statsId?: string;
 }) {
@@ -33,16 +38,16 @@ export function DeskShell({
       : onSystem
         ? "System"
         : onSweep
-          ? "24h step sweep"
+          ? "Historic test"
           : "Pulse desk";
   const sub = onSettings
-    ? "Per-connection CTS + overlay — Live and VST stay independent"
+    ? "Per-connection CTS + overlay — Test Historic is first on Overview, default ON"
     : onResults
       ? "Closed tape, equity path, symbol and exit breakdown"
       : onSystem
         ? "Generic core · exchange / strategy / risk slots · extend without rewriting the loop"
         : onSweep
-          ? "Historic 24h sim · 5 most volatile · TP steps 3–12"
+          ? "Historic test · 4–64h · fill until positive count · steps 3–12"
           : "Independent desks in parallel · pick Overall, Live or VST";
   const types: { id: ConnType; label: string; hint: string }[] = [
     { id: "overall", label: "Overall", hint: "all" },
@@ -66,9 +71,16 @@ export function DeskShell({
             const on = conn === t.id;
             const running = Boolean(lane?.running);
             const openN = lane?.openCount ?? 0;
+            const liveN = lane?.livePositionCount ?? -1;
             const xchN = lane?.exchangeOpenCount ?? -1;
             const simN = lane?.simOpenCount ?? -1;
-            const xchMismatch = xchN >= 0 && xchN !== openN;
+            const xchMismatch = xchN >= 0 && liveN >= 0 && xchN !== liveN;
+            const dot = engineDotClass({
+              running,
+              halted: Boolean(lane?.halted),
+              paused: Boolean(lane?.paused),
+              alive: lane?.alive !== false,
+            });
             return (
               <button
                 key={t.id}
@@ -81,9 +93,7 @@ export function DeskShell({
                 }`}
               >
                 <div className="flex items-center justify-center gap-2">
-                  <span
-                    className={`size-2 rounded-full ${running ? "bg-primary" : "bg-danger"}`}
-                  />
+                  <span className={`size-2 rounded-full ${dot}`} />
                   <span className="text-sm font-medium">{t.label}</span>
                 </div>
                 <div
@@ -117,16 +127,16 @@ export function DeskShell({
             <nav className="flex flex-wrap rounded-radius border border-border bg-surface p-1">
               <NavLink to="/" on={onDesk} icon={<LayoutDashboard className="size-4" />} label="Desk" />
               <NavLink to="/results" on={onResults} icon={<LineChart className="size-4" />} label="Results" />
-              <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="24h steps" />
+              <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="Historic test" />
               <NavLink to="/system" on={onSystem} icon={<Blocks className="size-4" />} label="System" />
               <NavLink to="/settings" on={onSettings} icon={<SlidersHorizontal className="size-4" />} label="Settings" />
             </nav>
             <EngineControls conn={conn} live={live} paused={paused} />
             <div className="flex items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2">
-              <span className={`live-dot size-2.5 rounded-full ${paused ? "bg-warn" : live ? "bg-primary" : "bg-danger"}`} />
+              <span className={`size-2.5 rounded-full ${live && !halted && !paused ? "live-dot" : ""} ${engineDotClass({ running: live, halted, paused, alive })}`} />
               <div className="leading-tight">
-                <div className="font-mono text-xs text-muted">{paused ? "PAUSED" : mode ?? "CONNECTING"}</div>
-                <div className="text-sm font-medium">{paused ? "PAUSE" : live ? "LIVE" : "OFFLINE"}</div>
+                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: live, halted, paused, mode }).sub}</div>
+                <div className="text-sm font-medium">{engineStatusLabel({ running: live, halted, paused, mode }).text}</div>
               </div>
             </div>
           </div>

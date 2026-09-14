@@ -122,6 +122,20 @@ export const POSITIVE_PF = 1.10;
 export const INTERN_PF = 1.0;
 export const DEFAULT_HIST_LOOKBACK_BARS = 2880; // 48 hours of 1m bars
 export const DEFAULT_MIN_STEP = 1;
+export const HIST_TEST_HOURS_MIN = 4;
+export const HIST_TEST_HOURS_MAX = 64;
+export const HIST_TEST_HOURS_DEFAULT = 20;
+export const HIST_TEST_HOURS_STEP = 1;
+
+export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
+  const n = Math.round(Number(value));
+  const base = Number.isFinite(n) ? n : fallback;
+  return Math.max(HIST_TEST_HOURS_MIN, Math.min(HIST_TEST_HOURS_MAX, base));
+}
+
+export function histTestLookbackBars(hours: unknown): number {
+  return clampHistTestHours(hours) * 60;
+}
 
 export function normalizePf(value: number, fallback: number): number {
   const parsed = Number.isFinite(value) ? value : fallback;
@@ -321,6 +335,12 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   histMinBars: number;
   histWarmup: number;
   histRefreshS: number;
+  /** Historic test window in hours (Settings Overall · Test Historic). */
+  histTestHours: number;
+  /** PF floor used to admit a symbol as a positive historic-test result. */
+  histTestMinPf: number;
+  /** Test Historic option on Settings Overview. Default ON. */
+  histTestEnabled: boolean;
   setPfWindow: number;
   baseEvalPosCount?: number;
   setDeactN: number;
@@ -509,6 +529,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 3600,
+  histTestHours: HIST_TEST_HOURS_DEFAULT,
+  histTestMinPf: POSITIVE_PF,
+  histTestEnabled: true,
   setPfWindow: 30,
   baseEvalPosCount: 30,
   setDeactN: 25,
@@ -667,6 +690,9 @@ export type CtsSettings = {
   histMinBars?: number;
   histWarmup?: number;
   histRefreshS?: number;
+  histTestHours?: number;
+  histTestMinPf?: number;
+  histTestEnabled?: boolean;
   setPfWindow?: number;
   setDeactN?: number;
   controlMinTrades?: number;
@@ -896,6 +922,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
     histRefreshS: num(cts.histRefreshS, 3600),
+    histTestHours: clampHistTestHours(cts.histTestHours ?? live?.histTestHours, HIST_TEST_HOURS_DEFAULT),
+    histTestMinPf: normalizePf(num(cts.histTestMinPf ?? live?.histTestMinPf, POSITIVE_PF), POSITIVE_PF),
+    histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
     baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setDeactN: num(cts.setDeactN, 25),
@@ -967,6 +996,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.symbolSort = coerceSymbolSort(out.symbolSort ?? live?.symbolSort);
   out.symbolsDynamic = bool(out.symbolsDynamic, true);
   out.symbolCap = Math.max(0, Math.round(num(out.symbolCap, DEFAULT_SYMBOL_COUNT)));
+  out.histTestHours = clampHistTestHours(out.histTestHours, HIST_TEST_HOURS_DEFAULT);
+  out.histTestMinPf = normalizePf(num(out.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
+  out.histTestEnabled = bool(out.histTestEnabled, true);
   if (out.trailRecalcGive && live?.trailGivePct == null) {
     out.trailGivePct = trailGiveFromArm(out.trailArmPct, out.trailGiveFactor, out.trailGiveMin, out.trailGiveMax);
   }
@@ -1079,6 +1111,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
   next.drawdownHaltPct = Math.max(0, Math.min(80, num(next.drawdownHaltPct, 0)));
   next.minimumEquity = Math.max(0, num(next.minimumEquity, 0.2));
+  next.histTestHours = clampHistTestHours(next.histTestHours, HIST_TEST_HOURS_DEFAULT);
+  next.histTestMinPf = normalizePf(num(next.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
+  next.histTestEnabled = bool(next.histTestEnabled, true);
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
     next.symbolsAll = true;

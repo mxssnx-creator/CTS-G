@@ -23,6 +23,7 @@ from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
+from hist_test import clamp_hours, clamp_min_pf, fill_positive, lookback_bars, symbol_clears_floor
 from user_presets import self_test as user_presets_self_test
 from storage_paths import self_test as storage_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
@@ -128,10 +129,41 @@ def overlay_test() -> None:
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
         rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
+        rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
+        rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.1) < 1e-9, str(ov.get("histTestMinPf")))
+        rec(f"{name}-hist-test-enabled", ov.get("histTestEnabled", True) is True, str(ov.get("histTestEnabled")))
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
         rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
+    rec("hist-test-hours-clamp", clamp_hours(1) == 4 and clamp_hours(20) == 20 and clamp_hours(99) == 64)
+    rec("hist-test-bars", lookback_bars(20) == 1200 and lookback_bars(4) == 240)
+    rec("hist-test-min-pf", abs(clamp_min_pf(None) - 1.1) < 1e-9)
+    rec("hist-test-positive-gate", symbol_clears_floor({"n": 12, "pf": 1.2}, 1.1) and not symbol_clears_floor({"n": 12, "pf": 1.02}, 1.1))
+
+    def _hist_fetch(symbol, limit):
+        return [[0, 1, 1, 1, 1, 1]] * 80
+
+    def _hist_score(symbol, bars):
+        return {"n": 10, "pf": 1.3 if symbol.startswith("WIN") else 0.7}
+
+    fill = fill_positive(
+        [{"symbol": "LOSER"}, {"symbol": "WIN1"}, {"symbol": "WIN2"}, {"symbol": "WIN3"}],
+        2,
+        1.1,
+        {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0},
+        _hist_fetch,
+        score_fn=_hist_score,
+    )
+    rec(
+        "hist-test-fill-until-count",
+        fill["filled"] == 2
+        and [r["symbol"] for r in fill["selected"]] == ["WIN1", "WIN2"]
+        and fill["evaluated"] == 3
+        and "WIN3" not in [r["symbol"] for r in fill["selected"] + fill["rejected"]],
+        {"filled": [r["symbol"] for r in fill["selected"]], "evaluated": fill["evaluated"]},
+    )
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
+    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 2880 and int(x01.get("histTestHours") or 0) == 20)
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")

@@ -119,6 +119,9 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(value.minPf, 1.1);
     assert.equal(value.baseMinPf, 1.1);
     assert.equal(value.histLookbackBars, 2880);
+    assert.equal(value.histTestHours, 20);
+    assert.equal(value.histTestMinPf, 1.1);
+    assert.equal(value.histTestEnabled, true);
     assert.equal(value.baseEvalPosCount, 30);
     assert.equal(value.setMinStep, 1);
   }
@@ -152,6 +155,28 @@ test("execution switches survive merge and save normalization independently", ()
 
 test("an explicit unlimited Set selection remains a user choice", () => {
   assert.equal(overlayFromCts({}, { setMaxActive: 0 }).setMaxActive, 0);
+});
+
+test("historic test hours stay 4–64 default 20 and min PF 1.1", () => {
+  for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
+    assert.equal(value.histTestHours, 20);
+    assert.equal(value.histTestMinPf, 1.1);
+    assert.equal(value.histTestEnabled, true);
+  }
+  const clamped = syncOverlayFlags(overlayFromCts({}, { histTestHours: 99, histTestMinPf: 0.5 }));
+  assert.equal(clamped.histTestHours, 64);
+  assert.equal(clamped.histTestMinPf, 1.02);
+  const off = syncOverlayFlags(overlayFromCts({}, { histTestEnabled: false }));
+  assert.equal(off.histTestEnabled, false);
+  const low = syncOverlayFlags(overlayFromCts({}, { histTestHours: 2, histTestMinPf: 1.1 }));
+  assert.equal(low.histTestHours, 4);
+  const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.1 }));
+  assert.equal(mid.histTestHours, 20);
+  assert.equal(mid.histLookbackBars, 2880);
+  const shifted = syncOverlayFlags(overlayFromCts({}, { histTestHours: 48, histLookbackBars: 2880, histTestMinPf: 1.15 }));
+  assert.equal(shifted.histTestHours, 48);
+  assert.equal(shifted.histLookbackBars, 2880);
+  assert.equal(shifted.histTestMinPf, 1.15);
 });
 
 

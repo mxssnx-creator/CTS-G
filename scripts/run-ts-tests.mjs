@@ -27,6 +27,7 @@ const files = [
   "src/lib/dimension-stats.test.ts",
   "src/lib/live-stats.test.ts",
   "src/lib/polling.test.ts",
+  "src/lib/hist-test.test.ts",
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
 ];

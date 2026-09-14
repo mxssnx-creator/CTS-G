@@ -74,8 +74,12 @@ type SweepReport = {
   pct?: number;
   generatedAt?: string;
   hours?: number;
+  minPf?: number;
+  targetCount?: number;
+  filled?: number;
   symbols?: string[];
-  ranked?: Array<{ symbol: string; vol1h: number; vol24h: number; quoteVolume: number; changePct: number }>;
+  positive?: string[];
+  ranked?: Array<{ symbol: string; vol1h: number; vol24h: number; quoteVolume: number; changePct: number; pf?: number; positive?: boolean }>;
   byStep?: StepRow[];
   ranges?: RangeRow[];
   heatmap?: Array<{ step: number; slRatio: number; pf: number; validated?: boolean; maxDdS: number }>;
@@ -103,10 +107,19 @@ function StepSweepPage() {
     let stop = false;
     const load = async () => {
       try {
-        const r = await fetch(`/step-sweep-24h.json?t=${Date.now()}`, { cache: "no-store" });
-        if (!r.ok) return;
-        const json = (await r.json()) as SweepReport;
-        if (!stop) setData(json);
+        const urls = ["/hist-test.json", "/step-sweep-24h.json"];
+        let json: SweepReport | null = null;
+        for (const url of urls) {
+          const r = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
+          if (!r.ok) continue;
+          const body = (await r.json()) as SweepReport;
+          if (!body || !(body.phase || body.hours || body.symbols)) continue;
+          const idle = !body.phase || body.phase === "idle";
+          if (url.endsWith("hist-test.json") && idle && !(body.symbols || []).length) continue;
+          json = body;
+          break;
+        }
+        if (!stop && json) setData(json);
       } catch {
         /* keep last */
       }
@@ -122,6 +135,8 @@ function StepSweepPage() {
   const steps = data?.byStep ?? [];
   const ranges = data?.ranges ?? [];
   const ranked = data?.ranked ?? [];
+  const hours = data?.hours || 20;
+  const floor = data?.minPf ?? data?.positivePf ?? 1.1;
   const ready = Boolean(data?.ready) && data?.phase === "ready" && !data?.error;
   const chart = useMemo(
     () =>
@@ -146,18 +161,18 @@ function StepSweepPage() {
   return (
     <DeskShell live={ready} mode={ready ? "SWEEP READY" : (data?.phase || "SWEEP").toUpperCase()}>
       <p className="font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="step-sweep-identity">
-        24h historic · steps 3–12 · {data?.symbols?.join(" · ") || "ranking 1H vol"} · intern 1.00 · floor {data?.positivePf ?? 1.1}
+        {hours}h historic · steps {data?.byStep?.length ? `${data.byStep[0]?.step}–${data.byStep[data.byStep.length - 1]?.step}` : "3–12"} · {data?.symbols?.join(" · ") || "ranking 1H vol"} · intern 1.00 · floor {floor}
       </p>
       <header className="grid gap-3 lg:grid-cols-4">
-        <Hero k="Window" v="24h" s="1m bars · default hist book" />
-        <Hero k="Symbols" v={String(data?.symbols?.length || 0)} s={(data?.symbols || []).join(" ") || "fetching ticker"} />
+        <Hero k="Window" v={`${hours}h`} s="1m bars · historic test" />
+        <Hero k="Symbols" v={String(data?.symbols?.length || data?.filled || 0)} s={(data?.symbols || []).join(" ") || "fill until positive"} />
         <Hero k="Best step" v={String(data?.bestStep?.step ?? "—")} s={`PF ${(data?.bestStep?.pf ?? 0).toFixed(3)} · PF/DD ${(data?.bestStep?.pfDdRatio ?? 0).toFixed(3)}`} good={Boolean(data?.bestStep?.validated)} />
         <Hero k="Validated" v={String(data?.validatedCount ?? 0)} s={data?.detail || `${data?.pct ?? 0}%`} />
       </header>
 
       {!ready ? (
         <section className="rounded-radius border border-border bg-surface p-4">
-          <p className="text-sm text-muted">{data?.error || data?.detail || "Ranking volatility and replaying the 24h book…"}</p>
+          <p className="text-sm text-muted">{data?.error || data?.detail || `Ranking volatility and replaying the ${hours}h book…`}</p>
           <div className="mt-3 h-2 overflow-hidden rounded-full bg-bg2">
             <div className="h-full bg-primary" style={{ width: `${Math.max(4, Math.min(100, data?.pct ?? 4))}%` }} />
           </div>
@@ -256,7 +271,7 @@ function StepSweepPage() {
               <tr key={s.step} className="border-t border-border/60">
                 <td className="py-1.5 font-medium">{s.step}</td>
                 <td>{(s.tpPct ?? s.step * 0.1).toFixed(2)}%</td>
-                <td className={s.validated ? "text-primary" : "text-danger"}>{s.pf.toFixed(3)}</td>
+                <td className={s.validated ? "text-primary" : "text-muted"}>{s.pf.toFixed(3)}</td>
                 <td>{(s.classicPf ?? 0).toFixed(2)}</td>
                 <td>{s.pfDdRatio.toFixed(3)}</td>
                 <td>{fmtDd(s.maxDdS)}</td>
@@ -286,7 +301,7 @@ function StepSweepPage() {
               <tr key={s.label} className="border-t border-border/60">
                 <td className="py-1.5 font-medium">{s.label}</td>
                 <td>{s.stepCount}</td>
-                <td className={s.validated ? "text-primary" : "text-danger"}>{s.pf.toFixed(3)}</td>
+                <td className={s.validated ? "text-primary" : "text-muted"}>{s.pf.toFixed(3)}</td>
                 <td>{s.pfDdRatio.toFixed(3)}</td>
                 <td>{fmtDd(s.maxDdS)}</td>
                 <td>{s.wr.toFixed(1)}%</td>
@@ -345,7 +360,7 @@ function StepSweepPage() {
               {(data?.bySymbol || []).map((s) => (
                 <tr key={s.symbol} className="border-t border-border/60">
                   <td className="py-1.5">{s.symbol}</td>
-                  <td className={s.validated ? "text-primary" : "text-danger"}>{s.pf.toFixed(3)}</td>
+                  <td className={s.validated ? "text-primary" : "text-muted"}>{s.pf.toFixed(3)}</td>
                   <td>{fmtDd(s.maxDdS)}</td>
                   <td>{s.n}</td>
                   <td>{s.wr.toFixed(1)}%</td>
@@ -372,7 +387,7 @@ function StepSweepPage() {
                   <td>{row.kind}</td>
                   <td>{row.slRatio.toFixed(1)}</td>
                   <td>{row.trailKey || "base"}</td>
-                  <td className={row.validated ? "text-primary" : "text-danger"}>{row.pf.toFixed(3)}</td>
+                  <td className={row.validated ? "text-primary" : "text-muted"}>{row.pf.toFixed(3)}</td>
                   <td>{fmtDd(row.maxDdS)}</td>
                   <td>{row.n}</td>
                 </tr>
