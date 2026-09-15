@@ -72,6 +72,21 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
 
+    def test_validated_set_ids_from_last_ready_file(self):
+        import tempfile, os
+        prev = ht.LAST_READY_PATH
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            ht.LAST_READY_PATH = path
+            with open(path, "w") as handle:
+                handle.write('{"winner":{"id":"indications:1m:sl2.7:tr0.9:0.1:st11"},"validatedIds":[]}')
+            ids = ht.validated_set_ids({"phase": "evaluate", "ready": False})
+            self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
+        finally:
+            ht.LAST_READY_PATH = prev
+            os.unlink(path)
+
     def test_apply_scores_activates_compact_winner(self):
         from set_engine import SetBook
         book = SetBook()

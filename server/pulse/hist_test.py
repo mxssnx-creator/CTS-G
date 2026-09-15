@@ -55,6 +55,7 @@ PUBLIC_SWEEP = os.path.join(ROOT, "public", "step-sweep-24h.json")
 OUT_DIR = os.path.join(ROOT, "reports", "hist-test")
 SUMMARY_PATH = os.path.join(OUT_DIR, "summary.json")
 PID_PATH = os.path.join(OUT_DIR, "hist-test.pid")
+LAST_READY_PATH = os.path.join(OUT_DIR, "last-ready.json")
 STOP_PATH = os.path.join(OUT_DIR, "STOP")
 PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 
@@ -161,6 +162,11 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
             add(row.get("id") or row.get("setId") or row.get("set_id"))
     for sid in blob.get("validatedIds") or []:
         add(sid)
+    last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else {}
+    if last:
+        add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
+        for sid in last.get("validatedIds") or []:
+            add(sid)
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     add(winner.get("id") or winner.get("setId") or winner.get("set_id"))
     for row in list(blob.get("ranked") or []) + list(blob.get("bySymbol") or []):
@@ -170,6 +176,11 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
         if not sid or ":" not in str(sid):
             continue
         add(sid)
+    if not out:
+        last = read_last_ready()
+        add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
+        for sid in last.get("validatedIds") or []:
+            add(sid)
     return out
 
 
@@ -351,10 +362,57 @@ def apply_control_latches(blob: Optional[Dict[str, Any]] = None) -> Dict[str, An
     return payload
 
 
+def read_last_ready() -> Dict[str, Any]:
+    try:
+        with open(LAST_READY_PATH, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict) and (loaded.get("winner") or loaded.get("validatedIds")):
+            return loaded
+    except Exception:
+        pass
+    return {}
+
+
+def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    ids = list(blob.get("validatedIds") or [])
+    if not ids:
+        ids = validated_set_ids(blob)
+    return {
+        "phase": "ready",
+        "ready": True,
+        "winner": winner,
+        "validatedIds": ids,
+        "validatedCount": blob.get("validatedCount"),
+        "successfulConfigs": list(blob.get("successfulConfigs") or [])[:60],
+        "hours": blob.get("hours"),
+        "minPf": blob.get("minPf"),
+        "n": (winner or {}).get("n"),
+    }
+
+
 def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_dir()
     payload = normalize_job(apply_control_latches(blob))
     payload.setdefault("generatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    ready = bool(payload.get("ready") or str(payload.get("phase") or "") == "ready")
+    if ready and (payload.get("winner") or payload.get("validatedIds")):
+        try:
+            atomic_write(LAST_READY_PATH, _ready_snapshot(payload))
+        except Exception:
+            pass
+    else:
+        last = read_last_ready()
+        if last:
+            if not payload.get("winner"):
+                payload["winner"] = last.get("winner") or {}
+            if not payload.get("validatedIds"):
+                payload["validatedIds"] = list(last.get("validatedIds") or [])
+            if payload.get("validatedCount") in (None, 0) and last.get("validatedCount"):
+                payload["validatedCount"] = last.get("validatedCount")
+            if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
+                payload["successfulConfigs"] = last.get("successfulConfigs")
+            payload["lastReady"] = True
     for dest in job_paths():
         try:
             atomic_write(dest, payload)
