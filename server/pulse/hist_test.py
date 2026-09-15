@@ -187,23 +187,47 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
         if sid:
             by_id[sid] = row
+    for row in blob.get("rows") or []:
+        if not isinstance(row, dict) or row.get("validated") is False:
+            continue
+        sid = str(row.get("id") or row.get("setId") or row.get("set_id") or "").strip()
+        if sid:
+            by_id.setdefault(sid, row)
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    win_id = str(winner.get("id") or winner.get("setId") or winner.get("set_id") or "").strip()
+    if win_id:
+        by_id.setdefault(win_id, {
+            **winner,
+            "validated": True,
+            "pf": winner.get("last15Ratio") or winner.get("pf") or 0,
+            "evalN": winner.get("n") or winner.get("evalN") or 0,
+            "n": winner.get("n") or 0,
+        })
+    for sid in ids:
+        by_id.setdefault(sid, {"setId": sid, "validated": True, "pf": 0, "n": 0, "evalN": 0})
     for st in getattr(book, "by_idx", None) or []:
         row = by_id.get(getattr(st, "id", ""))
         if not row:
             continue
         n = int(row.get("evalN") or row.get("n") or 0)
         try:
-            pf = float(row.get("pf") or 0)
+            pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
             pf = 0.0
-        st.last15_n = n
-        st.last15_ratio = pf if pf > 0 else 1.0
+        st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
+        st.last15_ratio = pf if pf > 0 else max(float(getattr(st, "last15_ratio", 0) or 0), 1.0)
         st.n = max(int(getattr(st, "n", 0) or 0), n)
         st.active = bool(row.get("validated", True))
         st.deact_reason = ""
         ledger = dict(getattr(st, "stage_ledger", None) or {})
         ledger["base"] = True
         st.stage_ledger = ledger
+    cap = getattr(book, "_cap_active", None)
+    if callable(cap):
+        try:
+            cap(True)
+        except Exception:
+            pass
     return ids
 
 

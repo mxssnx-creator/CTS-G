@@ -72,6 +72,24 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
 
+    def test_apply_scores_activates_compact_winner(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [2.7], "stratTrailing": True, "setMinStep": 11, "setStepMax": 11,
+                   "stratIndications": True, "stratGeneral": True})
+        winner_id = next((st.id for st in book.by_idx if "sl2.7" in st.id and "st11" in st.id), None)
+        self.assertTrue(winner_id)
+        ids = ht.apply_scores_to_book(book, {
+            "phase": "ready",
+            "ready": True,
+            "winner": {"id": winner_id, "last15Ratio": 3.98, "n": 1011, "pack": "indications"},
+        })
+        self.assertIn(winner_id, ids)
+        st = book.sets[winner_id]
+        self.assertTrue(st.active)
+        self.assertGreaterEqual(st.n, 1011)
+        self.assertEqual(st.last15_ratio, 3.98)
+
     def test_apply_scores_gates_book(self):
         from set_engine import SetBook
         book = SetBook()

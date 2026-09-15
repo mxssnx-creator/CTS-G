@@ -6,7 +6,7 @@
   "systemSqliteMemory": [1, 0, 1, true],
   "systemSqliteCheckpointS": [10, 1, 60, false],
   "systemRetentionDays": [35, 1, 365, true],
-  "systemEventMaxRows": [4096, 128, 50000, true],
+  "systemEventMaxRows": [1500, 128, 50000, true],
   "systemTradeMaxRows": [10000, 250, 100000, true],
   "systemSampleMaxRows": [17280, 120, 100000, true],
   "systemLogMaxLines": [1000, 32, 1000, true],

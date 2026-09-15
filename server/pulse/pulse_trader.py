@@ -3141,6 +3141,16 @@ class Pulse:
     def record_event(self, event_type: str, event_id: str = "", status: str = "", **fields: Any) -> bool:
         """Commit one bounded activity event without allowing telemetry to stop the engine."""
         try:
+            detail = str(fields.get("detail") or "")
+            if event_type in ("exchange_request", "exchange_response") and detail in (
+                "balance",
+                "fill polling",
+                "fill polling fallback",
+                "positions",
+            ):
+                # Routine polls must not flood SQLite; keep 1/20 for diagnostics.
+                if int(time.time() * 50) % 20:
+                    return True
             ledger = getattr(self, "event_ledger", None)
             if ledger is None:
                 ledger = EventLedger(EVENTS_PATH, CONN_SHORT, max_events=512, flush_interval_s=2)
@@ -13522,6 +13532,68 @@ class Pulse:
         except Exception:
             pass
 
+    def _score_hist_test_validated(self) -> None:
+        """Keep intern calcs and activate only Test Historic validated configs."""
+        try:
+            job = hist_test_mod.read_job()
+        except Exception:
+            job = {}
+        ids = hist_test_mod.validated_set_ids(job)
+        if not ids:
+            return
+        allow = set(ids)
+        with self.state_guard():
+            book = self.sets
+            try:
+                hist_test_mod.apply_scores_to_book(book, job)
+            except Exception:
+                apply = getattr(book, "apply_hist_test_gate", None)
+                if callable(apply):
+                    apply(ids)
+            states = [st for st in (getattr(book, "by_idx", None) or []) if getattr(st, "id", "") in allow]
+            if not states:
+                return
+            pairs = book.score_pairs(states) if hasattr(book, "score_pairs") else [(st, None) for st in states]
+            score_one = getattr(book, "_score_pair", None)
+            if callable(score_one):
+                for pair in pairs:
+                    try:
+                        score_one(pair)
+                    except Exception:
+                        continue
+            for st in states:
+                if int(getattr(st, "n", 0) or 0) or int(getattr(st, "last15_n", 0) or 0):
+                    st.active = True
+                    st.deact_reason = ""
+                    ledger = dict(getattr(st, "stage_ledger", None) or {})
+                    ledger["base"] = True
+                    st.stage_ledger = ledger
+            cap = getattr(book, "_cap_active", None)
+            if callable(cap):
+                try:
+                    cap(True)
+                except Exception:
+                    pass
+            flags = getattr(book, "_apply_processing_flags", None)
+            if callable(flags):
+                try:
+                    flags()
+                except Exception:
+                    pass
+            try:
+                book.progress.sets_total = max(int(book.progress.sets_total or 0), len(allow))
+                book.progress.sets_done = len(states)
+                n_active = sum(1 for st in states if getattr(st, "active", False))
+                book.progress.detail = (
+                    f"Test Historic · {len(allow)} validated · {n_active} active · skip full catalog"
+                )
+            except Exception:
+                pass
+        try:
+            self._hist_write_status(self.sets)
+        except Exception:
+            pass
+
     def _hist_loop_durable(self) -> None:
         """One lane-owned initial/hourly/gap state machine for historic replay."""
         while not self._hist_stop.is_set():
@@ -13576,6 +13648,10 @@ class Pulse:
                     continue
                 if self._hist_test_owns_catalog() and not manual:
                     self._sync_hist_test_lane()
+                    now_score = time.time()
+                    if now_score - float(getattr(self, "_hist_test_score_at", 0) or 0) >= 20.0:
+                        self._hist_test_score_at = now_score
+                        self._score_hist_test_validated()
                     self._hist_wake.wait(timeout=5.0)
                     continue
                 score_refresh = False
