@@ -282,7 +282,7 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
         ind_kind=str(row.get("ind_kind") or ""),
     )
     # Catalog identity already lives on the Set. Keep only scoring metadata.
-    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count"):
+    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count", "set_id", "pack", "strategy"):
         value = row.get(key) if hasattr(row, "get") else None
         if value not in (None, ""):
             compact[key] = value
@@ -2490,10 +2490,11 @@ class SetBook:
                 pass
 
     def score_block_main(self) -> Dict[tuple, Dict[str, Any]]:
-        """Main-stage last-N eval for each Block count × indication × set, independently.
+        """Main + Real/Overall last-N eval for each Block count × indication × set.
 
-        Intern calcs always continue. Too few last positions stay valid for Real/Live.
-        Proven negative counts are intern-only.
+        Each key is independent. Intern calcs always continue. Too few last
+        positions stay valid for Real/Live. Proven negative counts are intern-only.
+        Real stage uses the overall last-N tape (``block_eval_pos``), not Base.
         """
         need = max(5, min(75, int(getattr(self, "block_eval_pos", 50) or 50)))
         buckets: Dict[tuple, List[Any]] = {}
@@ -2512,28 +2513,57 @@ class SetBook:
                 kind = str(row.get("ind_kind") or "")
                 sid = str(row.get("set_id") or "")
                 buckets.setdefault((count, kind, sid), []).append(row)
-        from position_cost import clears_pf, is_positive_pf
-        out: Dict[tuple, Dict[str, Any]] = {}
-        for key, samples in buckets.items():
+        from position_cost import clears_pf, is_positive_pf, overall_last_pos_eval
+        floor = float(self.real_min_pf or POSITIVE_PF)
+
+        def eval_rows(samples: List[Any], *, stage: str, scope: str) -> Dict[str, Any]:
             n_all = len(samples)
             if n_all < need:
-                out[key] = {
+                return {
                     "n": n_all, "pf": 0.0, "liveOk": True, "internOk": True,
                     "internOnly": False, "reason": "insufficient-sample", "evalN": need,
+                    "stage": stage, "scope": scope,
+                    "realOverall": {
+                        "requestedN": need, "n": n_all, "available": False,
+                        "validated": False, "pf": 1.0, "liveOk": True,
+                        "costSubtracted": True,
+                    },
                 }
-                continue
             ordered = sorted(samples, key=lambda r: finite(r.get("t")))
             window = ordered[-need:]
-            n = len(window)
-            metric = self._window_cost_pf(window, need)
-            pf = float(metric.get("ratio") or 0.0)
-            live_ok = bool(is_positive_pf(pf) and clears_pf(pf, float(self.real_min_pf or POSITIVE_PF)))
-            out[key] = {
+            overall = overall_last_pos_eval(window, need, self.cost_pct, ordered=True)
+            pf = float(overall.get("ratio") or 0.0)
+            n = int(overall.get("count") or len(window))
+            live_ok = bool(n >= need and is_positive_pf(pf) and clears_pf(pf, floor))
+            return {
                 "n": n, "pf": round(pf, 4), "liveOk": live_ok, "internOk": True,
                 "internOnly": not live_ok,
-                "reason": "pass" if live_ok else "main-negative",
-                "evalN": need,
+                "reason": "pass" if live_ok else "real-overall-negative",
+                "evalN": need, "stage": stage, "scope": scope,
+                "realOverall": {
+                    "requestedN": need, "n": n, "available": n >= need,
+                    "validated": n >= need and is_positive_pf(pf),
+                    "pf": round(pf, 4), "liveOk": live_ok,
+                    "classicPf": float(overall.get("classicPf") or 0.0),
+                    "avgR": float(overall.get("avgR") or 0.0),
+                    "netAvg": float(overall.get("netAvg") or 0.0),
+                    "costPct": float(overall.get("costPct") or self.cost_pct),
+                    "costSubtracted": True, "scope": "overall-last-pos",
+                },
             }
+
+        out: Dict[tuple, Dict[str, Any]] = {}
+        for key, samples in buckets.items():
+            out[key] = eval_rows(samples, stage="real", scope="set")
+        kind_groups: Dict[tuple, List[Any]] = {}
+        count_groups: Dict[int, List[Any]] = {}
+        for (count, kind, sid), samples in buckets.items():
+            kind_groups.setdefault((count, kind), []).extend(samples)
+            count_groups.setdefault(count, []).extend(samples)
+        for (count, kind), samples in kind_groups.items():
+            out[(count, kind, "")] = eval_rows(samples, stage="real", scope="indication")
+        for count, samples in count_groups.items():
+            out[(count, "", "")] = eval_rows(samples, stage="real", scope="overall")
         self.block_main_eval = out
         return out
 
@@ -2551,17 +2581,21 @@ class SetBook:
         exact = blob.get((count_n, kind, sid))
         if exact is not None:
             return bool(exact.get("liveOk", True))
+        if kind and sid:
+            kind_set = blob.get((count_n, kind, ""))
+            if kind_set is not None:
+                return bool(kind_set.get("liveOk", True))
         if kind:
-            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind]
+            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind and k[2]]
             if kind_rows:
                 return all(bool(v.get("liveOk", True)) for v in kind_rows)
         if sid:
             sid_rows = [v for k, v in blob.items() if k[0] == count_n and k[2] == sid]
             if sid_rows:
                 return all(bool(v.get("liveOk", True)) for v in sid_rows)
-        count_rows = [v for k, v in blob.items() if k[0] == count_n]
-        if not count_rows:
-            return True
+        overall = blob.get((count_n, "", ""))
+        if overall is not None:
+            return bool(overall.get("liveOk", True))
         return True
 
     def _commit_hist(

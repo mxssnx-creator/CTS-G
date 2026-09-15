@@ -307,6 +307,14 @@ class BlockCalculationTests(unittest.TestCase):
         self.assertTrue(book.block_main_live_ok(2, indication="trend"))
         self.assertTrue(book.block_main_live_ok(3, indication="active"))
         self.assertTrue(book.block_main_live_ok(4))
+        # Real/Overall last-N is independent of a sibling indication.
+        overall2 = (book.block_main_eval or {}).get((2, "", ""))
+        self.assertIsNotNone(overall2)
+        self.assertEqual((overall2 or {}).get("scope"), "overall")
+        self.assertIn("realOverall", overall2 or {})
+        signals_blob = (book.block_main_eval or {}).get((2, "signals", "indications:sl0.6:st8"))
+        self.assertFalse((signals_blob or {}).get("liveOk"))
+        self.assertEqual((signals_blob or {}).get("stage"), "real")
 
     def test_active_live_is_a_view_of_the_same_remainder(self):
         b = self.book(blockVolumeRatio=0.25, blockMaxStack=3)
