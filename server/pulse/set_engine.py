@@ -281,7 +281,8 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
         cost=row.get("position_cost_pct", row.get("costPct")),
         ind_kind=str(row.get("ind_kind") or ""),
     )
-    for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key"):
+    # Catalog identity already lives on the Set. Keep only scoring metadata.
+    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count"):
         value = row.get(key) if hasattr(row, "get") else None
         if value not in (None, ""):
             compact[key] = value
