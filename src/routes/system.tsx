@@ -12,7 +12,7 @@ import {
   saveOverlay,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
 import {
   LAYERS,
   MODULES,
@@ -38,10 +38,16 @@ function SystemPage() {
     setDirty(false);
     dirtyRef.current = false;
     setOverlay(overlayFromCts({}, loadLocalOverlay(conn) || {}));
-    const delay = () => document.hidden ? 8000 : 4000;
+    const statsRef = { current: null as LiveStats | null };
+    const delay = () => deskPollMs(statsRef.current, document.hidden);
     const statsPoll = startPolling(async (signal) => {
       const s = await fetchLiveStats(conn, signal);
-      if (!signal.aborted && s) setStats(pickView(s, conn));
+      if (signal.aborted || !s) return;
+      const view = pickView(s, conn);
+      if (view && !statsUnchanged(statsRef.current, view)) {
+        statsRef.current = view;
+        setStats(view);
+      }
     }, delay);
     const configPoll = startPolling(async (signal) => {
       const c = await fetchCtsBundle(conn, signal);
@@ -75,9 +81,11 @@ function SystemPage() {
 
   return (
     <DeskShell
-      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
-      mode={stats?.paused ? "PAUSED" : stats?.mode}
-      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
+      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
+      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
+      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
+      halted={stats ? Boolean(stats.halted) : undefined}
+      alive={stats ? stats.alive !== false : undefined}
     >
       <section className="grid gap-3 sm:grid-cols-3">
         <Stat k="Live packs" v={String(liveN)} s="wired into the core" />

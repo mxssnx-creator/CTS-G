@@ -345,6 +345,8 @@ def audit_sim(book: Any, symbols: List[str], summary: Dict[str, Any], source: st
     rec("strategy-core-packs", "indications" in by_strat and "general" in by_strat, sorted(by_strat))
     rec("strategy-block", "block" in by_strat, sorted(by_strat))
     rec("strategy-block-fills", int((by_strat.get("block") or {}).get("n") or 0) > 0, (by_strat.get("block") or {}).get("n"))
+    rec("volume-ratio-shared", abs(float(getattr(book, "block_vr", 0) or 0) - (1.0 / 3.0)) < 1e-9, getattr(book, "block_vr", None))
+    rec("volume-stack", int(getattr(book, "block_stack", 0) or 0) == 3, getattr(book, "block_stack", None))
 
     identity_ok = 0
     identity_n = 0
@@ -764,8 +766,10 @@ def main() -> int:
         "stratDca": False,
         "histSimulateBlock": True,
         "histSimulateDca": False,
-        "blockVolumeRatio": 0.25,
+        "blockVolumeRatio": 1,
         "blockMaxStack": 3,
+        "blockProfitFactorRatio": 1.25,
+        "blockMaxVolumeMultiplier": 2,
         "trailArmMin": 0.3,
         "trailArmMax": 1.5,
         "trailGiveMin": 0.1,
@@ -896,6 +900,9 @@ def main() -> int:
             "trailGiveMin": 0.1,
             "trailGiveMax": 0.1,
             "blockMaxStack": 3,
+            "blockVolumeRatio": 1,
+            "blockProfitFactorRatio": 1.25,
+            "blockMaxVolumeMultiplier": 2,
             "blockOverall": True,
             "axes": False,
             "costPct": 0.10,

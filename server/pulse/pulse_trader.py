@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 import overall_controls
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
 from block_active import ContinuationBook, adjusted_quantity, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
@@ -65,7 +65,7 @@ from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETA
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
-from hist_calc import run_forced_calc, forced_path
+from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import (
     redis_key,
@@ -2216,8 +2216,9 @@ class Pulse:
                 med = sorted(refs)[len(refs) // 2]
                 if med > 0:
                     vf *= max(0.35, min(1.0, (v / med) ** 0.5))
-            elif v <= 0:
-                vf *= 0.5
+            # Missing 1h vol is unknown, not a half-size haircut. VolumeFactor
+            # and Set ratio must still reach the order; measured low-vol names
+            # shrink through the median ratio above.
         try:
             open_n = len(self.open) if isinstance(getattr(self, "open", None), dict) else 0
             vf *= float(self.coord.size_mult(open_n))
@@ -5478,15 +5479,20 @@ class Pulse:
         if not self.control_orders or not self.recon_ok or getattr(self, "recon_pending", False):
             return reject("confirmed reconciliation and controls required")
         view = self.sets._side_view(chosen, side)
-        n = int(view.get("last15_n") or 0)
-        pf = float(view.get("last15_ratio") or 0)
+        real_ok = False
+        try:
+            real_ok = bool(self.sets._real_metrics_ok(view))
+        except Exception:
+            real_ok = False
+        n = int(view.get("real_n") or 0)
+        pf = float(view.get("real_pf") or 0) if view.get("real_pf") is not None else 0.0
         net = float(view.get("net_avg", getattr(chosen, "expectancy", 0)) or 0)
         ddt = float(view.get("max_dd_s") or 0)
-        if (not chosen.active or n < self.sets.eval_need() or
-                not math.isfinite(pf) or pf < self.sets.real_min_pf or
-                not math.isfinite(net) or net <= 0 or
-                not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
-            return reject("reference sample/PF/net/DD qualification failed")
+        if (not chosen.active or not real_ok or n < max(3, int(getattr(self.sets, "real_eval", 3) or 3))
+                or not math.isfinite(pf) or not clears_pf(pf, float(getattr(self.sets, "real_min_pf", POSITIVE_PF) or POSITIVE_PF))
+                or not math.isfinite(net) or net <= 0
+                or not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
+            return reject("reference Real qualification failed")
         rows = self.config_strategy_closes(chosen.id, side, execution_lane, "block")
         consec = 0
         for row in reversed(rows):
@@ -7689,6 +7695,12 @@ class Pulse:
             self.block.cost_pct = POSITION_COST_PCT_DEFAULT
         self.block.pf_ratio = max(BLOCK_PF_RATIO_MIN, min(BLOCK_PF_RATIO_MAX, b_pfr))
         self.block.pause_ratio = max(0, b_pause)
+        try:
+            from block_engine import clamp_eval_pos_count
+            self.block.eval_pos_count = clamp_eval_pos_count(ov.get("blockEvalPosCount") or 50)
+            self.block.window = max(int(self.block.window or 25), int(self.block.eval_pos_count))
+        except Exception:
+            pass
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
@@ -8136,7 +8148,10 @@ class Pulse:
         view = self.sets._side_view(st, pos.side)
         if not self.sets._real_metrics_ok(view):
             return 0.0
-        return float(view.get("real_pf", view.get("last15_ratio", 0)) or 0)
+        pf = view.get("real_pf")
+        if pf is None:
+            return 0.0
+        return float(pf or 0)
 
     def _block_core_qty(self, symbol: str, side: str) -> float:
         """Own parent size for Overall Block: non-block-active lots on this side."""
@@ -8176,8 +8191,6 @@ class Pulse:
             if isinstance(row, dict):
                 if str(row.get("ours", True)).lower() in ("false", "0"):
                     continue
-                if int(row.get("member_count") or 1) != 1:
-                    continue
                 if str(row.get("symbol") or "").upper() != want:
                     continue
                 if str(row.get("side") or "").upper() != side_u:
@@ -8186,48 +8199,103 @@ class Pulse:
             else:
                 if getattr(row, "ours", True) is False:
                     continue
-                if int(getattr(row, "member_count", 1) or 1) != 1:
-                    continue
                 if str(getattr(row, "symbol", "") or "").upper() != want:
                     continue
                 if str(getattr(row, "side", "") or "").upper() != side_u:
                     continue
                 out.append(row)
+        out.sort(key=lambda row: float(getattr(row, "t", 0) or 0))
         return out
 
-    def block_overall_real_pf(self, symbol: str, side: str) -> float:
-        """Stage Real PF of the physical parent. Independent of the opening Set."""
+    def _block_overall_real_state(self, symbol: str, side: str) -> Dict[str, Any]:
+        """One Overall Block Real tape: closes (gross) or parent ring (net), never mixed.
+
+        ``n`` is the tape that produced ``pf``. Intern 1.00 returns pf=0 so extra
+        size cannot use cost-neutral evidence.
+        """
         rows = self.overall_side_closes(symbol, side)
-        lane = None
-        try:
-            lane = self.block.lanes.get(self.block.key(symbol, side))
-        except Exception:
-            lane = None
-        if lane is not None and getattr(lane, "parent_pf_ring", None):
-            extra = list(lane.parent_pf_ring or [])
-            for sample in extra:
-                rows.append(SimpleNamespace(pnl_pct=sample, pnl=sample, t=0.0, side=side, symbol=symbol))
         need = 3
         try:
             need = max(3, int(getattr(self.coord, "real_eval", 3) or 3))
         except Exception:
             need = 3
-        if len(rows) < need:
-            return 0.0
         floor = POSITIVE_PF
         try:
             floor = float(getattr(self.coord, "min_pf", POSITIVE_PF) or POSITIVE_PF)
             floor = float((getattr(self.coord, "stage_min_pf", None) or {}).get("real", floor) or floor)
         except Exception:
             pass
+        cost = getattr(self, "position_cost_pct", POSITION_COST_PCT_DEFAULT)
+        if len(rows) >= need:
+            try:
+                # Timestamp last-N, never insertion order. ordered=False lets
+                # last_n_cost_pf sort by t so a newest-first tape cannot fake Real.
+                blob = last_n_cost_pf(rows, need, cost, ordered=False)
+            except Exception:
+                return {"pf": 0.0, "n": len(rows), "source": "closes"}
+            ratio = float(blob.get("ratio") or 0)
+            if int(blob.get("count") or 0) < need or not clears_pf(ratio, floor):
+                return {"pf": 0.0, "n": len(rows), "source": "closes"}
+            return {"pf": ratio, "n": len(rows), "source": "closes"}
         try:
-            blob = last_n_cost_pf(rows, need, getattr(self, "position_cost_pct", POSITION_COST_PCT_DEFAULT), ordered=True)
+            lane = self.block.lanes.get(self.block.key(symbol, side))
         except Exception:
-            return 0.0
-        ratio = float(blob.get("ratio") or 0)
-        if int(blob.get("count") or 0) < need or not clears_pf(ratio, floor):
-            return 0.0
-        return ratio
+            lane = None
+        extra = list(getattr(lane, "parent_pf_ring", None) or []) if lane is not None else []
+        if len(extra) < need:
+            return {"pf": 0.0, "n": len(extra) if extra else len(rows), "source": "ring" if extra else "closes"}
+        try:
+            ratio = float(cost_pf_from_net_fracs(extra[-need:], cost) or 0)
+        except Exception:
+            return {"pf": 0.0, "n": len(extra), "source": "ring"}
+        if not clears_pf(ratio, floor):
+            return {"pf": 0.0, "n": len(extra), "source": "ring"}
+        return {"pf": ratio, "n": len(extra), "source": "ring"}
+
+    def block_overall_real_n(self, symbol: str, side: str) -> int:
+        """Sample count backing Overall Block Real PF (closes, else net ring)."""
+        return int(self._block_overall_real_state(symbol, side).get("n") or 0)
+
+    def block_overall_real_pf(self, symbol: str, side: str) -> float:
+        """Stage Real PF of the physical parent. Independent of the opening Set.
+
+        Confirmed closes carry gross ``pnl_pct``; ``parent_pf_ring`` is already
+        cost-net. Never mix the two — ``last_n_cost_pf`` would subtract cost
+        twice and understate Real PF (blocking extra size incorrectly).
+        """
+        return float(self._block_overall_real_state(symbol, side).get("pf") or 0)
+
+    def _block_snapshot_intern_pf(self, lane) -> float:
+        """Live intern for Block snapshot counts: Overall Real, else Set Real."""
+        if bool(getattr(self, "block_overall", True)):
+            return self.block_overall_real_pf(getattr(lane, "symbol", ""), getattr(lane, "side", ""))
+        for pos in self.positions_for(getattr(lane, "symbol", ""), getattr(lane, "side", "")):
+            if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
+            return self.block_intern_pf(pos)
+        return 0.0
+
+    def _block_stats_blob(self) -> Dict[str, Any]:
+        """Block snapshot with live Overall/Set Real intern on each lane."""
+        blob = self.block.snapshot(intern_pf_lookup=self._block_snapshot_intern_pf)
+        overall_real = [
+            {
+                "symbol": ln.symbol,
+                "side": ln.side,
+                "pf": round(float(self.block_overall_real_pf(ln.symbol, ln.side) or 0), 4),
+                "n": int(self.block_overall_real_n(ln.symbol, ln.side) or 0),
+            }
+            for ln in list(self.block.lanes.values()) if ln.active
+        ][:12]
+        by = {(row.get("symbol"), row.get("side")): row for row in overall_real}
+        for lane in blob.get("lanes") or []:
+            rec = by.get((lane.get("symbol"), lane.get("side")))
+            if rec:
+                lane["realPf"] = rec["pf"]
+                lane["realN"] = rec["n"]
+        blob["overall"] = bool(getattr(self, "block_overall", True))
+        blob["overallReal"] = overall_real
+        return blob
 
     def config_strategy_closes(self, set_id, side, execution_lane="", strategy=""):
         """Confirmed round trips of one Set, side and execution variant."""
@@ -8289,13 +8357,14 @@ class Pulse:
             if str(strategy or "") == "block":
                 if not self.sets._real_metrics_ok(view):
                     return False, stack, 0.0, ["config Real qualification"]
-                intern = {"pf": view.get("real_pf", view.get("last15_ratio", 0)), "n": view.get("real_n", view.get("last15_n", 0))}
+                intern = {"pf": view.get("real_pf") or 0, "n": view.get("real_n") or 0}
             else:
                 if not self.sets._base_metrics_ok(view):
                     return False, stack, 0.0, ["config Base qualification"]
                 intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
         elif overall and symbol and str(strategy or "") == "block":
-            intern = {"pf": self.block_overall_real_pf(symbol, side), "n": len(rows)}
+            state = self._block_overall_real_state(symbol, side)
+            intern = {"pf": state.get("pf") or 0, "n": state.get("n") or 0}
         tape = None
         if count is not None:
             try:
@@ -8370,8 +8439,8 @@ class Pulse:
             if not lane or lane.base_qty <= 0:
                 continue
             # Parent still valid only if pulse score agrees with side (continuation).
-            # intern PF comes from block_intern_pf: under the strict gate only
-            # a validated + profitable set lifts the CTS real-stage floor.
+            # Overall extras use physical-parent Real (symbol+direction). Set extras
+            # use that Set's Real. Intern 1.00 / failed Real returns 0 — no extra size.
             intern_pf = (
                 self.block_overall_real_pf(pos.symbol, pos.side)
                 if overall else self.block_intern_pf(pos)
@@ -8443,6 +8512,16 @@ class Pulse:
             if not row:
                 continue
             count_n = int(row.get("blockCount") or 0)
+            try:
+                ind_kind = str(getattr(pos, "ind_kind", "") or "")
+                if not self.sets.block_main_live_ok(
+                    count_n,
+                    indication=ind_kind,
+                    set_id="" if overall else str(getattr(pos, "set_id", "") or ""),
+                ):
+                    continue
+            except Exception:
+                pass
             ok_n, _, _, why_n = self._coord_add_state(
                 count=count_n,
                 set_id="" if overall else pos.set_id,
@@ -8471,16 +8550,28 @@ class Pulse:
             raw = min(raw, leftover) if leftover > 0 else 0.0
             if raw <= 0:
                 continue
-            # Dust remainder: mark the count filled instead of bumping to a full extra parent.
-            if raw < float(c.min_qty or 0) or raw * px < float(c.min_usdt or 0) * 0.98:
-                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
-                log(f"BLOCK sat dust {pos.symbol} n={row['blockCount']} rem={raw} min={c.min_qty}/{c.min_usdt}")
-                continue
+            confirmed = float(lane.confirmed_add or 0)
+            extra_room = max(0.0, parent * float(self.block.extra_cap()) - confirmed)
+            min_q = self.min_order_qty(c, px)
+            step = float(row.get("stepQty") or raw)
+            placed_limit = leftover
+            # True dust is a leftover remainder of an already-filled target.
+            # A whole unfilled step below the venue min is a volume adjustment
+            # that must be raised to min lot when it still fits the 2× cap.
+            if raw + 1e-12 < min_q:
+                tiny_remainder = confirmed > 0 and raw < 0.25 * max(step, min_q)
+                bumped = self.raise_to_min_qty(c, px, raw)
+                if tiny_remainder or bumped > extra_room + 1e-12:
+                    self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                    log(f"BLOCK sat dust {pos.symbol} n={row['blockCount']} rem={raw} min={c.min_qty}/{c.min_usdt}")
+                    continue
+                raw = bumped
+                placed_limit = extra_room
             room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, inc), room, leftover * px)
-            qty = self.cap_order_qty(c, px, raw, add_cap)
-            qty = min(qty, self.round_qty(c, leftover))
-            if qty > leftover + 1e-12 or qty < float(c.min_qty or 0) or qty <= 0:
+            qty_cap_usdt = min(self.notional_cap() * max(1.0, inc), room, placed_limit * px)
+            qty = self.cap_order_qty(c, px, raw, qty_cap_usdt)
+            qty = min(qty, self.round_qty(c, placed_limit))
+            if qty > placed_limit + 1e-12 or qty < min_q or qty <= 0:
                 self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                 continue
             if qty * px < float(c.min_usdt or 0) * 0.98:
@@ -11113,7 +11204,7 @@ class Pulse:
                     all_closed_rows,
                     self.position_cost_pct,
                     coverage=cov,
-                    block=self.block.snapshot(),
+                    block=self._block_stats_blob(),
                     dca=self.dca.snapshot(),
                     exits=self.exits.snapshot(),
                     sets_rows=sets_snap.get("rows") or [],
@@ -11241,7 +11332,7 @@ class Pulse:
             "events": activity.get("tail") or [],
             "maxHoldS": MAX_HOLD_S,
             "tests": self.tests[:24],
-            "block": self.block.snapshot(),
+            "block": self._block_stats_blob(),
             "pulse": pulse_view,
             "coord": coord_snap,
             "historic": historic_snap,
@@ -11600,6 +11691,16 @@ class Pulse:
                 "allCounts": catalog,
                 "liveLanes": sum(1 for ln in self.block.lanes.values() if ln.active),
                 "activeReal": bool(getattr(self.block, "active_real", True)),
+                "overall": bool(getattr(self, "block_overall", True)),
+                "overallReal": [
+                    {
+                        "symbol": ln.symbol,
+                        "side": ln.side,
+                        "pf": round(float(self.block_overall_real_pf(ln.symbol, ln.side) or 0), 4),
+                        "n": int(self.block_overall_real_n(ln.symbol, ln.side) or 0),
+                    }
+                    for ln in list(self.block.lanes.values()) if ln.active
+                ][:12],
             },
             "history": {
                 "busy": bool(getattr(self, "hist_busy", False)),
@@ -12180,6 +12281,8 @@ class Pulse:
                 "pct": round(float(progress.pct or 0.0), 1),
                 "detail": progress.detail,
                 "ready": bool(progress.ready),
+                "running": job_is_running(phase=progress.phase),
+                "continuous": bool(payload.get("continuous", True)),
                 "lookback": int(current.lookback),
                 "hours": round(float(current.lookback) / 60.0, 2),
                 "runId": progress.run_id or payload.get("runId") or "",
@@ -13421,18 +13524,11 @@ class Pulse:
                 }
                 lookback = int(book.lookback)
                 if manual:
-                    request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
-                    request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
-                    try:
-                        requested_hours = float(request.get("hours")) if request.get("hours") is not None else 0.0
-                        if requested_hours <= 0 and request_overlay.get("histLookbackBars") is not None:
-                            requested_hours = float(request_overlay.get("histLookbackBars")) / 60.0
-                        if requested_hours > 0:
-                            lookback = max(120, min(20160, int(round(requested_hours * 60))))
-                    except (TypeError, ValueError):
-                        pass
+                    lookback = request_lookback(request, fallback=lookback)
                     if lookback != book.lookback:
                         book.lookback = lookback
+                    request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
+                    request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
                     try:
                         refresh_raw = request.get("refreshS") or request_overlay.get("histRefreshS")
                         if refresh_raw is not None:

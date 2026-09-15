@@ -281,10 +281,10 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
         cost=row.get("position_cost_pct", row.get("costPct")),
         ind_kind=str(row.get("ind_kind") or ""),
     )
-    if str(row.get("strategy") or "") in ("block", "dca") or row.get("ind_kind"):
-        for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key", "ind_config"):
-            if key in row:
-                compact[key] = row[key]
+    for key in ("strategy", "set_id", "pack", "tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key"):
+        value = row.get(key) if hasattr(row, "get") else None
+        if value not in (None, ""):
+            compact[key] = value
     return compact
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
@@ -1166,6 +1166,8 @@ class SetBook:
         self.block_stack = 6
         self.block_max_multiplier = 2.0
         self.block_counts = list(range(1, 7))
+        self.block_eval_pos = 50
+        self.block_main_eval: Dict[tuple, Dict[str, Any]] = {}
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
         # Bounded exploration is explicit and lane-scoped. It admits only
@@ -1471,6 +1473,11 @@ class SetBook:
         self.block_stack = clamp_stack(ov.get("blockMaxStack"))
         self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
         self.block_counts = normalize_block_counts(ov.get("blockCounts"))
+        try:
+            from block_engine import clamp_eval_pos_count
+            self.block_eval_pos = clamp_eval_pos_count(ov.get("blockEvalPosCount") or 50)
+        except Exception:
+            self.block_eval_pos = 50
         live_block = [n for n in self.block_counts if n <= self.block_stack]
         self.block_vr = shared_block_volume_ratio(
             self.block_vr, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
@@ -2451,8 +2458,85 @@ class SetBook:
             self._running = False
             self._snap_ts = 0.0
             self._live_ov_ts = 0.0
-            self._snap_ts = 0.0
-            self._live_ov_ts = 0.0
+            try:
+                self.score_block_main()
+            except Exception:
+                pass
+
+    def score_block_main(self) -> Dict[tuple, Dict[str, Any]]:
+        """Main-stage last-N eval for each Block count × indication × set, independently.
+
+        Intern calcs always continue. Too few last positions stay valid for Real/Live.
+        Proven negative counts are intern-only.
+        """
+        need = max(5, min(75, int(getattr(self, "block_eval_pos", 50) or 50)))
+        buckets: Dict[tuple, List[Any]] = {}
+        for name, tape in list((self.strategy_hist or {}).items()):
+            is_block = name == "block" or str(name).startswith("block")
+            for row in tape or []:
+                strat = str(row.get("strategy") or name or "")
+                if not is_block and strat != "block":
+                    continue
+                try:
+                    count = int(row.get("block_count") or 0)
+                except (TypeError, ValueError):
+                    count = 0
+                if count < 1:
+                    continue
+                kind = str(row.get("ind_kind") or "")
+                sid = str(row.get("set_id") or "")
+                buckets.setdefault((count, kind, sid), []).append(row)
+        from position_cost import clears_pf, is_positive_pf
+        out: Dict[tuple, Dict[str, Any]] = {}
+        for key, samples in buckets.items():
+            n_all = len(samples)
+            if n_all < need:
+                out[key] = {
+                    "n": n_all, "pf": 0.0, "liveOk": True, "internOk": True,
+                    "internOnly": False, "reason": "insufficient-sample", "evalN": need,
+                }
+                continue
+            ordered = sorted(samples, key=lambda r: finite(r.get("t")))
+            window = ordered[-need:]
+            n = len(window)
+            metric = self._window_cost_pf(window, need)
+            pf = float(metric.get("ratio") or 0.0)
+            live_ok = bool(is_positive_pf(pf) and clears_pf(pf, float(self.real_min_pf or POSITIVE_PF)))
+            out[key] = {
+                "n": n, "pf": round(pf, 4), "liveOk": live_ok, "internOk": True,
+                "internOnly": not live_ok,
+                "reason": "pass" if live_ok else "main-negative",
+                "evalN": need,
+            }
+        self.block_main_eval = out
+        return out
+
+    def block_main_live_ok(self, count: int, indication: str = "", set_id: str = "") -> bool:
+        """Real/Live emit gate for one Block count. Missing evidence is valid."""
+        blob = getattr(self, "block_main_eval", None) or {}
+        if not blob:
+            return True
+        try:
+            count_n = int(count)
+        except (TypeError, ValueError):
+            return True
+        kind = str(indication or "")
+        sid = str(set_id or "")
+        exact = blob.get((count_n, kind, sid))
+        if exact is not None:
+            return bool(exact.get("liveOk", True))
+        if kind:
+            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind]
+            if kind_rows:
+                return all(bool(v.get("liveOk", True)) for v in kind_rows)
+        if sid:
+            sid_rows = [v for k, v in blob.items() if k[0] == count_n and k[2] == sid]
+            if sid_rows:
+                return all(bool(v.get("liveOk", True)) for v in sid_rows)
+        count_rows = [v for k, v in blob.items() if k[0] == count_n]
+        if not count_rows:
+            return True
+        return True
 
     def _commit_hist(
         self,
@@ -2764,6 +2848,8 @@ class SetBook:
             rec.update(set_id=_intern(st_id), pack=_intern(pack), tp_pct=tp_frac,
                        sl_ratio=sl_frac / tp_frac if tp_frac else 0,
                        step=self._record_step({"set_id": st_id}))
+        if strategy == "block":
+            rec["block_count"] = max(1, int(pos.get("adds") or 1))
         return None, rec
 
     def prepare_replay_signals(
@@ -3184,20 +3270,26 @@ class SetBook:
             self._replay_kind_tapes(
                 symbol, bars, kind_sigs, ind_hist, now, warmup, time_bars, scratch_bars, honor_tp,
             )
-        # Signals are an independent execution lane. Keep a dedicated Block
-        # tape instead of only attributing Block results to the aggregate
-        # indications pack.
+        # Each indication kind is an independent execution lane. Keep a
+        # dedicated Block tape per kind instead of only attributing Block
+        # results to the aggregate indications pack or the signals lane.
         if (
             strat_hist is not None
             and "indications" in self.packs
             and bool(getattr(self, "hist_block", True))
         ):
-            signal_sigs = kind_sigs.get("signals") or []
-            if any(d != 0 for d, _ in signal_sigs):
+            seen_kinds = set()
+            for config_key, sigs in (kind_sigs or {}).items():
+                kind = str(config_key).partition("|")[0]
+                if kind in seen_kinds or not sigs:
+                    continue
+                seen_kinds.add(kind)
+                if not any(d != 0 for d, _ in sigs):
+                    continue
                 self._replay_kind_strategy_tape(
-                    symbol, bars, signal_sigs, strat_hist.setdefault("block:signals", []),
+                    symbol, bars, sigs, strat_hist.setdefault(f"block:{kind}", []),
                     now, warmup, time_bars, scratch_bars, honor_tp,
-                    kind="signals",
+                    kind=kind,
                 )
 
     def _replay_kind_strategy_tape(
@@ -3237,6 +3329,8 @@ class SetBook:
                     )
                     if rec:
                         rec["ind_kind"] = kind
+                        rec["strategy"] = "block"
+                        rec["pack"] = "block"
                         rec["reason"] = f"block:{kind}:{rec.get('reason') or 'exit'}"
                         output.append(rec)
                         cool = self.cooldown_bars
@@ -3708,11 +3802,13 @@ class SetBook:
         need = self.eval_need()
         _base_req, main_req, real_req = self._stage_window_ns()
         base_n = int(m.get("base_n") if m.get("base_n") is not None else m.get("last15_n") or 0)
-        main_n = int(m.get("main_n") if m.get("main_n") is not None else base_n)
-        real_n = int(m.get("real_n") if m.get("real_n") is not None else base_n)
+        has_main = "main_n" in m or "main_pf" in m
+        has_real = "real_n" in m or "real_pf" in m
+        main_n = int(m.get("main_n") or 0) if has_main else 0
+        real_n = int(m.get("real_n") or 0) if has_real else 0
         base_pf = finite(m.get("base_pf"), finite(m.get("last15_ratio")))
-        main_pf = finite(m.get("main_pf"), base_pf)
-        real_pf = finite(m.get("real_pf"), base_pf)
+        main_pf = finite(m.get("main_pf")) if has_main else 0.0
+        real_pf = finite(m.get("real_pf")) if has_real else 0.0
         dd_ok = bool(m.get("ddOk", True))
         dd_s = finite(m.get("max_dd_s"), finite(st.max_dd_s))
         base_floor = float(self.stage_min_pf.get("base", POSITIVE_PF))
@@ -3949,13 +4045,32 @@ class SetBook:
         return out
 
     def _side_active_flags(self, m: Optional[Dict[str, Any]], live: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
-        """Per-side live flag. Unproven / hist-losing sides stay off the live path."""
+        """Per-side live flag.
+
+        Strict: only Real-qualified sides drive live orders. Non-strict intern
+        admits Base-qualified positive-PF sides; empty tapes stay cold, proven
+        losers stay off. Live last-N losses deactivate either mode.
+        """
         if self.live_negative_deact and len(live) >= self.deact_n:
             tail = sorted(live, key=lambda r: finite(r.get("t")))[-self.deact_n:]
             if sum(row_net_pnl(row, self.cost_pct) for row in tail) < 0:
                 return False, f"live last{self.deact_n} avg loss"
-        if not m or not self._real_metrics_ok(m):
-            return False, "unproven" if not m or int(m.get("last15_n") or 0) < self.eval_need() else "stage qualification"
+        n = int((m or {}).get("last15_n") or 0)
+        pf = float((m or {}).get("last15_ratio") or 0.0)
+        need = self.eval_need()
+        if n >= need and pf + 1e-9 < 1.0:
+            return False, "proven-neg"
+        if self.strict_gate:
+            if not m or not self._real_metrics_ok(m):
+                return False, "unproven" if not m or n < need else "stage qualification"
+            return True, ""
+        if n < need:
+            return False, "unproven"
+        dd = float((m or {}).get("max_dd_s") or 0.0)
+        if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
+            return False, "dd_cap"
+        if not is_positive_pf(pf, 1.0):
+            return False, "stage qualification"
         return True, ""
 
     @_invalidate_entry_cache_around_score
@@ -4646,8 +4761,21 @@ class SetBook:
             if use_side:
                 blob = (state.by_side or {}).get(want_side)
                 if isinstance(blob, dict) and "active" in blob:
-                    return bool(blob.get("active"))
-            return bool(state.active)
+                    if blob.get("active"):
+                        return True
+                    # Cached "unproven" / "stage qualification" is not a
+                    # deactivation. Those flags used to starve the intern
+                    # dispatcher (matrix=0 while hundreds of signals fired).
+                    reason = str(blob.get("deact_reason") or "")
+                    if reason in ("unproven", "stage qualification", ""):
+                        return not self.strict_gate
+                    return False
+            if self.strict_gate:
+                return bool(state.active)
+            reason = str(state.deact_reason or "")
+            if state.locked or reason == "locked":
+                return False
+            return True
 
         # A permissive replay may publish qualified Sets before the aggregate
         # catalog is complete.  That does not make the aggregate ``ready``
@@ -4673,6 +4801,7 @@ class SetBook:
 
         need = self.eval_need()
         floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
+        intern_floor = 1.0 if not self.strict_gate else floor
         result: List[SetState] = []
         rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
         for state in rows:
@@ -4686,7 +4815,7 @@ class SetBook:
             if n < need:
                 rejected["low_n"] += 1
                 continue
-            if not math.isfinite(pf) or pf + 1e-9 < floor:
+            if not math.isfinite(pf) or pf + 1e-9 < intern_floor:
                 rejected["low_pf"] += 1
                 continue
             if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
@@ -4695,7 +4824,7 @@ class SetBook:
             if not self._live_entry_allowed(state, want_side if use_side else None):
                 rejected["live"] += 1
                 continue
-            if not self._real_metrics_ok(view):
+            if self.strict_gate and not self._real_metrics_ok(view):
                 rejected["stage"] += 1
                 continue
             result.append(state)
@@ -4842,20 +4971,36 @@ class SetBook:
                     and 0 <= finite(view.get("max_dd_s", 0), -1) <= self.max_dd_s)
 
     def _real_metrics_ok(self, view: Dict[str, Any]) -> bool:
-        """Same sequential window gates for stage display and order admission."""
+        """Same sequential window gates for stage display and order admission.
+
+        Real cannot inherit Base/last-15. A view without its own Real window
+        is not extra-size evidence.
+        """
         from position_cost import clears_pf
-        _, main_n, real_n = self._stage_window_ns()
+        if not isinstance(view, dict) or not view:
+            return False
+        if "real_n" not in view and "real_pf" not in view:
+            return False
+        _, main_need, real_need = self._stage_window_ns()
         n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
         pf = float(view.get("base_pf", view.get("last15_ratio", 0)) or 0)
         base_floor = self.stage_min_pf.get("base", self.min_pf)
         main_floor = self.stage_min_pf.get("main", self.min_pf)
         real_floor = self.stage_min_pf.get("real", self.real_min_pf)
+        has_main = "main_n" in view or "main_pf" in view
+        main_n = int(view.get("main_n") or 0) if has_main else 0
+        main_pf = view.get("main_pf") if has_main else 0.0
+        real_n = int(view.get("real_n", 0) or 0)
+        real_pf = view.get("real_pf")
+        if real_pf is None:
+            return False
         return bool(
             n >= self.eval_need() and clears_pf(pf, base_floor)
-            and int(view.get("main_n", n) or 0) >= main_n
-            and clears_pf(view.get("main_pf", pf), main_floor)
-            and int(view.get("real_n", n) or 0) >= real_n
-            and clears_pf(view.get("real_pf", pf), real_floor)
+            and main_n >= main_need
+            and clears_pf(main_pf, main_floor)
+            and real_n >= real_need
+            and clears_pf(real_pf, real_floor)
+            and view.get("ddOk", True)
             and 0 <= float(view.get("max_dd_s", 0) or 0) <= self.max_dd_s
         )
 
@@ -4879,14 +5024,25 @@ class SetBook:
         active = (st.by_side.get(side) or {}).get("active", st.active)
         pf = float(view.get("last15_ratio") or 0)
         dd = float(view.get("max_dd_s") or 0)
-        if not active or not math.isfinite(pf) or not math.isfinite(dd) or dd < 0 or dd > self.max_dd_s:
+        n = int(view.get("last15_n") or 0)
+        if not math.isfinite(pf) or not math.isfinite(dd) or dd < 0 or dd > self.max_dd_s:
             return False
-        if not self._real_metrics_ok(view):
+        if n >= self.eval_need() and pf + 1e-9 < 1.0:
             return False
-        if int(view.get("last15_n") or 0) >= self.eval_need() and pf < 1.0:
+        if not self._live_entry_allowed(st, side):
             return False
-        return self._live_entry_allowed(st, side)
-
+        if self.strict_gate:
+            if not active:
+                return False
+            if not self._real_metrics_ok(view):
+                return False
+            return True
+        # Non-strict intern: Base-qualified positive-PF Sets enter even when
+        # the cached side flag still says unproven/stage. Empty tape is not
+        # evidence. Intern PF 1.00 is first-entry only, never extra size.
+        if n < self.eval_need():
+            return False
+        return clears_pf(pf, 1.0)
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
@@ -5094,6 +5250,11 @@ class SetBook:
         return out
 
     def snapshot(self, full: bool = False) -> Dict[str, Any]:
+        if not getattr(self, "block_main_eval", None):
+            try:
+                self.score_block_main()
+            except Exception:
+                pass
         now = time.monotonic()
         cached = self._snap_cache
         if cached is not None and now - self._snap_ts < (0.8 if full else 1.4):
@@ -5301,6 +5462,18 @@ class SetBook:
             "stageFlow": cover["stageFlow"],
             "liveOverview": live_ov,
             "strategyHistory": strategy_history,
+            "blockMainEval": {
+                "evalPosCount": int(getattr(self, "block_eval_pos", 50) or 50),
+                "counts": [
+                    {
+                        "count": k[0],
+                        "indication": k[1],
+                        "setId": k[2],
+                        **v,
+                    }
+                    for k, v in list((getattr(self, "block_main_eval", None) or {}).items())[:48]
+                ],
+            },
             "liveFills": int(live_ov.get("fills") or 0),
             "liveProcessed": int(live_ov.get("processed") or 0),
             "liveActive": int(live_ov.get("active") or 0),

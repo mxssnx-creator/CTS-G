@@ -9,6 +9,8 @@ import {
   syncOverlayFlags,
   blockTable,
   sharedBlockVolumeRatio,
+  clampHistTestRefreshHours,
+  HIST_TEST_REFRESH_DEFAULT,
 } from "./config-model.ts";
 
 test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
@@ -180,4 +182,36 @@ test("Block table shares overlay ratio 1.0 across the live stack, not the 6-coun
   assert.equal(quarter[3].tot, 2);
   assert.equal(quarter[5].tot, 2);
   assert.equal(quarter[4].step, 0);
+});
+
+test("forced symbol winners survive overlay roundtrip", () => {
+  const saved = syncOverlayFlags(overlayFromCts({}, {
+    forcedSymbols: ["XRP-USDT", "BCH-USDT", "SOL-USDT"],
+    forcedVariant: "overlay-default",
+    forcedEligible: 404,
+    forcedBest: {
+      "XRP-USDT": { indication: "signals", direction: "LONG", tpPct: 0.6, slPct: 0.2 },
+      "BCH-USDT": { indication: "break", direction: "SHORT", tpPct: 0.75, slPct: 0.25 },
+      "SOL-USDT": { indication: "trend", direction: "LONG", tpPct: 0.55, slPct: 0.1 },
+    },
+    tpPct: 0.6,
+    slPct: 0.2,
+  }));
+  assert.deepEqual(saved.forcedSymbols, ["XRP-USDT", "BCH-USDT", "SOL-USDT"]);
+  assert.equal(saved.forcedVariant, "overlay-default");
+  assert.equal(saved.forcedEligible, 404);
+  assert.equal(saved.forcedBest?.["XRP-USDT"]?.tpPct, 0.6);
+  assert.equal(saved.forcedBest?.["BCH-USDT"]?.slPct, 0.25);
+  assert.equal(saved.forcedBest?.["SOL-USDT"]?.indication, "trend");
+  assert.equal(saved.tpPct, 0.6);
+  assert.equal(saved.slPct, 0.2);
+});
+
+test("historic test refresh interval is 1–8 hours default 2", () => {
+  assert.equal(DEFAULT_OVERLAY.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
+  assert.equal(overlayFromCts({}).histTestRefreshHours, 2);
+  assert.equal(overlayFromCts({}, { histTestRefreshHours: 5 }).histTestRefreshHours, 5);
+  assert.equal(syncOverlayFlags(overlayFromCts({}, { histTestRefreshHours: 0 })).histTestRefreshHours, 1);
+  assert.equal(syncOverlayFlags(overlayFromCts({}, { histTestRefreshHours: 99 })).histTestRefreshHours, 8);
+  assert.equal(clampHistTestRefreshHours(undefined), 2);
 });

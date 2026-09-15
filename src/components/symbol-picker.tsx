@@ -249,7 +249,7 @@ export function SymbolPicker({
                   <td className="px-3 py-2 font-mono text-xs tabular-nums text-primary">{fmtPct(r.vol1h)}</td>
                   <td
                     className={`px-3 py-2 font-mono text-xs tabular-nums ${
-                      r.changePct >= 0 ? "text-primary" : "text-danger"
+                      r.changePct >= 0 ? "text-primary" : "text-muted"
                     }`}
                   >
                     {r.changePct >= 0 ? "+" : ""}

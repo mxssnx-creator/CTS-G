@@ -351,6 +351,48 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual([state.id], [row.id for row in book.entry_sets('general', 'LONG')])
         self.assertEqual([], book.entry_sets('general', 'SHORT'))
 
+    def test_nonstrict_intern_admits_stage_inactive_base_qualified_sets(self):
+        """Cached unproven/stage flags must not empty the live matrix.
+
+        Runtime was rejecting every row as side_inactive while 200+ signals
+        fired, so intern-open packs placed nothing. Intern 1.00 first-entry
+        still requires the Base last-N tape; empty evidence stays out.
+        """
+        book = self.book(3)
+        book.strict_gate = False
+        book.min_pf = 1.25
+        book.real_min_pf = 1.25
+        book.stage_min_pf = {"base": 1.25, "main": 1.25, "real": 1.25}
+        winner, intern, empty = book.by_idx
+        winner.last15_n = 20
+        winner.last15_ratio = 1.30
+        winner.by_side = {
+            "LONG": {"active": False, "deact_reason": "stage qualification",
+                     "last15_n": 20, "last15_ratio": 1.30, "max_dd_s": 0},
+        }
+        intern.last15_n = 20
+        intern.last15_ratio = 1.02
+        intern.by_side = {
+            "LONG": {"active": False, "deact_reason": "unproven",
+                     "last15_n": 20, "last15_ratio": 1.02, "max_dd_s": 0},
+        }
+        empty.last15_n = 0
+        empty.last15_ratio = 0.0
+        empty.active = False
+        empty.by_side = {
+            "LONG": {"active": False, "deact_reason": "unproven",
+                     "last15_n": 0, "last15_ratio": 0.0, "max_dd_s": 0},
+        }
+        book._invalidate_entry_cache()
+        admitted = {row.id for row in book.entry_sets("general", "LONG")}
+        self.assertEqual(admitted, {winner.id, intern.id})
+        self.assertTrue(book.execution_allowed(winner, "general", "LONG"))
+        self.assertTrue(book.execution_allowed(intern, "general", "LONG"))
+        self.assertFalse(book.execution_allowed(empty, "general", "LONG"))
+        book.strict_gate = True
+        book._invalidate_entry_cache()
+        self.assertEqual([], book.entry_sets("general", "LONG"))
+
     def test_permissive_policy_allows_cold_historic_set_then_honors_live_negative_gate(self):
         book = self.book(1)
         book.entry_policy = "permissive-bounded"

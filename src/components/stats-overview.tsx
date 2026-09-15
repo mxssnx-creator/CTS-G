@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
+import { pfClass, pnlClass } from "@/lib/status-tone";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -20,12 +21,14 @@ export function StatsOverview({
   const engineMaxMs = Number(live?.pfCost?.maxDdS ?? 0) * 1000;
   const engineCurrentMs = Number(live?.pfCost?.currentS ?? 0) * 1000;
   const engineEpisodes = Number(live?.pfCost?.ddEpisodes ?? 0);
+  const liveRatio = Number(live?.pfCost?.ratio ?? live?.profitFactor ?? 0);
+  const liveCount = Number(live?.pfCost?.count ?? live?.pfCost?.n ?? 0);
   const cost: CostPfMetric = {
     ...data.costPf,
-    ...(live?.pfCost
+    ...(live?.pfCost && typeof live.pfCost === "object"
       ? {
           n: live.pfCost.n ?? data.costPf.n,
-          count: live.pfCost.count ?? data.costPf.count,
+          count: live.pfCost.count ?? live.pfCost.n ?? data.costPf.count,
           avgR: live.pfCost.avgR ?? data.costPf.avgR,
           ratio: live.pfCost.ratio ?? data.costPf.ratio,
           classicPf: live.pfCost.classicPf ?? data.costPf.classicPf,
@@ -35,27 +38,31 @@ export function StatsOverview({
           minPf: live.pfCost.minPf ?? data.costPf.minPf,
           pass: live.pfCost.pass ?? data.costPf.pass,
         }
-      : {}),
+      : liveRatio
+        ? { ...data.costPf, ratio: liveRatio, classicPf: liveRatio, count: liveCount || data.costPf.count }
+        : {}),
   };
+  const shownCount = cost.count || liveCount;
+  const shownRatio = shownCount ? cost.ratio : liveRatio;
   const heroes = (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
           k="Last 15 cost PF"
-          v={cost.count ? cost.ratio.toFixed(2) : "—"}
-          s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
-          tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
+          v={shownCount || shownRatio ? shownRatio.toFixed(2) : "—"}
+          s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${shownCount} · ${cost.pass ? "pass" : "block"}`}
+          tone={shownCount < 8 ? "ok" : cost.pass ? "good" : "ok"}
         />
         <Hero
           k="Drawdown time avg"
           v={formatDuration(dd.averageDurationMs || all.averageDurationMs || engineAvgMs)}
           s={`${dd.episodes || all.episodes || engineEpisodes} episodes · 3d`}
-          tone={dd.inDrawdown ? "bad" : "ok"}
+          tone={dd.inDrawdown ? "ok" : "ok"}
         />
         <Hero
           k="Current DD time"
           v={formatDuration(dd.currentDurationMs || engineCurrentMs)}
           s={dd.inDrawdown ? `depth ${dd.currentDepth.toFixed(4)}` : "at peak"}
-          tone={dd.inDrawdown ? "bad" : "good"}
+          tone={dd.inDrawdown ? "ok" : "good"}
         />
         <Hero
           k="Max DD episode"
@@ -115,17 +122,16 @@ export function StatsOverview({
 }
 
 function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
-  const tone = m.count < 1 ? "ok" : m.ratio >= 1.1 ? "good" : m.ratio < 1 ? "bad" : "ok";
   return (
     <tr className="border-t border-border">
       <td className="py-2">{label}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.count}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.avgR.toFixed(2)}</td>
-      <td className={`py-2 text-right font-mono tabular-nums ${tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : ""}`}>
+      <td className={`py-2 text-right font-mono tabular-nums ${pfClass(m.ratio, m.count)}`}>
         {m.count ? m.ratio.toFixed(2) : "—"}
       </td>
       <td className="py-2 text-right font-mono tabular-nums">{m.count ? (m.classicPf >= 99 ? "∞" : m.classicPf.toFixed(2)) : "—"}</td>
-      <td className={`py-2 text-right font-mono tabular-nums ${m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
+      <td className={`py-2 text-right font-mono tabular-nums ${pnlClass(m.netPct)}`}>
         {m.netPct >= 0 ? "+" : ""}
         {m.netPct.toFixed(3)}
       </td>

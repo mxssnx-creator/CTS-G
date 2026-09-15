@@ -55,6 +55,56 @@ class OverallPerformanceTests(unittest.TestCase):
         self.assertEqual([l["pct"] for l in result["progress"]["lanes"]], [10, 80])
         self.assertEqual(states, before, "cached input snapshots must remain immutable")
 
+    def test_overall_identity_sums_books_without_inheriting_live_dust(self):
+        states = {}
+        for i, lane in enumerate(http.LANES):
+            states[lane["id"]] = {
+                "running": lane["type"] == "vst",
+                "halted": lane["type"] != "vst",
+                "haltReason": "equity 0.0023 below min" if lane["type"] == "live" else None,
+                "systemEquity": -1.57 if lane["type"] == "live" else 109035.11,
+                "walletEquity": 0.0023 if lane["type"] == "live" else 109154.67,
+                "systemPnl": -18.2 if lane["type"] == "live" else -125.5,
+                "systemGrow": 0.4 if lane["type"] == "live" else 210.2,
+                "systemLoss": 18.6 if lane["type"] == "live" else 335.7,
+                "drawdownPct": 12.5 if lane["type"] == "live" else 3.1,
+                "open": [{"symbol": "X-USDT", "side": "LONG", "qty": 1}] if lane["type"] == "vst" else [],
+                "openCount": 1 if lane["type"] == "vst" else 0,
+                "maxOpen": 100,
+                "symbolCap": 50,
+                "symbolCount": 50,
+                "symbols": [f"S{j}-USDT" for j in range(50)],
+                "closed": [],
+                "sets": {"progress": {"phase": "replay", "pct": 20 + i, "symbolsDone": 8, "symbolsTotal": 50}},
+                "tests": [],
+            }
+        with patch.object(http, "load_stats", side_effect=lambda cid: states[cid]), \
+             patch.object(http, "unit_state", return_value="active"), \
+             patch.object(http, "stats_age", return_value=1), \
+             patch.object(http.os.path, "exists", return_value=False):
+            result = http.merge_overall()
+        self.assertTrue(result["running"])
+        self.assertFalse(result["halted"])
+        self.assertGreater(result["systemEquity"], 100000)
+        self.assertNotEqual(result["equity"], -1.57)
+        self.assertAlmostEqual(result["walletEquity"], 0.0023 + 109154.67, places=3)
+        self.assertAlmostEqual(result["systemPnl"], -18.2 + -125.5, places=3)
+        self.assertAlmostEqual(result["systemGrow"], 0.4 + 210.2, places=3)
+        self.assertAlmostEqual(result["systemLoss"], 18.6 + 335.7, places=3)
+        self.assertAlmostEqual(result["drawdownPct"], 12.5, places=3)
+        self.assertEqual(result["maxOpen"], 200)
+        self.assertEqual(result["symbolCap"], 50)
+        self.assertEqual(result["symbolCount"], 50)
+        self.assertEqual(result["openCount"], 1)
+        self.assertEqual(result["progress"]["phase"], "lanes")
+        self.assertEqual(result["connType"], "overall")
+        live = next(l for l in result["lanes"] if l["type"] == "live")
+        vst = next(l for l in result["lanes"] if l["type"] == "vst")
+        self.assertEqual(live["maxOpen"], 100)
+        self.assertEqual(vst["symbolCap"], 50)
+        self.assertTrue(live["halted"])
+        self.assertTrue(vst["running"])
+
     def test_old_running_snapshot_cannot_mark_inactive_services_as_running(self):
         with patch.object(http, "load_stats", return_value={"running": True}), \
              patch.object(http, "unit_state", return_value="inactive"), \

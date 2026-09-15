@@ -23,6 +23,7 @@ from dca_engine import self_test as dca_self_test
 from stats_report import self_test as stats_self_test
 from load_engine import self_test as load_self_test
 from hist_calc import self_test as hist_calc_self_test
+from hist_test import clamp_hours, clamp_min_pf, fill_positive, lookback_bars, symbol_clears_floor
 from user_presets import self_test as user_presets_self_test
 from storage_paths import self_test as storage_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
@@ -128,10 +129,41 @@ def overlay_test() -> None:
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
         rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
+        rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
+        rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.1) < 1e-9, str(ov.get("histTestMinPf")))
+        rec(f"{name}-hist-test-enabled", ov.get("histTestEnabled", True) is True, str(ov.get("histTestEnabled")))
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
         rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
+    rec("hist-test-hours-clamp", clamp_hours(1) == 4 and clamp_hours(20) == 20 and clamp_hours(99) == 64)
+    rec("hist-test-bars", lookback_bars(20) == 1200 and lookback_bars(4) == 240)
+    rec("hist-test-min-pf", abs(clamp_min_pf(None) - 1.1) < 1e-9)
+    rec("hist-test-positive-gate", symbol_clears_floor({"n": 12, "pf": 1.2}, 1.1) and not symbol_clears_floor({"n": 12, "pf": 1.02}, 1.1))
+
+    def _hist_fetch(symbol, limit):
+        return [[0, 1, 1, 1, 1, 1]] * 80
+
+    def _hist_score(symbol, bars):
+        return {"n": 10, "pf": 1.3 if symbol.startswith("WIN") else 0.7}
+
+    fill = fill_positive(
+        [{"symbol": "LOSER"}, {"symbol": "WIN1"}, {"symbol": "WIN2"}, {"symbol": "WIN3"}],
+        2,
+        1.1,
+        {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0},
+        _hist_fetch,
+        score_fn=_hist_score,
+    )
+    rec(
+        "hist-test-fill-until-count",
+        fill["filled"] == 2
+        and [r["symbol"] for r in fill["selected"]] == ["WIN1", "WIN2"]
+        and fill["evaluated"] == 3
+        and "WIN3" not in [r["symbol"] for r in fill["selected"] + fill["rejected"]],
+        {"filled": [r["symbol"] for r in fill["selected"]], "evaluated": fill["evaluated"]},
+    )
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
+    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 2880 and int(x01.get("histTestHours") or 0) == 20)
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
@@ -1935,8 +1967,16 @@ def block_calc_test() -> None:
     st_split = SimpleNamespace(
         last15_ratio=1.0, last15_n=12,
         by_side={
-            "LONG": {"last15_ratio": 1.4, "last15_n": 12},
-            "SHORT": {"last15_ratio": 0.7, "last15_n": 12},
+            "LONG": {
+                "last15_ratio": 1.4, "last15_n": 12, "base_pf": 1.4, "base_n": 12,
+                "main_pf": 1.4, "main_n": 12, "real_pf": 1.4, "real_n": 12,
+                "max_dd_s": 0, "ddOk": True,
+            },
+            "SHORT": {
+                "last15_ratio": 0.7, "last15_n": 12, "base_pf": 0.7, "base_n": 12,
+                "main_pf": 0.7, "main_n": 12, "real_pf": 0.7, "real_n": 12,
+                "max_dd_s": 0, "ddOk": True,
+            },
         },
     )
     pI.sets.sets["parent-config"] = st_split
@@ -1981,6 +2021,77 @@ def block_calc_test() -> None:
     rec("block-close-other-side-live", pC2.block.lanes["TST-USDT:SHORT"].active is True
         and float(pC2.block.lanes["TST-USDT:SHORT"].base_qty) > 0,
         f"short={pC2.block.lanes.get('TST-USDT:SHORT') and pC2.block.lanes['TST-USDT:SHORT'].base_qty}")
+
+    from position_cost import INTERN_PF as _INTERN_PF
+    pInt = mk_trader(1.2, 1.5, 12)
+    pInt.block_overall_real_pf = lambda *a, **k: _INTERN_PF
+    pInt.maybe_block_adds()
+    rec("block-intern-1.00-not-extra-size", pInt.api.posts == [], f"posts={pInt.api.posts}")
+    pIntTape = mk_trader(1.2, 1.0, 12)
+    pIntTape.maybe_block_adds()
+    rec("block-overall-intern-tape-1.00-silent", pIntTape.api.posts == [],
+        f"posts={pIntTape.api.posts} pf={pIntTape.block_overall_real_pf('TST-USDT','LONG')}")
+
+    pMin = mk_trader(1.2, 1.5, 12)
+    pMin.contracts["TST-USDT"] = Contract("TST-USDT", 0.0001, 0.0001, 4, 2, 2.0, 100)
+    pMin.min_order_qty = lambda c, px: pt.Pulse.min_order_qty(pMin, c, px)
+    pMin.cap_order_qty = lambda c, px, qty, cap=None: pt.Pulse.cap_order_qty(pMin, c, px, qty, cap)
+    pMin.maybe_block_adds()
+    posted_min = float(pMin.api.posts[0][1]["quantity"]) if pMin.api.posts else 0.0
+    min_q = 2.0 / 100.30
+    rec("block-vol-raise-full-step-to-min",
+        len(pMin.api.posts) == 1 and posted_min + 1e-9 >= min_q - 1e-6
+        and posted_min <= 0.05 + 1e-9,
+        f"posts={pMin.api.posts} q={posted_min} min={min_q:.5f}")
+
+    pVf = object.__new__(pt.Pulse)
+    pVf.volume_factor = 1.0
+    pVf.vol1h = {}
+    pVf.open = {}
+    pVf.coord = SimpleNamespace(size_mult=lambda n: 1.0)
+    base_n = pt.Pulse.sized_notional(pVf)
+    missing_n = pt.Pulse.sized_notional(pVf, "AAA-USDT")
+    pVf.volume_factor = 2.0
+    doubled_n = pt.Pulse.sized_notional(pVf)
+    pVf.volume_factor = 1.0
+    pVf.vol1h = {"LO-USDT": 1.0, "HI-USDT": 4.0, "MID-USDT": 4.0}
+    low_n = pt.Pulse.sized_notional(pVf, "LO-USDT")
+    rec("vol-factor-identity", abs(base_n - float(pt.TARGET_NOTIONAL)) < 1e-9, f"base={base_n}")
+    rec("vol-missing-not-halved", abs(missing_n - base_n) < 1e-9, f"missing={missing_n} base={base_n}")
+    rec("vol-factor-doubles", abs(doubled_n - 2.0 * base_n) < 1e-9, f"doubled={doubled_n}")
+    rec("vol-low-vol-shrinks", low_n + 1e-9 < base_n and low_n + 1e-9 >= 0.35 * base_n, f"low={low_n} base={base_n}")
+
+    from hist_calc import overlay_from_options, winner_patch, parse_options
+    live_vol = overlay_from_options(parse_options({"hours": 24}), {"blockVolumeRatio": 1, "blockMaxStack": 3, "volumeFactor": 1})
+    rec("hist-overlay-keeps-live-volume",
+        abs(float(live_vol.get("blockVolumeRatio") or 0) - 1) < 1e-12
+        and int(live_vol.get("blockMaxStack") or 0) == 3
+        and abs(float(live_vol.get("volumeFactor") or 0) - 1) < 1e-12,
+        str({k: live_vol.get(k) for k in ("blockVolumeRatio", "blockMaxStack", "volumeFactor")}))
+    wp_vol = winner_patch(
+        {"slRatio": 0.6, "step": 8, "pack": "indications"},
+        parse_options({"hours": 24, "stratBlock": True}),
+        {"block": {"validated": True, "pf": 1.2, "netAvg": 0.01}},
+    )
+    rec("winner-patch-no-volume-reset",
+        "blockVolumeRatio" not in wp_vol and "blockMaxStack" not in wp_vol,
+        str({k: wp_vol.get(k) for k in ("blockVolumeRatio", "blockMaxStack", "blockEnabled")}))
+
+    live_book = BlockBook(os.path.join(tmp, "block-live-vr1.json"), {
+        "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 1.0,
+        "blockProfitFactorRatio": 1.25, "defaultMinPF": POSITIVE_PF})
+    rec("live-vr1-shares-third", abs(live_book.effective_volume_ratio() - (1.0 / 3.0)) < 1e-12,
+        str(live_book.effective_volume_ratio()))
+    rec("live-vr1-n1-add-third", abs(live_book.formula(9.0, 1)["targetAddQty"] - 3.0) < 1e-9,
+        str(live_book.formula(9.0, 1)))
+    intern_live = live_book.pick_emit(live_book.evaluate_counts(
+        BlockLane("SOL-USDT", "LONG", 9.0, 100.0), live_n=1, intern_pf=INTERN_PF))
+    rec("live-vr1-intern-no-extra", intern_live is None, str(intern_live))
+    real_live = live_book.pick_emit(live_book.evaluate_counts(
+        BlockLane("SOL-USDT", "LONG", 9.0, 100.0), live_n=1, intern_pf=POSITIVE_PF))
+    rec("live-vr1-real-emits-extra",
+        real_live is not None and abs(float(real_live["requestedAddQty"]) - 3.0) < 1e-9,
+        str(real_live and {k: real_live.get(k) for k in ("blockCount", "requestedAddQty", "passesProfitFactor")}))
 
 
 def set_orders_test() -> None:

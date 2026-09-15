@@ -93,8 +93,9 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
         </span>
         <span>
           block {cov?.block?.enabled ? "on" : "off"} · {cov?.block?.countN ?? 0} counts · {cov?.block?.liveLanes ?? 0} lanes
+          {cov?.block?.overall !== false ? " · overall Real" : ""}
         </span>
-        {sets.trailCover === false ? <span className="text-danger">trail cover gap</span> : null}
+        {sets.trailCover === false ? <span className="text-warn">trail cover gap</span> : null}
         {stages.intern || stages.main || stages.real ? (
           <span>
             intern {Number(stages.intern?.pf ?? 0).toFixed(2)}/{stages.intern?.n ?? 0}
@@ -173,9 +174,9 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Scan universe" v={`${px}/${n || 0} px`} ok={n > 0 && px >= n} />
         <KV k="Klines 1/5/15" v={`${scan?.kl1m ?? "—"} / ${scan?.kl5m ?? "—"} / ${scan?.kl15m ?? "—"}`} ok={Boolean(scan && scan.kl1m && scan.kl5m && scan.kl15m)} />
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
-        <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} />
-        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${pairCount} pairs · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} />
-        <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} />
+        <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} problem={recon?.ok === false} />
+        <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${pairCount} pairs · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
+        <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
         <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
         <KV
           k="Live sets (cost-net)"
@@ -183,7 +184,19 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
           ok={(sets.liveProcessed ?? liveSets?.processed ?? 0) >= 0}
         />
         <KV k="Set families" v={`base ${sets.families?.base ?? "—"} · trail ${sets.families?.trail ?? "—"}${sets.independentTrail ? " · independent" : ""}`} />
-        <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes`} ok={blk?.enabled !== false} />
+        <KV k="Block" v={`${blk?.enabled ? "on" : "off"} · stack ${blk?.maxStack ?? "—"} · ${blk?.liveLanes ?? 0} lanes${blk?.overall !== false ? " · overall Real" : ""}`} />
+        <KV
+          k="Overall Block Real"
+          v={
+            (blk?.overallReal ?? []).length
+              ? (blk?.overallReal ?? [])
+                  .slice(0, 4)
+                  .map((row) => `${String(row.symbol || "").replace("-USDT", "")} ${row.side} ${Number(row.pf ?? 0).toFixed(2)}/${row.n ?? 0}`)
+                  .join(" · ")
+              : "no live parent"
+          }
+          ok={(blk?.overallReal ?? []).some((row) => Number(row.pf ?? 0) >= 1.1)}
+        />
         <KV
           k="Stages intern/main/real"
           v={`${Number(cov?.coord?.stages?.intern?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.main?.pf ?? 0).toFixed(2)} · ${Number(cov?.coord?.stages?.real?.pf ?? 0).toFixed(2)}`}
@@ -301,11 +314,11 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   );
 }
 
-function KV({ k, v, ok }: { k: string; v: string; ok?: boolean }) {
+function KV({ k, v, ok, problem }: { k: string; v: string; ok?: boolean; problem?: boolean }) {
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
       <div className="font-mono text-xs text-muted">{k}</div>
-      <div className={`mt-0.5 break-all text-sm ${ok === false ? "text-danger" : ok ? "text-primary" : ""}`}>{v || "—"}</div>
+      <div className={`mt-0.5 break-all text-sm ${problem ? "text-danger" : ok === false ? "text-warn" : ok ? "text-primary" : ""}`}>{v || "—"}</div>
     </div>
   );
 }

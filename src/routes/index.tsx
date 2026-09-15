@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -26,11 +26,13 @@ import {
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
 import { KindStrategyStrip } from "@/components/kind-strategy-stats";
+import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { ActivityPanel } from "@/components/activity-overview";
 import { SetGroups } from "@/components/set-groups";
 import { enabledAxes, setMetric } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import type { ConnType } from "@/lib/connections";
+import { pnlClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
@@ -45,10 +47,11 @@ function DeskPage() {
       const s = await fetchLiveStats(conn, signal);
       if (signal.aborted) return;
       if (s) {
+        const prev = cacheRef.current[conn];
         cacheRef.current[conn] = s;
-        setRaw(s);
+        if (!statsUnchanged(prev, s)) setRaw(s);
       }
-    }, () => document.hidden ? 8000 : 3500);
+    }, () => deskPollMs(cacheRef.current[conn], document.hidden));
     window.addEventListener("pulse:control", poll.refresh);
     return () => {
       window.removeEventListener("pulse:control", poll.refresh);
@@ -75,9 +78,11 @@ function DeskPage() {
   return (
 
     <DeskShell
-      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
-      mode={stats?.paused ? "PAUSED" : stats?.mode}
-      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
+      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
+      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
+      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
+      halted={stats ? Boolean(stats.halted) : undefined}
+      alive={stats ? stats.alive !== false : undefined}
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
@@ -107,7 +112,7 @@ function DeskPage() {
               <p className="mt-1 text-xs text-muted">System book only; wallet equity and foreign exposure stay diagnostic.</p>
               {conn === "overall" ? (
                 <p className="mt-1 font-mono text-sm text-muted">
-                  VST {fmt(stats?.equityVst, 4)} · live {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
+                  live {fmt(stats?.equityLive, 4)} · vst {fmt(stats?.equityVst, 4)} · live pnl {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst pnl {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
                 </p>
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
@@ -142,7 +147,7 @@ function DeskPage() {
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <Meter label="Margin used" value={d.marginPct} danger={d.marginPct > 85} />
-            <Meter label="Drawdown" value={d.ddPct} max={18} danger={d.ddPct > 8} />
+            <Meter label="Drawdown" value={d.ddPct} max={18} warn={d.ddPct > 8 && d.ddPct <= 40} danger={d.ddPct > 40} />
           </div>
           <CoordStrip stats={stats} />
           {stats && conn !== "overall" ? <LaneProgress l={histProgressFromStats(stats)} /> : null}
@@ -158,6 +163,7 @@ function DeskPage() {
           <WorkStrip stats={stats} />
           <IndicationStrip stats={stats} />
           <KindStrategyStrip stats={stats} />
+          <ComboEvalPanel job={stats} compact />
           <div className="mt-3">
             <ActivityPanel stats={stats} compact />
           </div>
@@ -284,7 +290,7 @@ function DeskPage() {
 
       <section className="rounded-radius border border-border bg-surface p-4">
         <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">
-          Universe · {stats?.symbols?.length ?? 0}/{stats?.symbolMax ? stats.symbolMax : "unlimited"}
+          Universe · {stats?.symbolCount ?? stats?.symbols?.length ?? 0}/{stats?.symbolCap || stats?.symbolMax || "unlimited"}
         </h2>
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
           {(() => {
@@ -454,7 +460,7 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
                 <p className="font-mono text-xs tracking-wide text-muted uppercase">{l.label}</p>
                 <p className="mt-1 text-lg font-medium">{l.exchange}</p>
               </div>
-              <span className={`rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : "bg-danger/15 text-danger"}`}>
+              <span className={`rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-danger/15 text-danger"}`}>
                 {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : "off"}
               </span>
             </div>
@@ -467,7 +473,7 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
               <dt>Real pos</dt>
               <dd className="text-right text-fg" title="Internal config/set position lanes; groups are unique symbol+direction">
-                {l.realPositionCount ?? l.openCount} <span className="text-muted">({l.realPositionGroupCount ?? "—"} groups)</span>
+                {l.realPositionCount ?? l.openCount}{l.maxOpen ? `/${l.maxOpen}` : ""} <span className="text-muted">({l.realPositionGroupCount ?? "—"} groups)</span>
               </dd>
               <dt>Live pos</dt>
               <dd
@@ -518,10 +524,10 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
                 {l.controlPairsExpected != null ? `${l.controlPairsOk ?? 0}/${l.controlPairsExpected}` : `${l.controlsOk ?? 0}/${l.openCount}`}
               </dd>
               <dt>Symbols</dt>
-              <dd className="text-right text-fg">{l.symbolCount ?? "—"}</dd>
+              <dd className="text-right text-fg">{l.symbolCount ?? "—"}{l.symbolCap ? `/${l.symbolCap}` : ""}</dd>
             </dl>
             <LaneProgress l={l} />
-            {l.haltReason ? <p className="mt-2 text-xs text-danger">{l.haltReason}</p> : null}
+            {l.haltReason ? <p className={`mt-2 text-xs ${haltClass(l.haltReason, l.halted)}`}>{l.haltReason}</p> : null}
           </article>
         );
       })}
@@ -540,7 +546,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={allow ? "text-primary" : "text-danger"}>{allow ? "coord open" : "coord pause"}</span>
+        <span className={allow ? "text-primary" : "text-warn"}>{allow ? "coord open" : "coord pause"}</span>
         <span className="text-muted">
           last15 {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
         </span>
@@ -555,11 +561,11 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
           );
         })}
         <span>{c?.rearrange ? "rearr on" : "rearr off"}</span>
-        <span className={pc?.pass === false ? "text-danger" : "text-primary"}>
+        <span className={pc?.pass === false ? "text-warn" : "text-primary"}>
           {pc?.pass === false ? "block new risk" : "PF pass"}
         </span>
       </div>
-      {gate?.reasons?.length ? <p className="mt-1 text-danger">{gate.reasons.join(" · ")}</p> : null}
+      {gate?.reasons?.length ? <p className="mt-1 text-warn">{gate.reasons.join(" · ")}</p> : null}
     </div>
   );
 }
@@ -755,8 +761,8 @@ function WorkStrip({ stats }: { stats: LiveStats | null }) {
           err {stats?.errors ?? 0} · rss {fmt((stats as LiveStats & { rssMb?: number })?.rssMb, 0)}MB
         </span>
       </div>
-      {stats?.haltReason ? <p className="mt-1 text-danger">{stats.haltReason}</p> : null}
-      {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
+      {stats?.haltReason ? <p className={`mt-1 ${haltClass(stats.haltReason, stats.halted)}`}>{stats.haltReason}</p> : null}
+      {stats?.lastError && !isBenignError(stats.lastError) ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
           fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}${t.detail ? ` (${t.detail})` : ""}`).join(" · ")}
@@ -789,7 +795,7 @@ function EngineStrip({ stats }: { stats: LiveStats | null }) {
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={(e?.hotMs ?? 99) <= (e?.cycleMs ?? 200) + 40 && !e?.cycleOverrun ? "text-primary" : "text-danger"}>async engine</span>
+        <span className={(e?.hotMs ?? 99) <= (e?.cycleMs ?? 200) + 40 && !e?.cycleOverrun ? "text-primary" : "text-warn"}>async engine</span>
         <span className="text-muted">{qa}</span>
       </div>
       <div className="mt-1 flex flex-wrap gap-3 text-muted">
@@ -916,7 +922,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
                   <div key={r.symbol} className="flex items-center justify-between gap-2 font-mono text-xs">
                     <span className="text-fg">
                       {r.symbol.replace("-USDT", "")}{" "}
-                      <span className={r.direction === "long" ? "text-primary" : "text-danger"}>
+                      <span className={r.direction === "long" ? "text-primary" : "text-fg"}>
                         {r.direction}
                       </span>
                     </span>
@@ -950,9 +956,7 @@ function SideChip({ side, compact }: { side: string; compact?: boolean }) {
   const Icon = long ? ArrowUpRight : ArrowDownRight;
   return (
     <span
-      className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs font-medium ${
-        long ? "bg-primary-dim/40 text-primary" : "bg-danger/15 text-danger"
-      }`}
+      className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs font-medium ${sideChipClass(side)}`}
     >
       <Icon className="size-3" />
       {compact ? (long ? "L" : "S") : side}
@@ -970,12 +974,6 @@ function fmtPx(n: number | null | undefined) {
   if (n >= 100) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   return n.toFixed(6);
-}
-
-function pnlClass(n: number) {
-  if (n > 0) return "text-primary";
-  if (n < 0) return "text-danger";
-  return "text-muted";
 }
 
 function ago(s: number) {

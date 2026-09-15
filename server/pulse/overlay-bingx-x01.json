@@ -72,6 +72,9 @@
   "histMinBars": 120,
   "histRefreshS": 90,
   "histWarmup": 30,
+  "histTestHours": 20,
+  "histTestMinPf": 1.1,
+  "histTestEnabled": true,
   "indAtrMult": 0.85,
   "indEnabled": true,
   "indExtraSources": true,
@@ -230,5 +233,14 @@
   "useMaxLeverage": true,
   "volWeight": 0.3,
   "volumeFactor": 1,
-  "controlMinTrades": 0
+  "controlMinTrades": 0,
+  "blockEvalPosCount": 50,
+  "blockCounts": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ]
 }

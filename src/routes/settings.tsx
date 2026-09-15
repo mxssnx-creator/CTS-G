@@ -4,6 +4,7 @@ import {
   blockTable,
   bool,
   DEFAULT_OVERLAY,
+  DEFAULT_SYMBOL_COUNT,
   fetchCtsBundle,
   loadLocalOverlay,
   num,
@@ -11,23 +12,36 @@ import {
   PF_MAX,
   PF_MIN,
   PF_STEP,
+  POSITIVE_PF,
   overlayFromCts,
   saveOverlay,
   slTpGrid,
   trailGrid,
   trailGiveFromArm,
   syncOverlayFlags,
+  clampHistTestHours,
+  clampHistTestRefreshHours,
+  histTestLookbackBars,
+  HIST_TEST_HOURS_DEFAULT,
+  HIST_TEST_HOURS_MAX,
+  HIST_TEST_HOURS_MIN,
+  HIST_TEST_HOURS_STEP,
+  HIST_TEST_REFRESH_DEFAULT,
+  HIST_TEST_REFRESH_MAX,
+  HIST_TEST_REFRESH_MIN,
+  isUnlimitedSymbolBook,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
+import { HistTestControls } from "@/components/hist-test-controls";
+import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
-import { DEFAULT_SYMBOL_COUNT, isUnlimitedSymbolBook } from "@/lib/config-model";
 import { fetchConnection, saveConnection, type ConnectionCreds } from "@/lib/connections";
 import { CONFIG_PRESETS, applyPresetPatch } from "@/lib/config-presets";
 import {
@@ -43,7 +57,8 @@ import {
   overlayOverview,
   type UserPreset,
 } from "@/lib/user-presets";
-import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -51,11 +66,13 @@ import { enabledAxes, setMetric } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import { SystemSettingsPanel } from "@/components/system-settings";
 import { SystemHealthFooter } from "@/components/system-health";
+import { pnlClass, pfClass, activeClass, haltClass, isBenignError } from "@/lib/status-tone";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
 const SECTIONS = [
   "overview",
+  "historic",
   "system",
   "presets",
   "connection",
@@ -87,16 +104,6 @@ const CALC_RANGE_PRESETS = [
   { label: "14d", hours: 336 },
 ] as const;
 
-const CALC_RUNNING_PHASES = new Set(["initial", "hourly", "backfill", "fetch", "replay", "score", "gap", "incremental", "queued"]);
-
-function calcIsRunning(phase?: string) {
-  return Boolean(phase && CALC_RUNNING_PHASES.has(phase));
-}
-
-function hasCalcSnapshot(job: HistCalcJob | null) {
-  return Boolean(job && (job.phase !== "idle" || job.ready || job.lastCompleteRun || (job.rows?.length ?? 0) > 0));
-}
-
 function SettingsPage() {
   const { conn } = useConnection();
   const [cts, setCts] = useState<CtsSettings | null>(null);
@@ -118,6 +125,7 @@ function SettingsPage() {
   const [calcOpt, setCalcOpt] = useState<HistCalcOptions>(DEFAULT_CALC_OPTIONS);
   const [calcJob, setCalcJob] = useState<HistCalcJob | null>(null);
   const [calcBusy, setCalcBusy] = useState(false);
+  const [histTestJob, setHistTestJob] = useState<HistTestJob | null>(null);
   const [presetId, setPresetId] = useState<string | null>(null);
   const [resetAsk, setResetAsk] = useState(false);
   const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
@@ -130,12 +138,19 @@ function SettingsPage() {
   const [cleanupAsk, setCleanupAsk] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
+  const calcJobRef = useRef<HistCalcJob | null>(null);
+  const calcPollRef = useRef<{ refresh: () => void; stop: () => void } | null>(null);
+  const histTestJobRef = useRef<HistTestJob | null>(null);
+  const histTestSeqRef = useRef(0);
+  const rawRef = useRef<LiveStats | null>(null);
 
   useEffect(() => {
     setCts(null);
     setRaw(null);
+    rawRef.current = null;
     setCalcJob(null);
     setCalcBusy(false);
+    setHistTestJob(null);
     setDirty(false);
     dirtyRef.current = false;
     setSaveMsg(null);
@@ -150,10 +165,14 @@ function SettingsPage() {
     setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
-    const delay = () => document.hidden ? 8000 : 4000;
+    const delay = () => deskPollMs(rawRef.current, document.hidden);
     const statsPoll = startPolling(async (signal) => {
       const s = await fetchLiveStats(conn, signal);
-      if (!signal.aborted && s) setRaw(s);
+      if (signal.aborted || !s) return;
+      if (!statsUnchanged(rawRef.current, s)) {
+        rawRef.current = s;
+        setRaw(s);
+      }
     }, delay);
     const configPoll = startPolling(async (signal) => {
       const c = await fetchCtsBundle(conn, signal);
@@ -211,27 +230,41 @@ function SettingsPage() {
   }, []);
 
   const stats = pickView(raw, conn);
-  const calcPhase = calcJob?.phase;
-  // Historic workers are lane-owned; the aggregate view is display-only.
   const histConn = conn === "overall" ? "live" : conn;
 
   useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const pull = async () => {
-      const j = await fetchHistCalc(histConn);
-      if (!alive) return;
+    calcJobRef.current = calcJob;
+  }, [calcJob]);
+
+  useEffect(() => {
+    histTestJobRef.current = histTestJob;
+  }, [histTestJob]);
+
+  useEffect(() => {
+    const poll = startPolling(async (signal) => {
+      const seq = histTestSeqRef.current;
+      const j = await fetchHistTest(signal);
+      if (signal.aborted || seq !== histTestSeqRef.current) return;
+      histTestJobRef.current = j;
+      setHistTestJob(j);
+    }, () => histTestPollMs(histTestJobRef.current, document.hidden));
+    return () => poll.stop();
+  }, []);
+
+  useEffect(() => {
+    const poll = startPolling(async (signal) => {
+      const j = await fetchHistCalc(histConn, signal);
+      if (signal.aborted) return;
+      calcJobRef.current = j;
       setCalcJob(j);
-      const running = calcIsRunning(j.phase);
-      if (running) timer = setTimeout(() => void pull(), 1200);
-      else setCalcBusy(false);
-    };
-    void pull();
+      if (!calcIsRunning(j.phase)) setCalcBusy(false);
+    }, () => calcPollMs(calcJobRef.current, document.hidden));
+    calcPollRef.current = poll;
     return () => {
-      alive = false;
-      if (timer) clearTimeout(timer);
+      calcPollRef.current = null;
+      poll.stop();
     };
-  }, [calcBusy, calcPhase, histConn]);
+  }, [histConn]);
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
@@ -243,6 +276,15 @@ function SettingsPage() {
       }
       if (k === "setPfWindow" || k === "baseEvalPosCount") {
         next.baseEvalPosCount = Number(v); next.setPfWindow = Number(v); next.setMinSamples = Number(v);
+      }
+      if (k === "histTestHours") {
+        next.histTestHours = clampHistTestHours(Number(v), HIST_TEST_HOURS_DEFAULT);
+      }
+      if (k === "histTestRefreshHours") {
+        next.histTestRefreshHours = clampHistTestRefreshHours(Number(v), HIST_TEST_REFRESH_DEFAULT);
+      }
+      if (k === "histTestMinPf") {
+        next.histTestMinPf = normalizePf(Number(v), POSITIVE_PF);
       }
       return next;
     });
@@ -323,7 +365,7 @@ function SettingsPage() {
     const vst = await saveOverlay(next, "vst");
     setUserBusy(false);
     const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
-    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · historic calculation remains manual`);
+    setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · historic replay stays continuous on the shared lane`);
   };
 
   const onRenameSystemPreset = async () => {
@@ -364,20 +406,76 @@ function SettingsPage() {
       additionalCoordination: activeOverlay.additionalCoordination,
       coordOptimizationN: activeOverlay.coordOptimizationN,
       connection: histConn,
-      overlay: { ...activeOverlay, symbolCap: cap },
+      overlay: {
+        ...activeOverlay,
+        symbolCap: cap,
+        histLookbackBars: Math.round(activeCalcOpt.hours * 60),
+        histRefreshS: activeOverlay.histRefreshS,
+      },
       selectedSymbols: allSym ? [] : selected,
+      continuous: true,
+      mode: "hourly",
+      refreshS: activeOverlay.histRefreshS,
     });
+    calcJobRef.current = j;
     setCalcJob(j);
     if (j.phase === "error") setCalcBusy(false);
+    calcPollRef.current?.refresh();
   };
 
   const onStopCalc = async () => {
     if (!calcIsRunning(calcJob?.phase) && !calcBusy) return;
     setCalcBusy(true);
     const j = await stopHistCalc(histConn);
+    calcJobRef.current = j;
     setCalcJob(j);
     setCalcBusy(false);
-    setSaveMsg(j.error || j.detail || "Historic calculation stopped");
+    setSaveMsg(j.error || j.detail || "Historic replay stop requested · next hourly stays on the shared lane");
+    calcPollRef.current?.refresh();
+  };
+
+  const histTestTarget = overlay.symbolCap > 0 ? overlay.symbolCap : HIST_TEST_TARGET_DEFAULT;
+
+  const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
+    if (action === "start" && overlay.histTestEnabled === false) return;
+    const seq = ++histTestSeqRef.current;
+    setSaveMsg(null);
+    const hours = clampHistTestHours(overlay.histTestHours, HIST_TEST_HOURS_DEFAULT);
+    const minPf = normalizePf(Number(overlay.histTestMinPf || overlay.minPf), POSITIVE_PF);
+    const refreshHours = clampHistTestRefreshHours(overlay.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
+    const payload = {
+      hours,
+      minPf,
+      refreshHours,
+      symbolCap: histTestTarget,
+      overlay: {
+        ...overlay,
+        histTestHours: hours,
+        histTestMinPf: minPf,
+        histTestRefreshHours: refreshHours,
+        symbolCap: histTestTarget,
+      },
+    };
+    const j =
+      action === "stop"
+        ? await stopHistTest()
+        : action === "pause"
+          ? await pauseHistTest()
+          : await startHistTest({ ...payload, action: action === "resume" ? "resume" : "start" });
+    if (seq !== histTestSeqRef.current) return;
+    histTestJobRef.current = j;
+    setHistTestJob(j);
+    if (j.phase === "error") setSaveMsg(j.error || j.detail || `Historic test ${action} failed`);
+    else if (action === "stop" || action === "pause") setSaveMsg(j.detail || `Historic test ${action} requested`);
+  };
+
+  const onApplyPositiveSymbols = () => {
+    const names = (histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
+    if (!names.length) return;
+    dirtyRef.current = true;
+    setOverlay((o) => ({ ...o, symbols: names, symbolsAll: false, symbolCap: names.length }));
+    setDirty(true);
+    setSaveMsg(`Applied ${names.length} positive historic symbols · save Live or VST to persist`);
   };
 
   const onApplyWinner = () => {
@@ -462,9 +560,11 @@ function SettingsPage() {
 
   return (
     <DeskShell
-      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
-      mode={stats?.paused ? "PAUSED" : stats?.mode}
-      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
+      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
+      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
+      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
+      halted={stats ? Boolean(stats.halted) : undefined}
+      alive={stats ? stats.alive !== false : undefined}
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
@@ -477,7 +577,11 @@ function SettingsPage() {
                 type="button"
                 onClick={() => setSection(id)}
                 className={`min-h-11 shrink-0 rounded-lg px-3 text-left text-sm capitalize ${
-                  section === id ? "bg-bg2 text-fg ring-1 ring-primary" : "text-muted"
+                  section === id
+                    ? "bg-bg2 text-fg ring-1 ring-primary"
+                    : id === "historic"
+                      ? "text-fg"
+                      : "text-muted"
                 }`}
                 data-section={id}
                 data-testid={`section-${id}`}
@@ -502,6 +606,8 @@ function SettingsPage() {
                                   ? "Exits · SL"
                                   : id === "overview"
                                     ? "Overview"
+                                    : id === "historic"
+                                      ? "Test Historic · ON"
                                     : id === "presets"
                                       ? "Presets · calc"
                                     : id === "connection"
@@ -515,6 +621,16 @@ function SettingsPage() {
         </aside>
 
         <div className="min-w-0 flex-1 space-y-4">
+          {(section === "overview" || section === "historic") && (
+            <TestHistoricCard
+              overlay={overlay}
+              histTestTarget={histTestTarget}
+              histTestJob={histTestJob}
+              onControl={onHistTestControl}
+              onApply={onApplyPositiveSymbols}
+              patch={patch}
+            />
+          )}
           {section === "system" && <SystemSettingsPanel conn={conn} overlay={overlay} patch={patch} navigate={setSection} />}
           <LiveApplied conn={conn} stats={stats} overlay={overlay} dirty={dirty} />
           {section === "overview" && (
@@ -779,8 +895,8 @@ function SettingsPage() {
                 )}
               </Card>
               <Card
-                title="Historic calculations · manual replay"
-                hint="Settings runs only when started below. The internal Set and coordination calculations remain independent on their own lane."
+                title="Historic calculations · continuous replay"
+                hint="Start queues a generation on the shared lane. The 1m tape keeps refreshing on the lookback interval. Stop cancels an in-flight run; the next hourly remains on the engine lane."
               >
                 <Grid>
                   <Slider
@@ -806,7 +922,7 @@ function SettingsPage() {
                     min={2}
                     max={336}
                     step={1}
-                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · applied on Start`}
+                    hint={`${calcOpt.hours}h × 1m = ${calcOpt.hours * 60} bars · applied on Start, then kept on the hourly tape`}
                     onChange={(v) => setCalcOpt((o) => ({ ...o, hours: Math.round(v) }))}
                   />
                   <EnableSlider
@@ -901,7 +1017,7 @@ function SettingsPage() {
                       {preset.label}
                     </button>
                   ))}
-                  <span className="ml-auto text-xs text-muted">Manual only · no settings auto replay</span>
+                  <span className="ml-auto text-xs text-muted" data-testid="calc-continuous-hint">Continuous · hourly refresh after Start</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -911,7 +1027,7 @@ function SettingsPage() {
                     onClick={() => void onCalcAll()}
                     className="min-h-11 rounded-lg bg-primary px-4 text-sm font-medium text-bg disabled:opacity-40"
                   >
-                    {calcIsRunning(calcJob?.phase) ? "Calculating…" : "Start calculation"}
+                    {calcStartLabel(calcJob)}
                   </button>
                   <button
                     type="button"
@@ -932,10 +1048,8 @@ function SettingsPage() {
                       Apply winner
                     </button>
                   ) : null}
-                  <span className="text-sm text-muted">
-                    {calcJob?.phase && calcJob.phase !== "idle"
-                      ? `${calcJob.phase} ${Math.round(calcJob.pct || 0)}% · ${calcJob.detail || ""}`
-                      : "Ready · choose a range, then start a manual calculation"}
+                  <span className="text-sm text-muted" data-testid="hist-calc-status">
+                    {calcStatusLine(calcJob, calcOpt.hours)}
                   </span>
                 </div>
                 {calcJob && hasCalcSnapshot(calcJob) ? (
@@ -949,6 +1063,10 @@ function SettingsPage() {
                       <KV
                         k="Catalog valid sets"
                         v={`${calcJob.coverage?.validatedCount ?? 0}/${calcJob.coverage?.setCount ?? calcJob.coverage?.product ?? 0}`}
+                      />
+                      <KV
+                        k="Lane"
+                        v={`${calcJob.continuous === false ? "one-shot" : "continuous"} · ${calcJob.running || calcIsRunning(calcJob.phase) ? "in flight" : "waiting"}`}
                       />
                       <KV k="Source" v={String(calcJob.source || "shared lane")} />
                       <KV k="Run" v={`${calcJob.mode || "shared"} · generation ${calcJob.generation ?? 0}`} />
@@ -987,8 +1105,8 @@ function SettingsPage() {
                       />
                       <KV k="Backfill gaps" v={String(calcJob.coverage?.bars?.missing ?? calcJob.missingSymbols?.length ?? 0)} />
                       <KV
-                        k="Internal lane next refresh"
-                        v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : "pending"}
+                        k="Next refresh"
+                        v={calcJob.nextRunAt ? new Date(calcJob.nextRunAt * 1000).toLocaleTimeString() : calcIsRunning(calcJob.phase) ? "in flight" : "pending"}
                       />
                       <KV
                         k="Published tape"
@@ -1098,7 +1216,7 @@ function SettingsPage() {
                   </div>
                 ) : null}
                 <p className="text-sm text-muted">
-                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Settings calculations are manual; the internal Set calculation lane remains independent and the live engine is never started here.
+                  All configs = every enabled pack × SL:TP × trail × step × LONG and SHORT independently × every selected symbol × every indication type. Position cost is subtracted from PF, expectancy and averages. Settings Start attaches to the shared continuous replay; the live engine is never started from this page.
                 </p>
               </Card>
             </>
@@ -1376,7 +1494,7 @@ function SettingsPage() {
                   <Toggle label="Live negative-result deactivation" on={overlay.setLiveNegativeDeact} onChange={(v) => patch("setLiveNegativeDeact", v)} />
                 </Grid>
                 <div className="grid gap-2 sm:grid-cols-3">
-                  <ThresholdReadout label="Equity halt" value={`${overlay.drawdownHaltPct.toFixed(0)}%`} tone="text-danger" />
+                  <ThresholdReadout label="Equity halt" value={`${overlay.drawdownHaltPct.toFixed(0)}%`} tone="text-warn" />
                   <ThresholdReadout label="Set PF gate" value={overlay.setMinPf.toFixed(2)} tone="text-primary" />
                   <ThresholdReadout label="Pacing" value={`${overlay.cooldownS.toFixed(1)}s + ${overlay.staggerS.toFixed(1)}s`} />
                 </div>
@@ -1420,6 +1538,20 @@ function SettingsPage() {
                 />
                 <Slider label="Base TP" value={overlay.tpPct} min={0.2} max={4} step={0.05} unit="%" onChange={(v) => patch("tpPct", v)} />
               </Grid>
+              {overlay.forcedBest && Object.keys(overlay.forcedBest).length ? (
+                <div className="rounded-lg border border-primary-dim bg-surface p-3" data-testid="forced-applied-values">
+                  <div className="text-xs text-muted">
+                    Applied from forced 24h winners{overlay.forcedVariant ? ` · ${overlay.forcedVariant}` : ""} · desk TP {overlay.tpPct.toFixed(2)}% / SL {overlay.slPct.toFixed(2)}%
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    {Object.entries(overlay.forcedBest).sort(([a], [b]) => a.localeCompare(b)).map(([sym, row]) => (
+                      <div key={sym} className="font-mono text-xs">
+                        {sym.replace("-USDT", "")} · {row.indication} {row.direction} · TP {(row.tpPct ?? 0).toFixed(2)}% / SL {(row.slPct ?? 0).toFixed(2)}%
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="font-mono text-xs text-muted">
@@ -1791,6 +1923,15 @@ function SettingsPage() {
                   max={8}
                   step={1}
                   onChange={(v) => patch("blockPauseCountRatio", v)}
+                />
+                <Num
+                  label="Main eval last positions"
+                  value={overlay.blockEvalPosCount ?? 50}
+                  min={5}
+                  max={75}
+                  step={1}
+                  hint="Each Block count is scored independently at stage Main. Fewer samples stay valid. Failed counts keep intern calcs but do not emit Real/Live."
+                  onChange={(v) => patch("blockEvalPosCount", Math.max(5, Math.min(75, Math.round(v))))}
                 />
                 <KV k="Default min PF" v={String(defaultMinPf)} />
               </Grid>
@@ -2476,6 +2617,148 @@ function SettingsPage() {
   );
 }
 
+function TestHistoricCard({
+  overlay,
+  histTestTarget,
+  histTestJob,
+  onControl,
+  onApply,
+  patch,
+}: {
+  overlay: PulseOverlay;
+  histTestTarget: number;
+  histTestJob: HistTestJob | null;
+  onControl: (action: "start" | "stop" | "pause" | "resume") => Promise<void>;
+  onApply: () => void;
+  patch: <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => void;
+}) {
+  const enabled = overlay.histTestEnabled !== false;
+  return (
+    <div data-testid="test-historic" id="test-historic" className="scroll-mt-4">
+      <section className="min-w-0 space-y-4 rounded-radius border-2 border-primary bg-surface p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Settings · Overview</p>
+            <h2 className="mt-1 text-2xl font-semibold tracking-tight text-fg">Test Historic</h2>
+            <p className="mt-1 text-sm text-muted">
+              Default ON. Replay the step book on a chosen lookback and keep scoring ranked symbols until the selected count clears min PF. Independent of Live and VST engines.
+            </p>
+          </div>
+          <span
+            className={`shrink-0 rounded-full px-3 py-1 text-sm font-medium ${enabled ? "bg-primary text-bg" : "bg-bg2 text-muted"}`}
+            data-testid="hist-test-enabled-badge"
+          >
+            {enabled ? "ON" : "OFF"}
+          </span>
+        </div>
+        <EnableSlider
+          label="Test Historic"
+          on={enabled}
+          hint="default ON · independent of the live engine lane"
+          onChange={(v) => patch("histTestEnabled", v)}
+        />
+        <p className="text-sm text-muted">
+          Replay the step book on a {overlay.histTestHours}h tape. Symbols are evaluated in rank order until {histTestTarget} clear min PF {overlay.histTestMinPf.toFixed(2)}.
+        </p>
+        <Grid>
+          <Slider
+            label="Historic time range"
+            value={overlay.histTestHours}
+            min={HIST_TEST_HOURS_MIN}
+            max={HIST_TEST_HOURS_MAX}
+            step={HIST_TEST_HOURS_STEP}
+            unit="h"
+            testId="hist-test-hours"
+            hint={`${overlay.histTestHours}h prev · ${histTestLookbackBars(overlay.histTestHours)} × 1m bars · default ${HIST_TEST_HOURS_DEFAULT}h · engine lookback stays two days`}
+            onChange={(v) => patch("histTestHours", Math.round(v))}
+          />
+          <Slider
+            label="Min PF · test results"
+            value={overlay.histTestMinPf}
+            min={PF_MIN}
+            max={PF_MAX}
+            step={PF_STEP}
+            testId="hist-test-min-pf"
+            hint="A symbol counts as positive only when its cost-PF meets this floor"
+            onChange={(v) => patch("histTestMinPf", v)}
+          />
+          <Slider
+            label="Refresh interval"
+            value={overlay.histTestRefreshHours}
+            min={HIST_TEST_REFRESH_MIN}
+            max={HIST_TEST_REFRESH_MAX}
+            step={1}
+            unit="h"
+            testId="hist-test-refresh-hours"
+            hint={`Rerun the independent combo eval every ${overlay.histTestRefreshHours}h using only positive successful sets. Default ${HIST_TEST_REFRESH_DEFAULT}h.`}
+            onChange={(v) => patch("histTestRefreshHours", Math.round(v))}
+          />
+          <KV k="Fill until" v={`${histTestTarget} positive symbols`} />
+          <KV k="Lookback" v={`${histTestLookbackBars(overlay.histTestHours)} bars`} />
+        </Grid>
+        <HistTestControls
+          job={histTestJob}
+          enabled={enabled}
+          hours={overlay.histTestHours}
+          minPf={overlay.histTestMinPf}
+          onControl={onControl}
+        >
+          {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
+            <button
+              type="button"
+              data-testid="hist-test-apply"
+              onClick={onApply}
+              className="min-h-11 rounded-lg border border-border px-3 text-sm"
+            >
+              Apply {histTestJob?.positive?.length || histTestJob?.symbols?.length} positive
+            </button>
+          ) : null}
+          <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">
+            Open report
+          </a>
+        </HistTestControls>
+        {(histTestJob?.positive?.length || (Array.isArray(histTestJob?.rejected) && histTestJob.rejected.length) || histTestIsRunning(histTestJob?.phase) || histTestJob?.ready) ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Positive · {histTestJob?.filled ?? histTestJob?.positive?.length ?? 0}/{histTestJob?.targetCount ?? histTestTarget}</p>
+              <p className="mt-1 font-mono text-xs text-fg break-all">{(histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Rejected · evaluated {histTestJob?.evaluated ?? 0}</p>
+              <p className="mt-1 font-mono text-xs text-muted break-all">
+                {(Array.isArray(histTestJob?.rejected) ? histTestJob.rejected.map((r) => typeof r === "string" ? r : r.symbol) : []).join(" · ") || "none"}
+              </p>
+            </div>
+          </div>
+        ) : null}
+        {(histTestJob?.bySymbol || []).length > 0 ? (
+          <table className="w-full text-sm" data-testid="hist-test-symbols">
+            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th className="py-1 text-left">Symbol</th>
+                <th className="text-left">PF</th>
+                <th className="text-left">N</th>
+                <th className="text-left">WR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(histTestJob?.bySymbol || []).slice(0, 12).map((row) => (
+                <tr key={row.symbol} className="border-t border-border/60">
+                  <td className="py-1.5">{row.symbol}</td>
+                  <td className={`font-mono ${pfClass(Number(row.pf || 0), Number(row.n || 0), overlay.histTestMinPf)}`}>{(row.pf ?? 0).toFixed(2)}</td>
+                  <td className="font-mono">{row.evalN ?? row.n ?? 0}</td>
+                  <td className="font-mono">{row.wr ?? 0}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        <ComboEvalPanel job={histTestJob} compact />
+      </section>
+    </div>
+  );
+}
+
 function Card({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
     <section className="min-w-0 space-y-4 rounded-radius border border-border bg-surface p-4">
@@ -2542,6 +2825,7 @@ function Slider({
   step,
   unit = "",
   hint,
+  testId,
   onChange,
 }: {
   label: string;
@@ -2551,29 +2835,32 @@ function Slider({
   step: number;
   unit?: string;
   hint?: string;
+  testId?: string;
   onChange: (n: number) => void;
 }) {
   const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   return (
-    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="font-mono text-xs text-muted">{label}</span>
-        <span className="flex items-center gap-1 font-mono text-sm tabular-nums">
+    <label className="rounded-lg border border-border bg-bg2 px-3 py-3" data-testid={testId}>
+      <div className="flex flex-nowrap items-center justify-between gap-2">
+        <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-sm tabular-nums">
           <input
             type="number"
             min={min}
             max={max}
             step={step}
-            value={Number.isInteger(step) && step >= 1 ? value : Number(value.toFixed(step < 0.05 ? 2 : 2))}
+            aria-label={label}
+            data-testid={testId ? `${testId}-input` : undefined}
+            value={Number.isInteger(step) && step >= 1 ? value : Number(Number(value).toFixed(2))}
             onChange={(e) => {
               const n = Number(e.target.value);
               if (!Number.isFinite(n)) return;
               onChange(Math.min(max, Math.max(min, n)));
             }}
-            className="w-16 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
+            className="w-14 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
             suppressHydrationWarning
           />
-          {unit}
+          {unit ? <span>{unit}</span> : null}
         </span>
       </div>
       <input
@@ -2581,6 +2868,8 @@ function Slider({
         min={min}
         max={max}
         step={step}
+        aria-label={label}
+        data-testid={testId ? `${testId}-range` : undefined}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         className="mt-2 w-full"
@@ -2632,8 +2921,8 @@ function Num({
   return (
     <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="font-mono text-xs text-muted">{label}</span>
-        <span className="flex items-center gap-1 font-mono text-sm tabular-nums">
+        <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
+        <span className="flex shrink-0 items-center gap-1 font-mono text-sm tabular-nums">
           <input
             type="number"
             min={min}
@@ -2787,14 +3076,14 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 return (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
-                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
+                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
                   </td>
-                  <td className={`py-1.5 text-right ${(pf ?? 0) + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                  <td className={`py-1.5 text-right ${pfClass(pf ?? 0, r.n, overlay.setMinPf)}`}>
                     {r.n ? setMetric(pf) : "—"}
                   </td>
-                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>
+                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>
                     {setMetric(r.last25AvgR)}
                   </td>
                   <td className="py-1.5 text-right">{ddt == null ? "—" : formatDuration(ddt * 1000)}</td>
@@ -2845,10 +3134,10 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
               lanes.map((r) => (
                 <tr key={r.key} className="border-t border-border font-mono text-xs">
                   <td className={`py-1.5 ${r.selected ? "text-primary" : ""}`}>{r.key}</td>
-                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
+                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">{r.n}</td>
                   <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
+                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                   <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>
                 </tr>
@@ -2974,7 +3263,7 @@ function LiveApplied({
   return (
     <div className="rounded-radius border border-border bg-surface px-4 py-3 font-mono text-xs" data-testid="live-applied">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : "text-danger"}>
+        <span className={stats?.paused ? "text-warn" : stats?.running && !stats?.halted ? "text-primary" : stats?.halted ? "text-warn" : "text-danger"}>
           {stats?.paused ? "paused" : "live"} {conn} · SL:TP {Number(sl).toFixed(1)} · tr {trail} · vol ×{Number(stats?.volumeFactor ?? overlay.volumeFactor ?? 1).toFixed(1)}
         </span>
         <span className="text-muted">
@@ -2990,8 +3279,8 @@ function LiveApplied({
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F
         </span>
       </div>
-      {stats?.haltReason ? <p className="mt-1 text-danger">{stats.haltReason}</p> : null}
-      {stats?.lastError ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
+      {stats?.haltReason ? <p className={`mt-1 ${haltClass(stats.haltReason, stats.halted)}`}>{stats.haltReason}</p> : null}
+      {stats?.lastError && !isBenignError(stats.lastError) ? <p className="mt-1 text-danger">{stats.lastError}</p> : null}
       {fails.length ? (
         <p className="mt-1 text-danger">
           fail {fails.map((t) => `${t.connection ? `${t.connection.replace("bingx-", "")}/` : ""}${t.name}`).join(", ")}
@@ -3015,10 +3304,11 @@ function EffectiveSettingsSummary({
   overlay: PulseOverlay;
   dirty: boolean;
 }) {
-  const pulse = stats?.pulse;
-  const remoteReady = Boolean(stats && pulse && Object.keys(pulse).length > 0);
+  const livePulse = Boolean(stats?.pulse && Object.keys(stats.pulse).length > 0);
+  const pulse = { ...overlay, ...(livePulse ? stats!.pulse : {}) } as Record<string, unknown>;
+  const remoteReady = livePulse || Boolean(overlay);
   const remote = (value: unknown, suffix = "") =>
-    remoteReady ? formatAppliedSetting(value, suffix) : "—";
+    remoteReady && value != null && value !== "" ? formatAppliedSetting(value, suffix) : "—";
   const coverage = stats?.coverage;
   const controls = coverage?.controls;
   const setCoverage = coverage?.sets;
@@ -3039,11 +3329,11 @@ function EffectiveSettingsSummary({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-xs uppercase text-muted">Effective settings</span>
         <span className={remoteReady ? "font-mono text-xs text-primary" : "font-mono text-xs text-warn"}>
-          {remoteReady ? "applied remote" : "waiting for applied snapshot"}
+          {livePulse ? "applied remote" : "overlay · sidecar offline"}
         </span>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" data-testid="lane-status">
-        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf)} · ${remote(pulse?.pfWindow)}`} />
+        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf ?? pulse?.setMinPf)} · ${remote(pulse?.pfWindow ?? pulse?.setPfWindow ?? pulse?.baseEvalPosCount)}`} />
         <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />

@@ -79,8 +79,8 @@ class BlockContractTests(unittest.TestCase):
         b = self.book(positionCostPct=0.15, defaultMinPF=POSITIVE_PF)
         lane = BlockLane("PF-USDT", "LONG", 10, 100)
         one_r = cost_as_frac(0.15)
-        lane.pf_ring[1] = [one_r] * 8
-        lane.parent_pf_ring = [one_r] * 8
+        lane.pf_ring[1] = [one_r] * 50
+        lane.parent_pf_ring = [one_r] * 50
         d = b.pf_decision(lane, 1, intern_pf=INTERN_PF)
         self.assertAlmostEqual(d["observedProfitFactor"], POSITIVE_PF)
         self.assertTrue(d["passesProfitFactor"])
@@ -104,7 +104,7 @@ class BlockContractTests(unittest.TestCase):
         b = self.book(blockVolumeRatio=.1)
         lane = b.register_parent("SOL-USDT", "LONG", 3, 100)
         b.pause_count(lane, 1)
-        lane.pf_ring[2] = [-1] * 5
+        lane.pf_ring[2] = [-1] * 50
         rows = b.evaluate_counts(lane, 1, 2)
         self.assertEqual(len([r for r in rows if r["kind"] == "regular"]), 6)
         self.assertEqual(b.pick_emit(rows)["blockCount"], 3)

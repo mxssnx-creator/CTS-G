@@ -408,8 +408,22 @@ def slim_for_ui(st: dict) -> dict:
     if isinstance(out.get("signals"), list):
         out["signals"] = out["signals"][:8]
     closed = out.get("closed") or []
-    if isinstance(closed, list) and len(closed) > 40:
-        out["closed"] = closed[:40]
+    if isinstance(closed, list):
+        out["closedN"] = int(out.get("closedN") or len(closed))
+        if closed and not out.get("pfStats"):
+            try:
+                from combo_eval import evaluate_fills
+                min_pf = float(((out.get("coord") or {}) if isinstance(out.get("coord"), dict) else {}).get("minPf") or 1.1)
+                combo = evaluate_fills(closed, min_pf=min_pf or 1.1)
+                out["pfStats"] = combo.get("pfStats")
+                out["withWithout"] = combo.get("withWithout")
+                out["comboMatrix"] = combo.get("matrix")
+                out["successfulConfigs"] = combo.get("successful")
+                out["combo"] = combo.get("meta")
+            except Exception:
+                pass
+        if len(closed) > 80:
+            out["closed"] = closed[:80]
     if isinstance(opens, list) and len(opens) > 256:
         out["openCountReported"] = len(opens)
         out["openTruncated"] = True
@@ -1247,12 +1261,13 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "haltReason": halt_reason,
         "svcActive": state == "active",
         "statsAgeS": round(stats_age(lane["id"]), 1),
-        "equity": st.get("systemEquity", st.get("equity")) or 0,
-        "systemEquity": st.get("systemEquity", st.get("equity")) or 0,
-        "systemStartEquity": st.get("systemStartEquity", st.get("startEquity")) or 0,
-        "walletEquity": st.get("walletEquity", st.get("equity")) or 0,
-        "available": st.get("available") or 0,
-        "unrealized": st.get("systemUnrealized", st.get("unrealized")) or 0,
+        "equity": _report_number(st.get("systemEquity", st.get("equity"))),
+        "systemEquity": _report_number(st.get("systemEquity", st.get("equity"))),
+        "systemStartEquity": _report_number(st.get("systemStartEquity", st.get("startEquity"))),
+        "walletEquity": _report_number(st.get("walletEquity", st.get("equity"))),
+        "available": _report_number(st.get("available")),
+        "usedMargin": _report_number(st.get("usedMargin")),
+        "unrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
         "foreignUnrealized": st.get("foreignUnrealized") or 0,
         "foreignExposure": st.get("foreignExposure") or 0,
         "foreignPositionCount": st.get("foreignPositionCount") or 0,
@@ -1311,6 +1326,9 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "controlMemberMissing": cov.get("memberMissing") if cov.get("memberMissing") is not None else cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
         "symbolCount": st.get("symbolCount") or len(st.get("symbols") or []),
+        "symbolCap": int(st.get("symbolCap") or st.get("symbolMax") or 0),
+        "maxOpen": int(st.get("maxOpen") or 0),
+        "drawdownPct": _report_number(st.get("drawdownPct")),
         "lastError": _short_err(st.get("lastError")),
         "trackPrefix": eng.get("trackPrefix"),
         "cycle": st.get("cycle"),
@@ -1478,6 +1496,26 @@ def merge_overall() -> dict:
         sets["overview"] = overview
         for key in ("setCount", "activeCount", "validatedCount"):
             sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
+    system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in lanes)
+    wallet_equity = sum(_report_number(l.get("walletEquity")) for l in lanes)
+    session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in lanes)
+    system_grow = sum(_report_number(l.get("systemGrow")) for l in lanes)
+    system_loss = sum(_report_number(l.get("systemLoss")) for l in lanes)
+    caps = [int(l.get("maxOpen") or 0) for l in lanes]
+    max_open = 0 if any(c <= 0 for c in caps) else sum(caps)
+    symbol_cap = max((int(l.get("symbolCap") or 0) for l in lanes), default=0)
+    symbols = []
+    seen = set()
+    for st in stats_by_id.values():
+        if not isinstance(st, dict):
+            continue
+        for sym in st.get("symbols") or []:
+            if sym and sym not in seen:
+                seen.add(sym)
+                symbols.append(sym)
+    symbol_count = len(symbols) if symbols else max((int(l.get("symbolCount") or 0) for l in lanes), default=0)
+    if symbol_count > symbol_cap:
+        symbol_cap = symbol_count
     out = {
         "running": running_any,
         "mode": "OVERALL",
@@ -1487,21 +1525,26 @@ def merge_overall() -> dict:
         "exchange": "All",
         "lanes": lanes,
         "slots": SLOTS,
-        "equity": live.get("equity") or 0,
-        "equityLive": live.get("equity") or 0,
-        "equityVst": vst.get("equity") or 0,
-        "available": live.get("available") or 0,
-        "usedMargin": 0,
-        "unrealized": (live.get("unrealized") or 0) + (vst.get("unrealized") or 0),
-        "sessionPnl": (live.get("systemPnl") or live.get("sessionPnl") or 0),
-        "sessionPnlLive": live.get("systemPnl") or live.get("sessionPnl") or 0,
-        "sessionPnlVst": vst.get("systemPnl") or vst.get("sessionPnl") or 0,
-        "systemGrowLive": live.get("systemGrow") or 0,
-        "systemLossLive": live.get("systemLoss") or 0,
-        "systemGrowVst": vst.get("systemGrow") or 0,
-        "systemLossVst": vst.get("systemLoss") or 0,
+        "equity": system_equity,
+        "systemEquity": system_equity,
+        "walletEquity": wallet_equity,
+        "equityLive": _report_number(live.get("equity")),
+        "equityVst": _report_number(vst.get("equity")),
+        "available": _report_number(live.get("available")) + _report_number(vst.get("available")),
+        "usedMargin": sum(_report_number(l.get("usedMargin")) for l in lanes),
+        "unrealized": sum(_report_number(l.get("unrealized")) for l in lanes),
+        "sessionPnl": session_pnl,
+        "systemPnl": session_pnl,
+        "systemGrow": system_grow,
+        "systemLoss": system_loss,
+        "sessionPnlLive": _report_number(live.get("systemPnl", live.get("sessionPnl"))),
+        "sessionPnlVst": _report_number(vst.get("systemPnl", vst.get("sessionPnl"))),
+        "systemGrowLive": _report_number(live.get("systemGrow")),
+        "systemLossLive": _report_number(live.get("systemLoss")),
+        "systemGrowVst": _report_number(vst.get("systemGrow")),
+        "systemLossVst": _report_number(vst.get("systemLoss")),
         "pnlPct": 0,
-        "drawdownPct": 0,
+        "drawdownPct": max((_report_number(l.get("drawdownPct")) for l in lanes), default=0),
         "wins": wins,
         "losses": losses,
         "winRate": round(wr, 1),
@@ -1515,7 +1558,10 @@ def merge_overall() -> dict:
         "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
         "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
         "simUPnl": round(sum(float(l.get("simUPnl") or 0) for l in lanes), 4),
-        "maxOpen": 0,
+        "maxOpen": max_open,
+        "symbolCount": symbol_count,
+        "symbolCap": symbol_cap,
+        "symbolMax": symbol_cap,
         "open": opens,
         "closed": closed[:80],
         "tests": tests[:24],
@@ -1524,7 +1570,7 @@ def merge_overall() -> dict:
         "errors": errors,
         "halted": not running_any,
         "paused": any(bool(x.get("paused")) for x in lanes),
-        "symbols": [],
+        "symbols": symbols,
         "now": __import__("time").time(),
         "pfCost": pc,
         "profitFactor": pc.get("ratio"),
@@ -1570,7 +1616,7 @@ def merge_overall() -> dict:
             "coverage", "coord", "pulse", "indications", "engine", "variants",
             "exits", "block", "dca", "api", "byIndication", "byStrategy",
             "klinesTf", "signals", "prices", "regime", "cycle", "scanMs", "rssMb",
-            "forcedConfigs", "configEvidence",
+            "forcedConfigs", "configEvidence", "lastError",
         ):
             continue
         if detail_st.get(k) is not None:
@@ -1674,6 +1720,8 @@ def connections_blob() -> dict:
                     "entryPolicy": l.get("entryPolicy"),
                     "executionEvidence": l.get("executionEvidence"),
                     "symbolCount": l.get("symbolCount"),
+                    "symbolCap": l.get("symbolCap"),
+                    "maxOpen": l.get("maxOpen"),
                     "haltReason": l.get("haltReason"),
                 }
                 for l in lanes
@@ -1849,9 +1897,22 @@ class Handler(SimpleHTTPRequestHandler):
                 rows = []
             self._json({"ok": True, "presets": rows, "system": True, "max": 24})
             return
+        if path in ("/hist-test.json", "/hist-test"):
+            try:
+                from hist_test import read_job, job_is_running, job_is_paused
+                blob = read_job()
+                blob["ok"] = True
+                blob["running"] = job_is_running(blob)
+                blob["paused"] = job_is_paused(blob)
+                blob["independent"] = True
+                blob["shared"] = False
+                self._json(blob)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
+            return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import public_presets, read_job
+                from hist_calc import public_presets, read_job, job_is_running
                 blob = read_job(conn)
                 if not blob.get("presets"):
                     blob["presets"] = public_presets()
@@ -1859,6 +1920,8 @@ class Handler(SimpleHTTPRequestHandler):
                 blob["connection"] = conn
                 blob["shared"] = True
                 blob["independent"] = False
+                blob["running"] = job_is_running(blob)
+                blob["continuous"] = bool(blob.get("continuous") or blob.get("nextRunAt") or blob.get("ready"))
                 self._json(blob)
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
@@ -2103,9 +2166,30 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._json({"ok": False, "detail": str(exc)[:200]}, 200)
             return
+        if path in ("/hist-test.json", "/hist-test"):
+            try:
+                from hist_test import start_test, stop_test, pause_test, resume_test, read_job, job_is_running, job_is_paused
+                action = str((body or {}).get("action") or "start").lower().strip()
+                if action == "stop":
+                    job = stop_test()
+                elif action == "pause":
+                    job = pause_test()
+                elif action == "resume":
+                    job = resume_test(body if isinstance(body, dict) else {})
+                else:
+                    job = start_test(body if isinstance(body, dict) else {})
+                job["ok"] = True
+                job["running"] = job_is_running(job)
+                job["paused"] = job_is_paused(job)
+                job["independent"] = True
+                job["shared"] = False
+                self._json(job)
+            except Exception as exc:
+                self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)
+            return
         if path in ("/hist-calc.json", "/hist-calc"):
             try:
-                from hist_calc import read_job, start_job, stop_job
+                from hist_calc import read_job, start_job, stop_job, job_is_running
                 action = str((body or {}).get("action") or "start").lower().strip()
                 if action == "stop":
                     stop_result = stop_job(connection=conn)
@@ -2117,9 +2201,7 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
-                job["running"] = job.get("phase") in (
-                    "queued", "initial", "hourly", "fetch", "backfill", "gap", "replay", "score", "incremental"
-                )
+                job["running"] = job_is_running(job)
                 self._json(job)
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)

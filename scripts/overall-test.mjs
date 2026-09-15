@@ -123,12 +123,35 @@ try {
   if (/Indications/i.test(sys) && /Control orders/i.test(sys)) ok("system strategy/exec");
   else fail("system missing modules");
 
+  await page.goto(BASE + "/step-sweep", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("[data-testid=desk-root]", { timeout: 10000 });
+  await page.waitForTimeout(800);
+  if (await page.getByTestId("test-historic").count()) ok("sweep test historic");
+  else fail("sweep missing test historic");
+  if (await page.getByTestId("hist-test-start").count()) ok("sweep hist start");
+  else fail("sweep no hist-test-start");
+  if (await page.getByTestId("hist-test-pause").count()) ok("sweep hist pause");
+  else fail("sweep no hist-test-pause");
+  if (await page.getByTestId("hist-test-stop").count()) ok("sweep hist stop");
+  else fail("sweep no hist-test-stop");
+  const sweepStartOff = await page.getByTestId("hist-test-start").isDisabled().catch(() => true);
+  const sweepPauseOff = await page.getByTestId("hist-test-pause").isDisabled().catch(() => true);
+  const sweepStopOff = await page.getByTestId("hist-test-stop").isDisabled().catch(() => true);
+  if (!sweepStartOff && !sweepPauseOff && !sweepStopOff) ok("sweep hist buttons enabled");
+  else fail(`sweep hist disabled start=${sweepStartOff} pause=${sweepPauseOff} stop=${sweepStopOff}`);
+  const sweepStartLabel = (await page.getByTestId("hist-test-start").innerText().catch(() => "")).trim();
+  if (/Start|Resume/i.test(sweepStartLabel)) ok("sweep start label");
+  else fail("sweep start label " + sweepStartLabel);
+  const engStartOff = await page.getByTestId("engine-start").isDisabled().catch(() => true);
+  if (!engStartOff) ok("sweep engine start enabled");
+  else fail("sweep engine start disabled");
+
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-testid=desk-root]", { timeout: 10000 });
   await clickConn("vst");
   await page.waitForTimeout(800);
   const sections = [
-    "overview", "connection", "profit", "risk", "trailing", "timeframes",
+    "overview", "historic", "connection", "profit", "risk", "trailing", "timeframes",
     "packs", "sets", "exits", "block", "dca", "axes", "volume",
     "controls", "indication", "pulse", "symbols",
   ];
@@ -177,6 +200,51 @@ try {
   const ov = await page.locator("main").innerText();
   if (/coverage/i.test(ov)) ok("overview coverage");
   else fail("overview no coverage");
+  if (await page.getByTestId("test-historic").count()) ok("test historic");
+  else fail("no test historic");
+  const histPanel = await page.getByTestId("test-historic").innerText();
+  if (/Historic time range/i.test(histPanel)) ok("historic time range");
+  else fail("no historic time range");
+  if (/Min PF/i.test(histPanel)) ok("hist test min pf");
+  else fail("no hist test min pf");
+  if (await page.getByTestId("hist-test-start").count()) ok("hist test start");
+  else fail("no hist test start");
+  if (await page.getByTestId("hist-test-pause").count()) ok("hist test pause");
+  else fail("no hist test pause");
+  if (await page.getByTestId("hist-test-stop").count()) ok("hist test stop");
+  else fail("no hist test stop");
+  const startLabel = (await page.getByTestId("hist-test-start").innerText().catch(() => "")).trim();
+  if (/^Start$/i.test(startLabel) || /Resume/i.test(startLabel)) ok("hist test start label");
+  else fail("hist test start label " + startLabel);
+  const histStatus = await page.getByTestId("hist-test-status").innerText().catch(() => "");
+  if (/20h tape · min PF 1\.10 · fill until positive/i.test(histStatus) || /20h/.test(histPanel)) ok("hist test defaults");
+  else fail("hist test defaults " + histStatus.slice(0, 80));
+  const hoursInput = page.getByTestId("hist-test-hours-input");
+  if (await hoursInput.count()) {
+    await hoursInput.fill("48");
+    await page.waitForTimeout(120);
+    const afterHours = await page.getByTestId("hist-test-status").innerText().catch(() => "");
+    const afterPanel = await page.getByTestId("test-historic").innerText();
+    if (/48h/.test(afterHours) || /48h prev/i.test(afterPanel)) ok("hours slider 48");
+    else fail("hours not 48: " + afterHours.slice(0, 80));
+    await hoursInput.fill("20");
+  } else fail("no hist-test-hours-input");
+  const pfInput = page.getByTestId("hist-test-min-pf-input");
+  if (await pfInput.count()) {
+    await pfInput.fill("1.15");
+    await page.waitForTimeout(120);
+    const afterPf = await page.getByTestId("hist-test-status").innerText().catch(() => "");
+    const afterPfPanel = await page.getByTestId("test-historic").innerText();
+    if (/1\.15/.test(afterPf) || /1\.15/.test(afterPfPanel)) ok("min pf slider 1.15");
+    else fail("min pf not 1.15: " + afterPf.slice(0, 80));
+    await pfInput.fill("1.10");
+  } else fail("no hist-test-min-pf-input");
+
+  await clickConn("overall");
+  await page.getByTestId("section-overview").click();
+  await page.waitForTimeout(250);
+  if (await page.getByTestId("test-historic").count()) ok("overall test historic");
+  else fail("overall missing test historic");
 
   const snap = await page.evaluate(async () => {
     const r = await fetch("/live-stats.json", { cache: "no-store" });

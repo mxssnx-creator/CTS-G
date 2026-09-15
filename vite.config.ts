@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
@@ -150,8 +151,18 @@ function authPopupPlugin(): Plugin {
 
 function jsonRes(res: ServerResponse, status: number, body: unknown) {
   if (res.headersSent) return;
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
   res.end(JSON.stringify(body));
+}
+
+function jsonRaw(res: ServerResponse, status: number, raw: string) {
+  if (res.headersSent) return;
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Content-Length": Buffer.byteLength(raw),
+  });
+  res.end(raw);
 }
 
 function readReqBody(req: IncomingMessage): Promise<string> {
@@ -303,13 +314,91 @@ function overlayFile(conn: string): string {
   return join(process.cwd(), "server/pulse", `overlay-${id}.json`);
 }
 
-function readLiveStats(): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8"));
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
+function forcedConfigFile(conn: string): string {
+  const id = laneIds(conn)[0] === VST_ID || conn === "overall" ? "bingx-x02" : "bingx-x01";
+  return join(process.cwd(), "server/pulse", `forced-configs-${id}.json`);
+}
+
+function readLocalForced(conn: string): Record<string, unknown> | null {
+  const paths = [
+    forcedConfigFile(conn),
+    join(process.cwd(), "reports/hist-test/forced-configs.json"),
+  ];
+  for (const file of paths) {
+    if (!existsSync(file)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      const rows = parsed?.rows;
+      if (parsed && Array.isArray(rows) && rows.length) return parsed;
+    } catch {
+      /* try next */
+    }
   }
+  return null;
+}
+
+function winnerFields(local: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ["succeeded", "missing", "variant", "variantSettings", "bestBySymbol", "forcedBest", "engineMinPf", "hours"]) {
+    if (local[key] != null) out[key] = local[key];
+  }
+  return out;
+}
+
+function mergeForcedConfigs(payload: Record<string, unknown>, conn: string): Record<string, unknown> {
+  const lane = (conn || "").toLowerCase();
+  if (lane === "live" || lane === "bingx-x01" || lane.includes("90fb")) return payload;
+  const local = readLocalForced(conn);
+  if (!local) return payload;
+  const current = payload.forcedConfigs;
+  const rows = current && typeof current === "object" ? (current as { rows?: unknown }).rows : null;
+  if (Array.isArray(rows) && rows.length) {
+    return { ...payload, forcedConfigs: { ...(current as Record<string, unknown>), ...winnerFields(local), rows } };
+  }
+  return { ...payload, forcedConfigs: local, forcedOnly: payload.forcedOnly ?? true };
+}
+
+function readLiveStats(): Record<string, unknown> {
+  return loadLiveStatsCache()?.obj ?? {};
+}
+
+type LiveStatsFileCache = { mtime: number; obj: Record<string, unknown>; raw: string };
+let liveStatsFileCache: LiveStatsFileCache | null = null;
+const fallbackJsonCache = new Map<string, string>();
+let pulseGetDownUntil = 0;
+
+function liveStatsPath() {
+  return join(process.cwd(), "public/live-stats.json");
+}
+
+function loadLiveStatsCache(): LiveStatsFileCache | null {
+  try {
+    const path = liveStatsPath();
+    const mtime = statSync(path).mtimeMs;
+    if (liveStatsFileCache && liveStatsFileCache.mtime === mtime) return liveStatsFileCache;
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return liveStatsFileCache;
+    liveStatsFileCache = { mtime, obj: parsed as Record<string, unknown>, raw };
+    fallbackJsonCache.clear();
+    return liveStatsFileCache;
+  } catch {
+    return liveStatsFileCache;
+  }
+}
+
+function statsFallbackJson(conn: string): string {
+  const cache = loadLiveStatsCache();
+  const key = `${conn}:${cache?.mtime ?? 0}`;
+  const hit = fallbackJsonCache.get(key);
+  if (hit) return hit;
+  const json = JSON.stringify({ ...statsFallback(conn), stale: true, sidecar: false });
+  fallbackJsonCache.set(key, json);
+  if (fallbackJsonCache.size > 8) {
+    const first = fallbackJsonCache.keys().next().value;
+    if (first) fallbackJsonCache.delete(first);
+  }
+  return json;
 }
 
 function connectionsFallback(): unknown {
@@ -358,23 +447,59 @@ function universeFallback(): unknown {
 }
 
 function configFallback(conn: string): unknown {
+  const readOverlay = (lane: string) => {
+    const file = overlayFile(lane);
+    if (!existsSync(file)) return {};
+    try {
+      return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
   if (conn === "overall") {
     return {
       cts: null,
       overlay: null,
       conn: "overall",
       lanes: [
-        { type: "live", id: "bingx-x01", overlay: JSON.parse(readFileSync(overlayFile("live"), "utf8")) },
-        { type: "vst", id: "bingx-x02", overlay: JSON.parse(readFileSync(overlayFile("vst"), "utf8")) },
+        { type: "live", id: "bingx-x01", overlay: readOverlay("live") },
+        { type: "vst", id: "bingx-x02", overlay: readOverlay("vst") },
       ],
     };
   }
-  const file = overlayFile(conn);
-  const overlay = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
-  return { cts: null, overlay, conn };
+  return { cts: null, overlay: readOverlay(conn), conn };
+}
+
+function mergeOverlayForced(payload: Record<string, unknown>, conn: string): Record<string, unknown> {
+  const file = overlayFile(conn === "overall" ? "vst" : conn);
+  if (!existsSync(file)) return payload;
+  try {
+    const local = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (!local.forcedBest) return payload;
+    if (conn === "overall") {
+      return payload;
+    }
+    const overlay = payload.overlay && typeof payload.overlay === "object" ? (payload.overlay as Record<string, unknown>) : {};
+    return {
+      ...payload,
+      overlay: {
+        ...overlay,
+        forcedSymbols: local.forcedSymbols ?? overlay.forcedSymbols,
+        forcedVariant: local.forcedVariant ?? overlay.forcedVariant,
+        forcedEligible: local.forcedEligible ?? overlay.forcedEligible,
+        forcedBest: local.forcedBest,
+        tpPct: local.tpPct ?? overlay.tpPct,
+        slPct: local.slPct ?? overlay.slPct,
+        slToTpRatio: local.slToTpRatio ?? overlay.slToTpRatio,
+      },
+    };
+  } catch {
+    return payload;
+  }
 }
 
 async function tryPulse(method: string, path: string, raw?: string, ms = 4000): Promise<{ status: number; json: unknown } | null> {
+  if (method === "GET" && Date.now() < pulseGetDownUntil) return null;
   try {
     const r = await fetch(`${PULSE}${path}`, {
       method,
@@ -382,9 +507,21 @@ async function tryPulse(method: string, path: string, raw?: string, ms = 4000): 
       body: method === "GET" ? undefined : raw,
       signal: AbortSignal.timeout(ms),
     });
+    if (method === "GET" && r.status >= 400) {
+      pulseGetDownUntil = Date.now() + 4000;
+      return { status: r.status, json: null };
+    }
     const text = await r.text();
-    return { status: r.status, json: JSON.parse(text) };
+    try {
+      const json = JSON.parse(text);
+      if (r.ok) pulseGetDownUntil = 0;
+      return { status: r.status, json };
+    } catch {
+      if (method === "GET") pulseGetDownUntil = Date.now() + 4000;
+      return null;
+    }
   } catch {
+    pulseGetDownUntil = Date.now() + 4000;
     return null;
   }
 }
@@ -399,7 +536,7 @@ function pulseControlPlugin(): Plugin {
         const rawUrl = req.url ?? "";
         const pathOnly = rawUrl.split("?", 1)[0] ?? "";
         const method = (req.method ?? "GET").toUpperCase();
-        const handled = ["/stats.json", "/stats", "/progress.json", "/progress", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/user-presets.json"];
+        const handled = ["/stats.json", "/stats", "/progress.json", "/progress", "/system.json", "/control.json", "/connections.json", "/config.json", "/connection.json", "/universe.json", "/live-stats.json", "/hist-calc.json", "/hist-test.json", "/user-presets.json"];
         if (!handled.includes(pathOnly)) {
           next();
           return;
@@ -412,10 +549,13 @@ function pulseControlPlugin(): Plugin {
             jsonRes(res as ServerResponse, 405, { ok: false, detail: "GET only" });
             return;
           }
-          const result = await tryPulse("GET", rawUrl, undefined, 8000);
+          const result = await tryPulse("GET", rawUrl, undefined, 1500);
           const conn = new URL(rawUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
-          jsonRes(res as ServerResponse, result?.status === 200 ? 200 : 503,
-            result?.status === 200 ? result.json : statsFallback(conn));
+          if (result?.status === 200 && result.json && typeof result.json === "object") {
+            jsonRes(res as ServerResponse, 200, result.json);
+            return;
+          }
+          jsonRaw(res as ServerResponse, 200, statsFallbackJson(conn));
           return;
         }
         if (pathOnly === "/progress.json" || pathOnly === "/progress") {
@@ -493,23 +633,36 @@ function pulseControlPlugin(): Plugin {
             // default would fall through to the legacy-CTS fallback on every
             // start/stop and report bogus state. Control calls get 30s.
             const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000);
-            if (pulse) {
+            if (pulse && pulse.status < 400) {
               jsonRes(res as ServerResponse, pulse.status, pulse.json);
               return;
             }
-            const out = await applyCtsControl(conn, action);
-            jsonRes(res as ServerResponse, out.ok ? 200 : 400, {
-              ok: out.ok,
-              detail: out.detail,
-              conn,
-              action,
-              via: "cts",
-            });
+            try {
+              const out = await applyCtsControl(conn, action);
+              jsonRes(res as ServerResponse, out.ok ? 200 : 400, {
+                ok: out.ok,
+                detail: out.detail,
+                conn,
+                action,
+                via: "cts",
+              });
+            } catch {
+              jsonRes(res as ServerResponse, 200, {
+                ok: false,
+                detail: "pulse sidecar offline — control stays local",
+                conn,
+                action,
+                via: "offline",
+                halted: true,
+              });
+            }
             return;
           }
           if (pathOnly === "/connections.json") {
             const pulse = await tryPulse("GET", "/connections.json");
-            jsonRes(res as ServerResponse, 200, pulse?.json ?? connectionsFallback());
+            const body = pulse?.json as { types?: unknown; lanes?: unknown } | null;
+            const ok = Boolean(pulse && pulse.status < 400 && body && (Array.isArray(body.types) || Array.isArray(body.lanes)));
+            jsonRes(res as ServerResponse, 200, ok ? pulse!.json : connectionsFallback());
             return;
           }
           if (pathOnly === "/universe.json") {
@@ -554,20 +707,21 @@ function pulseControlPlugin(): Plugin {
               const pulse = await tryPulse("GET", `/hist-calc.json?conn=${encodeURIComponent(conn)}`);
               const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
               if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
-                jsonRes(res as ServerResponse, pulse.status, pulse.json);
+                jsonRes(res as ServerResponse, pulse.status, mergeForcedConfigs(pulse.json as Record<string, unknown>, conn));
                 return;
               }
               const laneId = conn === "vst" || conn === "bingx-x02" ? "bingx-x02" : "bingx-x01";
               const local = join(process.cwd(), `server/pulse/hist-calc-${laneId}.json`);
               if (existsSync(local)) {
                 try {
-                  jsonRes(res as ServerResponse, 200, JSON.parse(readFileSync(local, "utf8")));
+                  jsonRes(res as ServerResponse, 200, mergeForcedConfigs(JSON.parse(readFileSync(local, "utf8")) as Record<string, unknown>, conn));
                   return;
                 } catch {
                   /* fall through */
                 }
               }
-              jsonRes(res as ServerResponse, 200, {
+              const forced = readLocalForced(conn);
+              jsonRes(res as ServerResponse, 200, mergeForcedConfigs({
                 ok: true,
                 phase: "idle",
                 pct: 0,
@@ -578,7 +732,8 @@ function pulseControlPlugin(): Plugin {
                 rows: [],
                 kinds: {},
                 bySymbol: [],
-              });
+                ...(forced ? { forcedConfigs: forced, forcedOnly: true } : {}),
+              }, conn));
               return;
             }
             if (method !== "POST") {
@@ -601,6 +756,115 @@ function pulseControlPlugin(): Plugin {
                 independent: false,
               });
 
+            return;
+          }
+          if (pathOnly === "/hist-test.json") {
+            const histLatchDir = () => join(process.cwd(), "reports", "hist-test");
+            const writeHistLatch = (kind: "stop" | "pause" | "clear") => {
+              const dir = histLatchDir();
+              try { mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+              const stopF = join(dir, "STOP");
+              const pauseF = join(dir, "PAUSE");
+              if (kind === "stop") {
+                try { writeFileSync(stopF, "1"); } catch { /* ignore */ }
+                try { unlinkSync(pauseF); } catch { /* ignore */ }
+              } else if (kind === "pause") {
+                try { writeFileSync(pauseF, "1"); } catch { /* ignore */ }
+                try { unlinkSync(stopF); } catch { /* ignore */ }
+              } else {
+                try { unlinkSync(stopF); } catch { /* ignore */ }
+                try { unlinkSync(pauseF); } catch { /* ignore */ }
+              }
+            };
+            const localJob = () => {
+              const dest = join(process.cwd(), "public/hist-test.json");
+              let job: Record<string, unknown> = { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.1, ready: false, running: false, paused: false, independent: true, symbols: [] };
+              if (existsSync(dest)) {
+                try { job = { ...job, ...(JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>) }; } catch { /* fall through */ }
+              }
+              const phase = String(job.phase || "");
+              if ((job.ready === true || phase === "ready") && phase !== "paused" && phase !== "stopped") {
+                const pct = Number(job.pct);
+                if (!Number.isFinite(pct) || pct < 99) job.pct = 100;
+                const positives = (Array.isArray(job.positive) ? job.positive : Array.isArray(job.symbols) ? job.symbols : []) as unknown[];
+                if (job.filled == null && positives.length) job.filled = positives.length;
+              }
+              const dir = join(process.cwd(), "reports", "hist-test");
+              if (existsSync(join(dir, "STOP"))) {
+                return { ...job, phase: "stopped", running: false, paused: false, detail: "historic test stopped" };
+              }
+              if (existsSync(join(dir, "PAUSE"))) {
+                const phase = String(job.phase || "");
+                const runningPhases = ["queued", "rank", "evaluate", "fetch", "replay", "score"];
+                const resumePhase = runningPhases.includes(phase) ? phase : (job.resumePhase || "evaluate");
+                return { ...job, phase: "paused", paused: true, running: runningPhases.includes(String(resumePhase)), resumePhase, detail: "historic test paused" };
+              }
+              return job;
+            };
+            if (method === "GET") {
+              const pulse = await tryPulse("GET", "/hist-test.json");
+              const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+              if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+                jsonRes(res as ServerResponse, pulse.status, pulse.json);
+                return;
+              }
+              jsonRes(res as ServerResponse, 200, localJob());
+              return;
+            }
+            if (method !== "POST") {
+              jsonRes(res as ServerResponse, 405, { ok: false, detail: "POST only" });
+              return;
+            }
+            const raw = await readReqBody(req);
+            const pulse = await tryPulse("POST", "/hist-test.json", raw, 8000);
+            const pj = (pulse?.json ?? null) as { phase?: string; ok?: boolean } | null;
+            if (pulse && pulse.status < 400 && pj && (pj.phase || pj.ok)) {
+              jsonRes(res as ServerResponse, pulse.status, pulse.json);
+              return;
+            }
+            let body: Record<string, unknown> = {};
+            try { body = JSON.parse(raw || "{}") as Record<string, unknown>; } catch { body = {}; }
+            const action = String(body.action || "start").toLowerCase();
+            if (action === "stop") {
+              writeHistLatch("stop");
+              spawn("python3", ["scripts/run_hist_test.py", "--stop"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const job = { ...localJob(), phase: "stopped", running: false, paused: false, detail: "historic test stopped" };
+              try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(job)); } catch { /* ignore */ }
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            if (action === "pause") {
+              writeHistLatch("pause");
+              spawn("python3", ["scripts/run_hist_test.py", "--pause"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const job = { ...localJob(), phase: "paused", running: Boolean(localJob().running), paused: true, detail: "historic test paused" };
+              try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(job)); } catch { /* ignore */ }
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            if (action === "resume") {
+              writeHistLatch("clear");
+              spawn("python3", ["scripts/run_hist_test.py", "--resume"], { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
+              const prev = localJob();
+              const job = { ...prev, phase: String(prev.resumePhase || prev.phase || "evaluate"), running: true, paused: false, detail: "historic test resumed" };
+              try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(job)); } catch { /* ignore */ }
+              jsonRes(res as ServerResponse, 200, job);
+              return;
+            }
+            const hours = Math.max(4, Math.min(64, Math.round(Number(body.hours) || 20)));
+            const minPf = Number(body.minPf || body.histTestMinPf || 1.1);
+            const count = Math.max(1, Math.min(200, Math.round(Number(body.symbolCap || body.targetCount || body.count) || 20)));
+            writeHistLatch("clear");
+            const queued = {
+              ok: true, phase: "queued", pct: 1, ready: false, running: true, paused: false, independent: true,
+              hours, minPf, positivePf: minPf, targetCount: count,
+              detail: `queued · ${hours}h · min PF ${minPf} · fill ${count}`,
+              symbols: [],
+            };
+            try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(queued)); } catch { /* ignore */ }
+            spawn("python3", ["scripts/run_hist_test.py", "--hours", String(hours), "--min-pf", String(minPf), "--count", String(count)], {
+              cwd: process.cwd(), detached: true, stdio: "ignore",
+            }).unref();
+            jsonRes(res as ServerResponse, 200, queued);
             return;
           }
           if (pathOnly === "/user-presets.json") {
@@ -639,7 +903,15 @@ function pulseControlPlugin(): Plugin {
           if (pathOnly === "/config.json") {
             if (method === "GET") {
               const pulse = await tryPulse("GET", `/config.json?conn=${encodeURIComponent(conn)}`);
-              jsonRes(res as ServerResponse, 200, pulse?.json ?? configFallback(conn));
+              const body = pulse?.json as Record<string, unknown> | null;
+              const ok = Boolean(
+                pulse &&
+                  pulse.status < 400 &&
+                  body &&
+                  typeof body === "object" &&
+                  (body.overlay != null || body.cts != null || Array.isArray(body.lanes)),
+              );
+              jsonRes(res as ServerResponse, 200, mergeOverlayForced((ok ? body : configFallback(conn)) as Record<string, unknown>, conn));
               return;
             }
             if (method !== "POST") {
@@ -771,21 +1043,54 @@ function statsFallback(conn: string): Record<string, unknown> {
       "Live pulse sidecar unreachable. Restart grok-pulse@bingx-x01 on the VPS (SSH). Overlay is ready: all USDT-M, 0=unlimited, Block+DCA multi-add.",
   };
   if (conn === "live") {
-    return { ...base, connType: "live", connection: "bingx-x01", unit: "USDT", mode: "LIVE_MAINNET" };
+    return {
+      ...base,
+      ...snap,
+      ...liveLane,
+      connType: "live",
+      connection: "bingx-x01",
+      unit: "USDT",
+      mode: "LIVE_MAINNET",
+      halted: true,
+      running: false,
+      paused: false,
+      haltReason: "sidecar-down",
+      stale: true,
+    };
   }
   if (conn === "vst") {
-    return { ...base, connType: "vst", connection: "bingx-x02", unit: "VST", mode: "VST_DEMO", exchange: "BingX VST" };
+    return {
+      ...base,
+      ...snap,
+      ...vstLane,
+      connType: "vst",
+      connection: "bingx-x02",
+      unit: "VST",
+      mode: "VST_DEMO",
+      exchange: "BingX VST",
+      halted: true,
+      running: false,
+      paused: false,
+      haltReason: "sidecar-down",
+      stale: true,
+    };
   }
   return {
+    ...snap,
     ...base,
+    ...snap,
     connType: "overall",
     connection: "overall",
-    unit: "MIXED",
+    unit: String(snap.unit || "MIXED"),
     lanes: [liveLane, vstLane],
     equityLive: liveLane.equity,
     equityVst: vstLane.equity,
     sessionPnlLive: liveLane.sessionPnl,
     sessionPnlVst: vstLane.sessionPnl,
+    halted: true,
+    haltReason: "sidecar-down",
+    running: false,
+    stale: true,
   };
 }
 
@@ -837,26 +1142,13 @@ function pulseProxy(path: string): Record<string, ProxyOptions> {
           }
           if (requestUrl.startsWith("/stats.json")) {
             try {
-              const body = readFileSync(join(process.cwd(), "public/live-stats.json"), "utf8");
-              JSON.parse(body);
-              r.writeHead(200, { "Content-Type": "application/json" });
-              r.end(body);
+              const conn = new URL(requestUrl, "http://127.0.0.1").searchParams.get("conn") || "overall";
+              jsonRaw(r, 200, statsFallbackJson(conn));
               return;
             } catch {
-              /* fall through */
+              jsonRaw(r, 200, statsFallbackJson("overall"));
+              return;
             }
-            // No synced snapshot either: answer 200 with a full halted-desk
-            // payload so the desk renders halted lanes + identity instead of
-            // polling forever behind a "Loading…" placeholder.
-            let conn = "overall";
-            try {
-              conn = new URL(String(req.url || ""), "http://127.0.0.1").searchParams.get("conn") || "overall";
-            } catch {
-              /* keep overall */
-            }
-            r.writeHead(200, { "Content-Type": "application/json" });
-            r.end(JSON.stringify(statsFallback(conn)));
-            return;
           }
           r.writeHead(503, { "Content-Type": "application/json" });
           r.end(

@@ -29,8 +29,8 @@ function eventRows(stats: LiveStats | null, activity: ActivitySummary): Activity
 
 function statusTone(status: string): string {
   const normalized = status.toLowerCase();
-  if (["error", "rejected", "discrepant", "blocked"].includes(normalized)) return "text-danger";
-  if (["pending", "selected"].includes(normalized)) return "text-warn";
+  if (["error", "rejected", "discrepant"].includes(normalized)) return "text-danger";
+  if (["pending", "selected", "blocked"].includes(normalized)) return "text-warn";
   if (["confirmed", "filled", "recovered", "qualified"].includes(normalized)) return "text-primary";
   return "text-muted";
 }
@@ -89,7 +89,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
         <Metric label="Fills" value={activity.fillCount ?? 0} />
         <Metric label="Controls" value={activity.protectionEventCount ?? 0} />
         <Metric label="Closes" value={activity.closeEventCount ?? 0} />
-        <Metric label="Errors" value={activity.errorCount ?? 0} tone="danger" />
+        <Metric label="Errors" value={activity.errorCount ?? 0} tone={(activity.errorCount ?? 0) > 0 ? "danger" : undefined} />
         <Metric label="Duplicates" value={activity.duplicateCount ?? 0} tone="warn" />
       </div>
 
