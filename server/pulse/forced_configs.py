@@ -50,6 +50,32 @@ def select_best(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for i, row in enumerate(sorted(groups[key], key=rank_key)[:TOP_N or None])]
 
 
+ENGINE_MIN_PF = 1.10
+
+
+def engine_admitted(row: Dict[str, Any], min_pf: float = ENGINE_MIN_PF, *, last_n: int = 30) -> bool:
+    """True when the row would pass the live/VST admission gate (classic PF > 1.10)."""
+    return valid_candidate(dict(row), min_pf, control_n=0, last_n=last_n)
+
+
+def select_symbol_winners(rows: Sequence[Dict[str, Any]], min_pf: float = ENGINE_MIN_PF, *, last_n: int = 30) -> Dict[str, Dict[str, Any]]:
+    """One winner per forced symbol. Prefer engine-admitted rows, then throughput."""
+    admitted: List[Dict[str, Any]] = []
+    eligible: List[Dict[str, Any]] = []
+    for row in rows:
+        if not row.get("eligible"):
+            continue
+        eligible.append(row)
+        if engine_admitted(row, min_pf, last_n=last_n):
+            admitted.append(row)
+    best: Dict[str, Dict[str, Any]] = {}
+    for row in admitted or eligible:
+        cur = best.get(row["symbol"])
+        if cur is None or rank_key(row) < rank_key(cur):
+            best[row["symbol"]] = row
+    return best
+
+
 def training_window(row, last_n=30):
     """Re-evaluate only this Set's retained closes; no additional sample floor."""
     values = row.get("trainingResults", [])[-max(1, min(75, int(last_n))):]

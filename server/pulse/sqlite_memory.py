@@ -417,6 +417,11 @@ class MemoryStatisticsStore(OwnerMixin, StatisticsStore):
         self.journal_path = self.directory / "statistics.redo"
         self.journal_path.touch(mode=0o600, exist_ok=True)
         self.journal_path.chmod(0o600)
+        # Memory owner: keep the journal in RAM and give SQLite a 16 MiB cache.
+        # Disk mode stays at the 1 MiB WAL cache from StatisticsStore.
+        self.db.execute("PRAGMA journal_mode=MEMORY")
+        self.db.execute("PRAGMA temp_store=MEMORY")
+        self.db.execute("PRAGMA cache_size=-16384")
         self.checkpoint(force=True)
         self.db.journal = self.journal_path
         self.db.before_transaction = self._before_transaction

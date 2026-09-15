@@ -13,6 +13,7 @@ export type ConnLane = {
   equity?: number;
   openCount?: number;
   exchangeOpenCount?: number;
+  livePositionCount?: number;
   simOpenCount?: number;
   simUPnl?: number;
   alive?: boolean;
@@ -36,6 +37,8 @@ export type ConnLane = {
   entryPolicy?: string;
   executionEvidence?: Record<string, unknown>;
   symbolCount?: number;
+  symbolCap?: number;
+  maxOpen?: number;
 };
 
 export type ConnCatalog = {

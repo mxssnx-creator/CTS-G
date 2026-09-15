@@ -332,6 +332,7 @@ export type LiveStats = {
   logicalPositionCap?: number;
   symbols: string[];
   symbolCount?: number;
+  symbolCap?: number;
   symbolMax?: number;
   scanMs?: number;
   rssMb?: number;
@@ -421,6 +422,7 @@ export type LiveStats = {
   tests?: Array<{name:string;pass:boolean;detail:string;connection?:string}>;
   open: LiveOpen[];
   closed: LiveClosed[];
+  closedN?: number;
   signals: Array<Record<string, unknown>>;
   prices: Record<string, number | undefined>;
   block?: {
@@ -431,6 +433,8 @@ export type LiveStats = {
     pauseCountRatio: number;
     activeLive: boolean;
     activeReal: boolean;
+    overall?: boolean;
+    overallReal?: Array<{ symbol: string; side: string; pf: number; n: number }>;
     defaultMinPF: number;
     allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
     countN?: number;
@@ -440,6 +444,8 @@ export type LiveStats = {
       baseQty: number;
       confirmedAdd: number;
       aggregate: number;
+      realPf?: number;
+      realN?: number;
       counts: Array<{
         n: number;
         kind: string;
@@ -448,6 +454,7 @@ export type LiveStats = {
         requested: number;
         minPF: number;
         obsPF: number;
+        internPf?: number;
         pass: boolean;
         paused: boolean;
         satisfied: boolean;
@@ -519,6 +526,8 @@ export type LiveStats = {
       allCounts?: Array<{ n: number; inc: number; targetAdd: number; targetBlock?: number; minPF: number }>;
       liveLanes?: number;
       activeReal?: boolean;
+      overall?: boolean;
+      overallReal?: Array<{ symbol?: string; side?: string; pf?: number; n?: number }>;
     };
     sets?: {
       families?: { base?: number; trail?: number };
@@ -655,6 +664,8 @@ export type LiveStats = {
     liveTotalOrderCount?: number;
     simOpenCount?: number;
     simUPnl?: number;
+    maxOpen?: number;
+    symbolCap?: number;
     wins: number;
     losses: number;
     sessionPnl: number;
@@ -1011,6 +1022,11 @@ export type LiveStats = {
   };
   byIndication?: Record<string, KindStat>;
   byStrategy?: Record<string, StrategyStat>;
+  pfStats?: Record<string, { pf?: number; n?: number; wr?: number; evalN?: number; validated?: boolean }>;
+  withWithout?: Record<string, { with?: { pf?: number; n?: number; wr?: number; validated?: boolean }; without?: { pf?: number; n?: number; wr?: number; validated?: boolean } }>;
+  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean }>;
+  successfulConfigs?: Array<{ indication?: string; config?: string; strategy?: string; setId?: string; pf?: number; n?: number; wr?: number; validated?: boolean }>;
+  combo?: { engine?: string; journal?: string; cells?: number; successfulCount?: number; validatedCount?: number };
   klinesTf?: Record<string, number>;
   cts?: Record<string, unknown>;
 };
@@ -1040,6 +1056,45 @@ export function pickView(stats: LiveStats | null, conn: string): LiveStats | nul
   const sliced = viewFromSnapshot(stats, conn);
   if (sliced) return sliced;
   return null;
+}
+
+/** Cheap identity for poll skip — omits wall-clock `now` so a frozen snapshot does not re-render. */
+export function statsTickKey(s: LiveStats): string {
+  return [
+    Number(s.running),
+    Number(s.halted),
+    Number(s.paused),
+    s.haltReason || "",
+    s.openCount ?? "",
+    s.wins ?? "",
+    s.losses ?? "",
+    s.equity ?? "",
+    s.unrealized ?? "",
+    s.sessionPnl ?? "",
+    s.systemPnl ?? "",
+    s.progressCycle ?? "",
+    s.progressPct ?? "",
+    s.closedN ?? s.closed?.length ?? "",
+    s.sets?.activeCount ?? "",
+    s.sets?.histFills ?? "",
+    s.block?.lanes?.length ?? "",
+    s.stale ? 1 : 0,
+  ].join("|");
+}
+
+export function statsUnchanged(prev: LiveStats | null | undefined, next: LiveStats | null | undefined): boolean {
+  if (!prev || !next) return false;
+  return statsTickKey(prev) === statsTickKey(next);
+}
+
+export function deskPollMs(
+  stats?: { halted?: boolean; running?: boolean; stale?: boolean; haltReason?: string | null } | null,
+  hidden = false,
+): number {
+  if (hidden) return 8000;
+  if (stats?.halted && (stats.stale || stats.haltReason === "sidecar-down")) return 12000;
+  if (stats?.running && !stats.halted) return 3500;
+  return 5000;
 }
 
 function cidPrefix(conn: string): string {
@@ -1128,6 +1183,8 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     liveTotalOrderCount: lane.liveTotalOrderCount,
     simOpenCount: lane.simOpenCount,
     simUPnl: lane.simUPnl,
+    maxOpen: lane.maxOpen ?? 0,
+    symbolCap: lane.symbolCap,
     open,
     closed,
     symbolCount: lane.symbolCount,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
-import { fetchLiveStats, pickView, viewFromSnapshot, type LiveStats } from "./live-stats.ts";
+import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, type LiveStats } from "./live-stats.ts";
 import { fetchConnections } from "./connections.ts";
 import { fetchCtsBundle } from "./config-model.ts";
 
@@ -127,6 +127,16 @@ test("settings are usable while the statistics request remains stalled", async (
   assert.equal(calls[0].signal?.aborted, false);
   controller.abort();
   assert.equal(await stats, null);
+});
+
+test("frozen sidecar-down snapshots do not retrigger renders and poll slower", () => {
+  const a = { running: false, halted: true, haltReason: "sidecar-down", stale: true, equity: 1, wins: 2, openCount: 0 } as LiveStats;
+  const b = { ...a, now: 99 } as LiveStats;
+  assert.equal(statsUnchanged(a, b), true);
+  assert.equal(statsUnchanged(a, { ...a, wins: 3 }), false);
+  assert.equal(deskPollMs(a), 12000);
+  assert.equal(deskPollMs(a, true), 8000);
+  assert.equal(deskPollMs({ running: true, halted: false }), 3500);
 });
 
 test("stalled config reads time out and malformed settings cannot replace good values", async (t) => {

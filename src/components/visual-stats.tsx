@@ -143,26 +143,30 @@ export function Meter({
   max = 100,
   suffix = "%",
   danger,
+  warn,
 }: {
   label: string;
   value: number;
   max?: number;
   suffix?: string;
   danger?: boolean;
+  warn?: boolean;
 }) {
   const pct = Math.max(0, Math.min(100, (value / max) * 100));
+  const tone = danger ? "text-danger" : warn ? "text-warn" : "text-fg";
+  const bar = danger ? "bg-danger" : warn ? "bg-warn" : "bg-primary";
   return (
     <div>
       <div className="mb-1.5 flex justify-between font-mono text-xs text-muted">
         <span>{label}</span>
-        <span className={danger ? "text-danger" : "text-fg"}>
+        <span className={tone}>
           {value.toFixed(1)}
           {suffix}
         </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-bg2">
         <div
-          className={`h-full rounded-full ${danger ? "bg-danger" : "bg-primary"}`}
+          className={`h-full rounded-full ${bar}`}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -212,7 +216,7 @@ export function SlTpTape({ p }: { p: LiveOpen }) {
   return (
     <div className="relative mt-3 h-8">
       <div className="absolute top-3 right-0 left-0 h-px bg-border" />
-      <Tick left={x(sl)} label="SL" tone="danger" />
+      <Tick left={x(sl)} label="SL" tone="muted" />
       <Tick left={x(p.entry)} label="IN" tone="muted" />
       <Tick left={x(mark)} label="PX" tone="fg" />
       <Tick left={x(tp)} label="TP" tone="primary" />
@@ -261,6 +265,7 @@ export function BlockHeat({ stats }: { stats: LiveStats }) {
             </span>
             <span className="font-mono text-xs text-muted">
               base {lane.baseQty} · +{lane.confirmedAdd} → {lane.aggregate}
+              {lane.realN != null ? ` · Real ${Number(lane.realPf ?? 0).toFixed(2)}/${lane.realN}` : ""}
             </span>
           </div>
           <div className="grid grid-cols-6 gap-1.5 sm:grid-cols-12">
@@ -274,7 +279,7 @@ export function BlockHeat({ stats }: { stats: LiveStats }) {
                       ? "border-border text-faint"
                       : c.pass
                         ? "border-border bg-bg2 text-fg"
-                        : "border-danger/40 text-danger"
+                        : "border-border text-muted"
                 }`}
                 title={`count ${c.n} minPF ${c.minPF} req ${c.requested}`}
               >

@@ -26,6 +26,11 @@ export function DeskShell({
 }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const { conn, setConn, catalog } = useConnection();
+  const lane = catalog?.types.find((x) => x.type === conn);
+  const engineLive = live ?? (lane ? Boolean(lane.running && !lane.halted && !lane.paused) : undefined);
+  const enginePaused = paused ?? (lane ? Boolean(lane.paused) : undefined);
+  const engineHalted = halted ?? (lane ? Boolean(lane.halted) : undefined);
+  const engineAlive = alive ?? (lane ? lane.alive !== false : undefined);
   const onDesk = path === "/";
   const onResults = path.startsWith("/results");
   const onSettings = path.startsWith("/settings");
@@ -131,12 +136,12 @@ export function DeskShell({
               <NavLink to="/system" on={onSystem} icon={<Blocks className="size-4" />} label="System" />
               <NavLink to="/settings" on={onSettings} icon={<SlidersHorizontal className="size-4" />} label="Settings" />
             </nav>
-            <EngineControls conn={conn} live={live} paused={paused} />
+            <EngineControls conn={conn} live={engineLive} paused={enginePaused} />
             <div className="flex items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2">
-              <span className={`size-2.5 rounded-full ${live && !halted && !paused ? "live-dot" : ""} ${engineDotClass({ running: live, halted, paused, alive })}`} />
+              <span className={`size-2.5 rounded-full ${engineLive && !engineHalted && !enginePaused ? "live-dot" : ""} ${engineDotClass({ running: engineLive, halted: engineHalted, paused: enginePaused, alive: engineAlive })}`} />
               <div className="leading-tight">
-                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: live, halted, paused, mode }).sub}</div>
-                <div className="text-sm font-medium">{engineStatusLabel({ running: live, halted, paused, mode }).text}</div>
+                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).sub}</div>
+                <div className="text-sm font-medium">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).text}</div>
               </div>
             </div>
           </div>

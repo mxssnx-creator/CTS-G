@@ -134,6 +134,26 @@ export type ForcedConfigRow = {
   evaluationWindows?: Record<string, EvaluationWindow>;
   liveN?: number; livePf?: number; liveStatus?: string; liveEnabled?: boolean;
   measuredCosts?: boolean; openUnresolved?: number;
+  variant?: string;
+};
+
+export type ForcedBestRow = {
+  id?: string;
+  symbol: string;
+  indication?: string;
+  direction?: string;
+  tpPct: number;
+  slPct: number;
+  slRatio?: number;
+  trainPf?: number;
+  pf?: number;
+  holdoutPf?: number;
+  tradesPerHour?: number;
+  variant?: string;
+  settingsKey?: string;
+  trainN?: number;
+  n?: number;
+  eligible?: boolean;
 };
 
 export type ForcedConfigSummary = {
@@ -142,6 +162,14 @@ export type ForcedConfigSummary = {
   minPf?: number; updatedAt?: number; baselineOnly?: boolean; mainnetReady?: boolean;
   connection?: string; trialMode?: boolean;
   controlMinTrades?: number; controlMinPf?: number; trainingMinTrades?: number;
+  variant?: string;
+  variantSettings?: Record<string, number | boolean | string>;
+  succeeded?: string[];
+  missing?: string[];
+  hours?: number;
+  bestBySymbol?: Record<string, ForcedBestRow> | ForcedBestRow[];
+  forcedBest?: Record<string, ForcedBestRow> | ForcedBestRow[];
+  engineMinPf?: number;
 };
 
 export type HistCalcTimings = {
@@ -170,6 +198,7 @@ export type HistCalcTaskStatus = {
 
 export type HistCalcJob = {
   forcedConfigs?: ForcedConfigSummary;
+  forcedOnly?: boolean;
   ok?: boolean;
   phase: string;
   pct: number;
@@ -212,6 +241,11 @@ export type HistCalcJob = {
   bySymbol?: HistCalcSymbol[];
   byDirection?: Record<string, HistCalcDirection>;
   byStrategy?: Record<string, HistCalcStrategy>;
+  pfStats?: Record<string, HistCalcStrategy>;
+  withWithout?: Record<string, { with?: HistCalcStrategy; without?: HistCalcStrategy }>;
+  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean }>;
+  successfulConfigs?: Array<{ indication?: string; config?: string; strategy?: string; setId?: string; pf?: number; n?: number; wr?: number; validated?: boolean; slRatio?: number; step?: number; trailKey?: string }>;
+  combo?: { engine?: string; journal?: string; cells?: number; successfulCount?: number; validatedCount?: number };
   kinds?: Record<string, HistCalcKind>;
   evaluationWindows?: {
     windows?: number[];
@@ -264,6 +298,7 @@ export type HistCalcJob = {
     indication?: boolean;
     strategy?: boolean;
     config?: boolean;
+    combo?: boolean;
     costSubtracted?: boolean;
     async?: boolean;
     partial?: boolean;
@@ -328,11 +363,44 @@ export function hasCalcSnapshot(job: HistCalcJob | null | undefined): boolean {
   );
 }
 
+export function forcedBestBySymbol(data?: ForcedConfigSummary | null): ForcedBestRow[] {
+  const stored = data?.forcedBest || data?.bestBySymbol;
+  if (Array.isArray(stored) && stored.length) {
+    return [...stored].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+  if (stored && typeof stored === "object") {
+    const fromMap = Object.entries(stored).map(([symbol, row]) => ({ ...row, symbol: row.symbol || symbol }));
+    if (fromMap.length) return fromMap.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+  const ENGINE = data?.engineMinPf && data.engineMinPf > 0 ? data.engineMinPf : 1.1;
+  const best = new Map<string, ForcedConfigRow>();
+  for (const row of data?.rows ?? []) {
+    if (!row.eligible) continue;
+    const cur = best.get(row.symbol);
+    if (!cur) {
+      best.set(row.symbol, row);
+      continue;
+    }
+    const rowPass = row.trainPf > ENGINE;
+    const curPass = cur.trainPf > ENGINE;
+    if (rowPass !== curPass) {
+      if (rowPass) best.set(row.symbol, row);
+      continue;
+    }
+    const tph = row.tradesPerHour - cur.tradesPerHour;
+    const sl = row.slPct - cur.slPct;
+    if (tph > 0 || (tph === 0 && sl < 0) || (tph === 0 && sl === 0 && row.trainPf > cur.trainPf)) {
+      best.set(row.symbol, row);
+    }
+  }
+  return [...best.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
 export function calcPollMs(job: HistCalcJob | null | undefined, hidden = false): number {
   if (hidden) return 8000;
   if (calcIsRunning(job?.phase)) return 1200;
   if (job?.stale || job?.ready || job?.phase === "ready" || (job?.nextRunAt && job.nextRunAt * 1000 > Date.now())) {
-    return 4000;
+    return 8000;
   }
   return 8000;
 }
@@ -365,10 +433,47 @@ export async function fetchHistCalc(connection?: string, signal?: AbortSignal): 
     const query = connection ? `?conn=${encodeURIComponent(connection)}` : "";
     const r = await fetch(`/hist-calc.json${query}`, { cache: "no-store", signal });
     if (!r.ok) return { phase: "idle", pct: 0, detail: `status ${r.status}` };
-    return (await r.json()) as HistCalcJob;
+    const job = (await r.json()) as HistCalcJob;
+    const local = await fetchLocalForced(signal);
+    if (local) {
+      if (!(job.forcedConfigs?.rows?.length)) job.forcedConfigs = local;
+      else {
+        job.forcedConfigs = {
+          ...job.forcedConfigs,
+          succeeded: local.succeeded ?? job.forcedConfigs.succeeded,
+          missing: local.missing ?? job.forcedConfigs.missing,
+          variant: local.variant ?? job.forcedConfigs.variant,
+          variantSettings: local.variantSettings ?? job.forcedConfigs.variantSettings,
+          bestBySymbol: local.bestBySymbol ?? job.forcedConfigs.bestBySymbol,
+          forcedBest: local.forcedBest ?? job.forcedConfigs.forcedBest,
+          engineMinPf: local.engineMinPf ?? job.forcedConfigs.engineMinPf,
+        };
+      }
+    }
+    return job;
   } catch (e) {
     if (signal?.aborted) return { phase: "idle", pct: 0, detail: "aborted" };
     return { phase: "error", pct: 0, detail: String(e), error: String(e) };
+  }
+}
+
+let localForcedCache: ForcedConfigSummary | null | undefined;
+
+async function fetchLocalForced(signal?: AbortSignal): Promise<ForcedConfigSummary | null> {
+  if (localForcedCache !== undefined) return localForcedCache;
+  try {
+    const r = await fetch("/forced-configs.json", { cache: "no-store", signal });
+    if (!r.ok) {
+      localForcedCache = null;
+      return null;
+    }
+    const parsed = (await r.json()) as ForcedConfigSummary;
+    localForcedCache = Array.isArray(parsed?.rows) && parsed.rows.length ? parsed : null;
+    return localForcedCache;
+  } catch {
+    if (signal?.aborted) return null;
+    localForcedCache = null;
+    return null;
   }
 }
 

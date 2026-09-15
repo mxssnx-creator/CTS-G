@@ -1,5 +1,5 @@
 {
-  "wallS": 85.029,
+  "wallS": 146.237,
   "pass": 24,
   "fail": 0,
   "failed": [],
@@ -8,12 +8,12 @@
     "replayMode": "oneshot",
     "workers": 2,
     "rowCount": 14040,
-    "validatedCount": 2169,
+    "validatedCount": 2172,
     "product": 4680,
     "relative": {
       "sets": 4680,
       "ranked": 4680,
-      "validated": 885,
+      "validated": 886,
       "packs": {
         "indications": 2340,
         "general": 2340
@@ -163,7 +163,7 @@
       "detail": {
         "sets": 4680,
         "ranked": 4680,
-        "validated": 885,
+        "validated": 886,
         "packs": {
           "indications": 2340,
           "general": 2340

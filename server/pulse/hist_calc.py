@@ -22,6 +22,7 @@ import urllib.request
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from combo_eval import evaluate_book as combo_evaluate
 from position_cost import (
     EVALUATION_WINDOWS,
     POSITIVE_PF,
@@ -315,6 +316,34 @@ PRESETS: List[Dict[str, Any]] = [
         },
     },
 ]
+_CONN_ALIASES = {
+    "live": "bingx-x01",
+    "mainnet": "bingx-x01",
+    "x01": "bingx-x01",
+    "bingx-x01": "bingx-x01",
+    "vst": "bingx-x02",
+    "demo": "bingx-x02",
+    "x02": "bingx-x02",
+    "bingx-x02": "bingx-x02",
+}
+
+RUNNING_PHASES = {
+    "initial",
+    "hourly",
+    "backfill",
+    "fetch",
+    "replay",
+    "score",
+    "score-refresh",
+    "gap",
+    "incremental",
+    "queued",
+    "partial",
+    "deferred",
+    "paused",
+}
+
+
 def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
     """Convert a requested evaluation window to bounded one-minute bars."""
     try:
@@ -327,7 +356,35 @@ def hours_to_bars(hours: Any, default: int = HOURS_DEFAULT) -> int:
 
 def _connection_id(connection: Optional[str] = None) -> str:
     raw = str(connection or os.environ.get("PULSE_CONN") or "bingx-x02").replace("connection:", "")
-    return "".join(ch for ch in raw if ch.isalnum() or ch in "._-") or "bingx-x02"
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in "._-") or "bingx-x02"
+    return _CONN_ALIASES.get(cleaned.lower(), cleaned)
+
+
+def job_is_running(job: Optional[Dict[str, Any]] = None, phase: Optional[str] = None) -> bool:
+    token = str(phase if phase is not None else (job or {}).get("phase") or "")
+    return token in RUNNING_PHASES
+
+
+def request_lookback(request: Optional[Dict[str, Any]], fallback: int = 2880) -> int:
+    """Resolve the 1m bar window from a settings/engine request.
+
+    Hours may live at the top level, inside ``options``, or as overlay
+    ``histLookbackBars``. A missing value keeps the current book lookback.
+    """
+    body = request if isinstance(request, dict) else {}
+    options = body.get("options") if isinstance(body.get("options"), dict) else {}
+    overlay = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
+    hours = body.get("hours")
+    if hours is None:
+        hours = options.get("hours")
+    if hours is None and overlay.get("histLookbackBars") is not None:
+        try:
+            return max(120, min(LOOKBACK_MAX, int(overlay.get("histLookbackBars"))))
+        except (TypeError, ValueError):
+            return max(120, min(LOOKBACK_MAX, int(fallback or 2880)))
+    if hours is None:
+        return max(120, min(LOOKBACK_MAX, int(fallback or 2880)))
+    return max(120, min(LOOKBACK_MAX, hours_to_bars(hours)))
 
 
 def forced_path(connection: Optional[str] = None) -> str:
@@ -460,6 +517,8 @@ def idle_job(connection: Optional[str] = None) -> Dict[str, Any]:
         "source": "",
         "shared": True,
         "independent": False,
+        "running": False,
+        "continuous": False,
         "independence": {
             "symbol": True,
             "direction": True,
@@ -529,6 +588,8 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     opt = default_options()
     opt["controlMinTrades"] = control_min_trades(body.get("controlMinTrades"))
     raw_hours = body.get("hours")
+    if raw_hours is None and isinstance(body.get("options"), dict):
+        raw_hours = body["options"].get("hours")
     if raw_hours is None and body.get("lookback") is not None:
         try:
             raw_hours = float(body["lookback"]) / BARS_PER_HOUR
@@ -1610,8 +1671,6 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
         "blockEnabled": bool(opt.get("stratBlock", True)),
         "dcaEnabled": bool(opt.get("stratDca", False)),
         "stratDca": bool(opt.get("stratDca", False)),
-        "blockVolumeRatio": 0.25,
-        "blockMaxStack": 6,
         "dcaStepDistancesPct": [1.2, 1.6, 2.0, 2.4],
         "dcaStepVolumeMultipliers": [1.5, 2.0, 2.3, 2.5],
         "dcaMaxSteps": 4,
@@ -1660,9 +1719,11 @@ def winner_patch(row: Optional[Dict[str, Any]], opt: Dict[str, Any], by_strat: O
     patch["stratBlock"] = True
     patch["dcaEnabled"] = bool(dca_ok)
     patch["stratDca"] = bool(dca_ok)
-    if block_ok:
-        patch["blockVolumeRatio"] = 0.25
-        patch["blockMaxStack"] = 6
+    # Desk volume (ratio / stack / factor) is an overlay setting, not a Set
+    # winner. Applying a hist result must not reset extra-size to 0.25/6.
+    for key in ("blockVolumeRatio", "blockMaxStack", "blockMaxVolumeMultiplier", "blockProfitFactorRatio", "volumeFactor"):
+        if key in opt and opt.get(key) is not None:
+            patch[key] = opt[key]
     return patch
 
 
@@ -2561,6 +2622,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 by_sym = sym_fut.result()
                 by_dir = dir_fut.result()
                 by_strat = strat_fut.result()
+        combo = combo_evaluate(book, min_pf=float(getattr(book, "min_pf", 1.1) or 1.1), cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
         by_step = step_rollup(book)
         rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
         listings = catalog_listings(book, ranked, symbols)
@@ -2601,6 +2663,11 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
             "bySymbol": by_sym,
             "byDirection": by_dir,
             "byStrategy": by_strat,
+            "pfStats": combo.get("pfStats") or {},
+            "withWithout": combo.get("withWithout") or {},
+            "comboMatrix": combo.get("matrix") or [],
+            "successfulConfigs": combo.get("successful") or [],
+            "combo": combo.get("meta") or {},
             "byStep": by_step,
             "listings": listings,
             "index": listings.get("indexById") or {},
@@ -2634,6 +2701,7 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 "indication": True,
                 "strategy": True,
                 "config": True,
+                "combo": True,
                 "slTp": True,
                 "costSubtracted": True,
                 "async": True,
@@ -2711,14 +2779,29 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
     requested_at = time.time()
     run_id = f"{cid}:{generation}:{int(requested_at * 1000)}"
     options = parse_options(body)
+    continuous = bool(body.get("continuous")) if "continuous" in body else False
+    if not continuous:
+        continuous = str(body.get("mode") or "").lower() in ("hourly", "continuous", "initial")
+    mode = str(body.get("mode") or ("hourly" if continuous else "manual")).lower().strip()
+    if mode in ("continuous", "auto"):
+        mode = "hourly"
+        continuous = True
+    overlay = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
+    refresh_s = body.get("refreshS")
+    if refresh_s is None:
+        refresh_s = overlay.get("histRefreshS")
     request = {
         **body,
         "connection": cid,
         "runId": run_id,
         "generation": generation,
-        "mode": str(body.get("mode") or "manual"),
+        "mode": mode,
+        "continuous": continuous,
+        "hours": options["hours"],
+        "refreshS": refresh_s,
         "requestedAt": requested_at,
         "options": options,
+        "overlay": overlay,
     }
     try:
         _atomic_write(req_path(cid), request)
@@ -2742,10 +2825,13 @@ def start_job(body: Optional[Dict[str, Any]] = None, connection: Optional[str] =
         "runId": run_id,
         "generation": generation,
         "mode": request["mode"],
+        "continuous": continuous,
+        "running": True,
+        "refreshS": refresh_s,
         "symbols": list(selected) if isinstance(selected, list) else [],
         "selectedSymbols": list(selected) if isinstance(selected, list) else [],
         "requestOptions": options,
-        "requestOverlay": dict(body.get("overlay")) if isinstance(body.get("overlay"), dict) else {},
+        "requestOverlay": dict(overlay),
         "stale": bool(current.get("ready") or current.get("stale")),
         "deferredReason": "awaiting running connection worker",
         "shared": True,
@@ -2802,6 +2888,8 @@ def apply_preset(preset_id: str) -> Optional[Dict[str, Any]]:
 
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
+    from combo_eval import self_test as combo_self_test
+    out.extend(combo_self_test())
 
     def rec(name: str, ok: bool, detail: str = "") -> None:
         out.append((name, bool(ok), str(detail)[:220]))
@@ -2844,6 +2932,25 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
     rec("hours-one-hour", hours_to_bars(1) == 60 and parse_options({"hours": 1})["hours"] == 1)
     rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 60)
+    rec("conn-alias-live", _connection_id("live") == "bingx-x01", _connection_id("live"))
+    rec("conn-alias-vst", _connection_id("vst") == "bingx-x02", _connection_id("vst"))
+    rec("conn-alias-mainnet", _connection_id("mainnet") == "bingx-x01")
+    rec("conn-alias-x02", _connection_id("x02") == "bingx-x02")
+    rec("running-partial", job_is_running(phase="partial") and job_is_running({"phase": "deferred"}))
+    rec("running-score-refresh", job_is_running(phase="score-refresh"))
+    rec("running-ready-false", not job_is_running(phase="ready") and not job_is_running(phase="idle"))
+    rec(
+        "lookback-from-options-hours",
+        request_lookback({"options": {"hours": 7}}) == 420,
+        str(request_lookback({"options": {"hours": 7}})),
+    )
+    rec(
+        "lookback-from-overlay-bars",
+        request_lookback({"overlay": {"histLookbackBars": 1440}}) == 1440,
+        str(request_lookback({"overlay": {"histLookbackBars": 1440}})),
+    )
+    rec("lookback-top-level-wins", request_lookback({"hours": 2, "options": {"hours": 48}}) == 120)
+    rec("lookback-fallback", request_lookback({}, fallback=2880) == 2880)
     range_series = {hours: hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
@@ -2868,6 +2975,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
     )))
     rec("opt-hours-default-48", parse_options({})["hours"] == 48)
+    rec("opt-hours-nested-options", parse_options({"options": {"hours": 7}})["hours"] == 7, str(parse_options({"options": {"hours": 7}})))
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)
     rec("klines-parse-dict", len(parse_klines([{"open": 1, "high": 2, "low": 0.5, "close": 1.2, "volume": 3}])) == 1)
     rec("klines-parse-list", len(parse_klines([[0, 1, 2, 0.5, 1.2, 3]])) == 1)

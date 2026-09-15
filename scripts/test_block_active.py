@@ -40,12 +40,20 @@ class BlockActiveTests(unittest.TestCase):
         p.block = BlockBook(self.tmp.name + '/block.json', {})
         p.block_active, p.strat_block, p.control_orders, p.recon_ok = True, True, True, True
         p.normal_execution_enabled = False
-        self.view = dict(last15_n=12, last15_ratio=1.8, net_avg=.1, max_dd_s=10)
+        self.view = dict(
+            last15_n=12, last15_ratio=1.8, net_avg=.1, max_dd_s=10, ddOk=True,
+            base_n=12, base_pf=1.8, main_n=12, main_pf=1.8, real_n=12, real_pf=1.8,
+        )
         self.st = NS(id='general:sl0.6:st3', active=True, sl_ratio=.6, tp_pct=.0045,
                      idx=0, kind='base', step=3, parent_set_id='', volume_ratio=1)
         p.sets = NS(enabled=True, use_historic_gate=True, progress=NS(ready=True), eval_need=lambda: 8,
-                    real_min_pf=1.15, max_dd_s=27000, _side_view=lambda *_: self.view,
+                    real_min_pf=1.15, min_pf=1.15, max_dd_s=27000,
+                    stage_min_pf={"base": 1.15, "main": 1.15, "real": 1.15},
+                    pf_n=8, main_eval=5, real_eval=3,
+                    _side_view=lambda *_: self.view,
                     pick_any=lambda *a, **k: self.st)
+        p.sets._stage_window_ns = lambda: SetBook._stage_window_ns(p.sets)
+        p.sets._real_metrics_ok = lambda view: SetBook._real_metrics_ok(p.sets, view)
         p.coord = NS(min_pf=1.05, gate=lambda *a, **k: (True, [], {}))
         p.strategy_closes = lambda: []
         p.live_recent_pf = lambda *a, **k: None
@@ -116,10 +124,38 @@ class BlockActiveTests(unittest.TestCase):
                 self.assertAlmostEqual(r['requestedQty'], 8 * min(1, count * ratio))
 
     def test_each_qualification_and_control_gate_is_enforced(self):
-        for key, value in [('last15_n',7), ('last15_ratio',1.14), ('last15_ratio',float('nan')),
-                           ('net_avg',0), ('net_avg',float('nan')), ('max_dd_s',27001), ('max_dd_s',float('nan'))]:
+        for key, value in [('real_n', 2), ('real_pf', 1.14), ('real_pf', float('nan')),
+                           ('net_avg', 0), ('net_avg', float('nan')), ('max_dd_s', 27001), ('max_dd_s', float('nan'))]:
             before = self.view[key]; self.view[key] = value
             self.assertIsNone(self.plan(), key); self.view[key] = before
+        # Base last-15 is not Real evidence: a Base-only view cannot emit extra size.
+        saved = dict(self.view)
+        for key in ("real_n", "real_pf", "main_n", "main_pf", "base_n", "base_pf"):
+            self.view.pop(key, None)
+        self.assertIsNone(self.plan())
+        self.view.update(saved)
+
+    def test_overall_real_gate_uses_clears_pf_not_base_last15(self):
+        self.view["last15_ratio"] = 1.8
+        self.view["last15_n"] = 30
+        self.view["real_pf"] = 1.0
+        self.view["real_n"] = 12
+        self.assertIsNone(self.plan())
+        self.view["real_pf"] = 1.8
+        self.assertIsNotNone(self.plan())
+
+    def test_real_metrics_ok_does_not_inherit_main_from_base(self):
+        from set_engine import SetBook
+        view = dict(self.view)
+        view.pop("main_n", None)
+        view.pop("main_pf", None)
+        self.assertFalse(SetBook._real_metrics_ok(self.p.sets, view))
+        view["main_n"] = 12
+        view["main_pf"] = 1.8
+        self.assertTrue(SetBook._real_metrics_ok(self.p.sets, view))
+        view["ddOk"] = False
+        self.assertFalse(SetBook._real_metrics_ok(self.p.sets, view))
+
         for obj, key in [(self.p,'control_orders'), (self.p,'recon_ok'), (self.p,'block_active'),
                          (self.p.block,'enabled'), (self.p.block,'active_live'), (self.p.block,'active_real'), (self.st,'active'),
                          (self.p.sets.progress,'ready')]:
@@ -187,7 +223,7 @@ class BlockActiveTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
                 p.place('X-USDT',1,'gen:test',.9)
         request=p.api.post.call_args.args[1]
-        self.assertEqual(request['quantity'],2)
+        self.assertEqual(float(request['quantity']), 2)
         meta=p._remember_pending.call_args.kwargs['metadata']
         self.assertEqual(meta['strategy'],'block')
         self.assertEqual(meta['axis_key'],'block-active:1')
@@ -218,14 +254,14 @@ class BlockActiveTests(unittest.TestCase):
         with patch.object(pt.os.path,'exists',return_value=False), patch.object(pt.time,'time',return_value=60):
             with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
                 p.place('X-USDT',1,'gen:test',.9)
-        self.assertEqual(p.api.post.call_args.args[1]['quantity'],8)
+        self.assertEqual(float(p.api.post.call_args.args[1]['quantity']), 8)
 
     def test_exchange_minimum_upsizes_adjustment_for_closing(self):
         p=self.entry_fixture(); p.contracts['X-USDT'].min_qty=3
         with patch.object(pt.os.path,'exists',return_value=False), patch.object(pt.time,'time',return_value=60):
             with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
                 p.place('X-USDT',1,'gen:test',.9)
-        self.assertEqual(p.api.post.call_args.args[1]['quantity'],3)
+        self.assertEqual(float(p.api.post.call_args.args[1]['quantity']), 3)
 
     def test_known_exchange_minimum_is_applied_before_entry(self):
         p=self.entry_fixture(); p.block_active=False
@@ -235,7 +271,7 @@ class BlockActiveTests(unittest.TestCase):
         with patch.object(pt.os.path,'exists',return_value=False), patch.object(pt.time,'time',return_value=60):
             with self.assertRaisesRegex(RuntimeError,'exchange boundary'):
                 p.place('X-USDT',1,'gen:test',.9)
-        self.assertEqual(p.api.post.call_args.args[1]['quantity'],3)
+        self.assertEqual(float(p.api.post.call_args.args[1]['quantity']), 3)
 
     def test_unlimited_selection_and_explicit_bounded_policy(self):
         b=SetBook(); self.assertEqual(b.max_active,0)

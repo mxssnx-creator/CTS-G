@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
-import { fetchLiveStats, pickView, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveClosed, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -15,9 +15,11 @@ import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
+import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { SetGroups } from "@/components/set-groups";
 import { enabledAxes, setMetric, type SetOverviewRow } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
+import { pnlClass, pfClass, activeClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
 
 type ResultTab = "overview" | "coverage" | "indications" | "strategies" | "sets" | "controls" | "errors" | "tests" | "report";
 
@@ -41,14 +43,19 @@ function ResultsPage() {
   const { conn } = useConnection();
   const [raw, setRaw] = useState<LiveStats | null>(null);
   const [statsTab, setStatsTab] = useState<ResultTab>("overview");
+  const rawRef = useRef<LiveStats | null>(null);
   useEffect(() => {
     setRaw(null);
+    rawRef.current = null;
     setStatsTab("overview");
     const poll = startPolling(async (signal) => {
       const s = await fetchLiveStats(conn, signal);
       if (signal.aborted) return;
-      if (s) setRaw(s);
-    }, () => document.hidden ? 8000 : 4000);
+      if (s && !statsUnchanged(rawRef.current, s)) {
+        rawRef.current = s;
+        setRaw(s);
+      }
+    }, () => deskPollMs(rawRef.current, document.hidden));
     return poll.stop;
   }, [conn]);
   const stats = pickView(raw, conn);
@@ -63,17 +70,36 @@ function ResultsPage() {
     [stats],
   );
   const closed = stats?.closed ?? [];
+  const closedN = Math.max(
+    Number(stats?.closedN || 0),
+    Number(stats?.wins || 0) + Number(stats?.losses || 0),
+    closed.length,
+  );
+  const gp = Number(
+    stats?.systemGrow ??
+      (stats?.systemGrowLive != null || stats?.systemGrowVst != null
+        ? Number(stats?.systemGrowLive || 0) + Number(stats?.systemGrowVst || 0)
+        : d.gp),
+  );
+  const gl = Number(
+    stats?.systemLoss ??
+      (stats?.systemLossLive != null || stats?.systemLossVst != null
+        ? Number(stats?.systemLossLive || 0) + Number(stats?.systemLossVst || 0)
+        : d.gl),
+  );
 
   return (
     <DeskShell
-      live={Boolean(stats?.running && !stats?.halted && !stats?.paused)}
-      mode={stats?.paused ? "PAUSED" : stats?.mode}
-      paused={Boolean(stats?.paused || stats?.haltReason === "paused")}
+      live={stats ? Boolean(stats.running && !stats.halted && !stats.paused) : undefined}
+      mode={stats?.paused ? "PAUSED" : stats?.halted ? "HALTED" : stats?.mode}
+      paused={stats ? Boolean(stats.paused || stats.haltReason === "paused") : undefined}
+      halted={stats ? Boolean(stats.halted) : undefined}
+      alive={stats ? stats.alive !== false : undefined}
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
       <p className="font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="results-identity">
-        {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closed.length} closed
+        {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closedN} closed
       </p>
       <StatsOverview data={overview} live={stats} />
 
@@ -110,9 +136,9 @@ function ResultsPage() {
       </div>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Hero k="Trades" v={String(closed.length)} s={`${d.longs}L / ${d.shorts}S`} />
-        <Hero k="Gross profit" v={`+${d.gp.toFixed(4)}`} s={`avg win ${d.avgWin.toFixed(4)}`} good />
-        <Hero k="Gross loss" v={d.gl ? `-${d.gl.toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} bad={d.gl > 0} />
+        <Hero k="Trades" v={String(closedN)} s={`${d.longs}L / ${d.shorts}S · tape ${closed.length}`} />
+        <Hero k="Gross profit" v={`+${gp.toFixed(4)}`} s={`avg win ${d.avgWin.toFixed(4)}`} good />
+        <Hero k="Gross loss" v={gl ? `-${Math.abs(gl).toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} />
         <Hero
           k="PF after cost"
           v={(stats?.pfCost?.ratio ?? stats?.profitFactor ?? 1).toFixed(2)}
@@ -133,6 +159,7 @@ function ResultsPage() {
         <div id="results-panel-strategies" className="min-w-0 grid gap-3" role="tabpanel">
           <Suspense fallback={<p className="p-4 text-sm text-muted">Loading strategy diagrams…</p>}><DimensionStats stats={stats} focus="strategies" /></Suspense>
           <StrategyStatsPanel stats={stats} />
+          <ComboEvalPanel job={stats} />
           <ExitResults stats={stats} />
           <BlockResults stats={stats} />
           <DcaResults stats={stats} />
@@ -179,7 +206,7 @@ function ResultsPage() {
                       <li key={r.reason}>
                         <div className="mb-1 flex justify-between text-sm">
                           <span>{r.reason}</span>
-                          <span className={`font-mono tabular-nums ${r.pnl >= 0 ? "text-primary" : "text-danger"}`}>
+                          <span className={`font-mono tabular-nums ${pnlClass(r.pnl)}`}>
                             {r.n} · {r.pnl >= 0 ? "+" : ""}
                             {r.pnl.toFixed(4)}
                           </span>
@@ -341,20 +368,20 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
         <HealthMetric label="Open positions" value={open} />
         <HealthMetric label="Real / Live positions" value={`${stats?.realPositionCount ?? stats?.openCount ?? 0} / ${stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"}`} />
         <HealthMetric label="Real / Live orders" value={`${stats?.realOrderCount ?? stats?.openCount ?? 0} / ${stats?.liveOrderCount ?? "—"}`} />
-        <HealthMetric label="SL + TP protected" value={`${protectedCount}/${open}`} good={missing === 0} />
+        <HealthMetric label="SL + TP protected" value={`${protectedCount}/${open}`} good={missing === 0} problem={missing > 0} />
         <HealthMetric label="Control groups" value={Number(controls?.groupCount ?? controls?.groups?.length ?? 0)} />
-        <HealthMetric label="Reconciliation" value={stats?.coverage?.recon?.pending ? "pending" : stats?.coverage?.recon?.ok === false ? "review" : "ok"} good={stats?.coverage?.recon?.ok !== false && !stats?.coverage?.recon?.pending} />
+        <HealthMetric label="Reconciliation" value={stats?.coverage?.recon?.pending ? "pending" : stats?.coverage?.recon?.ok === false ? "review" : "ok"} good={stats?.coverage?.recon?.ok !== false && !stats?.coverage?.recon?.pending} problem={stats?.coverage?.recon?.ok === false} />
       </div>
-      {missing > 0 ? <p className="mt-3 text-xs text-warn">{missing} protection group{missing === 1 ? "" : "s"} pending reconciliation; details remain in the activity and error tabs.</p> : null}
+      {missing > 0 ? <p className="mt-3 text-xs text-danger">{missing} protection group{missing === 1 ? "" : "s"} missing SL/TP — control loop will attach.</p> : null}
     </section>
   );
 }
 
-function HealthMetric({ label, value, good }: { label: string; value: number | string; good?: boolean }) {
+function HealthMetric({ label, value, good, problem }: { label: string; value: number | string; good?: boolean; problem?: boolean }) {
   return (
     <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
       <div className="font-mono text-[10px] text-muted uppercase">{label}</div>
-      <div className={`mt-1 font-mono text-lg tabular-nums ${good === true ? "text-primary" : ""}`}>{value}</div>
+      <div className={`mt-1 font-mono text-lg tabular-nums ${problem ? "text-danger" : good === true ? "text-primary" : ""}`}>{value}</div>
     </div>
   );
 }
@@ -368,22 +395,25 @@ function ErrorsPanel({ stats }: { stats: LiveStats | null }) {
       return type === "error" || type === "rejected" || ["error", "rejected", "discrepant"].includes(status);
     })
     .slice(0, 24);
-  const hasErrors = Boolean(stats?.lastError) || failedTests.length > 0 || events.length > 0 || Number(stats?.errors ?? 0) > 0;
+  const lastError = isBenignError(stats?.lastError) ? "" : String(stats?.lastError || "");
+  const haltProblem = Boolean(stats?.halted) && !isBenignError(stats?.haltReason) && !String(stats?.haltReason || "").toLowerCase().includes("below min");
+  const hasErrors = Boolean(lastError) || failedTests.length > 0 || events.length > 0 || Number(stats?.errors ?? 0) > 0 || haltProblem;
   return (
     <section id="results-panel-errors" className="rounded-radius border border-border bg-surface p-4" data-testid="errors-panel" role="tabpanel">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Recorded errors and rejected actions</h2>
-          <p className="mt-1 text-xs text-muted">Operational notices stay in their normal panels; actionable failures are collected here.</p>
+          <p className="mt-1 text-xs text-muted">Red is reserved for faults. Equity halt and already-flat closes stay notices.</p>
         </div>
-        <span className={hasErrors ? "font-mono text-xs text-warn" : "font-mono text-xs text-primary"}>
-          {hasErrors ? "review required" : "no recorded errors"}
+        <span className={hasErrors ? "font-mono text-xs text-danger" : "font-mono text-xs text-primary"}>
+          {hasErrors ? "faults recorded" : "no recorded errors"}
         </span>
       </div>
-      {stats?.lastError ? <div className="mb-3 rounded-lg border border-border bg-bg2 p-3 text-sm"><span className="text-muted">Latest:</span> {stats.lastError}</div> : null}
+      {stats?.haltReason ? <p className={`mb-3 text-sm ${haltClass(stats.haltReason, stats.halted)}`}>{stats.haltReason}</p> : null}
+      {lastError ? <div className="mb-3 rounded-lg border border-border bg-bg2 p-3 text-sm text-danger"><span className="text-muted">Latest:</span> {lastError}</div> : null}
       {failedTests.length ? (
         <div className="mb-3 space-y-2">
-          {failedTests.map((test) => <div key={`${test.connection || stats?.connection}:${test.name}`} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs break-words"><span className="text-warn">{test.connection ? `${test.connection.replace("bingx-", "")} · ` : ""}{test.name}</span> · {test.detail}</div>)}
+          {failedTests.map((test) => <div key={`${test.connection || stats?.connection}:${test.name}`} className="rounded-lg border border-border bg-bg2 p-3 font-mono text-xs break-words"><span className="text-danger">{test.connection ? `${test.connection.replace("bingx-", "")} · ` : ""}{test.name}</span> · {test.detail}</div>)}
         </div>
       ) : null}
       {events.length ? (
@@ -433,13 +463,13 @@ function ClosedTape({ rows }: { rows: LiveClosed[] }) {
                 <td className="py-2.5 font-mono text-xs text-muted">{new Date(c.t * 1000).toLocaleTimeString()}</td>
                 <td className="py-2.5 font-medium">{c.symbol.replace("-USDT", "")}</td>
                 <td className="py-2.5">
-                  <span className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs ${c.side === "LONG" ? "bg-primary-dim/40 text-primary" : "bg-danger/15 text-danger"}`}>
+                  <span className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 font-mono text-xs ${sideChipClass(c.side)}`}>
                     {c.side === "LONG" ? <ArrowUpRight className="size-3" /> : <ArrowDownRight className="size-3" />}
                     {c.side}
                   </span>
                 </td>
                 <td className="py-2.5 font-mono text-xs">{c.entry.toPrecision(5)} → {c.exit.toPrecision(5)}</td>
-                <td className={`py-2.5 font-mono tabular-nums ${c.pnl >= 0 ? "text-primary" : "text-danger"}`}>
+                <td className={`py-2.5 font-mono tabular-nums ${pnlClass(c.pnl)}`}>
                   {c.pnl >= 0 ? "+" : ""}{c.pnl.toFixed(4)}<span className="ml-1 text-faint">({(c.pnl_pct * 100).toFixed(3)}%)</span>
                 </td>
                 <td className="py-2.5 font-mono text-muted">{c.hold_s.toFixed(0)}s</td>
@@ -489,7 +519,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
         gate {gate?.allow ? "open" : "paused"} · valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · active {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
       </p>
       {gate?.reasons?.length ? (
-        <p className="mb-3 font-mono text-xs text-danger">{gate.reasons.join(" · ")}</p>
+        <p className="mb-3 font-mono text-xs text-warn">{gate.reasons.join(" · ")}</p>
       ) : null}
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
@@ -507,9 +537,9 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
             {rows.map((r) => (
               <tr key={r.id} className="border-t border-border font-mono text-xs">
                 <td className="py-1.5">{r.id}</td>
-                <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
-                <td className={`py-1.5 text-right ${r.last15Ratio >= 1.1 ? "text-primary" : "text-danger"}`}>{r.last15Ratio.toFixed(2)}</td>
-                <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
+                <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
+                <td className={`py-1.5 text-right ${pfClass(r.last15Ratio, r.n)}`}>{r.last15Ratio.toFixed(2)}</td>
+                <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>{r.last25AvgR.toFixed(2)}</td>
                 <td className="py-1.5 text-right">
                   {r.n}
                 </td>
@@ -565,14 +595,14 @@ function SetRows({ rows }: { rows: SetOverviewRow[] }) {
               rows.slice(current * 25, (current + 1) * 25).map((r) => (
                 <tr key={r.id} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
-                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
+                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
                     {r.n}
                   </td>
                   <td className="py-1.5 text-right">{r.n ? setMetric(r.last15Ratio) : "—"}</td>
-                  <td className={`py-1.5 text-right ${(r.last25AvgR ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.last25AvgR)}</td>
+                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>{setMetric(r.last25AvgR)}</td>
                   <td className="py-1.5 text-right">{r.wr == null ? "—" : `${setMetric(r.wr, 0)}%`}</td>
-                  <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{setMetric(r.expectancy, 4)}</td>
+                  <td className={`py-1.5 text-right ${pnlClass(r.expectancy)}`}>{setMetric(r.expectancy, 4)}</td>
                   <td className="py-1.5 text-right">{r.avgHoldS == null ? "—" : formatDuration(r.avgHoldS * 1000)}</td>
                   <td className="py-1.5 text-right">{r.maxDdS == null ? "—" : formatDuration(r.maxDdS * 1000)}</td>
                   <td className="py-1.5 text-right">{r.avgDdS == null ? "—" : formatDuration(r.avgDdS * 1000)}</td>
@@ -621,10 +651,10 @@ function ExitResults({ stats }: { stats: LiveStats | null }) {
               lanes.map((r) => (
                 <tr key={r.key} className="border-t border-border font-mono text-xs">
                   <td className={`py-1.5 ${r.selected ? "text-primary" : ""}`}>{r.key}</td>
-                  <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
+                  <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">{r.n}</td>
                   <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
-                  <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
+                  <td className={`py-1.5 text-right ${pnlClass(r.last25AvgR)}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                 </tr>
               ))
@@ -643,6 +673,7 @@ function BlockResults({ stats }: { stats: LiveStats | null }) {
     <Card title="Block strategy · CTS counts · PF gate">
       <p className="mb-3 text-sm text-muted">
         stack {blk?.maxStack ?? "—"} · vol {blk?.volumeRatio ?? "—"} · pfRatio {blk?.profitFactorRatio ?? "—"} · minPF {blk?.defaultMinPF ?? "—"} · live {blk?.activeLive ? "on" : "off"}
+        {blk?.overall !== false ? " · overall Real" : ""}
       </p>
       {lanes.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted">Block lanes appear when a parent is open</p>
@@ -656,6 +687,7 @@ function BlockResults({ stats }: { stats: LiveStats | null }) {
                 </span>
                 <span className="font-mono text-xs text-muted">
                   base {lane.baseQty} · add {lane.confirmedAdd} · agg {lane.aggregate}
+                  {lane.realN != null ? ` · Real ${Number(lane.realPf ?? 0).toFixed(2)}/${lane.realN}` : ""}
                 </span>
               </div>
               <table className="w-full text-left text-xs">
@@ -677,8 +709,8 @@ function BlockResults({ stats }: { stats: LiveStats | null }) {
                       <td className="py-1 text-right">{c.inc}</td>
                       <td className="py-1 text-right">{c.minPF}</td>
                       <td className="py-1 text-right">{c.obsPF}</td>
-                      <td className={c.pass ? "py-1 text-primary" : "py-1 text-danger"}>{c.pass ? "yes" : "no"}</td>
-                      <td className={c.paused ? "py-1 text-danger" : "py-1"}>{c.paused ? "yes" : "no"}</td>
+                      <td className={c.pass ? "py-1 text-primary" : "py-1 text-muted"}>{c.pass ? "yes" : "no"}</td>
+                      <td className={c.paused ? "py-1 text-warn" : "py-1"}>{c.paused ? "yes" : "no"}</td>
                       <td className="py-1">{c.satisfied ? "yes" : "no"}</td>
                     </tr>
                   ))}

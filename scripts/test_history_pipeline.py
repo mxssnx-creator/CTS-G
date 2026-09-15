@@ -131,6 +131,36 @@ class HistoryPipelineTests(unittest.TestCase):
             self.assertEqual(second["phase"], "queued")
             self.assertEqual(request["options"]["hours"], 4)
 
+    def test_live_alias_writes_x01_lane_and_continuous_keeps_hours(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            def scoped_path(name: str) -> str:
+                return str(pathlib.Path(directory) / name)
+
+            with patch.object(hist_calc, "path_for", side_effect=scoped_path):
+                queued = hist_calc.start_job(
+                    {"hours": 7, "continuous": True, "symbols": ["SOL-USDT"]},
+                    connection="live",
+                )
+                request = hist_calc.read_request("bingx-x01")
+                idle_vst = hist_calc.read_job("vst")
+
+            self.assertEqual(hist_calc._connection_id("live"), "bingx-x01")
+            self.assertEqual(queued["connection"], "bingx-x01")
+            self.assertEqual(queued["phase"], "queued")
+            self.assertTrue(queued["continuous"])
+            self.assertTrue(queued["running"])
+            self.assertEqual(queued["mode"], "hourly")
+            self.assertEqual(queued["hours"], 7)
+            self.assertEqual(queued["lookback"], 420)
+            self.assertEqual(request["hours"], 7)
+            self.assertEqual(request["mode"], "hourly")
+            self.assertEqual(request["connection"], "bingx-x01")
+            self.assertEqual(idle_vst["phase"], "idle")
+            self.assertEqual(hist_calc.request_lookback(request), 420)
+            self.assertTrue(hist_calc.job_is_running(queued))
+            self.assertTrue(hist_calc.job_is_running(phase="partial"))
+            self.assertFalse(hist_calc.job_is_running(phase="ready"))
+
     def test_queued_request_keeps_last_published_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             def scoped_path(name: str) -> str:

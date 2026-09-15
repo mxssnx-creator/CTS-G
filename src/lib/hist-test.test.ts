@@ -4,11 +4,16 @@ import {
   HIST_TEST_HOURS_DEFAULT,
   HIST_TEST_HOURS_MAX,
   HIST_TEST_HOURS_MIN,
+  HIST_TEST_REFRESH_DEFAULT,
+  HIST_TEST_REFRESH_MAX,
+  HIST_TEST_REFRESH_MIN,
   HIST_TEST_TARGET_DEFAULT,
   clampHistTestHours,
+  clampHistTestRefreshHours,
   histTestIsPaused,
   histTestIsRunning,
   histTestLookbackBars,
+  histTestPollMs,
   histTestStartLabel,
   histTestStatusLine,
   pauseHistTest,
@@ -26,6 +31,13 @@ test("historic test hours clamp 4–64 default 20", () => {
   assert.equal(histTestLookbackBars(64), 3840);
 });
 
+test("historic test refresh clamp 1–8 default 2", () => {
+  assert.equal(clampHistTestRefreshHours(undefined), HIST_TEST_REFRESH_DEFAULT);
+  assert.equal(clampHistTestRefreshHours(2), 2);
+  assert.equal(clampHistTestRefreshHours(0), HIST_TEST_REFRESH_MIN);
+  assert.equal(clampHistTestRefreshHours(12), HIST_TEST_REFRESH_MAX);
+});
+
 test("historic test running phases and idle copy", () => {
   for (const phase of ["queued", "rank", "evaluate", "fetch", "replay", "score", "paused"]) {
     assert.equal(histTestIsRunning(phase), true, phase);
@@ -41,11 +53,15 @@ test("start pause stop match engine bar labels", () => {
   assert.equal(histTestStartLabel(null), "Start");
   assert.equal(histTestStartLabel({ phase: "idle", pct: 0, detail: "" }), "Start");
   assert.equal(histTestStartLabel({ phase: "evaluate", pct: 20, detail: "" }), "Start");
+  assert.equal(histTestStartLabel({ phase: "ready", pct: 100, detail: "", ready: true }), "Refresh now");
   assert.equal(histTestStartLabel({ phase: "paused", pct: 20, detail: "historic test paused", paused: true }), "Resume");
   assert.equal(histTestIsPaused({ phase: "paused", pct: 0, detail: "" }), true);
   assert.equal(histTestIsPaused({ phase: "evaluate", pct: 10, detail: "", paused: true }), true);
   assert.equal(histTestIsPaused({ phase: "evaluate", pct: 10, detail: "" }), false);
   assert.match(histTestStatusLine({ phase: "paused", pct: 40, detail: "historic test paused", paused: true }), /paused/);
+  assert.equal(histTestPollMs({ phase: "evaluate", pct: 10, detail: "" }), 1200);
+  assert.equal(histTestPollMs({ phase: "paused", pct: 10, detail: "", paused: true }), 1200);
+  assert.equal(histTestPollMs({ phase: "stopped", pct: 100, detail: "" }), 8000);
 });
 
 test("start posts hours, min PF and selected count", async (t) => {
@@ -66,6 +82,8 @@ test("start posts hours, min PF and selected count", async (t) => {
   assert.equal(body.hours, 20);
   assert.equal(body.minPf, 1.1);
   assert.equal(body.symbolCap, 20);
+  assert.equal(body.refreshHours, HIST_TEST_REFRESH_DEFAULT);
+  assert.equal(body.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
   assert.equal(HIST_TEST_TARGET_DEFAULT, 20);
 });
 

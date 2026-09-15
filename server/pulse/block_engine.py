@@ -26,6 +26,9 @@ BLOCK_VOL_RATIO_MIN = 0.05
 BLOCK_VOL_RATIO_MAX = 2.0
 BLOCK_VOL_RATIO_DEFAULT = 0.25
 BLOCK_MAX_VOLUME_MULTIPLIER = 2.0
+BLOCK_EVAL_POS_DEFAULT = 50
+BLOCK_EVAL_POS_MIN = 5
+BLOCK_EVAL_POS_MAX = 75
 # Base-1 PF coordination (position_cost): 1.00=neutral, 0.10=1×PositionCost.
 # Floor moved 0.2 -> 0.5 in the same +0.3 relation as the 0.8 -> 1.1 default.
 BLOCK_PF_RATIO_MIN = 0.5
@@ -61,6 +64,16 @@ def clamp_stack(n: Any) -> int:
     if v <= 0:
         return BLOCK_STACK_DEFAULT
     return max(1, min(BLOCK_STACK_MAX, v))
+
+
+def clamp_eval_pos_count(value: Any, fallback: int = BLOCK_EVAL_POS_DEFAULT) -> int:
+    try:
+        n = int(value)
+    except Exception:
+        n = int(fallback or BLOCK_EVAL_POS_DEFAULT)
+    if n <= 0:
+        n = int(fallback or BLOCK_EVAL_POS_DEFAULT)
+    return max(BLOCK_EVAL_POS_MIN, min(BLOCK_EVAL_POS_MAX, n))
 
 
 def calculate_block_volume_increment_ratio(block_count: int, volume_ratio: float) -> float:
@@ -210,7 +223,8 @@ class BlockBook:
         self.default_min_pf = float(cfg.get("defaultMinPF", POSITIVE_PF) or POSITIVE_PF)
         self.cost_pct = max(1e-9, float(cfg.get("positionCostPct", POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT))
         self.min_samples = max(1, int(cfg.get("prevPosMinCount", 5) or 5))
-        self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25))
+        self.eval_pos_count = clamp_eval_pos_count(cfg.get("blockEvalPosCount") or cfg.get("mainEvalPosCount") or BLOCK_EVAL_POS_DEFAULT)
+        self.window = max(self.min_samples, int(cfg.get("prevPosWindow", 25) or 25), self.eval_pos_count)
         self.lanes: Dict[str, BlockLane] = {}
         self.count_tape: Dict[int, List[float]] = {n: [] for n in range(1, BLOCK_EVAL_N + 1)}
         self.overall_tape: List[float] = []
@@ -300,6 +314,7 @@ class BlockBook:
                 "blockPauseCountRatio": self.pause_ratio,
                 "blockActiveRealEnabled": self.active_real,
                 "blockActiveLiveEnabled": self.active_live,
+                "blockEvalPosCount": self.eval_pos_count,
             },
             "lanes": {},
         }
@@ -462,10 +477,42 @@ class BlockBook:
         return cost_pf_from_net_fracs(ring, self.cost_pct)
 
     def observed_pf(self, lane: BlockLane, count: int) -> Tuple[float, int]:
-        ring = (lane.pf_ring.get(count) or [])[-self.window :]
+        need = max(1, int(self.eval_pos_count or BLOCK_EVAL_POS_DEFAULT))
+        ring = (lane.pf_ring.get(count) or [])[-need:]
         if not ring:
             return self.normal_pf(lane), 0
         return cost_pf_from_net_fracs(ring, self.cost_pct), len(ring)
+
+    def main_stage_eval(self, lane: Optional[BlockLane], count: int) -> Dict[str, Any]:
+        """Stage Main last-N check for one Block count. Independent of other counts.
+
+        Too few samples → valid for Real/Live. A proven negative stays intern-only.
+        """
+        need = max(1, int(self.eval_pos_count or BLOCK_EVAL_POS_DEFAULT))
+        if lane is not None:
+            samples = list(lane.pf_ring.get(int(count)) or [])[-need:]
+        else:
+            samples = list(self.count_tape.get(int(count)) or [])[-need:]
+        n = len(samples)
+        insufficient = n < need
+        observed = cost_pf_from_net_fracs(samples, self.cost_pct) if samples else 0.0
+        floor = float(self.default_min_pf or POSITIVE_PF)
+        from position_cost import clears_pf, is_positive_pf
+        positive = bool(samples) and is_positive_pf(observed)
+        better = bool(samples) and clears_pf(observed, floor)
+        live_ok = True if insufficient else (positive and better)
+        return {
+            "evalPosCount": need,
+            "sampleCount": n,
+            "insufficientSample": insufficient,
+            "observedProfitFactor": observed,
+            "positive": positive,
+            "better": better,
+            "liveOk": live_ok,
+            "internOk": True,
+            "internOnly": not live_ok,
+            "reason": "insufficient-sample" if insufficient else ("pass" if live_ok else "main-negative"),
+        }
 
     def pf_decision(self, lane: BlockLane, count: int, intern_pf: float = INTERN_PF) -> Dict[str, Any]:
         # Gate against the same cumulative target used by the order planner.
@@ -475,29 +522,41 @@ class BlockBook:
         inc = float(formula.get("volumeIncrement") or 0.0)
         configured = calculate_block_minimum_profit_factor(self.default_min_pf, self.pf_ratio, inc)
         normal = self.normal_pf(lane)
-        observed, n = self.observed_pf(lane, count)
-        cold = n < self.min_samples
+        main = self.main_stage_eval(lane, count)
         intern = float(intern_pf or 0.0)
         real_floor = float(self.default_min_pf or POSITIVE_PF)
-        if cold:
-            # intern 1.00 is cost-neutral only. Extra size needs the real floor.
+        if main["insufficientSample"]:
+            # Last-N check does not deactivate. Extra size still needs intern ≥ real floor.
             observed = intern if intern > 0 else INTERN_PF
             effective = configured if count > 1 else real_floor
             passes = observed + 1e-9 >= effective and observed + 1e-9 >= real_floor
+            cold = True
+            intern_only = False
+            live_ok = True
         else:
+            observed = float(main["observedProfitFactor"])
             effective = calculate_block_effective_minimum_profit_factor(configured, normal)
             effective = max(effective, real_floor)
-            passes = observed + 1e-9 >= effective
+            intern_only = bool(main["internOnly"])
+            live_ok = bool(main["liveOk"])
+            passes = live_ok and not intern_only
+            cold = False
         return {
             "coldStart": cold,
-            "sampleCount": n,
+            "sampleCount": main["sampleCount"],
             "observedProfitFactor": observed,
             "normalProfitFactor": normal,
             "configuredMinimumProfitFactor": configured,
             "effectiveMinimumProfitFactor": effective,
             "passesProfitFactor": passes,
             "comparisonAvailable": not cold,
-            "internPf": round(intern if intern > 0 else INTERN_PF, 4),
+            "internPf": round(intern, 4),
+            "evalPosCount": main["evalPosCount"],
+            "insufficientSample": main["insufficientSample"],
+            "liveOk": live_ok,
+            "internOk": True,
+            "internOnly": intern_only,
+            "mainReason": main["reason"],
         }
 
     def unlimited(self) -> bool:
@@ -561,7 +620,8 @@ class BlockBook:
             avg, n_avg = self.count_avg(n, lane)
             live_ok = n <= live_stack and n in self.counts
             requested = 0.0
-            if live_ok and not sat and not paused and pf["passesProfitFactor"]:
+            intern_only = bool(pf.get("internOnly"))
+            if live_ok and not sat and not paused and pf["passesProfitFactor"] and not intern_only:
                 requested = max(0.0, f["targetAddQty"] - lane.confirmed_add)
             rows.append({
                 "setKey": f"{lane.symbol}:{lane.side.lower()}#block:{n}",
@@ -587,7 +647,7 @@ class BlockBook:
             pf = self.pf_decision(lane, n, intern_pf=intern_pf)
             paused = lane.pause_remaining.get(n, 0) > 0 or now < lane.pause_until.get(n, 0)
             sat = bool(lane.satisfied.get(n)) or lane.confirmed_add + 1e-12 >= f["targetAddQty"]
-            requested = 0.0 if sat or paused or not pf["passesProfitFactor"] else max(0.0, f["targetAddQty"] - lane.confirmed_add)
+            requested = 0.0 if sat or paused or not pf["passesProfitFactor"] or pf.get("internOnly") else max(0.0, f["targetAddQty"] - lane.confirmed_add)
             rows.append({
                 "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:{n}",
                 "blockCount": n,
@@ -613,7 +673,8 @@ class BlockBook:
         regular = [r for r in rows if r.get("kind") == "regular"]
         unsat = [r for r in regular if not r.get("targetSatisfied")
                  and r.get("liveStack") and not r.get("paused")
-                 and r.get("passesProfitFactor") and finite_number(r.get("requestedAddQty")) > 0]
+                 and r.get("passesProfitFactor") and not r.get("internOnly")
+                 and finite_number(r.get("requestedAddQty")) > 0]
         if not unsat:
             return None
         nxt = min(unsat, key=lambda r: int(r.get("blockCount") or 99))
@@ -702,12 +763,18 @@ class BlockBook:
         lane.base_qty = 0.0
         self.save()
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, intern_pf_lookup=None) -> Dict[str, Any]:
         lanes = []
         for lane in self.lanes.values():
             if not lane.active and not lane.legs:
                 continue
-            rows = self.evaluate_counts(lane, live_n=1 if lane.active else 0, intern_pf=float(self.default_min_pf or POSITIVE_PF))
+            intern = float(self.default_min_pf or POSITIVE_PF)
+            if callable(intern_pf_lookup):
+                try:
+                    intern = float(intern_pf_lookup(lane) or 0.0)
+                except Exception:
+                    intern = 0.0
+            rows = self.evaluate_counts(lane, live_n=1 if lane.active else 0, intern_pf=intern)
             lanes.append({
                 "symbol": lane.symbol,
                 "side": lane.side,
@@ -730,6 +797,7 @@ class BlockBook:
                         "requested": round(r["requestedAddQty"], 8),
                         "minPF": round(r["blockMinPF"], 4),
                         "obsPF": round(r["observedProfitFactor"], 4),
+                        "internPf": round(float(r.get("internPf") or 0), 4),
                         "pass": r["passesProfitFactor"],
                         "paused": r["paused"],
                         "satisfied": r["targetSatisfied"],
@@ -773,6 +841,7 @@ class BlockBook:
             "pauseCountRatio": self.pause_ratio,
             "activeLive": self.active_live,
             "activeReal": self.active_real,
+            "evalPosCount": int(self.eval_pos_count or BLOCK_EVAL_POS_DEFAULT),
             "defaultMinPF": self.default_min_pf,
             "lanes": lanes,
         }
@@ -874,13 +943,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
     # cost-net PF: losing ring (net frac) blocks, winning ring passes
     lane4 = BlockLane(symbol="PF-USDT", side="LONG", base_qty=1.0, base_entry=100.0, confirmed_add=0.25, satisfied={1: True})
-    lane4.pf_ring[2] = [-0.0045] * 8  # 8 losing samples, warm
-    lane4.parent_pf_ring = [-0.0045] * 8
+    lane4.pf_ring[2] = [-0.0045] * 50  # 50 losing samples, Main last-N
+    lane4.parent_pf_ring = [-0.0045] * 50
     d_loss = b.pf_decision(lane4, 2, intern_pf=1.5)
     rec("blk-warm-loss-blocks", d_loss["passesProfitFactor"] is False and d_loss["coldStart"] is False,
         str(d_loss))
-    lane4.pf_ring[2] = [0.003] * 8
-    lane4.parent_pf_ring = [0.003] * 8
+    lane4.pf_ring[2] = [0.003] * 50
+    lane4.parent_pf_ring = [0.003] * 50
     d_win = b.pf_decision(lane4, 2, intern_pf=1.0)
     rec("blk-warm-win-passes", d_win["passesProfitFactor"] is True and d_win["observedProfitFactor"] + 1e-9 >= POSITIVE_PF,
         str(d_win))
@@ -893,8 +962,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-real-1.10-n1-cold", d_real["passesProfitFactor"] is True and d_real["coldStart"] is True,
         str(d_real))
     cost_lane = BlockLane(symbol="COST-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
-    cost_lane.pf_ring[1] = [0.001] * 8  # +0.10% net = +1.0R at 0.10% cost → 1.10
-    cost_lane.parent_pf_ring = [0.001] * 8
+    cost_lane.pf_ring[1] = [0.001] * 50  # +0.10% net = +1.0R at 0.10% cost → 1.10
+    cost_lane.parent_pf_ring = [0.001] * 50
     d_eq = b.pf_decision(cost_lane, 1, intern_pf=INTERN_PF)
     rec("blk-cost-pf-1R-is-1.10", abs(d_eq["observedProfitFactor"] - POSITIVE_PF) < 1e-9 and d_eq["passesProfitFactor"] is True,
         str(d_eq))
@@ -1017,6 +1086,35 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-wide-pf-matches-formula",
         abs(wide.pf_decision(BlockLane("W", "LONG", 10.0, 1.0), 1, intern_pf=1.5)["configuredMinimumProfitFactor"]
             - wide.formula(10.0, 1)["blockMinPF"]) < 1e-12)
+
+    main = BlockBook(os.path.join(tmp, "main.json"), {
+        "blockMaxStack": 6, "blockVolumeRatio": 0.25, "defaultMinPF": POSITIVE_PF,
+        "blockEvalPosCount": 50,
+    })
+    rec("blk-eval-pos-50", main.eval_pos_count == 50, str(main.eval_pos_count))
+    rec("blk-eval-pos-clamp", clamp_eval_pos_count(2) == 5 and clamp_eval_pos_count(99) == 75)
+    cold_lane = BlockLane("MN-USDT", "LONG", 10.0, 100.0)
+    cold = main.main_stage_eval(cold_lane, 3)
+    rec("blk-main-insufficient-valid", cold["liveOk"] is True and cold["insufficientSample"] is True, str(cold))
+    rec("blk-main-cold-emits", main.pf_decision(cold_lane, 3, intern_pf=1.5)["passesProfitFactor"] is True)
+    rec("blk-main-cold-intern-floor", main.pf_decision(cold_lane, 3, intern_pf=1.0)["passesProfitFactor"] is False)
+    win_lane = BlockLane("WN-USDT", "LONG", 10.0, 100.0)
+    win_lane.pf_ring[3] = [0.004] * 50
+    main.count_tape[3] = [0.004] * 50
+    lose_lane = BlockLane("LS-USDT", "LONG", 10.0, 100.0)
+    lose_lane.pf_ring[2] = [-0.01] * 50
+    lose_lane.pf_ring[3] = [0.004] * 50
+    main.count_tape[2] = [-0.01] * 50
+    win = main.main_stage_eval(win_lane, 3)
+    lose2 = main.main_stage_eval(lose_lane, 2)
+    win3 = main.main_stage_eval(lose_lane, 3)
+    rec("blk-main-win-live", win["liveOk"] is True and win["internOnly"] is False and win["observedProfitFactor"] > 1.1, str(win))
+    rec("blk-main-lose-intern", lose2["liveOk"] is False and lose2["internOnly"] is True and lose2["internOk"] is True, str(lose2))
+    rec("blk-main-count-indep", win3["liveOk"] is True and lose2["liveOk"] is False, f"c2={lose2['reason']} c3={win3['reason']}")
+    lose_rows = main.evaluate_counts(lose_lane, live_n=1, intern_pf=1.5)
+    lose_emit = [r for r in lose_rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0]
+    rec("blk-main-no-live-n2", all(int(r["blockCount"]) != 2 for r in lose_emit), str([(r["blockCount"], r.get("internOnly"), r.get("requestedAddQty")) for r in lose_rows if r.get("kind")=="regular"]))
+    rec("blk-main-snap-evaln", int((main.snapshot() or {}).get("evalPosCount") or 0) == 50)
     return out
 
 

@@ -123,6 +123,29 @@ try {
   if (/Indications/i.test(sys) && /Control orders/i.test(sys)) ok("system strategy/exec");
   else fail("system missing modules");
 
+  await page.goto(BASE + "/step-sweep", { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("[data-testid=desk-root]", { timeout: 10000 });
+  await page.waitForTimeout(800);
+  if (await page.getByTestId("test-historic").count()) ok("sweep test historic");
+  else fail("sweep missing test historic");
+  if (await page.getByTestId("hist-test-start").count()) ok("sweep hist start");
+  else fail("sweep no hist-test-start");
+  if (await page.getByTestId("hist-test-pause").count()) ok("sweep hist pause");
+  else fail("sweep no hist-test-pause");
+  if (await page.getByTestId("hist-test-stop").count()) ok("sweep hist stop");
+  else fail("sweep no hist-test-stop");
+  const sweepStartOff = await page.getByTestId("hist-test-start").isDisabled().catch(() => true);
+  const sweepPauseOff = await page.getByTestId("hist-test-pause").isDisabled().catch(() => true);
+  const sweepStopOff = await page.getByTestId("hist-test-stop").isDisabled().catch(() => true);
+  if (!sweepStartOff && !sweepPauseOff && !sweepStopOff) ok("sweep hist buttons enabled");
+  else fail(`sweep hist disabled start=${sweepStartOff} pause=${sweepPauseOff} stop=${sweepStopOff}`);
+  const sweepStartLabel = (await page.getByTestId("hist-test-start").innerText().catch(() => "")).trim();
+  if (/Start|Resume/i.test(sweepStartLabel)) ok("sweep start label");
+  else fail("sweep start label " + sweepStartLabel);
+  const engStartOff = await page.getByTestId("engine-start").isDisabled().catch(() => true);
+  if (!engStartOff) ok("sweep engine start enabled");
+  else fail("sweep engine start disabled");
+
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-testid=desk-root]", { timeout: 10000 });
   await clickConn("vst");

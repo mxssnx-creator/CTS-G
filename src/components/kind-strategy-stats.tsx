@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { lastNCostPf, formatDuration } from "@/lib/analytics";
 import type { KindStat, LiveClosed, LiveStats, SideStat, StrategyStat } from "@/lib/live-stats";
+import { pfClass } from "@/lib/status-tone";
 
 const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const;
 const STRATEGY_KEYS = ["indications", "general", "block", "block:signals", "trailing", "dca", "exits"] as const;
@@ -163,10 +164,7 @@ function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyS
 }
 
 function pfTone(pf: number, n: number) {
-  if (n < 1) return "text-muted";
-  if (pf >= 1.1) return "text-primary";
-  if (pf < 1) return "text-danger";
-  return "text-fg";
+  return pfClass(pf, n);
 }
 
 function Card({ title, hint, testId, children }: { title: string; hint?: string; testId?: string; children: ReactNode }) {
@@ -225,7 +223,7 @@ export function IndicationKindsPanel({ stats }: { stats: LiveStats | null }) {
                   </td>
                   <td className="py-1.5 text-right">{r.n ? `${Number(r.wr ?? 0).toFixed(0)}%` : "—"}</td>
                   <td className="py-1.5 text-right">{r.maxDdS ? formatDuration(Number(r.maxDdS) * 1000) : "—"}</td>
-                  <td className={`py-1.5 ${r.ok === false ? "text-danger" : r.validated && r.profitable ? "text-primary" : "text-muted"}`}>
+                  <td className={`py-1.5 ${r.ok === false ? "text-warn" : r.validated && r.profitable ? "text-primary" : "text-muted"}`}>
                     {r.ok === false ? "block" : r.validated ? (r.profitable ? "pass" : "fail") : "cold"}
                   </td>
                 </tr>

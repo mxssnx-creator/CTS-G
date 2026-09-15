@@ -44,6 +44,11 @@ def calculation_overlay(overlay, cts=None):
     result["histTestHours"] = max(4, min(64, hours))
     result["histTestMinPf"] = normalize_pf(result.get("histTestMinPf"), POSITIVE_PF)
     result["histTestEnabled"] = True if result.get("histTestEnabled") is None else bool(result.get("histTestEnabled"))
+    try:
+        refresh = int(round(float(result.get("histTestRefreshHours", 2))))
+    except (TypeError, ValueError, OverflowError):
+        refresh = 2
+    result["histTestRefreshHours"] = max(1, min(8, refresh))
     result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
     result["setPfWindow"] = result["baseEvalPosCount"]
     result.setdefault("setMinSamples", result["baseEvalPosCount"])

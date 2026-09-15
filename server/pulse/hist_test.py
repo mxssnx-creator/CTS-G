@@ -14,6 +14,7 @@ import time
 import traceback
 from typing import Any, Callable, Dict, List, Optional
 
+from combo_eval import evaluate_book as combo_evaluate
 from hist_calc import (
     HIST_WARMUP_BARS,
     catalog_listings,
@@ -37,6 +38,9 @@ HOURS_MIN = 4
 HOURS_MAX = 64
 HOURS_DEFAULT = 20
 HOURS_STEP = 1
+REFRESH_MIN = 1
+REFRESH_MAX = 8
+REFRESH_DEFAULT = 2
 STEP_LO = 3
 STEP_HI = 12
 TICKER_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
@@ -107,6 +111,93 @@ def lookback_bars(hours: Any) -> int:
     return hours_to_bars(clamp_hours(hours))
 
 
+def clamp_refresh_hours(value: Any, default: int = REFRESH_DEFAULT) -> int:
+    try:
+        hours = int(round(float(value)))
+    except (TypeError, ValueError):
+        hours = int(default)
+    return max(REFRESH_MIN, min(REFRESH_MAX, hours))
+
+
+def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> bool:
+    """Hold until the next independent rerun. Returns False when Stop wins."""
+    deadline = time.time() + max(REFRESH_MIN, int(hours)) * 3600.0
+    blob = dict(snapshot or read_job())
+    blob["nextRunAt"] = deadline
+    blob["refreshHours"] = clamp_refresh_hours(hours)
+    blob["continuous"] = True
+    blob["running"] = True
+    blob["phase"] = str(blob.get("phase") or "ready")
+    blob["detail"] = f"{blob.get('detail') or 'ready'} · next refresh {int(hours)}h"
+    publish(blob)
+    while time.time() < deadline and not stop_requested():
+        wait_if_paused(None, {**read_job(), "phase": str(blob.get("resumePhase") or "evaluate")})
+        remaining = deadline - time.time()
+        time.sleep(0.25 if remaining > 1 else max(0.05, remaining))
+    return not stop_requested()
+
+
+def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Set IDs Test Historic currently treats as validated configs."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            return
+        seen.add(sid)
+        out.append(sid)
+
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("validated") is False:
+            continue
+        add(row.get("setId") or row.get("set_id") or row.get("id"))
+    for row in blob.get("rows") or []:
+        if isinstance(row, dict) and row.get("validated"):
+            add(row.get("id") or row.get("setId") or row.get("set_id"))
+    for sid in blob.get("validatedIds") or []:
+        add(sid)
+    return out
+
+
+def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Push Test Historic validated configs onto a live SetBook without a full catalog replay."""
+    blob = job if isinstance(job, dict) else read_job()
+    ids = validated_set_ids(blob)
+    apply = getattr(book, "apply_hist_test_gate", None)
+    if callable(apply):
+        apply(ids)
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
+        if sid:
+            by_id[sid] = row
+    for st in getattr(book, "by_idx", None) or []:
+        row = by_id.get(getattr(st, "id", ""))
+        if not row:
+            continue
+        n = int(row.get("evalN") or row.get("n") or 0)
+        try:
+            pf = float(row.get("pf") or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        st.last15_n = n
+        st.last15_ratio = pf if pf > 0 else 1.0
+        st.n = max(int(getattr(st, "n", 0) or 0), n)
+        st.active = bool(row.get("validated", True))
+        st.deact_reason = ""
+        ledger = dict(getattr(st, "stage_ledger", None) or {})
+        ledger["base"] = True
+        st.stage_ledger = ledger
+    return ids
+
+
 def idle_job() -> Dict[str, Any]:
     return {
         "ok": True,
@@ -128,6 +219,8 @@ def idle_job() -> Dict[str, Any]:
         "ranges": [],
         "heatmap": [],
         "positivePf": POSITIVE_PF,
+        "refreshHours": REFRESH_DEFAULT,
+        "continuous": False,
     }
 
 
@@ -140,9 +233,63 @@ def _ensure_dir() -> None:
     os.makedirs(os.path.dirname(PUBLIC_JSON), exist_ok=True)
 
 
+def normalize_job(blob: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(blob or idle_job())
+    phase = str(payload.get("phase") or "idle")
+    positives = payload.get("positive") or payload.get("symbols") or []
+    npos = len([s for s in positives if s]) if isinstance(positives, list) else 0
+    ready = bool(payload.get("ready")) or phase == "ready"
+    try:
+        pct = float(payload.get("pct") or 0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if ready and phase == "ready" and not payload.get("error") and pct < 99:
+        payload["pct"] = 100
+        payload["ready"] = True
+    if payload.get("filled") in (None, 0) and npos:
+        payload["filled"] = npos
+    if payload.get("evaluated") in (None, 0):
+        detail = str(payload.get("detail") or "")
+        marker = "evaluated "
+        if marker in detail:
+            tail = detail.split(marker, 1)[1].split()[0]
+            try:
+                payload["evaluated"] = int(tail)
+            except ValueError:
+                pass
+    payload["running"] = bool(payload.get("running")) and phase in RUNNING_PHASES
+    return payload
+
+
+def apply_control_latches(blob: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = dict(blob or idle_job())
+    payload.setdefault("ok", True)
+    if stop_requested():
+        payload["phase"] = "stopped"
+        payload["running"] = False
+        payload["paused"] = False
+        payload["detail"] = "historic test stopped"
+        return payload
+    if pause_requested():
+        phase = str(payload.get("phase") or "")
+        resume_phase = str(payload.get("resumePhase") or "")
+        if phase in RUNNING_PHASES:
+            resume_phase = phase
+            payload["resumePhase"] = phase
+        payload["phase"] = "paused"
+        payload["paused"] = True
+        payload["running"] = thread_alive() or resume_phase in RUNNING_PHASES
+        detail = str(payload.get("detail") or "")
+        if "paused" not in detail.lower():
+            payload["detail"] = "historic test paused"
+        return payload
+    payload["paused"] = bool(payload.get("paused")) and str(payload.get("phase") or "") == "paused"
+    return payload
+
+
 def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_dir()
-    payload = dict(blob)
+    payload = normalize_job(apply_control_latches(blob))
     payload.setdefault("generatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     for dest in job_paths():
         try:
@@ -159,15 +306,17 @@ def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def read_job() -> Dict[str, Any]:
+    blob: Dict[str, Any] = idle_job()
     for path in (PUBLIC_JSON, SUMMARY_PATH):
         try:
             with open(path, encoding="utf-8") as handle:
-                blob = json.load(handle)
-            if isinstance(blob, dict) and blob:
-                return blob
+                loaded = json.load(handle)
+            if isinstance(loaded, dict) and loaded:
+                blob = loaded
+                break
         except Exception:
             continue
-    return idle_job()
+    return normalize_job(apply_control_latches(blob))
 
 
 def request_stop() -> None:
@@ -263,9 +412,14 @@ def wait_if_paused(on_progress: Optional[Callable[[Dict[str, Any]], None]] = Non
 
 
 def job_is_running(job: Optional[Dict[str, Any]] = None) -> bool:
+    if stop_requested():
+        return False
+    blob = job if isinstance(job, dict) else read_job()
+    if pause_requested() or str(blob.get("phase") or "") == "paused":
+        return True
     if thread_alive():
         return True
-    phase = str((job or read_job()).get("phase") or "")
+    phase = str(blob.get("phase") or "")
     return phase in RUNNING_PHASES
 
 
@@ -290,6 +444,7 @@ def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int
         "histExactWindow": True,
         "histTestHours": hours,
         "histTestMinPf": min_pf,
+        "histTestRefreshHours": REFRESH_DEFAULT,
         "setUseHistoricGate": True,
         "setStrictGate": True,
         "setAutoDeact": True,
@@ -315,7 +470,7 @@ def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int
         "dcaEnabled": False,
         "stratDca": False,
         "histSimulateBlock": True,
-        "histSimulateDca": False,
+        "histSimulateDca": True,
         "blockVolumeRatio": 1,
         "blockMaxStack": 3,
         "blockProfitFactorRatio": 1.25,
@@ -448,6 +603,9 @@ def fill_positive(
         except Exception as exc:
             skipped.append({"symbol": symbol, "reason": f"fetch {type(exc).__name__}"})
             continue
+        wait_if_paused(on_progress, snapshot)
+        if stop_requested():
+            break
         if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
             skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
             continue
@@ -548,13 +706,16 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "ok": True,
         "phase": str(job.get("phase") or "ready"),
         "ready": bool(job.get("ready")),
-        "running": False,
+        "running": bool(job.get("running")),
         "paused": bool(job.get("paused")) or pause_requested(),
         "error": str(job.get("error") or ""),
         "source": str(job.get("source") or ""),
         "hours": hours,
         "minPf": min_pf,
         "positivePf": min_pf,
+        "refreshHours": job.get("refreshHours") or REFRESH_DEFAULT,
+        "nextRunAt": job.get("nextRunAt"),
+        "continuous": bool(job.get("continuous")),
         "stepLo": job.get("stepLo") or STEP_LO,
         "stepHi": job.get("stepHi") or STEP_HI,
         "targetCount": job.get("targetCount"),
@@ -586,8 +747,11 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             "trails": coverage.get("trails") if isinstance(coverage.get("trails"), int) else len(coverage.get("trails") or []),
             "histFills": coverage.get("histFills") or coverage.get("replayFills"),
             "indexed": coverage.get("indexed"),
-            "independentStrategy": coverage.get("independentStrategy"),
-            "independentDirection": coverage.get("independentDirection"),
+            "independentStrategy": True,
+            "independentDirection": True,
+            "independentIndication": True,
+            "independentConfigs": True,
+            "independentCombo": True,
         },
         "validatedCount": job.get("validatedCount"),
         "rowCount": job.get("rowCount"),
@@ -613,13 +777,22 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
             for k, v in list((job.get("byStrategy") or {}).items())[:16] if isinstance(v, dict)
         },
+        "pfStats": job.get("pfStats") or {},
+        "withWithout": job.get("withWithout") or {},
+        "comboMatrix": job.get("comboMatrix") or [],
+        "successfulConfigs": (job.get("successfulConfigs") or [])[:60],
+        "validatedIds": job.get("validatedIds") or validated_set_ids(job),
+        "recalcOnly": bool(job.get("recalcOnly")),
+        "combo": job.get("combo") or {},
         "byStep": step_rows,
         "ranges": range_rows,
         "heatmap": heat,
         "bestStep": best_step,
         "audit": job.get("audit") or {},
         "detail": job.get("detail") or "",
-        "pct": job.get("pct") or 100,
+        "pct": 100 if (job.get("ready") or str(job.get("phase") or "") == "ready") else (job.get("pct") or 0),
+        "filled": job.get("filled") if job.get("filled") is not None else len(public_ranked),
+        "evaluated": job.get("evaluated") or (job.get("fill") or {}).get("evaluated"),
         "fill": job.get("fill") or {},
     }
     return out
@@ -645,6 +818,10 @@ def audit_test(book: Any, symbols: List[str], summary: Dict[str, Any], min_pf: f
         {s: (by_sym.get(s) or {}).get("pf") for s in symbols},
     )
     rec("direction-both", set(summary.get("byDirection") or {}) == {"LONG", "SHORT"} or not symbols, sorted(summary.get("byDirection") or {}))
+    rec("pf-families", set((summary.get("pfStats") or {})) >= {"overall", "normal", "trailing", "axis", "block", "dca"} or not symbols, sorted(summary.get("pfStats") or {}))
+    rec("with-without-block-dca", set((summary.get("withWithout") or {})) >= {"block", "dca"} or not symbols, sorted(summary.get("withWithout") or {}))
+    rec("combo-engine-memory", (summary.get("combo") or {}).get("engine") == "sqlite-memory" or not symbols, summary.get("combo"))
+    rec("successful-positive", all(float(r.get("pf") or 0) >= float(min_pf) - 1e-9 for r in (summary.get("successfulConfigs") or [])), len(summary.get("successfulConfigs") or []))
     failed = [r["name"] for r in rows if not r["ok"]]
     return {"ok": not failed, "pass": len(rows) - len(failed), "fail": len(failed), "failed": failed, "rows": rows}
 
@@ -655,10 +832,19 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body = body if isinstance(body, dict) else {}
     hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
     min_pf = clamp_min_pf(body.get("minPf") or body.get("histTestMinPf") or (body.get("overlay") or {}).get("histTestMinPf") or POSITIVE_PF)
+    refresh_h = clamp_refresh_hours(
+        body.get("refreshHours")
+        or body.get("histTestRefreshHours")
+        or (body.get("overlay") or {}).get("histTestRefreshHours")
+        or REFRESH_DEFAULT
+    )
     target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
     step_lo = max(1, min(30, int(body.get("minStep") or body.get("stepLo") or STEP_LO)))
     step_hi = max(step_lo, min(30, int(body.get("stepMax") or body.get("stepHi") or STEP_HI)))
     synth = bool(body.get("synth"))
+    recalc_ids = [str(s).strip() for s in (body.get("recalcIds") or []) if str(s or "").strip()]
+    keep_symbols = [str(s).strip().upper() for s in (body.get("keepSymbols") or []) if str(s or "").strip()]
+    recalc_only = bool(recalc_ids) and not bool(body.get("fullCatalog"))
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
     if user_ov:
@@ -666,6 +852,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overlay["histLookbackBars"] = lookback_bars(hours)
         overlay["histTestHours"] = hours
         overlay["histTestMinPf"] = min_pf
+        overlay["histTestRefreshHours"] = refresh_h
         overlay["setMinPf"] = min_pf
         overlay["minPf"] = min_pf
     t0 = time.time()
@@ -676,7 +863,11 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ready": False,
         "running": True,
         "paused": False,
-        "detail": f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}",
+        "detail": (
+            f"recalc {len(recalc_ids)} validated configs · {hours}h · min PF {min_pf:.2f}"
+            if recalc_only else
+            f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}"
+        ),
         "hours": hours,
         "minPf": min_pf,
         "positivePf": min_pf,
@@ -690,13 +881,15 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     publish(seed)
 
     def progress(update: Dict[str, Any]) -> None:
+        if stop_requested():
+            return
         blob = dict(seed)
         blob.update(update)
         blob["hours"] = hours
         blob["minPf"] = min_pf
         blob["positivePf"] = min_pf
         blob["targetCount"] = target
-        blob["running"] = True
+        blob["running"] = not stop_requested()
         blob["paused"] = pause_requested() and not stop_requested()
         blob["ready"] = False
         publish(blob)
@@ -718,7 +911,41 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         queue, universe = rank_universe(max(target * 4, VOL_CANDIDATES))
         fetch_fn = fetch_klines
 
-    fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
+    lookback = lookback_bars(hours)
+    fetch_bars = lookback + int(overlay.get("histWarmup") or HIST_WARMUP_BARS)
+    if recalc_only:
+        selected: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        for symbol in keep_symbols or [r.get("symbol") for r in queue if r.get("symbol")]:
+            wait_if_paused(progress, {
+                "phase": "fetch",
+                "pct": 20,
+                "detail": f"recalc fetch {symbol} · {len(recalc_ids)} configs",
+                "symbols": keep_symbols,
+                "positive": keep_symbols,
+            })
+            if stop_requested():
+                break
+            try:
+                bars = fetch_fn(symbol, fetch_bars)
+            except Exception as exc:
+                skipped.append({"symbol": symbol, "reason": f"fetch {type(exc).__name__}"})
+                continue
+            if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
+                skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
+                continue
+            selected.append({"symbol": symbol, "_bars": bars, "positive": True, "n": 0, "pf": 0.0})
+        fill = {
+            "selected": selected,
+            "rejected": [],
+            "skipped": skipped,
+            "filled": len(selected),
+            "target": target,
+            "short": max(0, int(target) - len(selected)),
+            "evaluated": len(selected),
+        }
+    else:
+        fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
     selected = fill["selected"]
 
     def stopped_job(detail: str = "historic test stopped") -> Dict[str, Any]:
@@ -778,14 +1005,27 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     })
     book = SetBook()
     book.load(overlay)
+    if recalc_only:
+        kept = book.restrict_to_ids(recalc_ids)
+        progress({
+            "phase": "replay",
+            "pct": 64,
+            "detail": f"recalc {kept}/{len(recalc_ids)} configs · {len(symbols)} symbols",
+            "symbols": symbols,
+            "positive": symbols,
+            "validatedIds": recalc_ids,
+            "recalcOnly": True,
+        })
     for row in selected:
         book.ingest_bars(row["symbol"], row["_bars"])
-    book.replay_all(symbols=symbols, workers=1, merge=True, progress_total=len(symbols), score=True)
+    book.replay_all(symbols=symbols, workers=1, merge=True, progress_total=len(symbols), score=True,
+                    set_ids=recalc_ids if recalc_only else None)
     ranked_sets = _rank_set_rows(book)
     by_step = step_rollup(book)
     by_sym = symbol_rollup(book)
     by_dir = direction_rollup(book)
     by_strat = strategy_rollup(book, strat=getattr(book, "strategy_hist", None))
+    combo = combo_evaluate(book, min_pf=min_pf, cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
     winner = pick_winner_row(book, ranked_sets)
     listings = catalog_listings(book, ranked_sets, symbols)
     prog = book.progress
@@ -799,6 +1039,9 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "source": "synth" if synth else "live",
         "hours": hours,
         "minPf": min_pf,
+        "refreshHours": refresh_h,
+        "continuous": not synth,
+        "running": not synth,
         "stepLo": step_lo,
         "stepHi": step_hi,
         "targetCount": target,
@@ -820,6 +1063,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "setMinPf": min_pf,
             "histTestHours": hours,
             "histTestMinPf": min_pf,
+            "histTestRefreshHours": refresh_h,
             "baseEvalPosCount": 30,
         },
         "coverage": {
@@ -837,6 +1081,13 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "bySymbol": by_sym,
         "byDirection": by_dir,
         "byStrategy": by_strat,
+        "pfStats": combo.get("pfStats") or {},
+        "withWithout": combo.get("withWithout") or {},
+        "comboMatrix": combo.get("matrix") or [],
+        "successfulConfigs": combo.get("successful") or [],
+        "validatedIds": [str(r.get("setId") or "") for r in (combo.get("successful") or []) if r.get("setId")],
+        "recalcOnly": recalc_only,
+        "combo": combo.get("meta") or {},
         "byStep": by_step,
         "listings": listings,
         "rejected": [{k: v for k, v in r.items() if k != "_bars"} for r in fill["rejected"]],
@@ -876,6 +1127,12 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Start a new run, or Resume a paused one. Start while already live is a no-op."""
     global _THREAD
     body = dict(body) if isinstance(body, dict) else {}
+    winding = None
+    with _LOCK:
+        if thread_alive() and stop_requested():
+            winding = _THREAD
+    if winding is not None:
+        winding.join(0.25)
     with _LOCK:
         if thread_alive() and pause_requested():
             clear_pause()
@@ -890,17 +1147,31 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             job["phase"] = resume_phase
             job["detail"] = "historic test resumed"
             return publish(job)
-        if thread_alive():
+        if thread_alive() and not stop_requested():
             current = read_job()
             current["ok"] = True
             current["paused"] = False
             current["running"] = True
             current["detail"] = current.get("detail") or "historic test already running"
             return current
+        if thread_alive() and stop_requested():
+            job = read_job()
+            job["ok"] = True
+            job["phase"] = "stopped"
+            job["running"] = False
+            job["paused"] = False
+            job["detail"] = "historic test stopping · click Start again"
+            return publish(job)
         clear_stop()
         clear_pause()
         hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
         min_pf = clamp_min_pf(body.get("minPf") or body.get("histTestMinPf") or (body.get("overlay") or {}).get("histTestMinPf") or POSITIVE_PF)
+        refresh_h = clamp_refresh_hours(
+            body.get("refreshHours")
+            or body.get("histTestRefreshHours")
+            or (body.get("overlay") or {}).get("histTestRefreshHours")
+            or REFRESH_DEFAULT
+        )
         target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
         queued = publish({
             "ok": True,
@@ -909,10 +1180,12 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "ready": False,
             "running": True,
             "paused": False,
-            "detail": f"queued · {hours}h · min PF {min_pf:.2f} · fill {target}",
+            "detail": f"queued · {hours}h · min PF {min_pf:.2f} · fill {target} · refresh {refresh_h}h",
             "hours": hours,
             "minPf": min_pf,
             "positivePf": min_pf,
+            "refreshHours": refresh_h,
+            "continuous": not bool(body.get("synth") or body.get("once")),
             "targetCount": target,
             "symbols": [],
             "positive": [],
@@ -921,7 +1194,20 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
         def worker() -> None:
             try:
-                run_test(body)
+                once = bool(body.get("synth") or body.get("once"))
+                prior: Dict[str, Any] = {}
+                while True:
+                    payload = dict(body)
+                    ids = validated_set_ids(prior)
+                    if ids and not once:
+                        payload["recalcIds"] = ids
+                        payload["keepSymbols"] = list(prior.get("positive") or prior.get("symbols") or [])
+                    run_test(payload)
+                    if once or stop_requested():
+                        break
+                    prior = read_job()
+                    if not wait_for_refresh(refresh_h, prior):
+                        break
             except Exception as exc:
                 publish({
                     "ok": False,
@@ -934,6 +1220,7 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                     "detail": traceback.format_exc()[-400:],
                     "hours": hours,
                     "minPf": min_pf,
+                    "refreshHours": refresh_h,
                     "targetCount": target,
                 })
 
@@ -1014,6 +1301,14 @@ def self_test() -> Dict[str, Any]:
     rec("positive-false-below", not symbol_clears_floor({"n": 12, "pf": 1.02}, 1.1))
     rec("positive-false-empty", not symbol_clears_floor({"n": 0, "pf": 2.0}, 1.1))
     rec("target-default", clamp_target(0) == DEFAULT_TARGET)
+    rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
+    rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))
+    rec("refresh-max", clamp_refresh_hours(99) == REFRESH_MAX, clamp_refresh_hours(99))
+    rec(
+        "validated-ids",
+        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}) == ["a"],
+        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
+    )
 
     ov = test_overlay(4, 1.1, 8, 8)
     ov["slToTpRatios"] = [0.6]
@@ -1068,6 +1363,20 @@ def self_test() -> Dict[str, Any]:
         rec("synth-reports-fill", "evaluated" in job or "fill" in job or job.get("phase") in ("ready", "error"), job.get("phase"))
         rec("synth-no-false-positive", all(symbol_clears_floor(r, 1.1) for r in (job.get("bySymbol") or []) if r.get("symbol") in (job.get("symbols") or [])), job.get("symbols"))
         rec("synth-does-not-publish-desk-job", not os.path.samefile(PUBLIC_JSON, prev_paths[0]) if os.path.exists(prev_paths[0]) else True)
+        ids = validated_set_ids(job)
+        rec("synth-validated-ids", True, ids)
+        if ids and (job.get("symbols") or job.get("positive")):
+            recalc = run_test({
+                "hours": 4, "minPf": 1.1, "targetCount": 2, "minStep": 8, "stepMax": 8, "synth": True,
+                "recalcIds": ids[:1],
+                "keepSymbols": list(job.get("positive") or job.get("symbols") or []),
+                "overlay": {"slToTpRatios": [0.6], "stratTrailing": False, "stratIndications": False, "stratBlock": False, "histSimulateBlock": False},
+            })
+            rec("recalc-only-flag", bool(recalc.get("recalcOnly")), recalc.get("recalcOnly"))
+            rec("recalc-does-not-expand-catalog", len(recalc.get("validatedIds") or []) <= max(1, len(ids)), recalc.get("validatedIds"))
+        else:
+            rec("recalc-only-flag", True, "no-ids-skip")
+            rec("recalc-does-not-expand-catalog", True, "no-ids-skip")
     finally:
         PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR = prev_paths
         shutil.rmtree(tmp, ignore_errors=True)

@@ -1,6 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pause, Play, Square } from "lucide-react";
 import {
   blockTable,
   bool,
@@ -21,19 +20,25 @@ import {
   trailGiveFromArm,
   syncOverlayFlags,
   clampHistTestHours,
+  clampHistTestRefreshHours,
   histTestLookbackBars,
   HIST_TEST_HOURS_DEFAULT,
   HIST_TEST_HOURS_MAX,
   HIST_TEST_HOURS_MIN,
   HIST_TEST_HOURS_STEP,
+  HIST_TEST_REFRESH_DEFAULT,
+  HIST_TEST_REFRESH_MAX,
+  HIST_TEST_REFRESH_MIN,
   isUnlimitedSymbolBook,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
+import { HistTestControls } from "@/components/hist-test-controls";
+import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
@@ -53,7 +58,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestIsPaused, histTestStartLabel, histTestStatusLine, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -136,10 +141,13 @@ function SettingsPage() {
   const calcJobRef = useRef<HistCalcJob | null>(null);
   const calcPollRef = useRef<{ refresh: () => void; stop: () => void } | null>(null);
   const histTestJobRef = useRef<HistTestJob | null>(null);
+  const histTestSeqRef = useRef(0);
+  const rawRef = useRef<LiveStats | null>(null);
 
   useEffect(() => {
     setCts(null);
     setRaw(null);
+    rawRef.current = null;
     setCalcJob(null);
     setCalcBusy(false);
     setHistTestJob(null);
@@ -157,10 +165,14 @@ function SettingsPage() {
     setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
-    const delay = () => document.hidden ? 8000 : 4000;
+    const delay = () => deskPollMs(rawRef.current, document.hidden);
     const statsPoll = startPolling(async (signal) => {
       const s = await fetchLiveStats(conn, signal);
-      if (!signal.aborted && s) setRaw(s);
+      if (signal.aborted || !s) return;
+      if (!statsUnchanged(rawRef.current, s)) {
+        rawRef.current = s;
+        setRaw(s);
+      }
     }, delay);
     const configPoll = startPolling(async (signal) => {
       const c = await fetchCtsBundle(conn, signal);
@@ -230,11 +242,12 @@ function SettingsPage() {
 
   useEffect(() => {
     const poll = startPolling(async (signal) => {
+      const seq = histTestSeqRef.current;
       const j = await fetchHistTest(signal);
-      if (signal.aborted) return;
+      if (signal.aborted || seq !== histTestSeqRef.current) return;
       histTestJobRef.current = j;
       setHistTestJob(j);
-    }, () => (histTestIsRunning(histTestJobRef.current?.phase) ? 1200 : document.hidden ? 8000 : 4000));
+    }, () => histTestPollMs(histTestJobRef.current, document.hidden));
     return () => poll.stop();
   }, []);
 
@@ -266,6 +279,9 @@ function SettingsPage() {
       }
       if (k === "histTestHours") {
         next.histTestHours = clampHistTestHours(Number(v), HIST_TEST_HOURS_DEFAULT);
+      }
+      if (k === "histTestRefreshHours") {
+        next.histTestRefreshHours = clampHistTestRefreshHours(Number(v), HIST_TEST_REFRESH_DEFAULT);
       }
       if (k === "histTestMinPf") {
         next.histTestMinPf = normalizePf(Number(v), POSITIVE_PF);
@@ -422,17 +438,21 @@ function SettingsPage() {
 
   const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
     if (action === "start" && overlay.histTestEnabled === false) return;
+    const seq = ++histTestSeqRef.current;
     setSaveMsg(null);
     const hours = clampHistTestHours(overlay.histTestHours, HIST_TEST_HOURS_DEFAULT);
     const minPf = normalizePf(Number(overlay.histTestMinPf || overlay.minPf), POSITIVE_PF);
+    const refreshHours = clampHistTestRefreshHours(overlay.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
     const payload = {
       hours,
       minPf,
+      refreshHours,
       symbolCap: histTestTarget,
       overlay: {
         ...overlay,
         histTestHours: hours,
         histTestMinPf: minPf,
+        histTestRefreshHours: refreshHours,
         symbolCap: histTestTarget,
       },
     };
@@ -442,6 +462,7 @@ function SettingsPage() {
         : action === "pause"
           ? await pauseHistTest()
           : await startHistTest({ ...payload, action: action === "resume" ? "resume" : "start" });
+    if (seq !== histTestSeqRef.current) return;
     histTestJobRef.current = j;
     setHistTestJob(j);
     if (j.phase === "error") setSaveMsg(j.error || j.detail || `Historic test ${action} failed`);
@@ -1517,6 +1538,20 @@ function SettingsPage() {
                 />
                 <Slider label="Base TP" value={overlay.tpPct} min={0.2} max={4} step={0.05} unit="%" onChange={(v) => patch("tpPct", v)} />
               </Grid>
+              {overlay.forcedBest && Object.keys(overlay.forcedBest).length ? (
+                <div className="rounded-lg border border-primary-dim bg-surface p-3" data-testid="forced-applied-values">
+                  <div className="text-xs text-muted">
+                    Applied from forced 24h winners{overlay.forcedVariant ? ` · ${overlay.forcedVariant}` : ""} · desk TP {overlay.tpPct.toFixed(2)}% / SL {overlay.slPct.toFixed(2)}%
+                  </div>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    {Object.entries(overlay.forcedBest).sort(([a], [b]) => a.localeCompare(b)).map(([sym, row]) => (
+                      <div key={sym} className="font-mono text-xs">
+                        {sym.replace("-USDT", "")} · {row.indication} {row.direction} · TP {(row.tpPct ?? 0).toFixed(2)}% / SL {(row.slPct ?? 0).toFixed(2)}%
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
                   <thead className="font-mono text-xs text-muted">
@@ -1888,6 +1923,15 @@ function SettingsPage() {
                   max={8}
                   step={1}
                   onChange={(v) => patch("blockPauseCountRatio", v)}
+                />
+                <Num
+                  label="Main eval last positions"
+                  value={overlay.blockEvalPosCount ?? 50}
+                  min={5}
+                  max={75}
+                  step={1}
+                  hint="Each Block count is scored independently at stage Main. Fewer samples stay valid. Failed counts keep intern calcs but do not emit Real/Live."
+                  onChange={(v) => patch("blockEvalPosCount", Math.max(5, Math.min(75, Math.round(v))))}
                 />
                 <KV k="Default min PF" v={String(defaultMinPf)} />
               </Grid>
@@ -2589,22 +2633,6 @@ function TestHistoricCard({
   patch: <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => void;
 }) {
   const enabled = overlay.histTestEnabled !== false;
-  const [busy, setBusy] = useState<Record<string, boolean>>({});
-  const paused = histTestIsPaused(histTestJob);
-  const live = histTestIsRunning(histTestJob?.phase) && !paused;
-  const startAction: "start" | "resume" = paused ? "resume" : "start";
-  const anyBusy = Object.values(busy).some(Boolean);
-  const run = async (action: "start" | "stop" | "pause" | "resume") => {
-    if (busy[action]) return;
-    if (action === "start" && !enabled) return;
-    setBusy((b) => ({ ...b, [action]: true }));
-    try {
-      await onControl(action);
-    } finally {
-      setBusy((b) => ({ ...b, [action]: false }));
-    }
-  };
-  const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-40";
   return (
     <div data-testid="test-historic" id="test-historic" className="scroll-mt-4">
       <section className="min-w-0 space-y-4 rounded-radius border-2 border-primary bg-surface p-4">
@@ -2613,7 +2641,7 @@ function TestHistoricCard({
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Settings · Overview</p>
             <h2 className="mt-1 text-2xl font-semibold tracking-tight text-fg">Test Historic</h2>
             <p className="mt-1 text-sm text-muted">
-              Default ON. Replay the step book on a chosen lookback and keep scoring ranked symbols until the selected count clears min PF. Independent of Live and VST engines.
+              Default ON. The engine skips full-catalog historic progress and only runs validated Test Historic configs. Every refresh interval those configs are recalculated and revalidated from scratch.
             </p>
           </div>
           <span
@@ -2626,7 +2654,7 @@ function TestHistoricCard({
         <EnableSlider
           label="Test Historic"
           on={enabled}
-          hint="default ON · independent of the live engine lane"
+          hint="default ON · engine skips full-catalog calcs; only validated Test Historic configs"
           onChange={(v) => patch("histTestEnabled", v)}
         />
         <p className="text-sm text-muted">
@@ -2654,42 +2682,27 @@ function TestHistoricCard({
             hint="A symbol counts as positive only when its cost-PF meets this floor"
             onChange={(v) => patch("histTestMinPf", v)}
           />
+          <Slider
+            label="Refresh interval"
+            value={overlay.histTestRefreshHours}
+            min={HIST_TEST_REFRESH_MIN}
+            max={HIST_TEST_REFRESH_MAX}
+            step={1}
+            unit="h"
+            testId="hist-test-refresh-hours"
+            hint={`Rerun the independent combo eval every ${overlay.histTestRefreshHours}h using only positive successful sets. Default ${HIST_TEST_REFRESH_DEFAULT}h.`}
+            onChange={(v) => patch("histTestRefreshHours", Math.round(v))}
+          />
           <KV k="Fill until" v={`${histTestTarget} positive symbols`} />
           <KV k="Lookback" v={`${histTestLookbackBars(overlay.histTestHours)} bars`} />
         </Grid>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex rounded-radius border border-border bg-bg2 p-1" data-testid="hist-test-controls">
-            <button
-              type="button"
-              data-testid="hist-test-start"
-              aria-label={paused ? "Resume historic test" : "Start historic test"}
-              disabled={Boolean(busy[startAction]) || (startAction === "start" && !enabled)}
-              onClick={() => void run(startAction)}
-              className={`${btn} ${live ? "text-muted" : "text-primary"}`}
-            >
-              <Play className="size-4" /> {histTestStartLabel(histTestJob)}
-            </button>
-            <button
-              type="button"
-              data-testid="hist-test-pause"
-              aria-label="Pause historic test"
-              disabled={Boolean(busy.pause)}
-              onClick={() => void run("pause")}
-              className={btn}
-            >
-              <Pause className="size-4" /> Pause
-            </button>
-            <button
-              type="button"
-              data-testid="hist-test-stop"
-              aria-label="Stop historic test"
-              disabled={Boolean(busy.stop)}
-              onClick={() => void run("stop")}
-              className={`${btn} text-danger`}
-            >
-              <Square className="size-4" /> Stop
-            </button>
-          </div>
+        <HistTestControls
+          job={histTestJob}
+          enabled={enabled}
+          hours={overlay.histTestHours}
+          minPf={overlay.histTestMinPf}
+          onControl={onControl}
+        >
           {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
             <button
               type="button"
@@ -2703,16 +2716,7 @@ function TestHistoricCard({
           <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">
             Open report
           </a>
-          {anyBusy ? <span className="font-mono text-[10px] text-muted">…</span> : null}
-        </div>
-        <p className={`text-sm ${histTestJob?.error ? "text-danger" : "text-muted"}`} data-testid="hist-test-status">
-          {histTestStatusLine(histTestJob, overlay.histTestHours, overlay.histTestMinPf)}
-        </p>
-        {histTestIsRunning(histTestJob?.phase) || histTestJob?.ready ? (
-          <div className="h-1.5 overflow-hidden rounded-full bg-border">
-            <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, histTestJob?.pct || 0))}%` }} />
-          </div>
-        ) : null}
+        </HistTestControls>
         {(histTestJob?.positive?.length || (Array.isArray(histTestJob?.rejected) && histTestJob.rejected.length) || histTestIsRunning(histTestJob?.phase) || histTestJob?.ready) ? (
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
@@ -2749,6 +2753,7 @@ function TestHistoricCard({
             </tbody>
           </table>
         ) : null}
+        <ComboEvalPanel job={histTestJob} compact />
       </section>
     </div>
   );
@@ -3299,10 +3304,11 @@ function EffectiveSettingsSummary({
   overlay: PulseOverlay;
   dirty: boolean;
 }) {
-  const pulse = stats?.pulse;
-  const remoteReady = Boolean(stats && pulse && Object.keys(pulse).length > 0);
+  const livePulse = Boolean(stats?.pulse && Object.keys(stats.pulse).length > 0);
+  const pulse = { ...overlay, ...(livePulse ? stats!.pulse : {}) } as Record<string, unknown>;
+  const remoteReady = livePulse || Boolean(overlay);
   const remote = (value: unknown, suffix = "") =>
-    remoteReady ? formatAppliedSetting(value, suffix) : "—";
+    remoteReady && value != null && value !== "" ? formatAppliedSetting(value, suffix) : "—";
   const coverage = stats?.coverage;
   const controls = coverage?.controls;
   const setCoverage = coverage?.sets;
@@ -3323,11 +3329,11 @@ function EffectiveSettingsSummary({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-xs uppercase text-muted">Effective settings</span>
         <span className={remoteReady ? "font-mono text-xs text-primary" : "font-mono text-xs text-warn"}>
-          {remoteReady ? "applied remote" : "waiting for applied snapshot"}
+          {livePulse ? "applied remote" : "overlay · sidecar offline"}
         </span>
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" data-testid="lane-status">
-        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf)} · ${remote(pulse?.pfWindow)}`} />
+        <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf ?? pulse?.setMinPf)} · ${remote(pulse?.pfWindow ?? pulse?.setPfWindow ?? pulse?.baseEvalPosCount)}`} />
         <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />

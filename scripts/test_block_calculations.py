@@ -22,6 +22,7 @@ from block_engine import (
     calculate_block_max_additional_ratio,
     calculate_block_minimum_profit_factor,
     calculate_block_volume_increment_ratio,
+    clamp_eval_pos_count,
     cost_pf_from_net_fracs,
     shared_block_volume_ratio,
 )
@@ -207,15 +208,17 @@ class BlockCalculationTests(unittest.TestCase):
     def test_warm_loss_blocks_and_warm_win_passes_on_position_cost(self):
         b = self.book(positionCostPct=0.10)
         lane = BlockLane("P", "LONG", 10.0, 100.0, confirmed_add=2.5, satisfied={1: True})
-        lane.pf_ring[2] = [-0.0045] * 8
-        lane.parent_pf_ring = [-0.0045] * 8
+        lane.pf_ring[2] = [-0.0045] * 50
+        lane.parent_pf_ring = [-0.0045] * 50
         loss = b.pf_decision(lane, 2, intern_pf=1.5)
         self.assertFalse(loss["coldStart"])
         self.assertFalse(loss["passesProfitFactor"])
-        lane.pf_ring[2] = [0.001] * 8
-        lane.parent_pf_ring = [0.001] * 8
+        self.assertTrue(loss["internOnly"])
+        lane.pf_ring[2] = [0.001] * 50
+        lane.parent_pf_ring = [0.001] * 50
         win = b.pf_decision(lane, 2, intern_pf=INTERN_PF)
         self.assertTrue(win["passesProfitFactor"])
+        self.assertFalse(win["internOnly"])
         self.assertAlmostEqual(win["observedProfitFactor"], POSITIVE_PF)
 
     def test_book_cost_pct_changes_observed_pf(self):
@@ -223,8 +226,8 @@ class BlockCalculationTests(unittest.TestCase):
         cheap = self.book("cheap.json", positionCostPct=0.10)
         dear = self.book("dear.json", positionCostPct=0.15)
         lane = BlockLane("C", "LONG", 10.0, 100.0)
-        lane.pf_ring[1] = [net] * 8
-        lane.parent_pf_ring = [net] * 8
+        lane.pf_ring[1] = [net] * 50
+        lane.parent_pf_ring = [net] * 50
         cheap_d = cheap.pf_decision(lane, 1, intern_pf=INTERN_PF)
         dear_d = dear.pf_decision(lane, 1, intern_pf=INTERN_PF)
         self.assertAlmostEqual(dear_d["observedProfitFactor"], POSITIVE_PF)
@@ -250,9 +253,60 @@ class BlockCalculationTests(unittest.TestCase):
         b = self.book(blockVolumeRatio=0.1, blockMaxStack=6)
         lane = b.register_parent("SOL-USDT", "LONG", 10.0, 100.0)
         b.pause_count(lane, 1)
-        lane.pf_ring[2] = [-1] * 5
+        lane.pf_ring[2] = [-1] * 50
         pick = b.pick_emit(b.evaluate_counts(lane, 1, 2.0))
         self.assertEqual(pick["blockCount"], 3)
+
+    def test_main_eval_insufficient_is_valid_and_losers_are_intern_only(self):
+        self.assertEqual(clamp_eval_pos_count(2), 5)
+        self.assertEqual(clamp_eval_pos_count(99), 75)
+        b = self.book(blockEvalPosCount=50, blockMaxStack=6, blockVolumeRatio=0.25)
+        self.assertEqual(b.eval_pos_count, 50)
+        cold = BlockLane("C", "LONG", 10.0, 100.0)
+        ev = b.main_stage_eval(cold, 1)
+        self.assertTrue(ev["liveOk"])
+        self.assertTrue(ev["insufficientSample"])
+        self.assertFalse(b.pf_decision(cold, 1, intern_pf=1.0)["passesProfitFactor"])
+        self.assertTrue(b.pf_decision(cold, 1, intern_pf=POSITIVE_PF)["passesProfitFactor"])
+        lane = BlockLane("L", "LONG", 10.0, 100.0)
+        lane.pf_ring[1] = [-0.01] * 50
+        lane.pf_ring[2] = [0.004] * 50
+        lane.pf_ring[3] = [0.004] * 12
+        lose = b.main_stage_eval(lane, 1)
+        win = b.main_stage_eval(lane, 2)
+        short = b.main_stage_eval(lane, 3)
+        self.assertTrue(lose["internOnly"])
+        self.assertFalse(lose["liveOk"])
+        self.assertTrue(win["liveOk"])
+        self.assertTrue(short["liveOk"])
+        self.assertTrue(short["insufficientSample"])
+        rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.5)
+        emit = {int(r["blockCount"]) for r in rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0}
+        self.assertNotIn(1, emit)
+        self.assertIn(2, emit)
+
+    def test_set_engine_block_main_is_independent_per_count_and_kind(self):
+        from set_engine import SetBook, hist_fill
+        book = SetBook()
+        book.block_eval_pos = 50
+        book.real_min_pf = POSITIVE_PF
+        losers = []
+        winners = []
+        for i in range(50):
+            lose = hist_fill(1000 + i, "XRP-USDT", 1, -0.02, 60, "block:tp", ind_kind="signals")
+            lose.update(strategy="block", block_count=2, set_id="indications:sl0.6:st8")
+            losers.append(lose)
+            win = hist_fill(2000 + i, "XRP-USDT", 1, 0.02, 60, "block:tp", ind_kind="trend")
+            win.update(strategy="block", block_count=2, set_id="indications:sl0.6:st8")
+            winners.append(win)
+        short = hist_fill(3000, "XRP-USDT", 1, -0.02, 60, "block:tp", ind_kind="active")
+        short.update(strategy="block", block_count=3, set_id="indications:sl0.6:st8")
+        book.strategy_hist = {"block": losers + winners + [short]}
+        book.score_block_main()
+        self.assertFalse(book.block_main_live_ok(2, indication="signals"))
+        self.assertTrue(book.block_main_live_ok(2, indication="trend"))
+        self.assertTrue(book.block_main_live_ok(3, indication="active"))
+        self.assertTrue(book.block_main_live_ok(4))
 
     def test_active_live_is_a_view_of_the_same_remainder(self):
         b = self.book(blockVolumeRatio=0.25, blockMaxStack=3)
@@ -310,6 +364,179 @@ class BlockCalculationTests(unittest.TestCase):
         # original 3/4-count example: base 3, n=4 hits 2×
         self.assertAlmostEqual(b.formula(3.0, 4)["targetBlockQty"], 6.0)
         self.assertAlmostEqual(b.formula(3.0, 6)["targetBlockQty"], 6.0)
+
+    def test_overall_real_pf_does_not_double_subtract_cost_from_net_ring(self):
+        import time as time_mod
+        from types import SimpleNamespace
+        import pulse_trader as pt
+        from position_cost import POSITIVE_PF, last_n_cost_pf, net_pnl_pct
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-real.json", blockMaxStack=3, blockVolumeRatio=0.25)
+        lane = p.block.register_parent("SOL-USDT", "LONG", 10.0, 100.0)
+        gross = 0.003  # +2R at 0.10% cost → PF 1.20
+        net = net_pnl_pct(gross, 0.10)
+        now = time_mod.time()
+        p.closed = [
+            SimpleNamespace(
+                symbol="SOL-USDT", side="LONG", pnl=gross, pnl_pct=gross, t=now - i,
+                ours=True, member_count=1, exchange_confirmed=True, client_id=f"c{i}",
+            )
+            for i in range(6)
+        ]
+        lane.parent_pf_ring = [net] * 6
+        ratio = p.block_overall_real_pf("SOL-USDT", "LONG")
+        want = last_n_cost_pf(p.closed, 3, 0.10, ordered=True)["ratio"]
+        self.assertGreater(ratio, 0.0)
+        self.assertAlmostEqual(ratio, want, places=4)
+        self.assertGreaterEqual(ratio + 1e-9, POSITIVE_PF)
+        mixed = last_n_cost_pf(
+            list(p.closed) + [SimpleNamespace(pnl_pct=net, pnl=net, t=0.0) for _ in range(6)],
+            3, 0.10, ordered=True,
+        )["ratio"]
+        self.assertNotAlmostEqual(ratio, mixed, places=4)
+        self.assertEqual(p.block_overall_real_n("SOL-USDT", "LONG"), 6)
+
+    def test_overall_real_n_matches_ring_when_closes_are_below_need(self):
+        import time as time_mod
+        from types import SimpleNamespace
+        import pulse_trader as pt
+        from position_cost import net_pnl_pct
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-n-mismatch.json")
+        lane = p.block.register_parent("BCH-USDT", "LONG", 5.0, 100.0)
+        now = time_mod.time()
+        p.closed = [
+            SimpleNamespace(
+                symbol="BCH-USDT", side="LONG", pnl=0.003, pnl_pct=0.003, t=now - i,
+                ours=True, member_count=1,
+            )
+            for i in range(2)
+        ]
+        lane.parent_pf_ring = [net_pnl_pct(0.003, 0.10)] * 8
+        self.assertGreaterEqual(p.block_overall_real_pf("BCH-USDT", "LONG") + 1e-9, 1.10)
+        self.assertEqual(p.block_overall_real_n("BCH-USDT", "LONG"), 8)
+        self.assertEqual(p._block_overall_real_state("BCH-USDT", "LONG")["source"], "ring")
+
+    def test_overall_real_last_n_is_chronological_not_insertion_order(self):
+        from types import SimpleNamespace
+        import pulse_trader as pt
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-chrono.json")
+        p.block.register_parent("XRP-USDT", "SHORT", 4.0, 1.0)
+        # Newest-first insertion: three recent losses, then older wins. Last-N Real
+        # must use the newest three (losses), not the trailing insertion wins.
+        p.closed = [
+            SimpleNamespace(symbol="XRP-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=30.0 + i,
+                            ours=True, member_count=1)
+            for i in range(3)
+        ] + [
+            SimpleNamespace(symbol="XRP-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=10.0 + i,
+                            ours=True, member_count=1)
+            for i in range(3)
+        ]
+        self.assertEqual(p.block_overall_real_pf("XRP-USDT", "SHORT"), 0.0)
+        self.assertEqual(p.block_overall_real_n("XRP-USDT", "SHORT"), 6)
+
+    def test_snapshot_intern_uses_overall_real_not_the_floor(self):
+        from types import SimpleNamespace
+        import pulse_trader as pt
+        from position_cost import INTERN_PF, net_pnl_pct
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.block_overall = True
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-snap.json", blockMaxStack=3, blockVolumeRatio=0.25)
+        p.closed = []
+        p.open = {}
+        lane = p.block.register_parent("SOL-USDT", "LONG", 10.0, 100.0)
+        lane.parent_pf_ring = [0.0] * 3  # intern 1.00
+        snap = p.block.snapshot(intern_pf_lookup=p._block_snapshot_intern_pf)
+        row = next(c for c in snap["lanes"][0]["counts"] if c["n"] == 1)
+        self.assertFalse(row["pass"])
+        self.assertEqual(row["internPf"], 0.0)
+        lane.parent_pf_ring = [net_pnl_pct(0.003, 0.10)] * 3
+        snap_ok = p.block.snapshot(intern_pf_lookup=p._block_snapshot_intern_pf)
+        row_ok = next(c for c in snap_ok["lanes"][0]["counts"] if c["n"] == 1)
+        self.assertTrue(row_ok["pass"])
+        self.assertGreater(INTERN_PF, 0.0)
+
+    def test_overall_real_pf_ring_fallback_when_closes_are_missing(self):
+        from types import SimpleNamespace
+        import pulse_trader as pt
+        from position_cost import net_pnl_pct
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-ring.json")
+        lane = p.block.register_parent("XRP-USDT", "LONG", 4.0, 1.0)
+        p.closed = []
+        self.assertEqual(p.block_overall_real_pf("XRP-USDT", "LONG"), 0.0)
+        lane.parent_pf_ring = [net_pnl_pct(0.003, 0.10)] * 3
+        self.assertGreaterEqual(p.block_overall_real_pf("XRP-USDT", "LONG") + 1e-9, 1.10)
+        self.assertEqual(p.block_overall_real_n("XRP-USDT", "LONG"), 3)
+        lane.parent_pf_ring = [0.0] * 3  # intern 1.00 after cost — not extra size
+        self.assertEqual(p.block_overall_real_pf("XRP-USDT", "LONG"), 0.0)
+
+    def test_overall_real_includes_merged_member_closes_in_last_n(self):
+        """Physical parent last-N includes merged lots. Dropping them fakes Real."""
+        from types import SimpleNamespace
+        import pulse_trader as pt
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-merged.json")
+        p.block.register_parent("SOL-USDT", "LONG", 8.0, 100.0)
+        # Three older single-lot wins, then three recent merged losses.
+        p.closed = [
+            SimpleNamespace(symbol="SOL-USDT", side="LONG", pnl=0.003, pnl_pct=0.003, t=10.0 + i,
+                            ours=True, member_count=1)
+            for i in range(3)
+        ] + [
+            SimpleNamespace(symbol="SOL-USDT", side="LONG", pnl=-0.003, pnl_pct=-0.003, t=40.0 + i,
+                            ours=True, member_count=2)
+            for i in range(3)
+        ]
+        self.assertEqual(p.block_overall_real_pf("SOL-USDT", "LONG"), 0.0)
+        self.assertEqual(p.block_overall_real_n("SOL-USDT", "LONG"), 6)
+        self.assertEqual(len(p.overall_side_closes("SOL-USDT", "LONG")), 6)
+
+    def test_overall_real_timestamp_last_n_does_not_need_pre_sorted_list(self):
+        from types import SimpleNamespace
+        import pulse_trader as pt
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=1.10, real_eval=3, stage_min_pf={"real": 1.10})
+        p.block = self.book("overall-ts.json")
+        p.block.register_parent("BCH-USDT", "SHORT", 4.0, 1.0)
+        # Unsorted: newest losses first, older wins after. Last-N Real = losses.
+        p.closed = [
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=50.0,
+                            ours=True, member_count=1),
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=10.0,
+                            ours=True, member_count=1),
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=60.0,
+                            ours=True, member_count=1),
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=11.0,
+                            ours=True, member_count=1),
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=-0.003, pnl_pct=-0.003, t=70.0,
+                            ours=True, member_count=1),
+            SimpleNamespace(symbol="BCH-USDT", side="SHORT", pnl=0.003, pnl_pct=0.003, t=12.0,
+                            ours=True, member_count=1),
+        ]
+        self.assertEqual(p.block_overall_real_pf("BCH-USDT", "SHORT"), 0.0)
 
 
 if __name__ == "__main__":

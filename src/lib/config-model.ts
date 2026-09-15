@@ -126,11 +126,20 @@ export const HIST_TEST_HOURS_MIN = 4;
 export const HIST_TEST_HOURS_MAX = 64;
 export const HIST_TEST_HOURS_DEFAULT = 20;
 export const HIST_TEST_HOURS_STEP = 1;
+export const HIST_TEST_REFRESH_MIN = 1;
+export const HIST_TEST_REFRESH_MAX = 8;
+export const HIST_TEST_REFRESH_DEFAULT = 2;
 
 export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
   const n = Math.round(Number(value));
   const base = Number.isFinite(n) ? n : fallback;
   return Math.max(HIST_TEST_HOURS_MIN, Math.min(HIST_TEST_HOURS_MAX, base));
+}
+
+export function clampHistTestRefreshHours(value: unknown, fallback = HIST_TEST_REFRESH_DEFAULT): number {
+  const n = Math.round(Number(value));
+  const base = Number.isFinite(n) ? n : fallback;
+  return Math.max(HIST_TEST_REFRESH_MIN, Math.min(HIST_TEST_REFRESH_MAX, base));
 }
 
 export function histTestLookbackBars(hours: unknown): number {
@@ -230,6 +239,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   blockCounts: number[];
   blockProfitFactorRatio: number;
   blockPauseCountRatio: number;
+  blockEvalPosCount: number;
   blockActiveLive: boolean;
   blockActiveReal: boolean;
   blockOverall: boolean;
@@ -341,6 +351,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   histTestMinPf: number;
   /** Test Historic option on Settings Overview. Default ON. */
   histTestEnabled: boolean;
+  /** Independent historic-test rerun interval in hours. */
+  histTestRefreshHours: number;
   setPfWindow: number;
   baseEvalPosCount?: number;
   setDeactN: number;
@@ -375,6 +387,22 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   exitMinPf: number;
   exitAutoDeact: boolean;
   modules?: Record<string, boolean>;
+  forcedSymbols?: string[];
+  forcedVariant?: string;
+  forcedEligible?: number;
+  forcedBest?: Record<string, {
+    id?: string;
+    indication?: string;
+    direction?: string;
+    tpPct?: number;
+    slPct?: number;
+    slRatio?: number;
+    trainPf?: number;
+    pf?: number;
+    tradesPerHour?: number;
+    variant?: string;
+    settingsKey?: string;
+  }>;
 };
 
 export const DEFAULT_OVERLAY: PulseOverlay = {
@@ -418,6 +446,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockCounts: [1, 2, 3, 4, 5, 6],
   blockProfitFactorRatio: 1.25,
   blockPauseCountRatio: 1,
+  blockEvalPosCount: 50,
   blockActiveLive: true,
   blockActiveReal: true,
   blockOverall: true,
@@ -532,6 +561,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histTestHours: HIST_TEST_HOURS_DEFAULT,
   histTestMinPf: POSITIVE_PF,
   histTestEnabled: true,
+  histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
   setPfWindow: 30,
   baseEvalPosCount: 30,
   setDeactN: 25,
@@ -603,6 +633,7 @@ export type CtsSettings = {
   blockCounts?: number[];
   blockProfitFactorRatio?: number;
   blockPauseCountRatio?: number;
+  blockEvalPosCount?: number;
   normalExecutionEnabled?: boolean;
   entryPolicy?: EntryPolicy | string;
   entryPolicyMaxCandidates?: number;
@@ -693,6 +724,7 @@ export type CtsSettings = {
   histTestHours?: number;
   histTestMinPf?: number;
   histTestEnabled?: boolean;
+  histTestRefreshHours?: number;
   setPfWindow?: number;
   setDeactN?: number;
   controlMinTrades?: number;
@@ -808,6 +840,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     blockCounts: cts.blockCounts ?? DEFAULT_OVERLAY.blockCounts,
     blockProfitFactorRatio: num(cts.blockProfitFactorRatio ?? coord.blockProfitFactorRatio, 1.1),
     blockPauseCountRatio: num(cts.blockPauseCountRatio ?? coord.blockPauseCountRatio, 1),
+    blockEvalPosCount: Math.max(5, Math.min(75, Math.round(num(cts.blockEvalPosCount ?? live?.blockEvalPosCount, 50)))),
   normalExecutionEnabled: bool(live?.normalExecutionEnabled ?? cts.normalExecutionEnabled, true),
   entryPolicy: coerceEntryPolicy(live?.entryPolicy ?? cts.entryPolicy ?? DEFAULT_OVERLAY.entryPolicy),
   entryPolicyMaxCandidates: (() => {
@@ -925,6 +958,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histTestHours: clampHistTestHours(cts.histTestHours ?? live?.histTestHours, HIST_TEST_HOURS_DEFAULT),
     histTestMinPf: normalizePf(num(cts.histTestMinPf ?? live?.histTestMinPf, POSITIVE_PF), POSITIVE_PF),
     histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
+    histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
     baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setDeactN: num(cts.setDeactN, 25),
@@ -999,6 +1033,15 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histTestHours = clampHistTestHours(out.histTestHours, HIST_TEST_HOURS_DEFAULT);
   out.histTestMinPf = normalizePf(num(out.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
   out.histTestEnabled = bool(out.histTestEnabled, true);
+  out.histTestRefreshHours = clampHistTestRefreshHours(out.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
+  if (Array.isArray(live?.forcedSymbols) && live.forcedSymbols.length) {
+    out.forcedSymbols = live.forcedSymbols.filter((s): s is string => typeof s === "string" && s.length > 0);
+  }
+  if (typeof live?.forcedVariant === "string" && live.forcedVariant) out.forcedVariant = live.forcedVariant;
+  if (live?.forcedEligible != null) out.forcedEligible = Math.max(0, Math.round(num(live.forcedEligible, 0)));
+  if (live?.forcedBest && typeof live.forcedBest === "object" && !Array.isArray(live.forcedBest)) {
+    out.forcedBest = live.forcedBest;
+  }
   if (out.trailRecalcGive && live?.trailGivePct == null) {
     out.trailGivePct = trailGiveFromArm(out.trailArmPct, out.trailGiveFactor, out.trailGiveMin, out.trailGiveMax);
   }
@@ -1092,6 +1135,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
     blockCounts: Array.isArray(overlay.blockCounts)
       ? [...new Set(overlay.blockCounts.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6))].sort((a, b) => a - b)
       : [1, 2, 3, 4, 5, 6],
+    blockEvalPosCount: Math.max(5, Math.min(75, Math.round(num(overlay.blockEvalPosCount, 50)))),
   };
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     next[key] = normalizePf(next.minPf, POSITIVE_PF);
@@ -1114,6 +1158,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.histTestHours = clampHistTestHours(next.histTestHours, HIST_TEST_HOURS_DEFAULT);
   next.histTestMinPf = normalizePf(num(next.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
   next.histTestEnabled = bool(next.histTestEnabled, true);
+  next.histTestRefreshHours = clampHistTestRefreshHours(next.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
     next.symbolsAll = true;
@@ -1147,6 +1192,14 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.symbolCap = Math.max(0, Math.round(Number(next.symbolCap) || 0));
   if (next.symbolCap === 0 && overlay.symbolCap == null) {
     next.symbolCap = DEFAULT_SYMBOL_COUNT;
+  }
+  if (Array.isArray(overlay.forcedSymbols) && overlay.forcedSymbols.length) {
+    next.forcedSymbols = overlay.forcedSymbols.filter((s) => typeof s === "string" && s.length > 0);
+  }
+  if (typeof overlay.forcedVariant === "string" && overlay.forcedVariant) next.forcedVariant = overlay.forcedVariant;
+  if (overlay.forcedEligible != null) next.forcedEligible = Math.max(0, Math.round(num(overlay.forcedEligible, 0)));
+  if (overlay.forcedBest && typeof overlay.forcedBest === "object" && !Array.isArray(overlay.forcedBest)) {
+    next.forcedBest = overlay.forcedBest;
   }
   const steps = Math.max(0, Math.round(Number(next.dcaMaxSteps) || 0));
   next.dcaMaxSteps = steps;

@@ -6,8 +6,10 @@ import {
   calcPollMs,
   calcStartLabel,
   calcStatusLine,
+  forcedBestBySymbol,
   hasCalcSnapshot,
   startHistCalc,
+  type ForcedConfigRow,
   type HistCalcJob,
 } from "./hist-calc.ts";
 
@@ -35,7 +37,7 @@ test("snapshot, poll cadence and labels follow a continuous lane", () => {
   assert.equal(hasCalcSnapshot(ready), true);
   assert.equal(calcPollMs({ phase: "partial", pct: 40, detail: "3/20" }), 1200);
   assert.equal(calcPollMs({ phase: "deferred", pct: 20, detail: "peer" }), 1200);
-  assert.equal(calcPollMs(ready), 4000);
+  assert.equal(calcPollMs(ready), 8000);
   assert.equal(calcPollMs({ phase: "idle", pct: 0, detail: "" }), 8000);
   assert.equal(calcPollMs(ready, true), 8000);
   assert.equal(calcStartLabel(null), "Start continuous replay");
@@ -44,6 +46,33 @@ test("snapshot, poll cadence and labels follow a continuous lane", () => {
   assert.match(calcStatusLine(null, 48), /continuous replay/);
   assert.match(calcStatusLine({ phase: "partial", pct: 55, detail: "12/20 symbols" }), /partial 55% · 12\/20 symbols/);
   assert.match(calcStatusLine(ready), /next refresh/);
+});
+
+test("forcedBestBySymbol prefers stored winners then throughput", () => {
+  const stored = forcedBestBySymbol({
+    bestBySymbol: {
+      "SOL-USDT": { symbol: "SOL-USDT", tpPct: 0.55, slPct: 0.1, indication: "trend" },
+      "XRP-USDT": { symbol: "XRP-USDT", tpPct: 0.6, slPct: 0.2, indication: "signals" },
+    },
+  });
+  assert.deepEqual(stored.map((row) => row.symbol), ["SOL-USDT", "XRP-USDT"]);
+  const row = (symbol: string, tph: number, sl: number, pf: number): ForcedConfigRow => ({
+    id: symbol, symbol, indication: "signals", direction: "LONG", tpPct: 0.6, slPct: sl, slRatio: sl / 0.6,
+    n: 10, trainN: 8, holdoutN: 2, pf, trainPf: pf, holdoutPf: 1, costRatio: 1, netPct: 1,
+    maxDrawdownR: 1, tradesPerHour: tph, avgHoldS: 60, eligible: true, status: "ok", source: "historical-market",
+    settingsKey: "k",
+  });
+  const derived = forcedBestBySymbol({
+    rows: [row("BCH-USDT", 1.1, 0.25, 1.2), row("BCH-USDT", 1.4, 0.2, 1.08), row("XRP-USDT", 2.2, 0.2, 1.14)],
+  });
+  assert.equal(derived.length, 2);
+  assert.equal(derived.find((item) => item.symbol === "BCH-USDT")?.slPct, 0.25);
+  assert.equal(derived.find((item) => item.symbol === "BCH-USDT")?.trainPf, 1.2);
+  const storedForced = forcedBestBySymbol({
+    forcedBest: { "BCH-USDT": { symbol: "BCH-USDT", tpPct: 0.75, slPct: 0.25, indication: "break", trainPf: 1.243 } },
+    bestBySymbol: { "BCH-USDT": { symbol: "BCH-USDT", tpPct: 0.75, slPct: 0.2, indication: "break", trainPf: 1.08 } },
+  });
+  assert.equal(storedForced[0]?.slPct, 0.25);
 });
 
 test("Start posts a continuous hourly generation and keeps allConfigs on", async (t) => {

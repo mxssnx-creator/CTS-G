@@ -634,7 +634,20 @@ class FastBingX:
         orders = normalized
         path = "/openApi/swap/v2/trade/batchOrders"
         if len(orders) <= 5:
-            return self.post(path, {"batchOrders": dumps(orders)})
+            response = self.post(path, {"batchOrders": dumps(orders)})
+            if not isinstance(response, dict):
+                return {"code": -1, "msg": "bad-json", "error": True, "complete": False,
+                        "pendingIndexes": list(range(len(orders)))}
+            if response.get("cooled") or response.get("code") not in (0, "0", None) or response.get("error"):
+                return response
+            data = response.get("data") or {}
+            rows = data.get("orders", []) if isinstance(data, dict) else data
+            if isinstance(rows, list) and len(rows) == len(orders):
+                out = dict(response)
+                out["complete"] = True
+                out["pendingIndexes"] = []
+                return out
+            return response
         results = []
         for start in range(0, len(orders), 5):
             chunk = orders[start:start + 5]

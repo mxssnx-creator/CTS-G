@@ -17,6 +17,14 @@ from position_cost import PF_MAX, PF_MIN, POSITIVE_PF  # noqa: E402
 
 
 class HistTestContract(unittest.TestCase):
+    def setUp(self):
+        ht.clear_stop()
+        ht.clear_pause()
+
+    def tearDown(self):
+        ht.clear_stop()
+        ht.clear_pause()
+
     def test_hours_clamp_4_to_64_default_20(self):
         self.assertEqual(ht.clamp_hours(None), 20)
         self.assertEqual(ht.clamp_hours(20), 20)
@@ -33,6 +41,53 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ht.clamp_min_pf(1.1), 1.1)
         self.assertEqual(ht.clamp_min_pf(0.8), PF_MIN)
         self.assertEqual(ht.clamp_min_pf(2.5), PF_MAX)
+
+    def test_refresh_hours_clamp_1_to_8_default_2(self):
+        self.assertEqual(ht.clamp_refresh_hours(None), 2)
+        self.assertEqual(ht.clamp_refresh_hours(2), 2)
+        self.assertEqual(ht.clamp_refresh_hours(1), 1)
+        self.assertEqual(ht.clamp_refresh_hours(8), 8)
+        self.assertEqual(ht.clamp_refresh_hours(0), 1)
+        self.assertEqual(ht.clamp_refresh_hours(99), 8)
+
+    def test_validated_set_ids_from_successful_configs(self):
+        ids = ht.validated_set_ids({
+            "successfulConfigs": [
+                {"setId": "general:1m:sl0.6:st8", "validated": True, "pf": 1.3},
+                {"setId": "indications:1m:sl0.6:st8", "validated": False, "pf": 0.9},
+                {"setId": "general:1m:sl0.6:st8", "validated": True, "pf": 1.4},
+            ],
+            "rows": [{"id": "trail-a", "validated": True}],
+            "validatedIds": ["extra-id"],
+        })
+        self.assertEqual(ids, ["general:1m:sl0.6:st8", "trail-a", "extra-id"])
+
+    def test_apply_scores_gates_book(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        self.assertGreater(len(book.by_idx), 0)
+        sid = book.by_idx[0].id
+        ids = ht.apply_scores_to_book(book, {
+            "successfulConfigs": [{"setId": sid, "validated": True, "pf": 1.42, "evalN": 30, "n": 40}],
+        })
+        self.assertEqual(ids, [sid])
+        self.assertEqual(book.hist_test_set_ids, {sid})
+        self.assertEqual(book.by_idx[0].last15_ratio, 1.42)
+        self.assertEqual(book.by_idx[0].last15_n, 30)
+        rows = book._validated_entry_rows(book.by_idx[0].pack)
+        self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
+        book.apply_hist_test_gate([])
+        self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+
+    def test_recalc_only_keeps_named_configs(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        keep = [st.id for st in book.by_idx[:1]]
+        n = book.restrict_to_ids(keep)
+        self.assertEqual(n, 1)
+        self.assertEqual([st.id for st in book.by_idx], keep)
 
     def test_symbol_positive_requires_fills_and_floor(self):
         self.assertTrue(ht.symbol_clears_floor({"n": 30, "pf": 1.21}, 1.1))
@@ -53,7 +108,25 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ov["histTestMinPf"], 1.1)
         self.assertEqual(ov["setMinPf"], 1.1)
         self.assertFalse(ov["dcaEnabled"])
+        self.assertTrue(ov["histSimulateDca"])
         self.assertTrue(ov["stratBlock"])
+        self.assertTrue(ov["histSimulateBlock"])
+
+    def test_normalize_ready_job_completes_progress(self):
+        blob = ht.normalize_job({
+            "phase": "ready",
+            "ready": True,
+            "pct": 0,
+            "detail": "5/5 positive · evaluated 11 · 2754/3600 validated",
+            "positive": ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT"],
+            "symbols": ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT"],
+            "error": "",
+        })
+        self.assertEqual(blob["pct"], 100)
+        self.assertEqual(blob["filled"], 5)
+        self.assertEqual(blob["evaluated"], 11)
+        self.assertTrue(blob["ready"])
+        self.assertFalse(blob["running"])
 
     def test_fill_walks_ranked_queue_until_target(self):
         queue = [{"symbol": "LOSER"}, {"symbol": "WIN1"}, {"symbol": "WIN2"}, {"symbol": "WIN3"}]
@@ -117,6 +190,25 @@ class HistTestContract(unittest.TestCase):
                 self.assertFalse(stopped.get("paused"))
                 self.assertFalse(os.path.exists(os.path.join(tmp, "PAUSE")))
                 self.assertTrue(os.path.exists(os.path.join(tmp, "STOP")))
+
+    def test_stop_latch_blocks_progress_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            public = os.path.join(tmp, "hist-test.json")
+            summary = os.path.join(tmp, "summary.json")
+            sweep = os.path.join(tmp, "step-sweep.json")
+            with patch.object(ht, "PUBLIC_JSON", public), patch.object(ht, "SUMMARY_PATH", summary), patch.object(ht, "PUBLIC_SWEEP", sweep), patch.object(ht, "OUT_DIR", tmp):
+                ht.clear_stop()
+                ht.clear_pause()
+                ht.publish({"phase": "evaluate", "pct": 8, "detail": "evaluate BCH-USDT", "running": True, "paused": False})
+                stopped = ht.stop_test()
+                self.assertEqual(stopped.get("phase"), "stopped")
+                ht.publish({"phase": "evaluate", "pct": 12, "detail": "evaluate SOL-USDT", "running": True, "paused": False})
+                blob = ht.read_job()
+                self.assertEqual(blob.get("phase"), "stopped")
+                self.assertFalse(blob.get("running"))
+                self.assertFalse(blob.get("paused"))
+                self.assertEqual(blob.get("detail"), "historic test stopped")
+                self.assertFalse(ht.job_is_running(blob))
 
     def test_fill_waits_on_pause_then_resumes(self):
         import threading

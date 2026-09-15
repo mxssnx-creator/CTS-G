@@ -15,6 +15,8 @@ import {
 } from "recharts";
 import { formatDuration } from "@/lib/analytics";
 import type { HistCalcJob } from "@/lib/hist-calc";
+import { calcIsRunning } from "@/lib/hist-calc";
+import { ComboEvalPanel } from "@/components/combo-eval-panel";
 
 type ChartFrameProps = {
   children: React.ReactElement;
@@ -137,8 +139,17 @@ export function HistoricCalcResults({ job }: { job: HistCalcJob }) {
   );
 
   const coverage = job.coverage || {};
-  const state = job.phase === "ready" || job.ready ? "Published" : job.phase === "stopped" ? "Stopped" : job.phase;
-  const stateTone = job.error ? "text-danger" : job.phase === "ready" || job.ready ? "text-primary" : "text-warn";
+  const running = calcIsRunning(job.phase);
+  const state = running
+    ? job.phase
+    : job.phase === "ready" || job.ready
+      ? job.nextRunAt
+        ? "Live"
+        : "Published"
+      : job.phase === "stopped"
+        ? "Stopped"
+        : job.phase;
+  const stateTone = job.error ? "text-danger" : running ? "text-warn" : job.phase === "ready" || job.ready ? "text-primary" : "text-warn";
   const winner = job.winner;
 
   return (
@@ -149,6 +160,8 @@ export function HistoricCalcResults({ job }: { job: HistCalcJob }) {
         <ResultStat label="Evaluation window" value={`${job.hours ?? 0}h · ${job.evaluationBars ?? job.lookback ?? 0} bars`} />
         <ResultStat label="Data source" value={String(job.source || "pending")} />
       </div>
+
+      <ComboEvalPanel job={job} />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ChartCard title="Strategy quality" hint="PF after cost">

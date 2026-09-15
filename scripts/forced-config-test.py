@@ -105,6 +105,19 @@ class ForcedTests(unittest.TestCase):
         self.assertTrue(forced.valid_candidate(self.row(trainPf=1.05,trainPfExact=1.0500004)))
         self.assertFalse(forced.valid_candidate(self.row(trainPf=1.050001,trainPfExact=1.05)))
 
+    def test_symbol_winners_prefer_engine_admitted(self):
+        weak = self.row(id="bch-weak", symbol="BCH-USDT", indication="break", direction="SHORT",
+                        tpPct=.75, slPct=.2, trainPf=1.08, trainPfExact=1.08, tradesPerHour=1.4)
+        strong = self.row(id="bch-strong", symbol="BCH-USDT", indication="break", direction="SHORT",
+                          tpPct=.75, slPct=.25, trainPf=1.24, trainPfExact=1.24, tradesPerHour=1.3)
+        xrp = self.row(id="xrp-best", symbol="XRP-USDT", indication="signals", direction="LONG",
+                       tpPct=.6, slPct=.2, trainPf=1.14, trainPfExact=1.14, tradesPerHour=2.2)
+        winners = forced.select_symbol_winners([weak, strong, xrp], min_pf=1.10)
+        self.assertEqual(winners["BCH-USDT"]["id"], "bch-strong")
+        self.assertEqual(winners["XRP-USDT"]["tpPct"], .6)
+        self.assertTrue(forced.engine_admitted(strong, 1.10))
+        self.assertFalse(forced.engine_admitted(weak, 1.10))
+
     def test_all_eligible_per_symbol_and_kind_throughput_first(self):
         rows = [self.row(id=f"{sym}:{kind}:{i}", symbol=sym, indication=kind, tradesPerHour=i)
                 for sym in forced.FORCED_SYMBOLS for kind in IND_KINDS for i in range(8)]
