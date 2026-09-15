@@ -66,6 +66,7 @@ from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
 from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
+import hist_test as hist_test_mod
 from contracts import INDICATION_KINDS, stable_key
 from runtime_scope import (
     redis_key,
@@ -2014,8 +2015,11 @@ class Pulse:
         floor = self.min_order_qty(c, px) if px > 0 else self.round_qty_up(c, max(q, float(c.min_qty or 0)))
         bumped = self.round_qty_up(c, max(q, floor))
         if msg and bumped <= q + 1e-12:
-            step = max(float(getattr(c, "step", 0) or 0), 0.0)
-            bumped = self.round_qty_up(c, max(q + step, q * 1.05, floor))
+            below = floor > 0 and q + 1e-12 < floor
+            unknown = floor <= 0
+            if below or unknown:
+                step = max(float(getattr(c, "step", 0) or 0), 0.0)
+                bumped = self.round_qty_up(c, max(q + step, q * 1.05, floor))
         return bumped
 
     def min_order_qty(self, c: Contract, px: float) -> float:
@@ -3973,6 +3977,62 @@ class Pulse:
         tp = max(tp_lo, min(tp_hi, tp))
         return sl, tp, sl_lo, sl_hi
 
+    def _refresh_open_risk_floors(self) -> int:
+        """Apply current SL/TP floors to open lots and wake protection refresh.
+
+        Control-group identity stays put. Only trigger prices move onto the
+        new desk floor so a raised slMinPct is not stuck behind ctrl_skip.
+        Trailed stops that already sit beyond the floor stay in place.
+        """
+        rows = list(getattr(self, "open", {}).values() or [])
+        if not rows:
+            return 0
+        changed = 0
+        for pos in rows:
+            try:
+                if not self.position_is_ours(pos):
+                    continue
+            except Exception:
+                continue
+            try:
+                sl_f, tp_f, sl_lo, sl_hi = self.opt_fracs(pos)
+            except Exception:
+                continue
+            entry = float(pos.entry or 0)
+            live_sl = float(pos.sl or 0)
+            dist = 0.0
+            if entry > 0 and live_sl > 0:
+                dist = ((entry - live_sl) / entry) if pos.side == "LONG" else ((live_sl - entry) / entry)
+            floor_sl_pct = max(float(pos.sl_pct or 0), sl_lo)
+            if dist + 1e-12 < sl_lo or float(pos.sl_pct or 0) + 1e-12 < sl_lo:
+                pos.sl_pct = floor_sl_pct
+            tp_lo = float(self.tp_min)
+            tp_hi = float(self.tp_max) if self.tp_max > 0 else float("inf")
+            if float(pos.tp_pct or 0) > 0:
+                pos.tp_pct = max(tp_lo, min(tp_hi, float(pos.tp_pct)))
+            try:
+                want_sl, want_tp = self.security_prices(pos)
+            except Exception:
+                want_sl, want_tp = pos.sl, pos.tp
+            if entry > 0 and (
+                abs(float(want_sl or 0) - live_sl) / max(entry, 1e-9) > 0.00035
+                or abs(float(want_tp or 0) - float(pos.tp or 0)) / max(entry, 1e-9) > 0.00035
+                or dist + 1e-12 < sl_lo
+            ):
+                pos.sl, pos.tp = want_sl, want_tp
+                changed += 1
+            try:
+                scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
+            except Exception:
+                scope = ""
+            if scope:
+                skip = getattr(self, "ctrl_skip", None)
+                if isinstance(skip, dict):
+                    skip.pop(scope, None)
+                    skip.pop(f"sync:{scope}", None)
+            pos.ctrl_verified = False
+        return changed
+
     def refresh_px_one(self, symbol: str) -> float:
         try:
             r = self.api.public("/openApi/swap/v2/quote/ticker", {"symbol": symbol})
@@ -4306,9 +4366,11 @@ class Pulse:
                     if new_s != qty_s and float(new_s or 0) > float(qty_s or 0):
                         qty_s = new_s
                         continue
+                    if self._defer_minimum_controls(pos, r):
+                        return have_this
                     if quantity_matched:
-                        # All-ours groups already have closePosition forms next.
-                        # Mixed/foreign groups must stay quantity-matched.
+                        # Missing quantity can be repaired by the next payload
+                        # form. A venue minimum floor must not.
                         continue
                 if not self.ok(r) and self._defer_minimum_controls(pos, r):
                     return have_this
@@ -4875,14 +4937,16 @@ class Pulse:
                 self.ctrl_skip[f"sync:{scope}"] = now + 30.0
             return oid or have_oid
 
+        old_sl_oid = real_oid(pos.sl_oid or pos.sec_sl_oid)
+        old_tp_oid = real_oid(pos.tp_oid or pos.sec_tp_oid)
         pos.sl_oid = pos.sec_sl_oid = _place_side(True, pos.sl_oid or pos.sec_sl_oid, pos.sl, want_sl, bool(sls), sls)
         if retired():
             return
-        if pos.sl_oid:
-            pos.sl = want_sl if not pos.sl or not self.sl_legal(pos, pos.sl) else pos.sl
+        if pos.sl_oid and (pos.sl_oid != old_sl_oid or not pos.sl or not self.sl_legal(pos, pos.sl)):
+            pos.sl = want_sl
         pos.tp_oid = pos.sec_tp_oid = _place_side(False, pos.tp_oid or pos.sec_tp_oid, pos.tp, want_tp, bool(tps), tps)
-        if pos.tp_oid:
-            pos.tp = want_tp if not pos.tp or not self.tp_legal(pos, pos.tp) else pos.tp
+        if pos.tp_oid and (pos.tp_oid != old_tp_oid or not pos.tp or not self.tp_legal(pos, pos.tp)):
+            pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
@@ -4893,12 +4957,22 @@ class Pulse:
         price = self.clamp_ctrl_price(pos, kind, price)
         c = self.contracts.get(pos.symbol)
         grouped = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
+        raw_qty = max(0.0, float(pos.qty or 0))
+        exch_qty = max(0.0, float(getattr(pos, "exchange_qty", 0) or 0))
+        if exch_qty > 0 and raw_qty > 0:
+            raw_qty = min(raw_qty, exch_qty)
+        elif exch_qty > 0:
+            raw_qty = exch_qty
+        qty_s = self.fmt_qty(
+            c,
+            self.raise_to_min_qty(c, max(self.px.get(pos.symbol) or 0, pos.entry or 0), raw_qty),
+        )
         return ctrl_payload(
             pos.symbol,
             pos.side,
             kind,
             self.fmt_px(c, price),
-            self.fmt_qty(c, pos.qty),
+            qty_s,
             self.cid("u" if kind == "sl" else "v", pos=pos),
             close_pos=not grouped,
             with_qty=grouped,
@@ -5027,8 +5101,8 @@ class Pulse:
             if kind == "qty_close":
                 continue
             if "minimum size" in msg.lower() or "minimum order amount" in msg.lower():
-                c = self.contracts.get(pos.symbol)
-                adopt_venue_minimum(c, msg)
+                c = (getattr(self, "contracts", None) or {}).get(pos.symbol)
+                learned = adopt_venue_minimum(c, msg)
                 px_now = self.px.get(pos.symbol) or pos.entry
                 if requested_qty * max(px_now, 0.0) < 0.02:
                     # Economically dust: below the venue close floor forever.
@@ -5051,7 +5125,14 @@ class Pulse:
                     })
                     log(f"CLOSE DUST-WRITEOFF {pos.symbol} qty={requested_qty} px={px_now}", key=f"dust:{pos.symbol}")
                     return True, px_now
-                # Remainder below lot: the next fallback form uses closePosition.
+                if not learned:
+                    # Unlearnable floor (BingX VST "0 USDT"): extra close forms
+                    # fail the same way and each one burns the order budget.
+                    self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 20.0)
+                    self._last_close_result.update({"status": "REJECTED", "message": short_api_msg(msg)})
+                    log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=20.0, key=f"close-minsize:{pos.symbol}")
+                    return False, px_now
+                # Remainder below a learned lot: the next fallback form uses closePosition.
                 continue
             if kind == "flat":
                 px = self.px.get(pos.symbol) or pos.entry
@@ -5953,7 +6034,7 @@ class Pulse:
                     )
                     r = self.api.post(
                         "/openApi/swap/v2/trade/order",
-                        _entry_body(self.fmt_qty(c, qty), cid),
+                        _entry_body(qty, cid),
                     )
                     self.did_io = True
                     msg = str(r.get("msg") or "")
@@ -7490,6 +7571,15 @@ class Pulse:
             self.overlay_mtime = os.path.getmtime(OVERLAY_PATH)
         except Exception:
             self.overlay_mtime = 0.0
+        try:
+            if self._hist_test_owns_catalog():
+                self._sync_hist_test_lane()
+            else:
+                apply = getattr(self.sets, "apply_hist_test_gate", None)
+                if callable(apply):
+                    apply(None)
+        except Exception:
+            pass
         if ov.get("targetNotional"):
             # Clamp desk-supplied target notional: a corrupt or absurd overlay
             # value must never translate into impossible order volume.
@@ -7793,6 +7883,10 @@ class Pulse:
                 self.ensure_strategy_lanes(position)
             except Exception:
                 pass
+        try:
+            self._refresh_open_risk_floors()
+        except Exception:
+            pass
         self.coord.rearrange = bool(self.mods.get("strategy.rearrange", self.coord.rearrange))
         if not self.mods.get("strategy.indications", True):
             self.indications.settings["enabled"] = False
@@ -8662,7 +8756,7 @@ class Pulse:
                     "type": "MARKET",
                     "side": order_side,
                     "positionSide": pos.side,
-                    "quantity": qty,
+                    "quantity": self.fmt_qty(c, qty),
                     "clientOrderID": cid,
                 },
             )
@@ -8903,7 +8997,7 @@ class Pulse:
                     "type": "MARKET",
                     "side": order_side,
                     "positionSide": pos.side,
-                    "quantity": qty,
+                    "quantity": self.fmt_qty(c, qty),
                     "clientOrderID": cid,
                 },
             )
@@ -13362,6 +13456,48 @@ class Pulse:
         self._hist_write_status(self.sets)
         return bool(done)
 
+    def _hist_test_owns_catalog(self) -> bool:
+        ov = getattr(self, "overlay", None) or {}
+        return ov.get("histTestEnabled", True) is not False
+
+    def _sync_hist_test_lane(self) -> None:
+        """Test Historic owns catalog calcs. Engine skips full-universe eval/progress."""
+        job: Dict[str, Any] = {}
+        try:
+            job = hist_test_mod.read_job()
+        except Exception:
+            job = {}
+        ids = hist_test_mod.validated_set_ids(job)
+        with self.state_guard():
+            book = self.sets
+            try:
+                hist_test_mod.apply_scores_to_book(book, job)
+            except Exception:
+                apply = getattr(book, "apply_hist_test_gate", None)
+                if callable(apply):
+                    apply(ids)
+            ready = bool(job.get("ready") or str(job.get("phase") or "") == "ready")
+            book.progress.phase = "hist-test" if not ready else "ready"
+            book.progress.ready = True
+            book.progress.coordination_complete = ready
+            book.progress.pct = 100.0 if ready else float(job.get("pct") or 0)
+            n_ids = len(ids)
+            refresh_h = int(job.get("refreshHours") or (self.overlay or {}).get("histTestRefreshHours") or 2)
+            if ready:
+                book.progress.detail = (
+                    f"Test Historic · {n_ids} validated configs · skip full catalog · refresh {refresh_h}h"
+                )
+            else:
+                book.progress.detail = (
+                    f"Test Historic owns calcs · waiting validated configs · skip full catalog"
+                )
+            if job.get("nextRunAt"):
+                book.progress.next_run_at = float(job.get("nextRunAt") or 0)
+        try:
+            self._hist_write_status(self.sets)
+        except Exception:
+            pass
+
     def _hist_loop_durable(self) -> None:
         """One lane-owned initial/hourly/gap state machine for historic replay."""
         while not self._hist_stop.is_set():
@@ -13412,6 +13548,10 @@ class Pulse:
                         book.progress.ready = True
                         book.progress.detail = "historic lane disabled"
                     self._hist_write_status(book)
+                    self._hist_wake.wait(timeout=5.0)
+                    continue
+                if self._hist_test_owns_catalog() and not manual:
+                    self._sync_hist_test_lane()
                     self._hist_wake.wait(timeout=5.0)
                     continue
                 score_refresh = False

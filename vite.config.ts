@@ -632,7 +632,12 @@ function pulseControlPlugin(): Plugin {
             // systemctl start/stop inside the sidecar can take ~25s — the 1.6s
             // default would fall through to the legacy-CTS fallback on every
             // start/stop and report bogus state. Control calls get 30s.
-            const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000);
+            // Never forward Start/Stop to a public desk URL. PULSE_URL in this
+            // sandbox is often the remote UI (:3102), not the sidecar (:3015).
+            const pulseIsSidecar = /:3015\b/.test(PULSE);
+            const pulse = pulseIsSidecar
+              ? await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000)
+              : null;
             if (pulse && pulse.status < 400) {
               jsonRes(res as ServerResponse, pulse.status, pulse.json);
               return;

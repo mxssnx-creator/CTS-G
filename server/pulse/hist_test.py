@@ -137,6 +137,67 @@ def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> b
     return not stop_requested()
 
 
+def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Set IDs Test Historic currently treats as validated configs."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            return
+        seen.add(sid)
+        out.append(sid)
+
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("validated") is False:
+            continue
+        add(row.get("setId") or row.get("set_id") or row.get("id"))
+    for row in blob.get("rows") or []:
+        if isinstance(row, dict) and row.get("validated"):
+            add(row.get("id") or row.get("setId") or row.get("set_id"))
+    for sid in blob.get("validatedIds") or []:
+        add(sid)
+    return out
+
+
+def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Push Test Historic validated configs onto a live SetBook without a full catalog replay."""
+    blob = job if isinstance(job, dict) else read_job()
+    ids = validated_set_ids(blob)
+    apply = getattr(book, "apply_hist_test_gate", None)
+    if callable(apply):
+        apply(ids)
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
+        if sid:
+            by_id[sid] = row
+    for st in getattr(book, "by_idx", None) or []:
+        row = by_id.get(getattr(st, "id", ""))
+        if not row:
+            continue
+        n = int(row.get("evalN") or row.get("n") or 0)
+        try:
+            pf = float(row.get("pf") or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        st.last15_n = n
+        st.last15_ratio = pf if pf > 0 else 1.0
+        st.n = max(int(getattr(st, "n", 0) or 0), n)
+        st.active = bool(row.get("validated", True))
+        st.deact_reason = ""
+        ledger = dict(getattr(st, "stage_ledger", None) or {})
+        ledger["base"] = True
+        st.stage_ledger = ledger
+    return ids
+
+
 def idle_job() -> Dict[str, Any]:
     return {
         "ok": True,
@@ -720,6 +781,8 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
         "successfulConfigs": (job.get("successfulConfigs") or [])[:60],
+        "validatedIds": job.get("validatedIds") or validated_set_ids(job),
+        "recalcOnly": bool(job.get("recalcOnly")),
         "combo": job.get("combo") or {},
         "byStep": step_rows,
         "ranges": range_rows,
@@ -779,6 +842,9 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     step_lo = max(1, min(30, int(body.get("minStep") or body.get("stepLo") or STEP_LO)))
     step_hi = max(step_lo, min(30, int(body.get("stepMax") or body.get("stepHi") or STEP_HI)))
     synth = bool(body.get("synth"))
+    recalc_ids = [str(s).strip() for s in (body.get("recalcIds") or []) if str(s or "").strip()]
+    keep_symbols = [str(s).strip().upper() for s in (body.get("keepSymbols") or []) if str(s or "").strip()]
+    recalc_only = bool(recalc_ids) and not bool(body.get("fullCatalog"))
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
     if user_ov:
@@ -797,7 +863,11 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ready": False,
         "running": True,
         "paused": False,
-        "detail": f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}",
+        "detail": (
+            f"recalc {len(recalc_ids)} validated configs · {hours}h · min PF {min_pf:.2f}"
+            if recalc_only else
+            f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}"
+        ),
         "hours": hours,
         "minPf": min_pf,
         "positivePf": min_pf,
@@ -841,7 +911,41 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         queue, universe = rank_universe(max(target * 4, VOL_CANDIDATES))
         fetch_fn = fetch_klines
 
-    fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
+    lookback = lookback_bars(hours)
+    fetch_bars = lookback + int(overlay.get("histWarmup") or HIST_WARMUP_BARS)
+    if recalc_only:
+        selected: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        for symbol in keep_symbols or [r.get("symbol") for r in queue if r.get("symbol")]:
+            wait_if_paused(progress, {
+                "phase": "fetch",
+                "pct": 20,
+                "detail": f"recalc fetch {symbol} · {len(recalc_ids)} configs",
+                "symbols": keep_symbols,
+                "positive": keep_symbols,
+            })
+            if stop_requested():
+                break
+            try:
+                bars = fetch_fn(symbol, fetch_bars)
+            except Exception as exc:
+                skipped.append({"symbol": symbol, "reason": f"fetch {type(exc).__name__}"})
+                continue
+            if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
+                skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
+                continue
+            selected.append({"symbol": symbol, "_bars": bars, "positive": True, "n": 0, "pf": 0.0})
+        fill = {
+            "selected": selected,
+            "rejected": [],
+            "skipped": skipped,
+            "filled": len(selected),
+            "target": target,
+            "short": max(0, int(target) - len(selected)),
+            "evaluated": len(selected),
+        }
+    else:
+        fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
     selected = fill["selected"]
 
     def stopped_job(detail: str = "historic test stopped") -> Dict[str, Any]:
@@ -901,9 +1005,21 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     })
     book = SetBook()
     book.load(overlay)
+    if recalc_only:
+        kept = book.restrict_to_ids(recalc_ids)
+        progress({
+            "phase": "replay",
+            "pct": 64,
+            "detail": f"recalc {kept}/{len(recalc_ids)} configs · {len(symbols)} symbols",
+            "symbols": symbols,
+            "positive": symbols,
+            "validatedIds": recalc_ids,
+            "recalcOnly": True,
+        })
     for row in selected:
         book.ingest_bars(row["symbol"], row["_bars"])
-    book.replay_all(symbols=symbols, workers=1, merge=True, progress_total=len(symbols), score=True)
+    book.replay_all(symbols=symbols, workers=1, merge=True, progress_total=len(symbols), score=True,
+                    set_ids=recalc_ids if recalc_only else None)
     ranked_sets = _rank_set_rows(book)
     by_step = step_rollup(book)
     by_sym = symbol_rollup(book)
@@ -969,6 +1085,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "withWithout": combo.get("withWithout") or {},
         "comboMatrix": combo.get("matrix") or [],
         "successfulConfigs": combo.get("successful") or [],
+        "validatedIds": [str(r.get("setId") or "") for r in (combo.get("successful") or []) if r.get("setId")],
+        "recalcOnly": recalc_only,
         "combo": combo.get("meta") or {},
         "byStep": by_step,
         "listings": listings,
@@ -1077,12 +1195,18 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         def worker() -> None:
             try:
                 once = bool(body.get("synth") or body.get("once"))
+                prior: Dict[str, Any] = {}
                 while True:
-                    run_test(body)
+                    payload = dict(body)
+                    ids = validated_set_ids(prior)
+                    if ids and not once:
+                        payload["recalcIds"] = ids
+                        payload["keepSymbols"] = list(prior.get("positive") or prior.get("symbols") or [])
+                    run_test(payload)
                     if once or stop_requested():
                         break
-                    job = read_job()
-                    if not wait_for_refresh(refresh_h, job):
+                    prior = read_job()
+                    if not wait_for_refresh(refresh_h, prior):
                         break
             except Exception as exc:
                 publish({
@@ -1180,6 +1304,11 @@ def self_test() -> Dict[str, Any]:
     rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
     rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))
     rec("refresh-max", clamp_refresh_hours(99) == REFRESH_MAX, clamp_refresh_hours(99))
+    rec(
+        "validated-ids",
+        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}) == ["a"],
+        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
+    )
 
     ov = test_overlay(4, 1.1, 8, 8)
     ov["slToTpRatios"] = [0.6]
@@ -1234,6 +1363,20 @@ def self_test() -> Dict[str, Any]:
         rec("synth-reports-fill", "evaluated" in job or "fill" in job or job.get("phase") in ("ready", "error"), job.get("phase"))
         rec("synth-no-false-positive", all(symbol_clears_floor(r, 1.1) for r in (job.get("bySymbol") or []) if r.get("symbol") in (job.get("symbols") or [])), job.get("symbols"))
         rec("synth-does-not-publish-desk-job", not os.path.samefile(PUBLIC_JSON, prev_paths[0]) if os.path.exists(prev_paths[0]) else True)
+        ids = validated_set_ids(job)
+        rec("synth-validated-ids", True, ids)
+        if ids and (job.get("symbols") or job.get("positive")):
+            recalc = run_test({
+                "hours": 4, "minPf": 1.1, "targetCount": 2, "minStep": 8, "stepMax": 8, "synth": True,
+                "recalcIds": ids[:1],
+                "keepSymbols": list(job.get("positive") or job.get("symbols") or []),
+                "overlay": {"slToTpRatios": [0.6], "stratTrailing": False, "stratIndications": False, "stratBlock": False, "histSimulateBlock": False},
+            })
+            rec("recalc-only-flag", bool(recalc.get("recalcOnly")), recalc.get("recalcOnly"))
+            rec("recalc-does-not-expand-catalog", len(recalc.get("validatedIds") or []) <= max(1, len(ids)), recalc.get("validatedIds"))
+        else:
+            rec("recalc-only-flag", True, "no-ids-skip")
+            rec("recalc-does-not-expand-catalog", True, "no-ids-skip")
     finally:
         PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR = prev_paths
         shutil.rmtree(tmp, ignore_errors=True)

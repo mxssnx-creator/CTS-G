@@ -27,6 +27,7 @@ class MinSizeCooldownTests(unittest.TestCase):
         p.cid = lambda *a, **k: 'cid1'
         p.api = NS(post=post)
         p.ok = lambda r: False
+        p.contracts = {}
         return p
 
     def test_min_size_close_cools_down_without_trying_fallback_forms(self):

@@ -1110,6 +1110,7 @@ class SetBook:
         self.trail_enabled = True
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
+        self.hist_test_set_ids: Optional[set[str]] = None
         self._by_pack: Dict[str, List[SetState]] = {}
         self._ids_by_pack: Dict[str, List[str]] = {}
         self._ids_by_kind: Dict[str, List[str]] = {}
@@ -1830,6 +1831,26 @@ class SetBook:
             self.progress.ready = False
             self.progress.phase = "idle"
 
+    def restrict_to_ids(self, ids: Sequence[str]) -> int:
+        """Keep only the named Sets for a focused Test Historic recalc."""
+        allow = {str(sid) for sid in ids if str(sid or "").strip()}
+        if not allow:
+            return 0
+        kept = [st for st in self.by_idx if st.id in allow]
+        if not kept:
+            return 0
+        self.by_idx = kept
+        self.sets = {st.id: st for st in kept}
+        self._reindex()
+        return len(kept)
+
+    def apply_hist_test_gate(self, ids: Optional[Sequence[str]]) -> None:
+        """None = no extra gate. A list (even empty) restricts live picks to Test Historic."""
+        if ids is None:
+            self.hist_test_set_ids = None
+            return
+        self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
+
     @staticmethod
     def _record_step(rec: Any) -> int:
         """Read a Set step from explicit metadata or its stable Set ID."""
@@ -2219,6 +2240,7 @@ class SetBook:
         merge: bool = False,
         progress_total: Optional[int] = None,
         score: bool = True,
+        set_ids: Optional[Sequence[str]] = None,
     ) -> None:
         if not self.enabled or self._running:
             return
@@ -2324,6 +2346,7 @@ class SetBook:
                     ind_hist=local_ind,
                     strat_hist=local_strategy,
                     hist_counts=local_counts,
+                    set_ids=set_ids,
                 )
                 # Core replay bounds its tape while counting every close.
                 # Other replay paths still return complete local tapes.
@@ -4563,8 +4586,10 @@ class SetBook:
             want_side = "SHORT"
         use_side = want_side in DIRECTIONS
         self._cap_active(force=False)
+        allow = getattr(self, "hist_test_set_ids", None)
         rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind
-                and s.deact_reason != "selection limit"]
+                and s.deact_reason != "selection limit"
+                and (allow is None or s.id in allow)]
         if not rows:
             return None
         need = self.eval_need()
@@ -4741,12 +4766,14 @@ class SetBook:
         ranking pass.
         """
         self._cap_active(force=False)
+        allow = getattr(self, "hist_test_set_ids", None)
         rows = [
             state
             for state in self.by_idx
             if state.pack == pack
             and state.kind in ("base", "trail")
             and state.deact_reason != "selection limit"
+            and (allow is None or state.id in allow)
         ]
         if not rows:
             return []

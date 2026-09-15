@@ -44,6 +44,8 @@ export type HistTestJob = {
   refreshHours?: number;
   nextRunAt?: number;
   continuous?: boolean;
+  validatedIds?: string[];
+  recalcOnly?: boolean;
 };
 
 export const HIST_TEST_HOURS_MIN = 4;
@@ -114,7 +116,7 @@ export function histTestPollMs(job?: HistTestJob | null, hidden = false): number
 
 export function histTestStatusLine(job: HistTestJob | null | undefined, hours = HIST_TEST_HOURS_DEFAULT, minPf = HIST_TEST_MIN_PF): string {
   if (!job || !job.phase || job.phase === "idle") {
-    return `Ready · ${hours}h tape · min PF ${minPf.toFixed(2)} · fill until positive count · refresh ${job?.refreshHours ?? HIST_TEST_REFRESH_DEFAULT}h`;
+    return `Ready · ${hours}h tape · min PF ${minPf.toFixed(2)} · fill until positive count · refresh ${job?.refreshHours ?? HIST_TEST_REFRESH_DEFAULT}h · recalc validated configs only`;
   }
   const ready = Boolean(job.ready) || job.phase === "ready";
   const pct = ready && !histTestIsRunning(job.phase) ? 100 : Math.round(Number(job.pct) || 0);

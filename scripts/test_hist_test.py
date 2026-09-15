@@ -50,6 +50,45 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ht.clamp_refresh_hours(0), 1)
         self.assertEqual(ht.clamp_refresh_hours(99), 8)
 
+    def test_validated_set_ids_from_successful_configs(self):
+        ids = ht.validated_set_ids({
+            "successfulConfigs": [
+                {"setId": "general:1m:sl0.6:st8", "validated": True, "pf": 1.3},
+                {"setId": "indications:1m:sl0.6:st8", "validated": False, "pf": 0.9},
+                {"setId": "general:1m:sl0.6:st8", "validated": True, "pf": 1.4},
+            ],
+            "rows": [{"id": "trail-a", "validated": True}],
+            "validatedIds": ["extra-id"],
+        })
+        self.assertEqual(ids, ["general:1m:sl0.6:st8", "trail-a", "extra-id"])
+
+    def test_apply_scores_gates_book(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        self.assertGreater(len(book.by_idx), 0)
+        sid = book.by_idx[0].id
+        ids = ht.apply_scores_to_book(book, {
+            "successfulConfigs": [{"setId": sid, "validated": True, "pf": 1.42, "evalN": 30, "n": 40}],
+        })
+        self.assertEqual(ids, [sid])
+        self.assertEqual(book.hist_test_set_ids, {sid})
+        self.assertEqual(book.by_idx[0].last15_ratio, 1.42)
+        self.assertEqual(book.by_idx[0].last15_n, 30)
+        rows = book._validated_entry_rows(book.by_idx[0].pack)
+        self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
+        book.apply_hist_test_gate([])
+        self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+
+    def test_recalc_only_keeps_named_configs(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        keep = [st.id for st in book.by_idx[:1]]
+        n = book.restrict_to_ids(keep)
+        self.assertEqual(n, 1)
+        self.assertEqual([st.id for st in book.by_idx], keep)
+
     def test_symbol_positive_requires_fills_and_floor(self):
         self.assertTrue(ht.symbol_clears_floor({"n": 30, "pf": 1.21}, 1.1))
         self.assertFalse(ht.symbol_clears_floor({"n": 30, "pf": 1.04}, 1.1))

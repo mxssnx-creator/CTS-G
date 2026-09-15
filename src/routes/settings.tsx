@@ -2641,7 +2641,7 @@ function TestHistoricCard({
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary">Settings · Overview</p>
             <h2 className="mt-1 text-2xl font-semibold tracking-tight text-fg">Test Historic</h2>
             <p className="mt-1 text-sm text-muted">
-              Default ON. Replay the step book on a chosen lookback and keep scoring ranked symbols until the selected count clears min PF. Independent of Live and VST engines.
+              Default ON. The engine skips full-catalog historic progress and only runs validated Test Historic configs. Every refresh interval those configs are recalculated and revalidated from scratch.
             </p>
           </div>
           <span
@@ -2654,7 +2654,7 @@ function TestHistoricCard({
         <EnableSlider
           label="Test Historic"
           on={enabled}
-          hint="default ON · independent of the live engine lane"
+          hint="default ON · engine skips full-catalog calcs; only validated Test Historic configs"
           onChange={(v) => patch("histTestEnabled", v)}
         />
         <p className="text-sm text-muted">
