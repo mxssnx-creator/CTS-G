@@ -161,6 +161,15 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
             add(row.get("id") or row.get("setId") or row.get("set_id"))
     for sid in blob.get("validatedIds") or []:
         add(sid)
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    add(winner.get("id") or winner.get("setId") or winner.get("set_id"))
+    for row in list(blob.get("ranked") or []) + list(blob.get("bySymbol") or []):
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("setId") or row.get("set_id") or row.get("id")
+        if not sid or ":" not in str(sid):
+            continue
+        add(sid)
     return out
 
 

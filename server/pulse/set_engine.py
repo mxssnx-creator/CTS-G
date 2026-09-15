@@ -1849,8 +1849,10 @@ class SetBook:
         """None = no extra gate. A list (even empty) restricts live picks to Test Historic."""
         if ids is None:
             self.hist_test_set_ids = None
-            return
-        self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
+        else:
+            self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
+        self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
+        self._entry_rows_cache = {}
 
     @staticmethod
     def _record_step(rec: Any) -> int:
@@ -4904,6 +4906,7 @@ class SetBook:
             str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
             int(getattr(self, "entry_policy_max_candidates", 0) or 0),
             max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0)),
+            None if getattr(self, "hist_test_set_ids", None) is None else frozenset(self.hist_test_set_ids),
         )
 
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:

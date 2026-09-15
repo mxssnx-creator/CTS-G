@@ -62,6 +62,16 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertEqual(ids, ["general:1m:sl0.6:st8", "trail-a", "extra-id"])
 
+    def test_validated_set_ids_from_compact_winner(self):
+        ids = ht.validated_set_ids({
+            "phase": "ready",
+            "ready": True,
+            "validatedCount": 2754,
+            "winner": {"id": "indications:1m:sl2.7:tr0.9:0.1:st11", "pack": "indications", "step": 11},
+            "ranked": [{"symbol": "SOL-USDT", "pf": 1.4}],
+        })
+        self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
+
     def test_apply_scores_gates_book(self):
         from set_engine import SetBook
         book = SetBook()
@@ -79,6 +89,22 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
         book.apply_hist_test_gate([])
         self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+
+    def test_hist_test_gate_invalidates_entry_cache(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        sid = book.by_idx[0].id
+        book.progress.ready = True
+        book.use_historic_gate = True
+        book.by_idx[0].last15_n = 30
+        book.by_idx[0].last15_ratio = 1.4
+        book.by_idx[0].active = True
+        before = book._entry_cache_key("general", "LONG")
+        book.apply_hist_test_gate([sid])
+        after = book._entry_cache_key("general", "LONG")
+        self.assertNotEqual(before, after)
+        self.assertEqual(book.hist_test_set_ids, {sid})
 
     def test_recalc_only_keeps_named_configs(self):
         from set_engine import SetBook

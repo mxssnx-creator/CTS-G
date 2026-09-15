@@ -7573,6 +7573,9 @@ class Pulse:
             self.overlay_mtime = 0.0
         try:
             if self._hist_test_owns_catalog():
+                apply = getattr(self.sets, "apply_hist_test_gate", None)
+                if callable(apply) and getattr(self.sets, "hist_test_set_ids", None) is None:
+                    apply([])
                 self._sync_hist_test_lane()
             else:
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
@@ -9687,8 +9690,27 @@ class Pulse:
         intern = {}
         intern_any = False
         hist_ready = bool(self.sets.enabled and getattr(self.sets, "progress", None) and self.sets.progress.ready)
+        hist_test_owns = False
+        try:
+            hist_test_owns = bool(self._hist_test_owns_catalog())
+        except Exception:
+            hist_test_owns = False
+        hist_test_ids = getattr(self.sets, "hist_test_set_ids", None)
         for pack in ("indications", "general"):
-            if self.sets.enabled and self.sets.use_historic_gate and hist_ready:
+            if hist_test_owns:
+                # Test Historic owns the catalog: intern calcs stay on, but
+                # Real/Live size is only the validated config allow-list.
+                intern[pack] = False
+                if hist_test_ids:
+                    try:
+                        entry_open = getattr(self.sets, "entry_pack_open", None)
+                        pack_open = entry_open if callable(entry_open) else self.sets.pack_open
+                        intern[pack] = bool(pack_open(pack, side="LONG") or pack_open(pack, side="SHORT"))
+                    except TypeError:
+                        intern[pack] = bool(self.sets.pack_open(pack))
+                    except Exception:
+                        intern[pack] = False
+            elif self.sets.enabled and self.sets.use_historic_gate and hist_ready:
                 try:
                     entry_open = getattr(self.sets, "entry_pack_open", None)
                     pack_open = entry_open if callable(entry_open) else self.sets.pack_open
@@ -9698,7 +9720,9 @@ class Pulse:
             else:
                 intern[pack] = True
             intern_any = intern_any or intern[pack]
-        if not intern_any and self.sets.enabled and not getattr(self.sets, "strict_gate", False):
+        if hist_test_owns and not intern_any:
+            intern_any = False
+        elif not intern_any and self.sets.enabled and not getattr(self.sets, "strict_gate", False):
             # Legacy mode only: reopen both packs when the gate has no pick.
             # Strict gate (default): closed packs stay closed — no validated +
             # profitable set means no live entries at all.

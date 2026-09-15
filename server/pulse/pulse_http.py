@@ -1622,13 +1622,16 @@ def merge_overall() -> dict:
         if detail_st.get(k) is not None:
             out[k] = detail_st.get(k)
     # Unique per-lane progress; overall does not inherit one desk's hist tape.
+    # Halted Live must not keep Overall in "waiting" while VST is ready.
+    active_lanes = [l for l in lanes if l.get("running") and not l.get("halted")]
+    overall_ready = all(bool(l.get("progressReady")) for l in active_lanes) if active_lanes else False
     out["progress"] = {
         "connection": "overall",
         "connType": "overall",
         "phase": "lanes",
         "pct": None,
         "detail": "per-connection",
-        "ready": all(bool(l.get("progressReady")) for l in lanes) if lanes else False,
+        "ready": overall_ready,
         "symbol": "",
         "setId": "",
         "symbolsDone": None,
@@ -1681,7 +1684,10 @@ def connections_blob() -> dict:
                 "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
                 "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
                 "halted": all(l["halted"] or not l["running"] for l in lanes),
-                "progressReady": all(bool(l.get("progressReady")) for l in lanes) if lanes else False,
+                "progressReady": (
+                    all(bool(l.get("progressReady")) for l in lanes if l.get("running") and not l.get("halted"))
+                    if any(l.get("running") and not l.get("halted") for l in lanes) else False
+                ),
             },
             *[
                 {
