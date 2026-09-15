@@ -219,9 +219,40 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         st.n = max(int(getattr(st, "n", 0) or 0), n)
         st.active = bool(row.get("validated", True))
         st.deact_reason = ""
+        try:
+            dd = float(row.get("maxDdS") or row.get("max_dd_s") or getattr(st, "max_dd_s", 0) or 0)
+        except (TypeError, ValueError):
+            dd = float(getattr(st, "max_dd_s", 0) or 0)
+        st.max_dd_s = dd
         ledger = dict(getattr(st, "stage_ledger", None) or {})
         ledger["base"] = True
+        ledger["main"] = True
+        ledger["real"] = True
         st.stage_ledger = ledger
+        # Per-side flags must follow the hist-test winner. Empty live tapes
+        # would otherwise keep LONG/SHORT inactive and starve intern/live size.
+        side_view = {
+            "last15_n": int(st.last15_n or 0),
+            "last15_ratio": float(st.last15_ratio or 0),
+            "n": int(st.n or 0),
+            "base_n": int(st.last15_n or 0),
+            "base_pf": float(st.last15_ratio or 0),
+            "main_n": int(st.last15_n or 0),
+            "main_pf": float(st.last15_ratio or 0),
+            "real_n": int(st.last15_n or 0),
+            "real_pf": float(st.last15_ratio or 0),
+            "max_dd_s": float(st.max_dd_s or 0),
+            "ddOk": True,
+            "validated": True,
+            "active": True,
+            "deact_reason": "",
+        }
+        sides = dict(getattr(st, "by_side", None) or {})
+        for direction in ("LONG", "SHORT"):
+            blob = dict(sides.get(direction) or {})
+            blob.update(side_view)
+            sides[direction] = blob
+        st.by_side = sides
     cap = getattr(book, "_cap_active", None)
     if callable(cap):
         try:

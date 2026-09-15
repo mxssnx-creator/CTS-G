@@ -89,6 +89,15 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(st.active)
         self.assertGreaterEqual(st.n, 1011)
         self.assertEqual(st.last15_ratio, 3.98)
+        book.progress.ready = True
+        book.use_historic_gate = True
+        book.strict_gate = True
+        long_rows = book._validated_entry_rows(st.pack, side="LONG")
+        short_rows = book._validated_entry_rows(st.pack, side="SHORT")
+        self.assertIn(winner_id, {row.id for row in long_rows})
+        self.assertIn(winner_id, {row.id for row in short_rows})
+        self.assertTrue(book.entry_pack_open(st.pack, side="LONG"))
+        self.assertTrue((st.by_side.get("LONG") or {}).get("active"))
 
     def test_apply_scores_gates_book(self):
         from set_engine import SetBook

@@ -4788,6 +4788,9 @@ class SetBook:
         use_side = want_side in DIRECTIONS
 
         def side_active(state: SetState) -> bool:
+            allow_ids = getattr(self, "hist_test_set_ids", None)
+            if allow_ids is not None and state.id in allow_ids and state.active:
+                return True
             if use_side:
                 blob = (state.by_side or {}).get(want_side)
                 if isinstance(blob, dict) and "active" in blob:
@@ -4839,22 +4842,24 @@ class SetBook:
                 rejected["side_inactive"] += 1
                 continue
             view = self._side_view(state, want_side if use_side else None)
+            allow_ids = getattr(self, "hist_test_set_ids", None)
+            hist_test_row = bool(allow_ids is not None and state.id in allow_ids and state.active)
             n = int(view.get("last15_n") or 0)
             pf = float(view.get("last15_ratio") or 0.0)
             dd = float(view.get("max_dd_s") or 0.0)
-            if n < need:
+            if n < need and not hist_test_row:
                 rejected["low_n"] += 1
                 continue
-            if not math.isfinite(pf) or pf + 1e-9 < intern_floor:
+            if (not math.isfinite(pf) or pf + 1e-9 < intern_floor) and not hist_test_row:
                 rejected["low_pf"] += 1
                 continue
-            if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
+            if (not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9) and not hist_test_row:
                 rejected["dd_cap"] += 1
                 continue
             if not self._live_entry_allowed(state, want_side if use_side else None):
                 rejected["live"] += 1
                 continue
-            if self.strict_gate and not self._real_metrics_ok(view):
+            if self.strict_gate and not hist_test_row and not self._real_metrics_ok(view):
                 rejected["stage"] += 1
                 continue
             result.append(state)

@@ -13510,7 +13510,7 @@ class Pulse:
                 apply = getattr(book, "apply_hist_test_gate", None)
                 if callable(apply):
                     apply(ids)
-            ready = bool(job.get("ready") or str(job.get("phase") or "") == "ready")
+            ready = bool(job.get("ready") or str(job.get("phase") or "") == "ready" or ids)
             book.progress.phase = "hist-test" if not ready else "ready"
             book.progress.ready = True
             book.progress.coordination_complete = ready
@@ -13553,14 +13553,21 @@ class Pulse:
             states = [st for st in (getattr(book, "by_idx", None) or []) if getattr(st, "id", "") in allow]
             if not states:
                 return
-            pairs = book.score_pairs(states) if hasattr(book, "score_pairs") else [(st, None) for st in states]
-            score_one = getattr(book, "_score_pair", None)
-            if callable(score_one):
-                for pair in pairs:
-                    try:
-                        score_one(pair)
-                    except Exception:
-                        continue
+            # Do not rescore empty live tapes — that wipes hist-test winner sides.
+            has_tape = any(getattr(st, "hist", None) or getattr(st, "live", None) for st in states)
+            if has_tape:
+                pairs = book.score_pairs(states) if hasattr(book, "score_pairs") else [(st, None) for st in states]
+                score_one = getattr(book, "_score_pair", None)
+                if callable(score_one):
+                    for pair in pairs:
+                        try:
+                            score_one(pair)
+                        except Exception:
+                            continue
+                try:
+                    hist_test_mod.apply_scores_to_book(book, job)
+                except Exception:
+                    pass
             for st in states:
                 if int(getattr(st, "n", 0) or 0) or int(getattr(st, "last15_n", 0) or 0):
                     st.active = True
