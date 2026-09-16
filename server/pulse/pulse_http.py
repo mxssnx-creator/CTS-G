@@ -345,6 +345,61 @@ def overlay_path(conn: str) -> str:
     return os.path.join(DIR, "overlay.json")
 
 
+_MAJOR_USDT = (
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
+    "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
+    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
+    "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
+    "ETC-USDT", "LDO-USDT", "HBAR-USDT", "TIA-USDT", "WLD-USDT", "JUP-USDT",
+    "RENDER-USDT", "FET-USDT", "TAO-USDT", "SEI-USDT", "WIF-USDT", "1000PEPE-USDT",
+    "STX-USDT", "IMX-USDT", "GRT-USDT", "ALGO-USDT", "VET-USDT", "EOS-USDT",
+    "THETA-USDT", "AXS-USDT", "SAND-USDT", "MANA-USDT", "CRV-USDT", "MKR-USDT",
+    "SNX-USDT", "COMP-USDT",
+)
+_MAJOR_SET = set(_MAJOR_USDT)
+
+
+def guard_runtime_overlay(cid: str, cur: dict) -> dict:
+    """Keep Block on and strip hist-test junk books. Never flatten lots."""
+    out = dict(cur or {})
+    out["blockEnabled"] = True
+    out["blockOverall"] = True
+    out["blockActive"] = True
+    try:
+        stack = int(out.get("blockMaxStack") or 0)
+    except (TypeError, ValueError):
+        stack = 0
+    out["blockMaxStack"] = max(stack, 6)
+    raw = out.get("symbols")
+    names = [str(s).strip().upper() for s in raw] if isinstance(raw, list) else []
+    wild = bool(out.get("symbolsAll")) or any(s in ("*", "ALL", "UNLIMITED") for s in names)
+    try:
+        cap = int(out.get("symbolCap") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    cleaned = [s for s in names if s in _MAJOR_SET]
+    usdt = [s for s in names if s.endswith("-USDT")]
+    junk = (not wild) and bool(usdt) and (not cleaned or len(cleaned) < 20 or len(cleaned) < len(usdt))
+    if cid == "bingx-x01" and (wild or junk):
+        out["symbols"] = ["*"]
+        out["symbolsAll"] = True
+        out["symbolsDynamic"] = True
+        out["symbolCap"] = max(cap, 50) if cap else 50
+        return out
+    if cid == "bingx-x02" and junk:
+        out["symbols"] = list(_MAJOR_USDT)
+        out["symbolsAll"] = False
+        out["symbolCap"] = 50
+        if junk:
+            out["histTestEnabled"] = False
+        return out
+    if cleaned:
+        out["symbols"] = cleaned
+    if cap and cap < 50:
+        out["symbolCap"] = 50
+    return out
+
+
 def write_overlay(conn: str, overlay: dict) -> dict:
     cid = resolve_conn(conn) if conn not in ("", "overall") else conn
     if cid not in ID_TO_LANE:
@@ -371,6 +426,7 @@ def write_overlay(conn: str, overlay: dict) -> dict:
             overlay.setdefault("setMinSamples", overlay["baseEvalPosCount"])
         cur.update(overlay)
         cur = calculation_overlay(cur)
+        cur = guard_runtime_overlay(cid, cur)
         atomic_write(dest, cur)
     return cur
 

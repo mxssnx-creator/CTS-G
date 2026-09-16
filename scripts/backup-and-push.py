@@ -104,6 +104,84 @@ PY
         return {}
 
 
+MAJORS = {
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
+    "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
+    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
+    "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
+    "ETC-USDT", "LDO-USDT", "HBAR-USDT",
+}
+
+
+def overlay_corrupt(blob: dict) -> bool:
+    if not isinstance(blob, dict) or blob.get("error"):
+        return True
+    if blob.get("blockEnabled") is False:
+        return True
+    names = [str(s).strip().upper() for s in (blob.get("symbols") or [])] if isinstance(blob.get("symbols"), list) else []
+    wild = any(s in ("*", "ALL", "UNLIMITED") for s in names)
+    try:
+        cap = int(blob.get("symbolCap") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    usdt = [s for s in names if s.endswith("-USDT")]
+    majors_hit = [s for s in usdt if s in MAJORS]
+    junk = [s for s in usdt if s not in MAJORS]
+    if not wild and junk and (len(majors_hit) < 20 or len(junk) >= 3):
+        return True
+    if names and not wild and len(names) < 20 and not majors_hit:
+        return True
+    if cap and cap < 20 and not wild:
+        return True
+    return False
+
+
+def restore_remote_overlays(names: list[str]) -> list[str]:
+    """Replace a corrupted data-dir overlay with the workspace copy. Never restarts engines."""
+    key = ssh_key()
+    if not key:
+        return [f"no-ssh {name}" for name in names]
+    notes: list[str] = []
+    for name in names:
+        src = ROOT / "server" / "pulse" / name
+        if not src.is_file():
+            notes.append(f"missing {name}")
+            continue
+        tmp = f"/tmp/{name}.restore"
+        dest = f"/var/lib/cts-ga/{name}"
+        scp = run(
+            [
+                "scp", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=12", str(src), f"root@{REMOTE_HOST}:{tmp}",
+            ],
+            check=False,
+            timeout=30,
+        )
+        if scp.returncode != 0:
+            notes.append(f"scp-fail {name}")
+            continue
+        py = (
+            "python3 - <<'PY'\n"
+            "import json, os, shutil\n"
+            f"src, dest = {tmp!r}, {dest!r}\n"
+            "blob = json.load(open(src))\n"
+            "assert isinstance(blob, dict) and blob.get('blockEnabled') is True\n"
+            "tmp = dest + '.tmp'\n"
+            "shutil.copy2(src, tmp)\n"
+            "os.replace(tmp, dest)\n"
+            "try:\n    os.remove(src)\nexcept OSError:\n    pass\n"
+            "print('ok')\n"
+            "PY"
+        )
+        ssh = [
+            "ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=12", f"root@{REMOTE_HOST}", py,
+        ]
+        proc = run(ssh, check=False, timeout=20)
+        notes.append(f"ok {name}" if proc.returncode == 0 else f"ssh-fail {name}")
+    return notes
+
+
 def rotate(stamp_dir: Path) -> None:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     dirs = sorted([p for p in BACKUP_DIR.iterdir() if p.is_dir() and p.name[:4].isdigit()], reverse=True)
@@ -129,6 +207,12 @@ def snapshot() -> Path:
         write_json(latest / f"repo-{name}", blob)
 
     remote = fetch_remote_overlays()
+    heal = [name for name, blob in (remote.get("overlays") or {}).items() if overlay_corrupt(blob if isinstance(blob, dict) else {})]
+    if heal:
+        notes = restore_remote_overlays(heal)
+        write_json(dest / "heal.json", {"restored": notes})
+        write_json(latest / "heal.json", {"restored": notes})
+        remote = fetch_remote_overlays()
     for name, blob in (remote.get("overlays") or {}).items():
         if not isinstance(blob, dict):
             continue
@@ -144,7 +228,15 @@ def snapshot() -> Path:
 
 def git_push() -> str:
     os.chdir(ROOT)
-    run(["git", "add", "backups/overlays/latest", "scripts/backup-and-push.py", ".gitignore"], check=False)
+    run([
+        "git", "add",
+        "backups/overlays/latest",
+        "scripts/backup-and-push.py",
+        ".gitignore",
+        "server/pulse/pulse_http.py",
+        "src/routes/settings.tsx",
+        "scripts/test_settings_persistence.py",
+    ], check=False)
     status = run(["git", "status", "--porcelain"], check=False)
     if status.stdout.strip():
         msg = "Backup Live/VST overlays and keep GitHub in sync."

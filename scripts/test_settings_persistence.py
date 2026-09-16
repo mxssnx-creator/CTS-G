@@ -29,7 +29,9 @@ class SettingsPersistence(unittest.TestCase):
             ph.write_overlay('vst',{'normalExecutionEnabled':False,'blockActive':True,'setMaxActive':50,'stratGeneral':True})
             ph.write_overlay('vst',{'blockActive':False})
             value=ph.load_overlay('bingx-x02')
-            self.assertEqual({k:value[k] for k in ('normalExecutionEnabled','blockActive','setMaxActive','stratGeneral')},{'normalExecutionEnabled':False,'blockActive':False,'setMaxActive':50,'stratGeneral':True})
+            self.assertEqual({k:value[k] for k in ('normalExecutionEnabled','setMaxActive','stratGeneral')},{'normalExecutionEnabled':False,'setMaxActive':50,'stratGeneral':True})
+            self.assertTrue(value['blockActive'])
+            self.assertTrue(value['blockEnabled'])
             ph.write_overlay('vst',{'normalExecutionEnabled':True})
             self.assertTrue(ph.load_overlay('bingx-x02')['normalExecutionEnabled'])
     def test_invalid_lane_cannot_write_a_file(self):
@@ -64,6 +66,28 @@ class SettingsPersistence(unittest.TestCase):
                 self.assertEqual(value['systemSqliteMemory'],mode)
                 self.assertEqual(value['systemSqliteCheckpointS'],seconds)
                 self.assertTrue(value['stratGeneral'])
+
+    def test_hist_test_junk_symbols_cannot_collapse_live_book(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            ph.write_overlay('live', {'symbols': ['*'], 'symbolCap': 50, 'blockEnabled': True, 'histTestEnabled': True})
+            ph.write_overlay('live', {'symbols': ['BONER-USDT', 'CTO-USDT', 'ZZZRH-USDT'], 'symbolCap': 3, 'blockEnabled': False})
+            live = ph.load_overlay('bingx-x01')
+            self.assertEqual(live['symbols'], ['*'])
+            self.assertEqual(live['symbolCap'], 50)
+            self.assertTrue(live['blockEnabled'])
+            self.assertTrue(live['blockOverall'])
+            self.assertGreaterEqual(int(live['blockMaxStack']), 6)
+            ph.write_overlay('live', {'symbols': ['BCH-USDT', 'SOL-USDT', 'XRP-USDT', 'AIN-USDT', 'FLYBRAIN-USDT', 'BONER-USDT'], 'symbolCap': 40})
+            live = ph.load_overlay('bingx-x01')
+            self.assertEqual(live['symbols'], ['*'])
+            self.assertGreaterEqual(int(live['symbolCap']), 50)
+            ph.write_overlay('vst', {'symbols': ['FLYBRAIN-USDT'], 'symbolCap': 5, 'histTestEnabled': True})
+            vst = ph.load_overlay('bingx-x02')
+            self.assertEqual(vst['symbols'][:4], ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'])
+            self.assertGreaterEqual(len(vst['symbols']), 20)
+            self.assertGreaterEqual(int(vst['symbolCap']), 50)
+            self.assertTrue(vst['blockEnabled'])
+            self.assertFalse(vst['histTestEnabled'])
 
     def test_overall_start_reports_a_failed_lane(self):
         def service_state(cid, fresh=False):

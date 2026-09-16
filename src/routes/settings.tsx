@@ -471,11 +471,40 @@ function SettingsPage() {
 
   const onApplyPositiveSymbols = () => {
     const names = (histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
-    if (!names.length) return;
+    const majors = names.filter((s) =>
+      /^(BTC|ETH|SOL|XRP|BNB|DOGE|ADA|BCH|AVAX|LINK|LTC|DOT|UNI|ATOM|NEAR|APT|ARB|SUI|INJ|AAVE|FIL|OP|TRX|XLM|ETC|LDO|HBAR)-USDT$/i.test(String(s)),
+    );
+    setOverlay((o) => {
+      const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
+      const stack = Math.max(Number(o.blockMaxStack) || 6, 6);
+      if (!majors.length || wild) {
+        return {
+          ...o,
+          blockEnabled: true,
+          blockOverall: true,
+          blockActive: true,
+          blockMaxStack: stack,
+          symbolCap: Math.max(Number(o.symbolCap) || DEFAULT_SYMBOL_COUNT, DEFAULT_SYMBOL_COUNT),
+        };
+      }
+      return {
+        ...o,
+        symbols: majors,
+        symbolsAll: false,
+        symbolCap: Math.max(majors.length, DEFAULT_SYMBOL_COUNT),
+        blockEnabled: true,
+        blockOverall: true,
+        blockActive: true,
+        blockMaxStack: stack,
+      };
+    });
+    if (!majors.length) {
+      setSaveMsg("Historic positives are not majors · Live/VST books and Block stay as they are");
+      return;
+    }
     dirtyRef.current = true;
-    setOverlay((o) => ({ ...o, symbols: names, symbolsAll: false, symbolCap: names.length }));
     setDirty(true);
-    setSaveMsg(`Applied ${names.length} positive historic symbols · save Live or VST to persist`);
+    setSaveMsg(`Kept majors and Block on (${majors.length}) · save Live or VST to persist`);
   };
 
   const onApplyWinner = () => {
