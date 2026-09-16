@@ -372,6 +372,34 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(off["runningSets"], [])
         self.assertEqual(off["internSymbols"], [])
 
+    def test_intern_liquid_pool_drops_range_dust(self):
+        universe = [
+            {"symbol": "LAPTOP-USDT", "quoteVolume": 12000},
+            {"symbol": "HOOKR-USDT", "quoteVolume": 800},
+            {"symbol": "BTC-USDT", "quoteVolume": 9e9},
+            {"symbol": "ETH-USDT", "quoteVolume": 4e9},
+            {"symbol": "XRP-USDT", "quoteVolume": 8e8},
+        ]
+        overlay = ["LAPTOP-USDT", "HOOKR-USDT", "AIN-USDT", "XRP-USDT"]
+        out = ht.intern_liquid_pool(overlay, universe, opens=["LAPTOP-USDT"], cap=50)
+        self.assertEqual(out[0], "BCH-USDT")
+        self.assertIn("SOL-USDT", out[:3])
+        self.assertIn("XRP-USDT", out[:3])
+        self.assertIn("BTC-USDT", out)
+        self.assertIn("ETH-USDT", out)
+        self.assertNotIn("LAPTOP-USDT", out)
+        self.assertNotIn("HOOKR-USDT", out)
+        self.assertNotIn("AIN-USDT", out)
+
+    def test_intern_liquid_pool_without_universe_uses_majors(self):
+        out = ht.intern_liquid_pool(["LAPTOP-USDT", "MICRODUCK-USDT"], [], cap=20)
+        self.assertIn("XRP-USDT", out)
+        self.assertIn("BCH-USDT", out)
+        self.assertIn("SOL-USDT", out)
+        self.assertIn("BTC-USDT", out)
+        self.assertNotIn("LAPTOP-USDT", out)
+        self.assertNotIn("MICRODUCK-USDT", out)
+
     def test_select_intern_symbols_ready_uses_overlay_not_junk(self):
         overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT", "BTC-USDT"]
         job = {

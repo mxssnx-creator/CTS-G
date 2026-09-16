@@ -6146,6 +6146,15 @@ class Pulse:
                     self._clear_pending(cid)
                     log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
                     return
+                if "trial fund" in low or "long and short position concurrently" in low:
+                    # BingX Trial Fund cannot hold both hedge sides on one symbol.
+                    blocked = dict(getattr(self, "_hedge_block_until", {}) or {})
+                    blocked[sym] = time.time() + 600.0
+                    self._hedge_block_until = blocked
+                    self.cooldown[sym] = time.time() + 45.0
+                    self._clear_pending(cid)
+                    log(f"ORDER SKIP {sym} {side} hedge-blocked {short}", every=20.0, key=f"hedge:{sym}")
+                    return
                 if is_transient_api(msg):
                     log(f"ORDER SKIP {sym} {side} {short}", every=12.0, key=f"oskip:{short}")
                     # No exchange order was accepted. Release the local
@@ -9722,6 +9731,7 @@ class Pulse:
                             continue
                         candidates[(s, d, "general")] = (conf, s, d, "gen:high-value")
         ranked = sorted(candidates.values(), reverse=True)
+        ranked = [row for row in ranked if not self._hedge_entry_blocked(row[1], row[2])]
         anchors = getattr(self, "_block_reference_anchors", {})
         current_sides = {(row[1], "LONG" if row[2] > 0 else "SHORT") for row in ranked}
         for key in list(anchors):
@@ -13585,6 +13595,24 @@ class Pulse:
         ov = getattr(self, "overlay", None) or {}
         return ov.get("histTestEnabled", True) is not False
 
+    def _hedge_entry_blocked(self, symbol: str, direction: int) -> bool:
+        """Skip the opposite side when the venue rejected Trial Fund hedge."""
+        until = float((getattr(self, "_hedge_block_until", {}) or {}).get(symbol) or 0)
+        if until < time.time():
+            return False
+        want = "LONG" if int(direction or 0) > 0 else "SHORT"
+        rows = getattr(self, "open", None) or {}
+        values = rows.values() if isinstance(rows, dict) else rows
+        for row in values or []:
+            try:
+                name = getattr(row, "symbol", None) or (row.get("symbol") if isinstance(row, dict) else None)
+                side = getattr(row, "side", None) or (row.get("side") if isinstance(row, dict) else None)
+            except Exception:
+                continue
+            if str(name or "") == str(symbol or "") and str(side or "").upper() != want:
+                return True
+        return False
+
     def _intern_symbols(self) -> List[str]:
         """When Test Historic owns the catalog, intern overlay + open symbols."""
         now = time.monotonic()
@@ -13614,11 +13642,21 @@ class Pulse:
                 opens.append(str(name))
         cap = int(getattr(self, "symbol_cap", 0) or 0) or 50
         try:
-            out = hist_test_mod.select_intern_symbols(list(SYMBOLS), job, opens=opens, cap=cap)
+            pool = hist_test_mod.intern_liquid_pool(
+                list(SYMBOLS),
+                getattr(self, "universe", None) or [],
+                cap=cap,
+            )
         except Exception:
-            out = list(SYMBOLS)[:cap] if cap > 0 else list(SYMBOLS)
+            pool = list(hist_test_mod.PREFERRED_SYMBOLS) + list(opens)
+        if not pool:
+            pool = list(hist_test_mod.PREFERRED_SYMBOLS) or list(SYMBOLS)[:cap]
+        try:
+            out = hist_test_mod.select_intern_symbols(pool, job, cap=cap)
+        except Exception:
+            out = list(pool)[:cap] if cap > 0 else list(pool)
         if not out:
-            out = list(SYMBOLS)[:cap] if cap > 0 else list(SYMBOLS)
+            out = list(pool)[:cap] if cap > 0 else list(pool)
         self._intern_scan_cache = out
         self._intern_scan_at = now
         return list(out)

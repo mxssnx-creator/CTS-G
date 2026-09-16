@@ -45,6 +45,13 @@ STEP_LO = 3
 STEP_HI = 12
 TICKER_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 PREFERRED_SYMBOLS = ["BCH-USDT", "SOL-USDT", "XRP-USDT"]
+INTERN_MAJORS = (
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
+    "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
+    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
+    "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
+    "ETC-USDT", "LDO-USDT", "HBAR-USDT",
+)
 VOL_CANDIDATES = 40
 MIN_QUOTE_VOLUME = 1_000_000.0
 DEFAULT_TARGET = 20
@@ -406,6 +413,44 @@ def intern_audit_floor_failed(job: Optional[Dict[str, Any]] = None) -> bool:
         return "symbols-meet-floor" in failed
     error = str(blob.get("error") or blob.get("detail") or "")
     return "symbols-meet-floor" in error
+
+
+def intern_liquid_pool(
+    overlay_symbols: Optional[List[str]] = None,
+    universe: Optional[List[Any]] = None,
+    *,
+    opens: Optional[List[str]] = None,
+    cap: int = SYMBOL_CAP,
+    min_quote: float = MIN_QUOTE_VOLUME,
+) -> List[str]:
+    """Intern preferred + majors only. Scan dust stays out of new intern entries."""
+    major_keys = {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
+    overlay = [
+        str(s).strip().upper()
+        for s in (overlay_symbols or [])
+        if str(s or "").strip() and str(s).strip() not in ("*", "ALL", "UNLIMITED") and ":" not in str(s)
+    ]
+    out: List[str] = []
+    used: set[str] = set()
+
+    def add(raw: Any) -> None:
+        name = str(raw or "").strip().upper()
+        if not name.endswith("-USDT") or name in used or ":" in name:
+            return
+        used.add(name)
+        out.append(name)
+
+    for s in PREFERRED_SYMBOLS:
+        add(s)
+    for s in INTERN_MAJORS:
+        add(s)
+    for s in overlay:
+        if s in major_keys:
+            add(s)
+    limit = int(cap or 0) or SYMBOL_CAP
+    if limit > 0:
+        out = out[:limit]
+    return out
 
 
 def select_intern_symbols(
