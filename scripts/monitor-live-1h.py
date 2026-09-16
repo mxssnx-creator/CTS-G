@@ -9,8 +9,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = os.environ.get("CTS_MONITOR_BASE", "http://152.53.114.112:3002").rstrip("/")
-PULSE = os.environ.get("CTS_MONITOR_PULSE", "http://152.53.114.112:3015").rstrip("/")
+BASE = os.environ.get("CTS_MONITOR_BASE", "http://127.0.0.1:3102").rstrip("/")
+PULSE = os.environ.get("CTS_MONITOR_PULSE", "http://127.0.0.1:3015").rstrip("/")
 LIVE_ID = "bingx-x01"
 VST_ID = "bingx-x02"
 FORBIDDEN = "bingx-8581b0cb8581"
@@ -173,9 +173,9 @@ def disable_forbidden() -> None:
 
 
 def pulse_lane(conn: str) -> dict:
-    st, body = req("GET", f"/stats/{conn}.json", timeout=12, base=PULSE)
+    st, body = req("GET", f"/live-stats.json?conn={conn}", timeout=12, base=PULSE)
     if st != 200 or not isinstance(body, dict):
-        st, body = req("GET", f"/live-stats.json?id={conn}", timeout=12, base=PULSE)
+        st, body = req("GET", f"/stats.json?conn={conn}", timeout=12, base=PULSE)
     if not isinstance(body, dict):
         return {"http": st, "detail": str(body)[:180]}
     ht = body.get("histTest") if isinstance(body.get("histTest"), dict) else {}
@@ -288,6 +288,9 @@ def snapshot(pass_n: int) -> dict:
 def repair_if_needed(pass_n: int, blob: dict) -> dict:
     repaired = False
     filling = str(blob.get("phase") or "").startswith("prehistoric")
+    halt = str(blob.get("liveBlock") or "")
+    reason = f"{halt} {blob.get('liveReason') or ''}".lower()
+    protection_hold = "entry_protection" in reason and blob.get("isTestnet") not in (True, "true", 1, "1")
     if blob.get("forbiddenRunning"):
         log(f"pass {pass_n} FORBIDDEN 8581 running — disabling")
         disable_forbidden()
@@ -296,10 +299,12 @@ def repair_if_needed(pass_n: int, blob: dict) -> dict:
         log(f"pass {pass_n} drifted to testnet — forcing mainnet")
         apply_live_repair()
         repaired = True
-    if blob.get("liveEffective") is False and not filling:
+    if blob.get("liveEffective") is False and not filling and not protection_hold:
         log(f"pass {pass_n} live not effective — re-arming mainnet + Block")
         apply_live_repair()
         repaired = True
+    elif protection_hold:
+        log(f"pass {pass_n} entry protection hold — keep mainnet engine, skip re-arm")
     elif blob.get("running") is False and not filling:
         log(f"pass {pass_n} engine heartbeat down — starting Live")
         req("POST", "/api/trade-engine/start", {"connectionId": LIVE_ID})

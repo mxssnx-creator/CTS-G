@@ -34,7 +34,7 @@ esac
 }
 
 PYTHONPATH="$PULSE_DIR:$CTS_G_ROOT/server/pulse${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 - "$CTS_DATA_DIR" "$LOG_DIR" "$PULSE_DIR" "$MAX_LINES" <<'PY'
+  python3 - "$CTS_DATA_DIR" "$LOG_DIR" "$PULSE_DIR" "$MAX_LINES" "$MAX_ERROR_LINES" <<'PY'
 from __future__ import annotations
 
 import os
@@ -48,6 +48,8 @@ from system_settings import normalize_system_settings
 
 data_dir, log_dir, pulse_dir = (Path(x) for x in sys.argv[1:4])
 max_lines = int(sys.argv[4])
+max_error_lines = int(sys.argv[5]) if len(sys.argv) > 5 else 500
+max_error_lines = max(32, min(500, max_error_lines))
 limits = {}
 for lane in ("bingx-x01", "bingx-x02"):
     try:
@@ -71,13 +73,27 @@ suffixes = (".log", ".jsonl", ".out", ".err")
 files = []
 for root in roots:
     try:
-        candidates = root.rglob("*")
+        # Depth-bounded walk: never scan SQLite backups or nested report trees.
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel = Path(dirpath)
+            depth = len(rel.relative_to(root).parts) if rel != root else 0
+            if depth >= 3:
+                dirnames[:] = []
+            skip = {"backups", "node_modules", ".git", "__pycache__", "statistics"}
+            dirnames[:] = [name for name in dirnames if name not in skip]
+            for name in filenames:
+                path = Path(dirpath) / name
+                if path.suffix.lower() not in suffixes:
+                    continue
+                files.append(path)
+                if len(files) >= 400:
+                    break
+            if len(files) >= 400:
+                break
     except OSError:
         continue
-    for path in candidates:
-        if not path.is_file() or path.is_symlink() or path.suffix.lower() not in suffixes:
-            continue
-        files.append(path)
+    if len(files) >= 400:
+        break
 
 trimmed = 0
 for path in sorted(set(files)):
@@ -86,7 +102,7 @@ for path in sorted(set(files)):
         selected = [value for lane, value in limits.items() if lane in path.name] or list(limits.values())
         selected_max_lines = min(max_lines, min(value["systemLogMaxLines"] for value in selected))
         if path.name.startswith("errors-") or path.name.endswith(".err") or path.name.endswith(".err.log"):
-            selected_max_lines = min(selected_max_lines, int(os.environ.get("CTS_MAX_ERROR_LOG_LINES", "500")))
+            selected_max_lines = min(selected_max_lines, max_error_lines)
         kept = retain_last_lines(
             str(path),
             max_lines=selected_max_lines,
@@ -99,7 +115,7 @@ for path in sorted(set(files)):
     if before != after:
         print(f"retained {path} lines={kept} bytes={before}->{after}")
 
-print(f"retention complete files={trimmed} maxLines={max_lines} maxBytes={MAX_RETAINED_FILE_BYTES}")
+print(f"retention complete files={trimmed} maxLines={max_lines} maxErrorLines={max_error_lines} maxBytes={MAX_RETAINED_FILE_BYTES}")
 
 prefix = str(os.environ.get("CTS_REDIS_PREFIX") or "")
 ttl_s = 21600
@@ -108,15 +124,19 @@ try:
 except (KeyError, ValueError, TypeError):
     ttl_s = 21600
 ttl_s = max(300, min(86400, ttl_s))
+# Only expire this installation's calc cache. Never SCAN shared KN/indication keys.
+patterns = []
 if prefix.endswith(":"):
-    expired = 0
-    try:
+    patterns.append(prefix + "cts-calc:*")
+patterns.append("cts-calc:*")
+expired = 0
+scanned = 0
+try:
+    for pattern in patterns:
         cur = "0"
-        pattern = prefix + "cts-calc:*"
-        scanned = 0
-        while scanned < 4000:
+        while scanned < 2000:
             raw = subprocess.check_output(
-                ["redis-cli", "--raw", "SCAN", cur, "MATCH", pattern, "COUNT", "200"],
+                ["redis-cli", "--raw", "SCAN", cur, "MATCH", pattern, "COUNT", "100"],
                 text=True, timeout=2,
             )
             parts = [p for p in raw.split("\n") if p != ""]
@@ -125,7 +145,7 @@ if prefix.endswith(":"):
             cur = parts[0]
             for key in parts[1:]:
                 scanned += 1
-                if not key.startswith(prefix + "cts-calc:"):
+                if "cts-calc:" not in key:
                     continue
                 try:
                     t = subprocess.check_output(["redis-cli", "--raw", "TTL", key], text=True, timeout=1).strip()
@@ -136,8 +156,8 @@ if prefix.endswith(":"):
                     expired += 1
             if cur == "0":
                 break
-        if expired:
-            print(f"expired {expired} {prefix}cts-calc keys ttl={ttl_s}")
-    except (OSError, subprocess.SubprocessError, FileNotFoundError):
-        pass
+    if expired:
+        print(f"expired {expired} cts-calc keys ttl={ttl_s} scanned={scanned}")
+except (OSError, subprocess.SubprocessError, FileNotFoundError):
+    pass
 PY

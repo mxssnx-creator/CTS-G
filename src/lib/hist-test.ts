@@ -118,7 +118,7 @@ export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
 export const HIST_TEST_REFRESH_DEFAULT = 2;
 
-export const HIST_TEST_RUNNING_PHASES = ["queued", "rank", "evaluate", "fetch", "replay", "score", "paused"] as const;
+export const HIST_TEST_RUNNING_PHASES = ["queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh", "paused"] as const;
 
 export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
   const n = Math.round(Number(value));

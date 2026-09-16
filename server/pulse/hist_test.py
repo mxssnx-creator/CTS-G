@@ -56,10 +56,13 @@ OUT_DIR = os.path.join(ROOT, "reports", "hist-test")
 SUMMARY_PATH = os.path.join(OUT_DIR, "summary.json")
 PID_PATH = os.path.join(OUT_DIR, "hist-test.pid")
 LAST_READY_PATH = os.path.join(OUT_DIR, "last-ready.json")
+VALIDATED_IDS_PATH = os.path.join(OUT_DIR, "validated-ids.json")
+VALIDATED_IDS_CAP = 8192
+PUBLIC_VALIDATED_IDS_CAP = 400
 STOP_PATH = os.path.join(OUT_DIR, "STOP")
 PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 
-RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score")
+RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
 SYMBOL_CAP = 50
 JOB_CACHE_TTL_S = 1.5
@@ -193,6 +196,87 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
         add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
         for sid in last.get("validatedIds") or []:
             add(sid)
+    persisted = read_persisted_validated_ids()
+    if persisted and (not out or (len(out) < 8 and len(persisted) > len(out))):
+        for sid in persisted:
+            add(sid)
+    return out
+
+
+def persist_validated_ids(ids: List[str]) -> None:
+    """Keep the full validated Set ID list off the compact public job."""
+    clean: List[str] = []
+    seen: set[str] = set()
+    for raw in ids or []:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        clean.append(sid)
+        if len(clean) >= VALIDATED_IDS_CAP:
+            break
+    if not clean:
+        return
+    try:
+        _ensure_dir()
+        atomic_write(VALIDATED_IDS_PATH, {"validatedIds": clean, "count": len(clean)})
+    except Exception:
+        pass
+
+
+def read_persisted_validated_ids() -> List[str]:
+    try:
+        with open(VALIDATED_IDS_PATH, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            rows = loaded.get("validatedIds") or []
+        elif isinstance(loaded, list):
+            rows = loaded
+        else:
+            rows = []
+        out: List[str] = []
+        seen: set[str] = set()
+        for raw in rows:
+            sid = str(raw or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            out.append(sid)
+            if len(out) >= VALIDATED_IDS_CAP:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any = None) -> List[str]:
+    """Union of job IDs, ranked-set flags, combo rows, and the sidecar."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            return
+        seen.add(sid)
+        out.append(sid)
+
+    for sid in validated_set_ids(blob):
+        add(sid)
+    if ranked_sets:
+        for item in ranked_sets:
+            try:
+                _key, st, _side, valid, _low = item
+            except (TypeError, ValueError):
+                continue
+            if not valid:
+                continue
+            add(getattr(st, "id", "") or "")
+    for sid in read_persisted_validated_ids():
+        add(sid)
+        if len(out) >= VALIDATED_IDS_CAP:
+            break
     return out
 
 
@@ -309,6 +393,8 @@ def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[
             add(row)
     for sid in blob.get("validatedIds") or []:
         add({"id": sid, "validated": True})
+    for sid in read_persisted_validated_ids()[:limit]:
+        add({"id": sid, "validated": True})
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     if winner:
         add({**winner, "id": winner.get("id") or winner.get("setId") or winner.get("set_id"), "validated": True})
@@ -350,10 +436,10 @@ def off_progress_view() -> Dict[str, Any]:
 def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
     """Push Test Historic validated configs onto a live SetBook without a full catalog replay."""
     blob = job if isinstance(job, dict) else read_job()
-    ids = validated_set_ids(blob)
+    ids = collect_validated_ids(blob)
     apply = getattr(book, "apply_hist_test_gate", None)
     if callable(apply):
-        apply(ids)
+        apply(ids if ids else None)
     by_id: Dict[str, Dict[str, Any]] = {}
     for row in blob.get("successfulConfigs") or []:
         if not isinstance(row, dict):
@@ -407,6 +493,8 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         st.n = max(int(getattr(st, "n", 0) or 0), n)
         st.active = bool(row.get("validated", True))
         st.deact_reason = ""
+        st.processing_active = True
+        st.processing_reason = "hist-test validated"
         try:
             dd = float(row.get("maxDdS") or row.get("max_dd_s") or getattr(st, "max_dd_s", 0) or 0)
         except (TypeError, ValueError):
@@ -554,17 +642,20 @@ def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     ids = list(blob.get("validatedIds") or [])
     if not ids:
-        ids = validated_set_ids(blob)
+        ids = collect_validated_ids(blob)
+    persist_validated_ids(ids)
     return {
         "phase": "ready",
         "ready": True,
         "winner": winner,
         "validatedIds": ids,
-        "validatedCount": blob.get("validatedCount"),
+        "validatedCount": blob.get("validatedCount") or len(ids),
         "successfulConfigs": list(blob.get("successfulConfigs") or [])[:60],
         "hours": blob.get("hours"),
         "minPf": blob.get("minPf"),
         "n": (winner or {}).get("n"),
+        "symbols": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
+        "positive": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
     }
 
 
@@ -573,12 +664,15 @@ def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
     payload = normalize_job(apply_control_latches(blob))
     payload["generatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ready = bool(payload.get("ready") or str(payload.get("phase") or "") == "ready")
-    if ready and (payload.get("winner") or payload.get("validatedIds")):
+    phase_now = str(payload.get("phase") or "")
+    in_flight = phase_now in IN_FLIGHT_PHASES
+    if ready and (payload.get("winner") or payload.get("validatedIds")) and not in_flight:
         try:
             atomic_write(LAST_READY_PATH, _ready_snapshot(payload))
         except Exception:
             pass
-    else:
+        persist_validated_ids(list(payload.get("validatedIds") or []))
+    elif not in_flight:
         last = read_last_ready()
         if last:
             if not payload.get("winner"):
@@ -644,18 +738,31 @@ def job_age_s(blob: Optional[Dict[str, Any]] = None) -> float:
 def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Engine/UI progress for Test Historic: in-flight pct plus last validated gate."""
     blob = job if isinstance(job, dict) else read_job()
-    ids = validated_set_ids(blob)
+    ids = collect_validated_ids(blob)
     phase = str(blob.get("phase") or "idle")
     paused = bool(blob.get("paused") or phase == "paused")
-    running = phase in RUNNING_PHASES and not paused
+    running = (phase in RUNNING_PHASES and not paused) or (paused and str(blob.get("resumePhase") or "") in RUNNING_PHASES)
     try:
         pct = float(blob.get("pct") or 0)
     except (TypeError, ValueError):
         pct = 0.0
-    if not running and ids:
-        pct = 100.0
+    try:
+        reported = int(blob.get("validatedCount") or 0)
+    except (TypeError, ValueError):
+        reported = 0
+    n_ids = max(len(ids), reported)
+    if running:
+        if pct <= 0:
+            pct = 1.0
+    elif paused:
+        pct = min(99.0, max(pct, 1.0))
+        if phase != "paused":
+            phase = "paused"
+    elif phase in ("ready",) or (not running and n_ids and phase in ("idle", "", "ready")):
         if phase in ("idle", ""):
             phase = "ready"
+        if not blob.get("error"):
+            pct = 100.0
     n_fills = 0
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     try:
@@ -674,30 +781,43 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 n_fills = 0
     age = job_age_s(blob)
     stale = bool(running and age > 180)
-    n_ids = len(ids)
-    detail = str(blob.get("detail") or phase)
+    raw_detail = str(blob.get("detail") or phase)
     refresh_h = clamp_refresh_hours(blob.get("refreshHours"))
-    if n_ids and running:
-        detail = f"Test Historic recalc · {detail} · live {n_ids} validated · skip full catalog"
+    symbols = validated_symbols(blob)
+    cov = blob.get("coverage") if isinstance(blob.get("coverage"), dict) else {}
+    sets_cov = cov.get("sets") if isinstance(cov.get("sets"), dict) else {}
+    try:
+        sets_done = int(sets_cov.get("completed") or sets_cov.get("done") or blob.get("setsDone") or n_ids)
+    except (TypeError, ValueError):
+        sets_done = n_ids
+    try:
+        sets_total = int(sets_cov.get("requested") or sets_cov.get("total") or blob.get("setsTotal") or max(n_ids, 1 if running or n_ids else 0))
+    except (TypeError, ValueError):
+        sets_total = max(n_ids, 1 if running or n_ids else 0)
+    if running:
+        detail = f"Test Historic {phase} {int(pct)}% · {raw_detail} · {n_ids} validated · {len(symbols)} symbols"
+    elif paused:
+        detail = f"Test Historic paused · {raw_detail}"
     elif n_ids:
-        detail = f"Test Historic · {n_ids} validated configs · skip full catalog · refresh {refresh_h}h"
+        detail = f"Test Historic · {n_ids} validated configs · {len(symbols)} symbols · skip full catalog · refresh {refresh_h}h"
     elif running:
-        detail = f"Test Historic owns calcs · {detail} · skip full catalog"
+        detail = f"Test Historic owns calcs · {raw_detail} · skip full catalog"
     else:
         detail = "Test Historic owns calcs · waiting validated configs · skip full catalog"
     if stale:
         detail += " · waiting on Test Historic refresh"
-    symbols = validated_symbols(blob)
+    if blob.get("error") and not running:
+        detail = f"{detail} · {blob.get('error')}"
     running_set_rows = running_sets(blob)
     return {
         "phase": phase,
         "pct": pct,
-        "ready": bool(ids) or bool(blob.get("ready")),
+        "ready": bool(ids) or bool(blob.get("ready")) or (phase == "ready" and n_ids > 0),
         "running": running,
         "paused": paused,
         "validatedCount": n_ids,
-        "setsDone": n_ids,
-        "setsTotal": max(n_ids, 1 if running or n_ids else 0),
+        "setsDone": sets_done if running else n_ids,
+        "setsTotal": sets_total if running else max(n_ids, 1 if running or n_ids else 0),
         "histFills": n_fills,
         "detail": detail,
         "generatedAt": blob.get("generatedAt"),
@@ -708,12 +828,13 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "symbol": symbols[0] if symbols else blob.get("symbol"),
         "enabled": True,
         "ownsCatalog": True,
-        "catalogSkipped": True,
+        "catalogSkipped": not running,
         "symbols": symbols[:SYMBOL_CAP],
         "runningSets": running_set_rows,
         "processedSetCount": n_ids,
         "processingCount": n_ids,
         "internSymbols": symbols[:SYMBOL_CAP],
+        "error": blob.get("error") or "",
     }
 
 
@@ -1100,6 +1221,13 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
     coverage = job.get("coverage") if isinstance(job.get("coverage"), dict) else {}
     winner = job.get("winner") if isinstance(job.get("winner"), dict) else {}
     public_ranked = [{k: v for k, v in row.items() if k != "_bars"} for row in ranked]
+    ids = list(job.get("validatedIds") or []) or collect_validated_ids(job)
+    persist_validated_ids(ids)
+    try:
+        validated_count = int(job.get("validatedCount") or 0)
+    except (TypeError, ValueError):
+        validated_count = 0
+    validated_count = max(validated_count, len(ids))
     out = {
         "ok": True,
         "phase": str(job.get("phase") or "ready"),
@@ -1151,7 +1279,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             "independentConfigs": True,
             "independentCombo": True,
         },
-        "validatedCount": job.get("validatedCount"),
+        "validatedCount": validated_count or job.get("validatedCount"),
         "rowCount": job.get("rowCount"),
         "winner": {
             "id": winner.get("id"),
@@ -1179,7 +1307,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
         "successfulConfigs": (job.get("successfulConfigs") or [])[:60],
-        "validatedIds": job.get("validatedIds") or validated_set_ids(job),
+        "validatedIds": ids[:PUBLIC_VALIDATED_IDS_CAP],
         "recalcOnly": bool(job.get("recalcOnly")),
         "combo": job.get("combo") or {},
         "byStep": step_rows,
@@ -1416,20 +1544,62 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         })
     for row in selected:
         book.ingest_bars(row["symbol"], row["_bars"])
-    book.replay_all(symbols=symbols, workers=1, merge=True, progress_total=len(symbols), score=True,
-                    set_ids=recalc_ids if recalc_only else None)
+
+    def on_symbol(symbol: str, done: int, total: int) -> None:
+        progress({
+            "phase": "replay",
+            "pct": 60 + int(28 * (done / max(1, total))),
+            "detail": f"replay {done}/{total} · {symbol}",
+            "symbols": symbols,
+            "positive": symbols,
+            "setsDone": done,
+            "setsTotal": max(total, 1),
+        })
+
+    book.replay_all(
+        symbols=symbols,
+        workers=1,
+        merge=True,
+        progress_total=len(symbols),
+        score=True,
+        set_ids=recalc_ids if recalc_only else None,
+        on_symbol=on_symbol,
+    )
+    progress({
+        "phase": "score",
+        "pct": 90,
+        "detail": f"score + combo · {len(symbols)} symbols",
+        "symbols": symbols,
+        "positive": symbols,
+    })
     ranked_sets = _rank_set_rows(book)
     by_step = step_rollup(book)
     by_sym = symbol_rollup(book)
     by_dir = direction_rollup(book)
     by_strat = strategy_rollup(book, strat=getattr(book, "strategy_hist", None))
     combo = combo_evaluate(book, min_pf=min_pf, cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
+    progress({
+        "phase": "score",
+        "pct": 96,
+        "detail": f"rank validated configs · {len(symbols)} symbols",
+        "symbols": symbols,
+        "positive": symbols,
+    })
     winner = pick_winner_row(book, ranked_sets)
     listings = catalog_listings(book, ranked_sets, symbols)
     prog = book.progress
     set_n = len(book.by_idx)
     requested_sets = set_n * max(len(symbols), 1)
     book_cov = book.coverage() if hasattr(book, "coverage") else {}
+    validated_ids = collect_validated_ids(
+        {
+            "successfulConfigs": combo.get("successful") or [],
+            "winner": winner or {},
+            "validatedIds": recalc_ids if recalc_only else [],
+        },
+        ranked_sets=ranked_sets,
+    )
+    persist_validated_ids(validated_ids)
     job = {
         "phase": "ready",
         "ready": True,
@@ -1472,7 +1642,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "evaluations": coverage_counter(set_n, set_n),
             "tasks": coverage_counter(len(symbols), len(symbols)),
         },
-        "validatedCount": sum(1 for item in ranked_sets if item[3]),
+        "validatedCount": len(validated_ids) or sum(1 for item in ranked_sets if item[3]),
         "rowCount": len(ranked_sets),
         "rows": [set_row(st, side) for _k, st, side, _v, _l in ranked_sets[:80]],
         "winner": winner or {},
@@ -1483,7 +1653,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "withWithout": combo.get("withWithout") or {},
         "comboMatrix": combo.get("matrix") or [],
         "successfulConfigs": combo.get("successful") or [],
-        "validatedIds": [str(r.get("setId") or "") for r in (combo.get("successful") or []) if r.get("setId")],
+        "validatedIds": validated_ids,
         "recalcOnly": recalc_only,
         "combo": combo.get("meta") or {},
         "byStep": by_step,
@@ -1500,7 +1670,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         },
         "detail": (
             f"{len(symbols)}/{target} positive · evaluated {fill['evaluated']} · "
-            f"{sum(1 for item in ranked_sets if item[3])}/{len(ranked_sets)} validated"
+            f"{len(validated_ids)} validated configs"
         ),
         "pct": 100,
     }
@@ -1679,7 +1849,7 @@ def self_test() -> Dict[str, Any]:
     import shutil
     import tempfile
 
-    global LAST_READY_PATH
+    global LAST_READY_PATH, VALIDATED_IDS_PATH, PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR
     clear_stop()
     invalidate_job_cache()
     rows: List[Dict[str, Any]] = []
@@ -1710,7 +1880,10 @@ def self_test() -> Dict[str, Any]:
         validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
     )
     prev_last_ready = LAST_READY_PATH
-    LAST_READY_PATH = os.path.join(tempfile.gettempdir(), "cts-hist-test-no-last-ready.json")
+    prev_validated_ids = VALIDATED_IDS_PATH
+    tmp_iso = tempfile.mkdtemp(prefix="hist-ids-")
+    LAST_READY_PATH = os.path.join(tmp_iso, "no-last-ready.json")
+    VALIDATED_IDS_PATH = os.path.join(tmp_iso, "no-validated-ids.json")
     try:
         pos_job = {
             "positive": ["AAA-USDT"],
@@ -1740,12 +1913,32 @@ def self_test() -> Dict[str, Any]:
             and view.get("catalogSkipped") is True,
             view,
         )
+        flying = job_progress_view({
+            "phase": "evaluate",
+            "pct": 22,
+            "detail": "SOL-USDT · 3/20 positive",
+            "running": True,
+            "validatedCount": 40,
+            "positive": ["SOL-USDT"],
+        })
+        rec(
+            "progress-keeps-inflight-pct",
+            flying.get("phase") == "evaluate" and abs(float(flying.get("pct") or 0) - 22) < 1e-6 and flying.get("running") is True,
+            flying,
+        )
+        rec("progress-uses-validated-count", int(flying.get("validatedCount") or 0) >= 40, flying.get("validatedCount"))
+        persist_validated_ids(["indications:1m:sl0.6:st3", "general:1m:sl0.6:st4"])
+        rec("persist-ids", read_persisted_validated_ids()[:2] == ["indications:1m:sl0.6:st3", "general:1m:sl0.6:st4"], read_persisted_validated_ids())
+        persist_validated_ids([f"set:{i}" for i in range(VALIDATED_IDS_CAP + 40)])
+        rec("persist-ids-cap", len(read_persisted_validated_ids()) == VALIDATED_IDS_CAP, len(read_persisted_validated_ids()))
         off = off_progress_view()
         rec("off-progress", off.get("enabled") is False and off.get("phase") == "off", off)
         cap_job = {"positive": [f"S{i}-USDT" for i in range(80)]}
         rec("validated-symbols-cap", len(validated_symbols(cap_job)) == SYMBOL_CAP, len(validated_symbols(cap_job)))
     finally:
         LAST_READY_PATH = prev_last_ready
+        VALIDATED_IDS_PATH = prev_validated_ids
+        shutil.rmtree(tmp_iso, ignore_errors=True)
 
     ov = test_overlay(4, 1.1, 8, 8)
     ov["slToTpRatios"] = [0.6]
@@ -1785,13 +1978,14 @@ def self_test() -> Dict[str, Any]:
     rec("live-eval-runs", live_fill["evaluated"] == 2, live_fill)
     rec("live-eval-records-pf", all("pf" in r for r in live_fill["selected"] + live_fill["rejected"]), live_fill)
 
-    global PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR
-    prev_paths = (PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR)
+    prev_paths = (PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR, VALIDATED_IDS_PATH, LAST_READY_PATH)
     tmp = tempfile.mkdtemp(prefix="hist-self-")
     PUBLIC_JSON = os.path.join(tmp, "hist-test.json")
     SUMMARY_PATH = os.path.join(tmp, "summary.json")
     PUBLIC_SWEEP = os.path.join(tmp, "step-sweep.json")
     OUT_DIR = tmp
+    VALIDATED_IDS_PATH = os.path.join(tmp, "validated-ids.json")
+    LAST_READY_PATH = os.path.join(tmp, "last-ready.json")
     try:
         job = run_test({"hours": 4, "minPf": 1.1, "targetCount": 2, "minStep": 8, "stepMax": 8, "synth": True,
                         "overlay": {"slToTpRatios": [0.6], "stratTrailing": False, "stratIndications": False, "stratBlock": False, "histSimulateBlock": False}})
@@ -1815,7 +2009,7 @@ def self_test() -> Dict[str, Any]:
             rec("recalc-only-flag", True, "no-ids-skip")
             rec("recalc-does-not-expand-catalog", True, "no-ids-skip")
     finally:
-        PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR = prev_paths
+        PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, OUT_DIR, VALIDATED_IDS_PATH, LAST_READY_PATH = prev_paths
         shutil.rmtree(tmp, ignore_errors=True)
 
     failed = [r["name"] for r in rows if not r["ok"]]

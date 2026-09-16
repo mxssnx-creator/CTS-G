@@ -658,6 +658,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const s = stats?.sets;
   const p = s?.progress;
   const ht = stats?.histTest;
+  const htOn = histTestIsEnabled(ht);
   const nested = (p as { lanes?: Array<{ pct?: number; phase?: string; progress?: { pct?: number; phase?: string } }> } | undefined)?.lanes || [];
   const lanePcts = [
     ...(s?.lanes || []).map((ln) => ln.progress?.pct),
@@ -665,20 +666,23 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   ].filter((n): n is number => n != null && Number.isFinite(n));
   const pct = Math.max(
     0,
-    Math.min(100, p?.pct ?? ht?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
+    Math.min(100, (htOn ? ht?.pct : p?.pct) ?? ht?.pct ?? p?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
   );
-  const phase = String(p?.phase ?? ht?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
-  const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
+  const phase = String((htOn ? ht?.phase : p?.phase) ?? ht?.phase ?? p?.phase ?? "idle");
+  const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
+  const gate = (htOn ? ht?.ready : p?.ready) ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
-  const proc = s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0;
+  const proc = htOn
+    ? (ht?.processingCount ?? s?.processingCount ?? 0)
+    : (s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0);
+  const validN = htOn ? (ht?.validatedCount ?? s?.validatedCount ?? 0) : (s?.validatedCount ?? 0);
   const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={p?.ready ? "text-primary" : "text-warn"}>
-          sets · {phaseLabel} · valid {s?.validatedCount ?? 0}/{s?.setCount ?? 0} · active {active}/{s?.setCount ?? 0}
+        <span className={(htOn ? ht?.ready : p?.ready) ? "text-primary" : "text-warn"}>
+          sets · {phaseLabel} · valid {validN}/{htOn ? (ht?.processedSetCount ?? s?.setCount ?? 0) : (s?.setCount ?? 0)} · active {active}/{s?.setCount ?? 0}
           {proc ? ` · proc ${proc}` : ""}
           {updating ? " · updating" : ""}{gate}
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
@@ -698,7 +702,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           {lanes.map((ln) => {
             const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? (ln as { pct?: number }).pct ?? 0));
             const lanePhase = String(ln.progress?.phase ?? (ln as { phase?: string }).phase ?? "idle");
-            const laneUpdating = ["fetch", "replay", "score", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
+            const laneUpdating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             return (
               <div key={ln.id || ln.type}>
@@ -723,9 +727,9 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
           </div>
           <p className="mt-1 text-muted">
-            {p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
-            {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
-            {updating && p?.ready ? " · prior gate remains active" : ""}
+            {(htOn ? ht?.detail : p?.detail) || p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
+            {p?.symbolsTotal && !htOn ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
+            {updating && (htOn ? ht?.ready : p?.ready) ? " · prior gate remains active" : ""}
           </p>
         </>
       )}

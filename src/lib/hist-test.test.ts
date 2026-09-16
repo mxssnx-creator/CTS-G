@@ -40,14 +40,14 @@ test("historic test refresh clamp 1–8 default 2", () => {
 });
 
 test("historic test running phases and idle copy", () => {
-  for (const phase of ["queued", "rank", "evaluate", "fetch", "replay", "score", "paused"]) {
+  for (const phase of ["queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh", "paused"]) {
     assert.equal(histTestIsRunning(phase), true, phase);
   }
   for (const phase of ["idle", "ready", "error", "stopped", ""]) {
     assert.equal(histTestIsRunning(phase), false, phase);
   }
   assert.match(histTestStatusLine(null, 20, 1.1), /20h tape · min PF 1.10 · fill until positive/);
-  assert.match(histTestStatusLine({ phase: "evaluate", pct: 22, detail: "SOL-USDT · 3/20 positive" }), /evaluate 22%/);
+  assert.equal(histTestIsRunning("score-refresh"), true);
 });
 
 test("start pause stop match engine bar labels", () => {

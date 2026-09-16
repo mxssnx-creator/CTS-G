@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import nullcontext
-from collections import deque
+from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
 from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
@@ -817,7 +817,8 @@ def parse_stop_bound(msg: str) -> Tuple[str, float]:
 
 
 _LOG_N = 0
-_LOG_LAST: Dict[str, float] = {}
+_LOG_LAST: "OrderedDict[str, float]" = OrderedDict()
+_LOG_LAST_CAP = 256
 _LOG_BUF: List[str] = []
 _LOG_FLUSH = 0.0
 
@@ -839,9 +840,14 @@ def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> Non
     if every > 0:
         k = key or msg[:48]
         now = time.time()
-        if now - _LOG_LAST.get(k, 0.0) < every:
-            return
+        prev = _LOG_LAST.get(k)
+        if prev is not None:
+            _LOG_LAST.move_to_end(k)
+            if now - prev < every:
+                return
         _LOG_LAST[k] = now
+        while len(_LOG_LAST) > _LOG_LAST_CAP:
+            _LOG_LAST.popitem(last=False)
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}"
     if not quiet:
         print(line, flush=False)
@@ -7610,7 +7616,12 @@ class Pulse:
             if self._hist_test_owns_catalog():
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
                 if callable(apply) and getattr(self.sets, "hist_test_set_ids", None) is None:
-                    apply([])
+                    ids = []
+                    try:
+                        ids = hist_test_mod.collect_validated_ids(hist_test_mod.read_job())
+                    except Exception:
+                        ids = []
+                    apply(ids if ids else None)
                 self._sync_hist_test_lane()
             else:
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
@@ -11302,13 +11313,15 @@ class Pulse:
         phase = hist_phase if hist_phase and hist_phase not in ("idle",) else (prog_phase or hist_phase or "idle")
         if hist_phase in ("backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial") and prog_phase in ("idle", "ready", ""):
             phase = hist_phase
-        if hist_test_snap.get("running"):
+        if hist_test_snap.get("enabled") or hist_test_snap.get("ownsCatalog") or hist_test_snap.get("running"):
             phase = str(hist_test_snap.get("phase") or phase)
             if hist_test_snap.get("pct") is not None:
                 historic_snap = dict(historic_snap)
                 historic_snap["pct"] = hist_test_snap.get("pct")
             if hist_test_snap.get("detail"):
                 historic_snap["detail"] = hist_test_snap.get("detail")
+            if hist_test_snap.get("ready") is not None:
+                historic_snap["ready"] = hist_test_snap.get("ready")
         pct_raw = historic_snap.get("pct") if historic_snap.get("pct") is not None else prog.get("pct")
         try:
             pct_val = round(float(pct_raw or 0), 1)
@@ -13604,12 +13617,13 @@ class Pulse:
             seen.add(key)
             names.append(name)
 
+        job: Dict[str, Any] = {}
         try:
             job = hist_test_mod.read_job()
             for s in hist_test_mod.validated_symbols(job):
                 add(s)
         except Exception:
-            pass
+            job = {}
         opens = getattr(self, "open", None) or {}
         rows = opens.values() if isinstance(opens, dict) else opens
         for row in rows or []:
@@ -13617,23 +13631,39 @@ class Pulse:
                 add(getattr(row, "symbol", None) or (row.get("symbol") if isinstance(row, dict) else None))
             except Exception:
                 continue
-        if not names:
-            self._intern_scan_cache = []
-            self._intern_scan_at = now
-            return []
         order = {str(s).upper(): s for s in SYMBOLS}
         out: List[str] = []
         used: set[str] = set()
+        # Prefer overlay ∩ tested positives so intern uses the live universe.
         for s in SYMBOLS:
             key = str(s).upper()
             if key in seen and key not in used:
                 used.add(key)
                 out.append(s)
-        for s in names:
-            key = str(s).upper()
-            if key not in used:
-                used.add(key)
-                out.append(order.get(key, s))
+        if not out:
+            # Stale positives not in overlay, or job ready with configs: intern the overlay
+            # using validated configs so the engine is not dead on leftover junk symbols.
+            phase = str(job.get("phase") or "")
+            ready = bool(job.get("ready") or phase == "ready")
+            running = phase in getattr(hist_test_mod, "IN_FLIGHT_PHASES", ())
+            if ready or (names and not running):
+                for s in SYMBOLS:
+                    key = str(s).upper()
+                    if key not in used:
+                        used.add(key)
+                        out.append(s)
+            else:
+                for s in names:
+                    key = str(s).upper()
+                    if key not in used:
+                        used.add(key)
+                        out.append(order.get(key, s))
+        else:
+            for s in names:
+                key = str(s).upper()
+                if key not in used:
+                    used.add(key)
+                    out.append(order.get(key, s))
         cap = int(getattr(self, "symbol_cap", 0) or 0) or 50
         if cap > 0 and len(out) > cap:
             out = out[:cap]
@@ -13648,7 +13678,10 @@ class Pulse:
             job = hist_test_mod.read_job()
         except Exception:
             job = {}
-        ids = hist_test_mod.validated_set_ids(job)
+        try:
+            ids = hist_test_mod.collect_validated_ids(job)
+        except Exception:
+            ids = hist_test_mod.validated_set_ids(job)
         try:
             view = hist_test_mod.job_progress_view(job)
         except Exception:
@@ -13669,7 +13702,7 @@ class Pulse:
             except Exception:
                 apply = getattr(book, "apply_hist_test_gate", None)
                 if callable(apply):
-                    apply(ids)
+                    apply(ids if ids else None)
             book.progress.phase = str(view.get("phase") or "hist-test")
             book.progress.ready = True if ids else bool(view.get("ready"))
             book.progress.coordination_complete = not bool(view.get("running"))
@@ -13695,7 +13728,10 @@ class Pulse:
             job = hist_test_mod.read_job()
         except Exception:
             job = {}
-        ids = hist_test_mod.validated_set_ids(job)
+        try:
+            ids = hist_test_mod.collect_validated_ids(job)
+        except Exception:
+            ids = hist_test_mod.validated_set_ids(job)
         if not ids:
             return
         allow = set(ids)

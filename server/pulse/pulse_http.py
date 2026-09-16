@@ -1730,51 +1730,51 @@ def merge_overall() -> dict:
     try:
         from hist_test import job_progress_view, off_progress_view
         existing = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
-        if not existing:
-            for st in stats_by_id.values():
-                if not isinstance(st, dict):
-                    continue
-                blob = st.get("histTest") if isinstance(st.get("histTest"), dict) else {}
-                if not blob:
-                    continue
-                if blob.get("enabled") is True or blob.get("ownsCatalog") is True:
-                    existing = blob
-                    break
-                if not existing:
-                    existing = blob
-        off = (
-            not existing
-            or existing.get("enabled") is False
-            or existing.get("ownsCatalog") is False
-            or existing.get("phase") == "off"
-        )
-        if off:
-            if existing and (
-                existing.get("enabled") is False
-                or existing.get("ownsCatalog") is False
-                or existing.get("phase") == "off"
-            ):
-                out["histTest"] = existing
-            else:
-                out["histTest"] = off_progress_view()
+        on_blob = None
+        off_blob = None
+        for st in [existing] + [stats_by_id.get(lane["id"]) or {} for lane in LANES]:
+            if not isinstance(st, dict):
+                continue
+            blob = st if st is existing else (st.get("histTest") if isinstance(st.get("histTest"), dict) else {})
+            if not blob:
+                continue
+            if blob.get("enabled") is True or blob.get("ownsCatalog") is True:
+                on_blob = blob
+                break
+            if blob.get("enabled") is False or blob.get("ownsCatalog") is False or blob.get("phase") == "off":
+                if off_blob is None:
+                    off_blob = blob
+        if on_blob:
+            view = dict(on_blob)
+            if view.get("running") or not view.get("runningSets"):
+                try:
+                    fresh = job_progress_view()
+                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal"):
+                        if fresh.get(key) is not None:
+                            view[key] = fresh.get(key)
+                except Exception:
+                    pass
+            view["enabled"] = True
+            view["ownsCatalog"] = True
+            out["histTest"] = view
+            if isinstance(sets, dict):
+                sets["histTest"] = view
+            # Keep overall progress on Test Historic when a desk owns the catalog.
+            if str(out.get("progressPhase") or "") in ("replay", "catalog", "backfill", "gap", "partial") and not view.get("running"):
+                out["progressPhase"] = view.get("phase") or out.get("progressPhase")
+                out["progressPct"] = view.get("pct") if view.get("pct") is not None else out.get("progressPct")
+                out["progressDetail"] = view.get("detail") or out.get("progressDetail")
+                prog = dict(out.get("progress") or {})
+                prog["phase"] = out["progressPhase"]
+                prog["pct"] = out["progressPct"]
+                prog["detail"] = out["progressDetail"]
+                out["progress"] = prog
+                if isinstance(sets, dict):
+                    sets["progress"] = dict(prog)
+        else:
+            out["histTest"] = off_blob or off_progress_view()
             if isinstance(sets, dict):
                 sets["histTest"] = out["histTest"]
-        elif existing.get("runningSets") is not None or existing.get("internSymbols") is not None:
-            out["histTest"] = existing
-            if isinstance(sets, dict) and not sets.get("histTest"):
-                sets["histTest"] = existing
-        else:
-            view = job_progress_view()
-            view["enabled"] = existing.get("enabled", True)
-            view["ownsCatalog"] = existing.get("ownsCatalog", existing.get("enabled", True))
-            view["catalogSkipped"] = existing.get("catalogSkipped", True)
-            if existing.get("internSymbols"):
-                view["internSymbols"] = existing.get("internSymbols")
-            if existing.get("symbols") and not view.get("symbols"):
-                view["symbols"] = existing.get("symbols")
-            out["histTest"] = view
-            if isinstance(sets, dict) and not sets.get("histTest"):
-                sets["histTest"] = view
     except Exception:
         pass
     return slim_for_ui(out)

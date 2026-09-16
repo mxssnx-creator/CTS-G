@@ -5502,7 +5502,7 @@ class SetBook:
         hist_ids = getattr(self, "hist_test_set_ids", None)
         processing_rows = []
         for st in self.by_idx:
-            hist_proc = bool(hist_ids and st.id in hist_ids and st.active)
+            hist_proc = bool(hist_ids is not None and st.id in hist_ids)
             if not (st.processing_active or hist_proc):
                 continue
             processing_rows.append({
@@ -5559,7 +5559,11 @@ class SetBook:
             "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
-            "processingCount": max(len(getattr(self, "_processing_set_ids", set()) or set()), len(processing_rows)),
+            "processingCount": max(
+                len(getattr(self, "_processing_set_ids", set()) or set()),
+                len(processing_rows),
+                len(hist_ids) if hist_ids else 0,
+            ),
             "processingSetIds": (list(dict.fromkeys([row["id"] for row in processing_rows] + self.processing_set_ids())))[:350],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),

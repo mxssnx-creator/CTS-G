@@ -73,6 +73,22 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
 
+    def test_persist_validated_ids_caps_sidecar(self):
+        import tempfile, os
+        prev = ht.VALIDATED_IDS_PATH
+        tmp = tempfile.mkdtemp(prefix="hist-ids-cap-")
+        try:
+            ht.VALIDATED_IDS_PATH = os.path.join(tmp, "validated-ids.json")
+            ht.persist_validated_ids([f"set:{i}" for i in range(ht.VALIDATED_IDS_CAP + 25)])
+            ids = ht.read_persisted_validated_ids()
+            self.assertEqual(len(ids), ht.VALIDATED_IDS_CAP)
+            self.assertEqual(ids[0], "set:0")
+            self.assertEqual(ids[-1], f"set:{ht.VALIDATED_IDS_CAP - 1}")
+        finally:
+            ht.VALIDATED_IDS_PATH = prev
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_validated_set_ids_from_last_ready_file(self):
         import tempfile, os
         prev = ht.LAST_READY_PATH

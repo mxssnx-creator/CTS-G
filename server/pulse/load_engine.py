@@ -32,6 +32,7 @@ CATALOG_HARD_FLOOR_MB = 2200.0
 # and extra TFs before the kernel starts reclaiming into D-state stalls.
 HOST_PRESSURE_MB = 1600.0
 HOST_CRITICAL_MB = 800.0
+HOST_SWAP_PRESSURE_MB = 1536.0
 
 
 def rss_mb() -> float:
@@ -164,6 +165,24 @@ def host_mem_mb() -> Tuple[float, float]:
     except Exception:
         return 0.0, 0.0
     return avail, total
+
+
+def host_swap_used_mb() -> float:
+    """Return used swap in MiB. Stale swap from a prior spike still counts."""
+    total = 0.0
+    free = 0.0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("SwapTotal:"):
+                    total = float(line.split()[1]) / 1024.0
+                elif line.startswith("SwapFree:"):
+                    free = float(line.split()[1]) / 1024.0
+    except Exception:
+        return 0.0
+    if total <= 0:
+        return 0.0
+    return max(0.0, total - free)
 
 
 def trim_map(store: Dict[Any, Any], keep: Iterable[Any]) -> int:
@@ -433,7 +452,15 @@ class LoadGovernor:
         shed: List[str] = []
         host_avail = self._host_avail()
         host_critical = host_avail > 0 and host_avail < HOST_CRITICAL_MB
-        host_pressure = host_avail > 0 and host_avail < HOST_PRESSURE_MB
+        swap_used = 0.0
+        if self._host_avail_override is None:
+            try:
+                swap_used = host_swap_used_mb()
+            except Exception:
+                swap_used = 0.0
+        host_pressure = (host_avail > 0 and host_avail < HOST_PRESSURE_MB) or (
+            swap_used >= HOST_SWAP_PRESSURE_MB
+        )
         pressure_rss = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
         cgroup_near_max = bool(
             self.cgroup_mb > 0
@@ -810,6 +837,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     b = g.observe(n_sym=12, n_open=1, hot_ms=40, warm_ms=70, rss_mb=42.0)
     out.append(("load-level-calm", b.level in ("idle", "normal"), f"level={b.level} chunk={b.scan_chunk}"))
     out.append(("load-chunk-fits", b.scan_chunk >= 8 and b.scan_chunk <= 12, f"chunk={b.scan_chunk}"))
+    swap_used = host_swap_used_mb()
+    out.append(("load-swap-used-finite", swap_used >= 0.0 and swap_used < 1_000_000.0, f"swap={swap_used}"))
     out.append(("load-tf-calm", b.tf_5m and b.tf_15m and b.hist_run, f"5m={b.tf_5m} 15m={b.tf_15m}"))
     b2 = g.observe(
         n_sym=400,
