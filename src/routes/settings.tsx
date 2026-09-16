@@ -70,6 +70,18 @@ import { pnlClass, pfClass, activeClass, haltClass, isBenignError } from "@/lib/
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
+const MAJOR_USDT = new Set([
+  "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
+  "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
+  "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
+  "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
+  "ETC-USDT", "LDO-USDT", "HBAR-USDT", "TIA-USDT", "WLD-USDT", "JUP-USDT",
+  "RENDER-USDT", "FET-USDT", "TAO-USDT", "SEI-USDT", "WIF-USDT", "1000PEPE-USDT",
+  "STX-USDT", "IMX-USDT", "GRT-USDT", "ALGO-USDT", "VET-USDT", "EOS-USDT",
+  "THETA-USDT", "AXS-USDT", "SAND-USDT", "MANA-USDT", "CRV-USDT", "MKR-USDT",
+  "SNX-USDT", "COMP-USDT",
+]);
+
 const SECTIONS = [
   "overview",
   "historic",
@@ -471,9 +483,7 @@ function SettingsPage() {
 
   const onApplyPositiveSymbols = () => {
     const names = (histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
-    const majors = names.filter((s) =>
-      /^(BTC|ETH|SOL|XRP|BNB|DOGE|ADA|BCH|AVAX|LINK|LTC|DOT|UNI|ATOM|NEAR|APT|ARB|SUI|INJ|AAVE|FIL|OP|TRX|XLM|ETC|LDO|HBAR)-USDT$/i.test(String(s)),
-    );
+    const majors = names.filter((s) => MAJOR_USDT.has(String(s).toUpperCase()));
     setOverlay((o) => {
       const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
       const stack = Math.max(Number(o.blockMaxStack) || 6, 6);
