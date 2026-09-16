@@ -65,7 +65,7 @@ PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
 SYMBOL_CAP = 50
-GATE_SET_CAP = 350
+GATE_SET_CAP = 512
 JOB_CACHE_TTL_S = 1.5
 
 _JOB_CACHE: Optional[Dict[str, Any]] = None
@@ -349,6 +349,56 @@ def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
     return out[:SYMBOL_CAP]
 
 
+def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
+    """Indication × strategy cells Test Historic marked successful/validated."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        if row.get("validated") is False:
+            return
+        sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
+        indication = str(row.get("indication") or row.get("ind_kind") or "")
+        strategy = str(row.get("strategy") or row.get("config") or "")
+        key = sid or f"{indication}:{strategy}"
+        if not key or key in seen:
+            return
+        if not sid and not indication and not strategy:
+            return
+        seen.add(key)
+        try:
+            pf = float(row.get("pf") or row.get("last15Ratio") or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        try:
+            n = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        out.append({
+            "id": sid,
+            "indication": indication,
+            "strategy": strategy,
+            "pf": pf,
+            "n": n,
+            "validated": True,
+        })
+
+    for row in blob.get("successfulConfigs") or []:
+        add(row)
+    for cell in blob.get("comboMatrix") or []:
+        if isinstance(cell, dict) and cell.get("validated"):
+            add(cell)
+    cap = 24
+    try:
+        cap = max(1, min(int(limit or 24), 48))
+    except (TypeError, ValueError):
+        cap = 24
+    return out[:cap]
+
+
 def intern_audit_floor_failed(job: Optional[Dict[str, Any]] = None) -> bool:
     blob = job if isinstance(job, dict) else {}
     failed = (blob.get("audit") or {}).get("failed") if isinstance(blob.get("audit"), dict) else None
@@ -496,14 +546,16 @@ def off_progress_view() -> Dict[str, Any]:
 
 
 def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Push Test Historic validated configs onto a live SetBook without a full catalog replay."""
+    """Push Test Historic validated configs onto a live SetBook without a full catalog replay.
+
+    Always applies the allow-list (even empty). Empty IDs keep the gate closed so
+    engine progress does not reopen the full catalog while Test Historic is on.
+    """
     blob = job if isinstance(job, dict) else read_job()
     ids = collect_validated_ids(blob)
-    if len(ids) > GATE_SET_CAP:
-        ids = ids[:GATE_SET_CAP]
     apply = getattr(book, "apply_hist_test_gate", None)
     if callable(apply):
-        apply(ids if ids else None)
+        apply(ids)
     by_id: Dict[str, Dict[str, Any]] = {}
     for row in blob.get("successfulConfigs") or []:
         if not isinstance(row, dict):
@@ -898,6 +950,12 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "processedSetCount": n_ids,
         "processingCount": n_ids,
         "internSymbols": symbols[:SYMBOL_CAP],
+        "selectedCoordinations": selected_coordinations(blob),
+        "withWithout": blob.get("withWithout") or {},
+        "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
+        "successfulConfigs": (blob.get("successfulConfigs") or [])[:24] if isinstance(blob.get("successfulConfigs"), list) else [],
+        "pfStats": blob.get("pfStats") or {},
+        "combo": blob.get("combo") or {},
         "error": blob.get("error") or "",
     }
 

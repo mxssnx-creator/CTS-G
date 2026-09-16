@@ -132,10 +132,14 @@ test("overview line reports OFF and ON running sets", () => {
     enabled: true,
     ownsCatalog: true,
     validatedCount: 2,
+    processingCount: 2,
     runningSets: [{ id: "indications:1m:sl0.6:st3" }, { id: "general:1m:sl0.6:st4" }],
+    selectedCoordinations: [{ id: "indications:1m:sl0.6:st3", indication: "combined", strategy: "block" }],
     symbols: ["AAA-USDT", "BBB-USDT"],
   });
   assert.match(line, /Test Historic · ON/);
   assert.match(line, /2 validated/);
+  assert.match(line, /2 processing/);
+  assert.match(line, /1 coordinations/);
   assert.match(line, /indications:1m:sl0.6:st3/);
 });

@@ -116,12 +116,18 @@ export function HistTestStatus({
     ? histTestOverviewLine({ ...blob, enabled: true })
     : histTestOverviewLine({ ...blob, enabled: false, phase: "off" });
   const sets = on ? (histTest?.runningSets || []).slice(0, compact ? 4 : 12) : [];
+  const coords = on ? (histTest?.selectedCoordinations || []).slice(0, compact ? 3 : 8) : [];
   return (
     <div className={compact ? "font-mono text-[11px] text-muted" : "space-y-1 font-mono text-xs"} data-testid="hist-test-live-status">
       <p className={on ? "text-primary" : "text-muted"}>{line}</p>
       {!compact && sets.length ? (
         <p className="text-muted" data-testid="hist-test-running-sets">
           running {sets.map((s) => s.id).filter(Boolean).join(" · ")}
+        </p>
+      ) : null}
+      {!compact && coords.length ? (
+        <p className="text-muted" data-testid="hist-test-coordinations">
+          coordinations {coords.map((s) => s.strategy ? `${s.indication || s.id || ""}/${s.strategy}` : s.id).filter(Boolean).join(" · ")}
         </p>
       ) : null}
     </div>

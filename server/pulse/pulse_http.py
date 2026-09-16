@@ -445,7 +445,26 @@ def slim_for_ui(st: dict) -> dict:
             ht["symbols"] = ht["symbols"][:50]
         if isinstance(ht.get("runningSets"), list):
             ht["runningSets"] = ht["runningSets"][:24]
+        if isinstance(ht.get("selectedCoordinations"), list):
+            ht["selectedCoordinations"] = ht["selectedCoordinations"][:24]
+        if isinstance(ht.get("comboMatrix"), list):
+            ht["comboMatrix"] = ht["comboMatrix"][:40]
+        if isinstance(ht.get("successfulConfigs"), list):
+            ht["successfulConfigs"] = ht["successfulConfigs"][:24]
         out["histTest"] = ht
+        if ht.get("enabled") or ht.get("ownsCatalog"):
+            if ht.get("withWithout"):
+                out["withWithout"] = ht["withWithout"]
+            if ht.get("comboMatrix"):
+                out["comboMatrix"] = ht["comboMatrix"]
+            if ht.get("successfulConfigs"):
+                out["successfulConfigs"] = ht["successfulConfigs"]
+            if ht.get("pfStats"):
+                out["pfStats"] = ht["pfStats"]
+            if ht.get("combo"):
+                out["combo"] = ht["combo"]
+            if ht.get("selectedCoordinations"):
+                out["selectedCoordinations"] = ht["selectedCoordinations"]
     if isinstance(opens, list) and len(opens) > 256:
         out["openCountReported"] = len(opens)
         out["openTruncated"] = True
@@ -1749,7 +1768,7 @@ def merge_overall() -> dict:
             if view.get("running") or not view.get("runningSets"):
                 try:
                     fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal"):
+                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats"):
                         if fresh.get(key) is not None:
                             view[key] = fresh.get(key)
                 except Exception:

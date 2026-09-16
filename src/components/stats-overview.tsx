@@ -3,6 +3,7 @@ import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
 import { pfClass, pnlClass } from "@/lib/status-tone";
+import { HistTestStatus } from "@/components/hist-test-controls";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -75,6 +76,7 @@ export function StatsOverview({
   return (
     <section className="grid gap-3">
       {heroes}
+      {live ? <HistTestStatus histTest={live.histTest} /> : null}
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor · cost PF scale plus classic PF">

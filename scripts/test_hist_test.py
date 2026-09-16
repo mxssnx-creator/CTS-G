@@ -398,6 +398,130 @@ class HistTestContract(unittest.TestCase):
         out = ht.select_intern_symbols(overlay, job, opens=["AAVE-USDT", "XRP-USDT"], cap=50)
         self.assertEqual(out, ["XRP-USDT", "SOL-USDT", "AAVE-USDT"])
 
+    def test_apply_scores_empty_ids_keeps_gate_closed(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        self.assertGreater(len(book.by_idx), 1)
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            ids = ht.apply_scores_to_book(book, {"successfulConfigs": [], "validatedIds": [], "rows": []})
+        self.assertEqual(ids, [])
+        self.assertIsNotNone(book.hist_test_set_ids)
+        self.assertEqual(book.hist_test_set_ids, set())
+        self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+        self.assertIsNone(book.pick(book.by_idx[0].pack))
+        snap = book.snapshot()
+        self.assertEqual(snap["processingCount"], 0)
+        self.assertEqual(snap["histFills"], 0)
+
+    def test_engine_processes_only_selected_hist_test_configs(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6, 0.9], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8,
+                   "stratIndications": True, "stratGeneral": True})
+        self.assertGreaterEqual(len(book.by_idx), 4)
+        keep = [st.id for st in book.by_idx[:2]]
+        other = [st.id for st in book.by_idx[2:4]]
+        for st in book.by_idx:
+            st.last15_n = 40
+            st.last15_ratio = 1.4
+            st.active = True
+            st.n = 40
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            ids = ht.apply_scores_to_book(book, {
+            "successfulConfigs": [
+                {"setId": keep[0], "validated": True, "pf": 1.51, "evalN": 40, "n": 40,
+                 "indication": "combined", "strategy": "block"},
+                {"setId": keep[1], "validated": True, "pf": 1.44, "evalN": 32, "n": 32,
+                 "indication": "general", "strategy": "normal"},
+            ],
+            "comboMatrix": [
+                {"indication": "combined", "strategy": "block", "validated": True, "pf": 1.51, "n": 40, "setId": keep[0]},
+                {"indication": "general", "strategy": "dca", "validated": False, "pf": 0.8, "n": 12},
+            ],
+        })
+        self.assertEqual(ids, keep)
+        self.assertEqual(book.hist_test_set_ids, set(keep))
+        for sid in keep:
+            self.assertTrue(book.sets[sid].active, sid)
+            self.assertEqual(book.sets[sid].deact_reason, "")
+        for sid in other:
+            self.assertFalse(book.sets[sid].active, sid)
+            self.assertEqual(book.sets[sid].deact_reason, "hist-test gate")
+        picked = {st.id for st in book._validated_entry_rows(book.by_idx[0].pack)}
+        self.assertTrue(picked <= set(keep))
+        self.assertTrue(picked)
+        for sid in other:
+            self.assertNotIn(sid, picked)
+        source = book.intern_metric_source()
+        self.assertIsNotNone(source)
+        self.assertIn(source.id, keep)
+        snap = book.snapshot()
+        self.assertEqual(snap["processingCount"], 2)
+        proc_ids = set(snap["processingSetIds"])
+        self.assertTrue(set(keep) <= proc_ids)
+        self.assertFalse(set(other) & proc_ids)
+        coords = ht.selected_coordinations({
+            "successfulConfigs": [
+                {"setId": keep[0], "validated": True, "indication": "combined", "strategy": "block", "pf": 1.51, "n": 40},
+            ],
+            "comboMatrix": [
+                {"indication": "combined", "strategy": "block", "validated": True, "pf": 1.51, "n": 40},
+            ],
+        })
+        self.assertGreaterEqual(len(coords), 1)
+        self.assertEqual(coords[0]["strategy"], "block")
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            view = ht.job_progress_view({
+            "phase": "ready",
+            "ready": True,
+            "validatedCount": 2,
+            "validatedIds": keep,
+            "successfulConfigs": [
+                {"setId": keep[0], "validated": True, "indication": "combined", "strategy": "block", "pf": 1.51, "n": 40},
+            ],
+            "comboMatrix": [
+                {"indication": "combined", "strategy": "block", "validated": True, "pf": 1.51, "n": 40, "setId": keep[0]},
+            ],
+            "withWithout": {"block": {"with": {"pf": 1.4, "n": 10}, "without": {"pf": 1.1, "n": 8}}},
+            "pfStats": {"overall": {"pf": 1.4, "n": 10}},
+        })
+        self.assertTrue(view["selectedCoordinations"])
+        self.assertIn("block", view["withWithout"])
+        self.assertEqual(view["processingCount"], 2)
+
+    def test_cap_active_cannot_drop_hist_test_validated(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        sid = book.by_idx[0].id
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            ht.apply_scores_to_book(book, {
+                "successfulConfigs": [{"setId": sid, "validated": True, "pf": 1.2, "evalN": 30, "n": 30}],
+            })
+        book.max_active = 0
+        book._cap_active(True)
+        self.assertTrue(book.sets[sid].active)
+        book.max_active = 1
+        for st in book.by_idx:
+            st.last15_ratio = 9.9
+            st.active = True
+        book._cap_active(True)
+        self.assertTrue(book.sets[sid].active)
+        self.assertEqual(book.sets[sid].deact_reason, "")
+
+    def test_apply_scores_does_not_drop_validated_ids_above_old_cap(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        sid = book.by_idx[0].id
+        extras = [f"extra:{i}:st8" for i in range(360)]
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            ids = ht.apply_scores_to_book(book, {"validatedIds": [sid] + extras})
+        self.assertGreaterEqual(len(ids), 361)
+        self.assertIn(sid, book.hist_test_set_ids)
+        self.assertEqual(len(book.hist_test_set_ids), len(ids))
+
 
 if __name__ == "__main__":
     unittest.main()

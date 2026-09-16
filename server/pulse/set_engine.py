@@ -1870,6 +1870,7 @@ class SetBook:
             self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
         self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
         self._entry_rows_cache = {}
+        self._selection_dirty = True
 
     @staticmethod
     def _record_step(rec: Any) -> int:
@@ -4359,12 +4360,32 @@ class SetBook:
 
 
     def _cap_active(self, force: bool = True) -> None:
-        selection_key = (id(self.by_idx), len(self.by_idx), self.max_active)
+        allow = getattr(self, "hist_test_set_ids", None)
+        allow_key = None if allow is None else frozenset(allow)
+        selection_key = (id(self.by_idx), len(self.by_idx), self.max_active, allow_key)
         if not force and not getattr(self, "_selection_dirty", True) and getattr(self, "_selection_key", None) == selection_key:
             return
         self._invalidate_entry_cache()
         self._selection_key = selection_key
         self._selection_dirty = False
+        if allow is not None:
+            # Test Historic owns selection: only validated configs stay active.
+            # Live lots already in processing keep their flags so they stay managed.
+            for st in self.by_idx:
+                if st.locked:
+                    st.active = False
+                    st.deact_reason = "locked"
+                    continue
+                if st.id in allow:
+                    st.active = True
+                    st.deact_reason = ""
+                    continue
+                if getattr(st, "processing_active", False):
+                    continue
+                st.active = False
+                st.deact_reason = "hist-test gate"
+            self._snap_ts = self._live_ov_ts = 0.0
+            return
         # Keep scoring all configs, including previously unselected candidates.
         eligible = [s for s in self.by_idx if not s.locked and
                     (s.active or s.deact_reason == "selection limit")]
@@ -4644,6 +4665,28 @@ class SetBook:
                 "active": st.active,
             }
         return blob
+
+    def intern_metric_source(self) -> Optional[SetState]:
+        """Best Base row for intern coordination. Hist-test gate restricts to selected configs."""
+        allow = getattr(self, "hist_test_set_ids", None)
+        sets_map = self.sets or {}
+        ids = list((self._ids_by_kind or {}).get("base") or [])
+        if allow is not None:
+            allow_set = allow
+            ranked = [sid for sid in ids if sid in allow_set]
+            extra = [sid for sid in allow_set if sid not in set(ranked) and sid in sets_map]
+            ids = ranked + extra
+        best: Optional[SetState] = None
+        best_n = -1
+        for sid in ids:
+            cand = sets_map.get(sid)
+            if cand is None:
+                continue
+            n = int(getattr(cand, "last15_n", 0) or 0)
+            if best is None or n > best_n:
+                best = cand
+                best_n = n
+        return best
 
     def pick(self, pack: str, kind: str = "base", side: Optional[str] = None, *, all_valid: bool = False):
         gated = bool(self.progress.ready and self.use_historic_gate)
@@ -5530,7 +5573,7 @@ class SetBook:
                 break
         def _hist_n(st: Any) -> int:
             return max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
-        if hist_ids:
+        if hist_ids is not None:
             hist_fills = sum(_hist_n(st) for st in self.sets.values() if st.id in hist_ids)
         else:
             hist_fills = sum(_hist_n(st) for st in self.sets.values())
@@ -5576,9 +5619,13 @@ class SetBook:
             "processingCount": max(
                 len(getattr(self, "_processing_set_ids", set()) or set()),
                 len(processing_rows),
-                len(hist_ids) if hist_ids else 0,
+                0 if hist_ids is None else len(hist_ids),
             ),
-            "processingSetIds": (list(dict.fromkeys([row["id"] for row in processing_rows] + self.processing_set_ids())))[:350],
+            "processingSetIds": (list(dict.fromkeys(
+                [row["id"] for row in processing_rows]
+                + self.processing_set_ids()
+                + (list(hist_ids) if hist_ids is not None else [])
+            )))[:512],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),

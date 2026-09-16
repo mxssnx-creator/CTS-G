@@ -80,6 +80,11 @@ export type HistTestLive = {
   runningSets?: HistTestRunningSet[];
   symbols?: string[];
   internSymbols?: string[];
+  selectedCoordinations?: HistTestRunningSet[];
+  withWithout?: HistTestJob["withWithout"];
+  comboMatrix?: HistTestJob["comboMatrix"];
+  successfulConfigs?: HistTestJob["successfulConfigs"];
+  pfStats?: HistTestJob["pfStats"];
   ready?: boolean;
   running?: boolean;
   paused?: boolean;
@@ -100,8 +105,12 @@ export function histTestOverviewLine(ht?: HistTestLive | null): string {
   if (!histTestIsEnabled(ht)) return "Test Historic · OFF · full catalog in play";
   const n = ht?.validatedCount ?? ht?.processedSetCount ?? (ht?.runningSets?.length ?? 0);
   const ids = (ht?.runningSets || []).map((r) => r.id).filter(Boolean).slice(0, 6);
+  const coords = (ht?.selectedCoordinations || ht?.successfulConfigs || []).length;
+  const proc = ht?.processingCount ?? 0;
   const syms = (ht?.internSymbols || ht?.symbols || []).slice(0, 8);
   const parts = ["Test Historic · ON", `${n} validated`];
+  if (proc) parts.push(`${proc} processing`);
+  if (coords) parts.push(`${coords} coordinations`);
   if (ids.length) parts.push(`sets ${ids.join(" ")}`);
   if (syms.length) parts.push(syms.join(" "));
   if (ht?.detail && !ids.length && !syms.length) parts.push(String(ht.detail));

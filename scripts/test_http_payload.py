@@ -61,6 +61,27 @@ class HttpPayloadTests(unittest.TestCase):
         self.assertEqual(len(ht["runningSets"]), 24)
         self.assertTrue(ht["enabled"])
 
+    def test_hist_test_coordinations_override_live_combo(self):
+        blob = {
+            "closed": [{"pnl": 1, "t": 1}],
+            "pfStats": {"overall": {"pf": 0.9, "n": 1}},
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "phase": "ready",
+                "pfStats": {"overall": {"pf": 1.4, "n": 40}},
+                "withWithout": {"block": {"with": {"pf": 1.5, "n": 10}}},
+                "comboMatrix": [{"indication": "combined", "strategy": "block", "validated": True, "pf": 1.5, "n": 10}],
+                "successfulConfigs": [{"setId": "indications:1m:sl0.6:st8", "validated": True}],
+                "selectedCoordinations": [{"id": "indications:1m:sl0.6:st8", "strategy": "block"}],
+            },
+        }
+        compact = slim_for_ui(blob)
+        self.assertEqual(compact["pfStats"]["overall"]["pf"], 1.4)
+        self.assertIn("block", compact["withWithout"])
+        self.assertEqual(compact["comboMatrix"][0]["strategy"], "block")
+        self.assertEqual(compact["selectedCoordinations"][0]["strategy"], "block")
+
 
 if __name__ == "__main__":
     unittest.main()

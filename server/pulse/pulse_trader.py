@@ -7615,13 +7615,13 @@ class Pulse:
         try:
             if self._hist_test_owns_catalog():
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
-                if callable(apply) and getattr(self.sets, "hist_test_set_ids", None) is None:
+                if callable(apply):
                     ids = []
                     try:
                         ids = hist_test_mod.collect_validated_ids(hist_test_mod.read_job())
                     except Exception:
                         ids = []
-                    apply(ids if ids else None)
+                    apply(ids)
                 self._sync_hist_test_lane()
             else:
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
@@ -9608,18 +9608,11 @@ class Pulse:
             best_st = None
             best_n = -1
             best_side = ""
-            sets_map = getattr(self.sets, "sets", None) or {}
-            base_ids = list((getattr(self.sets, "_ids_by_kind", None) or {}).get("base") or [])
-            if base_ids and isinstance(sets_map, dict):
-                for sid in base_ids:
-                    cand = sets_map.get(sid)
-                    if cand is None:
-                        continue
-                    n = int(getattr(cand, "last15_n", 0) or 0)
-                    if best_st is None or n > best_n:
-                        best_st = cand
-                        best_n = n
+            source = getattr(self.sets, "intern_metric_source", None)
+            if callable(source):
+                best_st = source()
                 if best_st is not None:
+                    best_n = int(getattr(best_st, "last15_n", 0) or 0)
                     intern_metrics = {
                         "pf": float(getattr(best_st, "last15_ratio", 0) or 0),
                         "n": float(best_n),
@@ -13661,7 +13654,7 @@ class Pulse:
             except Exception:
                 apply = getattr(book, "apply_hist_test_gate", None)
                 if callable(apply):
-                    apply(ids if ids else None)
+                    apply(ids)
             book.progress.phase = str(view.get("phase") or "hist-test")
             book.progress.ready = True if ids else bool(view.get("ready"))
             book.progress.coordination_complete = not bool(view.get("running"))
@@ -13692,8 +13685,13 @@ class Pulse:
         except Exception:
             ids = hist_test_mod.validated_set_ids(job)
         if not ids:
+            with self.state_guard():
+                apply = getattr(self.sets, "apply_hist_test_gate", None)
+                if callable(apply):
+                    apply([])
             return
-        allow = set(ids[:350] if len(ids) > 350 else ids)
+        score_cap = int(getattr(hist_test_mod, "GATE_SET_CAP", 512) or 512)
+        allow = set(ids[:score_cap] if len(ids) > score_cap else ids)
         with self.state_guard():
             book = self.sets
             try:
