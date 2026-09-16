@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -21,8 +22,16 @@ class HistTestContract(unittest.TestCase):
         ht.clear_stop()
         ht.clear_pause()
         ht.invalidate_job_cache()
+        self._iso = tempfile.mkdtemp(prefix="hist-test-iso-")
+        self._prev_ids = ht.VALIDATED_IDS_PATH
+        self._prev_last = ht.LAST_READY_PATH
+        ht.VALIDATED_IDS_PATH = os.path.join(self._iso, "validated-ids.json")
+        ht.LAST_READY_PATH = os.path.join(self._iso, "last-ready.json")
 
     def tearDown(self):
+        ht.VALIDATED_IDS_PATH = self._prev_ids
+        ht.LAST_READY_PATH = self._prev_last
+        shutil.rmtree(self._iso, ignore_errors=True)
         ht.clear_stop()
         ht.clear_pause()
 

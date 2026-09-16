@@ -2287,17 +2287,17 @@ def self_test() -> Dict[str, Any]:
     rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
     rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))
     rec("refresh-max", clamp_refresh_hours(99) == REFRESH_MAX, clamp_refresh_hours(99))
-    rec(
-        "validated-ids",
-        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}) == ["a"],
-        validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
-    )
     prev_last_ready = LAST_READY_PATH
     prev_validated_ids = VALIDATED_IDS_PATH
     tmp_iso = tempfile.mkdtemp(prefix="hist-ids-")
     LAST_READY_PATH = os.path.join(tmp_iso, "no-last-ready.json")
     VALIDATED_IDS_PATH = os.path.join(tmp_iso, "no-validated-ids.json")
     try:
+        rec(
+            "validated-ids",
+            validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}) == ["a"],
+            validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
+        )
         pos_job = {
             "positive": ["AAA-USDT"],
             "bySymbol": [
