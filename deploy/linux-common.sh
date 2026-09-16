@@ -570,7 +570,8 @@ ensure_prefixed_credentials() {
     src="connection:$slot"
     dst="${CTS_REDIS_PREFIX}connection:$slot"
     [[ "$src" != "$dst" ]] || continue
-    redis-cli COPY "$src" "$dst" NX >/dev/null 2>&1 || true
+    redis-cli COPY "$src" "$dst" NX >/dev/null 2>&1 || \
+      redis-cli EVAL 'if redis.call("EXISTS", KEYS[2]) == 1 then return 0 end local d = redis.call("DUMP", KEYS[1]) if not d then return -1 end redis.call("RESTORE", KEYS[2], 0, d) return 1' 2 "$src" "$dst" >/dev/null 2>&1 || true
   done
 }
 
