@@ -241,8 +241,14 @@ def git_push() -> str:
         "scripts/backup-and-push.py",
         ".gitignore",
         "server/pulse/pulse_http.py",
+        "server/pulse/hist_test.py",
+        "server/pulse/combo_eval.py",
         "src/routes/settings.tsx",
+        "src/lib/hist-test.ts",
+        "src/components/combo-eval-panel.tsx",
         "scripts/test_settings_persistence.py",
+        "scripts/test_hist_test.py",
+        "scripts/test_combo_eval.py",
     ], check=False)
     status = run(["git", "status", "--porcelain"], check=False)
     if status.stdout.strip():

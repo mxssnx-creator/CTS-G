@@ -2790,6 +2790,7 @@ function TestHistoricCard({
                 <th className="text-left">PF</th>
                 <th className="text-left">N</th>
                 <th className="text-left">WR</th>
+                <th className="text-left">DDT</th>
               </tr>
             </thead>
             <tbody>
@@ -2799,12 +2800,57 @@ function TestHistoricCard({
                   <td className={`font-mono ${pfClass(Number(row.pf || 0), Number(row.n || 0), overlay.histTestMinPf)}`}>{(row.pf ?? 0).toFixed(2)}</td>
                   <td className="font-mono">{row.evalN ?? row.n ?? 0}</td>
                   <td className="font-mono">{row.wr ?? 0}</td>
+                  <td className="font-mono">{Math.round(Number(row.maxDdS || 0))}s</td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : null}
         <ComboEvalPanel job={histTestJob} compact />
+        {Object.keys(histTestJob?.byIndication || histTestJob?.kinds || {}).length ? (
+          <table className="w-full text-sm" data-testid="hist-test-indications">
+            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th className="py-1 text-left">Indication</th>
+                <th className="text-left">PF</th>
+                <th className="text-left">N</th>
+                <th className="text-left">DDT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 12).map(([name, row]) => (
+                <tr key={name} className="border-t border-border/60">
+                  <td className="py-1.5">{name}</td>
+                  <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
+                  <td className="font-mono">{row?.n ?? 0}</td>
+                  <td className="font-mono">{Math.round(Number(row?.maxDdS || 0))}s</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        {Object.keys(histTestJob?.byStrategy || {}).length ? (
+          <table className="w-full text-sm" data-testid="hist-test-strategies">
+            <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
+              <tr>
+                <th className="py-1 text-left">Relation / strategy</th>
+                <th className="text-left">PF</th>
+                <th className="text-left">N</th>
+                <th className="text-left">DDT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(histTestJob?.byStrategy || {}).slice(0, 16).map(([name, row]) => (
+                <tr key={name} className="border-t border-border/60">
+                  <td className="py-1.5">{name}</td>
+                  <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
+                  <td className="font-mono">{row?.n ?? 0}</td>
+                  <td className="font-mono">{Math.round(Number(row?.maxDdS || 0))}s</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </section>
     </div>
   );

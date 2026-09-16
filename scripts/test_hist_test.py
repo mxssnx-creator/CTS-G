@@ -550,6 +550,65 @@ class HistTestContract(unittest.TestCase):
         self.assertIn(sid, book.hist_test_set_ids)
         self.assertEqual(len(book.hist_test_set_ids), len(ids))
 
+    def test_keep_recalc_symbols_drops_junk(self):
+        out = ht.keep_recalc_symbols(["BONER-USDT", "XRP-USDT", "AIN-USDT", "SOL-USDT"], target=40)
+        self.assertEqual(out, ["XRP-USDT", "SOL-USDT"])
+        empty = ht.keep_recalc_symbols([], target=5, job={"positive": ["SYN-USDT"]})
+        self.assertTrue(empty)
+        self.assertIn("BCH-USDT", empty)
+        self.assertNotIn("SYN-USDT", empty)
+
+    def test_rank_universe_is_majors_not_range_dust(self):
+        ticker = [
+            {"symbol": "BONER-USDT", "lastPrice": 1, "highPrice": 2, "lowPrice": 0.1, "quoteVolume": 5e6, "priceChangePercent": 90},
+            {"symbol": "BTC-USDT", "lastPrice": 100, "highPrice": 101, "lowPrice": 99, "quoteVolume": 9e9, "priceChangePercent": 1},
+            {"symbol": "XRP-USDT", "lastPrice": 1, "highPrice": 1.1, "lowPrice": 0.9, "quoteVolume": 8e8, "priceChangePercent": 2},
+            {"symbol": "SOL-USDT", "lastPrice": 80, "highPrice": 81, "lowPrice": 79, "quoteVolume": 2e9, "priceChangePercent": 1},
+            {"symbol": "BCH-USDT", "lastPrice": 400, "highPrice": 401, "lowPrice": 399, "quoteVolume": 1e8, "priceChangePercent": 0.5},
+        ]
+        with patch.object(ht, "_public_json", return_value={"data": ticker}):
+            picked, _preview = ht.rank_universe(10)
+        names = [r["symbol"] for r in picked]
+        self.assertEqual(names[0], "BCH-USDT")
+        self.assertIn("SOL-USDT", names[:3])
+        self.assertIn("XRP-USDT", names[:3])
+        self.assertNotIn("BONER-USDT", names)
+
+    def test_job_is_running_ready_is_not_inflight(self):
+        self.assertFalse(ht.job_is_running({"phase": "ready", "ready": True, "running": True}))
+        self.assertTrue(ht.job_is_running({"phase": "replay", "running": True}))
+
+    def test_compact_job_positives_are_scored_majors(self):
+        job = {
+            "phase": "ready",
+            "ready": True,
+            "positive": ["XRP-USDT", "SOL-USDT"],
+            "symbols": ["XRP-USDT", "SOL-USDT"],
+            "validatedIds": ["indications:1m:sl0.6:st8"],
+            "bySymbol": [
+                {"symbol": "XRP-USDT", "n": 20, "pf": 1.4, "maxDdS": 12, "validated": True},
+                {"symbol": "BONER-USDT", "n": 90, "pf": 3.7, "maxDdS": 180, "validated": True},
+            ],
+            "pfStats": {
+                "overall": {"pf": 1.3, "n": 20, "maxDdS": 12},
+                "block": {"pf": 1.2, "n": 4, "maxDdS": 8},
+                "dca": {"pf": 1.0, "n": 0, "maxDdS": 0},
+            },
+            "kinds": {"signals": {"pf": 1.4, "n": 10, "maxDdS": 9, "evaluationWindows": {}}},
+        }
+        ranked = [{"symbol": "XRP-USDT", "n": 20, "pf": 1.4, "positive": True, "maxDdS": 12}]
+        out = ht.compact_job(job, ranked, [], 20, 1.1)
+        self.assertEqual(out["symbols"], ["XRP-USDT", "SOL-USDT"])
+        self.assertNotIn("BONER-USDT", [r.get("symbol") for r in out["bySymbol"]])
+        self.assertEqual(out["filled"], 2)
+        self.assertIn("signals", out["byIndication"])
+        self.assertIn("maxDdS", out["byIndication"]["signals"])
+        self.assertNotIn("evaluationWindows", out["byIndication"]["signals"])
+        view = ht.job_progress_view(out)
+        self.assertFalse(view["running"])
+        self.assertEqual(view["phase"], "ready")
+        self.assertIn("signals", view.get("byIndication") or {})
+
 
 if __name__ == "__main__":
     unittest.main()

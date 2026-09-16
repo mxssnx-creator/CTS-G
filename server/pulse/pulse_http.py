@@ -1824,7 +1824,7 @@ def merge_overall() -> dict:
             if view.get("running") or not view.get("runningSets"):
                 try:
                     fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats"):
+                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy"):
                         if fresh.get(key) is not None:
                             view[key] = fresh.get(key)
                 except Exception:

@@ -4,6 +4,8 @@ export type ComboStat = {
   wr?: number;
   evalN?: number;
   validated?: boolean;
+  maxDdS?: number;
+  avgDdS?: number;
 };
 
 export type ComboEvalBlob = {
@@ -67,6 +69,7 @@ export function ComboEvalPanel({
                   <p className="font-mono text-[10px] uppercase tracking-wide text-muted">{key}</p>
                   <p className={`mt-0.5 font-mono text-lg tabular-nums ${pfTone(v)}`}>{(v?.pf ?? 0).toFixed(3)}</p>
                   <p className="font-mono text-[10px] text-muted">{v?.n ?? 0} fills · WR {(v?.wr ?? 0).toFixed(1)}%</p>
+                  <p className="font-mono text-[10px] text-muted">DDT {Math.round(Number(v?.maxDdS || 0))}s</p>
                 </article>
               );
             })}
@@ -88,6 +91,7 @@ export function ComboEvalPanel({
                       <th className="text-left">PF</th>
                       <th className="text-left">Fills</th>
                       <th className="text-left">WR</th>
+                      <th className="text-left">DDT</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -99,6 +103,7 @@ export function ComboEvalPanel({
                           <td className={`font-mono ${pfTone(v)}`}>{(v?.pf ?? 0).toFixed(3)}</td>
                           <td className="font-mono">{v?.n ?? 0}</td>
                           <td className="font-mono">{(v?.wr ?? 0).toFixed(1)}%</td>
+                          <td className="font-mono">{Math.round(Number(v?.maxDdS || 0))}s</td>
                         </tr>
                       );
                     })}
@@ -131,8 +136,8 @@ export function ComboEvalPanel({
                     const cell = matrix.find((c) => c.indication === indication && c.strategy === strategy);
                     const n = cell?.n ?? 0;
                     return (
-                      <td key={strategy} className={cell?.validated ? "text-primary" : "text-muted"} title={`${indication} × ${strategy} n=${n}`}>
-                        {n ? Number(cell?.pf || 0).toFixed(2) : "—"}
+                      <td key={strategy} className={cell?.validated ? "text-primary" : "text-muted"} title={`${indication} × ${strategy} n=${n} ddt=${Math.round(Number(cell?.maxDdS || 0))}s`}>
+                        {n ? `${Number(cell?.pf || 0).toFixed(2)}/${Math.round(Number(cell?.maxDdS || 0))}s` : "—"}
                       </td>
                     );
                   })}

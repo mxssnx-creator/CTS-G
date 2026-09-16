@@ -17,14 +17,14 @@ from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from position_cost import POSITIVE_PF, is_positive_pf, last_n_cost_pf
-from set_engine import IND_KINDS
+from set_engine import IND_KINDS, drawdown_time
 
 STRATEGIES = ("normal", "trailing", "axis", "block", "dca")
 PF_FAMILIES = ("overall", "normal", "trailing", "axis", "block", "dca")
 INDICATIONS = ("general", "combined") + tuple(IND_KINDS)
 TAIL_CAP = 80
 SUCCESSFUL_CAP = 80
-MATRIX_EMPTY = {"n": 0, "evalN": 0, "pf": 1.0, "wr": 0.0, "netAvg": 0.0, "validated": False}
+MATRIX_EMPTY = {"n": 0, "evalN": 0, "pf": 1.0, "wr": 0.0, "netAvg": 0.0, "validated": False, "maxDdS": 0.0, "avgDdS": 0.0, "pfDdRatio": 0.0}
 
 
 def open_combo_db() -> sqlite3.Connection:
@@ -182,6 +182,8 @@ def _score(acc: _Acc, cost_pct: float, pf_n: int) -> Dict[str, Any]:
     pf = float(window.get("ratio") or 1.0)
     eval_n = int(window.get("count") or 0)
     wr = round(100.0 * acc.wins / acc.decided, 1) if acc.decided else 0.0
+    dd = drawdown_time(tail, ordered=True) if tail else {"maxS": 0.0, "avgS": 0.0}
+    max_dd = float(dd.get("maxS") or 0)
     return {
         "n": acc.n,
         "evalN": eval_n,
@@ -190,6 +192,9 @@ def _score(acc: _Acc, cost_pct: float, pf_n: int) -> Dict[str, Any]:
         "netAvg": round(float(window.get("netAvg") or 0), 6),
         "validated": eval_n > 0 and is_positive_pf(pf),
         "costSubtracted": True,
+        "maxDdS": round(max_dd, 1),
+        "avgDdS": round(float(dd.get("avgS") or 0), 1),
+        "pfDdRatio": round(pf / max(0.05, (max_dd / 3600.0) + 0.05), 4),
     }
 
 
@@ -325,6 +330,12 @@ def evaluate_fills(
         }
         for r in successful_sql
     ]
+    by_combo = {c.get("setId"): c for c in public_combos}
+    for row in successful:
+        extra = by_combo.get(row["setId"]) or {}
+        row["maxDdS"] = extra.get("maxDdS") or 0.0
+        row["avgDdS"] = extra.get("avgDdS") or 0.0
+        row["pfDdRatio"] = extra.get("pfDdRatio") or 0.0
     cell_count = int(db.execute("SELECT COUNT(*) FROM combos").fetchone()[0])
     validated_count = int(db.execute("SELECT COUNT(*) FROM combos WHERE validated=1").fetchone()[0])
     db.close()
@@ -478,6 +489,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("combo-engine", (blob.get("meta") or {}).get("engine") == "sqlite-memory", blob.get("meta"))
     rec("combo-matrix-cover", len(blob.get("matrix") or []) == len(INDICATIONS) * len(STRATEGIES), len(blob.get("matrix") or []))
     rec("combo-successful-have-identity", all(r.get("indication") and r.get("strategy") and r.get("config") for r in (blob.get("successful") or [])), blob.get("successful")[:3])
+    rec("combo-family-ddt", all("maxDdS" in ((blob.get("pfStats") or {}).get(k) or {}) for k in PF_FAMILIES), blob.get("pfStats"))
+    rec("combo-matrix-ddt", all("maxDdS" in (c or {}) for c in (blob.get("matrix") or [])[:5]), (blob.get("matrix") or [])[:1])
+    rec("combo-successful-ddt", all("maxDdS" in r for r in (blob.get("successful") or [])) or not blob.get("successful"), blob.get("successful")[:1])
     return out
 
 

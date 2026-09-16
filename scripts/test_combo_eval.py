@@ -20,6 +20,18 @@ class ComboEvalTests(unittest.TestCase):
         self.assertFalse(failed, failed)
         self.assertGreaterEqual(len(rows), 14)
 
+    def test_family_and_matrix_include_ddt(self):
+        blob = ce.evaluate_fills(
+            [{"t": i, "pnl_pct": 0.02, "ind_kind": "signals", "strategy": "normal", "set_id": "a", "ind_config": "c", "sl_ratio": 0.6, "step": 8} for i in range(16)],
+            min_pf=1.1,
+            pf_n=12,
+        )
+        self.assertIn("maxDdS", blob["pfStats"]["overall"])
+        cell = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "normal")
+        self.assertIn("maxDdS", cell)
+        self.assertTrue(blob["successful"])
+        self.assertIn("maxDdS", blob["successful"][0])
+
     def test_independent_configs_do_not_share_pf(self):
         a = [{"t": i, "pnl_pct": 0.02, "ind_kind": "signals", "strategy": "normal", "set_id": "cfg-a", "ind_config": "wide", "sl_ratio": 0.6, "step": 8} for i in range(16)]
         b = [{"t": 100 + i, "pnl_pct": -0.015, "ind_kind": "signals", "strategy": "normal", "set_id": "cfg-b", "ind_config": "tight", "sl_ratio": 2.4, "step": 8} for i in range(16)]

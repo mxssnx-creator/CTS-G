@@ -5,6 +5,8 @@ export type HistTestSymbol = {
   evalN?: number;
   wr?: number;
   maxDdS?: number;
+  avgDdS?: number;
+  pfDdRatio?: number;
   positive?: boolean;
   validated?: boolean;
   vol1h?: number;
@@ -47,10 +49,10 @@ export type HistTestJob = {
   fill?: { filled?: number; target?: number; short?: number; evaluated?: number; rejectedCount?: number };
   elapsedMs?: number;
   resumePhase?: string;
-  pfStats?: Record<string, { pf?: number; n?: number; wr?: number; evalN?: number; validated?: boolean }>;
-  withWithout?: Record<string, { with?: { pf?: number; n?: number; wr?: number; validated?: boolean }; without?: { pf?: number; n?: number; wr?: number; validated?: boolean } }>;
-  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean }>;
-  successfulConfigs?: Array<{ indication?: string; config?: string; strategy?: string; setId?: string; pf?: number; n?: number; wr?: number; validated?: boolean; slRatio?: number; step?: number }>;
+  pfStats?: Record<string, { pf?: number; n?: number; wr?: number; evalN?: number; validated?: boolean; maxDdS?: number; avgDdS?: number }>;
+  withWithout?: Record<string, { with?: { pf?: number; n?: number; wr?: number; validated?: boolean; maxDdS?: number }; without?: { pf?: number; n?: number; wr?: number; validated?: boolean; maxDdS?: number } }>;
+  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean; maxDdS?: number }>;
+  successfulConfigs?: Array<{ indication?: string; config?: string; strategy?: string; setId?: string; pf?: number; n?: number; wr?: number; validated?: boolean; slRatio?: number; step?: number; maxDdS?: number }>;
   combo?: { engine?: string; journal?: string; cells?: number; successfulCount?: number };
   refreshHours?: number;
   nextRunAt?: number;
@@ -65,6 +67,9 @@ export type HistTestJob = {
   validatedCount?: number;
   processingCount?: number;
   processedSetCount?: number;
+  byIndication?: Record<string, { pf?: number; n?: number; maxDdS?: number; wr?: number; validated?: boolean }>;
+  byStrategy?: Record<string, { pf?: number; n?: number; maxDdS?: number; wr?: number; validated?: boolean }>;
+  kinds?: Record<string, { pf?: number; n?: number; maxDdS?: number; wr?: number; validated?: boolean }>;
 };
 
 export type HistTestLive = {
@@ -85,6 +90,8 @@ export type HistTestLive = {
   comboMatrix?: HistTestJob["comboMatrix"];
   successfulConfigs?: HistTestJob["successfulConfigs"];
   pfStats?: HistTestJob["pfStats"];
+  byIndication?: HistTestJob["byIndication"];
+  byStrategy?: HistTestJob["byStrategy"];
   ready?: boolean;
   running?: boolean;
   paused?: boolean;
@@ -195,7 +202,8 @@ export function histTestStatusLine(job: HistTestJob | null | undefined, hours = 
   }
   const head = `${job.phase} ${pct}%`;
   if (histTestIsRunning(job.phase)) return detail ? `${head} · ${detail}` : head;
-  if (job.error) return `${head} · ${job.error}`;
+  const err = String(job.error || "");
+  if (err && !err.startsWith("audit:")) return `${head} · ${err}`;
   if (job.nextRunAt) {
     const when = new Date(job.nextRunAt * 1000).toLocaleTimeString();
     return detail ? `${head} · next refresh ${when} · ${detail}` : `${head} · next refresh ${when}`;

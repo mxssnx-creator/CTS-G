@@ -52,6 +52,18 @@ INTERN_MAJORS = (
     "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
     "ETC-USDT", "LDO-USDT", "HBAR-USDT",
 )
+HIST_TEST_MAJORS = (
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "BNB-USDT", "DOGE-USDT",
+    "ADA-USDT", "BCH-USDT", "AVAX-USDT", "LINK-USDT", "LTC-USDT", "DOT-USDT",
+    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT", "SUI-USDT",
+    "INJ-USDT", "AAVE-USDT", "FIL-USDT", "OP-USDT", "TRX-USDT", "XLM-USDT",
+    "ETC-USDT", "LDO-USDT", "HBAR-USDT", "TIA-USDT", "WLD-USDT", "JUP-USDT",
+    "RENDER-USDT", "FET-USDT", "TAO-USDT", "SEI-USDT", "WIF-USDT", "1000PEPE-USDT",
+    "STX-USDT", "IMX-USDT", "GRT-USDT", "ALGO-USDT", "VET-USDT", "EOS-USDT",
+    "THETA-USDT", "AXS-USDT", "SAND-USDT", "MANA-USDT", "CRV-USDT", "MKR-USDT",
+    "SNX-USDT", "COMP-USDT",
+)
+_MAJOR_KEYS = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS} | {s.upper() for s in INTERN_MAJORS}
 VOL_CANDIDATES = 40
 MIN_QUOTE_VOLUME = 1_000_000.0
 DEFAULT_TARGET = 20
@@ -150,7 +162,7 @@ def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> b
     blob["nextRunAt"] = deadline
     blob["refreshHours"] = clamp_refresh_hours(hours)
     blob["continuous"] = True
-    blob["running"] = True
+    blob["running"] = str(blob.get("phase") or "") in RUNNING_PHASES
     blob["phase"] = str(blob.get("phase") or "ready")
     blob["detail"] = f"{blob.get('detail') or 'ready'} · next refresh {int(hours)}h"
     publish(blob)
@@ -357,15 +369,13 @@ def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
 
 
 def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
-    """Indication × strategy cells Test Historic marked successful/validated."""
+    """Indication × strategy cells Test Historic scored (PF + DDT)."""
     blob = job if isinstance(job, dict) else {}
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
     def add(row: Any) -> None:
         if not isinstance(row, dict):
-            return
-        if row.get("validated") is False:
             return
         sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
         indication = str(row.get("indication") or row.get("ind_kind") or "")
@@ -384,26 +394,95 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
             n = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
         except (TypeError, ValueError):
             n = 0
+        try:
+            max_dd = float(row.get("maxDdS") or row.get("max_dd_s") or 0)
+        except (TypeError, ValueError):
+            max_dd = 0.0
         out.append({
             "id": sid,
             "indication": indication,
             "strategy": strategy,
             "pf": pf,
             "n": n,
-            "validated": True,
+            "maxDdS": max_dd,
+            "validated": bool(row.get("validated")),
         })
 
     for row in blob.get("successfulConfigs") or []:
         add(row)
-    for cell in blob.get("comboMatrix") or []:
-        if isinstance(cell, dict) and cell.get("validated"):
-            add(cell)
+    cells = [
+        c for c in (blob.get("comboMatrix") or [])
+        if isinstance(c, dict) and int(c.get("n") or 0) > 0
+    ]
+    cells.sort(key=lambda c: (-float(c.get("pf") or 0), -int(c.get("n") or 0)))
+    for cell in cells:
+        add(cell)
     cap = 24
     try:
         cap = max(1, min(int(limit or 24), 48))
     except (TypeError, ValueError):
         cap = 24
     return out[:cap]
+
+
+def successful_from_ranked(ranked_sets: Any, min_pf: float, limit: int = 60) -> List[Dict[str, Any]]:
+    """Set-level validated rows (PF + DDT) for stats when combo last-N is empty."""
+    best: Dict[str, Dict[str, Any]] = {}
+    for item in ranked_sets or []:
+        try:
+            _key, st, side, valid, _low = item
+        except (TypeError, ValueError):
+            continue
+        if not valid:
+            continue
+        sid = str(getattr(st, "id", "") or "")
+        if not sid:
+            continue
+        prev = best.get(sid)
+        if prev is not None and not side:
+            pass
+        elif prev is not None:
+            continue
+        pack = str(getattr(st, "pack", "") or "")
+        kind = str(getattr(st, "kind", "") or "")
+        if kind == "trail":
+            strategy = "trailing"
+        elif pack == "block" or str(kind).startswith("block"):
+            strategy = "block"
+        elif pack == "dca":
+            strategy = "dca"
+        else:
+            strategy = "normal"
+        indication = "combined" if pack == "indications" else (pack if pack == "general" else (kind or pack or "combined"))
+        try:
+            pf = float(getattr(st, "last15_ratio", 0) or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        if not is_positive_pf(pf, min_pf):
+            continue
+        best[sid] = {
+            "indication": indication,
+            "config": (
+                f"sl{float(getattr(st, 'sl_ratio', 0) or 0):.1f}:"
+                f"st{int(getattr(st, 'step', 0) or 0)}:"
+                f"tr{getattr(st, 'trail_key', '') or 'base'}"
+            ),
+            "strategy": strategy,
+            "setId": sid,
+            "slRatio": float(getattr(st, "sl_ratio", 0) or 0),
+            "step": int(getattr(st, "step", 0) or 0),
+            "trailKey": str(getattr(st, "trail_key", "") or ""),
+            "n": int(getattr(st, "n", 0) or 0),
+            "evalN": int(getattr(st, "last15_n", 0) or 0),
+            "pf": round(pf, 4),
+            "wr": float(getattr(st, "wr", 0) or 0),
+            "maxDdS": float(getattr(st, "max_dd_s", 0) or 0),
+            "avgDdS": float(getattr(st, "avg_dd_s", 0) or 0),
+            "validated": True,
+        }
+        if len(best) >= max(1, int(limit or 60)):
+            break
+    return list(best.values())[:limit]
 
 
 def intern_audit_floor_failed(job: Optional[Dict[str, Any]] = None) -> bool:
@@ -967,8 +1046,9 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         detail = "Test Historic owns calcs · waiting validated configs · skip full catalog"
     if stale:
         detail += " · waiting on Test Historic refresh"
-    if blob.get("error") and not running:
-        detail = f"{detail} · {blob.get('error')}"
+    err = str(blob.get("error") or "")
+    if err and not running and not err.startswith("audit:"):
+        detail = f"{detail} · {err}"
     running_set_rows = running_sets(blob)
     return {
         "phase": phase,
@@ -1001,6 +1081,8 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "successfulConfigs": (blob.get("successfulConfigs") or [])[:24] if isinstance(blob.get("successfulConfigs"), list) else [],
         "pfStats": blob.get("pfStats") or {},
         "combo": blob.get("combo") or {},
+        "byIndication": _compact_stat_map(blob.get("byIndication") or blob.get("kinds") or {}, 16),
+        "byStrategy": _compact_stat_map(blob.get("byStrategy") or {}, 16),
         "error": blob.get("error") or "",
     }
 
@@ -1101,11 +1183,9 @@ def job_is_running(job: Optional[Dict[str, Any]] = None) -> bool:
     if stop_requested():
         return False
     blob = job if isinstance(job, dict) else read_job()
-    if pause_requested() or str(blob.get("phase") or "") == "paused":
-        return True
-    if thread_alive():
-        return True
     phase = str(blob.get("phase") or "")
+    if pause_requested() or phase == "paused":
+        return True
     return phase in RUNNING_PHASES
 
 
@@ -1215,8 +1295,42 @@ def fetch_ticker() -> List[Dict[str, Any]]:
             "changePct": chg,
             "vol1h": 0.0,
         })
-    out.sort(key=lambda r: -r["vol24h"])
+    out.sort(key=lambda r: -float(r.get("quoteVolume") or 0))
     return out
+
+
+def keep_recalc_symbols(
+    keep_symbols: Optional[List[str]] = None,
+    target: int = DEFAULT_TARGET,
+    job: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Recalc majors that already cleared the floor. A junk rank queue is discarded."""
+    cap = max(int(target or 0), len(PREFERRED_SYMBOLS))
+    raw = [str(s).strip().upper() for s in (keep_symbols or []) if str(s or "").strip().endswith("-USDT")]
+    majors_hit = [s for s in raw if s in _MAJOR_KEYS]
+    if majors_hit:
+        return majors_hit[:cap]
+    if raw and len(raw) <= max(cap, 8):
+        return raw[:cap]
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(name: Any) -> None:
+        key = str(name or "").strip().upper()
+        if not key.endswith("-USDT") or key in seen or key not in _MAJOR_KEYS:
+            return
+        seen.add(key)
+        out.append(key)
+
+    blob = job if isinstance(job, dict) else {}
+    for name in validated_symbols(blob) or validated_symbols(read_last_ready()):
+        add(name)
+    if not out:
+        for name in PREFERRED_SYMBOLS:
+            add(name)
+        for name in HIST_TEST_MAJORS:
+            add(name)
+    return out[:cap]
 
 
 def rank_universe(n: int = 80) -> tuple:
@@ -1226,18 +1340,35 @@ def rank_universe(n: int = 80) -> tuple:
     by_sym = {r["symbol"]: r for r in universe}
     picked: List[Dict[str, Any]] = []
     have = set()
-    for symbol in PREFERRED_SYMBOLS:
-        row = dict(by_sym.get(symbol) or {"symbol": symbol, "last": 0, "vol24h": 0, "quoteVolume": 0, "changePct": 0, "vol1h": 0})
+
+    def add_symbol(symbol: str) -> None:
+        if symbol in have:
+            return
+        row = dict(by_sym.get(symbol) or {
+            "symbol": symbol, "last": 0, "vol24h": 0, "quoteVolume": 0, "changePct": 0, "vol1h": 0,
+        })
+        row["symbol"] = symbol
         picked.append(row)
         have.add(symbol)
-    for row in universe:
-        if row["symbol"] in have:
+
+    for symbol in PREFERRED_SYMBOLS:
+        add_symbol(symbol)
+    rest = []
+    for symbol in HIST_TEST_MAJORS:
+        if symbol in have:
             continue
-        picked.append(row)
-        have.add(row["symbol"])
+        if symbol in by_sym:
+            rest.append(by_sym[symbol])
+        else:
+            rest.append({"symbol": symbol, "last": 0, "vol24h": 0, "quoteVolume": 0, "changePct": 0, "vol1h": 0})
+    rest.sort(key=lambda r: -float(r.get("quoteVolume") or 0))
+    for row in rest:
         if len(picked) >= max(n, len(PREFERRED_SYMBOLS)):
             break
-    return picked, universe[:40]
+        add_symbol(str(row.get("symbol") or ""))
+    preview = [r for r in universe if r["symbol"] in have]
+    preview.sort(key=lambda r: -float(r.get("quoteVolume") or 0))
+    return picked, preview[:40]
 
 
 def symbol_clears_floor(stats: Dict[str, Any], min_pf: float) -> bool:
@@ -1332,6 +1463,35 @@ def fill_positive(
     }
 
 
+def _compact_stat_map(blob: Any, limit: int = 40) -> Dict[str, Any]:
+    """Keep PF + DDT identity for relations/types. Drop window dumps."""
+    if not isinstance(blob, dict):
+        return {}
+    prefer = [
+        "indications", "general", "block", "dca", "core", "trail",
+        "state", "signals", "active", "direction", "move", "common", "trend", "break",
+        "block:active", "block:break", "block:common", "block:direction",
+        "block:move", "block:signals", "block:state", "block:trend",
+        "indications:trail",
+    ]
+    keys = [k for k in prefer if k in blob] + [k for k in blob if k not in prefer]
+    out: Dict[str, Any] = {}
+    keep = {"n", "evalN", "pf", "wr", "netAvg", "validated", "maxDdS", "avgDdS", "pfDdRatio",
+            "last15N", "costSubtracted", "kind", "strategy", "indication", "direction", "tapeN"}
+    for key in keys[: max(1, int(limit or 40))]:
+        row = blob.get(key)
+        if not isinstance(row, dict):
+            continue
+        slim = {kk: vv for kk, vv in row.items() if kk in keep or kk == "bySide"}
+        if isinstance(slim.get("bySide"), dict):
+            slim["bySide"] = {
+                side: {kk: vv for kk, vv in (stats or {}).items() if kk in keep}
+                for side, stats in slim["bySide"].items() if isinstance(stats, dict)
+            }
+        out[str(key)] = slim
+    return out
+
+
 def _cov_blob(value: Any, fallback_done: int = 0, fallback_total: int = 0) -> Dict[str, Any]:
     if isinstance(value, dict) and ("coveragePct" in value or "completed" in value or "done" in value):
         requested = int(value.get("requested") or value.get("total") or fallback_total or 0)
@@ -1387,7 +1547,37 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         )[0]
     coverage = job.get("coverage") if isinstance(job.get("coverage"), dict) else {}
     winner = job.get("winner") if isinstance(job.get("winner"), dict) else {}
-    public_ranked = [{k: v for k, v in row.items() if k != "_bars"} for row in ranked]
+    public_ranked = []
+    for row in ranked:
+        if not isinstance(row, dict):
+            continue
+        item = {k: v for k, v in row.items() if k != "_bars"}
+        if not item.get("symbol"):
+            continue
+        if item.get("positive") is None:
+            item["positive"] = symbol_clears_floor(item, min_pf)
+        public_ranked.append(item)
+    scored = [r for r in public_ranked if r.get("positive") or symbol_clears_floor(r, min_pf)]
+    tape_names = [str(s).strip().upper() for s in (job.get("positive") or job.get("symbols") or []) if str(s or "").strip()]
+    if not tape_names:
+        tape_names = [str(r.get("symbol") or "").upper() for r in (public_ranked or scored) if r.get("symbol")]
+    tape_names = [s for s in tape_names if s in _MAJOR_KEYS] or tape_names
+    name_keys = {s.upper() for s in tape_names}
+    by_sym_rows: List[Dict[str, Any]] = []
+    for row in (job.get("bySymbol") or []):
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").upper()
+        if not sym:
+            continue
+        if name_keys and sym not in name_keys:
+            continue
+        slim = {k: v for k, v in row.items() if k != "evaluationWindows"}
+        slim["symbol"] = sym
+        slim["positive"] = symbol_clears_floor(slim, min_pf)
+        by_sym_rows.append(slim)
+    positive_names = [str(r.get("symbol") or "") for r in by_sym_rows if r.get("positive")]
+    names = tape_names or positive_names
     ids = list(job.get("validatedIds") or []) or collect_validated_ids(job)
     persist_validated_ids(ids)
     try:
@@ -1420,11 +1610,11 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "timings": job.get("timings") or {},
         "options": job.get("options") or {},
         "costPct": 0.10,
-        "symbols": [r.get("symbol") for r in public_ranked],
-        "positive": [r.get("symbol") for r in public_ranked],
+        "symbols": names,
+        "positive": names,
         "rejected": (job.get("rejected") or [])[:80],
         "skipped": (job.get("skipped") or [])[:40],
-        "ranked": public_ranked[:80],
+        "ranked": (scored or public_ranked)[:80],
         "universePreview": universe[:12],
         "coverage": {
             "sets": _cov_blob(coverage.get("sets"), int(coverage.get("setCount") or 0), int(coverage.get("setCount") or 0)),
@@ -1458,18 +1648,14 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             "maxDdS": winner.get("maxDdS"),
             "n": winner.get("n"),
         } if winner else {},
-        "bySymbol": [
-            {k: v for k, v in row.items() if k != "evaluationWindows"}
-            for row in (job.get("bySymbol") or []) if isinstance(row, dict)
-        ],
+        "bySymbol": by_sym_rows,
         "byDirection": {
             k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
             for k, v in (job.get("byDirection") or {}).items() if isinstance(v, dict)
         },
-        "byStrategy": {
-            k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
-            for k, v in list((job.get("byStrategy") or {}).items())[:16] if isinstance(v, dict)
-        },
+        "byStrategy": _compact_stat_map(job.get("byStrategy") or {}, 40),
+        "byIndication": _compact_stat_map(job.get("byIndication") or job.get("kinds") or {}, 24),
+        "kinds": _compact_stat_map(job.get("kinds") or job.get("byIndication") or {}, 24),
         "pfStats": job.get("pfStats") or {},
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
@@ -1484,7 +1670,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "audit": job.get("audit") or {},
         "detail": job.get("detail") or "",
         "pct": 100 if (job.get("ready") or str(job.get("phase") or "") == "ready") else (job.get("pct") or 0),
-        "filled": job.get("filled") if job.get("filled") is not None else len(public_ranked),
+        "filled": len(names) if names else (job.get("filled") if job.get("filled") is not None else len(scored)),
         "evaluated": job.get("evaluated") or (job.get("fill") or {}).get("evaluated"),
         "fill": job.get("fill") or {},
     }
@@ -1499,7 +1685,7 @@ def audit_test(book: Any, symbols: List[str], summary: Dict[str, Any], min_pf: f
 
     rec("hours-range", HOURS_MIN <= hours <= HOURS_MAX, hours)
     rec("min-pf-floor", abs(float(min_pf) - float(summary.get("minPf") or min_pf)) < 1e-9, summary.get("minPf"))
-    rec("symbols-filled", 0 < len(symbols) <= target, {"got": len(symbols), "target": target})
+    rec("symbols-filled", 0 < len(symbols) <= max(int(target or 0), 50), {"got": len(symbols), "target": target})
     rec("positive-count", len(summary.get("positive") or []) == len(symbols), summary.get("positive"))
     cov = summary.get("coverage") or {}
     rec("sets-present", int(cov.get("setCount") or cov.get("product") or 0) > 0, cov.get("setCount"))
@@ -1515,6 +1701,8 @@ def audit_test(book: Any, symbols: List[str], summary: Dict[str, Any], min_pf: f
     rec("with-without-block-dca", set((summary.get("withWithout") or {})) >= {"block", "dca"} or not symbols, sorted(summary.get("withWithout") or {}))
     rec("combo-engine-memory", (summary.get("combo") or {}).get("engine") == "sqlite-memory" or not symbols, summary.get("combo"))
     rec("successful-positive", all(float(r.get("pf") or 0) >= float(min_pf) - 1e-9 for r in (summary.get("successfulConfigs") or [])), len(summary.get("successfulConfigs") or []))
+    rec("combo-ddt", all("maxDdS" in ((summary.get("pfStats") or {}).get(k) or {}) for k in ("overall", "block", "dca")) or not symbols, summary.get("pfStats"))
+    rec("kinds-pf-ddt", all("pf" in (v or {}) and "maxDdS" in (v or {}) for v in (summary.get("byIndication") or summary.get("kinds") or {}).values()) or not (summary.get("byIndication") or summary.get("kinds")), sorted((summary.get("byIndication") or summary.get("kinds") or {}).keys()))
     failed = [r["name"] for r in rows if not r["ok"]]
     return {"ok": not failed, "pass": len(rows) - len(failed), "fail": len(failed), "failed": failed, "rows": rows}
 
@@ -1607,36 +1795,40 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     lookback = lookback_bars(hours)
     fetch_bars = lookback + int(overlay.get("histWarmup") or HIST_WARMUP_BARS)
     if recalc_only:
-        selected: List[Dict[str, Any]] = []
-        skipped: List[Dict[str, Any]] = []
-        for symbol in keep_symbols or [r.get("symbol") for r in queue if r.get("symbol")]:
-            wait_if_paused(progress, {
-                "phase": "fetch",
-                "pct": 20,
-                "detail": f"recalc fetch {symbol} · {len(recalc_ids)} configs",
-                "symbols": keep_symbols,
-                "positive": keep_symbols,
-            })
-            if stop_requested():
-                break
-            try:
-                bars = fetch_fn(symbol, fetch_bars)
-            except Exception as exc:
-                skipped.append({"symbol": symbol, "reason": f"fetch {type(exc).__name__}"})
-                continue
-            if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
-                skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
-                continue
-            selected.append({"symbol": symbol, "_bars": bars, "positive": True, "n": 0, "pf": 0.0})
-        fill = {
-            "selected": selected,
-            "rejected": [],
-            "skipped": skipped,
-            "filled": len(selected),
-            "target": target,
-            "short": max(0, int(target) - len(selected)),
-            "evaluated": len(selected),
-        }
+        keep = keep_recalc_symbols(keep_symbols, target)
+        selected = []
+        skipped = []
+        fill = fill_positive(
+            [{"symbol": s} for s in keep],
+            max(len(keep), 1),
+            min_pf,
+            overlay,
+            fetch_fn,
+            on_progress=progress,
+        )
+        selected = fill["selected"]
+        skipped = fill["skipped"]
+        if not selected and keep:
+            # Floor wobble must not drop the last ready majors book.
+            for symbol in keep:
+                try:
+                    bars = fetch_fn(symbol, fetch_bars)
+                except Exception as exc:
+                    skipped.append({"symbol": symbol, "reason": f"fetch {type(exc).__name__}"})
+                    continue
+                if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
+                    skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
+                    continue
+                selected.append({"symbol": symbol, "_bars": bars, "positive": True, "n": 0, "pf": 0.0})
+            fill = {
+                "selected": selected,
+                "rejected": fill.get("rejected") or [],
+                "skipped": skipped,
+                "filled": len(selected),
+                "target": target,
+                "short": max(0, int(target) - len(selected)),
+                "evaluated": len(selected) + len(fill.get("rejected") or []) + len(skipped),
+            }
     else:
         fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
     selected = fill["selected"]
@@ -1745,6 +1937,11 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     by_dir = direction_rollup(book)
     by_strat = strategy_rollup(book, strat=getattr(book, "strategy_hist", None))
     combo = combo_evaluate(book, min_pf=min_pf, cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
+    kinds = {}
+    try:
+        kinds = book.ind_gate_snapshot() if hasattr(book, "ind_gate_snapshot") else {}
+    except Exception:
+        kinds = {}
     progress({
         "phase": "score",
         "pct": 96,
@@ -1776,7 +1973,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "minPf": min_pf,
         "refreshHours": refresh_h,
         "continuous": not synth,
-        "running": not synth,
+        "running": False,
         "stepLo": step_lo,
         "stepHi": step_hi,
         "targetCount": target,
@@ -1816,6 +2013,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "bySymbol": by_sym,
         "byDirection": by_dir,
         "byStrategy": by_strat,
+        "byIndication": kinds,
+        "kinds": kinds,
         "pfStats": combo.get("pfStats") or {},
         "withWithout": combo.get("withWithout") or {},
         "comboMatrix": combo.get("matrix") or [],
@@ -1936,7 +2135,11 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                     ids = validated_set_ids(prior)
                     if ids and not once:
                         payload["recalcIds"] = ids
-                        payload["keepSymbols"] = list(prior.get("positive") or prior.get("symbols") or [])
+                        payload["keepSymbols"] = keep_recalc_symbols(
+                            list(prior.get("positive") or prior.get("symbols") or []),
+                            clamp_target(payload.get("symbolCap") or payload.get("targetCount") or target),
+                            prior,
+                        )
                     run_test(payload)
                     if once or stop_requested():
                         break
