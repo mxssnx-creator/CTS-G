@@ -43,6 +43,18 @@ def _flag(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_listen_port(name: str = "PULSE_PORT", default: int = 3015) -> int:
+    """Coerce an empty/invalid listen port. systemd EnvironmentFile can set PULSE_PORT=."""
+    raw = str(os.environ.get(name) or "").strip()
+    try:
+        port = int(raw, 10)
+    except (TypeError, ValueError):
+        port = int(default)
+    if port < 1024 or port > 65535:
+        return int(default)
+    return port
+
+
 def _live_start_allowed(cid: str) -> bool:
     """Live (x01) trading is on by default. Tests/operators can opt out."""
     if cid != "bingx-x01":
@@ -2427,4 +2439,7 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
-    ThreadingHTTPServer((os.environ.get("PULSE_HOST", "127.0.0.1"), int(os.environ.get("PULSE_PORT", "3015"))), Handler).serve_forever()
+    ThreadingHTTPServer(
+        (str(os.environ.get("PULSE_HOST") or "127.0.0.1").strip() or "127.0.0.1", env_listen_port()),
+        Handler,
+    ).serve_forever()
