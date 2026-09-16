@@ -270,7 +270,7 @@ def snapshot(pass_n: int) -> dict:
     protected = sum(1 for r in open_rows if isinstance(r, dict) and r.get("stopLossPrice") and r.get("takeProfitPrice"))
     pulse_x01 = pulse_lane(LIVE_ID)
     pulse_x02 = pulse_lane(VST_ID)
-    desk_missing = st_es in (0, 404) and st_te in (0, 404)
+    desk_missing = st_es not in (200,) or st_te not in (200,)
     if desk_missing:
         open_count = _int(pulse_x01.get("exchangeOpenCount") or pulse_x01.get("livePositionCount") or pulse_x01.get("openCount"), 0)
         protected = _int(pulse_x01.get("protectedCount"), protected)
@@ -338,7 +338,13 @@ def snapshot(pass_n: int) -> dict:
 
 def repair_if_needed(pass_n: int, blob: dict) -> dict:
     repaired = False
-    if blob.get("deskMissing"):
+    pulse = blob.get("pulseX01") if isinstance(blob.get("pulseX01"), dict) else {}
+    pulse_live = bool(pulse.get("running")) and pulse.get("halted") is not True and "MAINNET" in str(pulse.get("mode") or "")
+    if blob.get("deskMissing") or pulse_live:
+        if blob.get("forbiddenRunning"):
+            log(f"pass {pass_n} FORBIDDEN 8581 running — disabling")
+            disable_forbidden()
+            return snapshot(pass_n)
         return blob
     filling = str(blob.get("phase") or "").startswith("prehistoric")
     halt = str(blob.get("liveBlock") or "")
