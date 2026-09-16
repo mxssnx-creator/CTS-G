@@ -2096,13 +2096,24 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ("/hist-test.json", "/hist-test"):
             try:
-                from hist_test import read_job, job_is_running, job_is_paused
+                from hist_test import read_job, job_is_running, job_is_paused, job_progress_view
                 blob = read_job()
+                view = job_progress_view(blob)
                 blob["ok"] = True
                 blob["running"] = job_is_running(blob)
                 blob["paused"] = job_is_paused(blob)
                 blob["independent"] = True
                 blob["shared"] = False
+                if view.get("validatedCount") and not blob.get("validatedCount"):
+                    blob["validatedCount"] = view.get("validatedCount")
+                if view.get("symbols") and not blob.get("positive"):
+                    blob["positive"] = view.get("symbols")
+                    blob.setdefault("symbols", view.get("symbols"))
+                for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats"):
+                    if view.get(key) and not blob.get(key):
+                        blob[key] = view.get(key)
+                if view.get("detail"):
+                    blob["detail"] = view.get("detail")
                 self._json(blob)
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "independent": True, "shared": False}, 200)

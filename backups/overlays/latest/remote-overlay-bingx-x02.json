@@ -225,7 +225,7 @@
   "rearrangeGap": 0.22,
   "rssHardMb": 0,
   "rssSoftMb": 0,
-  "scanS": 0.2,
+  "scanS": 4.0,
   "scratchMinPct": 0.16,
   "scratchS": 600,
   "setAutoDeact": true,

@@ -609,6 +609,34 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(view["phase"], "ready")
         self.assertIn("signals", view.get("byIndication") or {})
 
+    def test_seed_recalc_prior_keeps_last_ready_ids(self):
+        import tempfile, os, shutil
+        prev_last = ht.LAST_READY_PATH
+        prev_ids = ht.VALIDATED_IDS_PATH
+        tmp = tempfile.mkdtemp(prefix="hist-seed-")
+        try:
+            ht.LAST_READY_PATH = os.path.join(tmp, "last-ready.json")
+            ht.VALIDATED_IDS_PATH = os.path.join(tmp, "validated-ids.json")
+            with open(ht.LAST_READY_PATH, "w") as handle:
+                json.dump({
+                    "phase": "ready",
+                    "ready": True,
+                    "positive": ["BCH-USDT", "SOL-USDT", "XRP-USDT"],
+                    "validatedIds": ["indications:1m:sl0.6:st8", "general:1m:sl0.6:st4"],
+                    "winner": {"id": "indications:1m:sl0.6:st8"},
+                }, handle)
+            ht.persist_validated_ids(["indications:1m:sl0.6:st8", "general:1m:sl0.6:st4"])
+            with patch.object(ht, "read_job", return_value={"phase": "evaluate", "validatedIds": [], "positive": []}):
+                prior = ht.seed_recalc_prior()
+            self.assertEqual(prior.get("positive"), ["BCH-USDT", "SOL-USDT", "XRP-USDT"])
+            self.assertIn("indications:1m:sl0.6:st8", prior.get("validatedIds") or [])
+            ids = ht.collect_validated_ids({"phase": "evaluate", "validatedIds": []})
+            self.assertIn("indications:1m:sl0.6:st8", ids)
+        finally:
+            ht.LAST_READY_PATH = prev_last
+            ht.VALIDATED_IDS_PATH = prev_ids
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

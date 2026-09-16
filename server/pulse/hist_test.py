@@ -878,6 +878,24 @@ def read_last_ready() -> Dict[str, Any]:
     return {}
 
 
+def seed_recalc_prior() -> Dict[str, Any]:
+    """First loop must recalc last-ready IDs, never a blank rank that drops the gate."""
+    last = read_last_ready()
+    job = read_job()
+    if not isinstance(last, dict):
+        last = {}
+    if not isinstance(job, dict):
+        job = {}
+    prior = last if (last.get("validatedIds") or last.get("positive") or last.get("winner")) else job
+    ids = validated_set_ids(prior)
+    if not ids:
+        ids = read_persisted_validated_ids()
+        if ids:
+            prior = dict(prior or {})
+            prior["validatedIds"] = ids
+    return prior or {}
+
+
 def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     ids = list(blob.get("validatedIds") or [])
@@ -1724,7 +1742,11 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     step_hi = max(step_lo, min(30, int(body.get("stepMax") or body.get("stepHi") or STEP_HI)))
     synth = bool(body.get("synth"))
     recalc_ids = [str(s).strip() for s in (body.get("recalcIds") or []) if str(s or "").strip()]
+    if not recalc_ids:
+        recalc_ids = [str(s).strip() for s in seed_recalc_prior().get("validatedIds") or [] if str(s or "").strip()] or read_persisted_validated_ids()
     keep_symbols = [str(s).strip().upper() for s in (body.get("keepSymbols") or []) if str(s or "").strip()]
+    if not keep_symbols:
+        keep_symbols = keep_recalc_symbols(None, target, seed_recalc_prior())
     recalc_only = bool(recalc_ids) and not bool(body.get("fullCatalog"))
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
@@ -1737,6 +1759,9 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overlay["setMinPf"] = min_pf
         overlay["minPf"] = min_pf
     t0 = time.time()
+    prior_ready = seed_recalc_prior()
+    seed_ids = recalc_ids or list(prior_ready.get("validatedIds") or []) or read_persisted_validated_ids()
+    seed_syms = keep_symbols or [str(s).strip().upper() for s in (prior_ready.get("positive") or prior_ready.get("symbols") or []) if str(s or "").strip()]
     seed = {
         "ok": True,
         "phase": "rank",
@@ -1745,7 +1770,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "running": True,
         "paused": False,
         "detail": (
-            f"recalc {len(recalc_ids)} validated configs · {hours}h · min PF {min_pf:.2f}"
+            f"recalc {len(seed_ids)} validated configs · {hours}h · min PF {min_pf:.2f}"
             if recalc_only else
             f"ranking universe · fill {target} positive · {hours}h · min PF {min_pf:.2f}"
         ),
@@ -1755,8 +1780,10 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "targetCount": target,
         "stepLo": step_lo,
         "stepHi": step_hi,
-        "symbols": [],
-        "positive": [],
+        "symbols": list(seed_syms),
+        "positive": list(seed_syms),
+        "validatedIds": list(seed_ids)[:PUBLIC_VALIDATED_IDS_CAP],
+        "validatedCount": len(seed_ids),
         "rejected": [],
     }
     publish(seed)
@@ -1773,6 +1800,14 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         blob["running"] = not stop_requested()
         blob["paused"] = pause_requested() and not stop_requested()
         blob["ready"] = False
+        if not blob.get("validatedIds"):
+            blob["validatedIds"] = list(seed.get("validatedIds") or seed_ids or [])[:PUBLIC_VALIDATED_IDS_CAP]
+        if not blob.get("validatedCount"):
+            blob["validatedCount"] = int(seed.get("validatedCount") or len(blob.get("validatedIds") or seed_ids or []))
+        if not blob.get("positive"):
+            blob["positive"] = list(seed.get("positive") or seed_syms or [])
+        if not blob.get("symbols"):
+            blob["symbols"] = list(blob.get("positive") or seed.get("symbols") or seed_syms or [])
         publish(blob)
 
     if synth:
@@ -2129,10 +2164,10 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         def worker() -> None:
             try:
                 once = bool(body.get("synth") or body.get("once"))
-                prior: Dict[str, Any] = {}
+                prior: Dict[str, Any] = seed_recalc_prior()
                 while True:
                     payload = dict(body)
-                    ids = validated_set_ids(prior)
+                    ids = validated_set_ids(prior) or read_persisted_validated_ids()
                     if ids and not once:
                         payload["recalcIds"] = ids
                         payload["keepSymbols"] = keep_recalc_symbols(
