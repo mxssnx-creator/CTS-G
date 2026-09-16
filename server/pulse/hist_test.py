@@ -65,6 +65,7 @@ PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
 SYMBOL_CAP = 50
+GATE_SET_CAP = 350
 JOB_CACHE_TTL_S = 1.5
 
 _JOB_CACHE: Optional[Dict[str, Any]] = None
@@ -437,6 +438,8 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
     """Push Test Historic validated configs onto a live SetBook without a full catalog replay."""
     blob = job if isinstance(job, dict) else read_job()
     ids = collect_validated_ids(blob)
+    if len(ids) > GATE_SET_CAP:
+        ids = ids[:GATE_SET_CAP]
     apply = getattr(book, "apply_hist_test_gate", None)
     if callable(apply):
         apply(ids if ids else None)

@@ -13734,7 +13734,7 @@ class Pulse:
             ids = hist_test_mod.validated_set_ids(job)
         if not ids:
             return
-        allow = set(ids)
+        allow = set(ids[:350] if len(ids) > 350 else ids)
         with self.state_guard():
             book = self.sets
             try:
