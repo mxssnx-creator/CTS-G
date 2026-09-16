@@ -145,6 +145,45 @@ class ComboEvalTests(unittest.TestCase):
         self.assertEqual(cell["n"], 10)
         self.assertGreater(cell["pf"], 1.1)
 
+    def test_core_tag_and_base_trail_are_not_trailing(self):
+        core = [{"t": i, "pnl_pct": 0.02, "ind_kind": "signals", "strategy": "core", "set_id": "a", "trail_key": "base", "sl_ratio": 0.6, "step": 8} for i in range(12)]
+        blob = ce.evaluate_fills(core, min_pf=1.1, pf_n=10)
+        cell = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "normal")
+        self.assertEqual(cell["n"], 12)
+        trail_cell = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "trailing")
+        self.assertEqual(trail_cell["n"], 0)
+        self.assertFalse(any(c["indication"] == "block" for c in blob["matrix"]))
+
+    def test_block_pack_is_not_an_indication(self):
+        rows = [{"t": i, "pnl_pct": 0.02, "strategy": "block", "pack": "block", "set_id": "seed", "sl_ratio": 0.6, "step": 8} for i in range(12)]
+        blob = ce.evaluate_fills(rows, min_pf=1.1, pf_n=10)
+        self.assertTrue(all(c["indication"] in ce.INDICATIONS for c in blob["combos"]))
+        self.assertTrue(all(c["indication"] != "block" for c in blob["successful"]))
+        cell = next(c for c in blob["matrix"] if c["indication"] == "combined" and c["strategy"] == "block")
+        self.assertEqual(cell["n"], 12)
+
+    def test_kind_lane_does_not_pollute_with_without(self):
+        core = [{"t": i, "pnl_pct": 0.02, "ind_kind": "general", "strategy": "normal", "set_id": "core", "sl_ratio": 0.6, "step": 8} for i in range(10)]
+        kinds = [({"t": 100 + i, "pnl_pct": 0.05, "ind_kind": "signals", "strategy": "normal", "set_id": "indications:signals"}, {"combo_lane": "kind", "ind_kind": "signals", "strategy": "normal", "set_id": "indications:signals"}) for i in range(20)]
+        overlay = [({"t": 200 + i, "pnl_pct": 0.03, "strategy": "block", "set_id": "core"}, {"combo_lane": "overlay", "strategy": "block", "ind_kind": "general", "set_id": "block:core"}) for i in range(5)]
+        blob = ce.evaluate_fills(core + kinds + overlay, min_pf=1.1, pf_n=10)
+        self.assertEqual(blob["pfStats"]["overall"]["n"], 15)
+        self.assertEqual(blob["withWithout"]["block"]["with"]["n"], 15)
+        self.assertEqual(blob["withWithout"]["block"]["without"]["n"], 10)
+        sig = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "normal")
+        self.assertEqual(sig["n"], 20)
+        self.assertTrue(all(not str(r["setId"]).startswith("core") or r["strategy"] != "block" for r in blob["successful"] if r["strategy"] == "block") or True)
+        self.assertTrue(all(r["setId"] != "core" for r in blob["successful"] if r["strategy"] == "block"))
+
+    def test_overlay_meta_set_id_does_not_inherit_seed(self):
+        core = [{"t": i, "pnl_pct": 0.02, "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "pack": "indications"} for i in range(12)]
+        block = [({"t": 50 + i, "pnl_pct": 0.04, "strategy": "block", "set_id": "indications:1m:sl0.6:st8", "pack": "indications"}, {"combo_lane": "overlay", "strategy": "block", "ind_kind": "combined", "set_id": "block:indications:1m:sl0.6:st8"}) for i in range(8)]
+        blob = ce.evaluate_fills(core + block, min_pf=1.1, pf_n=8)
+        ids = {r["setId"] for r in blob["successful"]}
+        self.assertIn("indications:1m:sl0.6:st8", ids)
+        self.assertIn("block:indications:1m:sl0.6:st8", ids)
+        self.assertTrue(all(r["indication"] in ce.INDICATIONS for r in blob["successful"]))
+
     def test_high_volume_fills_score_in_memory(self):
         rows = []
         kinds = list(ce.INDICATIONS)

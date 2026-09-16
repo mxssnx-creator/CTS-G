@@ -22,6 +22,10 @@ from set_engine import IND_KINDS, drawdown_time
 STRATEGIES = ("normal", "trailing", "axis", "block", "dca")
 PF_FAMILIES = ("overall", "normal", "trailing", "axis", "block", "dca")
 INDICATIONS = ("general", "combined") + tuple(IND_KINDS)
+INDICATION_SET = set(INDICATIONS)
+STRATEGY_SET = set(STRATEGIES)
+TRAIL_OFF = {"", "0", "off", "none", "base", "false", "core"}
+KIND_LANES = {"kind", "kind-overlay"}
 TAIL_CAP = 80
 SUCCESSFUL_CAP = 80
 MATRIX_EMPTY = {"n": 0, "evalN": 0, "pf": 1.0, "wr": 0.0, "netAvg": 0.0, "validated": False, "maxDdS": 0.0, "avgDdS": 0.0, "pfDdRatio": 0.0}
@@ -144,12 +148,15 @@ def _indication_of(row: Any, meta: Optional[Dict[str, Any]] = None, pack: str = 
         return "general"
     if pack == "indications":
         return "combined"
-    return pack or "combined"
+    if pack in INDICATION_SET:
+        return pack
+    # Never treat a strategy pack (block/dca/axis/core) as an indication.
+    return "combined"
 
 
 def _strategy_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
     tagged = str(_pick(row, meta, "strategy", default="")).strip().lower()
-    if tagged in STRATEGIES:
+    if tagged in STRATEGY_SET:
         return tagged
     pack = str(_pick(row, meta, "pack", default="") or "").lower()
     reason = str(_pick(row, meta, "reason", default="") or "").lower()
@@ -159,9 +166,12 @@ def _strategy_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
         return "block"
     if _pick(row, meta, "axis_key", "axisKey") or pack == "axis" or tagged == "axis":
         return "axis"
-    trail = str(_pick(row, meta, "trail_key", "trailKey", default="") or "")
-    kind = str(_pick(row, meta, "kind", default="") or "")
-    if kind == "trail" or (trail and trail not in ("", "0", "off", "none")):
+    kind = str(_pick(row, meta, "kind", default="") or "").strip().lower()
+    if kind in ("trail", "trailing") or tagged in ("trail", "trailing"):
+        return "trailing"
+    trail = str(_pick(row, meta, "trail_key", "trailKey", default="") or "").strip().lower()
+    # "base" is the non-trailing placeholder. Real trail keys look like 0.3:0.1.
+    if trail not in TRAIL_OFF and ":" in trail:
         return "trailing"
     return "normal"
 
@@ -173,10 +183,12 @@ def _config_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
     sl = _f(_pick(row, meta, "sl_ratio", "slRatio", default=0))
     step = int(_f(_pick(row, meta, "step", default=0)))
     trail = str(_pick(row, meta, "trail_key", "trailKey", default="base") or "base")
+    if trail.lower() in TRAIL_OFF:
+        trail = "base"
     return f"sl{sl:.1f}:st{step}:tr{trail or 'base'}"
 
 
-def _score(acc: _Acc, cost_pct: float, pf_n: int) -> Dict[str, Any]:
+def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     tail = list(acc.tail)
     window = last_n_cost_pf(tail, max(1, pf_n), cost_pct, ordered=True, simple=True) if tail else last_n_cost_pf([], 1, cost_pct)
     pf = float(window.get("ratio") or 1.0)
@@ -190,7 +202,7 @@ def _score(acc: _Acc, cost_pct: float, pf_n: int) -> Dict[str, Any]:
         "pf": round(pf, 4),
         "wr": wr,
         "netAvg": round(float(window.get("netAvg") or 0), 6),
-        "validated": eval_n > 0 and is_positive_pf(pf),
+        "validated": eval_n > 0 and is_positive_pf(pf, min_pf),
         "costSubtracted": True,
         "maxDdS": round(max_dd, 1),
         "avgDdS": round(float(dd.get("avgS") or 0), 1),
@@ -232,9 +244,17 @@ def evaluate_fills(
         if not hasattr(row, "get") and not isinstance(row, Mapping):
             continue
         indication = _indication_of(row, meta)
+        if indication not in INDICATION_SET:
+            indication = "combined"
         strategy = _strategy_of(row, meta)
+        if strategy not in STRATEGY_SET:
+            strategy = "normal"
         config = _config_of(row, meta)
-        set_id = str(_pick(row, meta, "set_id", "setId", "id", default=f"{indication}:{config}:{strategy}"))
+        # Overlay identity lives on meta so Block/DCA never inherit the seed Set id.
+        set_id = str((meta or {}).get("set_id") or _pick(row, None, "set_id", "setId", "id", default="") or "")
+        if not set_id:
+            set_id = f"{indication}:{config}:{strategy}"
+        lane = str((meta or {}).get("combo_lane") or _pick(row, meta, "combo_lane", "lane", default="core") or "core").strip().lower()
         t = _f(_pick(row, meta, "t", default=0))
         pnl_pct = _f(_pick(row, meta, "pnl_pct", "pnlPct", default=0))
         hold = _f(_pick(row, meta, "hold_s", "holdS", default=0))
@@ -255,15 +275,20 @@ def evaluate_fills(
             matt = _Acc()
             matrix_acc[mkey] = matt
         matt.add(t, pnl_pct, hold)
-        family_acc["overall"].add(t, pnl_pct, hold)
-        if strategy in family_acc:
+        # Independent kind tapes are their own relation books. Mixing them
+        # into overall / with-without is a false affection.
+        if lane not in KIND_LANES:
+            family_acc["overall"].add(t, pnl_pct, hold)
+            if strategy in family_acc:
+                family_acc[strategy].add(t, pnl_pct, hold)
+            with_acc["block"]["with"].add(t, pnl_pct, hold)
+            with_acc["dca"]["with"].add(t, pnl_pct, hold)
+            if strategy != "block":
+                with_acc["block"]["without"].add(t, pnl_pct, hold)
+            if strategy != "dca":
+                with_acc["dca"]["without"].add(t, pnl_pct, hold)
+        elif strategy in ("block", "dca") and strategy in family_acc:
             family_acc[strategy].add(t, pnl_pct, hold)
-        with_acc["block"]["with"].add(t, pnl_pct, hold)
-        with_acc["dca"]["with"].add(t, pnl_pct, hold)
-        if strategy != "block":
-            with_acc["block"]["without"].add(t, pnl_pct, hold)
-        if strategy != "dca":
-            with_acc["dca"]["without"].add(t, pnl_pct, hold)
 
     db = open_combo_db()
     meta = db_pragmas(db)
@@ -271,7 +296,7 @@ def evaluate_fills(
     public_combos: List[Dict[str, Any]] = []
     for key, acc in combo_acc.items():
         indication, config, strategy, set_id = key
-        scored = _score(acc, cost_pct, pf_n)
+        scored = _score(acc, cost_pct, pf_n, min_pf)
         info = combo_meta[key]
         rows.append(
             (
@@ -330,9 +355,9 @@ def evaluate_fills(
         }
         for r in successful_sql
     ]
-    by_combo = {c.get("setId"): c for c in public_combos}
+    by_combo = {(c.get("setId"), c.get("strategy"), c.get("indication")): c for c in public_combos}
     for row in successful:
-        extra = by_combo.get(row["setId"]) or {}
+        extra = by_combo.get((row["setId"], row["strategy"], row["indication"])) or {}
         row["maxDdS"] = extra.get("maxDdS") or 0.0
         row["avgDdS"] = extra.get("avgDdS") or 0.0
         row["pfDdRatio"] = extra.get("pfDdRatio") or 0.0
@@ -344,14 +369,14 @@ def evaluate_fills(
     for indication in INDICATIONS:
         for strategy in STRATEGIES:
             acc = matrix_acc.get((indication, strategy))
-            scored = _score(acc, cost_pct, pf_n) if acc is not None else dict(MATRIX_EMPTY)
+            scored = _score(acc, cost_pct, pf_n, min_pf) if acc is not None else dict(MATRIX_EMPTY)
             matrix.append({"indication": indication, "strategy": strategy, **scored})
 
-    pf_stats = {name: _score(family_acc[name], cost_pct, pf_n) if family_acc[name].n else _empty_family() for name in PF_FAMILIES}
+    pf_stats = {name: _score(family_acc[name], cost_pct, pf_n, min_pf) if family_acc[name].n else _empty_family() for name in PF_FAMILIES}
     with_without = {
         name: {
-            "with": _score(pair["with"], cost_pct, pf_n) if pair["with"].n else _empty_family(),
-            "without": _score(pair["without"], cost_pct, pf_n) if pair["without"].n else _empty_family(),
+            "with": _score(pair["with"], cost_pct, pf_n, min_pf) if pair["with"].n else _empty_family(),
+            "without": _score(pair["without"], cost_pct, pf_n, min_pf) if pair["without"].n else _empty_family(),
         }
         for name, pair in with_acc.items()
     }
@@ -388,6 +413,20 @@ def _set_meta(st: Any) -> Dict[str, Any]:
     pack = str(getattr(st, "pack", "") or "")
     trail = str(getattr(st, "trail_key", "") or "")
     kind = str(getattr(st, "kind", "") or "")
+    if kind == "trail":
+        strategy = "trailing"
+    elif pack in ("block", "dca"):
+        strategy = pack
+    elif str(getattr(st, "axis_key", "") or ""):
+        strategy = "axis"
+    else:
+        strategy = "normal"
+    if pack == "general":
+        indication = "general"
+    elif pack == "indications":
+        indication = "combined"
+    else:
+        indication = pack if pack in INDICATION_SET else "combined"
     return {
         "set_id": str(getattr(st, "id", "") or ""),
         "pack": pack,
@@ -395,7 +434,9 @@ def _set_meta(st: Any) -> Dict[str, Any]:
         "kind": kind,
         "sl_ratio": _f(getattr(st, "sl_ratio", 0)),
         "step": int(_f(getattr(st, "step", 0))),
-        "strategy": "trailing" if kind == "trail" else "",
+        "strategy": strategy,
+        "ind_kind": str(getattr(st, "indication_kind", "") or "") or indication,
+        "combo_lane": "core",
     }
 
 
@@ -412,32 +453,63 @@ def iter_book_fills(book: Any) -> Iterable[Tuple[Any, Dict[str, Any]]]:
         yield from _set_fills(st)
     for kind, tape in (getattr(book, "ind_hist", None) or {}).items():
         indication = str(kind).partition("|")[0]
+        if indication not in IND_KINDS:
+            continue
         meta = {
             "ind_kind": indication,
             "pack": "indications",
             "strategy": "normal",
             "set_id": f"indications:{indication}",
+            "combo_lane": "kind",
         }
         for row in tape or []:
             if row is not None:
                 yield row, meta
     for name, tape in (getattr(book, "strategy_hist", None) or {}).items():
         label = str(name or "")
-        strategy = "dca" if label.startswith("dca") else "block" if "block" in label else _strategy_of({"strategy": label, "pack": label})
+        if label.startswith("dca"):
+            strategy = "dca"
+        elif "block" in label:
+            strategy = "block"
+        else:
+            strategy = _strategy_of({"strategy": label, "pack": label})
         indication = ""
         if ":" in label:
             tail = label.split(":", 1)[1]
             if tail in IND_KINDS:
                 indication = tail
-        meta = {
-            "strategy": strategy,
-            "ind_kind": indication,
-            "pack": strategy,
-            "set_id": label,
-        }
+        lane = "kind-overlay" if indication else "overlay"
         for row in tape or []:
-            if row is not None:
-                yield row, meta
+            if row is None:
+                continue
+            row_kind = str(_pick(row, None, "ind_kind", "indKind", default="") or "")
+            if row_kind in IND_KINDS:
+                cell_ind = row_kind
+            elif indication in IND_KINDS:
+                cell_ind = indication
+            else:
+                pack = str(_pick(row, None, "pack", default="") or "")
+                if pack == "general":
+                    cell_ind = "general"
+                elif pack in INDICATION_SET:
+                    cell_ind = pack
+                else:
+                    cell_ind = "combined"
+            row_sid = str(_pick(row, None, "set_id", "setId", "id", default="") or "")
+            if lane == "kind-overlay":
+                set_id = label
+            elif row_sid and not row_sid.startswith(f"{strategy}:"):
+                set_id = f"{strategy}:{row_sid}"
+            else:
+                set_id = row_sid or label
+            meta = {
+                "strategy": strategy,
+                "ind_kind": cell_ind,
+                "pack": "indications" if cell_ind != "general" else "general",
+                "set_id": set_id,
+                "combo_lane": lane,
+            }
+            yield row, meta
 
 
 def evaluate_book(

@@ -12,9 +12,9 @@ function kindOf(c: LiveClosed): string {
   const k = String(c.indKind || c.ind_kind || "").toLowerCase();
   if (KIND_SET.has(k)) return k;
   const reason = String(c.reason || "");
-  if (reason.startsWith("ind:")) {
-    const cand = reason.split(":")[1] || "signals";
-    return KIND_SET.has(cand) ? cand : "signals";
+  if (reason.startsWith("ind:") || reason.startsWith("block:")) {
+    const cand = (reason.split(":")[1] || "").toLowerCase();
+    return KIND_SET.has(cand) ? cand : reason.startsWith("ind:") ? "signals" : "";
   }
   return "";
 }
@@ -22,17 +22,25 @@ function kindOf(c: LiveClosed): string {
 function stratsOf(c: LiveClosed): string[] {
   const keys: string[] = [];
   const pack = String(c.pack || "").toLowerCase();
-  if (["indications", "general", "block", "dca"].includes(pack)) keys.push(pack);
+  const tagged = String(c.strategy || "").toLowerCase();
   const reason = String(c.reason || "").toLowerCase();
   const head = reason.split(":")[0].split(" ")[0] || "";
-  if (head.startsWith("block") || pack === "block") {
+  const trail = String(c.trail_key || "").toLowerCase();
+  const trailOff = trail === "" || trail === "0" || trail === "off" || trail === "none" || trail === "base" || trail === "false" || trail === "core";
+  if (tagged === "block" || head.startsWith("block") || pack === "block") {
     keys.push("block");
     if (kindOf(c) === "signals") keys.push("block:signals");
+    return keys;
   }
-  if (head.startsWith("dca") || pack === "dca") keys.push("dca");
-  const trail = String(c.trail_key || "");
-  if (trail && trail !== "0" && trail !== "off") keys.push("trailing");
-  if (["lock", "peak", "rev", "hard", "sl", "tp", "trail"].includes(head) || reason.includes("exit:")) keys.push("exits");
+  if (tagged === "dca" || head.startsWith("dca") || pack === "dca") {
+    keys.push("dca");
+    return keys;
+  }
+  if (pack === "general" || pack === "indications") keys.push(pack);
+  if (tagged === "trailing" || tagged === "trail" || (!trailOff && trail.includes(":"))) keys.push("trailing");
+  if (tagged.startsWith("exit") || head.startsWith("exit") || ["lock", "peak", "rev", "hard"].includes(head) || reason.includes("exit:")) {
+    keys.push("exits");
+  }
   const kind = kindOf(c);
   if (kind) keys.push("indications");
   else if (pack === "indications") keys.push("indications");

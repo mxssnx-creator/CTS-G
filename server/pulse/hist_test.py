@@ -15,6 +15,7 @@ import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 from combo_eval import evaluate_book as combo_evaluate
+from combo_eval import INDICATIONS, STRATEGIES
 from hist_calc import (
     HIST_WARMUP_BARS,
     catalog_listings,
@@ -183,6 +184,10 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
         sid = str(raw or "").strip()
         if not sid or sid in seen:
             return
+        if ":" in sid:
+            sid = normalize_catalog_set_id(sid)
+            if not sid or sid in seen:
+                return
         seen.add(sid)
         out.append(sid)
 
@@ -234,6 +239,10 @@ def persist_validated_ids(ids: List[str]) -> None:
 
     def add(raw: Any) -> None:
         sid = str(raw or "").strip()
+        if not sid:
+            return
+        if ":" in sid:
+            sid = normalize_catalog_set_id(sid)
         if not sid or sid in seen or len(clean) >= VALIDATED_IDS_CAP:
             return
         seen.add(sid)
@@ -266,6 +275,8 @@ def read_persisted_validated_ids() -> List[str]:
         seen: set[str] = set()
         for raw in rows:
             sid = str(raw or "").strip()
+            if ":" in sid:
+                sid = normalize_catalog_set_id(sid)
             if not sid or sid in seen:
                 continue
             seen.add(sid)
@@ -285,6 +296,10 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
 
     def add(raw: Any) -> None:
         sid = str(raw or "").strip()
+        if not sid:
+            return
+        if ":" in sid:
+            sid = normalize_catalog_set_id(sid)
         if not sid or sid in seen:
             return
         seen.add(sid)
@@ -376,24 +391,90 @@ def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
     return out[:SYMBOL_CAP]
 
 
+VALID_INDICATIONS = set(INDICATIONS)
+VALID_STRATEGIES = set(STRATEGIES)
+
+
+CATALOG_PACKS = {"general", "indications"}
+
+
+def normalize_catalog_set_id(sid: Any) -> str:
+    """Keep real Set ids. Drop side suffixes and overlay/strategy aliases."""
+    raw = str(sid or "").strip()
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if lower.endswith(":long") or lower.endswith(":short"):
+        raw = raw.rsplit(":", 1)[0]
+        lower = raw.lower()
+    parts = [p for p in raw.split(":") if p]
+    if not parts:
+        return ""
+    pack = parts[0].lower()
+    if pack in VALID_STRATEGIES or pack in ("core", "trail"):
+        return ""
+    if pack in CATALOG_PACKS:
+        if len(parts) < 3 or parts[1] != "1m" or not str(parts[2]).lower().startswith("sl"):
+            return ""
+        if not any(str(p).lower().startswith("st") for p in parts):
+            return ""
+    return raw
+
+
+def identity_from_set_id(sid: str) -> Dict[str, str]:
+    """Parse pack / indication / strategy from a catalog Set id."""
+    clean = normalize_catalog_set_id(sid) or str(sid or "").strip()
+    parts = [p for p in clean.split(":") if p]
+    if parts and parts[-1].lower() in ("long", "short"):
+        parts = parts[:-1]
+    pack = parts[0].lower() if parts else ""
+    if pack == "general":
+        indication = "general"
+    elif pack == "indications":
+        indication = "combined"
+    elif pack in VALID_INDICATIONS:
+        indication = pack
+    else:
+        indication = ""
+    strategy = "normal"
+    if pack in VALID_STRATEGIES and pack not in ("normal",):
+        strategy = pack
+        if not indication:
+            indication = "combined"
+    elif any(p.startswith("tr") and p != "trend" for p in parts):
+        strategy = "trailing"
+    return {"pack": pack, "indication": indication, "strategy": strategy}
+
+
 def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
-    """Indication × strategy cells Test Historic scored (PF + DDT)."""
+    """Indication × strategy cells Test Historic scored (PF + DDT).
+
+    Only validated, named indication × strategy pairs. Config strings and
+    unvalidated matrix cells are not coordinations.
+    """
     blob = job if isinstance(job, dict) else {}
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    def add(row: Any) -> None:
+    def add(row: Any, require_validated: bool = True) -> None:
         if not isinstance(row, dict):
             return
+        if require_validated and row.get("validated") is False:
+            return
         sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
-        indication = str(row.get("indication") or row.get("ind_kind") or "")
-        strategy = str(row.get("strategy") or row.get("config") or "")
-        key = sid or f"{indication}:{strategy}"
-        if not key or key in seen:
+        indication = str(row.get("indication") or row.get("ind_kind") or "").strip().lower()
+        strategy = str(row.get("strategy") or "").strip().lower()
+        if strategy not in VALID_STRATEGIES:
+            strategy = ""
+        if indication not in VALID_INDICATIONS:
+            indication = ""
+        ident = identity_from_set_id(sid)
+        if not indication:
+            indication = ident["indication"]
+        if not strategy:
+            strategy = ident["strategy"]
+        if not indication or not strategy or indication not in VALID_INDICATIONS or strategy not in VALID_STRATEGIES:
             return
-        if not sid and not indication and not strategy:
-            return
-        seen.add(key)
         try:
             pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
@@ -402,6 +483,14 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
             n = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
         except (TypeError, ValueError):
             n = 0
+        if require_validated and row.get("validated") is not True and not is_positive_pf(pf):
+            return
+        if n <= 0 and not sid:
+            return
+        key = f"{indication}:{strategy}:{sid}" if sid else f"{indication}:{strategy}"
+        if key in seen:
+            return
+        seen.add(key)
         try:
             max_dd = float(row.get("maxDdS") or row.get("max_dd_s") or 0)
         except (TypeError, ValueError):
@@ -413,18 +502,18 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
             "pf": pf,
             "n": n,
             "maxDdS": max_dd,
-            "validated": bool(row.get("validated")),
+            "validated": True,
         })
 
     for row in blob.get("successfulConfigs") or []:
-        add(row)
+        add(row, require_validated=True)
     cells = [
         c for c in (blob.get("comboMatrix") or [])
-        if isinstance(c, dict) and int(c.get("n") or 0) > 0
+        if isinstance(c, dict) and int(c.get("n") or 0) > 0 and c.get("validated") is True
     ]
     cells.sort(key=lambda c: (-float(c.get("pf") or 0), -int(c.get("n") or 0)))
     for cell in cells:
-        add(cell)
+        add(cell, require_validated=True)
     cap = 24
     try:
         cap = max(1, min(int(limit or 24), 48))
@@ -619,10 +708,21 @@ def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[
             step = int(row.get("step") or 0)
         except (TypeError, ValueError):
             step = 0
+        ident = identity_from_set_id(sid)
+        indication = str(row.get("indication") or row.get("ind_kind") or "").strip().lower()
+        strategy = str(row.get("strategy") or "").strip().lower()
+        if strategy not in VALID_STRATEGIES:
+            strategy = ""
+        if indication not in VALID_INDICATIONS:
+            indication = ""
+        if not indication:
+            indication = ident["indication"]
+        if not strategy:
+            strategy = ident["strategy"]
         out.append({
             "id": sid,
-            "indication": str(row.get("indication") or row.get("ind_kind") or ""),
-            "strategy": str(row.get("strategy") or row.get("config") or ""),
+            "indication": indication,
+            "strategy": strategy,
             "symbol": str(row.get("symbol") or ""),
             "pf": pf,
             "n": n,
@@ -1665,7 +1765,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "validatedCount": validated_count or job.get("validatedCount"),
         "rowCount": job.get("rowCount"),
         "winner": {
-            "id": winner.get("id"),
+            "id": normalize_catalog_set_id(winner.get("id")) or winner.get("id"),
             "step": winner.get("step"),
             "slRatio": winner.get("slRatio"),
             "pack": winner.get("pack"),

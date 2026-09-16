@@ -555,6 +555,45 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("block", view["withWithout"])
         self.assertEqual(view["processingCount"], 2)
 
+    def test_selected_coordinations_drop_false_cells(self):
+        coords = ht.selected_coordinations({
+            "successfulConfigs": [
+                {"setId": "indications:1m:sl0.6:st8", "validated": True, "indication": "combined", "strategy": "block", "pf": 1.5, "n": 20, "maxDdS": 12},
+                {"setId": "junk", "validated": True, "indication": "", "strategy": "sl0.6:st8:trbase", "pf": 1.9, "n": 9},
+                {"setId": "general:1m:sl0.6:st4", "validated": False, "indication": "general", "strategy": "dca", "pf": 0.7, "n": 8},
+            ],
+            "comboMatrix": [
+                {"indication": "combined", "strategy": "block", "validated": True, "pf": 1.5, "n": 20},
+                {"indication": "signals", "strategy": "normal", "validated": False, "pf": 0.9, "n": 40},
+                {"indication": "block", "strategy": "block", "validated": True, "pf": 2.0, "n": 5},
+            ],
+        })
+        keys = {(c["indication"], c["strategy"]) for c in coords}
+        self.assertIn(("combined", "block"), keys)
+        self.assertNotIn(("signals", "normal"), keys)
+        self.assertNotIn(("block", "block"), keys)
+        self.assertFalse(any("sl0.6" in str(c.get("strategy") or "") for c in coords))
+        self.assertTrue(all(c["validated"] for c in coords))
+        ident = ht.identity_from_set_id("indications:1m:sl2.7:tr0.9:0.1:st11")
+        self.assertEqual(ident["indication"], "combined")
+        self.assertEqual(ident["strategy"], "trailing")
+        run = ht.running_sets({"validatedIds": ["general:1m:sl0.6:st8"]})
+        self.assertEqual(run[0]["indication"], "general")
+        self.assertEqual(run[0]["strategy"], "normal")
+        self.assertNotEqual(run[0]["strategy"], "sl0.6:st8:trbase")
+        self.assertEqual(ht.normalize_catalog_set_id("indications:1m:sl0.6:st8:long"), "indications:1m:sl0.6:st8")
+        self.assertEqual(ht.normalize_catalog_set_id("dca:base"), "")
+        self.assertEqual(ht.normalize_catalog_set_id("block:indications:1m:sl0.6:st8"), "")
+        ids = ht.validated_set_ids({
+            "validatedIds": [
+                "indications:1m:sl0.6:st8:long",
+                "indications:1m:sl0.6:st8:SHORT",
+                "dca:add",
+                "general:1m:sl0.6:st4",
+            ]
+        })
+        self.assertEqual(ids, ["indications:1m:sl0.6:st8", "general:1m:sl0.6:st4"])
+
     def test_cap_active_cannot_drop_hist_test_validated(self):
         from set_engine import SetBook
         book = SetBook()

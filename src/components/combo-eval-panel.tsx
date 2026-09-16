@@ -11,7 +11,7 @@ export type ComboStat = {
 export type ComboEvalBlob = {
   pfStats?: Record<string, ComboStat>;
   withWithout?: Record<string, { with?: ComboStat; without?: ComboStat }>;
-  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean }>;
+  comboMatrix?: Array<{ indication: string; strategy: string; n?: number; pf?: number; wr?: number; evalN?: number; validated?: boolean; maxDdS?: number }>;
   successfulConfigs?: Array<{
     indication?: string;
     config?: string;
@@ -118,7 +118,7 @@ export function ComboEvalPanel({
       {hasMatrix ? (
         <section className="overflow-auto rounded-lg border border-border bg-bg2 p-3" data-testid="combo-matrix">
           <h3 className="mb-2 text-sm font-medium">Indication × strategy · independent last-N PF</h3>
-          <p className="mb-2 text-xs text-muted">Every cell is its own book. Empty cells stay at PF 1.00 with n=0 rather than inheriting another lane.</p>
+          <p className="mb-2 text-xs text-muted">Every cell is its own book. Empty cells stay at PF 1.00 with n=0 rather than inheriting another lane. Validated cells are the selected coordinations.</p>
           <table className="w-max min-w-full text-center font-mono text-[11px]">
             <thead>
               <tr>
@@ -156,7 +156,7 @@ export function ComboEvalPanel({
       {hasSuccessful ? (
         <section className="rounded-lg border border-border bg-bg2 p-3" data-testid="successful-configs">
           <h3 className="mb-2 text-sm font-medium">Successful configs · used for subsequent calcs</h3>
-          <p className="mb-2 text-xs text-muted">Only combinations that cleared the historic PF floor. Each row is one indication + type + config + strategy set.</p>
+          <p className="mb-2 text-xs text-muted">Only combinations that cleared the historic PF floor. Each row is one indication + type + config + strategy set. Block/DCA overlays keep their own ids so they cannot inherit a core Set.</p>
           <table className="w-full text-sm">
             <thead>
               <tr className="font-mono text-[10px] uppercase tracking-wide text-muted">

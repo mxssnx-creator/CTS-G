@@ -34,15 +34,17 @@ def indication(row: dict, pack: str) -> str:
 
 
 def strategy(row: dict, trail: str = "") -> str:
-    value = str(row.get("strategy") or row.get("pack") or "").lower()
+    value = str(row.get("strategy") or "").lower()
+    pack = str(row.get("pack") or "").lower()
     reason = str(row.get("reason") or "").lower()
-    if value in ("block", "block-active") or reason.startswith("block"):
+    if value in ("block", "block-active") or reason.startswith("block") or pack == "block":
         return "block"
-    if value == "dca" or reason.startswith("dca"):
+    if value == "dca" or reason.startswith("dca") or pack == "dca":
         return "dca"
     if row.get("axis_key") or row.get("axisKey") or value == "axis":
         return "axis"
-    if value in ("trailing", "trail") or trail not in ("", "0", "off"):
+    trail_key = str(trail or row.get("trail_key") or row.get("trailKey") or "").strip().lower()
+    if value in ("trailing", "trail") or (trail_key not in ("", "0", "off", "none", "base", "false", "core") and ":" in trail_key):
         return "trailing"
     return "normal"
 

@@ -501,8 +501,19 @@ def slim_for_ui(st: dict) -> dict:
             ht["symbols"] = ht["symbols"][:50]
         if isinstance(ht.get("runningSets"), list):
             ht["runningSets"] = ht["runningSets"][:24]
-        if isinstance(ht.get("selectedCoordinations"), list):
-            ht["selectedCoordinations"] = ht["selectedCoordinations"][:24]
+        try:
+            from hist_test import selected_coordinations
+            ht["selectedCoordinations"] = selected_coordinations({
+                "successfulConfigs": ht.get("successfulConfigs") or [],
+                "comboMatrix": ht.get("comboMatrix") or [],
+            })[:24]
+        except Exception:
+            coords = ht.get("selectedCoordinations") if isinstance(ht.get("selectedCoordinations"), list) else []
+            ht["selectedCoordinations"] = [
+                c for c in coords
+                if isinstance(c, dict) and c.get("validated") is True
+                and str(c.get("strategy") or "") in ("normal", "trailing", "axis", "block", "dca")
+            ][:24]
         if isinstance(ht.get("comboMatrix"), list):
             ht["comboMatrix"] = ht["comboMatrix"][:40]
         if isinstance(ht.get("successfulConfigs"), list):
@@ -1035,6 +1046,19 @@ def _report_number(value, default=0.0) -> float:
         return default
 
 
+def _sum_known_int(values, unknown: int = -1) -> int:
+    """Sum confirmed counts. Unknown/negative values are skipped, not treated as zero."""
+    known = []
+    for value in values:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0:
+            known.append(number)
+    return sum(known) if known else unknown
+
+
 def _report_row_in_scope(row: dict, state: dict) -> bool:
     """Keep overall reports limited to the lane's proven system ownership."""
     if not isinstance(row, dict) or row.get("ours") is False:
@@ -1153,6 +1177,21 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         for state in states
     ]
     exchange_position_group_count = sum(exchange_group_values) if all(value >= 0 for value in exchange_group_values) else -1
+    real_position_count = _sum_known_int(
+        state.get("realPositionCount", state.get("openCount", 0)) for state in states
+    )
+    real_position_group_count = _sum_known_int(
+        state.get("realPositionGroupCount", (state.get("executionEvidence") or {}).get("internalPositionGroups", 0))
+        for state in states
+    )
+    real_order_count = _sum_known_int((state.get("realOrderCount") for state in states), unknown=0)
+    live_position_count = _sum_known_int(
+        state.get("livePositionCount", state.get("exchangeOwnOpenCount", state.get("exchangeOpenCount", -1)))
+        for state in states
+    )
+    live_order_count = _sum_known_int(state.get("liveOrderCount") for state in states)
+    live_total_order_count = _sum_known_int(state.get("liveTotalOrderCount") for state in states)
+    sim_open_count = _sum_known_int(state.get("simOpenCount") for state in states)
     entry_candidate_count = sum(
         int(_report_number((state.get("pulse") or {}).get("entryCandidateCount")))
         for state in states
@@ -1197,7 +1236,15 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "losses": losses,
         "openCount": logical_position_count,
         "logicalPositionCount": logical_position_count,
+        "realPositionCount": real_position_count if real_position_count >= 0 else logical_position_count,
+        "realPositionGroupCount": real_position_group_count if real_position_group_count >= 0 else 0,
+        "realOrderCount": real_order_count if real_order_count >= 0 else 0,
         "exchangePositionGroupCount": exchange_position_group_count,
+        "exchangeOpenCount": live_position_count,
+        "livePositionCount": live_position_count,
+        "liveOrderCount": live_order_count,
+        "liveTotalOrderCount": live_total_order_count,
+        "simOpenCount": sim_open_count,
         "open": open_positions,
         "closed": closed,
         "symbols": symbols,
@@ -1373,7 +1420,7 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "openCount": st.get("openCount") or 0,
         "realPositionCount": st.get("realPositionCount", st.get("openCount") or 0),
         "realPositionGroupCount": st.get("realPositionGroupCount", (st.get("executionEvidence") or {}).get("internalPositionGroups", st.get("openCount") or 0)),
-        "realOrderCount": st.get("realOrderCount", st.get("openCount") or 0),
+        "realOrderCount": st.get("realOrderCount") if st.get("realOrderCount") is not None else (st.get("executionEvidence") or {}).get("internalOrderCount"),
         "exchangeOpenCount": st.get("exchangeOpenCount", -1),
         "livePositionCount": st.get("livePositionCount", st.get("exchangeOwnOpenCount", st.get("exchangeOpenCount", -1))),
         "liveOrderCount": st.get("liveOrderCount", -1),
@@ -1647,13 +1694,13 @@ def merge_overall() -> dict:
         "losses": losses,
         "winRate": round(wr, 1),
         "openCount": len(opens),
-        "realPositionCount": sum(l.get("realPositionCount") or 0 for l in lanes),
-        "realPositionGroupCount": sum(l.get("realPositionGroupCount") or 0 for l in lanes),
-        "realOrderCount": sum(l.get("realOrderCount") or 0 for l in lanes),
-        "exchangeOpenCount": sum(l.get("exchangeOpenCount") or 0 for l in lanes if (l.get("exchangeOpenCount") or 0) >= 0) if any((l.get("exchangeOpenCount") or 0) >= 0 for l in lanes) else -1,
-        "livePositionCount": sum(l.get("livePositionCount") or 0 for l in lanes if (l.get("livePositionCount") or 0) >= 0) if any((l.get("livePositionCount") or 0) >= 0 for l in lanes) else -1,
-        "liveOrderCount": sum(l.get("liveOrderCount") or 0 for l in lanes if (l.get("liveOrderCount") or 0) >= 0) if any((l.get("liveOrderCount") or 0) >= 0 for l in lanes) else -1,
-        "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
+        "realPositionCount": _sum_known_int(l.get("realPositionCount") for l in lanes),
+        "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+        "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
+        "exchangeOpenCount": _sum_known_int(l.get("exchangeOpenCount") for l in lanes),
+        "livePositionCount": _sum_known_int(l.get("livePositionCount") for l in lanes),
+        "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
+        "liveTotalOrderCount": _sum_known_int(l.get("liveTotalOrderCount") for l in lanes),
         "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
         "simUPnl": round(sum(float(l.get("simUPnl") or 0) for l in lanes), 4),
         "maxOpen": max_open,
@@ -1866,13 +1913,13 @@ def connections_blob() -> dict:
                 "blurb": "All desks in parallel",
                 "running": any(l["running"] and not l["halted"] for l in lanes),
                 "openCount": sum(l["openCount"] for l in lanes),
-                "realPositionCount": sum(l.get("realPositionCount") or 0 for l in lanes),
-                "realPositionGroupCount": sum(l.get("realPositionGroupCount") or 0 for l in lanes),
-                "realOrderCount": sum(l.get("realOrderCount") or 0 for l in lanes),
-                "exchangeOpenCount": sum(l.get("exchangeOpenCount") or 0 for l in lanes if (l.get("exchangeOpenCount") or 0) >= 0) if any((l.get("exchangeOpenCount") or 0) >= 0 for l in lanes) else -1,
-                "livePositionCount": sum(l.get("livePositionCount") or 0 for l in lanes if (l.get("livePositionCount") or 0) >= 0) if any((l.get("livePositionCount") or 0) >= 0 for l in lanes) else -1,
-                "liveOrderCount": sum(l.get("liveOrderCount") or 0 for l in lanes if (l.get("liveOrderCount") or 0) >= 0) if any((l.get("liveOrderCount") or 0) >= 0 for l in lanes) else -1,
-                "liveTotalOrderCount": sum(l.get("liveTotalOrderCount") or 0 for l in lanes if (l.get("liveTotalOrderCount") or 0) >= 0) if any((l.get("liveTotalOrderCount") or 0) >= 0 for l in lanes) else -1,
+                "realPositionCount": _sum_known_int(l.get("realPositionCount") for l in lanes),
+                "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+                "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
+                "exchangeOpenCount": _sum_known_int(l.get("exchangeOpenCount") for l in lanes),
+                "livePositionCount": _sum_known_int(l.get("livePositionCount") for l in lanes),
+                "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
+                "liveTotalOrderCount": _sum_known_int(l.get("liveTotalOrderCount") for l in lanes),
                 "simOpenCount": sum(l.get("simOpenCount") or 0 for l in lanes if (l.get("simOpenCount") or 0) >= 0) if any((l.get("simOpenCount") or 0) >= 0 for l in lanes) else -1,
                 "halted": all(l["halted"] or not l["running"] for l in lanes),
                 "progressReady": (

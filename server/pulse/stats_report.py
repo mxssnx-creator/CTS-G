@@ -246,37 +246,47 @@ def _kind_of(r: Dict[str, Any]) -> str:
     if k in IND_KIND_SET:
         return k
     reason = str(r.get("reason") or "")
-    if reason.startswith("ind:"):
+    if reason.startswith("ind:") or reason.startswith("block:"):
         bits = reason.split(":")
-        cand = (bits[1] if len(bits) > 1 else "signals").strip().lower()
-        return cand if cand in IND_KIND_SET else "signals"
+        cand = (bits[1] if len(bits) > 1 else "").strip().lower()
+        if cand in IND_KIND_SET:
+            return cand
+        if reason.startswith("ind:"):
+            return "signals"
     return ""
 
 
 def _strats_of(r: Dict[str, Any]) -> List[str]:
     keys: List[str] = []
     pack = str(r.get("pack") or "").lower()
-    if pack in ("indications", "general", "block", "dca"):
-        keys.append(pack)
+    tagged = str(r.get("strategy") or "").lower()
     reason = str(r.get("reason") or "").lower()
     head = reason.split(":")[0].split()[0] if reason else ""
     kind = _kind_of(r)
-    if head.startswith("block") or pack == "block":
+    trail = str(r.get("trail_key") or r.get("trailKey") or "").strip().lower()
+    overlay = tagged in ("block", "dca") or head.startswith("block") or head.startswith("dca") or pack in ("block", "dca")
+    if tagged == "block" or head.startswith("block") or pack == "block":
         keys.append("block")
         if kind == "signals":
             keys.append("block:signals")
-    if head.startswith("dca") or pack == "dca":
+        return list(dict.fromkeys(keys))
+    if tagged == "dca" or head.startswith("dca") or pack == "dca":
         keys.append("dca")
-    trail = str(r.get("trail_key") or r.get("trailKey") or "")
-    if trail and trail not in ("0", "off", "none"):
+        return list(dict.fromkeys(keys))
+    if pack in ("indications", "general"):
+        keys.append(pack)
+    if tagged in ("trailing", "trail") or (trail not in ("", "0", "off", "none", "base", "false", "core") and ":" in trail):
         keys.append("trailing")
-    if any(tok in reason for tok in ("lock", "peak", "rev", "time-exit", "hard", "exit:")) or head in ("sl", "tp", "trail"):
+    if tagged.startswith("exit") or head.startswith("exit") or any(
+        tok in reason for tok in ("exit:lock", "exit:peak", "exit:rev", "exit:hard", "time-exit")
+    ) or head in ("lock", "peak", "rev", "hard"):
         keys.append("exits")
-    if kind:
-        keys.append("indications")
-        keys.append(f"indications:{kind}")
-    elif pack == "indications":
-        keys.append("indications")
+    if not overlay:
+        if kind:
+            keys.append("indications")
+            keys.append(f"indications:{kind}")
+        elif pack == "indications":
+            keys.append("indications")
     return list(dict.fromkeys(keys))
 
 
@@ -584,6 +594,12 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "losses": st.get("losses"),
         "winRate": st.get("winRate"),
         "openCount": st.get("openCount"),
+        "realPositionCount": st.get("realPositionCount", st.get("openCount")),
+        "realPositionGroupCount": st.get("realPositionGroupCount"),
+        "realOrderCount": st.get("realOrderCount"),
+        "livePositionCount": st.get("livePositionCount", st.get("exchangeOpenCount")),
+        "liveOrderCount": st.get("liveOrderCount"),
+        "liveTotalOrderCount": st.get("liveTotalOrderCount"),
         "open": st.get("open") or [],
         "occupancy": occ,
         "cycle": st.get("cycle"),
@@ -749,6 +765,17 @@ def render_html(blob: Dict[str, Any]) -> str:
             return "−∞"
         return f"{value:,.{digits}f}"
 
+    def count(value: Any) -> str:
+        if value in (None, "", -1):
+            return "—"
+        try:
+            number_val = int(value)
+        except (TypeError, ValueError):
+            return "—"
+        if number_val < 0:
+            return "—"
+        return str(number_val)
+
     def signed(value: Any, digits: int = 4) -> str:
         try:
             value_num = float(value)
@@ -805,6 +832,12 @@ def render_html(blob: Dict[str, Any]) -> str:
     running = bool(blob.get("running", False))
     status = "RUNNING" if running else "STOPPED"
     status_class = "positive" if running else "muted"
+    real_pos = count(blob.get("realPositionCount", blob.get("openCount")))
+    real_ord = count(blob.get("realOrderCount"))
+    live_pos = count(blob.get("livePositionCount", blob.get("exchangeOpenCount")))
+    live_ord = count(blob.get("liveOrderCount"))
+    pos_orders = f"{real_pos}/{real_ord}"
+    live_pos_orders = f"{live_pos}/{live_ord}"
     cost = (blob.get("costAccounting") or {}).get("last15") or {}
     windows = blob.get("profitFactor") or {}
     current_pf = (blob.get("costAccounting") or {}).get("currentWindow") or cost
@@ -1052,7 +1085,7 @@ footer {{ padding-top: 20px; color: var(--muted); font-size: 12px; }}
   <div class="label">CTS-G · canonical live stats export</div>
   <h1>Pulse results · {connection}</h1>
   <p class="muted">One self-contained HTML report generated from the same canonical stats blob as the JSON and Markdown exports. Generated {generated}.</p>
-  <div class="status-line"><span>status <b class="{status_class}">{status}</b></span><span>mode <b>{mode}</b></span><span>unit <b>{unit}</b></span><span>closed <b>{number(blob.get("closedN"), 0)}</b></span><span>open <b>{number(blob.get("openCount"), 0)}</b></span></div>
+  <div class="status-line"><span>status <b class="{status_class}">{status}</b></span><span>mode <b>{mode}</b></span><span>unit <b>{unit}</b></span><span>closed <b>{number(blob.get("closedN"), 0)}</b></span><span>positions/orders <b>{pos_orders}</b></span><span>live P/O <b>{live_pos_orders}</b></span></div>
 </header>
 <section class="card-grid">{overview_cards}</section>
 <section class="panel"><div class="panel-head"><h2>Profit factor windows</h2><span class="muted">PositionCost deducted · neutral 1.00 · +1× cost 1.10</span></div>{table(["Window", "N", "Wins", "Losses", "Cost PF", "Classic PF", "Net", "Avg hold s"], window_rows)}</section>
@@ -1089,7 +1122,7 @@ def render_md(blob: Dict[str, Any]) -> str:
         "",
         "## Overview",
         f"- Equity **{blob.get('equity')}** {blob.get('unit')} · session {blob.get('sessionPnl')} · {blob.get('wins')}W/{blob.get('losses')}L ({blob.get('winRate')}%)",
-        f"- Symbols **{blob.get('symbolCount')}** · open {blob.get('openCount')} · RSS {blob.get('rssMb')}MB · scan {blob.get('scanMs')}ms · cycle {blob.get('cycle')}",
+        f"- Symbols **{blob.get('symbolCount')}** · positions/orders {blob.get('realPositionCount', blob.get('openCount'))}/{blob.get('realOrderCount') if blob.get('realOrderCount') not in (None, -1) else '—'} · live P/O {blob.get('livePositionCount', blob.get('exchangeOpenCount')) if blob.get('livePositionCount', blob.get('exchangeOpenCount')) not in (None, -1) else '—'}/{blob.get('liveOrderCount') if blob.get('liveOrderCount') not in (None, -1) else '—'} · RSS {blob.get('rssMb')}MB · scan {blob.get('scanMs')}ms · cycle {blob.get('cycle')}",
         f"- Occupancy unique={occ.get('uniqueSlots')} dup={occ.get('duplicateSlots')} max1={occ.get('maxOnePerSymbolDirSet')}",
         "",
         "## Open book",
