@@ -158,23 +158,51 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(all(n <= CalculationCache.BATCH for n in _Cache.calls))
         self.assertEqual(sum(_Cache.calls), len(states))
 
+    def test_persist_validated_ids_does_not_shrink(self):
+        import tempfile, os, shutil
+        prev = ht.VALIDATED_IDS_PATH
+        tmp = tempfile.mkdtemp(prefix="hist-ids-keep-")
+        try:
+            ht.VALIDATED_IDS_PATH = os.path.join(tmp, "validated-ids.json")
+            ht.persist_validated_ids([f"keep:{i}" for i in range(40)])
+            ht.persist_validated_ids(["keep:0", "tiny:1"])
+            ids = ht.read_persisted_validated_ids()
+            self.assertEqual(len(ids), 41)
+            self.assertEqual(ids[0], "keep:0")
+            self.assertIn("tiny:1", ids)
+            self.assertIn("keep:39", ids)
+        finally:
+            ht.VALIDATED_IDS_PATH = prev
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_apply_scores_gates_book(self):
+        import tempfile, os, shutil
         from set_engine import SetBook
-        book = SetBook()
-        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
-        self.assertGreater(len(book.by_idx), 0)
-        sid = book.by_idx[0].id
-        ids = ht.apply_scores_to_book(book, {
-            "successfulConfigs": [{"setId": sid, "validated": True, "pf": 1.42, "evalN": 30, "n": 40}],
-        })
-        self.assertEqual(ids, [sid])
-        self.assertEqual(book.hist_test_set_ids, {sid})
-        self.assertEqual(book.by_idx[0].last15_ratio, 1.42)
-        self.assertEqual(book.by_idx[0].last15_n, 30)
-        rows = book._validated_entry_rows(book.by_idx[0].pack)
-        self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
-        book.apply_hist_test_gate([])
-        self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+        prev_ids = ht.VALIDATED_IDS_PATH
+        prev_last = ht.LAST_READY_PATH
+        tmp = tempfile.mkdtemp(prefix="hist-gate-")
+        try:
+            ht.VALIDATED_IDS_PATH = os.path.join(tmp, "validated-ids.json")
+            ht.LAST_READY_PATH = os.path.join(tmp, "no-last-ready.json")
+            book = SetBook()
+            book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+            self.assertGreater(len(book.by_idx), 0)
+            sid = book.by_idx[0].id
+            ids = ht.apply_scores_to_book(book, {
+                "successfulConfigs": [{"setId": sid, "validated": True, "pf": 1.42, "evalN": 30, "n": 40}],
+            })
+            self.assertEqual(ids, [sid])
+            self.assertEqual(book.hist_test_set_ids, {sid})
+            self.assertEqual(book.by_idx[0].last15_ratio, 1.42)
+            self.assertEqual(book.by_idx[0].last15_n, 30)
+            rows = book._validated_entry_rows(book.by_idx[0].pack)
+            self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
+            book.apply_hist_test_gate([])
+            self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+        finally:
+            ht.VALIDATED_IDS_PATH = prev_ids
+            ht.LAST_READY_PATH = prev_last
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_hist_test_gate_invalidates_entry_cache(self):
         from set_engine import SetBook

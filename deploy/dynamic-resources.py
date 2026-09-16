@@ -30,7 +30,7 @@ MIN_RESERVE_MB = 2048.0
 MAX_RESERVE_MB = 4096.0
 MIN_GROWTH_MB = 768.0
 MAX_GROWTH_MB = 4096.0
-MIN_PULSE_MAX_MB = 3072.0
+MIN_PULSE_MAX_MB = 4608.0
 DEFAULT_PULSE_MAX_MB = 6144.0
 ROUND_MB = 64.0
 SAFETY_MARGIN_MB = 256.0
@@ -106,12 +106,13 @@ def compute_policy(
     growth = _growth_mb(float(available_mb or 0.0))
 
     if active and any(value > 0 for value in current.values()):
-        current_sum = sum(current.values())
-        target_pool = current_sum + growth
+        fattest = max(current.values())
+        # MemoryMax is a per-unit ceiling, not a reservation. Splitting leftover
+        # growth across Live+VST dropped the VST catalog to a 3GiB max and the
+        # cgroup OOM-killed it at a ~3.3GiB working set (50-symbol full book).
+        target_mb = max(MIN_PULSE_MAX_MB, fattest + growth)
         if ceiling > 0:
-            target_pool = min(target_pool, ceiling)
-        target_pool = max(target_pool, current_sum + SAFETY_MARGIN_MB * active)
-        target_mb = target_pool / active
+            target_mb = min(max(target_mb, MIN_PULSE_MAX_MB), max(ceiling, MIN_PULSE_MAX_MB))
     else:
         # Before the first process starts there is no current cgroup sample.
         # Keep enough room for the catalog's initial load; the first timer pass
@@ -148,7 +149,7 @@ def compute_policy(
         "activePulseCount": active,
         "currentByUnitMb": {unit: round(value, 1) for unit, value in current.items()},
         "cpuWeight": CPU_WEIGHT_MAX,
-        "cpuQuota": "infinity",
+        "cpuQuota": "",
         "memorySwapMax": 0,
         "calculatedAt": int(time.time()),
     }
@@ -167,7 +168,6 @@ def dropin_text(policy: Mapping[str, Any]) -> str:
         f"MemoryMax={maximum}M\n"
         "MemorySwapMax=0\n"
         f"CPUWeight={CPU_WEIGHT_MAX}\n"
-        "CPUQuota=infinity\n"
     )
 
 

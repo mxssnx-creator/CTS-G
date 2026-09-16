@@ -224,17 +224,25 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
 
 
 def persist_validated_ids(ids: List[str]) -> None:
-    """Keep the full validated Set ID list off the compact public job."""
+    """Keep the full validated Set ID list off the compact public job.
+
+    Never shrinks an existing sidecar. Compact public jobs and tests may pass a
+    short list; the engine still needs last-ready IDs after a restart.
+    """
     clean: List[str] = []
     seen: set[str] = set()
-    for raw in ids or []:
+
+    def add(raw: Any) -> None:
         sid = str(raw or "").strip()
-        if not sid or sid in seen:
-            continue
+        if not sid or sid in seen or len(clean) >= VALIDATED_IDS_CAP:
+            return
         seen.add(sid)
         clean.append(sid)
-        if len(clean) >= VALIDATED_IDS_CAP:
-            break
+
+    for raw in ids or []:
+        add(raw)
+    for sid in read_persisted_validated_ids():
+        add(sid)
     if not clean:
         return
     try:

@@ -1,9 +1,9 @@
 {
   "stats-bingx-x01.json": {
-    "activeCount": 397,
+    "activeCount": 350,
     "blockEnabled": true,
     "blockMaxStack": 6,
-    "equity": 46.4032,
+    "equity": 11.444,
     "halted": false,
     "histTestEnabled": true,
     "histTestPhase": "ready",
@@ -14,16 +14,16 @@
     "validatedCount": 401
   },
   "stats-bingx-x02.json": {
-    "activeCount": 20377,
+    "activeCount": 4366,
     "blockEnabled": true,
     "blockMaxStack": 6,
-    "equity": 109140.2093,
+    "equity": 109140.0618,
     "halted": false,
     "histTestEnabled": false,
     "histTestPhase": "off",
     "mode": "VST_DEMO",
-    "openCount": 34,
-    "processingCount": 65,
+    "openCount": 22,
+    "processingCount": 50,
     "running": true,
     "validatedCount": 0
   }

@@ -29,14 +29,12 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PULSE_CONN=%i
 Nice=-5
 CPUWeight=10000
-CPUQuota=infinity
-# A 25-symbol 34,320-set catalog plus klines sits around 2.4–2.6G RSS.
-# MemoryHigh must stay above that working set; reclaim at 2304M turned the
-# first hist slice into a multi-minute futex stall (mem_cgroup_handle_over_high).
-# These are conservative fallbacks. The scoped dynamic-resources timer writes
-# a host-aware 99-* drop-in and applies the current policy at runtime.
-MemoryHigh=3456M
-MemoryMax=3840M
+# A 50-symbol full catalog plus klines sits around 2.6–3.3G RSS. The 3GiB
+# dynamic floor OOM-killed VST twice after reinstall. These are conservative
+# fallbacks; the scoped dynamic-resources timer writes a host-aware 99-*
+# drop-in (MIN 4608M) and applies the current policy at runtime.
+MemoryHigh=4144M
+MemoryMax=4608M
 MemorySwapMax=0
 TasksMax=128
 LimitNOFILE=4096

@@ -25,7 +25,7 @@ class DynamicResourceTests(unittest.TestCase):
         self.assertGreater(policy["memoryHighMb"], 4200)
         self.assertLessEqual(policy["memoryMaxMb"], 16000 - policy["memoryReserveMb"] + 64)
         self.assertEqual(policy["cpuWeight"], 10000)
-        self.assertEqual(policy["cpuQuota"], "infinity")
+        self.assertEqual(policy["cpuQuota"], "")
 
     def test_two_pulse_lanes_keep_catalog_floor(self):
         policy = MODULE.compute_policy(16000, 8000, {
@@ -35,6 +35,7 @@ class DynamicResourceTests(unittest.TestCase):
         self.assertGreaterEqual(policy["memoryMaxMb"], MODULE.MIN_PULSE_MAX_MB)
         self.assertGreaterEqual(policy["memoryMaxMb"], 1200 + MODULE.SAFETY_MARGIN_MB)
         self.assertLess(policy["memoryHighMb"], policy["memoryMaxMb"])
+        # Splitting leftover growth used to pin MemoryMax at 3GiB.
 
     def test_low_available_never_sets_max_below_live_floor(self):
         policy = MODULE.compute_policy(16000, 300, {"pulse@x02.service": 4900})
@@ -67,7 +68,7 @@ class DynamicResourceTests(unittest.TestCase):
         policy = MODULE.compute_policy(16000, 8000, {})
         text = MODULE.dropin_text(policy)
         self.assertIn("CPUWeight=10000", text)
-        self.assertIn("CPUQuota=infinity", text)
+        self.assertNotIn("CPUQuota=", text)
         self.assertIn("MemorySwapMax=0", text)
         self.assertIn("MemoryHigh=", text)
         self.assertIn("MemoryMax=", text)

@@ -250,6 +250,9 @@ def git_push() -> str:
         "scripts/test_settings_persistence.py",
         "scripts/test_hist_test.py",
         "scripts/test_combo_eval.py",
+        "scripts/test_dynamic_resources.py",
+        "deploy/dynamic-resources.py",
+        "deploy/grok-pulse@.service",
     ], check=False)
     status = run(["git", "status", "--porcelain"], check=False)
     if status.stdout.strip():
