@@ -424,6 +424,16 @@ def slim_for_ui(st: dict) -> dict:
                 pass
         if len(closed) > 80:
             out["closed"] = closed[:80]
+    ht = out.get("histTest")
+    if isinstance(ht, dict):
+        ht = dict(ht)
+        if isinstance(ht.get("internSymbols"), list):
+            ht["internSymbols"] = ht["internSymbols"][:50]
+        if isinstance(ht.get("symbols"), list):
+            ht["symbols"] = ht["symbols"][:50]
+        if isinstance(ht.get("runningSets"), list):
+            ht["runningSets"] = ht["runningSets"][:24]
+        out["histTest"] = ht
     if isinstance(opens, list) and len(opens) > 256:
         out["openCountReported"] = len(opens)
         out["openTruncated"] = True
@@ -1153,7 +1163,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
 
 def _sets_lane(lane: dict, st: dict) -> dict:
     sets = st.get("sets") or {}
-    prog = sets.get("progress") or {}
+    prog = _lane_progress(st)
     return {
         "type": lane["type"],
         "id": lane["id"],
@@ -1164,6 +1174,7 @@ def _sets_lane(lane: dict, st: dict) -> dict:
         "setCount": sets.get("setCount") or 0,
         "ready": bool(sets.get("ready") or prog.get("ready")),
         "histFills": sets.get("histFills") or 0,
+        "processingCount": sets.get("processingCount") or 0,
         "running": bool(st.get("running")),
         "halted": bool(st.get("halted")),
     }
@@ -1621,23 +1632,60 @@ def merge_overall() -> dict:
             continue
         if detail_st.get(k) is not None:
             out[k] = detail_st.get(k)
-    # Unique per-lane progress; overall does not inherit one desk's hist tape.
+    # Unique per-lane progress; overall follows the in-flight desk, not a blank "lanes" bar.
     # Halted Live must not keep Overall in "waiting" while VST is ready.
+    _BUSY = {
+        "queued", "rank", "evaluate", "fetch", "replay", "score", "catalog",
+        "backfill", "gap", "partial", "initial", "incremental", "starting", "hist-test",
+    }
     active_lanes = [l for l in lanes if l.get("running") and not l.get("halted")]
+    busy_lanes = [l for l in active_lanes if str(l.get("progressPhase") or "") in _BUSY]
+
+    def _lane_pct(row: dict):
+        try:
+            val = row.get("progressPct")
+            return float(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    focus = None
+    if busy_lanes:
+        focus = min(
+            busy_lanes,
+            key=lambda row: (_lane_pct(row) is None, _lane_pct(row) if _lane_pct(row) is not None else 0.0),
+        )
+    elif active_lanes:
+        focus = active_lanes[0]
     overall_ready = all(bool(l.get("progressReady")) for l in active_lanes) if active_lanes else False
+    if focus:
+        overall_phase = focus.get("progressPhase") or "ready"
+        overall_pct = _lane_pct(focus)
+        overall_detail = focus.get("progressDetail") or "per-connection"
+        overall_sets_done = focus.get("progressSetsDone")
+        overall_sets_total = focus.get("progressSetsTotal")
+        overall_symbols_done = focus.get("progressSymbolsDone")
+        overall_symbols_total = focus.get("progressSymbolsTotal")
+    else:
+        overall_phase = "lanes"
+        overall_pct = None
+        overall_detail = "per-connection"
+        overall_sets_done = None
+        overall_sets_total = None
+        overall_symbols_done = None
+        overall_symbols_total = None
     out["progress"] = {
         "connection": "overall",
         "connType": "overall",
-        "phase": "lanes",
-        "pct": None,
-        "detail": "per-connection",
+        "phase": overall_phase,
+        "pct": overall_pct,
+        "detail": overall_detail,
         "ready": overall_ready,
         "symbol": "",
         "setId": "",
-        "symbolsDone": None,
-        "symbolsTotal": None,
-        "setsDone": None,
-        "setsTotal": None,
+        "symbolsDone": overall_symbols_done,
+        "symbolsTotal": overall_symbols_total,
+        "setsDone": overall_sets_done,
+        "setsTotal": overall_sets_total,
         "barsDone": None,
         "barsTotal": None,
         "elapsedMs": None,
@@ -1661,6 +1709,62 @@ def merge_overall() -> dict:
         ],
     }
     sets["progress"] = dict(out["progress"])
+    out["progressPhase"] = overall_phase
+    out["progressPct"] = overall_pct
+    out["progressDetail"] = overall_detail
+    out["progressReady"] = overall_ready
+    out["progressSetsDone"] = overall_sets_done
+    out["progressSetsTotal"] = overall_sets_total
+    try:
+        from hist_test import job_progress_view, off_progress_view
+        existing = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
+        if not existing:
+            for st in stats_by_id.values():
+                if not isinstance(st, dict):
+                    continue
+                blob = st.get("histTest") if isinstance(st.get("histTest"), dict) else {}
+                if not blob:
+                    continue
+                if blob.get("enabled") is True or blob.get("ownsCatalog") is True:
+                    existing = blob
+                    break
+                if not existing:
+                    existing = blob
+        off = (
+            not existing
+            or existing.get("enabled") is False
+            or existing.get("ownsCatalog") is False
+            or existing.get("phase") == "off"
+        )
+        if off:
+            if existing and (
+                existing.get("enabled") is False
+                or existing.get("ownsCatalog") is False
+                or existing.get("phase") == "off"
+            ):
+                out["histTest"] = existing
+            else:
+                out["histTest"] = off_progress_view()
+            if isinstance(sets, dict):
+                sets["histTest"] = out["histTest"]
+        elif existing.get("runningSets") is not None or existing.get("internSymbols") is not None:
+            out["histTest"] = existing
+            if isinstance(sets, dict) and not sets.get("histTest"):
+                sets["histTest"] = existing
+        else:
+            view = job_progress_view()
+            view["enabled"] = existing.get("enabled", True)
+            view["ownsCatalog"] = existing.get("ownsCatalog", existing.get("enabled", True))
+            view["catalogSkipped"] = existing.get("catalogSkipped", True)
+            if existing.get("internSymbols"):
+                view["internSymbols"] = existing.get("internSymbols")
+            if existing.get("symbols") and not view.get("symbols"):
+                view["symbols"] = existing.get("symbols")
+            out["histTest"] = view
+            if isinstance(sets, dict) and not sets.get("histTest"):
+                sets["histTest"] = view
+    except Exception:
+        pass
     return slim_for_ui(out)
 
 

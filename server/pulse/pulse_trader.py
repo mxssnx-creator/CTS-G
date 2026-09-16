@@ -1803,17 +1803,39 @@ class Pulse:
             return True
         return False
 
-    def entry_slot_count(self) -> int:
-        """Confirmed and pending lanes share the configured open-slot budget."""
-        pending = set()
+    def effective_group_keys(self) -> set:
+        """Unique (symbol, side) groups occupying the effective-position budget."""
+        keys = set()
+        for pos in self.open.values():
+            symbol = str(getattr(pos, "symbol", "") or "")
+            side = str(getattr(pos, "side", "") or "").upper()
+            if symbol and side:
+                keys.add((symbol, side))
         for cid, row in (getattr(self, "pending_orders", {}) or {}).items():
             if str(row.get("kind") or "entry") != "entry":
                 continue
             if _sf(row.get("requested_qty")) <= _sf(row.get("filled_qty")) + 1e-12:
                 continue
-            if self._position_for_client(cid) is None:
-                pending.add(row.get("group_key") or cid)
-        return len(self.open) + len(pending)
+            if self._position_for_client(cid) is not None:
+                continue
+            symbol = str(row.get("symbol") or "")
+            side = str(row.get("side") or "").upper()
+            if symbol and side:
+                keys.add((symbol, side))
+            else:
+                keys.add(("pending", str(row.get("group_key") or cid)))
+        return keys
+
+    def effective_group_occupied(self, symbol: str, side: str) -> bool:
+        symbol = str(symbol or "")
+        side = str(side or "").upper()
+        if not symbol or not side:
+            return False
+        return (symbol, side) in self.effective_group_keys()
+
+    def entry_slot_count(self) -> int:
+        """Effective-position budget: unique (symbol, side) groups, not intern lots."""
+        return len(self.effective_group_keys())
 
     def entry_queue_state(self, matrix) -> Dict[str, Any]:
         """Count currently signalled config lanes without expanding the matrix.
@@ -2933,6 +2955,9 @@ class Pulse:
         return (not r.get("error")) and r.get("code") in (0, None)
 
     def record_test(self, name: str, passed: bool, detail: str = "") -> None:
+        if not isinstance(detail, str):
+            as_dict = getattr(detail, "as_dict", None)
+            detail = str(as_dict()) if callable(as_dict) else str(detail)
         rec = {"name": name, "pass": passed, "detail": detail[:180], "t": time.time()}
         prev = self.test_map.get(name)
         self.test_map[name] = rec
@@ -5692,11 +5717,12 @@ class Pulse:
             return
         if float(self.available or 0) <= 0:
             return
-        if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0:
-            return
-        if MAX_OPEN > 0 and self.entry_slot_count() >= MAX_OPEN:
-            return
         side = "LONG" if direction > 0 else "SHORT"
+        occupied = self.effective_group_occupied(sym, side)
+        if time.time() - self.last_entry_ts < STAGGER_S and MAX_OPEN > 0 and not occupied:
+            return
+        if MAX_OPEN > 0 and not occupied and self.entry_slot_count() >= MAX_OPEN:
+            return
         pack = "indications" if str(reason).startswith("ind:") else "general"
         lane_set = SimpleNamespace(id=forced_row["id"]) if forced_row is not None else selected_set
         execution_lane = self.execution_lane_key(pack, reason, lane_set, execution_strategy)
@@ -5705,18 +5731,8 @@ class Pulse:
                 and getattr(p, "strategy", "") != "block"
                 for p in self.positions_for(sym, side)):
             return
-        # High-value / preferMinimalRange: one normal/trailing config per
-        # symbol+side+pack. Block/DCA remain extra lanes on the same group.
-        if (
-            normal_allowed
-            and getattr(self.sets, "prefer_minimal_range", False)
-            and any(
-                getattr(p, "pack", "") == pack
-                and str(getattr(p, "strategy", "") or "") != "block"
-                for p in self.positions_for(sym, side)
-            )
-        ):
-            return
+        # preferMinimalRange ranks which config to try first. Independent intern
+        # lots on the same symbol+side stay unlimited; Block/DCA remain extras.
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
                 str(pending.get("kind") or "entry") == "entry"
@@ -7459,11 +7475,20 @@ class Pulse:
             self.sets.cost_source = self.position_cost_source
             if rebuild:
                 try:
-                    self.sets._rebuild_sets()
+                    if not self._hist_test_owns_catalog():
+                        self.sets._rebuild_sets()
                 except Exception:
                     pass
+            allow_ids = None
+            try:
+                if self._hist_test_owns_catalog():
+                    allow_ids = getattr(self.sets, "hist_test_set_ids", None)
+            except Exception:
+                allow_ids = None
             for st in getattr(self.sets, "by_idx", []) or []:
                 st.position_cost_pct = cost
+                if allow_ids is not None and getattr(st, "id", "") not in allow_ids:
+                    continue
                 try:
                     self.sets._score_one(st)
                 except Exception:
@@ -8520,7 +8545,7 @@ class Pulse:
             lane_key = self.block_lane_key(p)
             live_n_by[lane_key] = live_n_by.get(lane_key, 0) + 1
         emitted = 0
-        add_budget = 8 if MAX_OPEN <= 0 else 2
+        add_budget = 32 if MAX_OPEN <= 0 else max(8, min(32, int(MAX_OPEN or 8)))
         seen_parents = set()
         overall = bool(getattr(self, "block_overall", True))
         for pos in list(self.open.values()):
@@ -8900,7 +8925,7 @@ class Pulse:
         if time.time() - getattr(self, "dca_last_emit", 0) < 0.35:
             return
         emitted = 0
-        add_budget = 8 if MAX_OPEN <= 0 else 2
+        add_budget = 32 if MAX_OPEN <= 0 else max(8, min(32, int(MAX_OPEN or 8)))
         for pos in list(self.open.values()):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
@@ -9628,6 +9653,7 @@ class Pulse:
         slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Ratio", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
         candidates: Dict[Tuple[str, int, str], Tuple[float, str, int, str]] = {}
+        intern_scan = self._intern_symbols()
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
             def _ind_allow(kind: str, direction: str = "") -> bool:
                 gate = getattr(self.sets, "indication_ok", None)
@@ -9640,7 +9666,7 @@ class Pulse:
                     return bool(gate(kind))
                 except Exception:
                     return True
-            for s in SYMBOLS:
+            for s in intern_scan:
                 picked_lanes = []
                 try:
                     pick_lanes = getattr(self.indications, "pick_entries", None)
@@ -9666,7 +9692,7 @@ class Pulse:
                     why = f"ind:{pick.kind}:{pick.mode} cfg={pick.entry_key}"
                     candidates[(s, d, why)] = (float(conf), s, d, why)
         if self.strat_general:
-            for s in SYMBOLS:
+            for s in intern_scan:
                 d, why, conf = self.score(s)
                 if d == 0:
                     continue
@@ -9754,11 +9780,16 @@ class Pulse:
             if ranked and (time.time() - self.skip_log.get("gate", 0) > 45):
                 log("COORD soft " + "; ".join(reasons)[:160] + f" intern={intern}", every=45.0, key="coord-pause", quiet=True)
                 self.skip_log["gate"] = time.time()
-        opens = []
+        opens_by_group = {}
         for p in self.open.values():
             px = self.px.get(p.symbol) or p.entry
             u = ((px - p.entry) / p.entry * (1 if p.side == "LONG" else -1)) * 100
-            opens.append({"symbol": p.symbol, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf})
+            row = {"symbol": p.symbol, "side": p.side, "uPnlPct": u, "ageS": time.time() - p.opened_at, "conf": p.conf}
+            key = (p.symbol, p.side)
+            prev = opens_by_group.get(key)
+            if prev is None or (row["uPnlPct"], -row["ageS"], row["conf"]) < (prev["uPnlPct"], -prev["ageS"], prev["conf"]):
+                opens_by_group[key] = row
+        opens = list(opens_by_group.values())
         swap = self.coord.pick_rearrange(opens, ranked, slot_cap)
         if swap:
             from_key = str(swap.get("from") or "")
@@ -9768,7 +9799,7 @@ class Pulse:
             if pos is not None:
                 self.close_pos(pos, self.px.get(pos.symbol) or pos.entry, f"rearr->{swap['to']}")
                 log(f"COORD rearr {from_key} -> {swap['to']} gap={swap['conf']:.2f}")
-        if len(self.open) >= slot_cap:
+        if self.entry_slot_count() >= slot_cap and not intern_any:
             return
         n_l = sum(1 for _, _, d, _ in ranked if d > 0)
         n_s = sum(1 for _, _, d, _ in ranked if d < 0)
@@ -9823,7 +9854,7 @@ class Pulse:
             room = self.avail_notional()
             budget = getattr(getattr(self, "load", None), "last_budget", None)
             level = str(getattr(budget, "level", "normal") or "normal")
-            default_burst = 32 if MAX_OPEN <= 0 else 6  # unlimited: no order-count cap
+            default_burst = 32  # intern lots are independent of the effective-position cap
             burst_by_level = {"normal": default_burst, "busy": 16, "overload": 8, "critical": 4}
             burst = burst_by_level.get(level, default_burst)
             if budget is not None:
@@ -9833,7 +9864,9 @@ class Pulse:
                     pass
             if room < 8:
                 burst = 1
-            if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
+            if placed >= burst:
+                break
+            if slot_cap > 0 and self.entry_slot_count() >= slot_cap and not intern_any:
                 break
         self._entry_queue = self.entry_queue_state(matrix)
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
@@ -11219,12 +11252,63 @@ class Pulse:
         if getattr(self, "_sets_overview", None) is not None:
             sets_snap["overview"] = self._sets_overview
         historic_snap = dict(getattr(self, "_hist_status", {}) or {})
+        hist_test_snap: Dict[str, Any] = {}
+        hist_test_owns = False
+        try:
+            hist_test_owns = bool(self._hist_test_owns_catalog())
+        except Exception:
+            hist_test_owns = False
+        if hist_test_owns:
+            try:
+                hist_test_snap = dict(hist_test_mod.job_progress_view() or {})
+            except Exception:
+                hist_test_snap = {}
+            hist_test_snap["enabled"] = True
+            hist_test_snap["ownsCatalog"] = True
+            hist_test_snap["catalogSkipped"] = True
+            try:
+                intern_syms = self._intern_symbols()
+                hist_test_snap["internSymbols"] = intern_syms[:50]
+                if not hist_test_snap.get("symbols"):
+                    hist_test_snap["symbols"] = intern_syms[:50]
+                elif isinstance(hist_test_snap.get("symbols"), list):
+                    hist_test_snap["symbols"] = hist_test_snap["symbols"][:50]
+            except Exception:
+                pass
+        else:
+            try:
+                hist_test_snap = dict(hist_test_mod.off_progress_view())
+            except Exception:
+                hist_test_snap = {
+                    "enabled": False,
+                    "ownsCatalog": False,
+                    "catalogSkipped": False,
+                    "runningSets": [],
+                    "symbols": [],
+                    "internSymbols": [],
+                    "validatedCount": 0,
+                    "processedSetCount": 0,
+                    "processingCount": 0,
+                    "detail": "Test Historic off · full catalog in play",
+                    "phase": "off",
+                    "pct": 0,
+                    "ready": False,
+                    "running": False,
+                    "paused": False,
+                }
         prog = (sets_snap.get("progress") or {}) if isinstance(sets_snap, dict) else {}
         hist_phase = str(historic_snap.get("phase") or "")
         prog_phase = str(prog.get("phase") or "")
         phase = hist_phase if hist_phase and hist_phase not in ("idle",) else (prog_phase or hist_phase or "idle")
         if hist_phase in ("backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial") and prog_phase in ("idle", "ready", ""):
             phase = hist_phase
+        if hist_test_snap.get("running"):
+            phase = str(hist_test_snap.get("phase") or phase)
+            if hist_test_snap.get("pct") is not None:
+                historic_snap = dict(historic_snap)
+                historic_snap["pct"] = hist_test_snap.get("pct")
+            if hist_test_snap.get("detail"):
+                historic_snap["detail"] = hist_test_snap.get("detail")
         pct_raw = historic_snap.get("pct") if historic_snap.get("pct") is not None else prog.get("pct")
         try:
             pct_val = round(float(pct_raw or 0), 1)
@@ -11464,6 +11548,7 @@ class Pulse:
             "pulse": pulse_view,
             "coord": coord_snap,
             "historic": historic_snap,
+            "histTest": hist_test_snap,
             "progressPct": pct_val,
             "progressPhase": phase,
             "progressDetail": detail,
@@ -13494,6 +13579,68 @@ class Pulse:
         ov = getattr(self, "overlay", None) or {}
         return ov.get("histTestEnabled", True) is not False
 
+    def _intern_symbols(self) -> List[str]:
+        """When Test Historic owns the catalog, intern only validated + open symbols."""
+        now = time.monotonic()
+        cached = getattr(self, "_intern_scan_cache", None)
+        ts = float(getattr(self, "_intern_scan_at", 0) or 0)
+        if cached is not None and (now - ts) < 2.0:
+            return list(cached)
+        if not self._hist_test_owns_catalog():
+            out = list(SYMBOLS)
+            self._intern_scan_cache = out
+            self._intern_scan_at = now
+            return list(out)
+        names: List[str] = []
+        seen: set[str] = set()
+
+        def add(raw: Any) -> None:
+            name = str(raw or "").strip()
+            if not name or name in ("*", "ALL", "UNLIMITED"):
+                return
+            key = name.upper()
+            if key in seen or ":" in name:
+                return
+            seen.add(key)
+            names.append(name)
+
+        try:
+            job = hist_test_mod.read_job()
+            for s in hist_test_mod.validated_symbols(job):
+                add(s)
+        except Exception:
+            pass
+        opens = getattr(self, "open", None) or {}
+        rows = opens.values() if isinstance(opens, dict) else opens
+        for row in rows or []:
+            try:
+                add(getattr(row, "symbol", None) or (row.get("symbol") if isinstance(row, dict) else None))
+            except Exception:
+                continue
+        if not names:
+            self._intern_scan_cache = []
+            self._intern_scan_at = now
+            return []
+        order = {str(s).upper(): s for s in SYMBOLS}
+        out: List[str] = []
+        used: set[str] = set()
+        for s in SYMBOLS:
+            key = str(s).upper()
+            if key in seen and key not in used:
+                used.add(key)
+                out.append(s)
+        for s in names:
+            key = str(s).upper()
+            if key not in used:
+                used.add(key)
+                out.append(order.get(key, s))
+        cap = int(getattr(self, "symbol_cap", 0) or 0) or 50
+        if cap > 0 and len(out) > cap:
+            out = out[:cap]
+        self._intern_scan_cache = out
+        self._intern_scan_at = now
+        return list(out)
+
     def _sync_hist_test_lane(self) -> None:
         """Test Historic owns catalog calcs. Engine skips full-universe eval/progress."""
         job: Dict[str, Any] = {}
@@ -13502,6 +13649,19 @@ class Pulse:
         except Exception:
             job = {}
         ids = hist_test_mod.validated_set_ids(job)
+        try:
+            view = hist_test_mod.job_progress_view(job)
+        except Exception:
+            view = {
+                "phase": "hist-test" if not ids else "ready",
+                "pct": 100.0 if ids else float(job.get("pct") or 0),
+                "ready": bool(ids),
+                "running": False,
+                "detail": f"Test Historic · {len(ids)} validated configs · skip full catalog",
+                "setsDone": len(ids),
+                "setsTotal": max(len(ids), 1 if ids else 0),
+                "histFills": 0,
+            }
         with self.state_guard():
             book = self.sets
             try:
@@ -13510,21 +13670,18 @@ class Pulse:
                 apply = getattr(book, "apply_hist_test_gate", None)
                 if callable(apply):
                     apply(ids)
-            ready = bool(job.get("ready") or str(job.get("phase") or "") == "ready" or ids)
-            book.progress.phase = "hist-test" if not ready else "ready"
-            book.progress.ready = True
-            book.progress.coordination_complete = ready
-            book.progress.pct = 100.0 if ready else float(job.get("pct") or 0)
-            n_ids = len(ids)
-            refresh_h = int(job.get("refreshHours") or (self.overlay or {}).get("histTestRefreshHours") or 2)
-            if ready:
-                book.progress.detail = (
-                    f"Test Historic · {n_ids} validated configs · skip full catalog · refresh {refresh_h}h"
-                )
-            else:
-                book.progress.detail = (
-                    f"Test Historic owns calcs · waiting validated configs · skip full catalog"
-                )
+            book.progress.phase = str(view.get("phase") or "hist-test")
+            book.progress.ready = True if ids else bool(view.get("ready"))
+            book.progress.coordination_complete = not bool(view.get("running"))
+            try:
+                book.progress.pct = float(view.get("pct") or 0)
+            except (TypeError, ValueError):
+                book.progress.pct = 0.0
+            book.progress.sets_total = int(view.get("setsTotal") or (len(ids) if ids else 0))
+            book.progress.sets_done = int(view.get("setsDone") or len(ids))
+            book.progress.detail = str(view.get("detail") or "")
+            if view.get("symbol"):
+                book.progress.symbol = str(view.get("symbol") or "")
             if job.get("nextRunAt"):
                 book.progress.next_run_at = float(job.get("nextRunAt") or 0)
         try:
@@ -13588,14 +13745,22 @@ class Pulse:
                 except Exception:
                     pass
             try:
-                book.progress.sets_total = max(int(book.progress.sets_total or 0), len(allow))
-                book.progress.sets_done = len(states)
+                view = hist_test_mod.job_progress_view(job)
+                book.progress.sets_total = int(view.get("setsTotal") or len(allow) or 1)
+                book.progress.sets_done = int(view.get("setsDone") or len(states))
                 n_active = sum(1 for st in states if getattr(st, "active", False))
-                book.progress.detail = (
-                    f"Test Historic · {len(allow)} validated · {n_active} active · skip full catalog"
+                book.progress.phase = str(view.get("phase") or book.progress.phase)
+                book.progress.pct = float(view.get("pct") if view.get("pct") is not None else book.progress.pct or 0)
+                book.progress.detail = str(
+                    view.get("detail")
+                    or f"Test Historic · {len(allow)} validated · {n_active} active · skip full catalog"
                 )
             except Exception:
-                pass
+                try:
+                    book.progress.sets_total = max(len(allow), 1)
+                    book.progress.sets_done = len(states)
+                except Exception:
+                    pass
         try:
             self._hist_write_status(self.sets)
         except Exception:

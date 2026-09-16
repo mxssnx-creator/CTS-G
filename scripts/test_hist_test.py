@@ -20,6 +20,7 @@ class HistTestContract(unittest.TestCase):
     def setUp(self):
         ht.clear_stop()
         ht.clear_pause()
+        ht.invalidate_job_cache()
 
     def tearDown(self):
         ht.clear_stop()
@@ -318,6 +319,15 @@ class HistTestContract(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(seen, ["WIN1", "WIN2"])
                 ht.clear_stop()
+
+    def test_validated_symbols_cap_and_off_view(self):
+        names = [f"S{i}-USDT" for i in range(80)]
+        self.assertEqual(ht.validated_symbols({"positive": names}), names[: ht.SYMBOL_CAP])
+        off = ht.off_progress_view()
+        self.assertEqual(off["phase"], "off")
+        self.assertFalse(off["enabled"])
+        self.assertEqual(off["runningSets"], [])
+        self.assertEqual(off["internSymbols"], [])
 
 
 if __name__ == "__main__":

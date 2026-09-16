@@ -206,6 +206,23 @@ class CompactHistRow(Mapping):
     def __len__(self) -> int:
         return len(self._BASE_KEYS) + (len(self._extra) if self._extra else 0)
 
+    def __contains__(self, key: object) -> bool:
+        if key in self._BASE_KEYS:
+            return True
+        return bool(self._extra is not None and key in self._extra)
+
+    def as_dict(self) -> Dict[str, Any]:
+        out = {key: getattr(self, key) for key in self._BASE_KEYS}
+        if self._extra:
+            out.update(self._extra)
+        return out
+
+    def __str__(self) -> str:
+        return str(self.as_dict())
+
+    def __repr__(self) -> str:
+        return f"CompactHistRow({self.as_dict()!r})"
+
     def get(self, key: str, default: Any = None) -> Any:
         try:
             return self[key]
@@ -282,7 +299,7 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
         ind_kind=str(row.get("ind_kind") or ""),
     )
     # Catalog identity already lives on the Set. Keep only scoring metadata.
-    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count", "set_id", "pack", "strategy"):
+    for key in ("tp_pct", "sl_ratio", "step", "axis_key", "ind_config", "trail_key", "block_count"):
         value = row.get(key) if hasattr(row, "get") else None
         if value not in (None, ""):
             compact[key] = value
@@ -5482,11 +5499,30 @@ class SetBook:
                 }
                 for st in self.by_idx[:48]
             ]
+        hist_ids = getattr(self, "hist_test_set_ids", None)
+        processing_rows = []
+        for st in self.by_idx:
+            hist_proc = bool(hist_ids and st.id in hist_ids and st.active)
+            if not (st.processing_active or hist_proc):
+                continue
+            processing_rows.append({
+                "id": st.id,
+                "processingActive": True,
+                "evaluating": hist_proc,
+                "processingReason": st.processing_reason or ("hist-test validated" if hist_proc else ""),
+                "baseQualified": bool((st.stage_ledger or {}).get("base")),
+            })
+            if len(processing_rows) >= 48:
+                break
+        def _hist_n(st: Any) -> int:
+            return max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
+        if hist_ids:
+            hist_fills = sum(_hist_n(st) for st in self.sets.values() if st.id in hist_ids)
+        else:
+            hist_fills = sum(_hist_n(st) for st in self.sets.values())
         out = {
             "enabled": self.enabled,
-            "processingRows": [{"id": st.id, "processingActive": True,
-                                "processingReason": st.processing_reason, "baseQualified": bool(st.stage_ledger.get("base"))}
-                               for st in self.by_idx if st.processing_active],
+            "processingRows": processing_rows,
             "ready": p.ready,
             "entrySelectionPolicy": self.entry_policy,
             "entryPolicy": self.entry_policy,
@@ -5523,8 +5559,8 @@ class SetBook:
             "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
-            "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
-            "processingSetIds": self.processing_set_ids()[:350],
+            "processingCount": max(len(getattr(self, "_processing_set_ids", set()) or set()), len(processing_rows)),
+            "processingSetIds": (list(dict.fromkeys([row["id"] for row in processing_rows] + self.processing_set_ids())))[:350],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),
@@ -5555,7 +5591,7 @@ class SetBook:
             "stepAdapt": self.step_adapt,
             "steps": list(self.steps),
             "trailEnabled": bool(getattr(self, "trail_enabled", True)),
-            "histFills": sum(s.n for s in self.sets.values()),
+            "histFills": hist_fills,
             "barsSymbols": len(self.bars),
             "progress": {
                 "phase": p.phase,

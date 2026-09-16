@@ -37,7 +37,7 @@ import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } 
 import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
-import { HistTestControls } from "@/components/hist-test-controls";
+import { HistTestControls, HistTestStatus } from "@/components/hist-test-controls";
 import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
@@ -58,7 +58,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -607,7 +607,7 @@ function SettingsPage() {
                                   : id === "overview"
                                     ? "Overview"
                                     : id === "historic"
-                                      ? "Test Historic · ON"
+                                      ? (overlay.histTestEnabled !== false ? "Test Historic · ON" : "Test Historic · OFF")
                                     : id === "presets"
                                       ? "Presets · calc"
                                     : id === "connection"
@@ -639,17 +639,17 @@ function SettingsPage() {
               <div data-testid="capacity-caps" className="rounded-lg border border-border bg-bg2 p-3">
                 <div>
                   <p className="font-mono text-xs uppercase text-muted">Capacity caps</p>
-                  <p className="mt-1 text-sm text-muted">Set the live order ceiling and ranked symbol book without leaving the first settings page.</p>
+                  <p className="mt-1 text-sm text-muted">Set the effective-position ceiling (symbol × side) and ranked symbol book. Independent intern, Block, DCA and control orders are unlimited.</p>
                 </div>
                 <div className="mt-3">
                   <Grid>
                     <Num
-                      label="Logical-position cap"
+                      label="Effective-position cap"
                       value={overlay.maxOpen}
                       min={0}
                       max={10000}
                       step={1}
-                      hint="0 = unlimited logical positions · margin, API and exchange limits still apply"
+                      hint="Default 100 unique symbol×side groups. Independent intern orders are unlimited. 0 = unlimited groups · margin, API and exchange limits still apply"
                       onChange={(v) => patch("maxOpen", Math.round(v))}
                     />
                     <Num
@@ -665,7 +665,7 @@ function SettingsPage() {
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
                     <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
-                    <Toggle label="Overall SL/TP by symbol and direction" hint="Shared exchange protection; each Set keeps its own targets and fills." on={overlay.controlOrdersOverall} onChange={(v) => patch("controlOrdersOverall", v)} />
+                    <Toggle label="Overall SL/TP by symbol and direction" hint="Shared exchange protection using the widest member SL/TP; each Set keeps its own targets and fills." on={overlay.controlOrdersOverall} onChange={(v) => patch("controlOrdersOverall", v)} />
                   </Grid>
                 </div>
               </div>
@@ -2317,7 +2317,7 @@ function SettingsPage() {
           )}
 
           {section === "controls" && (
-            <Card title="Control orders" hint="Shared quantity-matched SL/TP by symbol and direction · independent Set targets and fills">
+            <Card title="Control orders" hint="Shared quantity-matched SL/TP by symbol and direction using the widest member range · independent Set lots and fills">
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
@@ -2326,7 +2326,7 @@ function SettingsPage() {
                 />
                 <Toggle
                   label="Overall SL/TP by symbol and direction"
-                  hint="ON = shared protection for the own total quantity; individual Set targets and fills stay separate"
+                  hint="ON = one shared pair per symbol and direction at the widest member SL/TP; individual Set lots, targets and fills stay separate"
                   on={overlay.controlOrdersOverall}
                   onChange={(v) => patch("controlOrdersOverall", v)}
                 />
@@ -2343,7 +2343,7 @@ function SettingsPage() {
               <ControlsLive stats={stats} />
               <p className="text-sm text-muted">
                 {overlay.controlOrdersOverall
-                  ? "One exchange SL/TP pair protects the total own quantity for each symbol and direction. The system manages each Set’s targets and trailing separately and allocates confirmed partial fills to the bound positions."
+                  ? "One exchange SL/TP pair protects the total own quantity for each symbol and direction. The pair uses the widest member range (LONG: lowest SL and highest TP; SHORT: highest SL and lowest TP). Each Set keeps its own lots, targets, trailing and confirmed fills."
                   : "Each independent configuration has its own quantity-matched exchange SL/TP pair."}
               </p>
             </Card>
@@ -2391,7 +2391,7 @@ function SettingsPage() {
           {section === "pulse" && (
             <Card title="Pulse overlay" hint="Always max leverage per contract. Order qty is raised to exchange min lot / min USDT if the target is smaller.">
               <Grid>
-                <Num label="Max open" value={overlay.maxOpen} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxOpen", v)} />
+                <Num label="Effective positions" value={overlay.maxOpen} min={0} max={10000} step={1} hint="Default 100 unique symbol×side groups. Independent intern orders are unlimited. 0 = unlimited groups" onChange={(v) => patch("maxOpen", v)} />
                 <Num label="Max per group" value={overlay.maxPerGroup} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxPerGroup", v)} />
                 <Num label="Cycle s" value={overlay.scanS} min={0.2} max={8} step={0.05} onChange={(v) => patch("scanS", v)} />
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
@@ -2430,7 +2430,7 @@ function SettingsPage() {
               </p>
               <div className="mt-3">
                 <Grid>
-                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint="Default 25. 0 = unlimited. Live scan and historic calc use only this many ranked names." onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
+                  <Num label="Dynamic cap" value={overlay.symbolCap} min={0} max={10000} step={1} hint={`Default ${DEFAULT_SYMBOL_COUNT}. 0 = unlimited. Live scan and historic calc use only this many ranked names.`} onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))} />
                 </Grid>
               </div>
               <div className="mt-3">
@@ -2657,6 +2657,17 @@ function TestHistoricCard({
           hint="default ON · engine skips full-catalog calcs; only validated Test Historic configs"
           onChange={(v) => patch("histTestEnabled", v)}
         />
+        <HistTestStatus
+          histTest={
+            histTestJob
+              ? {
+                  ...(histTestJob as HistTestLive),
+                  symbols: histTestJob.internSymbols || histTestJob.symbols || histTestJob.positive,
+                }
+              : null
+          }
+          enabled={enabled}
+        />
         <p className="text-sm text-muted">
           Replay the step book on a {overlay.histTestHours}h tape. Symbols are evaluated in rank order until {histTestTarget} clear min PF {overlay.histTestMinPf.toFixed(2)}.
         </p>
@@ -2702,6 +2713,7 @@ function TestHistoricCard({
           hours={overlay.histTestHours}
           minPf={overlay.histTestMinPf}
           onControl={onControl}
+          testId="hist-test-start-settings"
         >
           {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
             <button
@@ -3338,7 +3350,7 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
         <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controlPairs)} SL+TP pairs`} />
-        <AppliedKV label="Logical cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
+        <AppliedKV label="Effective cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
         <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
         <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
         <AppliedKV label="Live ranges" value={controlRanges} />

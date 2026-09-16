@@ -3,11 +3,14 @@ import { useState, type ReactNode } from "react";
 import {
   HIST_TEST_HOURS_DEFAULT,
   HIST_TEST_MIN_PF,
+  histTestIsEnabled,
   histTestIsPaused,
   histTestIsRunning,
+  histTestOverviewLine,
   histTestStartLabel,
   histTestStatusLine,
   type HistTestJob,
+  type HistTestLive,
 } from "@/lib/hist-test";
 
 export function HistTestControls({
@@ -17,6 +20,7 @@ export function HistTestControls({
   minPf = HIST_TEST_MIN_PF,
   onControl,
   children,
+  testId = "hist-test-start",
 }: {
   job: HistTestJob | null;
   enabled?: boolean;
@@ -24,6 +28,7 @@ export function HistTestControls({
   minPf?: number;
   onControl: (action: "start" | "stop" | "pause" | "resume") => Promise<void>;
   children?: ReactNode;
+  testId?: string;
 }) {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const paused = histTestIsPaused(job);
@@ -47,7 +52,7 @@ export function HistTestControls({
         <div className="flex rounded-radius border border-border bg-surface p-1" data-testid="hist-test-controls">
           <button
             type="button"
-            data-testid="hist-test-start"
+            data-testid={testId}
             aria-label={paused ? "Resume historic test" : "Start historic test"}
             disabled={Boolean(busy[startAction]) || (startAction === "start" && !enabled)}
             onClick={() => void run(startAction)}
@@ -91,6 +96,33 @@ export function HistTestControls({
             }}
           />
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function HistTestStatus({
+  histTest,
+  enabled,
+  compact = false,
+}: {
+  histTest?: HistTestLive | null;
+  enabled?: boolean;
+  compact?: boolean;
+}) {
+  const on = enabled ?? histTestIsEnabled(histTest);
+  const blob = histTest || (on ? { enabled: true, phase: "ready" } : { enabled: false, phase: "off" });
+  const line = on
+    ? histTestOverviewLine({ ...blob, enabled: true })
+    : histTestOverviewLine({ ...blob, enabled: false, phase: "off" });
+  const sets = on ? (histTest?.runningSets || []).slice(0, compact ? 4 : 12) : [];
+  return (
+    <div className={compact ? "font-mono text-[11px] text-muted" : "space-y-1 font-mono text-xs"} data-testid="hist-test-live-status">
+      <p className={on ? "text-primary" : "text-muted"}>{line}</p>
+      {!compact && sets.length ? (
+        <p className="text-muted" data-testid="hist-test-running-sets">
+          running {sets.map((s) => s.id).filter(Boolean).join(" · ")}
+        </p>
       ) : null}
     </div>
   );

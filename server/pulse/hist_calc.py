@@ -52,7 +52,7 @@ from validation_policy import control_min_trades
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
-DEFAULT_SYMBOL_CAP = 0
+DEFAULT_SYMBOL_CAP = 50
 DEFAULT_SYMBOLS = [
     "SOL-USDT",
     "XRP-USDT",
@@ -2964,7 +2964,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("opt-trailing-default-on", parse_options({})["trailing"] is True)
     rec("opt-all-symbols-default-on", parse_options({})["allSymbols"] is True)
     rec("opt-all-symbols-on", parse_options({"allSymbols": True})["allSymbols"] is True)
-    rec("symbol-cap-default-unlimited", configured_symbol_cap({}) == 0)
+    rec("symbol-cap-default-ranked", configured_symbol_cap({}) == 50)
     rec("symbol-cap-explicit-unlimited", configured_symbol_cap({"symbolCap": 0}) == 0)
     rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})

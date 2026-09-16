@@ -27,15 +27,13 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
     result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
-                  maxOpen=0, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
-                  # VST keeps a deliberate 20-symbol execution universe for
-                  # stable high-count processing; Set, position and order
-                  # counts remain unlimited. The wildcard still selects the
-                  # exchange universe before the ranked test cap.
-                  # X02 intentionally scans the ranked top-20 book.  The
-                  # wildcard selects the exchange universe before the cap;
-                  # it must not be mistaken for an unlimited live universe.
-                  symbolsAll=True, symbolsDynamic=True, symbolCap=20,
+                  maxOpen=100, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
+                  # Ranked 50-symbol book. maxOpen=100 is the effective-position
+                  # cap (symbol × LONG/SHORT). Independent intern, Block, DCA
+                  # and control lots on an occupied group are unlimited.
+                  # The wildcard still selects the exchange universe before
+                  # the ranked cap; it is not an unlimited live universe.
+                  symbolsAll=True, symbolsDynamic=True, symbolCap=50,
                   maxRealSets=0, strategyLiveSetsCeiling=0,
                   strategyRealSetsSafetyCeiling=0,
                   axisPrevEnabled=False, axisLastEnabled=False,

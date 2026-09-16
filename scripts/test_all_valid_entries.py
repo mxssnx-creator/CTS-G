@@ -47,6 +47,18 @@ class Exchange:
 
 
 class AllValidEntries(unittest.TestCase):
+    def _real_qualify(self, state, side='LONG', pf=1.8, n=12):
+        blob = dict(active=True, last15_n=n, last15_ratio=pf, last25_avg_r=0.002,
+                    base_n=n, base_pf=pf, main_n=n, main_pf=pf, real_n=n, real_pf=pf,
+                    ddOk=True, max_dd_s=0, net_avg=0.002, expectancy=0.002)
+        state.active = True
+        state.last15_n = n
+        state.last15_ratio = pf
+        state.expectancy = 0.002
+        state.by_side = dict(state.by_side or {})
+        state.by_side[side] = blob
+        return state
+
     def test_250_sets_open_500_independent_normal_and_block_orders_with_exact_volume(self):
         from block_engine import BlockBook
         p=self.pulse(self.book(250))
@@ -56,7 +68,7 @@ class AllValidEntries(unittest.TestCase):
         p._coord_add_state=lambda **k:(True,6,1.8,[])
         p._block_reference_anchors={}
         for st in p.sets.by_idx:
-            st.last15_ratio=1.8
+            self._real_qualify(st, pf=1.8)
             lane=pt.stable_key('general',st.id,'general')
             p._block_reference_anchors[('X-USDT','LONG','block-active:'+lane)]=dict(at=pt.time.time()-60,seen=pt.time.time(),price=99.5,direction=1)
             p.place('X-USDT',1,'trend',.9,selected_set=st)
@@ -115,7 +127,7 @@ class AllValidEntries(unittest.TestCase):
                 p.live_recent_pf = lambda *a, **k: None
                 p._coord_add_state = lambda **k: (True, 6, 1.8, [])
                 st = p.sets.by_idx[0]
-                st.last15_ratio = 1.8
+                self._real_qualify(st, pf=1.8)
                 lane = pt.stable_key('general', st.id, 'general')
                 p._block_reference_anchors = {('X-USDT','LONG','block-active:'+lane):
                     dict(at=pt.time.time()-60, seen=pt.time.time(), price=99.5, direction=1)}
@@ -258,6 +270,7 @@ class AllValidEntries(unittest.TestCase):
         book = SetBook()
         book.min_samples = 8  # Explicit small fixture; production defaults require 30.
         book.max_active = 0
+        book.strict_gate = False
         book.progress.ready = True
         book.sets, book.by_idx = {}, []
         for index in range(count):
@@ -332,7 +345,7 @@ class AllValidEntries(unittest.TestCase):
         book.by_idx[3].active = True
         base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
         entry_ids = {state.id for state in book.entry_sets('general', 'LONG')}
-        self.assertEqual(entry_ids, {book.by_idx[0].id, trailing.id})
+        self.assertEqual(entry_ids, {book.by_idx[0].id, trailing.id, book.by_idx[3].id})
         self.assertNotEqual(entry_ids, base_ids)
         self.assertIn(trailing.id, entry_ids)
         # The broader catalogue API remains intentionally unchanged for
@@ -478,7 +491,10 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual(set(actual), expected)
 
     def test_scheduler_opens_250_independent_orders_on_one_symbol_and_range(self):
-        p = self.pulse(self.book(250))
+        book = self.book(250)
+        book.prefer_minimal_range = False
+        book.strict_gate = False
+        p = self.pulse(book)
         with patch.object(pt, 'SYMBOLS', ['X-USDT']):
             for _ in range(50):
                 p.maybe_entries()
@@ -509,13 +525,45 @@ class AllValidEntries(unittest.TestCase):
             p.place('X-USDT', 1, 'gen:trend', .9, selected_set=state)
         self.assertEqual(len(p.open), 2)
         self.assertEqual(len(p.pending_orders), 2)
-        self.assertEqual(p.entry_slot_count(), 2)
+        self.assertEqual(p.entry_slot_count(), 1)
         self.assertGreater(p.pending_entry_margin(), 0)
         p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
         self.assertEqual(len(p.api.posts), 2)
         with patch.object(pt, 'MAX_OPEN', 2):
             p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[2])
-        self.assertEqual(len(p.api.posts), 2)
+        self.assertEqual(len(p.api.posts), 3)
+
+    def test_intern_orders_unlimited_when_effective_cap_is_100(self):
+        book = self.book(80)
+        book.prefer_minimal_range = False
+        book.strict_gate = False
+        p = self.pulse(book)
+        with patch.object(pt, 'MAX_OPEN', 100), patch.object(pt, 'SYMBOLS', ['X-USDT']):
+            for _ in range(50):
+                p.maybe_entries()
+                if len(p.open) == 80:
+                    break
+        self.assertEqual(p.errors, 0, p.last_error)
+        self.assertEqual(len(p.open), 80)
+        self.assertEqual(p.entry_slot_count(), 1)
+        self.assertEqual(len({pos.set_id for pos in p.open.values()}), 80)
+
+    def test_new_effective_group_blocked_at_max_open(self):
+        p = self.pulse(self.book(4))
+        p.px['Y-USDT'] = 100.
+        p.contracts['Y-USDT'] = pt.Contract('Y-USDT', .001, .001, 3, 2, 1., 100)
+        with patch.object(pt, 'MAX_OPEN', 1):
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+            self.assertEqual(len(p.open), 1)
+            self.assertEqual(p.entry_slot_count(), 1)
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[1])
+            self.assertEqual(len(p.open), 2)
+            self.assertEqual(p.entry_slot_count(), 1)
+            p.place('Y-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[2])
+            self.assertEqual(len(p.open), 2)
+            p.place('X-USDT', -1, 'gen:trend', .9, selected_set=p.sets.by_idx[3])
+            self.assertEqual(len(p.open), 2)
+            self.assertEqual(p.entry_slot_count(), 1)
 
     def test_all_indication_and_general_candidates_keep_their_own_orders(self):
         b = self.book(2)
@@ -530,9 +578,9 @@ class AllValidEntries(unittest.TestCase):
             for _ in range(5):
                 p.maybe_entries()
         self.assertEqual(p.errors, 0, p.last_error)
-        self.assertEqual(len(p.open), 4)
-        self.assertEqual(sum(pos.pack == 'general' for pos in p.open.values()), 1)
-        self.assertEqual(sum(pos.side == 'SHORT' for pos in p.open.values()), 1)
+        self.assertEqual(len(p.open), 5)
+        self.assertEqual(sum(pos.pack == 'general' for pos in p.open.values()), 2)
+        self.assertEqual(sum(pos.side == 'SHORT' for pos in p.open.values()), 2)
         self.assertEqual(len({pos.execution_lane for pos in p.open.values()}), 4)
         from stats_report import occupancy
         positions=list(p.open.values())

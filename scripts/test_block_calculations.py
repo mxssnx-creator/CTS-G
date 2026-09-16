@@ -546,6 +546,45 @@ class BlockCalculationTests(unittest.TestCase):
         ]
         self.assertEqual(p.block_overall_real_pf("BCH-USDT", "SHORT"), 0.0)
 
+    def test_block_main_covers_every_indication_kind_set_and_overall(self):
+        """Block Real last-N is independent per indication, Set, and Overall."""
+        from set_engine import SetBook, hist_fill
+        kinds = ["direction", "move", "active", "signals", "trend", "break", "common", "state"]
+        book = SetBook()
+        book.block_eval_pos = 50
+        book.real_min_pf = POSITIVE_PF
+        tape = []
+        for kind in kinds:
+            sid = f"indications:{kind}:sl0.6:st8"
+            for i in range(50):
+                row = hist_fill(1000 + i, "SOL-USDT", 1, 0.02, 60, "block:tp", ind_kind=kind)
+                row.update(strategy="block", block_count=1, set_id=sid)
+                tape.append(row)
+        losers = []
+        for i in range(50):
+            row = hist_fill(5000 + i, "SOL-USDT", 1, -0.03, 60, "block:tp", ind_kind="signals")
+            row.update(strategy="block", block_count=1, set_id="indications:signals:sl0.6:st8")
+            losers.append(row)
+        book.strategy_hist = {"block": tape + losers}
+        book.score_block_main()
+        self.assertFalse(book.block_main_live_ok(1, indication="signals", set_id="indications:signals:sl0.6:st8"))
+        for kind in kinds:
+            if kind == "signals":
+                continue
+            sid = f"indications:{kind}:sl0.6:st8"
+            self.assertTrue(book.block_main_live_ok(1, indication=kind, set_id=sid), kind)
+            blob = (book.block_main_eval or {}).get((1, kind, sid))
+            self.assertIsNotNone(blob, kind)
+            self.assertEqual((blob or {}).get("scope"), "set")
+            self.assertEqual((blob or {}).get("stage"), "real")
+            kind_blob = (book.block_main_eval or {}).get((1, kind, ""))
+            self.assertEqual((kind_blob or {}).get("scope"), "indication")
+        overall = (book.block_main_eval or {}).get((1, "", ""))
+        self.assertEqual((overall or {}).get("scope"), "overall")
+        self.assertIn("realOverall", overall or {})
+        self.assertTrue(book.block_main_live_ok(2, indication="direction"))
+        self.assertTrue(book.block_main_live_ok(3))
+
 
 if __name__ == "__main__":
     unittest.main()
