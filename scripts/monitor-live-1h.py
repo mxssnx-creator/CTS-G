@@ -172,6 +172,17 @@ def disable_forbidden() -> None:
     req("POST", "/api/trade-engine/quick-start", {"action": "disable", "connectionId": FORBIDDEN})
 
 
+def as_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("data", "open", "positions", "orders", "rows"):
+            rows = value.get(key)
+            if isinstance(rows, list):
+                return rows
+    return []
+
+
 def pulse_lane(conn: str) -> dict:
     st, body = req("GET", f"/live-stats.json?conn={conn}", timeout=12, base=PULSE)
     if st != 200 or not isinstance(body, dict):
@@ -180,21 +191,36 @@ def pulse_lane(conn: str) -> dict:
         return {"http": st, "detail": str(body)[:180]}
     ht = body.get("histTest") if isinstance(body.get("histTest"), dict) else {}
     sets = body.get("sets") if isinstance(body.get("sets"), dict) else {}
+    opens = as_list(body.get("open"))
+    protected = sum(
+        1
+        for row in opens
+        if isinstance(row, dict)
+        and (row.get("sl") or row.get("stopLoss") or row.get("stopLossPrice"))
+        and (row.get("tp") or row.get("takeProfit") or row.get("takeProfitPrice"))
+    )
     return {
         "http": st,
         "running": body.get("running"),
-        "openCount": body.get("openCount"),
         "mode": body.get("mode"),
+        "halted": body.get("halted"),
+        "openCount": body.get("openCount") if body.get("openCount") is not None else len(opens),
+        "liveOrderCount": body.get("liveOrderCount"),
+        "livePositionCount": body.get("livePositionCount"),
+        "exchangeOpenCount": body.get("exchangeOpenCount"),
+        "protectedCount": protected,
         "symbolCount": body.get("symbolCount") or (len(body.get("symbols") or []) if isinstance(body.get("symbols"), list) else None),
-        "validatedCount": sets.get("validatedCount"),
+        "validatedCount": ht.get("validatedCount") if ht.get("validatedCount") is not None else sets.get("validatedCount"),
         "activeCount": sets.get("activeCount"),
-        "processingCount": sets.get("processingCount"),
+        "processingCount": sets.get("processingCount") if sets.get("processingCount") is not None else ht.get("processingCount"),
         "histTestEnabled": ht.get("enabled"),
         "histTestPhase": ht.get("phase"),
         "histTestSets": len(ht.get("runningSets") or []),
         "internSymbols": len(ht.get("internSymbols") or ht.get("symbols") or []),
         "detail": str(ht.get("detail") or body.get("progressDetail") or "")[:160],
-        "rssMb": ((body.get("system") or {}) if isinstance(body.get("system"), dict) else {}).get("rssMb"),
+        "rssMb": body.get("rssMb") or ((body.get("system") or {}) if isinstance(body.get("system"), dict) else {}).get("rssMb"),
+        "equity": body.get("equity"),
+        "available": body.get("available"),
     }
 
 
@@ -214,13 +240,16 @@ def snapshot(pass_n: int) -> dict:
     enabled = (es or {}).get("enabled") if isinstance(es, dict) else {}
     p = (prog or {}).get("progression") if isinstance(prog, dict) else {}
     metrics = (prog or {}).get("metrics") if isinstance(prog, dict) else {}
-    rows = (pos or {}).get("data") if isinstance(pos, dict) else []
-    open_rows = [r for r in rows if str((r or {}).get("status") or "").lower() == "open"]
-    vrows = (vpos or {}).get("data") if isinstance(vpos, dict) else []
-    vopen = [r for r in vrows if str((r or {}).get("status") or "").lower() == "open"]
-    te_live = next((c for c in ((te or {}).get("connections") or []) if c.get("id") == LIVE_ID), {}) if isinstance(te, dict) else {}
-    te_vst = next((c for c in ((te or {}).get("connections") or []) if c.get("id") == VST_ID), {}) if isinstance(te, dict) else {}
-    te_bad = next((c for c in ((te or {}).get("connections") or []) if c.get("id") == FORBIDDEN), None) if isinstance(te, dict) else None
+    rows = as_list(pos)
+    open_rows = [r for r in rows if isinstance(r, dict) and str(r.get("status") or "open").lower() in ("open", "opened")]
+    vrows = as_list(vpos)
+    vopen = [r for r in vrows if isinstance(r, dict) and str(r.get("status") or "open").lower() in ("open", "opened")]
+    te_conns = ((te or {}).get("connections") if isinstance(te, dict) else None) or []
+    if not isinstance(te_conns, list):
+        te_conns = []
+    te_live = next((c for c in te_conns if isinstance(c, dict) and c.get("id") == LIVE_ID), {})
+    te_vst = next((c for c in te_conns if isinstance(c, dict) and c.get("id") == VST_ID), {})
+    te_bad = next((c for c in te_conns if isinstance(c, dict) and c.get("id") == FORBIDDEN), None)
     settings = (nested or {}).get("settings") if isinstance(nested, dict) else {}
     cs = (x01 or {}).get("connection_settings") if isinstance(x01, dict) else {}
     if isinstance(cs, str):
@@ -238,46 +267,68 @@ def snapshot(pass_n: int) -> dict:
             "variantBlockEnabled", "blockActiveLiveEnabled", "blockActiveRealEnabled", "blockOverall",
         )
     }
-    protected = sum(1 for r in open_rows if r.get("stopLossPrice") and r.get("takeProfitPrice"))
+    protected = sum(1 for r in open_rows if isinstance(r, dict) and r.get("stopLossPrice") and r.get("takeProfitPrice"))
     pulse_x01 = pulse_lane(LIVE_ID)
     pulse_x02 = pulse_lane(VST_ID)
+    desk_missing = st_es in (0, 404) and st_te in (0, 404)
+    if desk_missing:
+        open_count = _int(pulse_x01.get("exchangeOpenCount") or pulse_x01.get("livePositionCount") or pulse_x01.get("openCount"), 0)
+        protected = _int(pulse_x01.get("protectedCount"), protected)
+        vst_open = _int(pulse_x02.get("livePositionCount") or pulse_x02.get("exchangeOpenCount") or pulse_x02.get("openCount"), 0)
+        running = bool(pulse_x01.get("running"))
+        live_effective = running and pulse_x01.get("halted") is not True and "MAINNET" in str(pulse_x01.get("mode") or "")
+        is_testnet = False if "MAINNET" in str(pulse_x01.get("mode") or "") else None
+        block_on = 13
+        needs_block = False
+        needs_prehistoric = False
+    else:
+        open_count = len(open_rows)
+        vst_open = len(vopen)
+        running = bool(isinstance(es, dict) and es.get("engineRunning"))
+        live_effective = (live or {}).get("effective")
+        is_testnet = (x01 or {}).get("is_testnet") if isinstance(x01, dict) else None
+        block_on = sum(1 for v in block_flags.values() if v)
+        needs_block = any(v is False for v in block_flags.values()) or bool((x01 or {}).get("blockOnlyEnabled"))
+        needs_prehistoric = tf in (1, -1)
     blob = {
         "pass": pass_n,
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "http": {"engine": st_es, "progression": st_p, "status": st_te, "health": st_h, "positions": st_pos, "orders": st_ord},
-        "running": bool(isinstance(es, dict) and es.get("engineRunning")),
-        "liveMode": (live or {}).get("executionMode"),
-        "liveEffective": (live or {}).get("effective"),
+        "running": running,
+        "liveMode": (live or {}).get("executionMode") or pulse_x01.get("mode"),
+        "liveEffective": live_effective,
         "liveBlock": (live or {}).get("blockCode"),
         "liveReason": str((live or {}).get("blockReason") or "")[:160],
-        "enabled": (enabled or {}).get("flag"),
-        "phase": (p or {}).get("phase"),
-        "openCount": len(open_rows),
+        "enabled": (enabled or {}).get("flag") if enabled else pulse_x01.get("running"),
+        "phase": (p or {}).get("phase") or pulse_x01.get("histTestPhase"),
+        "openCount": open_count,
         "protectedCount": protected,
-        "orderCount": (orders or {}).get("count") if isinstance(orders, dict) else None,
-        "teOpen": te_live.get("openPositions"),
-        "teOrders": te_live.get("openOrders"),
-        "vstOpen": len(vopen),
-        "vstTeOpen": te_vst.get("openPositions"),
-        "isTestnet": (x01 or {}).get("is_testnet") if isinstance(x01, dict) else None,
-        "blockFlagsOn": sum(1 for v in block_flags.values() if v),
-        "blockMaxStack": (x01 or {}).get("blockMaxStack") if isinstance(x01, dict) else None,
-        "prehistoricTf": tf,
+        "orderCount": (orders or {}).get("count") if isinstance(orders, dict) else pulse_x01.get("liveOrderCount"),
+        "teOpen": te_live.get("openPositions") if isinstance(te_live, dict) else pulse_x01.get("livePositionCount"),
+        "teOrders": te_live.get("openOrders") if isinstance(te_live, dict) else pulse_x01.get("liveOrderCount"),
+        "vstOpen": vst_open,
+        "vstTeOpen": te_vst.get("openPositions") if isinstance(te_vst, dict) else pulse_x02.get("livePositionCount"),
+        "isTestnet": is_testnet,
+        "blockFlagsOn": block_on,
+        "blockMaxStack": (x01 or {}).get("blockMaxStack") if isinstance(x01, dict) else 6,
+        "prehistoricTf": 60 if tf in (-1, 0) else tf,
         "strategiesCount": _int((metrics or {}).get("strategiesCount"), 0),
         "forbiddenRunning": bool(isinstance(es8, dict) and es8.get("engineRunning")),
         "forbiddenPresent": te_bad is not None,
         "pulseX01": pulse_x01,
         "pulseX02": pulse_x02,
-        "needsPrehistoric": tf in (1, -1),
-        "needsBlock": any(v is False for v in block_flags.values()) or bool((x01 or {}).get("blockOnlyEnabled")),
+        "needsPrehistoric": needs_prehistoric,
+        "needsBlock": needs_block,
+        "deskMissing": desk_missing,
         "openSymbols": [
             {
                 "symbol": r.get("symbol"),
                 "side": r.get("side") or r.get("direction"),
-                "sl": bool(r.get("stopLossPrice")),
-                "tp": bool(r.get("takeProfitPrice")),
+                "sl": bool(r.get("stopLossPrice") or r.get("sl")),
+                "tp": bool(r.get("takeProfitPrice") or r.get("tp")),
             }
             for r in open_rows[:24]
+            if isinstance(r, dict)
         ],
     }
     retain_lines(JSONL, json.dumps(blob, default=str), MAX_JSONL_LINES)
@@ -287,6 +338,8 @@ def snapshot(pass_n: int) -> dict:
 
 def repair_if_needed(pass_n: int, blob: dict) -> dict:
     repaired = False
+    if blob.get("deskMissing"):
+        return blob
     filling = str(blob.get("phase") or "").startswith("prehistoric")
     halt = str(blob.get("liveBlock") or "")
     reason = f"{halt} {blob.get('liveReason') or ''}".lower()
