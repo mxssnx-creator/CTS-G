@@ -339,6 +339,7 @@ def ensure(pulse, pos):
                         p.tp = tp_px
             if not sl_values or not tp_values:
                 return False
+        # Widest member range: LONG lowest SL / highest TP; SHORT highest SL / lowest TP.
         low = min(sl_values)
         high = max(tp_values)
         if pos.side == 'SHORT':

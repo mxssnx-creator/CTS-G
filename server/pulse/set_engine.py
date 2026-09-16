@@ -206,6 +206,23 @@ class CompactHistRow(Mapping):
     def __len__(self) -> int:
         return len(self._BASE_KEYS) + (len(self._extra) if self._extra else 0)
 
+    def __contains__(self, key: object) -> bool:
+        if key in self._BASE_KEYS:
+            return True
+        return bool(self._extra is not None and key in self._extra)
+
+    def as_dict(self) -> Dict[str, Any]:
+        out = {key: getattr(self, key) for key in self._BASE_KEYS}
+        if self._extra:
+            out.update(self._extra)
+        return out
+
+    def __str__(self) -> str:
+        return str(self.as_dict())
+
+    def __repr__(self) -> str:
+        return f"CompactHistRow({self.as_dict()!r})"
+
     def get(self, key: str, default: Any = None) -> Any:
         try:
             return self[key]
@@ -1849,8 +1866,10 @@ class SetBook:
         """None = no extra gate. A list (even empty) restricts live picks to Test Historic."""
         if ids is None:
             self.hist_test_set_ids = None
-            return
-        self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
+        else:
+            self.hist_test_set_ids = {str(sid) for sid in ids if str(sid or "").strip()}
+        self._entry_cache_epoch = int(getattr(self, "_entry_cache_epoch", 0) or 0) + 1
+        self._entry_rows_cache = {}
 
     @staticmethod
     def _record_step(rec: Any) -> int:
@@ -2488,10 +2507,11 @@ class SetBook:
                 pass
 
     def score_block_main(self) -> Dict[tuple, Dict[str, Any]]:
-        """Main-stage last-N eval for each Block count × indication × set, independently.
+        """Main + Real/Overall last-N eval for each Block count × indication × set.
 
-        Intern calcs always continue. Too few last positions stay valid for Real/Live.
-        Proven negative counts are intern-only.
+        Each key is independent. Intern calcs always continue. Too few last
+        positions stay valid for Real/Live. Proven negative counts are intern-only.
+        Real stage uses the overall last-N tape (``block_eval_pos``), not Base.
         """
         need = max(5, min(75, int(getattr(self, "block_eval_pos", 50) or 50)))
         buckets: Dict[tuple, List[Any]] = {}
@@ -2510,28 +2530,57 @@ class SetBook:
                 kind = str(row.get("ind_kind") or "")
                 sid = str(row.get("set_id") or "")
                 buckets.setdefault((count, kind, sid), []).append(row)
-        from position_cost import clears_pf, is_positive_pf
-        out: Dict[tuple, Dict[str, Any]] = {}
-        for key, samples in buckets.items():
+        from position_cost import clears_pf, is_positive_pf, overall_last_pos_eval
+        floor = float(self.real_min_pf or POSITIVE_PF)
+
+        def eval_rows(samples: List[Any], *, stage: str, scope: str) -> Dict[str, Any]:
             n_all = len(samples)
             if n_all < need:
-                out[key] = {
+                return {
                     "n": n_all, "pf": 0.0, "liveOk": True, "internOk": True,
                     "internOnly": False, "reason": "insufficient-sample", "evalN": need,
+                    "stage": stage, "scope": scope,
+                    "realOverall": {
+                        "requestedN": need, "n": n_all, "available": False,
+                        "validated": False, "pf": 1.0, "liveOk": True,
+                        "costSubtracted": True,
+                    },
                 }
-                continue
             ordered = sorted(samples, key=lambda r: finite(r.get("t")))
             window = ordered[-need:]
-            n = len(window)
-            metric = self._window_cost_pf(window, need)
-            pf = float(metric.get("ratio") or 0.0)
-            live_ok = bool(is_positive_pf(pf) and clears_pf(pf, float(self.real_min_pf or POSITIVE_PF)))
-            out[key] = {
+            overall = overall_last_pos_eval(window, need, self.cost_pct, ordered=True)
+            pf = float(overall.get("ratio") or 0.0)
+            n = int(overall.get("count") or len(window))
+            live_ok = bool(n >= need and is_positive_pf(pf) and clears_pf(pf, floor))
+            return {
                 "n": n, "pf": round(pf, 4), "liveOk": live_ok, "internOk": True,
                 "internOnly": not live_ok,
-                "reason": "pass" if live_ok else "main-negative",
-                "evalN": need,
+                "reason": "pass" if live_ok else "real-overall-negative",
+                "evalN": need, "stage": stage, "scope": scope,
+                "realOverall": {
+                    "requestedN": need, "n": n, "available": n >= need,
+                    "validated": n >= need and is_positive_pf(pf),
+                    "pf": round(pf, 4), "liveOk": live_ok,
+                    "classicPf": float(overall.get("classicPf") or 0.0),
+                    "avgR": float(overall.get("avgR") or 0.0),
+                    "netAvg": float(overall.get("netAvg") or 0.0),
+                    "costPct": float(overall.get("costPct") or self.cost_pct),
+                    "costSubtracted": True, "scope": "overall-last-pos",
+                },
             }
+
+        out: Dict[tuple, Dict[str, Any]] = {}
+        for key, samples in buckets.items():
+            out[key] = eval_rows(samples, stage="real", scope="set")
+        kind_groups: Dict[tuple, List[Any]] = {}
+        count_groups: Dict[int, List[Any]] = {}
+        for (count, kind, sid), samples in buckets.items():
+            kind_groups.setdefault((count, kind), []).extend(samples)
+            count_groups.setdefault(count, []).extend(samples)
+        for (count, kind), samples in kind_groups.items():
+            out[(count, kind, "")] = eval_rows(samples, stage="real", scope="indication")
+        for count, samples in count_groups.items():
+            out[(count, "", "")] = eval_rows(samples, stage="real", scope="overall")
         self.block_main_eval = out
         return out
 
@@ -2549,17 +2598,21 @@ class SetBook:
         exact = blob.get((count_n, kind, sid))
         if exact is not None:
             return bool(exact.get("liveOk", True))
+        if kind and sid:
+            kind_set = blob.get((count_n, kind, ""))
+            if kind_set is not None:
+                return bool(kind_set.get("liveOk", True))
         if kind:
-            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind]
+            kind_rows = [v for k, v in blob.items() if k[0] == count_n and k[1] == kind and k[2]]
             if kind_rows:
                 return all(bool(v.get("liveOk", True)) for v in kind_rows)
         if sid:
             sid_rows = [v for k, v in blob.items() if k[0] == count_n and k[2] == sid]
             if sid_rows:
                 return all(bool(v.get("liveOk", True)) for v in sid_rows)
-        count_rows = [v for k, v in blob.items() if k[0] == count_n]
-        if not count_rows:
-            return True
+        overall = blob.get((count_n, "", ""))
+        if overall is not None:
+            return bool(overall.get("liveOk", True))
         return True
 
     def _commit_hist(
@@ -4786,6 +4839,9 @@ class SetBook:
         use_side = want_side in DIRECTIONS
 
         def side_active(state: SetState) -> bool:
+            allow_ids = getattr(self, "hist_test_set_ids", None)
+            if allow_ids is not None and state.id in allow_ids and state.active:
+                return True
             if use_side:
                 blob = (state.by_side or {}).get(want_side)
                 if isinstance(blob, dict) and "active" in blob:
@@ -4837,22 +4893,24 @@ class SetBook:
                 rejected["side_inactive"] += 1
                 continue
             view = self._side_view(state, want_side if use_side else None)
+            allow_ids = getattr(self, "hist_test_set_ids", None)
+            hist_test_row = bool(allow_ids is not None and state.id in allow_ids and state.active)
             n = int(view.get("last15_n") or 0)
             pf = float(view.get("last15_ratio") or 0.0)
             dd = float(view.get("max_dd_s") or 0.0)
-            if n < need:
+            if n < need and not hist_test_row:
                 rejected["low_n"] += 1
                 continue
-            if not math.isfinite(pf) or pf + 1e-9 < intern_floor:
+            if (not math.isfinite(pf) or pf + 1e-9 < intern_floor) and not hist_test_row:
                 rejected["low_pf"] += 1
                 continue
-            if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
+            if (not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9) and not hist_test_row:
                 rejected["dd_cap"] += 1
                 continue
             if not self._live_entry_allowed(state, want_side if use_side else None):
                 rejected["live"] += 1
                 continue
-            if self.strict_gate and not self._real_metrics_ok(view):
+            if self.strict_gate and not hist_test_row and not self._real_metrics_ok(view):
                 rejected["stage"] += 1
                 continue
             result.append(state)
@@ -4904,6 +4962,7 @@ class SetBook:
             str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
             int(getattr(self, "entry_policy_max_candidates", 0) or 0),
             max(0, int(getattr(self, "entry_policy_min_live_samples", 0) or 0)),
+            None if getattr(self, "hist_test_set_ids", None) is None else frozenset(self.hist_test_set_ids),
         )
 
     def entry_sets(self, pack: str, side: Optional[str] = None) -> List[SetState]:
@@ -5440,11 +5499,30 @@ class SetBook:
                 }
                 for st in self.by_idx[:48]
             ]
+        hist_ids = getattr(self, "hist_test_set_ids", None)
+        processing_rows = []
+        for st in self.by_idx:
+            hist_proc = bool(hist_ids and st.id in hist_ids and st.active)
+            if not (st.processing_active or hist_proc):
+                continue
+            processing_rows.append({
+                "id": st.id,
+                "processingActive": True,
+                "evaluating": hist_proc,
+                "processingReason": st.processing_reason or ("hist-test validated" if hist_proc else ""),
+                "baseQualified": bool((st.stage_ledger or {}).get("base")),
+            })
+            if len(processing_rows) >= 48:
+                break
+        def _hist_n(st: Any) -> int:
+            return max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
+        if hist_ids:
+            hist_fills = sum(_hist_n(st) for st in self.sets.values() if st.id in hist_ids)
+        else:
+            hist_fills = sum(_hist_n(st) for st in self.sets.values())
         out = {
             "enabled": self.enabled,
-            "processingRows": [{"id": st.id, "processingActive": True,
-                                "processingReason": st.processing_reason, "baseQualified": bool(st.stage_ledger.get("base"))}
-                               for st in self.by_idx if st.processing_active],
+            "processingRows": processing_rows,
             "ready": p.ready,
             "entrySelectionPolicy": self.entry_policy,
             "entryPolicy": self.entry_policy,
@@ -5481,8 +5559,8 @@ class SetBook:
             "directions": list(DIRECTIONS),
             "setCount": len(self.sets),
             "activeCount": sum(1 for s in self.sets.values() if s.active),
-            "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
-            "processingSetIds": self.processing_set_ids()[:350],
+            "processingCount": max(len(getattr(self, "_processing_set_ids", set()) or set()), len(processing_rows)),
+            "processingSetIds": (list(dict.fromkeys([row["id"] for row in processing_rows] + self.processing_set_ids())))[:350],
             "validatedCount": validated_count,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),
@@ -5513,7 +5591,7 @@ class SetBook:
             "stepAdapt": self.step_adapt,
             "steps": list(self.steps),
             "trailEnabled": bool(getattr(self, "trail_enabled", True)),
-            "histFills": sum(s.n for s in self.sets.values()),
+            "histFills": hist_fills,
             "barsSymbols": len(self.bars),
             "progress": {
                 "phase": p.phase,

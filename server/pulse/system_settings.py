@@ -52,8 +52,10 @@ def calculation_overlay(overlay, cts=None):
     result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
     result["setPfWindow"] = result["baseEvalPosCount"]
     result.setdefault("setMinSamples", result["baseEvalPosCount"])
-    for key in ("maxOpen", "maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates", "symbolCap"):
+    for key in ("maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates"):
         result.setdefault(key, 0)
+    result.setdefault("maxOpen", 100)
+    result.setdefault("symbolCap", 50)
     for key in ("axisPrevEnabled", "axisLastEnabled", "axisContEnabled", "axisPauseEnabled"):
         result.setdefault(key, False)
     result["stratGeneral"] = True

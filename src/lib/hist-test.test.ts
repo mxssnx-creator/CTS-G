@@ -13,6 +13,7 @@ import {
   histTestIsPaused,
   histTestIsRunning,
   histTestLookbackBars,
+  histTestOverviewLine,
   histTestPollMs,
   histTestStartLabel,
   histTestStatusLine,
@@ -123,4 +124,18 @@ test("start treats a missing cap as the 20-symbol fill target", async (t) => {
   assert.equal(body.hours, 48);
   assert.equal(body.minPf, 1.15);
   assert.equal(body.symbolCap, HIST_TEST_TARGET_DEFAULT);
+});
+
+test("overview line reports OFF and ON running sets", () => {
+  assert.equal(histTestOverviewLine({ enabled: false, phase: "off" }), "Test Historic · OFF · full catalog in play");
+  const line = histTestOverviewLine({
+    enabled: true,
+    ownsCatalog: true,
+    validatedCount: 2,
+    runningSets: [{ id: "indications:1m:sl0.6:st3" }, { id: "general:1m:sl0.6:st4" }],
+    symbols: ["AAA-USDT", "BBB-USDT"],
+  });
+  assert.match(line, /Test Historic · ON/);
+  assert.match(line, /2 validated/);
+  assert.match(line, /indications:1m:sl0.6:st3/);
 });

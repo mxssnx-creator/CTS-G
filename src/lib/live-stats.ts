@@ -244,6 +244,7 @@ export type LiveStats = {
     fallback?: boolean;
   };
   forcedConfigs?: import("./hist-calc").ForcedConfigSummary;
+  histTest?: import("./hist-test").HistTestLive;
   running: boolean;
   svcActive?: boolean;
   stale?: boolean;
@@ -839,6 +840,8 @@ export type LiveStats = {
     validatedCount?: number;
     overview?: SetOverview;
     histFills?: number;
+    processingCount?: number;
+    processingRows?: Array<{ id?: string; processingActive?: boolean; evaluating?: boolean; processingReason?: string }>;
     liveFills?: number;
     liveProcessed?: number;
     liveActive?: number;
@@ -885,6 +888,7 @@ export type LiveStats = {
       setCount?: number;
       ready?: boolean;
       histFills?: number;
+      processingCount?: number;
       running?: boolean;
       halted?: boolean;
     }>;
@@ -1079,6 +1083,9 @@ export function statsTickKey(s: LiveStats): string {
     s.sets?.histFills ?? "",
     s.block?.lanes?.length ?? "",
     s.stale ? 1 : 0,
+    s.histTest?.enabled,
+    s.histTest?.validatedCount ?? "",
+    s.histTest?.phase || "",
   ].join("|");
 }
 

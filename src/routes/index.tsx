@@ -33,6 +33,7 @@ import { enabledAxes, setMetric } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import type { ConnType } from "@/lib/connections";
 import { pnlClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
+import { histTestIsEnabled, histTestOverviewLine } from "@/lib/hist-test";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
@@ -348,6 +349,15 @@ const PROGRESS_PHASE_LABEL: Record<string, string> = {
   ready: "ready",
   deferred: "history deferred by load",
   error: "calc error",
+  evaluate: "evaluating symbols",
+  rank: "ranking symbols",
+  queued: "queued",
+  "hist-test": "test historic",
+  lanes: "per desk",
+  aggregate: "all desks",
+  stopped: "stopped",
+  paused: "paused",
+  "score-refresh": "rescoring sets",
 };
 
 function progressCount(...vals: Array<number | null | undefined>): number | undefined {
@@ -405,7 +415,7 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const starting = l.running && !l.progressReady && (!l.progressPhase || l.progressPhase === "idle" || pct <= 0);
   const phase = starting ? "starting" : String(l.progressPhase || "idle");
   const label = PROGRESS_PHASE_LABEL[phase] ?? phase;
-  const updating = ["fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial", "incremental"].includes(phase);
+  const updating = ["fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial", "incremental", "evaluate", "rank", "queued", "hist-test", "score-refresh"].includes(phase);
   const busy = updating || !l.progressReady;
   const gate = l.progressReady ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const details: Array<[string, string]> = [];
@@ -647,38 +657,57 @@ function PacksStrip({ stats }: { stats: LiveStats | null }) {
 function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const s = stats?.sets;
   const p = s?.progress;
-  const pct = Math.max(0, Math.min(100, p?.pct ?? 0));
-  const phase = String(p?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score", "partial"].includes(phase);
+  const ht = stats?.histTest;
+  const nested = (p as { lanes?: Array<{ pct?: number; phase?: string; progress?: { pct?: number; phase?: string } }> } | undefined)?.lanes || [];
+  const lanePcts = [
+    ...(s?.lanes || []).map((ln) => ln.progress?.pct),
+    ...nested.map((ln) => ln.pct ?? ln.progress?.pct),
+  ].filter((n): n is number => n != null && Number.isFinite(n));
+  const pct = Math.max(
+    0,
+    Math.min(100, p?.pct ?? ht?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
+  );
+  const phase = String(p?.phase ?? ht?.phase ?? "idle");
+  const updating = ["fetch", "replay", "score", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
   const gate = p?.ready ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
   const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
+  const proc = s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0;
+  const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={p?.ready ? "text-primary" : "text-warn"}>
-          sets · {p?.phase ?? "idle"} · valid {s?.validatedCount ?? 0}/{s?.setCount ?? 0} · active {active}/{s?.setCount ?? 0}
+          sets · {phaseLabel} · valid {s?.validatedCount ?? 0}/{s?.setCount ?? 0} · active {active}/{s?.setCount ?? 0}
+          {proc ? ` · proc ${proc}` : ""}
           {updating ? " · updating" : ""}{gate}
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
+          {` · ${histTestIsEnabled(stats?.histTest) ? "test historic ON" : "test historic OFF"}`}
         </span>
         <span className="text-muted">
           last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}
         </span>
       </div>
+      {histTestIsEnabled(ht) && ((ht?.runningSets && ht.runningSets.length) || (ht?.symbols && ht.symbols.length) || ht?.detail) ? (
+        <p className="mt-1 text-muted" data-testid="hist-test-sets-line">
+          {histTestOverviewLine(ht)}
+        </p>
+      ) : null}
       {lanes.length > 1 ? (
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           {lanes.map((ln) => {
-            const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? 0));
-            const lanePhase = String(ln.progress?.phase ?? "idle");
-            const laneUpdating = ["fetch", "replay", "score", "partial"].includes(lanePhase);
+            const lp = Math.max(0, Math.min(100, ln.progress?.pct ?? (ln as { pct?: number }).pct ?? 0));
+            const lanePhase = String(ln.progress?.phase ?? (ln as { phase?: string }).phase ?? "idle");
+            const laneUpdating = ["fetch", "replay", "score", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             return (
               <div key={ln.id || ln.type}>
                 <div className="flex justify-between text-muted">
                   <span className={ln.running && !ln.halted ? "text-primary" : "text-faint"}>
                     {ln.type} valid {ln.validatedCount ?? 0}/{ln.setCount ?? 0} · active {ln.activeCount ?? 0}/{ln.setCount ?? 0}
+                    {(ln as { processingCount?: number }).processingCount ? ` · proc ${(ln as { processingCount?: number }).processingCount}` : ""}
                   </span>
-                  <span>{ln.progress?.phase ?? "idle"}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
+                  <span>{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
                   <div className="h-full rounded-full bg-primary" style={{ width: `${lp}%` }} />

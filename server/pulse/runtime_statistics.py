@@ -118,10 +118,11 @@ class StatisticsStore:
         self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
-        self.db.execute("PRAGMA cache_size=-1024")
+        self.db.execute("PRAGMA cache_size=-8192")
         self.db.execute("PRAGMA temp_store=MEMORY")
-        self.db.execute("PRAGMA wal_autocheckpoint=64")
-        self.db.execute("PRAGMA journal_size_limit=262144")
+        self.db.execute("PRAGMA wal_autocheckpoint=32")
+        self.db.execute("PRAGMA journal_size_limit=131072")
+        self.db.execute("PRAGMA mmap_size=8388608")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS trades (id TEXT PRIMARY KEY, t REAL NOT NULL, payload TEXT NOT NULL);
@@ -275,9 +276,12 @@ class StatisticsStore:
                     if old is not None:
                         self._set("tradeFloor", max(number(self.get("tradeFloor")), old))
                 self.db.execute(f"DELETE FROM {table} WHERE t<? OR id IN (SELECT id FROM {table} ORDER BY t DESC,id DESC LIMIT -1 OFFSET ?)", (cutoff, limit))
+            if pressure:
+                self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY t DESC,id DESC LIMIT -1 OFFSET 800)")
         with self.lock:
-            self.db.execute("PRAGMA incremental_vacuum(256)")
+            self.db.execute("PRAGMA incremental_vacuum(1024)")
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.db.execute("PRAGMA optimize")
 
     def backup(self, record=True):
         directory = self.directory / "backups"

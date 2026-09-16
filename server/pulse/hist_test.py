@@ -55,11 +55,17 @@ PUBLIC_SWEEP = os.path.join(ROOT, "public", "step-sweep-24h.json")
 OUT_DIR = os.path.join(ROOT, "reports", "hist-test")
 SUMMARY_PATH = os.path.join(OUT_DIR, "summary.json")
 PID_PATH = os.path.join(OUT_DIR, "hist-test.pid")
+LAST_READY_PATH = os.path.join(OUT_DIR, "last-ready.json")
 STOP_PATH = os.path.join(OUT_DIR, "STOP")
 PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 
 RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
+SYMBOL_CAP = 50
+JOB_CACHE_TTL_S = 1.5
+
+_JOB_CACHE: Optional[Dict[str, Any]] = None
+_JOB_CACHE_AT = 0.0
 
 
 def _stop_file() -> str:
@@ -68,6 +74,13 @@ def _stop_file() -> str:
 
 def _pause_file() -> str:
     return os.path.join(OUT_DIR, "PAUSE")
+
+
+def invalidate_job_cache() -> None:
+    """Drop the short-lived public job cache after publish or test path swaps."""
+    global _JOB_CACHE, _JOB_CACHE_AT
+    _JOB_CACHE = None
+    _JOB_CACHE_AT = 0.0
 
 
 def _pid_file() -> str:
@@ -161,7 +174,177 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
             add(row.get("id") or row.get("setId") or row.get("set_id"))
     for sid in blob.get("validatedIds") or []:
         add(sid)
+    last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else {}
+    if last:
+        add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
+        for sid in last.get("validatedIds") or []:
+            add(sid)
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    add(winner.get("id") or winner.get("setId") or winner.get("set_id"))
+    for row in list(blob.get("ranked") or []) + list(blob.get("bySymbol") or []):
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("setId") or row.get("set_id") or row.get("id")
+        if not sid or ":" not in str(sid):
+            continue
+        add(sid)
+    if not out:
+        last = read_last_ready()
+        add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
+        for sid in last.get("validatedIds") or []:
+            add(sid)
     return out
+
+
+def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Positive / filled Test Historic symbols. Never the full rank queue."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        name = str(raw or "").strip()
+        if not name:
+            return
+        key = name.upper()
+        if key in ("*", "ALL", "UNLIMITED") or key in seen:
+            return
+        if ":" in name:
+            return  # set ids, not symbols
+        seen.add(key)
+        out.append(name)
+
+    def add_list(raw: Any) -> None:
+        if isinstance(raw, str):
+            add(raw)
+            return
+        if not isinstance(raw, (list, tuple)):
+            return
+        for item in raw:
+            if isinstance(item, str):
+                add(item)
+            elif isinstance(item, dict):
+                add(item.get("symbol"))
+
+    add_list(blob.get("positive"))
+    for row in blob.get("bySymbol") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("positive") is False or row.get("validated") is False:
+            continue
+        if row.get("positive") or row.get("validated"):
+            add(row.get("symbol"))
+    for row in blob.get("ranked") or []:
+        if isinstance(row, dict) and (row.get("positive") or row.get("validated")):
+            add(row.get("symbol"))
+    # filled universe after a run (not the rank queue)
+    if blob.get("ready") or str(blob.get("phase") or "") in ("ready", "idle", ""):
+        add_list(blob.get("symbols"))
+    last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else {}
+    if last:
+        add_list(last.get("positive"))
+        add_list(last.get("symbols"))
+        winner = last.get("winner") if isinstance(last.get("winner"), dict) else {}
+        add(winner.get("symbol"))
+    if not out:
+        last = read_last_ready()
+        add_list(last.get("positive"))
+        add_list(last.get("symbols"))
+        winner = last.get("winner") if isinstance(last.get("winner"), dict) else {}
+        add(winner.get("symbol"))
+    # Do not fall back to full rank queue unless short ≤ 40
+    if not out:
+        ranked = blob.get("ranked") or []
+        if isinstance(ranked, list) and 0 < len(ranked) <= 40:
+            for row in ranked:
+                if isinstance(row, dict):
+                    add(row.get("symbol"))
+                elif isinstance(row, str):
+                    add(row)
+    return out[:SYMBOL_CAP]
+
+
+def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
+    """Compact validated configs currently in play for overviews/stats."""
+    blob = job if isinstance(job, dict) else {}
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        if row.get("validated") is False:
+            return
+        sid = str(row.get("id") or row.get("setId") or row.get("set_id") or "").strip()
+        if not sid or sid in seen:
+            return
+        seen.add(sid)
+        try:
+            pf = float(row.get("pf") or row.get("last15Ratio") or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        try:
+            n = int(row.get("n") or row.get("evalN") or row.get("last15N") or row.get("last15_n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        try:
+            step = int(row.get("step") or 0)
+        except (TypeError, ValueError):
+            step = 0
+        out.append({
+            "id": sid,
+            "indication": str(row.get("indication") or row.get("ind_kind") or ""),
+            "strategy": str(row.get("strategy") or row.get("config") or ""),
+            "symbol": str(row.get("symbol") or ""),
+            "pf": pf,
+            "n": n,
+            "step": step,
+            "validated": True,
+        })
+
+    for row in blob.get("successfulConfigs") or []:
+        add(row)
+    for row in blob.get("rows") or []:
+        if isinstance(row, dict) and row.get("validated"):
+            add(row)
+    for sid in blob.get("validatedIds") or []:
+        add({"id": sid, "validated": True})
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    if winner:
+        add({**winner, "id": winner.get("id") or winner.get("setId") or winner.get("set_id"), "validated": True})
+    last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else {}
+    if last:
+        for sid in last.get("validatedIds") or []:
+            add({"id": sid, "validated": True})
+        w = last.get("winner") if isinstance(last.get("winner"), dict) else {}
+        if isinstance(w, dict):
+            add({**w, "id": w.get("id") or w.get("setId") or w.get("set_id"), "validated": True})
+    cap = 24
+    try:
+        cap = max(1, min(int(limit or 24), 48))
+    except (TypeError, ValueError):
+        cap = 24
+    return out[:cap]
+
+
+def off_progress_view() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "ownsCatalog": False,
+        "catalogSkipped": False,
+        "runningSets": [],
+        "symbols": [],
+        "internSymbols": [],
+        "validatedCount": 0,
+        "processedSetCount": 0,
+        "processingCount": 0,
+        "detail": "Test Historic off · full catalog in play",
+        "phase": "off",
+        "pct": 0,
+        "ready": False,
+        "running": False,
+        "paused": False,
+    }
 
 
 def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -178,23 +361,92 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
         if sid:
             by_id[sid] = row
+    for row in blob.get("rows") or []:
+        if not isinstance(row, dict) or row.get("validated") is False:
+            continue
+        sid = str(row.get("id") or row.get("setId") or row.get("set_id") or "").strip()
+        if sid:
+            by_id.setdefault(sid, row)
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    win_id = str(winner.get("id") or winner.get("setId") or winner.get("set_id") or "").strip()
+    if win_id:
+        by_id.setdefault(win_id, {
+            **winner,
+            "validated": True,
+            "pf": winner.get("last15Ratio") or winner.get("pf") or 0,
+            "evalN": winner.get("n") or winner.get("evalN") or 0,
+            "n": winner.get("n") or 0,
+        })
+    last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
+    if not isinstance(last, dict):
+        last = read_last_ready()
+    last_win = (last or {}).get("winner") if isinstance(last, dict) else {}
+    if isinstance(last_win, dict):
+        last_id = str(last_win.get("id") or last_win.get("setId") or last_win.get("set_id") or "").strip()
+        if last_id:
+            by_id.setdefault(last_id, {
+                **last_win,
+                "validated": True,
+                "pf": last_win.get("last15Ratio") or last_win.get("pf") or 0,
+                "evalN": last_win.get("n") or last_win.get("evalN") or 0,
+                "n": last_win.get("n") or 0,
+            })
+    for sid in ids:
+        by_id.setdefault(sid, {"setId": sid, "validated": True, "pf": 0, "n": 0, "evalN": 0})
     for st in getattr(book, "by_idx", None) or []:
         row = by_id.get(getattr(st, "id", ""))
         if not row:
             continue
-        n = int(row.get("evalN") or row.get("n") or 0)
+        n = int(row.get("evalN") or row.get("n") or row.get("last15N") or row.get("last15_n") or 0)
         try:
-            pf = float(row.get("pf") or 0)
+            pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
             pf = 0.0
-        st.last15_n = n
-        st.last15_ratio = pf if pf > 0 else 1.0
+        st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
+        st.last15_ratio = pf if pf > 0 else max(float(getattr(st, "last15_ratio", 0) or 0), 1.0)
         st.n = max(int(getattr(st, "n", 0) or 0), n)
         st.active = bool(row.get("validated", True))
         st.deact_reason = ""
+        try:
+            dd = float(row.get("maxDdS") or row.get("max_dd_s") or getattr(st, "max_dd_s", 0) or 0)
+        except (TypeError, ValueError):
+            dd = float(getattr(st, "max_dd_s", 0) or 0)
+        st.max_dd_s = dd
         ledger = dict(getattr(st, "stage_ledger", None) or {})
         ledger["base"] = True
+        ledger["main"] = True
+        ledger["real"] = True
         st.stage_ledger = ledger
+        # Per-side flags must follow the hist-test winner. Empty live tapes
+        # would otherwise keep LONG/SHORT inactive and starve intern/live size.
+        side_view = {
+            "last15_n": int(st.last15_n or 0),
+            "last15_ratio": float(st.last15_ratio or 0),
+            "n": int(st.n or 0),
+            "base_n": int(st.last15_n or 0),
+            "base_pf": float(st.last15_ratio or 0),
+            "main_n": int(st.last15_n or 0),
+            "main_pf": float(st.last15_ratio or 0),
+            "real_n": int(st.last15_n or 0),
+            "real_pf": float(st.last15_ratio or 0),
+            "max_dd_s": float(st.max_dd_s or 0),
+            "ddOk": True,
+            "validated": True,
+            "active": True,
+            "deact_reason": "",
+        }
+        sides = dict(getattr(st, "by_side", None) or {})
+        for direction in ("LONG", "SHORT"):
+            blob = dict(sides.get(direction) or {})
+            blob.update(side_view)
+            sides[direction] = blob
+        st.by_side = sides
+    cap = getattr(book, "_cap_active", None)
+    if callable(cap):
+        try:
+            cap(True)
+        except Exception:
+            pass
     return ids
 
 
@@ -287,10 +539,57 @@ def apply_control_latches(blob: Optional[Dict[str, Any]] = None) -> Dict[str, An
     return payload
 
 
+def read_last_ready() -> Dict[str, Any]:
+    try:
+        with open(LAST_READY_PATH, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict) and (loaded.get("winner") or loaded.get("validatedIds")):
+            return loaded
+    except Exception:
+        pass
+    return {}
+
+
+def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    ids = list(blob.get("validatedIds") or [])
+    if not ids:
+        ids = validated_set_ids(blob)
+    return {
+        "phase": "ready",
+        "ready": True,
+        "winner": winner,
+        "validatedIds": ids,
+        "validatedCount": blob.get("validatedCount"),
+        "successfulConfigs": list(blob.get("successfulConfigs") or [])[:60],
+        "hours": blob.get("hours"),
+        "minPf": blob.get("minPf"),
+        "n": (winner or {}).get("n"),
+    }
+
+
 def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_dir()
     payload = normalize_job(apply_control_latches(blob))
-    payload.setdefault("generatedAt", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    payload["generatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ready = bool(payload.get("ready") or str(payload.get("phase") or "") == "ready")
+    if ready and (payload.get("winner") or payload.get("validatedIds")):
+        try:
+            atomic_write(LAST_READY_PATH, _ready_snapshot(payload))
+        except Exception:
+            pass
+    else:
+        last = read_last_ready()
+        if last:
+            if not payload.get("winner"):
+                payload["winner"] = last.get("winner") or {}
+            if not payload.get("validatedIds"):
+                payload["validatedIds"] = list(last.get("validatedIds") or [])
+            if payload.get("validatedCount") in (None, 0) and last.get("validatedCount"):
+                payload["validatedCount"] = last.get("validatedCount")
+            if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
+                payload["successfulConfigs"] = last.get("successfulConfigs")
+            payload["lastReady"] = True
     for dest in job_paths():
         try:
             atomic_write(dest, payload)
@@ -302,10 +601,15 @@ def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
                 os.replace(tmp, dest)
             except Exception:
                 pass
+    invalidate_job_cache()
     return payload
 
 
 def read_job() -> Dict[str, Any]:
+    global _JOB_CACHE, _JOB_CACHE_AT
+    now = time.monotonic()
+    if _JOB_CACHE is not None and now - _JOB_CACHE_AT < JOB_CACHE_TTL_S:
+        return _JOB_CACHE
     blob: Dict[str, Any] = idle_job()
     for path in (PUBLIC_JSON, SUMMARY_PATH):
         try:
@@ -316,7 +620,101 @@ def read_job() -> Dict[str, Any]:
                 break
         except Exception:
             continue
-    return normalize_job(apply_control_latches(blob))
+    blob = normalize_job(apply_control_latches(blob))
+    _JOB_CACHE = blob
+    _JOB_CACHE_AT = now
+    return blob
+
+
+def job_age_s(blob: Optional[Dict[str, Any]] = None) -> float:
+    """Seconds since the public Test Historic job last published."""
+    import calendar
+    text = str((blob or {}).get("generatedAt") or "").strip()
+    if not text:
+        return 0.0
+    try:
+        if text.endswith("Z"):
+            stamp = time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+            return max(0.0, time.time() - calendar.timegm(stamp))
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Engine/UI progress for Test Historic: in-flight pct plus last validated gate."""
+    blob = job if isinstance(job, dict) else read_job()
+    ids = validated_set_ids(blob)
+    phase = str(blob.get("phase") or "idle")
+    paused = bool(blob.get("paused") or phase == "paused")
+    running = phase in RUNNING_PHASES and not paused
+    try:
+        pct = float(blob.get("pct") or 0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if not running and ids:
+        pct = 100.0
+        if phase in ("idle", ""):
+            phase = "ready"
+    n_fills = 0
+    winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
+    try:
+        n_fills = int(winner.get("n") or winner.get("evalN") or winner.get("last15N") or 0)
+    except (TypeError, ValueError):
+        n_fills = 0
+    if not n_fills:
+        last = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
+        if not isinstance(last, dict):
+            last = read_last_ready()
+        w = (last or {}).get("winner") if isinstance(last, dict) else {}
+        if isinstance(w, dict):
+            try:
+                n_fills = int(w.get("n") or w.get("evalN") or w.get("last15N") or 0)
+            except (TypeError, ValueError):
+                n_fills = 0
+    age = job_age_s(blob)
+    stale = bool(running and age > 180)
+    n_ids = len(ids)
+    detail = str(blob.get("detail") or phase)
+    refresh_h = clamp_refresh_hours(blob.get("refreshHours"))
+    if n_ids and running:
+        detail = f"Test Historic recalc · {detail} · live {n_ids} validated · skip full catalog"
+    elif n_ids:
+        detail = f"Test Historic · {n_ids} validated configs · skip full catalog · refresh {refresh_h}h"
+    elif running:
+        detail = f"Test Historic owns calcs · {detail} · skip full catalog"
+    else:
+        detail = "Test Historic owns calcs · waiting validated configs · skip full catalog"
+    if stale:
+        detail += " · waiting on Test Historic refresh"
+    symbols = validated_symbols(blob)
+    running_set_rows = running_sets(blob)
+    return {
+        "phase": phase,
+        "pct": pct,
+        "ready": bool(ids) or bool(blob.get("ready")),
+        "running": running,
+        "paused": paused,
+        "validatedCount": n_ids,
+        "setsDone": n_ids,
+        "setsTotal": max(n_ids, 1 if running or n_ids else 0),
+        "histFills": n_fills,
+        "detail": detail,
+        "generatedAt": blob.get("generatedAt"),
+        "stale": stale,
+        "hours": blob.get("hours"),
+        "filled": blob.get("filled"),
+        "targetCount": blob.get("targetCount"),
+        "symbol": symbols[0] if symbols else blob.get("symbol"),
+        "enabled": True,
+        "ownsCatalog": True,
+        "catalogSkipped": True,
+        "symbols": symbols[:SYMBOL_CAP],
+        "runningSets": running_set_rows,
+        "processedSetCount": n_ids,
+        "processingCount": n_ids,
+        "internSymbols": symbols[:SYMBOL_CAP],
+    }
 
 
 def request_stop() -> None:
@@ -729,9 +1127,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "costPct": 0.10,
         "symbols": [r.get("symbol") for r in public_ranked],
         "positive": [r.get("symbol") for r in public_ranked],
-        "rejected": job.get("rejected") or [],
-        "skipped": job.get("skipped") or [],
-        "ranked": public_ranked,
+        "rejected": (job.get("rejected") or [])[:80],
+        "skipped": (job.get("skipped") or [])[:40],
+        "ranked": public_ranked[:80],
         "universePreview": universe[:12],
         "coverage": {
             "sets": _cov_blob(coverage.get("sets"), int(coverage.get("setCount") or 0), int(coverage.get("setCount") or 0)),
@@ -1281,7 +1679,9 @@ def self_test() -> Dict[str, Any]:
     import shutil
     import tempfile
 
+    global LAST_READY_PATH
     clear_stop()
+    invalidate_job_cache()
     rows: List[Dict[str, Any]] = []
 
     def rec(name: str, ok: bool, detail: Any = "") -> None:
@@ -1309,6 +1709,43 @@ def self_test() -> Dict[str, Any]:
         validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}) == ["a"],
         validated_set_ids({"successfulConfigs": [{"setId": "a", "validated": True}, {"setId": "b", "validated": False}]}),
     )
+    prev_last_ready = LAST_READY_PATH
+    LAST_READY_PATH = os.path.join(tempfile.gettempdir(), "cts-hist-test-no-last-ready.json")
+    try:
+        pos_job = {
+            "positive": ["AAA-USDT"],
+            "bySymbol": [
+                {"symbol": "BBB-USDT", "positive": True},
+                {"symbol": "CCC-USDT", "positive": False},
+            ],
+        }
+        rec("validated-symbols", validated_symbols(pos_job) == ["AAA-USDT", "BBB-USDT"], validated_symbols(pos_job))
+        long_rank = {"ranked": [{"symbol": f"S{i}-USDT"} for i in range(50)]}
+        rec("validated-symbols-no-rank-fallback", validated_symbols(long_rank) == [], validated_symbols(long_rank))
+        short_rank = {"ranked": [{"symbol": "AAA-USDT"}, {"symbol": "BBB-USDT"}]}
+        rec("validated-symbols-short-rank", validated_symbols(short_rank) == ["AAA-USDT", "BBB-USDT"], validated_symbols(short_rank))
+        run_job = {"successfulConfigs": [{"id": "indications:1m:sl0.6:st3", "validated": True, "pf": 1.4}]}
+        run_rows = running_sets(run_job)
+        rec("running-sets", bool(run_rows) and run_rows[0].get("id") == "indications:1m:sl0.6:st3", run_rows)
+        view = job_progress_view({
+            "successfulConfigs": [{"id": "a", "validated": True}],
+            "positive": ["AAA-USDT"],
+            "phase": "ready",
+        })
+        rec(
+            "progress-has-running-sets",
+            bool(view.get("runningSets"))
+            and bool(view.get("symbols"))
+            and view.get("enabled") is True
+            and view.get("catalogSkipped") is True,
+            view,
+        )
+        off = off_progress_view()
+        rec("off-progress", off.get("enabled") is False and off.get("phase") == "off", off)
+        cap_job = {"positive": [f"S{i}-USDT" for i in range(80)]}
+        rec("validated-symbols-cap", len(validated_symbols(cap_job)) == SYMBOL_CAP, len(validated_symbols(cap_job)))
+    finally:
+        LAST_READY_PATH = prev_last_ready
 
     ov = test_overlay(4, 1.1, 8, 8)
     ov["slToTpRatios"] = [0.6]

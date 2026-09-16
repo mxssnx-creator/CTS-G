@@ -11,6 +11,17 @@ export type HistTestSymbol = {
   vol24h?: number;
 };
 
+export type HistTestRunningSet = {
+  id?: string;
+  indication?: string;
+  strategy?: string;
+  symbol?: string;
+  pf?: number;
+  n?: number;
+  step?: number;
+  validated?: boolean;
+};
+
 export type HistTestJob = {
   ok?: boolean;
   phase: string;
@@ -46,7 +57,56 @@ export type HistTestJob = {
   continuous?: boolean;
   validatedIds?: string[];
   recalcOnly?: boolean;
+  runningSets?: HistTestRunningSet[];
+  internSymbols?: string[];
+  enabled?: boolean;
+  ownsCatalog?: boolean;
+  catalogSkipped?: boolean;
+  validatedCount?: number;
+  processingCount?: number;
+  processedSetCount?: number;
 };
+
+export type HistTestLive = {
+  enabled?: boolean;
+  ownsCatalog?: boolean;
+  catalogSkipped?: boolean;
+  phase?: string;
+  pct?: number;
+  detail?: string;
+  validatedCount?: number;
+  processingCount?: number;
+  processedSetCount?: number;
+  runningSets?: HistTestRunningSet[];
+  symbols?: string[];
+  internSymbols?: string[];
+  ready?: boolean;
+  running?: boolean;
+  paused?: boolean;
+  hours?: number;
+  filled?: number;
+  targetCount?: number;
+  stale?: boolean;
+};
+
+export function histTestIsEnabled(ht?: HistTestLive | null): boolean {
+  if (!ht) return false;
+  if (ht.enabled === false || ht.ownsCatalog === false || ht.phase === "off") return false;
+  if (ht.enabled === true || ht.ownsCatalog === true) return true;
+  return Boolean(ht.phase && ht.phase !== "idle" && ht.phase !== "off");
+}
+
+export function histTestOverviewLine(ht?: HistTestLive | null): string {
+  if (!histTestIsEnabled(ht)) return "Test Historic · OFF · full catalog in play";
+  const n = ht?.validatedCount ?? ht?.processedSetCount ?? (ht?.runningSets?.length ?? 0);
+  const ids = (ht?.runningSets || []).map((r) => r.id).filter(Boolean).slice(0, 6);
+  const syms = (ht?.internSymbols || ht?.symbols || []).slice(0, 8);
+  const parts = ["Test Historic · ON", `${n} validated`];
+  if (ids.length) parts.push(`sets ${ids.join(" ")}`);
+  if (syms.length) parts.push(syms.join(" "));
+  if (ht?.detail && !ids.length && !syms.length) parts.push(String(ht.detail));
+  return parts.join(" · ");
+}
 
 export const HIST_TEST_HOURS_MIN = 4;
 export const HIST_TEST_HOURS_MAX = 64;

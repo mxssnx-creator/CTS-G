@@ -20,6 +20,7 @@ class HistTestContract(unittest.TestCase):
     def setUp(self):
         ht.clear_stop()
         ht.clear_pause()
+        ht.invalidate_job_cache()
 
     def tearDown(self):
         ht.clear_stop()
@@ -62,6 +63,58 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertEqual(ids, ["general:1m:sl0.6:st8", "trail-a", "extra-id"])
 
+    def test_validated_set_ids_from_compact_winner(self):
+        ids = ht.validated_set_ids({
+            "phase": "ready",
+            "ready": True,
+            "validatedCount": 2754,
+            "winner": {"id": "indications:1m:sl2.7:tr0.9:0.1:st11", "pack": "indications", "step": 11},
+            "ranked": [{"symbol": "SOL-USDT", "pf": 1.4}],
+        })
+        self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
+
+    def test_validated_set_ids_from_last_ready_file(self):
+        import tempfile, os
+        prev = ht.LAST_READY_PATH
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            ht.LAST_READY_PATH = path
+            with open(path, "w") as handle:
+                handle.write('{"winner":{"id":"indications:1m:sl2.7:tr0.9:0.1:st11"},"validatedIds":[]}')
+            ids = ht.validated_set_ids({"phase": "evaluate", "ready": False})
+            self.assertEqual(ids, ["indications:1m:sl2.7:tr0.9:0.1:st11"])
+        finally:
+            ht.LAST_READY_PATH = prev
+            os.unlink(path)
+
+    def test_apply_scores_activates_compact_winner(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [2.7], "stratTrailing": True, "setMinStep": 11, "setStepMax": 11,
+                   "stratIndications": True, "stratGeneral": True})
+        winner_id = next((st.id for st in book.by_idx if "sl2.7" in st.id and "st11" in st.id), None)
+        self.assertTrue(winner_id)
+        ids = ht.apply_scores_to_book(book, {
+            "phase": "ready",
+            "ready": True,
+            "winner": {"id": winner_id, "last15Ratio": 3.98, "n": 1011, "pack": "indications"},
+        })
+        self.assertIn(winner_id, ids)
+        st = book.sets[winner_id]
+        self.assertTrue(st.active)
+        self.assertGreaterEqual(st.n, 1011)
+        self.assertEqual(st.last15_ratio, 3.98)
+        book.progress.ready = True
+        book.use_historic_gate = True
+        book.strict_gate = True
+        long_rows = book._validated_entry_rows(st.pack, side="LONG")
+        short_rows = book._validated_entry_rows(st.pack, side="SHORT")
+        self.assertIn(winner_id, {row.id for row in long_rows})
+        self.assertIn(winner_id, {row.id for row in short_rows})
+        self.assertTrue(book.entry_pack_open(st.pack, side="LONG"))
+        self.assertTrue((st.by_side.get("LONG") or {}).get("active"))
+
     def test_apply_scores_gates_book(self):
         from set_engine import SetBook
         book = SetBook()
@@ -79,6 +132,22 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(all(st.id == sid for st in rows) or sid in {st.id for st in rows} or True)
         book.apply_hist_test_gate([])
         self.assertEqual(book._validated_entry_rows(book.by_idx[0].pack), [])
+
+    def test_hist_test_gate_invalidates_entry_cache(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8})
+        sid = book.by_idx[0].id
+        book.progress.ready = True
+        book.use_historic_gate = True
+        book.by_idx[0].last15_n = 30
+        book.by_idx[0].last15_ratio = 1.4
+        book.by_idx[0].active = True
+        before = book._entry_cache_key("general", "LONG")
+        book.apply_hist_test_gate([sid])
+        after = book._entry_cache_key("general", "LONG")
+        self.assertNotEqual(before, after)
+        self.assertEqual(book.hist_test_set_ids, {sid})
 
     def test_recalc_only_keeps_named_configs(self):
         from set_engine import SetBook
@@ -250,6 +319,15 @@ class HistTestContract(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(seen, ["WIN1", "WIN2"])
                 ht.clear_stop()
+
+    def test_validated_symbols_cap_and_off_view(self):
+        names = [f"S{i}-USDT" for i in range(80)]
+        self.assertEqual(ht.validated_symbols({"positive": names}), names[: ht.SYMBOL_CAP])
+        off = ht.off_progress_view()
+        self.assertEqual(off["phase"], "off")
+        self.assertFalse(off["enabled"])
+        self.assertEqual(off["runningSets"], [])
+        self.assertEqual(off["internSymbols"], [])
 
 
 if __name__ == "__main__":

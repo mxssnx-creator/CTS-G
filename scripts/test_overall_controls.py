@@ -99,6 +99,30 @@ class OverallTests(unittest.TestCase):
         self.assertEqual(len(p.api.batches),before)
         self.assertEqual(len({p.position_key(r) for r in rows}),2)
 
+    def test_overall_pair_uses_widest_member_range(self):
+        p = self.pulse()
+        p.sets.by_idx[0].tp_pct = .006
+        p.sets.by_idx[1].tp_pct = .012
+        for st in p.sets.by_idx:
+            p.place('X-USDT', 1, 'trend', .9, selected_set=st)
+        longs = [r for r in p.open.values() if r.side == 'LONG']
+        self.assertEqual(len(longs), 2)
+        self.assertNotAlmostEqual(longs[0].sl, longs[1].sl)
+        self.assertNotAlmostEqual(longs[0].tp, longs[1].tp)
+        self.assertAlmostEqual(longs[0].overall_sl, min(r.sl for r in longs))
+        self.assertAlmostEqual(longs[0].overall_tp, max(r.tp for r in longs))
+        self.assertEqual(longs[0].sl_oid, longs[1].sl_oid)
+        self.assertEqual(longs[0].tp_oid, longs[1].tp_oid)
+        for st in p.sets.by_idx:
+            p.place('X-USDT', -1, 'trend', .9, selected_set=st)
+        shorts = [r for r in p.open.values() if r.side == 'SHORT']
+        self.assertEqual(len(shorts), 2)
+        self.assertNotAlmostEqual(shorts[0].sl, shorts[1].sl)
+        self.assertAlmostEqual(shorts[0].overall_sl, max(r.sl for r in shorts))
+        self.assertAlmostEqual(shorts[0].overall_tp, min(r.tp for r in shorts))
+        self.assertEqual(len({r.sl_oid for r in shorts}), 1)
+        self.assertEqual(len({r.tp_oid for r in shorts}), 1)
+
     def test_own_targets_and_directions_remain_separate(self):
         p=self.pulse()
         for direction in (1,-1):

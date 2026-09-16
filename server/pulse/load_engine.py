@@ -502,11 +502,14 @@ class LoadGovernor:
             level = "normal"
 
         # Repeated compute overruns are a scheduling signal even when RSS is
-        # healthy. They reduce optional work on the next cycle and keep a
-        # catalog-heavy lane from monopolising live controls.
+        # healthy. They reduce optional work on the next cycle. Do not jump
+        # to overload (which sheds hist scoring) unless RAM is actually tight.
         if self.overrun_n >= 2 and LEVEL_RANK[level] < LEVEL_RANK["busy"]:
             level = "busy"
-        if self.overrun_n >= 5 and LEVEL_RANK[level] < LEVEL_RANK["overload"]:
+        ram_tight = pressure_rss >= soft or (
+            self.cgroup_mb > 0 and self.cgroup_headroom_mb < max(384.0, self.cgroup_mb * 0.12)
+        )
+        if self.overrun_n >= 8 and ram_tight and LEVEL_RANK[level] < LEVEL_RANK["overload"]:
             level = "overload"
         self.raw_level = level
 
@@ -820,6 +823,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("load-level-hot", b2.level in ("overload", "critical"), f"level={b2.level} rss={b2.rss_mb}"))
     out.append(("load-shed-hot", (not b2.tf_15m) and (not b2.extra_sources) and b2.scan_chunk <= 12, f"chunk={b2.scan_chunk} shed={b2.shed}"))
     out.append(("load-backpressure", b2.kline_rest is False or "hist" in b2.shed or not b2.hist_run, f"klineRest={b2.kline_rest} hist={b2.hist_run}"))
+    g3 = LoadGovernor()
+    g3._host_avail_override = 8192.0
+    g3.cgroup_mb = 4096.0
+    g3._cgroup_current_override = 700.0
+    g3.overrun_n = 16
+    b3 = g3.observe(n_sym=50, n_open=3, hot_ms=800, warm_ms=200, rss_mb=700.0, cycle_overrun=True, hist_busy=False)
+    out.append(("load-overrun-healthy-ram", b3.level == "busy" and b3.hist_run, f"level={b3.level} hist={b3.hist_run} rss={b3.rss_mb}"))
     keep, cur = g.scan_window(["A", "B", "C", "D", "E", "F"], ["C"], chunk=3, cursor=0)
     out.append(("load-window-open-first", keep[:1] == ["C"] and len(keep) == 3, f"keep={keep} cur={cur}"))
     keep2, cur2 = g.scan_window(["A", "B", "C", "D", "E", "F"], ["C"], chunk=3, cursor=cur)

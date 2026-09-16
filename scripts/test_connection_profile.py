@@ -26,11 +26,12 @@ class ConnectionProfileTests(unittest.TestCase):
         p = processing_profile()
         for key in ('minPf','baseMinPf','mainMinPf','realMinPf','setMinPf','dcaMinPf','exitMinPf'):
             self.assertEqual(p[key],1.02)
-        for key in ('maxOpen','maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
+        for key in ('maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
             self.assertEqual(p[key],0)
+        self.assertEqual(p['maxOpen'],100)
         self.assertEqual(p['histLookbackBars'],2880)
         self.assertEqual(p['baseEvalPosCount'],30)
-        self.assertEqual(p['symbolCap'],20)
+        self.assertEqual(p['symbolCap'],50)
         self.assertTrue(p['controlOrdersOverall'])
         self.assertTrue(p['symbolsAll'])
         self.assertTrue(p['symbolsDynamic'])
@@ -40,7 +41,7 @@ class ConnectionProfileTests(unittest.TestCase):
         p['minPf']=999
         self.assertEqual(processing_profile()['minPf'],1.02)
 
-    def test_control_rollout_preserves_remote_edits_except_explicit_20_symbol_profile(self):
+    def test_control_rollout_preserves_remote_edits_except_explicit_50_symbol_profile(self):
         import runpy
         patch = runpy.run_path(str(ROOT/'deploy/continuous-vst-release.py'))['profile_patch']
         current = {'minPf':1.04,'setDeactN':15,'symbolCap':120,'controlMinTrades':8}
@@ -48,7 +49,8 @@ class ConnectionProfileTests(unittest.TestCase):
         proposed = patch(current,processing_profile(),True)
         self.assertEqual(proposed['minPf'],1.04)
         self.assertEqual(proposed['setDeactN'],15)
-        self.assertEqual(proposed['symbolCap'],20)
+        self.assertEqual(proposed['symbolCap'],50)
+        self.assertEqual(proposed['maxOpen'],100)
         self.assertTrue(proposed['controlOrdersOverall'])
         self.assertEqual(proposed['controlMinTrades'],0)
         self.assertEqual(current,before)
