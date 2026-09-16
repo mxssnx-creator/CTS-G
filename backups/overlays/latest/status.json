@@ -3,7 +3,7 @@
     "activeCount": 397,
     "blockEnabled": true,
     "blockMaxStack": 6,
-    "equity": 46.6659,
+    "equity": 46.4032,
     "halted": false,
     "histTestEnabled": true,
     "histTestPhase": "ready",
@@ -14,10 +14,10 @@
     "validatedCount": 401
   },
   "stats-bingx-x02.json": {
-    "activeCount": 19478,
+    "activeCount": 20377,
     "blockEnabled": true,
     "blockMaxStack": 6,
-    "equity": 109140.1999,
+    "equity": 109140.2093,
     "halted": false,
     "histTestEnabled": false,
     "histTestPhase": "off",

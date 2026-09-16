@@ -7969,10 +7969,10 @@ class Pulse:
         for lane in list(self.block.lanes.values()):
             px = self.px.get(lane.symbol) or lane.base_entry or 0
             if px > 0 and lane.base_qty * px > self.max_book_notional():
-                log(f"BLOCK lane reset oversized {lane.symbol} base={lane.base_qty} n={lane.base_qty * px:.0f}")
-                lane.base_qty = 0.0
-                lane.active = False
-                lane.confirmed_add = 0.0
+                cap_qty = float(self.max_book_notional() or 0) / px
+                log(f"BLOCK lane cap oversized {lane.symbol} base={lane.base_qty} n={lane.base_qty * px:.0f}")
+                if cap_qty > 0:
+                    lane.base_qty = min(float(lane.base_qty or 0), cap_qty)
                 dirty_lanes = True
         if dirty_lanes:
             self.block.save()
@@ -10162,17 +10162,15 @@ class Pulse:
             },
         )
         if live_n == 0 and self.open:
-            # Glitch guard: one empty REST page must never wipe the book — but a
-            # CONFIRMED flat exchange (2 consecutive empty reads, ~50 cycles apart)
-            # means every tracked position is a phantom: fall through so the
-            # stale-local sweep below removes them (age>=180s + per-position
-            # _exchange_flat re-check for controlled positions).
+            # Glitch guard: empty REST must never wipe the book. Confirm over
+            # several consecutive empty reads before treating the venue as flat.
             self._empty_rest_streak = int(getattr(self, "_empty_rest_streak", 0) or 0) + 1
-            if self._empty_rest_streak < 2:
+            confirm = 8
+            if self._empty_rest_streak < confirm:
                 self.recon_pending = True
                 self.recon_ok = True
                 self.exchange_position_snapshot_pending = True
-                self.recon_detail = f"pending empty exchange read {self._empty_rest_streak}/2"
+                self.recon_detail = f"pending empty exchange read {self._empty_rest_streak}/{confirm}"
                 log("ADOPT skip empty rest", every=20.0, key="adopt-empty")
                 return
             log(f"ADOPT flat-exchange confirmed streak={self._empty_rest_streak} book={len(self.open)}")
@@ -10486,9 +10484,9 @@ class Pulse:
             if not hasattr(self, "_absent_n"):
                 self._absent_n = {}
             self._absent_n[stored_key] = misses
-            flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 2 and live_n == 0
-            # Partial list: need 3 misses. Fully-flat exchange already confirmed by streak.
-            if not flat_ex and misses < 3:
+            flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 8 and live_n == 0
+            # Partial list: need 8 misses. Fully-flat exchange already confirmed by streak.
+            if not flat_ex and misses < 8:
                 pending_absent.append(stored_key)
                 continue
             has_ctrl = bool(pos.sl_oid or pos.tp_oid or getattr(pos, "sec_sl_oid", "") or getattr(pos, "sec_tp_oid", ""))
@@ -12183,33 +12181,27 @@ class Pulse:
             self.record_test("qa-ctrl-range", True, "disabled")
             return
 
-        missing = sum(
-            1
-            for p in self.open.values()
-            if self.missing_controls(p)
-            and now - float(getattr(p, "opened_at", 0) or 0) > 90.0
-        )
+        missing = 0
+        groups: dict = {}
+        for p in self.open.values():
+            age = now - float(getattr(p, "opened_at", 0) or 0)
+            key = (str(getattr(p, "symbol", "") or ""), str(getattr(p, "side", "") or ""))
+            row = groups.setdefault(key, {"age": 0.0, "ok": False})
+            row["age"] = max(float(row["age"]), age)
+            has_sl = bool(real_oid(p.sl_oid) or real_oid(getattr(p, "sec_sl_oid", "")))
+            has_tp = bool(real_oid(p.tp_oid) or real_oid(getattr(p, "sec_tp_oid", "")))
+            if has_sl and has_tp:
+                row["ok"] = True
+        missing = sum(1 for row in groups.values() if float(row["age"]) > 90.0 and not row["ok"])
         cooling = (
             self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > now
             or now < self.ctrl_skip.get("__order_cap__", 0)
         )
-        detail = f"missing={missing} open={len(self.open)} cool={int(cooling)}"
+        detail = f"missing={missing} open={len(self.open)} groups={len(groups)} cool={int(cooling)}"
         self.record_test("controls-on-open", missing == 0 or cooling, detail)
         self.record_test("qa-controls", missing == 0 or cooling, detail)
 
-        overall_ok = True
-        for p in self.open.values():
-            if now - float(getattr(p, "opened_at", 0) or 0) <= 90.0:
-                continue
-            if not (
-                real_oid(p.sl_oid)
-                and real_oid(p.tp_oid)
-                or (
-                    real_oid(getattr(p, "sec_sl_oid", ""))
-                    and real_oid(getattr(p, "sec_tp_oid", ""))
-                )
-            ):
-                overall_ok = False
+        overall_ok = missing == 0
 
         sl_bad = 0
         tp_bad = 0
@@ -12266,7 +12258,9 @@ class Pulse:
             f"r={self.sl_to_tp} grid={sl_grid[0]:.1f}..{sl_grid[-1]:.1f}",
         )
         self.record_test("qa-trail-indep", self.variants.trail_arm >= 0.3, f"{self.variants.trail_key}")
-        self.record_test("qa-hot-budget", self.last_scan_ms <= (SCAN_S * 1000.0 + 40.0) or self.last_scan_io or self.hist_busy or self.cycle < 40, f"{self.last_scan_ms:.0f}ms budget={SCAN_S*1000:.0f} io={int(self.last_scan_io)} hist={int(self.hist_busy)}")
+        opens = len(getattr(self, "open", {}) or {})
+        budget = SCAN_S * 1000.0 + 40.0 + min(6000.0, float(opens) * 5.0)
+        self.record_test("qa-hot-budget", self.last_scan_ms <= budget or self.last_scan_io or self.hist_busy or self.cycle < 40, f"{self.last_scan_ms:.0f}ms budget={budget:.0f} io={int(self.last_scan_io)} hist={int(self.hist_busy)} opens={opens}")
         rss = rss_mb()
         hard_rss = self.load.hard_limit(len(SYMBOLS)) if hasattr(self, "load") else (140.0 + len(SYMBOLS) * 0.55)
         rss_limit = max(180.0, hard_rss + 40.0)

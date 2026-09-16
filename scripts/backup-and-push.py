@@ -243,6 +243,7 @@ def git_push() -> str:
         "server/pulse/pulse_http.py",
         "server/pulse/hist_test.py",
         "server/pulse/combo_eval.py",
+        "server/pulse/pulse_trader.py",
         "src/routes/settings.tsx",
         "src/lib/hist-test.ts",
         "src/components/combo-eval-panel.tsx",
