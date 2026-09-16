@@ -82,13 +82,16 @@ class SetOverviewTests(unittest.TestCase):
         original = {**tape()[0], "set_id": "general:1m:sl0.6:st3", "pack": "general",
                     "strategy": "block", "tp_pct": .003, "sl_ratio": .6, "step": 3}
         compact = slim_hist_row(original)
-        for key in ("set_id", "pack", "strategy", "tp_pct", "sl_ratio", "step"):
+        # Catalog identity lives on the Set; compact fills keep scoring metadata only.
+        for key in ("set_id", "pack", "strategy"):
+            self.assertNotIn(key, compact)
+        for key in ("tp_pct", "sl_ratio", "step"):
             self.assertEqual(compact[key], original[key])
         self.assertNotIn("pnl", compact)
-        b = book([])
-        b.strategy_hist["block"] = [slim_hist_row(dict(original, t=original['t']+60*i)) for i in range(15)]
-        row = build_overview(b)["rows"][0]
-        self.assertEqual((row["indicationKind"], row["strategyType"], row["tpRange"]), ("general", "block", "0.3000"))
+        st = state(hist=[slim_hist_row(dict(original, t=original['t']+60*i)) for i in range(15)])
+        row = next(r for r in build_overview(book([st]))["rows"] if r["scope"] == "system")
+        self.assertEqual((row["strategyType"], row["tpRange"]), ("normal", "0.3000"))
+        self.assertEqual(row["setId"], st.id)
 
     def test_legacy_unassigned_ranges_do_not_inherit_new_settings(self):
         b = book([])
