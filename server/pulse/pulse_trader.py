@@ -13593,7 +13593,7 @@ class Pulse:
         return ov.get("histTestEnabled", True) is not False
 
     def _intern_symbols(self) -> List[str]:
-        """When Test Historic owns the catalog, intern only validated + open symbols."""
+        """When Test Historic owns the catalog, intern overlay + open symbols."""
         now = time.monotonic()
         cached = getattr(self, "_intern_scan_cache", None)
         ts = float(getattr(self, "_intern_scan_at", 0) or 0)
@@ -13604,69 +13604,28 @@ class Pulse:
             self._intern_scan_cache = out
             self._intern_scan_at = now
             return list(out)
-        names: List[str] = []
-        seen: set[str] = set()
-
-        def add(raw: Any) -> None:
-            name = str(raw or "").strip()
-            if not name or name in ("*", "ALL", "UNLIMITED"):
-                return
-            key = name.upper()
-            if key in seen or ":" in name:
-                return
-            seen.add(key)
-            names.append(name)
-
         job: Dict[str, Any] = {}
         try:
             job = hist_test_mod.read_job()
-            for s in hist_test_mod.validated_symbols(job):
-                add(s)
         except Exception:
             job = {}
-        opens = getattr(self, "open", None) or {}
-        rows = opens.values() if isinstance(opens, dict) else opens
-        for row in rows or []:
+        opens: List[str] = []
+        rows = getattr(self, "open", None) or {}
+        values = rows.values() if isinstance(rows, dict) else rows
+        for row in values or []:
             try:
-                add(getattr(row, "symbol", None) or (row.get("symbol") if isinstance(row, dict) else None))
+                name = getattr(row, "symbol", None) or (row.get("symbol") if isinstance(row, dict) else None)
             except Exception:
-                continue
-        order = {str(s).upper(): s for s in SYMBOLS}
-        out: List[str] = []
-        used: set[str] = set()
-        # Prefer overlay ∩ tested positives so intern uses the live universe.
-        for s in SYMBOLS:
-            key = str(s).upper()
-            if key in seen and key not in used:
-                used.add(key)
-                out.append(s)
-        if not out:
-            # Stale positives not in overlay, or job ready with configs: intern the overlay
-            # using validated configs so the engine is not dead on leftover junk symbols.
-            phase = str(job.get("phase") or "")
-            ready = bool(job.get("ready") or phase == "ready")
-            running = phase in getattr(hist_test_mod, "IN_FLIGHT_PHASES", ())
-            if ready or (names and not running):
-                for s in SYMBOLS:
-                    key = str(s).upper()
-                    if key not in used:
-                        used.add(key)
-                        out.append(s)
-            else:
-                for s in names:
-                    key = str(s).upper()
-                    if key not in used:
-                        used.add(key)
-                        out.append(order.get(key, s))
-        else:
-            for s in names:
-                key = str(s).upper()
-                if key not in used:
-                    used.add(key)
-                    out.append(order.get(key, s))
+                name = None
+            if name:
+                opens.append(str(name))
         cap = int(getattr(self, "symbol_cap", 0) or 0) or 50
-        if cap > 0 and len(out) > cap:
-            out = out[:cap]
+        try:
+            out = hist_test_mod.select_intern_symbols(list(SYMBOLS), job, opens=opens, cap=cap)
+        except Exception:
+            out = list(SYMBOLS)[:cap] if cap > 0 else list(SYMBOLS)
+        if not out:
+            out = list(SYMBOLS)[:cap] if cap > 0 else list(SYMBOLS)
         self._intern_scan_cache = out
         self._intern_scan_at = now
         return list(out)

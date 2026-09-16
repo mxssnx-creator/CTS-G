@@ -372,6 +372,32 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(off["runningSets"], [])
         self.assertEqual(off["internSymbols"], [])
 
+    def test_select_intern_symbols_ready_uses_overlay_not_junk(self):
+        overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT", "BTC-USDT"]
+        job = {
+            "phase": "ready",
+            "ready": True,
+            "positive": ["SYN-USDT", "BONER-USDT", "XRP-USDT"],
+            "audit": {"failed": ["symbols-meet-floor"]},
+            "error": "audit: symbols-meet-floor",
+        }
+        out = ht.select_intern_symbols(overlay, job, cap=50)
+        self.assertEqual(out[:4], overlay)
+        self.assertNotIn("BONER-USDT", out)
+        self.assertNotIn("SYN-USDT", out)
+
+    def test_select_intern_symbols_inflight_uses_overlap(self):
+        overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT"]
+        job = {"phase": "score", "ready": False, "positive": ["BCH-USDT", "BONER-USDT"]}
+        out = ht.select_intern_symbols(overlay, job, cap=50)
+        self.assertEqual(out, ["BCH-USDT"])
+
+    def test_select_intern_symbols_keeps_open_lots(self):
+        overlay = ["XRP-USDT", "SOL-USDT"]
+        job = {"phase": "ready", "ready": True, "positive": ["SYN-USDT"]}
+        out = ht.select_intern_symbols(overlay, job, opens=["AAVE-USDT", "XRP-USDT"], cap=50)
+        self.assertEqual(out, ["XRP-USDT", "SOL-USDT", "AAVE-USDT"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,27 @@ def rss_mb() -> float:
         return 0.0
 
 
+def unescape_cgroup_rel(rel: str) -> str:
+    """Decode systemd /proc/self/cgroup escapes (``\\x2d`` → ``-``)."""
+    text = str(rel or "")
+    if "\\x" not in text:
+        return text
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 3 < n and text[i + 1] in "xX":
+            try:
+                out.append(chr(int(text[i + 2 : i + 4], 16)))
+                i += 4
+                continue
+            except ValueError:
+                pass
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def cgroup_memory_limit_mb() -> float:
     """Return this process' effective memory cap when cgroups expose one."""
     paths = []
@@ -53,8 +74,11 @@ def cgroup_memory_limit_mb() -> float:
                 parts = line.strip().split(":", 2)
                 if len(parts) == 3:
                     rel = parts[2].lstrip("/")
-                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory.max"))
-                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory", "memory.limit_in_bytes"))
+                    for candidate in (unescape_cgroup_rel(rel), rel):
+                        if not candidate:
+                            continue
+                        paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory.max"))
+                        paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory", "memory.limit_in_bytes"))
     except Exception:
         pass
     paths.extend(("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"))
@@ -86,9 +110,11 @@ def _cgroup_paths(v2_name: str, v1_name: str) -> List[str]:
                 if len(parts) != 3:
                     continue
                 rel = parts[2].lstrip("/")
-                if rel:
-                    paths.append(os.path.join("/sys/fs/cgroup", rel, v2_name))
-                    paths.append(os.path.join("/sys/fs/cgroup", rel, "memory", v1_name))
+                for candidate in (unescape_cgroup_rel(rel), rel):
+                    if not candidate:
+                        continue
+                    paths.append(os.path.join("/sys/fs/cgroup", candidate, v2_name))
+                    paths.append(os.path.join("/sys/fs/cgroup", candidate, "memory", v1_name))
     except Exception:
         pass
     paths.extend((os.path.join("/sys/fs/cgroup", v2_name),
@@ -837,6 +863,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     b = g.observe(n_sym=12, n_open=1, hot_ms=40, warm_ms=70, rss_mb=42.0)
     out.append(("load-level-calm", b.level in ("idle", "normal"), f"level={b.level} chunk={b.scan_chunk}"))
     out.append(("load-chunk-fits", b.scan_chunk >= 8 and b.scan_chunk <= 12, f"chunk={b.scan_chunk}"))
+    escaped = r"system.slice/system-cts\x2dga\x2dpulse.slice/cts-ga-pulse@bingx-x02.service"
+    out.append((
+        "cgroup-unescape-hyphen",
+        unescape_cgroup_rel(escaped) == "system.slice/system-cts-ga-pulse.slice/cts-ga-pulse@bingx-x02.service",
+        unescape_cgroup_rel(escaped),
+    ))
+    out.append(("cgroup-unescape-plain", unescape_cgroup_rel("system.slice/foo") == "system.slice/foo", "ok"))
     swap_used = host_swap_used_mb()
     out.append(("load-swap-used-finite", swap_used >= 0.0 and swap_used < 1_000_000.0, f"swap={swap_used}"))
     out.append(("load-tf-calm", b.tf_5m and b.tf_15m and b.hist_run, f"5m={b.tf_5m} 15m={b.tf_15m}"))

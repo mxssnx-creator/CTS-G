@@ -349,6 +349,67 @@ def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
     return out[:SYMBOL_CAP]
 
 
+def intern_audit_floor_failed(job: Optional[Dict[str, Any]] = None) -> bool:
+    blob = job if isinstance(job, dict) else {}
+    failed = (blob.get("audit") or {}).get("failed") if isinstance(blob.get("audit"), dict) else None
+    if isinstance(failed, (list, tuple, set)):
+        return "symbols-meet-floor" in failed
+    error = str(blob.get("error") or blob.get("detail") or "")
+    return "symbols-meet-floor" in error
+
+
+def select_intern_symbols(
+    overlay_symbols: Optional[List[str]] = None,
+    job: Optional[Dict[str, Any]] = None,
+    *,
+    opens: Optional[List[str]] = None,
+    cap: int = SYMBOL_CAP,
+) -> List[str]:
+    """Intern universe while Test Historic owns the catalog.
+
+    Ready jobs (or positives that fail the PF floor) intern the overlay ranked
+    list so validated configs trade the live universe, not leftover microcaps.
+    In-flight jobs intern overlay ∩ positives when that overlap exists.
+    Open lots always stay scannable.
+    """
+    overlay = [str(s).strip() for s in (overlay_symbols or []) if str(s or "").strip() and str(s).strip() not in ("*", "ALL", "UNLIMITED") and ":" not in str(s)]
+    blob = job if isinstance(job, dict) else {}
+    positives = validated_symbols(blob)
+    phase = str(blob.get("phase") or "")
+    ready = bool(blob.get("ready") or phase == "ready")
+    running = phase in IN_FLIGHT_PHASES
+    floor_failed = intern_audit_floor_failed(blob)
+    pos_keys = {s.upper() for s in positives}
+    overlap = [s for s in overlay if s.upper() in pos_keys]
+
+    out: List[str] = []
+    used: set[str] = set()
+
+    def add(raw: Any) -> None:
+        name = str(raw or "").strip()
+        if not name or name in ("*", "ALL", "UNLIMITED") or ":" in name:
+            return
+        key = name.upper()
+        if key in used:
+            return
+        used.add(key)
+        out.append(name)
+
+    use_overlay = bool(overlay) and (ready or floor_failed or (positives and not running) or not overlap)
+    if use_overlay:
+        for s in overlay:
+            add(s)
+    else:
+        for s in overlap or positives:
+            add(s)
+    for s in opens or []:
+        add(s)
+    limit = int(cap or 0) or SYMBOL_CAP
+    if limit > 0:
+        out = out[:limit]
+    return out
+
+
 def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
     """Compact validated configs currently in play for overviews/stats."""
     blob = job if isinstance(job, dict) else {}

@@ -282,6 +282,15 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(json.loads(rows[-1])["n"], MAX_ERROR_LOG_LINES + 124)
         self.assertEqual(retain_last_lines(str(path), max_lines=MAX_ERROR_LOG_LINES), MAX_ERROR_LOG_LINES)
 
+    def test_retain_last_lines_keeps_inode(self):
+        path = Path(self.root) / "pulse-bingx-x02.log"
+        path.write_text("".join(f"line-{i}\n" for i in range(80)), encoding="utf-8")
+        before = path.stat().st_ino
+        kept = retain_last_lines(str(path), max_lines=40)
+        self.assertEqual(kept, 40)
+        self.assertEqual(path.stat().st_ino, before)
+        self.assertEqual(path.read_text(encoding="utf-8").splitlines()[-1], "line-79")
+
     def test_corrupt_database_is_reported_without_deleting_anything(self):
         directory = lane_directory(self.root, "bingx-x02"); directory.mkdir(parents=True)
         path = directory / "statistics.sqlite3"; path.write_bytes(b"not a database")

@@ -248,23 +248,33 @@ def _tail_lines_locked(
         total += len(line)
     payload = b"".join(reversed(selected))
     try:
-        mode = target.stat().st_mode & 0o777
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(tmp_name, mode)
-            os.replace(tmp_name, target)
-        except Exception:
-            try:
-                Path(tmp_name).unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+        # Rewrite in place so systemd StandardOutput=append keeps the same
+        # inode. os.replace() after mkstemp left pulse writing to a deleted fd.
+        with target.open("r+b") as handle:
+            handle.seek(0)
+            handle.write(payload)
+            handle.truncate(len(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
     except OSError:
-        return 0
+        try:
+            mode = target.stat().st_mode & 0o777
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(target.parent))
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(tmp_name, mode)
+                os.replace(tmp_name, target)
+            except Exception:
+                try:
+                    Path(tmp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            return 0
     return len(selected)
 
 
@@ -432,6 +442,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
         rows: List[Tuple[str, bool, str]] = []
         rows.append(("tail-count", kept == 1000 and len(lines) == 1000, f"kept={kept} lines={len(lines)}"))
         rows.append(("tail-last", lines[-1:] == ["line-1204"], str(lines[-1:])))
+        inode = log_path.stat().st_ino
+        retain_last_lines(str(log_path))
+        rows.append(("tail-same-inode", log_path.stat().st_ino == inode, f"before={inode} after={log_path.stat().st_ino}"))
 
         for i in range(1205, 1305):
             append_bounded_line(str(log_path), f"line-{i}")
