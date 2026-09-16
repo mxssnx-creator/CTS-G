@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,4 +100,44 @@ for path in sorted(set(files)):
         print(f"retained {path} lines={kept} bytes={before}->{after}")
 
 print(f"retention complete files={trimmed} maxLines={max_lines} maxBytes={MAX_RETAINED_FILE_BYTES}")
+
+prefix = str(os.environ.get("CTS_REDIS_PREFIX") or "")
+ttl_s = 21600
+try:
+    ttl_s = int(min(value["systemRedisCalcTtlS"] for value in limits.values()))
+except (KeyError, ValueError, TypeError):
+    ttl_s = 21600
+ttl_s = max(300, min(86400, ttl_s))
+if prefix.endswith(":"):
+    expired = 0
+    try:
+        cur = "0"
+        pattern = prefix + "cts-calc:*"
+        scanned = 0
+        while scanned < 4000:
+            raw = subprocess.check_output(
+                ["redis-cli", "--raw", "SCAN", cur, "MATCH", pattern, "COUNT", "200"],
+                text=True, timeout=2,
+            )
+            parts = [p for p in raw.split("\n") if p != ""]
+            if not parts:
+                break
+            cur = parts[0]
+            for key in parts[1:]:
+                scanned += 1
+                if not key.startswith(prefix + "cts-calc:"):
+                    continue
+                try:
+                    t = subprocess.check_output(["redis-cli", "--raw", "TTL", key], text=True, timeout=1).strip()
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if t == "-1":
+                    subprocess.check_output(["redis-cli", "EXPIRE", key, str(ttl_s)], timeout=1)
+                    expired += 1
+            if cur == "0":
+                break
+        if expired:
+            print(f"expired {expired} {prefix}cts-calc keys ttl={ttl_s}")
+    except (OSError, subprocess.SubprocessError, FileNotFoundError):
+        pass
 PY

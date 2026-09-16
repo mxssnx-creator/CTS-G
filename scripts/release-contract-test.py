@@ -45,6 +45,46 @@ start_stack 0
             self.assertIn('restart qa-bingx-x02',commands)
             self.assertFalse(any('bingx-x01' in row for row in commands))
 
+    def test_empty_pulse_port_defaults_to_3015(self):
+        code = r'''
+source "$1"
+PULSE_PORT=
+PULSE_PORT="${PULSE_PORT:-3015}"
+[[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
+printf '%s\n' "$PULSE_PORT"
+'''
+        result = subprocess.run(
+            ["bash", "-c", code, "probe", str(ROOT / "deploy/linux-common.sh")],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "3015")
+
+    def test_prefixed_credentials_copy_uses_nx_and_skips_same_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = Path(tmp) / "calls"
+            code = r'''
+source "$1"
+have() { [[ "$1" == redis-cli ]]; }
+redis-cli() { printf '%s\n' "$*" >> "$CALL_RECORD"; echo 1; }
+CTS_REDIS_PREFIX="cts-ga:"
+LIVE_SLOT=bingx-x01
+VST_SLOT=bingx-x02
+ensure_prefixed_credentials
+CTS_REDIS_PREFIX=""
+ensure_prefixed_credentials
+'''
+            result = subprocess.run(
+                ["bash", "-c", code, "probe", str(ROOT / "deploy/linux-common.sh")],
+                env={**os.environ, "CALL_RECORD": str(record)},
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = record.read_text().splitlines() if record.exists() else []
+            self.assertIn("COPY connection:bingx-x01 cts-ga:connection:bingx-x01 NX", calls)
+            self.assertIn("COPY connection:bingx-x02 cts-ga:connection:bingx-x02 NX", calls)
+            self.assertEqual(len(calls), 2)
+
     def test_redis_readiness_retries_loading_and_requires_pong(self):
         for mode, expected, calls in (("loading",0,3),("auth",1,1),("error",1,5)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:

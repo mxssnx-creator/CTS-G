@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = "http://152.53.114.112:3002"
-PULSE = "http://152.53.114.112:3015"
+BASE = os.environ.get("CTS_MONITOR_BASE", "http://152.53.114.112:3002").rstrip("/")
+PULSE = os.environ.get("CTS_MONITOR_PULSE", "http://152.53.114.112:3015").rstrip("/")
 LIVE_ID = "bingx-x01"
 VST_ID = "bingx-x02"
 FORBIDDEN = "bingx-8581b0cb8581"
-OUT = Path("/workspace/reports/live-monitor-1h")
+OUT = Path(os.environ.get("CTS_MONITOR_OUT", "/workspace/reports/live-monitor-1h"))
 OUT.mkdir(parents=True, exist_ok=True)
 LOG = OUT / "monitor.log"
 JSONL = OUT / "snapshots.jsonl"

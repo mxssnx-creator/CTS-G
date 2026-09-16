@@ -87,10 +87,16 @@ fi
 # from this release actually run (Live default, halt-flag clear, etc.).
 saved_pulse_explicit="${PULSE_PORT_EXPLICIT:-0}"
 saved_start_live="${START_LIVE:-1}"
+saved_pulse_port="${PULSE_PORT:-}"
+saved_desk_port="${DESK_PORT:-}"
 # shellcheck source=linux-common.sh
 source "$HERE/linux-common.sh"
 PULSE_PORT_EXPLICIT="$saved_pulse_explicit"
 START_LIVE="$saved_start_live"
+[[ -n "$saved_pulse_port" ]] && PULSE_PORT="$saved_pulse_port"
+[[ -n "$saved_desk_port" ]] && DESK_PORT="$saved_desk_port"
+PULSE_PORT="${PULSE_PORT:-3015}"
+[[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
 
 find "$CTS_G_ROOT/deploy" -maxdepth 1 -type f -name '*.sh' ! -name 'linux-common.sh' -exec chmod 755 {} +
 configure_git "$CTS_G_ROOT"

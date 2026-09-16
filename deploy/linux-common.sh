@@ -31,7 +31,7 @@ GIT_USER_NAME="${GIT_USER_NAME:-xssnet}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-mxssnx@gmail.com}"
 DESK_HOST="${DESK_HOST:-0.0.0.0}"
 DESK_PORT="${DESK_PORT:-3102}"
-PULSE_PORT="${PULSE_PORT:-}"
+PULSE_PORT="${PULSE_PORT:-3015}"
 PULSE_PORT_EXPLICIT=0
 CTS_REDIS_PREFIX="${CTS_G_NAME}:"
 PYTHON_BIN="$CTS_G_ROOT/.venv/bin/python"
@@ -101,13 +101,15 @@ validate_instance() {
   local saved_desk saved_pulse port unit
   saved_desk="$(env_value PORT || true)"
   saved_pulse="$(env_value PULSE_PORT || true)"
-  [[ -n "$saved_pulse" ]] || saved_pulse="$(env_value PULSE_URL | sed -n 's|.*:\([0-9]*\)$|\1|p' || true)"
+  [[ "$saved_pulse" =~ ^[0-9]+$ ]] || saved_pulse=""
+  [[ -n "$saved_pulse" ]] || saved_pulse="$(env_value PULSE_URL | sed -n 's|.*:\([0-9][0-9]*\)$|\1|p' || true)"
+  [[ "$saved_pulse" =~ ^[0-9]+$ ]] || saved_pulse=""
   if [[ "${PORT_EXPLICIT:-0}" != 1 && -n "$saved_desk" ]]; then DESK_PORT="$saved_desk"; fi
   if [[ "$PULSE_PORT_EXPLICIT" != 1 && -n "$saved_pulse" ]]; then PULSE_PORT="$saved_pulse"; fi
   [[ "$DESK_PORT" =~ ^[0-9]+$ ]] || die "invalid desk port"
   DESK_PORT=$((10#$DESK_PORT))
-  PULSE_PORT="${PULSE_PORT:-$((DESK_PORT + 1))}"
-  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || die "invalid pulse port"
+  PULSE_PORT="${PULSE_PORT:-3015}"
+  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
   PULSE_PORT=$((10#$PULSE_PORT))
   (( DESK_PORT >= 1024 && DESK_PORT <= 65535 && PULSE_PORT >= 1024 && PULSE_PORT <= 65535 && DESK_PORT != PULSE_PORT )) || die "ports must be distinct and between 1024 and 65535"
   for port in "$DESK_PORT" "$PULSE_PORT"; do
@@ -274,6 +276,8 @@ ensure_dirs() {
 
 write_env_file() {
   mkdir -p "$ETC_DIR"
+  PULSE_PORT="${PULSE_PORT:-3015}"
+  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
   cat >"$ENV_FILE" <<EOF
 PULSE_URL=http://127.0.0.1:${PULSE_PORT}
 HOST=${DESK_HOST}
@@ -298,6 +302,8 @@ EOF
 
 seed_env() {
   mkdir -p "$ETC_DIR"
+  PULSE_PORT="${PULSE_PORT:-3015}"
+  [[ "$PULSE_PORT" =~ ^[0-9]+$ ]] || PULSE_PORT=3015
   if [[ ! -f "$ENV_FILE" ]]; then
     write_env_file
     ok "env $ENV_FILE (desk :$DESK_PORT)"
@@ -553,8 +559,24 @@ redis_has_keys() {
   [[ -n "$key" && -n "$sec" && "$key" != "(nil)" && "$sec" != "(nil)" ]]
 }
 
+ensure_prefixed_credentials() {
+  # Fill an empty prefixed connection hash from the unprefixed original so this
+  # sidecar can trade the shared BingX lanes. Never overwrite a dest that
+  # already has keys. Never print values. Originals are retained.
+  have redis-cli || return 0
+  [[ -n "${CTS_REDIS_PREFIX:-}" ]] || return 0
+  local slot src dst
+  for slot in "$LIVE_SLOT" "$VST_SLOT"; do
+    src="connection:$slot"
+    dst="${CTS_REDIS_PREFIX}connection:$slot"
+    [[ "$src" != "$dst" ]] || continue
+    redis-cli COPY "$src" "$dst" NX >/dev/null 2>&1 || true
+  done
+}
+
 enable_stack() {
   [[ "${NO_START:-0}" != 1 ]] || { skip "enable (--no-start)"; return; }
+  ensure_prefixed_credentials
   systemctl enable "$(pulse_http_unit)" "$(desk_unit)" "$(retention_timer_unit)" "$(resource_timer_unit)" >/dev/null
   if redis_has_keys "$VST_SLOT"; then systemctl enable "$(pulse_instance_unit "$VST_SLOT")" >/dev/null; fi
   if [[ "${START_LIVE:-1}" != 0 ]] && redis_has_keys "$LIVE_SLOT"; then
@@ -574,6 +596,7 @@ clear_live_halt_flags() {
 
 start_stack() {
   local start_live="${1:-1}"
+  ensure_prefixed_credentials
   systemctl restart "$(pulse_http_unit)"
   systemctl restart "$(desk_unit)"
   systemctl start "$(retention_timer_unit)"
