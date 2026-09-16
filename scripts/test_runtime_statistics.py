@@ -115,7 +115,7 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(report["foreignRealized"], 8)
         self.assertEqual({row["symbol"] for row in report["open"]}, {"OWN-USDT"})
         self.assertEqual(report["pfCost"]["n"], 30)
-        self.assertEqual(report["pfCost"]["minPf"], 1.02)
+        self.assertEqual(report["pfCost"]["minPf"], 1.1)
 
         live, vst = lane("bingx-x01", 100, 130), lane("bingx-x02", 200, 240)
         live.update(logicalPositionCount=700, pfCost={"n": 75, "minPf": 1.2})

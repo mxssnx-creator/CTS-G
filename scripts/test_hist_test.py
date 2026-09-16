@@ -131,6 +131,33 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(book.entry_pack_open(st.pack, side="LONG"))
         self.assertTrue((st.by_side.get("LONG") or {}).get("active"))
 
+    def test_score_pairs_chunks_above_calc_batch(self):
+        from set_engine import SetBook
+        from calculation_cache import CalculationCache
+
+        class St:
+            def __init__(self, i):
+                self.id = f"dummy:{i}"
+
+        class _Cache:
+            BATCH = CalculationCache.BATCH
+            calls = []
+
+            def prepare(self, _book, states):
+                if len(states) > self.BATCH:
+                    raise ValueError("calculation pipeline exceeds batch limit")
+                self.calls.append(len(states))
+                return [(st, None) for st in states]
+
+        book = SetBook()
+        book.calculation_cache = _Cache()
+        states = [St(i) for i in range(CalculationCache.BATCH * 2 + 5)]
+        pairs = book.score_pairs(states)
+        self.assertEqual(len(pairs), len(states))
+        self.assertEqual(len(_Cache.calls), 3)
+        self.assertTrue(all(n <= CalculationCache.BATCH for n in _Cache.calls))
+        self.assertEqual(sum(_Cache.calls), len(states))
+
     def test_apply_scores_gates_book(self):
         from set_engine import SetBook
         book = SetBook()

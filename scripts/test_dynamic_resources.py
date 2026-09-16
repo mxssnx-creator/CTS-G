@@ -27,6 +27,15 @@ class DynamicResourceTests(unittest.TestCase):
         self.assertEqual(policy["cpuWeight"], 10000)
         self.assertEqual(policy["cpuQuota"], "infinity")
 
+    def test_two_pulse_lanes_keep_catalog_floor(self):
+        policy = MODULE.compute_policy(16000, 8000, {
+            "cts-ga-pulse@bingx-x01.service": 220,
+            "cts-ga-pulse@bingx-x02.service": 1200,
+        })
+        self.assertGreaterEqual(policy["memoryMaxMb"], MODULE.MIN_PULSE_MAX_MB)
+        self.assertGreaterEqual(policy["memoryMaxMb"], 1200 + MODULE.SAFETY_MARGIN_MB)
+        self.assertLess(policy["memoryHighMb"], policy["memoryMaxMb"])
+
     def test_low_available_never_sets_max_below_live_floor(self):
         policy = MODULE.compute_policy(16000, 300, {"pulse@x02.service": 4900})
         self.assertGreaterEqual(policy["memoryMaxMb"], 5156)

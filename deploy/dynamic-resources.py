@@ -122,6 +122,10 @@ def compute_policy(
         target_mb = max(MIN_PULSE_MAX_MB, base, growth)
 
     live_floor = max(current.values(), default=0.0) + SAFETY_MARGIN_MB
+    # Two pulse lanes sharing one box still each need the catalog floor.
+    # Splitting leftover growth across actives used to drop MemoryMax to ~2GiB
+    # and OOM-kill the VST replay at a 2.2GiB working set.
+    target_mb = max(target_mb, MIN_PULSE_MAX_MB)
     if live_floor > target_mb:
         target_mb = live_floor
     if ceiling > 0 and target_mb < live_floor:

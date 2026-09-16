@@ -2734,7 +2734,21 @@ class SetBook:
 
     def score_pairs(self, states):
         cache = getattr(self, "calculation_cache", None)
-        return cache.prepare(self, states) if cache else [(st, None) for st in states]
+        rows = list(states or [])
+        if not rows:
+            return []
+        try:
+            from calculation_cache import CalculationCache
+            batch = max(1, int(getattr(cache, "BATCH", None) or CalculationCache.BATCH))
+        except Exception:
+            batch = 32
+        if cache is None:
+            return [(st, None) for st in rows]
+        out = []
+        for start in range(0, len(rows), batch):
+            chunk = rows[start:start + batch]
+            out.extend(cache.prepare(self, chunk))
+        return out
 
     def _score_pair(self, pair):
         state, bundle = pair
