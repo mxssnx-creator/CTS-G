@@ -217,6 +217,9 @@ def snapshot() -> Path:
         write_json(dest / "heal.json", {"restored": notes})
         write_json(latest / "heal.json", {"restored": notes})
         remote = fetch_remote_overlays()
+    else:
+        leftover = latest / "heal.json"
+        leftover.unlink(missing_ok=True)
     for name, blob in (remote.get("overlays") or {}).items():
         if not isinstance(blob, dict):
             continue
