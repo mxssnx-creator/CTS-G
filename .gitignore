@@ -39,3 +39,8 @@ server/pulse/hist-calc.json
 server/pulse/hist-calc-req.json
 server/pulse/hist-calc.log
 server/pulse/hist-calc.pid
+
+# Timestamped overlay snapshots; keep the latest copy in git
+backups/overlays/*/
+!backups/overlays/latest/
+!backups/overlays/latest/**
