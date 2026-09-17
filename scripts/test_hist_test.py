@@ -495,12 +495,13 @@ class HistTestContract(unittest.TestCase):
         self.assertNotIn("AIN-USDT", out)
 
     def test_intern_liquid_pool_fills_cap_with_liquid_volume(self):
-        tradable = list(ht.HIST_TEST_MAJORS[:48]) + ["AAA-USDT", "BBB-USDT"]
+        tradable = list(ht.HIST_TEST_MAJORS[:48]) + ["AAA-USDT", "BBB-USDT", "NCCOGOLD2USD-USDT"]
         universe = (
             [{"symbol": s, "quoteVolume": 5e9} for s in ht.HIST_TEST_MAJORS[:48]]
             + [
                 {"symbol": "AAA-USDT", "quoteVolume": 9e9},
                 {"symbol": "BBB-USDT", "quoteVolume": 8e9},
+                {"symbol": "NCCOGOLD2USD-USDT", "quoteVolume": 2e10},
                 {"symbol": "DUST-USDT", "quoteVolume": 12},
             ]
         )
@@ -509,6 +510,7 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("AAA-USDT", out)
         self.assertIn("BBB-USDT", out)
         self.assertNotIn("DUST-USDT", out)
+        self.assertNotIn("NCCOGOLD2USD-USDT", out)
 
     def test_intern_liquid_pool_drops_offline_contracts(self):
         tradable = [s for s in ht.HIST_TEST_MAJORS if s not in ("EOS-USDT", "MKR-USDT")]

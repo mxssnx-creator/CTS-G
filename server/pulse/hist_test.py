@@ -740,6 +740,8 @@ def intern_liquid_pool(
             name = str(s or "").strip().upper()
             if not name.endswith("-USDT") or name in used or ":" in name:
                 continue
+            if name.startswith(("NCCO", "NCS", "NCFX")):
+                continue
             if apply_tradable and name not in tradable_keys and name not in open_keys:
                 continue
             used.add(name)
