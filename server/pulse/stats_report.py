@@ -845,6 +845,25 @@ def render_html(blob: Dict[str, Any]) -> str:
     ddt = (blob.get("drawdownTime") or {}).get("afterCost") or {}
     coverage = blob.get("coverage") or {}
     sets_coverage = coverage.get("sets") or {}
+    hist_test = blob.get("histTest") or {}
+    hist_on = bool(
+        (hist_test.get("enabled") is True or hist_test.get("ownsCatalog") is True)
+        and hist_test.get("phase") != "off"
+    )
+    intern_n = int(sets_coverage.get("internSetCount") or hist_test.get("validatedCount") or sets_coverage.get("validatedCount") or 0)
+    catalog_n = int(sets_coverage.get("catalogSetCount") or sets_coverage.get("setCount") or blob.get("setCount") or 0)
+    proc_n = int(sets_coverage.get("processingCount") if sets_coverage.get("processingCount") is not None else (hist_test.get("processingCount") or 0))
+    active_n = int(sets_coverage.get("activeCount", blob.get("setActive")) or 0)
+    if hist_on:
+        set_card_strong = f"intern {number(intern_n, 0)} validated"
+        set_card_small = (
+            f"processing {number(proc_n, 0)} · {number(active_n, 0)} active"
+            + (f" · catalog {number(catalog_n, 0)} skipped" if catalog_n and intern_n and catalog_n > intern_n else "")
+            + f" · {number(sets_coverage.get('histFills', blob.get('histFills')), 0)} historic fills"
+        )
+    else:
+        set_card_strong = f"{number(sets_coverage.get('validatedCount', blob.get('setValidated')), 0)} / {number(sets_coverage.get('setCount', blob.get('setCount')), 0)}"
+        set_card_small = f"{number(active_n, 0)} active · {number(blob.get('histFills'), 0)} historic fills"
     historic = blob.get("historic") or {}
     historic_coverage = historic.get("coverage") or {}
     historic_symbols = historic_coverage.get("symbols") or {}
@@ -862,7 +881,7 @@ def render_html(blob: Dict[str, Any]) -> str:
             f'<div class="card"><span class="label">Session PnL</span><strong class="{metric_class(blob.get("sessionPnl"))}">{signed(blob.get("sessionPnl"), 4)}</strong><small>{number(blob.get("wins"), 0)}W / {number(blob.get("losses"), 0)}L · {number(blob.get("winRate"), 1)}% WR</small></div>',
             f'<div class="card"><span class="label">Last {number(current_n, 0)} cost PF</span><strong class="{pf_class(current_pf.get("ratio"), current_pf.get("count"))}">{number(current_pf.get("ratio"), 2)}</strong><small>n {number(current_pf.get("count"), 0)} · min {number((blob.get("costAccounting") or {}).get("minPf"), 2)}</small></div>',
             f'<div class="card"><span class="label">Drawdown time</span><strong>{number(float(ddt.get("maxDdS") or 0) / 3600, 2)} h</strong><small>{number(ddt.get("episodes"), 0)} episodes · avg {number(float(ddt.get("avgDdS") or 0) / 3600, 2)} h</small></div>',
-            f'<div class="card"><span class="label">Set coverage</span><strong>{number(sets_coverage.get("validatedCount", blob.get("setValidated")), 0)} / {number(sets_coverage.get("setCount", blob.get("setCount")), 0)}</strong><small>{number(sets_coverage.get("activeCount", blob.get("setActive")), 0)} active · {number(blob.get("histFills"), 0)} historic fills</small></div>',
+            f'<div class="card"><span class="label">Set coverage</span><strong>{set_card_strong}</strong><small>{set_card_small}</small></div>',
         ]
     )
 
@@ -1195,7 +1214,18 @@ def render_md(blob: Dict[str, Any]) -> str:
     for c in bcov.get("allCounts") or []:
         lines.append(f"  n={c.get('n')} inc={c.get('inc')}× add={c.get('targetAdd')} tot={c.get('targetBlock')} minPF={c.get('minPF')}")
     scov = cov.get("sets") or {}
-    lines.append(f"- sets valid {scov.get('validatedCount')}/{scov.get('setCount')} · active {scov.get('activeCount')}/{scov.get('setCount')} histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}")
+    ht = blob.get("histTest") or {}
+    ht_on = bool((ht.get("enabled") is True or ht.get("ownsCatalog") is True) and ht.get("phase") != "off")
+    intern_n = scov.get("internSetCount") or ht.get("validatedCount") or scov.get("validatedCount")
+    catalog_n = scov.get("catalogSetCount") or scov.get("setCount")
+    if ht_on:
+        lines.append(
+            f"- intern {intern_n} validated · processing {scov.get('processingCount') if scov.get('processingCount') is not None else ht.get('processingCount')} · active {scov.get('activeCount')}"
+            + (f" · catalog {catalog_n} skipped" if catalog_n and intern_n and catalog_n > intern_n else "")
+            + f" histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}"
+        )
+    else:
+        lines.append(f"- sets valid {scov.get('validatedCount')}/{scov.get('setCount')} · active {scov.get('activeCount')}/{scov.get('setCount')} histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}")
     cc = cov.get("controls") or {}
     lines.append(f"- controls ok={cc.get('ok')} missing={cc.get('missing')} open={cc.get('open')}")
     lines += ["", "## Block strategy", ""]

@@ -125,10 +125,12 @@ def overlay_test() -> None:
         rec(f"{name}-modules", all((ov.get("modules") or {}).get(k, True) is True for k in ("strategy.block", "strategy.dca", "strategy.indications", "strategy.trailing", "strategy.exits", "exec.controls")))
         rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
-        rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 1 and int(ov.get("trailingMinStep") or 0) == 1)
+        rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 7 and int(ov.get("trailingMinStep") or 0) == 7)
+        rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.4) < 1e-9, str(ov.get("slMinPct")))
+        rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - 1.15) < 1e-9, str(ov.get("minPf")))
         rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
         rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
-        rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.1) < 1e-9, str(ov.get("histTestMinPf")))
+        rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.15) < 1e-9, str(ov.get("histTestMinPf")))
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
         rec(f"{name}-direct-risk-range", ov.get("slMaxPct") == 3.0 and ov.get("tpMinPct") == 0.3 and ov.get("tpMaxPct") == 3.0)
         rec(f"{name}-block-stack", int(ov.get("blockMaxStack") or 0) == 6, str(ov.get("blockMaxStack")))
@@ -1635,7 +1637,7 @@ def block_calc_test() -> None:
         str(calculate_block_minimum_profit_factor(1.2, 1.1, 4.5)))
     from block_engine import cost_pf_from_net_fracs
     from position_cost import INTERN_PF, POSITIVE_PF
-    rec("block-cost-pf-1R", abs(cost_pf_from_net_fracs([0.001] * 8) - POSITIVE_PF) < 1e-9,
+    rec("block-cost-pf-1R", abs(cost_pf_from_net_fracs([0.001] * 8) - 1.10) < 1e-9,
         str(cost_pf_from_net_fracs([0.001] * 8)))
     rec("block-intern-not-real-floor", INTERN_PF + 1e-9 < POSITIVE_PF, f"{INTERN_PF} vs {POSITIVE_PF}")
     intern_book = BlockBook(os.path.join(tmp, "block-intern.json"), {
@@ -1644,7 +1646,7 @@ def block_calc_test() -> None:
     intern_lane = BlockLane(symbol="AAA-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     rec("block-intern-1.00-no-emit",
         intern_book.pick_emit(intern_book.evaluate_counts(intern_lane, live_n=1, intern_pf=INTERN_PF)) is None)
-    rec("block-real-1.10-emits-n1",
+    rec("block-real-1.15-emits-n1",
         intern_book.pick_emit(intern_book.evaluate_counts(intern_lane, live_n=1, intern_pf=POSITIVE_PF)) is not None)
 
     # 2) coverage blob exposes ALL counts (unlimited -> full preview window)

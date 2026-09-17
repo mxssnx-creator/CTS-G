@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -666,12 +666,10 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const phase = String((htOn ? ht?.phase : p?.phase) ?? ht?.phase ?? p?.phase ?? "idle");
   const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
   const gateReady = Boolean(htOn ? ht?.ready : p?.ready);
-  const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
   const proc = htOn
     ? (ht?.processingCount ?? s?.processingCount ?? 0)
     : (s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0);
-  const validN = htOn ? (ht?.validatedCount ?? s?.validatedCount ?? 0) : (s?.validatedCount ?? 0);
   const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
@@ -679,8 +677,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
         <span className={gateReady ? "text-primary" : "text-warn"}>
           sets · {phaseLabel}
         </span>
-        <span className="whitespace-nowrap">valid {validN}/{htOn ? (ht?.processedSetCount ?? s?.setCount ?? 0) : (s?.setCount ?? 0)}</span>
-        <span className="whitespace-nowrap">active {active}/{s?.setCount ?? 0}</span>
+        <span className="min-w-0 [overflow-wrap:anywhere]">{formatEffectiveSets(stats)}</span>
         {proc ? <span className="whitespace-nowrap">proc {proc}</span> : null}
         {updating ? <span>updating</span> : null}
         <span>{gateReady ? (phase === "ready" ? "ready" : "gate ready") : "gate closed"}</span>
@@ -700,12 +697,16 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             const lanePhase = String(ln.progress?.phase ?? (ln as { phase?: string }).phase ?? "idle");
             const laneUpdating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
+            const internN = ln.internSetCount ?? 0;
+            const laneSets = internN || htOn
+              ? `intern ${ln.validatedCount ?? internN} validated · active ${ln.activeCount ?? 0}`
+              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;
             return (
               <div key={ln.id || ln.type}>
                 <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-muted">
                   <span className={`min-w-0 ${ln.running && !ln.halted ? "text-primary" : "text-faint"}`}>
-                    {ln.type} valid {ln.validatedCount ?? 0}/{ln.setCount ?? 0} · active {ln.activeCount ?? 0}/{ln.setCount ?? 0}
-                    {(ln as { processingCount?: number }).processingCount ? ` · proc ${(ln as { processingCount?: number }).processingCount}` : ""}
+                    {ln.type} {laneSets}
+                    {ln.processingCount ? ` · proc ${ln.processingCount}` : ""}
                   </span>
                   <span className="shrink-0">{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>

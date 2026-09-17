@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { CostPfMetric } from "@/lib/analytics";
 import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
+import { formatEffectiveSets } from "@/lib/live-stats";
 import { pfClass, pnlClass } from "@/lib/status-tone";
 import { HistTestStatus } from "@/components/hist-test-controls";
 import { PosOrdersLine } from "@/components/pos-orders";
@@ -78,6 +79,7 @@ export function StatsOverview({
       <div className="grid gap-3">
         {heroes}
         {live ? <PosOrdersLine stats={live} className="font-mono text-xs text-muted" /> : null}
+        {live ? <p className="font-mono text-xs text-muted">Sets · {formatEffectiveSets(live)}</p> : null}
       </div>
     );
   }
@@ -85,6 +87,11 @@ export function StatsOverview({
     <section className="grid gap-3">
       {heroes}
       {live ? <PosOrdersLine stats={live} className="font-mono text-xs text-muted" /> : null}
+      {live ? (
+        <p className="font-mono text-xs text-muted" data-testid="stats-effective-sets">
+          Sets · {formatEffectiveSets(live)}
+        </p>
+      ) : null}
       {live ? <HistTestStatus histTest={live.histTest} /> : null}
 
       <div className="grid gap-3 lg:grid-cols-2">

@@ -146,7 +146,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "minimumAgreement": 0.6,
     "minimumConfidence": 0.6,
     "minimumStrength": 0.2,
-    "stopLossMinPct": 0.2,
+    "stopLossMinPct": 0.4,
     "stopLossMaxPct": 1.5,
     "stopLossAtrMultiplier": 0.85,
     "takeProfitRewardRisk": 1.8,
@@ -911,7 +911,7 @@ def evaluate_active_range(
     vol_w = clamp(float(settings.get("activeVolatilityWeight") or 0.3), 0.0, 1.0)
     cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
     vol_risk = max(cost * 2.0, cur_act * (0.75 + vol_w * 0.75))
-    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.2)), float(settings.get("stopLossMaxPct", 1.5)))
+    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.4)), float(settings.get("stopLossMaxPct", 1.5)))
     tp = clamp(max(cost * 3.0, price_chg * 1.25, sl * 1.1), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
     n_move = price_chg / threshold
     n_brk = breakout / max(noise, 0.01)

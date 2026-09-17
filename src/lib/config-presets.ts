@@ -67,7 +67,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     patch: {
       ...SHARED,
       slToTpRatio: 0.3,
-      slMinPct: 0.2,
+      slMinPct: 0.4,
       slMaxPct: 0.6,
       setMinStep: 12,
       setStepMax: 18,
@@ -102,7 +102,7 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     patch: {
       ...SHARED,
       slToTpRatio: 0.6,
-      slMinPct: 0.2,
+      slMinPct: 0.4,
       slMaxPct: 0.8,
       setMinStep: 10,
       setStepMax: 16,

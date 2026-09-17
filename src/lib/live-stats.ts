@@ -534,8 +534,12 @@ export type LiveStats = {
     sets?: {
       families?: { base?: number; trail?: number };
       setCount?: number;
+      internSetCount?: number;
+      catalogSetCount?: number;
+      internSymbolCount?: number;
       activeCount?: number;
       validatedCount?: number;
+      processingCount?: number;
       entryCandidateCount?: number;
     entryQueue?: { eligible: number; opened: number; pending: number; remaining: number; updatedAt?: number };
       entryCandidateCap?: number;
@@ -832,6 +836,12 @@ export type LiveStats = {
     useHistoricGate?: boolean;
     indGate?: Record<string, KindStat>;
     setCount?: number;
+    internSetCount?: number;
+    catalogSetCount?: number;
+    internSymbolCount?: number;
+    internSetIds?: string[];
+    internSetIdCount?: number;
+    processingSetIds?: string[];
     minStep?: number;
     minStepCfg?: number;
     stepMax?: number;
@@ -887,6 +897,9 @@ export type LiveStats = {
       activeCount?: number;
       validatedCount?: number;
       setCount?: number;
+      internSetCount?: number;
+      catalogSetCount?: number;
+      internSymbolCount?: number;
       ready?: boolean;
       histFills?: number;
       processingCount?: number;
@@ -1275,6 +1288,83 @@ export function posOrdersCounts(stats: {
   if (realOrders != null && lanes != null && realOrders === lanes) realOrders = liveOrders;
   if (liveOrders != null) realOrders = liveOrders;
   return { realPositions, livePositions, realOrders, liveOrders };
+}
+
+export type EffectiveSetCounts = {
+  on: boolean;
+  catalog: number | null;
+  intern: number | null;
+  validated: number | null;
+  active: number | null;
+  processing: number | null;
+  setCount: number | null;
+  symbols: number | null;
+  coordinations: number | null;
+};
+
+export function effectiveSetCounts(stats: {
+  histTest?: {
+    enabled?: boolean;
+    ownsCatalog?: boolean;
+    phase?: string;
+    validatedCount?: number;
+    processingCount?: number;
+    internSymbols?: string[];
+    symbols?: string[];
+    selectedCoordinations?: unknown[];
+  } | null;
+  sets?: {
+    setCount?: number;
+    catalogSetCount?: number;
+    internSetCount?: number;
+    validatedCount?: number;
+    activeCount?: number;
+    processingCount?: number;
+    internSymbolCount?: number;
+  } | null;
+  coverage?: { sets?: { setCount?: number; validatedCount?: number; activeCount?: number; internSetCount?: number; catalogSetCount?: number; internSymbolCount?: number; processingCount?: number } };
+} | null | undefined): EffectiveSetCounts {
+  const ht = stats?.histTest;
+  const on = Boolean(
+    ht &&
+      ht.enabled !== false &&
+      ht.ownsCatalog !== false &&
+      ht.phase !== "off" &&
+      (ht.enabled === true || ht.ownsCatalog === true),
+  );
+  const sets = stats?.sets;
+  const cov = stats?.coverage?.sets;
+  const catalog =
+    knownCount(sets?.catalogSetCount) ?? knownCount(sets?.setCount) ?? knownCount(cov?.catalogSetCount) ?? knownCount(cov?.setCount);
+  const intern =
+    knownCount(ht?.validatedCount) ??
+    knownCount(sets?.internSetCount) ??
+    knownCount(cov?.internSetCount) ??
+    knownCount(sets?.validatedCount);
+  const validated = on ? intern : (knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount));
+  const setCount = on ? intern : catalog;
+  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
+  let processing = knownCount(sets?.processingCount) ?? knownCount(ht?.processingCount);
+  if (on && intern != null && processing != null && processing > intern) processing = intern;
+  const symbols =
+    knownCount(sets?.internSymbolCount) ??
+    (Array.isArray(ht?.symbols) ? ht.symbols.length : null);
+  const coordinations = Array.isArray(ht?.selectedCoordinations) ? ht.selectedCoordinations.length : null;
+  return { on, catalog, intern, validated, active, processing, setCount, symbols, coordinations };
+}
+
+export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>[0]): string {
+  const c = effectiveSetCounts(stats);
+  if (c.on) {
+    const parts = [`intern ${c.validated ?? 0} validated`];
+    if (c.processing != null) parts.push(`processing ${c.processing}`);
+    if (c.active != null) parts.push(`active ${c.active}`);
+    if (c.symbols) parts.push(`${c.symbols} symbols`);
+    if (c.coordinations) parts.push(`${c.coordinations} coord`);
+    if (c.catalog != null && c.intern != null && c.catalog > c.intern) parts.push(`catalog ${c.catalog} skipped`);
+    return parts.join(" · ");
+  }
+  return `valid ${c.validated ?? 0}/${c.setCount ?? 0} · active ${c.active ?? 0}/${c.setCount ?? 0}`;
 }
 
 export function realPosOrders(stats: {

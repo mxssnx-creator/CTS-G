@@ -114,7 +114,8 @@ export function histTestOverviewLine(ht?: HistTestLive | null): string {
   const ids = (ht?.runningSets || []).map((r) => r.id).filter(Boolean).slice(0, 6);
   const coords = (ht?.selectedCoordinations || ht?.successfulConfigs || []).length;
   const proc = ht?.processingCount ?? 0;
-  const syms = (ht?.internSymbols || ht?.symbols || []).slice(0, 8);
+  const book = Array.isArray(ht?.symbols) ? ht.symbols : [];
+  const syms = book.slice(0, 8);
   const parts = ["Test Historic · ON", `${n} validated`];
   if (proc) parts.push(`${proc} processing`);
   if (coords) parts.push(`${coords} coordinations`);
@@ -129,7 +130,9 @@ export const HIST_TEST_HOURS_MAX = 64;
 export const HIST_TEST_HOURS_DEFAULT = 20;
 export const HIST_TEST_HOURS_STEP = 1;
 export const HIST_TEST_MIN_PF = 1.1;
-export const HIST_TEST_TARGET_DEFAULT = 20;
+export const HIST_TEST_TARGET_DEFAULT = 50;
+export const HIST_TEST_TARGET_MAX = 250;
+export const HIST_TEST_VALIDATE_CAP = 250;
 export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
 export const HIST_TEST_REFRESH_DEFAULT = 2;
@@ -253,7 +256,7 @@ export async function startHistTest(body: {
     histTestMinPf: body.minPf,
     histTestRefreshHours: refreshHours,
     refreshHours,
-    symbolCap: Math.max(1, Math.round(Number(body.symbolCap) || HIST_TEST_TARGET_DEFAULT)),
+    symbolCap: Math.max(1, Math.min(HIST_TEST_TARGET_MAX, Math.round(Number(body.symbolCap) || HIST_TEST_TARGET_DEFAULT))),
     overlay: { ...(body.overlay || {}), histTestRefreshHours: refreshHours },
   });
 }

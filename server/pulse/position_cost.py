@@ -2,6 +2,7 @@
 
 1.00 = Neutral (net 0 after one PositionCost)
 1.10 = +1× PositionCost net  (gross move = 2× cost)
+1.15 = +1.5× PositionCost net — live real-edge floor
 Each 0.10 of ratio = one more PositionCost of net result.
 
 required net % = cost% × ((ratio − 1) / 0.10)
@@ -23,10 +24,11 @@ RATIO_MIN = PF_MIN
 RATIO_MAX = PF_MAX
 RATIO_STEP = PF_STEP
 LAST_N_DEFAULT = 30
-# Real-edge floor: +1× PositionCost net. Intern/cost-neutral stays 1.00 and
-# must never be treated as this real floor (or vice versa).
-POSITIVE_PF = 1.10
+# Real-edge floor: +1.5× PositionCost net. Intern/cost-neutral stays 1.00 and
+# must never be treated as this real floor (or vice versa). +1× cost remains 1.10.
+POSITIVE_PF = 1.15
 INTERN_PF = 1.0
+SL_MIN_PCT = 0.4
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -853,5 +855,12 @@ if __name__ == "__main__":
         sl_to_tp=1.5,
     )
     assert abs(sl15 - 0.0075 * 1.5) < 1e-9 and sl15 > tp15
+    sl40, tp70, src40 = resolve_sl_tp(
+        base_sl=0.0, base_tp=0.0,
+        sl_min=0.004, sl_max=0.03, tp_min=0.003, tp_max=0.0,
+        cost_pct=0.10, tp_cost_ratio=7, sl_to_tp=0.6,
+    )
+    assert src40.startswith("cost") and abs(tp70 - 0.007) < 1e-9
+    assert abs(sl40 - 0.0042) < 1e-9, (sl40, tp70, src40)
     assert abs(snap_ratio(0.64) - 0.6) < 1e-9
     print("position_cost ok", got, src, src15)

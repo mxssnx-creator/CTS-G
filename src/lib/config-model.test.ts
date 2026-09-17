@@ -58,7 +58,7 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.1, key);
+      assert.equal(value[key], 1.15, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -66,18 +66,24 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
   }
 });
 
-test("risk and step limits preserve unlimited TP and the 0.15 percent SL floor", () => {
+test("risk and step limits preserve unlimited TP and the 0.4 percent SL floor", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.tpMinPct, .3);
     assert.equal(value.tpMaxPct, 0);
-    assert.equal(value.slMinPct, .15);
+    assert.equal(value.slMinPct, .4);
     assert.equal(value.slMaxPct, 3);
+    assert.equal(value.setMinStep, 7);
+    assert.equal(value.minStep, 7);
+    assert.equal(value.trailingMinStep, 7);
     assert.equal(value.setStepMax, 30);
   }
-  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, setStepMax: 70, minPf: 2.5, setMinPf: .8 });
+  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, setStepMax: 70, minPf: 2.5, setMinPf: .8, minStep: 1, trailingMinStep: 1 });
   assert.equal(value.tpMaxPct, 12);
-  assert.equal(value.slMinPct, .15);
+  assert.equal(value.slMinPct, .4);
   assert.equal(value.setStepMax, 30);
+  assert.equal(value.setMinStep, 7);
+  assert.equal(value.minStep, 7);
+  assert.equal(value.trailingMinStep, 7);
   assert.equal(value.minPf, 1.35);
   assert.equal(value.setMinPf, 1.35);
 });
@@ -118,14 +124,14 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(value.symbolCap, DEFAULT_SYMBOL_COUNT);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
-    assert.equal(value.minPf, 1.1);
-    assert.equal(value.baseMinPf, 1.1);
+    assert.equal(value.minPf, 1.15);
+    assert.equal(value.baseMinPf, 1.15);
     assert.equal(value.histLookbackBars, 2880);
     assert.equal(value.histTestHours, 20);
-    assert.equal(value.histTestMinPf, 1.1);
+    assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
     assert.equal(value.baseEvalPosCount, 30);
-    assert.equal(value.setMinStep, 1);
+    assert.equal(value.setMinStep, 7);
   }
 });
 
@@ -159,10 +165,10 @@ test("an explicit unlimited Set selection remains a user choice", () => {
   assert.equal(overlayFromCts({}, { setMaxActive: 0 }).setMaxActive, 0);
 });
 
-test("historic test hours stay 4–64 default 20 and min PF 1.1", () => {
+test("historic test hours stay 4–64 default 20 and min PF 1.15", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.histTestHours, 20);
-    assert.equal(value.histTestMinPf, 1.1);
+    assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
   }
   const clamped = syncOverlayFlags(overlayFromCts({}, { histTestHours: 99, histTestMinPf: 0.5 }));
@@ -170,9 +176,9 @@ test("historic test hours stay 4–64 default 20 and min PF 1.1", () => {
   assert.equal(clamped.histTestMinPf, 1.02);
   const off = syncOverlayFlags(overlayFromCts({}, { histTestEnabled: false }));
   assert.equal(off.histTestEnabled, false);
-  const low = syncOverlayFlags(overlayFromCts({}, { histTestHours: 2, histTestMinPf: 1.1 }));
+  const low = syncOverlayFlags(overlayFromCts({}, { histTestHours: 2, histTestMinPf: 1.15 }));
   assert.equal(low.histTestHours, 4);
-  const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.1 }));
+  const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.15 }));
   assert.equal(mid.histTestHours, 20);
   assert.equal(mid.histLookbackBars, 2880);
   const shifted = syncOverlayFlags(overlayFromCts({}, { histTestHours: 48, histLookbackBars: 2880, histTestMinPf: 1.15 }));
@@ -188,7 +194,7 @@ test("Control holdout defaults off and preserves zero independently of PF and la
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
     assert.equal(value.baseEvalPosCount, 30);
-    assert.equal(value.minPf, 1.1);
+    assert.equal(value.minPf, 1.15);
     assert.equal(value.controlOrdersPerConfig, true);
   }
 });
@@ -228,7 +234,7 @@ test("forced symbol winners survive overlay roundtrip", () => {
   assert.equal(saved.forcedBest?.["BCH-USDT"]?.slPct, 0.25);
   assert.equal(saved.forcedBest?.["SOL-USDT"]?.indication, "trend");
   assert.equal(saved.tpPct, 0.6);
-  assert.equal(saved.slPct, 0.2);
+  assert.equal(saved.slPct, 0.4);
 });
 
 test("historic test refresh interval is 1–8 hours default 2", () => {

@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, formatEffectiveSets, type LiveClosed, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -132,6 +132,12 @@ function ResultsPage() {
           className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
         >
           Download Markdown
+        </a>
+        <a
+          href="/sim-70h"
+          className="inline-flex min-h-11 items-center rounded-lg border border-border px-4 text-sm"
+        >
+          70h complete test
         </a>
       </div>
 
@@ -280,7 +286,7 @@ function EvaluationWindowsStrip({ stats }: { stats: LiveStats | null }) {
           <p className="mt-1 text-xs text-muted">Independent recent-position checks; a window is valid only when its requested sample is available.</p>
         </div>
         <span className="font-mono text-xs text-muted">
-          Sets valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · active {sets?.activeCount ?? 0}/{sets?.setCount ?? 0}
+          {formatEffectiveSets(stats)}
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
@@ -521,7 +527,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
   return (
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
-        gate {gate?.allow ? "open" : "paused"} · valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · active {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
+        gate {gate?.allow ? "open" : "paused"} · {formatEffectiveSets(stats)} · hist {sets?.histFills ?? 0} · min PF {sets?.minPf ?? 1.1}
       </p>
       {gate?.reasons?.length ? (
         <p className="mb-3 font-mono text-xs text-warn">{gate.reasons.join(" · ")}</p>

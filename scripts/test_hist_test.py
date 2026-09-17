@@ -46,6 +46,33 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ht.lookback_bars(4), 240)
         self.assertEqual(ht.lookback_bars(64), 3840)
 
+    def test_target_defaults_to_fifty_and_validates_up_to_250(self):
+        self.assertEqual(ht.DEFAULT_TARGET, 50)
+        self.assertEqual(ht.VALIDATION_CAP, 250)
+        self.assertEqual(ht.SYMBOL_CAP, 50)
+        self.assertEqual(ht.clamp_target(None), 50)
+        self.assertEqual(ht.clamp_target(0), 50)
+        self.assertEqual(ht.clamp_target(50), 50)
+        self.assertEqual(ht.clamp_target(250), 250)
+        self.assertEqual(ht.clamp_target(999), 250)
+
+    def test_rank_universe_fills_volume_beyond_majors_up_to_250(self):
+        majors = list(ht.HIST_TEST_MAJORS)
+        extra = [
+            {"symbol": f"ALT{i}-USDT", "last": 1, "vol24h": 1, "quoteVolume": 1e9 - i, "changePct": 1, "vol1h": 1}
+            for i in range(220)
+        ]
+        ticker = [
+            {"symbol": s, "last": 1, "vol24h": 1, "quoteVolume": 5e9, "changePct": 1, "vol1h": 1}
+            for s in majors
+        ] + extra
+        with patch.object(ht, "fetch_ticker", return_value=ticker):
+            picked, preview = ht.rank_universe(250)
+        self.assertEqual(len(picked), 250)
+        self.assertTrue(set(ht.PREFERRED_SYMBOLS).issubset({r["symbol"] for r in picked}))
+        self.assertGreaterEqual(sum(1 for r in picked if str(r["symbol"]).startswith("ALT")), 150)
+        self.assertLessEqual(len(preview), 40)
+
     def test_min_pf_defaults_to_positive_floor(self):
         self.assertEqual(ht.clamp_min_pf(None), POSITIVE_PF)
         self.assertEqual(ht.clamp_min_pf(1.1), 1.1)
@@ -237,6 +264,14 @@ class HistTestContract(unittest.TestCase):
         n = book.restrict_to_ids(keep)
         self.assertEqual(n, 1)
         self.assertEqual([st.id for st in book.by_idx], keep)
+
+    def test_short_ready_book_does_not_recalc_only(self):
+        """2 positive symbols vs target 50 must fill the ranked book, not freeze intern."""
+        ids = ["indications:1m:sl0.6:st8"]
+        self.assertFalse(ht.use_recalc_only({}, ids, ["THETA-USDT", "RENDER-USDT"], 50))
+        self.assertTrue(ht.use_recalc_only({}, ids, [f"S{i}-USDT" for i in range(50)], 50))
+        self.assertFalse(ht.use_recalc_only({"fullCatalog": True}, ids, [f"S{i}-USDT" for i in range(50)], 50))
+        self.assertFalse(ht.use_recalc_only({}, [], ["THETA-USDT", "RENDER-USDT"], 2))
 
     def test_symbol_positive_requires_fills_and_floor(self):
         self.assertTrue(ht.symbol_clears_floor({"n": 30, "pf": 1.21}, 1.1))
@@ -564,9 +599,15 @@ class HistTestContract(unittest.TestCase):
         self.assertIsNotNone(source)
         self.assertIn(source.id, keep)
         snap = book.snapshot()
-        self.assertEqual(snap["processingCount"], 2)
+        self.assertEqual(snap["setCount"], 2)
+        self.assertEqual(snap["internSetCount"], 2)
+        self.assertEqual(snap["validatedCount"], 2)
+        self.assertGreater(snap["catalogSetCount"], 2)
+        self.assertEqual(snap["processingCount"], 0)
+        intern_ids = set(snap.get("internSetIds") or [])
         proc_ids = set(snap["processingSetIds"])
-        self.assertTrue(set(keep) <= proc_ids)
+        self.assertTrue(set(keep) <= intern_ids)
+        self.assertFalse(set(other) & intern_ids)
         self.assertFalse(set(other) & proc_ids)
         coords = ht.selected_coordinations({
             "successfulConfigs": [
@@ -595,7 +636,9 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertTrue(view["selectedCoordinations"])
         self.assertIn("block", view["withWithout"])
-        self.assertEqual(view["processingCount"], 2)
+        self.assertEqual(view["validatedCount"], 2)
+        self.assertEqual(view["processedSetCount"], 2)
+        self.assertLessEqual(view["processingCount"], 2)
 
     def test_selected_coordinations_drop_false_cells(self):
         coords = ht.selected_coordinations({

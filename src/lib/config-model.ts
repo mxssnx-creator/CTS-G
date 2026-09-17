@@ -118,10 +118,11 @@ import { normalizeSystemSettings } from "./system-settings.ts";
 export const PF_MIN = 1.02;
 export const PF_MAX = 1.35;
 export const PF_STEP = 0.01;
-export const POSITIVE_PF = 1.10;
+export const POSITIVE_PF = 1.15;
 export const INTERN_PF = 1.0;
 export const DEFAULT_HIST_LOOKBACK_BARS = 2880; // 48 hours of 1m bars
-export const DEFAULT_MIN_STEP = 1;
+export const DEFAULT_MIN_STEP = 7;
+export const SL_MIN_PCT = 0.4;
 export const HIST_TEST_HOURS_MIN = 4;
 export const HIST_TEST_HOURS_MAX = 64;
 export const HIST_TEST_HOURS_DEFAULT = 20;
@@ -417,8 +418,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   symbolsDynamic: true,
   symbolSort: "vol1h",
   symbolCap: DEFAULT_SYMBOL_COUNT,
-  slPct: 0.48,
-  tpPct: 0.75,
+  slPct: 0.42,
+  tpPct: 0.70,
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
@@ -458,7 +459,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: 1.10,
+  dcaMinPf: 1.15,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
@@ -472,10 +473,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisPauseMaxWindow: 8,
   prevPosWindow: 25,
   prevPosMinCount: 5,
-  minPf: 1.10,
-  baseMinPf: 1.10,
-  mainMinPf: 1.10,
-  realMinPf: 1.10,
+  minPf: 1.15,
+  baseMinPf: 1.15,
+  mainMinPf: 1.15,
+  realMinPf: 1.15,
   positionCostPct: 0.10,
   positionCostFallbackPct: 0.10,
   // Prefer measured exchange fees. The manual PositionCost remains the
@@ -494,7 +495,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
   coordOptimizationN: 150,
   pfWindow: 15,
-  slMinPct: 0.15,
+  slMinPct: 0.4,
   slMaxPct: 3.0,
   tpMinPct: 0.3,
   tpMaxPct: 0,
@@ -537,9 +538,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeBreak: true,
   noise: 0.05,
   volWeight: 0.3,
-  minStep: 1,
+  minStep: 7,
   maxStopLossRatio: 2.5,
-  trailingMinStep: 1,
+  trailingMinStep: 7,
   posCountsVolumeRatio: 0.05,
   rearrange: true,
   rearrangeGap: 0.22,
@@ -548,7 +549,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indMinAgreement: 0.6,
   indMinConfidence: 0.6,
   indMinStrength: 0.2,
-  indStopMinPct: 0.2,
+  indStopMinPct: 0.4,
   indStopMaxPct: 1.5,
   indAtrMult: 0.85,
   indRewardRisk: 1.8,
@@ -566,7 +567,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   baseEvalPosCount: 30,
   setDeactN: 25,
   controlMinTrades: 0,
-  setMinPf: 1.10,
+  setMinPf: 1.15,
   setMaxDdTimeS: 57600,
   setAutoDeact: true,
   // Live negative-result deactivation is an explicit safety policy, not an
@@ -577,7 +578,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinSamples: 30,
   setReactivate: true,
   setMaxActive: 0,
-  setMinStep: 1,
+  setMinStep: 7,
   setStepMax: 30,
   setStepAdapt: true,
   exitEnabled: true,
@@ -595,7 +596,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 15,
   exitDeactN: 25,
-  exitMinPf: 1.10,
+  exitMinPf: 1.15,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -861,7 +862,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
-    dcaMinPf: num(cts.dcaMinPf, 1.10),
+    dcaMinPf: num(cts.dcaMinPf, POSITIVE_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 1),
@@ -901,7 +902,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
-    slMinPct: num(cts.slMinPct, 0.15),
+    slMinPct: num(cts.slMinPct, SL_MIN_PCT),
     slMaxPct: num(cts.slMaxPct, 3.0),
     tpMinPct: num(cts.tpMinPct, 0.3),
     tpMaxPct: num(cts.tpMaxPct, 0),
@@ -990,7 +991,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, 1.10),
+    exitMinPf: num(cts.exitMinPf, POSITIVE_PF),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),
@@ -1002,7 +1003,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.blockActiveMinLevel = Math.max(0, Math.min(out.blockMaxStack || 6, Math.trunc(num(out.blockActiveMinLevel, 0))));
   const pct = (value: number, fallback: number): number =>
     Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 100) / 100;
-  out.slMinPct = Math.max(0.15, pct(out.slMinPct, 0.15));
+  out.slMinPct = Math.max(SL_MIN_PCT, pct(out.slMinPct, SL_MIN_PCT));
   out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
   out.tpMinPct = Math.max(0.3, pct(out.tpMinPct, 0.3));
   out.tpMaxPct = num(out.tpMaxPct, 0) <= 0 ? 0 : Math.max(out.tpMinPct, num(out.tpMaxPct, 0));
@@ -1014,8 +1015,11 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.trailArmMax = 1.5;
   out.trailGiveMin = 0.1;
   out.trailGiveMax = 0.5;
-  out.setMinStep = Math.max(1, Math.min(30, Math.round(num(out.setMinStep, DEFAULT_MIN_STEP))));
+  out.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.setMinStep, DEFAULT_MIN_STEP))));
+  out.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.minStep, DEFAULT_MIN_STEP))));
+  out.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.trailingMinStep, DEFAULT_MIN_STEP))));
   out.setStepMax = Math.max(out.setMinStep, Math.min(30, Math.round(num(out.setStepMax, 30))));
+  out.slPct = Math.max(out.slMinPct, num(out.slPct, out.slMinPct));
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     out[key] = normalizePf(out.minPf, POSITIVE_PF);
   }
@@ -1143,12 +1147,15 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 30))));
   next.setPfWindow = next.baseEvalPosCount;
   next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
-  next.slMinPct = Math.max(.15, Math.min(3, num(next.slMinPct, .15)));
+  next.slMinPct = Math.max(SL_MIN_PCT, Math.min(3, num(next.slMinPct, SL_MIN_PCT)));
   next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
   next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));
   next.tpMaxPct = num(next.tpMaxPct, 0) <= 0 ? 0 : Math.max(next.tpMinPct, next.tpMaxPct);
-  next.setMinStep = Math.max(1, Math.min(30, Math.round(num(next.setMinStep, DEFAULT_MIN_STEP))));
+  next.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.setMinStep, DEFAULT_MIN_STEP))));
+  next.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.minStep, DEFAULT_MIN_STEP))));
+  next.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.trailingMinStep, DEFAULT_MIN_STEP))));
   next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
+  next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
   next.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.maxDdTimeS, 57600) / 600) * 600));
   next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
   next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));

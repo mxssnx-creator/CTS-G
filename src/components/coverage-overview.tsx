@@ -1,5 +1,5 @@
 import type { LiveStats } from "@/lib/live-stats";
-import { posOrdersCounts } from "@/lib/live-stats";
+import { posOrdersCounts, formatEffectiveSets } from "@/lib/live-stats";
 import { formatDuration } from "@/lib/analytics";
 import { HistTestStatus } from "@/components/hist-test-controls";
 import { histTestIsEnabled } from "@/lib/hist-test";
@@ -58,7 +58,7 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           coverage · px {px}/{n || "—"} · 1m {scan?.kl1m ?? "—"} · 5m {scan?.kl5m ?? "—"} · 15m {scan?.kl15m ?? "—"} · ind {scan?.indications ?? "—"}
         </span>
         <span className="min-w-0 text-muted [overflow-wrap:anywhere]">
-          valid {sets.validatedCount ?? 0}/{sets.setCount ?? 0} · active {sets.activeCount ?? 0}/{sets.setCount ?? 0}
+          {formatEffectiveSets(live)}
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
           {sets.histFills != null ? ` · hist ${sets.histFills}` : ""}
@@ -187,8 +187,8 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Positions/Orders" v={`Pos R ${po.realPositions ?? "—"} L ${po.livePositions ?? "—"} · Ord R ${po.realOrders ?? "—"} L ${po.liveOrders ?? "—"}`} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${pairCount} pairs · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
         <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
-        <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
-        <KV k="Test Historic" v={histTestIsEnabled(live?.histTest) ? `ON · ${live?.histTest?.validatedCount ?? 0} validated` : "OFF · full catalog"} ok={histTestIsEnabled(live?.histTest)} />
+        <KV k="Sets" v={formatEffectiveSets(live)} ok={(sets.validatedCount ?? 0) > 0 || histTestIsEnabled(live?.histTest)} />
+        <KV k="Test Historic" v={histTestIsEnabled(live?.histTest) ? `ON · ${formatEffectiveSets(live)}` : "OFF · full catalog"} ok={histTestIsEnabled(live?.histTest)} />
         <KV
           k="Live sets (cost-net)"
           v={`${sets.liveActive ?? liveSets?.active ?? 0}/${sets.liveProcessed ?? liveSets?.processed ?? 0} processed · PF ${Number(sets.livePf ?? liveSets?.last15Ratio ?? 0).toFixed(2)} · n ${sets.liveFills ?? liveSets?.fills ?? 0}`}

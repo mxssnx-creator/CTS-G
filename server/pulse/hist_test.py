@@ -65,9 +65,11 @@ HIST_TEST_MAJORS = (
     "SNX-USDT", "COMP-USDT",
 )
 _MAJOR_KEYS = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS} | {s.upper() for s in INTERN_MAJORS}
-VOL_CANDIDATES = 40
+VOL_CANDIDATES = 250
 MIN_QUOTE_VOLUME = 1_000_000.0
-DEFAULT_TARGET = 20
+DEFAULT_TARGET = 50
+VALIDATION_CAP = 250
+TARGET_MAX = 250
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PUBLIC_JSON = os.path.join(ROOT, "public", "hist-test.json")
@@ -141,7 +143,7 @@ def clamp_target(value: Any, default: int = DEFAULT_TARGET) -> int:
         n = int(default)
     if n <= 0:
         n = int(default)
-    return max(1, min(200, n))
+    return max(1, min(TARGET_MAX, n))
 
 
 def lookback_bars(hours: Any) -> int:
@@ -638,6 +640,23 @@ def successful_from_ranked(ranked_sets: Any, min_pf: float, limit: int = 60) -> 
         if len(best) >= max(1, int(limit or 60)):
             break
     return list(best.values())[:limit]
+
+
+def use_recalc_only(body: Optional[Dict[str, Any]], recalc_ids: Sequence[str], keep_symbols: Sequence[str], target: int) -> bool:
+    """Recalc the ready book only when it already meets the fill target.
+
+    Auto-seeded validated IDs must not freeze intern at 2 symbols while target is 50.
+    """
+    blob = body if isinstance(body, dict) else {}
+    if not recalc_ids:
+        return False
+    if blob.get("fullCatalog"):
+        return False
+    try:
+        need = max(1, int(target or 0))
+    except (TypeError, ValueError):
+        need = 1
+    return len([s for s in (keep_symbols or []) if str(s or "").strip()]) >= need
 
 
 def intern_audit_floor_failed(job: Optional[Dict[str, Any]] = None) -> bool:
@@ -1266,7 +1285,18 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if stale:
         detail += " · waiting on Test Historic refresh"
     running_set_rows = running_sets(blob)
-    intern = intern_liquid_pool(list(HIST_TEST_MAJORS), None, cap=SYMBOL_CAP)
+    intern_syms = intern_liquid_pool(
+        symbols,
+        blob.get("universe") or blob.get("ranked"),
+        cap=SYMBOL_CAP,
+    )
+    remaining = max(0, int(sets_total) - int(sets_done))
+    if running:
+        processing_n = remaining if remaining else (1 if pct < 100.0 else 0)
+    elif paused:
+        processing_n = remaining
+    else:
+        processing_n = 0
     ready_flag = bool(ids) or bool(blob.get("ready")) or (phase == "ready" and n_ids > 0)
     if err_line and not running and not paused:
         ready_flag = False
@@ -1290,11 +1320,11 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "enabled": True,
         "ownsCatalog": True,
         "catalogSkipped": not running,
-        "symbols": symbols[:SYMBOL_CAP],
+        "symbols": intern_syms,
         "runningSets": running_set_rows,
         "processedSetCount": n_ids,
-        "processingCount": n_ids,
-        "internSymbols": intern[:SYMBOL_CAP],
+        "processingCount": processing_n,
+        "internSymbols": intern_syms,
         "selectedCoordinations": selected_coordinations(blob),
         "withWithout": blob.get("withWithout") or {},
         "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
@@ -1553,7 +1583,7 @@ def keep_recalc_symbols(
     return out[:cap]
 
 
-def rank_universe(n: int = 80) -> tuple:
+def rank_universe(n: int = VALIDATION_CAP) -> tuple:
     universe = fetch_ticker()
     if not universe:
         raise RuntimeError("BingX ticker returned no USDT perps")
@@ -1586,9 +1616,15 @@ def rank_universe(n: int = 80) -> tuple:
         if len(picked) >= max(n, len(PREFERRED_SYMBOLS)):
             break
         add_symbol(str(row.get("symbol") or ""))
+    extra = [r for r in universe if r["symbol"] not in have]
+    extra.sort(key=lambda r: (-float(r.get("quoteVolume") or 0), str(r.get("symbol") or "")))
+    for row in extra:
+        if len(picked) >= max(n, len(PREFERRED_SYMBOLS)):
+            break
+        add_symbol(str(row.get("symbol") or ""))
     preview = [r for r in universe if r["symbol"] in have]
     preview.sort(key=lambda r: -float(r.get("quoteVolume") or 0))
-    return picked, preview[:40]
+    return picked, preview[: min(40, max(n, 1))]
 
 
 def symbol_clears_floor(stats: Dict[str, Any], min_pf: float) -> bool:
@@ -1939,7 +1975,14 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         or (body.get("overlay") or {}).get("histTestRefreshHours")
         or REFRESH_DEFAULT
     )
-    target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
+    target = clamp_target(
+        body.get("targetCount")
+        or body.get("count")
+        or body.get("symbolCap")
+        or (body.get("overlay") or {}).get("histTestTargetCount")
+        or (body.get("overlay") or {}).get("symbolCap")
+        or DEFAULT_TARGET
+    )
     step_lo = max(1, min(30, int(body.get("minStep") or body.get("stepLo") or STEP_LO)))
     step_hi = max(step_lo, min(30, int(body.get("stepMax") or body.get("stepHi") or STEP_HI)))
     synth = bool(body.get("synth"))
@@ -1949,7 +1992,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     keep_symbols = [str(s).strip().upper() for s in (body.get("keepSymbols") or []) if str(s or "").strip()]
     if not keep_symbols:
         keep_symbols = keep_recalc_symbols(None, target, seed_recalc_prior())
-    recalc_only = bool(recalc_ids) and not bool(body.get("fullCatalog"))
+    recalc_only = use_recalc_only(body, recalc_ids, keep_symbols, target)
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
     if user_ov:
@@ -2026,7 +2069,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             step = {"AAA-USDT": 0.22, "CCC-USDT": 0.18, "EEE-USDT": 0.16}.get(symbol, -0.14)
             return synth_trend(max(80, min(limit, 240)), start=50.0 if step < 0 else 80.0, step=step, noise=0.03)
     else:
-        queue, universe = rank_universe(max(target * 4, VOL_CANDIDATES))
+        queue, universe = rank_universe(max(VALIDATION_CAP, int(target or 0)))
         fetch_fn = fetch_klines
 
     lookback = lookback_bars(hours)
@@ -2343,7 +2386,14 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             or (body.get("overlay") or {}).get("histTestRefreshHours")
             or REFRESH_DEFAULT
         )
-        target = clamp_target(body.get("symbolCap") or body.get("targetCount") or body.get("count") or (body.get("overlay") or {}).get("symbolCap") or DEFAULT_TARGET)
+        target = clamp_target(
+            body.get("targetCount")
+            or body.get("count")
+            or body.get("symbolCap")
+            or (body.get("overlay") or {}).get("histTestTargetCount")
+            or (body.get("overlay") or {}).get("symbolCap")
+            or DEFAULT_TARGET
+        )
         queued = publish({
             "ok": True,
             "phase": "queued",
@@ -2478,6 +2528,9 @@ def self_test() -> Dict[str, Any]:
     rec("positive-false-below", not symbol_clears_floor({"n": 12, "pf": 1.02}, 1.1))
     rec("positive-false-empty", not symbol_clears_floor({"n": 0, "pf": 2.0}, 1.1))
     rec("target-default", clamp_target(0) == DEFAULT_TARGET)
+    rec("target-active-50", clamp_target(50) == 50)
+    rec("target-validate-250", clamp_target(250) == VALIDATION_CAP)
+    rec("target-max", clamp_target(999) == TARGET_MAX)
     rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
     rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))
     rec("refresh-max", clamp_refresh_hours(99) == REFRESH_MAX, clamp_refresh_hours(99))

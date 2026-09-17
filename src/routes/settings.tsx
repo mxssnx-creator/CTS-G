@@ -30,10 +30,12 @@ import {
   HIST_TEST_REFRESH_MAX,
   HIST_TEST_REFRESH_MIN,
   isUnlimitedSymbolBook,
+  DEFAULT_MIN_STEP,
+  SL_MIN_PCT,
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, formatEffectiveSets, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
@@ -701,7 +703,7 @@ function SettingsPage() {
                       hint={`Default ${DEFAULT_SYMBOL_COUNT} ranked symbols · All/unlimited is a separate opt-in universe`}
                       onChange={(v) => patch("symbolCap", Math.max(0, Math.round(v)))}
                     />
-                    <Num label="Step range · minimum" value={overlay.setMinStep} min={1} max={30} step={1} onChange={(v) => patch("setMinStep", Math.round(v))} />
+                    <Num label="Step range · minimum" value={overlay.setMinStep} min={DEFAULT_MIN_STEP} max={30} step={1} onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
                     <Num label="Step range · maximum" value={overlay.setStepMax} min={overlay.setMinStep} max={30} step={1} onChange={(v) => patch("setStepMax", Math.round(v))} />
                     <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                     <Num label="Set DDT maximum · minutes" value={overlay.setMaxDdTimeS / 60} min={10} max={960} step={10} onChange={(v) => patch("setMaxDdTimeS", Math.round(v / 10) * 600)} />
@@ -1386,7 +1388,7 @@ function SettingsPage() {
                   min={PF_MIN}
                   max={PF_MAX}
                   step={PF_STEP}
-                  hint={`Shared by Base, Main, Real, DCA and exits. Default requires PF > 1.02. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
+                  hint={`Shared by Base, Main, Real, DCA and exits. Default ${POSITIVE_PF.toFixed(2)}. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
                   onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
                 />
                 <Slider
@@ -1563,7 +1565,7 @@ function SettingsPage() {
                   step={1}
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
-                <Slider label="SL min" value={overlay.slMinPct} min={0.15} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
+                <Slider label="SL min" value={overlay.slMinPct} min={SL_MIN_PCT} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
                 <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
                 <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
                 <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
@@ -1720,20 +1722,20 @@ function SettingsPage() {
                 <Slider
                   label="Minimal Step Range"
                   value={overlay.setMinStep}
-                  min={1}
+                  min={DEFAULT_MIN_STEP}
                   max={30}
                   step={1}
-                  hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed.`}
-                  onChange={(v) => patch("setMinStep", Math.max(1, Math.min(30, Math.round(v))))}
+                  hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
+                  onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
-                  min={1}
+                  min={DEFAULT_MIN_STEP}
                   max={30}
                   step={1}
                   hint="Upper TP step. Every integer from min through max is its own Set."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 1, Math.min(30, Math.round(v))))}
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -2277,9 +2279,9 @@ function SettingsPage() {
                 <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
                 <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
-                <Num label="Min step" value={Math.max(1, overlay.minStep)} min={1} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(1, Math.min(30, Math.round(v))))} />
+                <Num label="Min step" value={Math.max(DEFAULT_MIN_STEP, overlay.minStep)} min={DEFAULT_MIN_STEP} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
-                <Num label="Trail min step" value={overlay.trailingMinStep} min={1} max={30} step={1} onChange={(v) => patch("trailingMinStep", v)} />
+                <Num label="Trail min step" value={overlay.trailingMinStep} min={DEFAULT_MIN_STEP} max={30} step={1} hint="Trailing Sets start at this range step. TP = step × position cost." onChange={(v) => patch("trailingMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
                 <Num
                   label="Pos-count vol ratio"
                   value={overlay.posCountsVolumeRatio}
@@ -3137,7 +3139,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
         <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
           <span className={p?.ready ? "text-primary" : "text-warn"}>{p?.phase ?? "idle"}{updating ? " · updating" : ""}{gate}</span>
           <span className="text-muted">
-            valid {sets?.validatedCount ?? 0}/{sets?.setCount ?? 0} · {sets?.activeCount ?? 0}/{sets?.setCount ?? 0} active · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
+            {formatEffectiveSets(stats)} · {sets?.histFills ?? 0} hist · last {fmtNum(p?.lastRunMs, 0)}ms
           </span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-border">
@@ -3439,7 +3441,7 @@ function EffectiveSettingsSummary({
       <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3" data-testid="lane-status">
         <AppliedKV label="PF floor · window" value={`${remote(pulse?.minPf ?? pulse?.setMinPf)} · ${remote(pulse?.pfWindow ?? pulse?.setPfWindow ?? pulse?.baseEvalPosCount)}`} />
         <AppliedKV label="DDT · live / Set" value={`${remote(pulse?.maxDdTimeS, "s")} · ${remote(pulse?.setMaxDdTimeS, "s")}`} />
-        <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
+        <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${formatEffectiveSets(stats)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
         <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controlPairs)} SL+TP pairs`} />
         <AppliedKV label="Positions" value={`R ${posOrdersCounts(stats).realPositions ?? "—"} · L ${posOrdersCounts(stats).livePositions ?? "—"}`} />
@@ -3453,7 +3455,7 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
         <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
         <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
-        <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
+        <AppliedKV label="Sets · fills" value={`${formatEffectiveSets(stats)} · ${remote(setCoverage?.histFills ?? stats?.sets?.histFills)} hist`} />
         <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
         <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
         <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />

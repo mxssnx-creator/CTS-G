@@ -794,7 +794,7 @@ function pulseControlPlugin(): Plugin {
             };
             const localJob = () => {
               const dest = join(process.cwd(), "public/hist-test.json");
-              let job: Record<string, unknown> = { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.1, ready: false, running: false, paused: false, independent: true, symbols: [] };
+              let job: Record<string, unknown> = { ok: true, phase: "idle", pct: 0, detail: "Ready · 20h historic test · fill until positive count", hours: 20, minPf: 1.15, ready: false, running: false, paused: false, independent: true, symbols: [] };
               if (existsSync(dest)) {
                 try { job = { ...job, ...(JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>) }; } catch { /* fall through */ }
               }
@@ -867,8 +867,8 @@ function pulseControlPlugin(): Plugin {
               return;
             }
             const hours = Math.max(4, Math.min(64, Math.round(Number(body.hours) || 20)));
-            const minPf = Number(body.minPf || body.histTestMinPf || 1.1);
-            const count = Math.max(1, Math.min(200, Math.round(Number(body.symbolCap || body.targetCount || body.count) || 20)));
+            const minPf = Number(body.minPf || body.histTestMinPf || 1.15);
+            const count = Math.max(1, Math.min(250, Math.round(Number(body.targetCount || body.count || body.symbolCap) || 50)));
             writeHistLatch("clear");
             const queued = {
               ok: true, phase: "queued", pct: 1, ready: false, running: true, paused: false, independent: true,

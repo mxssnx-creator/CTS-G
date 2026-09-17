@@ -385,11 +385,15 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         out["symbolsAll"] = True
         out["symbolsDynamic"] = True
         out["symbolCap"] = max(cap, 50) if cap else 50
+        out["histTestValidateCap"] = 250
+        out["histTestTargetCount"] = max(1, min(250, int(out.get("histTestTargetCount") or 50)))
         return out
     if cid == "bingx-x02" and junk:
         out["symbols"] = list(_MAJOR_USDT)
         out["symbolsAll"] = False
         out["symbolCap"] = 50
+        out["histTestValidateCap"] = 250
+        out["histTestTargetCount"] = max(1, min(250, int(out.get("histTestTargetCount") or 50)))
         if junk:
             out["histTestEnabled"] = False
         return out
@@ -397,6 +401,21 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         out["symbols"] = cleaned
     if cap and cap < 50:
         out["symbolCap"] = 50
+    else:
+        out["symbolCap"] = cap or 50
+    try:
+        validate_cap = int(out.get("histTestValidateCap") or 0)
+    except (TypeError, ValueError):
+        validate_cap = 0
+    out["histTestValidateCap"] = max(validate_cap, 250) if validate_cap else 250
+    try:
+        hist_target = int(out.get("histTestTargetCount") or 0)
+    except (TypeError, ValueError):
+        hist_target = 0
+    if not hist_target:
+        out["histTestTargetCount"] = 50
+    else:
+        out["histTestTargetCount"] = max(1, min(250, hist_target))
     return out
 
 
@@ -443,6 +462,52 @@ def stats_path(conn: str) -> str:
     if cid not in ID_TO_LANE:
         return os.path.join(DIR, "__invalid-connection-stats__.json")
     return os.path.join(DIR, f"stats-{cid}.json")
+
+
+def _hist_test_on(ht: Any) -> bool:
+    if not isinstance(ht, dict):
+        return False
+    if ht.get("enabled") is False or ht.get("ownsCatalog") is False or ht.get("phase") == "off":
+        return False
+    return bool(ht.get("enabled") is True or ht.get("ownsCatalog") is True)
+
+
+def _apply_effective_set_counts(out: dict) -> None:
+    """When Test Historic owns intern, overviews show intern/validated book not the full catalog."""
+    if not isinstance(out, dict):
+        return
+    sets = out.get("sets") if isinstance(out.get("sets"), dict) else None
+    if not sets:
+        return
+    ht = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
+    catalog = int(sets.get("catalogSetCount") or 0) or int(sets.get("setCount") or 0)
+    if catalog:
+        sets["catalogSetCount"] = catalog
+    if _hist_test_on(ht):
+        intern = int(ht.get("validatedCount") or sets.get("internSetCount") or sets.get("validatedCount") or 0)
+        sets["internSetCount"] = intern
+        sets["setCount"] = intern
+        sets["validatedCount"] = intern
+        proc = sets.get("processingCount")
+        if proc is None:
+            proc = ht.get("processingCount")
+        try:
+            proc = int(proc or 0)
+        except (TypeError, ValueError):
+            proc = 0
+        if intern and proc > intern:
+            proc = intern
+        sets["processingCount"] = proc
+        job_syms = ht.get("symbols") if isinstance(ht.get("symbols"), list) else []
+        if job_syms:
+            sets["internSymbolCount"] = len(job_syms)
+    cov = out.get("coverage") if isinstance(out.get("coverage"), dict) else None
+    if isinstance(cov, dict):
+        cov_sets = dict(cov.get("sets") or {})
+        for key in ("setCount", "validatedCount", "activeCount", "processingCount", "internSetCount", "catalogSetCount", "histFills", "internSymbolCount"):
+            if sets.get(key) is not None:
+                cov_sets[key] = sets.get(key)
+        cov["sets"] = cov_sets
 
 
 def slim_for_ui(st: dict) -> dict:
@@ -556,6 +621,7 @@ def slim_for_ui(st: dict) -> dict:
                 out["combo"] = ht["combo"]
             if ht.get("selectedCoordinations"):
                 out["selectedCoordinations"] = ht["selectedCoordinations"]
+    _apply_effective_set_counts(out)
     if isinstance(opens, list) and len(opens) > 256:
         out["openCountReported"] = len(opens)
         out["openTruncated"] = True
@@ -620,7 +686,19 @@ def slim_for_ui(st: dict) -> dict:
             if isinstance(processing_ids, list) and len(processing_ids) > 256:
                 nested_cov["processingSetIdCount"] = len(processing_ids)
                 nested_cov["processingSetIds"] = processing_ids[:256]
+            intern_ids = nested_cov.get("internSetIds")
+            if isinstance(intern_ids, list) and len(intern_ids) > 256:
+                nested_cov["internSetIdCount"] = nested_cov.get("internSetIdCount") or len(intern_ids)
+                nested_cov["internSetIds"] = intern_ids[:256]
             sets["coverage"] = nested_cov
+        intern_ids = sets.get("internSetIds")
+        if isinstance(intern_ids, list) and len(intern_ids) > 256:
+            sets["internSetIdCount"] = sets.get("internSetIdCount") or len(intern_ids)
+            sets["internSetIds"] = intern_ids[:256]
+        proc_ids = sets.get("processingSetIds")
+        if isinstance(proc_ids, list) and len(proc_ids) > 256:
+            sets["processingSetIdCount"] = sets.get("processingSetIdCount") or len(proc_ids)
+            sets["processingSetIds"] = proc_ids[:256]
         if isinstance(sets.get("rows"), list) and len(sets["rows"]) > 40:
             sets["rowCount"] = len(sets["rows"])
             sets["rows"] = sets["rows"][:40]
@@ -1512,6 +1590,9 @@ def _sets_lane(lane: dict, st: dict) -> dict:
         "activeCount": sets.get("activeCount") or 0,
         "validatedCount": sets.get("validatedCount") or 0,
         "setCount": sets.get("setCount") or 0,
+        "internSetCount": sets.get("internSetCount") or 0,
+        "catalogSetCount": sets.get("catalogSetCount") or 0,
+        "internSymbolCount": sets.get("internSymbolCount") or 0,
         "ready": bool(sets.get("ready") or prog.get("ready")),
         "histFills": sets.get("histFills") or 0,
         "processingCount": sets.get("processingCount") or 0,
@@ -1850,6 +1931,11 @@ def merge_overall() -> dict:
         sets["overview"] = overview
         for key in ("setCount", "activeCount", "validatedCount"):
             sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
+        intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
+        catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
+        sets["internSetCount"] = max(intern_vals) if intern_vals else 0
+        sets["catalogSetCount"] = max(catalog_vals) if catalog_vals else 0
+        sets["processingCount"] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES)
     system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in lanes)
     wallet_equity = sum(_report_number(l.get("walletEquity")) for l in lanes)
     session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in lanes)
@@ -2081,8 +2167,14 @@ def merge_overall() -> dict:
                 try:
                     fresh = job_progress_view()
                     for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy"):
-                        if fresh.get(key) is not None:
-                            view[key] = fresh.get(key)
+                        if fresh.get(key) is None:
+                            continue
+                        existing = view.get(key)
+                        if key == "processingCount" and existing is not None:
+                            continue
+                        if key in ("internSymbols", "symbols") and existing not in (None, [], ""):
+                            continue
+                        view[key] = fresh.get(key)
                 except Exception:
                     pass
             view["enabled"] = True

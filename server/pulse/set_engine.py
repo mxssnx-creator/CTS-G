@@ -1119,6 +1119,7 @@ class SetBook:
         self.opt_sl = 0.0030
         self.min_step_cfg = STEP_LIVE_MIN
         self.min_step = STEP_LIVE_MIN
+        self.trailing_min_step = STEP_LIVE_MIN
         self.step_max = STEP_MAX
         self.step_adapt = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
@@ -1393,7 +1394,7 @@ class SetBook:
         ov = shared_pf_settings(ov)
         from system_settings import normalize_system_settings
         self.system_workers = normalize_system_settings(ov)["systemWorkers"]
-        self.sl_min = min(.03, max(.0015, finite(ov.get("slMinPct"), .15) / 100))
+        self.sl_min = min(.03, max(0.004, finite(ov.get("slMinPct"), 0.4) / 100))
         self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
         self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
         cap = finite(ov.get("tpMaxPct"), 0.) / 100
@@ -1465,7 +1466,7 @@ class SetBook:
         self.live_test_min_samples = self.entry_policy_min_live_samples
         self.reactivate = bool(ov.get("setReactivate", True))
         # Strict gate (default ON): only VALIDATED (configured Last-N fills) AND
-        # PROFITABLE (cost-adjusted PF >= 1.10 = +1× PositionCost) + DDt under
+        # PROFITABLE (cost-adjusted PF >= POSITIVE_PF = +1.5× PositionCost) + DDt under
         # the cap may drive live orders. Cold/unproven sets keep collecting.
         self.strict_gate = bool(ov.get("setStrictGate", True))
         try:
@@ -1509,6 +1510,10 @@ class SetBook:
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
         self.step_adapt = bool(ov.get("setStepAdapt", True))
         self.min_step = self.min_step_cfg
+        raw_trail_step = ov.get("trailingMinStep")
+        if raw_trail_step is None:
+            raw_trail_step = ov.get("minStep") or self.min_step_cfg
+        self.trailing_min_step = clamp_step(raw_trail_step)
         self.steps = list(range(self.min_step, self.step_max + 1))
         packs = []
         if bool(ov.get("stratIndications", True)):
@@ -1556,7 +1561,7 @@ class SetBook:
             "minimumStrength": float(ov.get("indMinStrength") or 0.2),
             "minimumConfidence": float(ov.get("indMinConfidence") or 0.6),
             "minimumAgreement": float(ov.get("indMinAgreement") or 0.55),
-            "stopLossMinPct": float(ov.get("indStopMinPct") or 0.2),
+            "stopLossMinPct": float(ov.get("indStopMinPct") or 0.4),
             "stopLossMaxPct": float(ov.get("indStopMaxPct") or 1.5),
             "stopLossAtrMultiplier": float(ov.get("indAtrMult") or 0.85),
             "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
@@ -1675,6 +1680,7 @@ class SetBook:
             int(self.min_bars),
             int(self.warmup),
             int(self.hist_time_bars),
+            int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN),
             round(float(self.scratch_s), 6),
             round(float(self.scratch_min), 12),
             int(self.cooldown_bars),
@@ -1751,6 +1757,8 @@ class SetBook:
                     st.tr_i = -1
                     st.step_i = step_i
                     _put(st)
+                    if step < int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN):
+                        continue
                     for tr_i, (tkey, arm, give) in enumerate(trails):
                         sid = make_trail_id(pack, tkey, sl, step)
                         prev = keep.get(sid)
@@ -4604,6 +4612,16 @@ class SetBook:
             stage_counts[stage] += 1
             stage_parent_counts[stage].add(st.parent_set_id or st.id)
         axis_counts = {"prev": 0, "last": 0, "cont": 0, "pause": 0}
+        hist_ids = getattr(self, "hist_test_set_ids", None)
+        intern_n = 0 if hist_ids is None else len(hist_ids)
+        if hist_ids is not None:
+            intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
+            intern_validated = intern_n
+            intern_fills = sum(int(getattr(self.sets.get(sid), "n", 0) or 0) for sid in hist_ids if sid in self.sets)
+        else:
+            intern_active = sum(1 for st in self.sets.values() if st.active)
+            intern_validated = validated_count
+            intern_fills = sum(st.n for st in self.sets.values())
         return {
             "packs": list(self.packs),
             "slRatios": list(self.sl_ratios),
@@ -4617,15 +4635,19 @@ class SetBook:
                 "direction": 2,
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
-            "product": len(self.by_idx),
-            "setCount": len(self.sets),
-            "activeCount": sum(1 for st in self.sets.values() if st.active),
+            "product": intern_n if hist_ids is not None else len(self.by_idx),
+            "setCount": intern_n if hist_ids is not None else len(self.sets),
+            "catalogSetCount": len(self.sets),
+            "internSetCount": intern_n,
+            "internSetIdCount": intern_n,
+            "internSetIds": (list(hist_ids)[:64] if hist_ids is not None else []),
+            "activeCount": intern_active,
             "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
             "processingSetIds": self.processing_set_ids()[:350],
-            "validatedCount": validated_count,
+            "validatedCount": intern_validated,
             "validationNeed": need,
             "entryGate": getattr(self, "entry_gate_stats", None),
-            "histFills": sum(st.n for st in self.sets.values()),
+            "histFills": intern_fills,
             "replaySymbols": len(self._hist_seen),
             "replayFills": sum(int(st.n or 0) for st in self.sets.values()),
             "indexed": True,
@@ -5567,16 +5589,24 @@ class SetBook:
                 for st in self.by_idx[:48]
             ]
         hist_ids = getattr(self, "hist_test_set_ids", None)
+        intern_n = 0 if hist_ids is None else len(hist_ids)
+        catalog_n = len(self.sets)
+        if hist_ids is not None:
+            intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
+            intern_validated = intern_n
+        else:
+            intern_active = sum(1 for s in self.sets.values() if s.active)
+            intern_validated = validated_count
+        processing_n = len(getattr(self, "_processing_set_ids", set()) or set())
         processing_rows = []
         for st in self.by_idx:
-            hist_proc = bool(hist_ids is not None and st.id in hist_ids)
-            if not (st.processing_active or hist_proc):
+            if not st.processing_active:
                 continue
             processing_rows.append({
                 "id": st.id,
                 "processingActive": True,
-                "evaluating": hist_proc,
-                "processingReason": st.processing_reason or ("hist-test validated" if hist_proc else ""),
+                "evaluating": bool(hist_ids is not None and st.id in hist_ids),
+                "processingReason": st.processing_reason or "",
                 "baseQualified": bool((st.stage_ledger or {}).get("base")),
             })
             if len(processing_rows) >= 48:
@@ -5624,19 +5654,15 @@ class SetBook:
             "costSubtracted": True,
             "independentDirection": True,
             "directions": list(DIRECTIONS),
-            "setCount": len(self.sets),
-            "activeCount": sum(1 for s in self.sets.values() if s.active),
-            "processingCount": max(
-                len(getattr(self, "_processing_set_ids", set()) or set()),
-                len(processing_rows),
-                0 if hist_ids is None else len(hist_ids),
-            ),
-            "processingSetIds": (list(dict.fromkeys(
-                [row["id"] for row in processing_rows]
-                + self.processing_set_ids()
-                + (list(hist_ids) if hist_ids is not None else [])
-            )))[:512],
-            "validatedCount": validated_count,
+            "setCount": intern_n if hist_ids is not None else catalog_n,
+            "catalogSetCount": catalog_n,
+            "internSetCount": intern_n,
+            "internSetIdCount": intern_n,
+            "internSetIds": (list(hist_ids)[:64] if hist_ids is not None else []),
+            "activeCount": intern_active,
+            "processingCount": processing_n,
+            "processingSetIds": self.processing_set_ids()[:512],
+            "validatedCount": intern_validated,
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),
             "coverage": cover,
@@ -5662,6 +5688,7 @@ class SetBook:
             "listings": self.relative_listings(id_limit=120),
             "minStep": self.min_step,
             "minStepCfg": self.min_step_cfg,
+            "trailingMinStep": int(getattr(self, "trailing_min_step", STEP_LIVE_MIN) or STEP_LIVE_MIN),
             "stepMax": self.step_max,
             "stepAdapt": self.step_adapt,
             "steps": list(self.steps),
@@ -5748,7 +5775,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     bal = last_n_balanced(mixed_sym, 15)
     out.append(("set-last-n-chrono-newest", all(r["symbol"] == "B" for r in chrono), str({r["symbol"] for r in chrono})))
     out.append(("set-last-n-balanced-mix", {r["symbol"] for r in bal} == {"A", "B"}, str({r["symbol"] for r in bal})))
-    out.append(("set-positive-pf-floor", _PP == 1.10 and (not _is_pos(1.02)) and _is_pos(1.10), f"floor={_PP}"))
+    out.append(("set-positive-pf-floor", _PP == 1.15 and (not _is_pos(1.02)) and (not _is_pos(1.10)) and _is_pos(1.15), f"floor={_PP}"))
     live_usdt = {"t": 1, "pnl": 9.0, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     hist_frac = {"t": 2, "pnl": 0.0015, "pnl_pct": 0.003, "position_cost_pct": 0.15}
     out.append((
@@ -5797,6 +5824,32 @@ def self_test() -> List[Tuple[str, bool, str]]:
     slim = book.snapshot()
     out.append(("set-snap-slim-index", len(slim.get("index") or []) == 0, f"index={len(slim.get('index') or [])} rows={len(slim.get('rows') or [])}"))
     out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.0045) < 1e-9, f"{step_tp_pct(3, 0.15)}"))
+    out.append(("set-tp-step7-cost10", abs(step_tp_pct(7, 0.10) - 0.007) < 1e-9, f"{step_tp_pct(7, 0.10)}"))
+    trail_floor = SetBook()
+    trail_floor.load(
+        {
+            "histEnabled": True,
+            "setMinStep": 3,
+            "setStepMax": 8,
+            "trailingMinStep": 7,
+            "stratGeneral": True,
+            "stratIndications": False,
+            "stratTrailing": True,
+            "slToTpRatios": [0.6],
+            "trailArmMin": 0.3,
+            "trailArmMax": 0.3,
+            "trailGiveMin": 0.1,
+            "trailGiveMax": 0.1,
+            "positionCostPct": 0.10,
+        }
+    )
+    base_steps = sorted({s.step for s in trail_floor.sets.values() if s.kind == "base"})
+    trail_steps = sorted({s.step for s in trail_floor.sets.values() if s.kind == "trail"})
+    out.append(("set-trail-min-step", base_steps == list(range(3, 9)) and trail_steps == list(range(7, 9)),
+                f"base={base_steps} trail={trail_steps}"))
+    live_sl = max(trail_floor.sl_min, step_tp_pct(7, 0.10) * 0.6)
+    out.append(("set-sl-bound-to-step-tp", abs(live_sl - 0.0042) < 1e-9 and trail_floor.sl_min >= 0.004 - 1e-12,
+                f"sl={live_sl} floor={trail_floor.sl_min}"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
     trail_only = [s for s in book.sets.values() if s.kind == "trail"]
     out.append(("set-step-floor", bool(base_only) and all(s.step >= 3 for s in base_only) and min(s.step for s in base_only) == 3, f"steps={sorted({s.step for s in base_only})} trails={len(trail_only)}"))

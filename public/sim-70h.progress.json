@@ -1,0 +1,38 @@
+{
+  "phase": "ready",
+  "pct": 100,
+  "ok": true,
+  "source": "bingx",
+  "elapsedS": 68.48,
+  "detail": "done 68.48s \u00b7 fills 116,800 \u00b7 validated@30 3 \u00b7 issues 0",
+  "histFills": 116800,
+  "validated": {
+    "last10": 7,
+    "last20": 4,
+    "last30": 3,
+    "last40": 1,
+    "last50": 1,
+    "last60": 1,
+    "last70": 1
+  },
+  "issues": [],
+  "html": "/workspace/public/sim-70h.html",
+  "t": "2026-09-17T13:47:46Z",
+  "hours": 70,
+  "lastN": [
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70
+  ],
+  "symbols": [
+    "BTC-USDT",
+    "ETH-USDT",
+    "SOL-USDT",
+    "XRP-USDT",
+    "BCH-USDT"
+  ]
+}

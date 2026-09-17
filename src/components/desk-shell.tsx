@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Blocks, ChartSpline, LayoutDashboard, LineChart, Pause, Play, Square, SlidersHorizontal } from "lucide-react";
+import { Blocks, ChartSpline, LayoutDashboard, LineChart, Pause, Play, Square, SlidersHorizontal, Timer } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useConnection } from "@/components/connection-provider";
 import { postControl, type ConnType } from "@/lib/connections";
@@ -37,6 +37,7 @@ export function DeskShell({
   const onSettings = path.startsWith("/settings");
   const onSystem = path.startsWith("/system");
   const onSweep = path.startsWith("/step-sweep");
+  const onSim70 = path.startsWith("/sim-70h");
   const title = onSettings
     ? "Settings & config"
     : onResults
@@ -45,6 +46,8 @@ export function DeskShell({
         ? "System"
         : onSweep
           ? "Historic test"
+          : onSim70
+            ? "70h complete test"
           : "Pulse desk";
   const sub = onSettings
     ? "Per-connection CTS + overlay — Test Historic is first on Overview, default ON"
@@ -54,6 +57,8 @@ export function DeskShell({
         ? "Generic core · exchange / strategy / risk slots · extend without rewriting the loop"
         : onSweep
           ? "Historic test · 4–64h · fill until positive count · steps 3–12"
+          : onSim70
+            ? "70-hour replay · 5 symbols · last-N 10–70 · all indications, strategies and types"
           : "Independent desks in parallel · pick Overall, Live or VST";
   const types: { id: ConnType; label: string; short: string }[] = [
     { id: "overall", label: "Overall", short: "Overall" },
@@ -149,6 +154,7 @@ export function DeskShell({
             <nav className="flex min-w-0 flex-wrap rounded-radius border border-border bg-surface p-1">
               <NavLink to="/" on={onDesk} icon={<LayoutDashboard className="size-4" />} label="Desk" />
               <NavLink to="/results" on={onResults} icon={<LineChart className="size-4" />} label="Results" />
+              <NavLink to="/sim-70h" on={onSim70} icon={<Timer className="size-4" />} label="70h test" short="70h" />
               <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="Historic test" short="Historic" />
               <NavLink to="/system" on={onSystem} icon={<Blocks className="size-4" />} label="System" />
               <NavLink to="/settings" on={onSettings} icon={<SlidersHorizontal className="size-4" />} label="Settings" />
@@ -243,7 +249,7 @@ function NavLink({
   label,
   short,
 }: {
-  to: "/" | "/results" | "/settings" | "/step-sweep" | "/system";
+  to: "/" | "/results" | "/settings" | "/step-sweep" | "/system" | "/sim-70h";
   on: boolean;
   icon: ReactNode;
   label: string;

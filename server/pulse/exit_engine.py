@@ -94,7 +94,7 @@ class ExitBook:
         self.time_stop_s = 21600.0
         self.scratch_s = 600.0
         self.scratch_min = 0.0025
-        self.trail_min_step = 6.0
+        self.trail_min_step = 7
         self.pf_n = 15
         self.deact_n = 25
         self.min_pf = POSITIVE_PF
@@ -123,7 +123,7 @@ class ExitBook:
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.scratch_s = float(ov.get("scratchS") or 600)
         self.scratch_min = pct_to_frac(float(ov.get("scratchMin") or ov.get("scratchMinPct") or 0.25))
-        self.trail_min_step = float(ov.get("trailingMinStep") or 3)
+        self.trail_min_step = max(1, int(float(ov.get("trailingMinStep") or 7)))
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(5, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = shared_pf_settings(ov)["minPf"]
@@ -215,7 +215,7 @@ class ExitBook:
             if improved:
                 tightens.append(ExitDecision("tighten", "exit:lock", target, "lock", 0.7))
 
-        if self.peak_on and self._lane_ok("peak") and fav_peak >= max(self.lock_pct, trail_arm, self.opt_sl) and age >= self.trail_min_step:
+        if self.peak_on and self._lane_ok("peak") and fav_peak >= max(self.lock_pct, trail_arm, self.opt_sl) and age >= self.min_hold_s:
             target = self.optimal_sl(side, entry, peak, sl)
             improved = (long and target > sl + 1e-12) or ((not long) and target < sl - 1e-12)
             if improved:

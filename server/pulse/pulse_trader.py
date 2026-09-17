@@ -335,8 +335,8 @@ LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
 MAX_PER_GROUP = 0  # 0 = unlimited
-SL_PCT = 0.0048
-TP_PCT = 0.0075
+SL_PCT = 0.0042
+TP_PCT = 0.0070
 TRAIL_ARM = 0.0032
 TRAIL_GIVE = 0.0016
 TIME_STOP_S = 21600
@@ -1012,6 +1012,7 @@ class Position:
     trail_give: float = 0.001
     sl_pct: float = 0.0
     tp_pct: float = 0.0
+    step: int = 0
     set_id: str = ""
     execution_lane: str = ""
     set_idx: int = -1
@@ -5655,6 +5656,7 @@ class Pulse:
             trail_give=trail_give,
             sl_pct=sl_pct,
             tp_pct=tp_pct,
+            step=int(meta.get("step") or 0),
             set_id=str(meta.get("set_id") or meta.get("setId") or ""),
             execution_lane=str(meta.get("execution_lane") or ""),
             set_idx=int(meta.get("set_idx", meta.get("setIdx", -1))),
@@ -6122,6 +6124,7 @@ class Pulse:
             "axis_key": str(getattr(chosen, "axis_key", "") or ""),
             "relative_count": int(getattr(chosen, "relative_count", 1) or 1),
             "volume_ratio": position_ratio,
+            "step": int(getattr(chosen, "step", 0) or 0),
             "ind_kind": ind_kind_hint,
             "sl_ratio": sl_ratio,
             "sl_pct": sl_pct_a,
@@ -6430,6 +6433,7 @@ class Pulse:
             sl_ratio=sl_ratio, trail_key=trail_key,
             trail_arm=trail_arm / 100.0, trail_give=trail_give / 100.0,
             sl_pct=sl_pct, tp_pct=tp_pct,
+            step=int(pending_meta.get("step") or getattr(chosen, "step", 0) or 0),
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
             execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
@@ -7158,29 +7162,34 @@ class Pulse:
                         else:
                             pos.trail_pending = dec.sl
                     continue
-            if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
-                pos.trail_armed = True
-                give = pos.trail_give or TRAIL_GIVE
-                if pos.side == "LONG":
-                    trail = max(pos.peak * (1 - give), pos.entry * (1 + 0.0004))
-                    pending = float(pos.trail_pending or 0.0)
-                    desired = max(trail, pending)
-                    if pos.trail is None or desired > pos.trail + 1e-12:
-                        if self.replace_sl(pos, desired):
-                            pos.trail = pos.sl
-                            pos.trail_pending = None
-                        else:
-                            pos.trail_pending = desired
-                else:
-                    trail = min(pos.peak * (1 + give), pos.entry * (1 - 0.0004))
-                    pending = float(pos.trail_pending or 0.0)
-                    desired = min(trail, pending) if pending > 0 else trail
-                    if pos.trail is None or desired < pos.trail - 1e-12:
-                        if self.replace_sl(pos, desired):
-                            pos.trail = pos.sl
-                            pos.trail_pending = None
-                        else:
-                            pos.trail_pending = desired
+            if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM):
+                pos_step = int(getattr(pos, "step", 0) or 0)
+                trail_floor = int(getattr(self.coord, "trailing_min_step", 7) or 7)
+                hold_s = float(getattr(self.exits, "min_hold_s", 6) or 0)
+                step_ok = pos_step <= 0 or pos_step >= trail_floor
+                if step_ok and (now - pos.opened_at) >= hold_s:
+                    pos.trail_armed = True
+                    give = pos.trail_give or TRAIL_GIVE
+                    if pos.side == "LONG":
+                        trail = max(pos.peak * (1 - give), pos.entry * (1 + 0.0004))
+                        pending = float(pos.trail_pending or 0.0)
+                        desired = max(trail, pending)
+                        if pos.trail is None or desired > pos.trail + 1e-12:
+                            if self.replace_sl(pos, desired):
+                                pos.trail = pos.sl
+                                pos.trail_pending = None
+                            else:
+                                pos.trail_pending = desired
+                    else:
+                        trail = min(pos.peak * (1 + give), pos.entry * (1 - 0.0004))
+                        pending = float(pos.trail_pending or 0.0)
+                        desired = min(trail, pending) if pending > 0 else trail
+                        if pos.trail is None or desired < pos.trail - 1e-12:
+                            if self.replace_sl(pos, desired):
+                                pos.trail = pos.sl
+                                pos.trail_pending = None
+                            else:
+                                pos.trail_pending = desired
             if not self.exits.enabled:
                 age = now - pos.opened_at
                 if age >= TIME_STOP_S and (pnl_pct >= 0.0012 or pnl_pct <= -0.0025):
@@ -7878,11 +7887,16 @@ class Pulse:
                 value = fallback
             return max(0.1, min(3.0, value)) / 100.0
 
-        self.sl_min = max(0.0015, _risk_pct("slMinPct", 0.15))
+        self.sl_min = max(0.004, _risk_pct("slMinPct", 0.4))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
         self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
         tp_cap = finite_number(ov.get("tpMaxPct"), 0.0)
         self.tp_max = max(self.tp_min, tp_cap / 100) if tp_cap > 0 else 0.0
+        SL_PCT = max(self.sl_min, min(self.sl_max, SL_PCT))
+        if self.tp_max > 0:
+            TP_PCT = max(self.tp_min, min(self.tp_max, TP_PCT))
+        else:
+            TP_PCT = max(self.tp_min, TP_PCT)
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
         self.variants.load(calc_ov, cts)
         self.sl_to_tp = self.variants.current_sl()
@@ -10643,6 +10657,7 @@ class Pulse:
                 rec_pos.axis_key = str(pending_meta.get("axis_key") or rec_pos.axis_key or "")
                 rec_pos.relative_count = int(pending_meta.get("relative_count") or rec_pos.relative_count or 1)
                 rec_pos.volume_ratio = float(pending_meta.get("volume_ratio") or rec_pos.volume_ratio or 1.0)
+                rec_pos.step = int(pending_meta.get("step") or rec_pos.step or 0)
                 rec_pos.pending_qty = max(
                     0.0,
                     _sf(pending_entry.get("requested_qty")) - qty,
@@ -11492,10 +11507,9 @@ class Pulse:
             try:
                 intern_syms = self._intern_symbols()
                 hist_test_snap["internSymbols"] = intern_syms[:50]
-                if not hist_test_snap.get("symbols"):
-                    hist_test_snap["symbols"] = intern_syms[:50]
-                elif isinstance(hist_test_snap.get("symbols"), list):
-                    hist_test_snap["symbols"] = hist_test_snap["symbols"][:50]
+                job_syms = hist_test_snap.get("symbols")
+                if isinstance(job_syms, list) and job_syms:
+                    hist_test_snap["symbols"] = job_syms[:50]
             except Exception:
                 pass
         else:
@@ -12161,14 +12175,17 @@ class Pulse:
             },
             "sets": {
                 "families": scov.get("families"),
-                "setCount": len(self.sets.sets),
-                "activeCount": sum(1 for s in self.sets.sets.values() if s.active),
+                "setCount": int(scov.get("setCount") if scov.get("setCount") is not None else len(self.sets.sets)),
+                "catalogSetCount": int(scov.get("catalogSetCount") if scov.get("catalogSetCount") is not None else len(self.sets.sets)),
+                "internSetCount": int(scov.get("internSetCount") or 0),
+                "activeCount": int(scov.get("activeCount") if scov.get("activeCount") is not None else sum(1 for s in self.sets.sets.values() if s.active)),
                 "validatedCount": int(scov.get("validatedCount") or 0),
+                "processingCount": int(scov.get("processingCount") or 0),
                 "entryCandidateCount": int(getattr(self, "_entry_candidate_count", 0) or 0),
                 "entryQueue": dict(getattr(self, "_entry_queue", {}) or {}),
             "baselineEntryQueue": dict(getattr(self, "_forced_entry_queue", {}) or {}),
                 "entryCandidateCap": int(getattr(self.sets, "entry_policy_max_candidates", 0) or 0),
-                "histFills": sum(s.n for s in self.sets.sets.values()),
+                "histFills": int(scov.get("histFills") if scov.get("histFills") is not None else sum(s.n for s in self.sets.sets.values())),
                 "liveFills": int(live_ov.get("fills") or 0),
                 "liveProcessed": int(live_ov.get("processed") or 0),
                 "liveActive": int(live_ov.get("active") or 0),

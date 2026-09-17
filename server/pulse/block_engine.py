@@ -876,7 +876,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
 
     b = BlockBook(os.path.join(tmp, "main.json"), {
         "variantBlockEnabled": True, "blockMaxStack": 3, "blockVolumeRatio": 0.25,
-        "blockProfitFactorRatio": 1.1, "defaultMinPF": 1.1,
+        "blockProfitFactorRatio": 1.1, "defaultMinPF": POSITIVE_PF,
         "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True,
     })
     rec("blk-zero-remap", BlockBook(os.path.join(tmp, "z.json"), {"blockMaxStack": 0}).max_stack == 6)
@@ -959,18 +959,20 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("blk-intern-1.00-not-real", d_intern["passesProfitFactor"] is False and d_intern["coldStart"] is True,
         str(d_intern))
     d_real = b.pf_decision(intern_lane, 1, intern_pf=POSITIVE_PF)
-    rec("blk-real-1.10-n1-cold", d_real["passesProfitFactor"] is True and d_real["coldStart"] is True,
+    rec("blk-real-1.15-n1-cold", d_real["passesProfitFactor"] is True and d_real["coldStart"] is True,
         str(d_real))
     cost_lane = BlockLane(symbol="COST-USDT", side="LONG", base_qty=10.0, base_entry=100.0)
     cost_lane.pf_ring[1] = [0.001] * 50  # +0.10% net = +1.0R at 0.10% cost → 1.10
     cost_lane.parent_pf_ring = [0.001] * 50
     d_eq = b.pf_decision(cost_lane, 1, intern_pf=INTERN_PF)
-    rec("blk-cost-pf-1R-is-1.10", abs(d_eq["observedProfitFactor"] - POSITIVE_PF) < 1e-9 and d_eq["passesProfitFactor"] is True,
+    rec("blk-cost-pf-1R-is-1.10", abs(d_eq["observedProfitFactor"] - 1.10) < 1e-9,
         str(d_eq))
     rec("blk-default-min-is-real", abs(float(b.default_min_pf) - POSITIVE_PF) < 1e-9, str(b.default_min_pf))
-    rec("blk-cost-pf-matches-r", abs(cost_pf_from_net_fracs([0.001] * 5) - POSITIVE_PF) < 1e-9)
-    rec("blk-cost-pf-015", abs(cost_pf_from_net_fracs([0.0015] * 5, 0.15) - POSITIVE_PF) < 1e-9,
+    rec("blk-cost-pf-matches-r", abs(cost_pf_from_net_fracs([0.001] * 5) - 1.10) < 1e-9)
+    rec("blk-cost-pf-015", abs(cost_pf_from_net_fracs([0.0015] * 5, 0.15) - 1.10) < 1e-9,
         str(cost_pf_from_net_fracs([0.0015] * 5, 0.15)))
+    rec("blk-cost-pf-floor", abs(cost_pf_from_net_fracs([0.0015] * 5) - POSITIVE_PF) < 1e-9,
+        str(cost_pf_from_net_fracs([0.0015] * 5)))
     rec("blk-cost-pf-empty", cost_pf_from_net_fracs([]) == 0.0)
 
     # PF gates must use the same cumulative target as volume planning when a
@@ -980,7 +982,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     held_lane.parent_pf_ring = [-0.01] * 8
     held_lane.held_factor[2] = 2.0
     held_decision = b.pf_decision(held_lane, 2, intern_pf=1.5)
-    rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - 1.055) < 1e-9,
+    rec("blk-pf-uses-actual-target", abs(held_decision["configuredMinimumProfitFactor"] - (1 + (POSITIVE_PF - 1) * 1.1 * 0.5)) < 1e-9,
         str(held_decision))
     rec("blk-formula-minpf-is-inc",
         abs(b.formula(10.0, 2)["blockMinPF"] - held_decision["configuredMinimumProfitFactor"]) < 1e-9)
@@ -1081,7 +1083,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "blockProfitFactorRatio": 1.1, "defaultMinPF": POSITIVE_PF,
     })
     rec("blk-wide-inc-capped", abs(wide.formula(10.0, 1)["volumeIncrement"] - 1.0) < 1e-12)
-    rec("blk-wide-minpf-uses-inc", abs(wide.formula(10.0, 1)["blockMinPF"] - 1.11) < 1e-9,
+    rec("blk-wide-minpf-uses-inc", abs(wide.formula(10.0, 1)["blockMinPF"] - (1 + (POSITIVE_PF - 1) * 1.1 * 1.0)) < 1e-9,
         str(wide.formula(10.0, 1)["blockMinPF"]))
     rec("blk-wide-pf-matches-formula",
         abs(wide.pf_decision(BlockLane("W", "LONG", 10.0, 1.0), 1, intern_pf=1.5)["configuredMinimumProfitFactor"]

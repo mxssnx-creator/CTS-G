@@ -40,9 +40,10 @@ def identities() -> List[Dict[str, Any]]:
     def rec(name: str, ok: bool, detail: Any = "") -> None:
         rows.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    rec("floor-is-1.10", POSITIVE_PF == 1.10, POSITIVE_PF)
+    rec("floor-is-1.15", POSITIVE_PF == 1.15, POSITIVE_PF)
     rec("1.02-is-not-positive", not is_positive_pf(1.02))
-    rec("1.10-is-positive", is_positive_pf(1.10))
+    rec("1.10-is-plus1x-not-floor", abs(ratio_from_r(1.0) - 1.10) < 1e-12 and not is_positive_pf(1.10))
+    rec("1.15-is-positive", is_positive_pf(1.15))
     rec("1.00-is-neutral-not-positive", not is_positive_pf(1.00))
     # pnl_pct=0.002 fraction = +0.20% gross; cost 0.10% → +1R → PF 1.10
     zero_net_plus1 = last_n_cost_pf([{"t": i, "pnl_pct": 0.002} for i in range(15)], 15)
@@ -69,9 +70,9 @@ def identities() -> List[Dict[str, Any]]:
     coord = Coordinator()
     coord.load({}, {})
     intern_open = 1.00
-    rec("intern-neutral-is-1.00-not-1.10", intern_open + 1e-9 >= 1.0 and not is_positive_pf(intern_open))
-    rec("coord-stage-floors-1.10", all(abs(float(v) - 1.10) < 1e-9 for v in coord.stage_min_pf.values()), coord.stage_min_pf)
-    rec("coord-min-pf-1.10", abs(float(coord.min_pf) - 1.10) < 1e-9, coord.min_pf)
+    rec("intern-neutral-is-1.00-not-1.15", intern_open + 1e-9 >= 1.0 and not is_positive_pf(intern_open))
+    rec("coord-stage-floors-1.15", all(abs(float(v) - POSITIVE_PF) < 1e-9 for v in coord.stage_min_pf.values()), coord.stage_min_pf)
+    rec("coord-min-pf-1.15", abs(float(coord.min_pf) - POSITIVE_PF) < 1e-9, coord.min_pf)
     # DDT uses net pnl_pct
     now = 10_000.0
     dd_rows = [

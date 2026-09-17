@@ -88,7 +88,7 @@ class Coordinator:
         }
         self.min_pf = POSITIVE_PF
         # Stage PF floors use the shared 0.80–2.50 / 0.02 contract.
-        # 1.00 is break-even after cost; 1.10 is +1× PositionCost.
+        # 1.00 is break-even after cost; 1.15 is +1.5× PositionCost (live floor).
         self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
         self.pf_window = LAST_N_DEFAULT
         self.position_cost_pct = POSITION_COST_PCT_DEFAULT
@@ -108,9 +108,9 @@ class Coordinator:
         self.prev_window = 25
         self.main_eval = 5
         self.real_eval = 3
-        self.min_step = 1
+        self.min_step = 7
         self.max_sl_ratio = 2.5
-        self.trailing_min_step = 1
+        self.trailing_min_step = 7
         self.pos_count_vol_ratio = 0.05
         self.rearrange = True
         self.rearrange_gap = 0.22
@@ -195,9 +195,9 @@ class Coordinator:
             self.prev_window = 25
         self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)
         self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
-        self.min_step = int(ov.get("minStep") or coord.get("minStep") or 1)
+        self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
-        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or 1)
+        self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or self.min_step)
         self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)

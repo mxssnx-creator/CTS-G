@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ResultsRouteImport } from './routes/results'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as Sim70hRouteImport } from './routes/sim-70h'
 import { Route as StepSweepRouteImport } from './routes/step-sweep'
 import { Route as SystemRouteImport } from './routes/system'
 
@@ -30,6 +31,11 @@ const SettingsRoute = SettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const Sim70hRoute = Sim70hRouteImport.update({
+  id: '/sim-70h',
+  path: '/sim-70h',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const StepSweepRoute = StepSweepRouteImport.update({
   id: '/step-sweep',
   path: '/step-sweep',
@@ -45,6 +51,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/results': typeof ResultsRoute
   '/settings': typeof SettingsRoute
+  '/sim-70h': typeof Sim70hRoute
   '/step-sweep': typeof StepSweepRoute
   '/system': typeof SystemRoute
 }
@@ -52,6 +59,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/results': typeof ResultsRoute
   '/settings': typeof SettingsRoute
+  '/sim-70h': typeof Sim70hRoute
   '/step-sweep': typeof StepSweepRoute
   '/system': typeof SystemRoute
 }
@@ -60,21 +68,31 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/results': typeof ResultsRoute
   '/settings': typeof SettingsRoute
+  '/sim-70h': typeof Sim70hRoute
   '/step-sweep': typeof StepSweepRoute
   '/system': typeof SystemRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/results' | '/settings' | '/step-sweep' | '/system'
+  fullPaths:
+    '/' | '/results' | '/settings' | '/sim-70h' | '/step-sweep' | '/system'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/results' | '/settings' | '/step-sweep' | '/system'
-  id: '__root__' | '/' | '/results' | '/settings' | '/step-sweep' | '/system'
+  to: '/' | '/results' | '/settings' | '/sim-70h' | '/step-sweep' | '/system'
+  id:
+    | '__root__'
+    | '/'
+    | '/results'
+    | '/settings'
+    | '/sim-70h'
+    | '/step-sweep'
+    | '/system'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ResultsRoute: typeof ResultsRoute
   SettingsRoute: typeof SettingsRoute
+  Sim70hRoute: typeof Sim70hRoute
   StepSweepRoute: typeof StepSweepRoute
   SystemRoute: typeof SystemRoute
 }
@@ -102,6 +120,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sim-70h': {
+      id: '/sim-70h'
+      path: '/sim-70h'
+      fullPath: '/sim-70h'
+      preLoaderRoute: typeof Sim70hRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/step-sweep': {
       id: '/step-sweep'
       path: '/step-sweep'
@@ -123,6 +148,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ResultsRoute: ResultsRoute,
   SettingsRoute: SettingsRoute,
+  Sim70hRoute: Sim70hRoute,
   StepSweepRoute: StepSweepRoute,
   SystemRoute: SystemRoute,
 }
