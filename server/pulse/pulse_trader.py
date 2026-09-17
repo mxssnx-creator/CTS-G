@@ -3336,7 +3336,8 @@ class Pulse:
         ws_age = (time.time() - getattr(hub, "last_msg", 0)) if hub and getattr(hub, "last_msg", 0) else 99
         ws_ok = bool(getattr(hub, "ok", False) and ws_age < 4.0)
         covered = sum(1 for s in scan if (self.px.get(s) or 0) > 0)
-        if ws_ok and covered >= max(8, len(scan) - 2):
+        write_uni = (time.time() - self.last_uni) >= UNIVERSE_EVERY
+        if ws_ok and covered >= max(8, len(scan) - 2) and not write_uni:
             return
         self.did_io = True
         r = self.api.public("/openApi/swap/v2/quote/ticker")
