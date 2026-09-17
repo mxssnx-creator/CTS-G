@@ -347,6 +347,7 @@ class LoadGovernor:
         self.n_open = 0
         self.shed: List[str] = []
         self._host_avail_override: Optional[float] = None
+        self._swap_used_override: Optional[float] = None
         self.host_avail_mb = 0.0
         self.host_total_mb = 0.0
         self._cgroup_current_override: Optional[float] = None
@@ -479,14 +480,21 @@ class LoadGovernor:
         host_avail = self._host_avail()
         host_critical = host_avail > 0 and host_avail < HOST_CRITICAL_MB
         swap_used = 0.0
-        if self._host_avail_override is None:
+        if self._swap_used_override is not None:
+            swap_used = float(self._swap_used_override)
+        elif self._host_avail_override is None:
             try:
                 swap_used = host_swap_used_mb()
             except Exception:
                 swap_used = 0.0
-        host_pressure = (host_avail > 0 and host_avail < HOST_PRESSURE_MB) or (
+        # Residual swap from a prior peak is not pressure when RAM is free.
+        # Only treat swap as host pressure when available RAM is also tight.
+        ram_host_pressure = host_avail > 0 and host_avail < HOST_PRESSURE_MB
+        swap_host_pressure = (
             swap_used >= HOST_SWAP_PRESSURE_MB
+            and (host_avail <= 0 or host_avail < max(HOST_PRESSURE_MB * 2.5, 4096.0))
         )
+        host_pressure = ram_host_pressure or swap_host_pressure
         pressure_rss = max(rss, self.cgroup_current_mb) if self.cgroup_current_mb > 0 else rss
         cgroup_near_max = bool(
             self.cgroup_mb > 0
@@ -734,6 +742,16 @@ class LoadGovernor:
                 b.hist_run = True
                 if "hist" in shed:
                     shed.remove("hist")
+            # A 50-symbol intern book must keep 5m/15m/extra indications unless
+            # RAM is actually critical. False host/swap pressure used to shed
+            # tf15m and stall Set scoring.
+            if level != "critical" and not host_critical:
+                b.tf_5m = True
+                b.tf_15m = True
+                b.extra_sources = True
+                for token in ("tf15m", "tf5m", "extra"):
+                    if token in shed:
+                        shed.remove(token)
         if n:
             b.scan_chunk = min(int(b.scan_chunk or 1), n)
             b.hist_chunk = min(int(b.hist_chunk or 1), n)
@@ -953,6 +971,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     ranks = [LEVEL_RANK[x] for x in LEVELS]
     out.append(("load-levels", ranks == list(range(5)), str(LEVELS))
     )
+    g._host_avail_override = 8192.0
+    g._swap_used_override = 2048.0
+    g.cgroup_mb = 4608.0
+    g._cgroup_current_override = 240.0
+    b_swap = g.observe(n_sym=48, n_open=16, hot_ms=22, warm_ms=80, rss_mb=230.0)
+    out.append((
+        "load-swap-ignored-when-ram-free",
+        b_swap.level not in ("overload", "critical") and b_swap.tf_15m and b_swap.extra_sources and "host" not in b_swap.shed,
+        f"level={b_swap.level} tf15m={b_swap.tf_15m} shed={b_swap.shed}",
+    ))
+    g._swap_used_override = None
     g._host_avail_override = 400.0
     b_host = g.observe(n_sym=25, n_open=0, hot_ms=40, warm_ms=40, rss_mb=220.0)
     out.append((

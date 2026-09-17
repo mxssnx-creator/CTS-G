@@ -729,6 +729,21 @@ def intern_liquid_pool(
     for s in opens or []:
         add(s, keep_open=True)
     limit = int(cap or 0) or SYMBOL_CAP
+    if vol and (not limit or len(out) < limit):
+        ranked_vol = sorted(
+            (s for s, qv in vol.items() if float(qv or 0) >= float(min_quote or 0)),
+            key=lambda s: (-float(vol.get(s, 0) or 0), s),
+        )
+        for s in ranked_vol:
+            if limit and len(out) >= limit:
+                break
+            name = str(s or "").strip().upper()
+            if not name.endswith("-USDT") or name in used or ":" in name:
+                continue
+            if apply_tradable and name not in tradable_keys and name not in open_keys:
+                continue
+            used.add(name)
+            out.append(name)
     if limit > 0:
         out = out[:limit]
     return out
