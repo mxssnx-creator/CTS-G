@@ -246,6 +246,17 @@ class BlockBook:
         """Configured ratio, shared across live counts when n=1 would eat the cap."""
         return shared_block_volume_ratio(self.volume_ratio, len(self.live_counts()), self.extra_cap())
 
+    def specified_volume_ratio(self) -> float:
+        """Configured Block Active ratio. Never a 6-count split."""
+        return clamp(finite_number(self.volume_ratio, BLOCK_VOL_RATIO_DEFAULT), BLOCK_VOL_RATIO_MIN, BLOCK_VOL_RATIO_MAX)
+
+    def active_increment(self, count: int = 1) -> float:
+        """Each Active add is the specified ratio, capped at extra (2× parent).
+
+        Count is attribution only. Size does not use n×ratio or shared crumbs.
+        """
+        return min(self.extra_cap(), self.specified_volume_ratio())
+
     def load(self) -> None:
         if not os.path.exists(self.path):
             return
@@ -1046,6 +1057,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
         str(b.lanes["SOL-USDT:LONG"].parent_pf_ring[-1:]))
 
     rec("blk-freeze-parent", b.register_parent("SOL-USDT", "SHORT", 99.0, 1.0).base_qty == 8.0)
+    rec("blk-active-inc-default", abs(b.active_increment() - 0.25) < 1e-12)
+    fat_inc = BlockBook(os.path.join(tmp, "act.json"), {"blockVolumeRatio": 2.0, "blockMaxStack": 6})
+    rec("blk-active-inc-full-ratio", abs(fat_inc.active_increment() - 1.0) < 1e-12 and abs(fat_inc.specified_volume_ratio() - 2.0) < 1e-12)
+    rec("blk-active-inc-ignores-count", abs(fat_inc.active_increment(6) - fat_inc.active_increment(1)) < 1e-12)
 
     rec("blk-eval-6", len([r for r in b.evaluate_counts(short, 1, 1.5) if r["kind"] == "regular"]) == 6)
     rec("blk-live-stack-3", all((r["requestedAddQty"] == 0 or r["blockCount"] <= 3) for r in b.evaluate_counts(short, 1, 1.5) if r["kind"] == "regular"))

@@ -1758,6 +1758,7 @@ def block_calc_test() -> None:
             "blockProfitFactorRatio": 1.1, "defaultMinPF": default_min_pf,
             "blockActiveRealEnabled": True, "blockActiveLiveEnabled": True})
         p.strat_block = True
+        p.block_active = False
         p.available = 100.0
         p.block_last_emit = 0.0
         p.cooldown = {}

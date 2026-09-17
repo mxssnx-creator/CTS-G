@@ -83,7 +83,7 @@ class BlockActiveTests(unittest.TestCase):
                 self.assertEqual(result['blockCount'], max(1, level))
                 self.assertEqual(result['minimumLevel'], level)
                 self.assertEqual(result['normalQtyExecuted'], 0)
-                self.assertAlmostEqual(result['requestedQty'], 8 * min(1, max(1, level) * .25))
+                self.assertAlmostEqual(result['requestedQty'], 8 * min(1, .25))
         self.p.block.counts = [1, 2]
         self.p.block_active_min_level = 3
         self.assertIsNone(self.plan())
@@ -121,7 +121,7 @@ class BlockActiveTests(unittest.TestCase):
                 self.p.block.counts = [count]
                 self.p.block.volume_ratio = ratio
                 r = self.plan()
-                self.assertAlmostEqual(r['requestedQty'], 8 * min(1, count * ratio))
+                self.assertAlmostEqual(r['requestedQty'], 8 * min(1, ratio))
 
     def test_each_qualification_and_control_gate_is_enforced(self):
         for key, value in [('real_n', 2), ('real_pf', 1.14), ('real_pf', float('nan')),
@@ -181,6 +181,42 @@ class BlockActiveTests(unittest.TestCase):
             set_id=self.st.id, strategy='block', client_id='count-1', t=50, qty=1, entry=100,
             exchange_confirmed=True, symbol='X-USDT', side='LONG', pnl=-1, pnl_pct=-.009)]
         self.assertEqual(self.plan()['blockCount'], 2)
+        self.assertAlmostEqual(self.plan()['requestedQty'], 2)
+
+    def test_specified_ratio_fills_each_count_completely(self):
+        self.p.block.volume_ratio = 2.0
+        for count in range(1, 7):
+            self.p.block.counts = [count]
+            r = self.plan()
+            self.assertAlmostEqual(r['requestedQty'], 8.0, msg=count)
+            self.assertAlmostEqual(r['volumeIncrement'], 1.0)
+            self.assertEqual(r['blockCount'], count)
+            self.assertEqual(r['normalQtyExecuted'], 0)
+
+    def test_intern_hist_test_parent_emits_active_without_real_tape(self):
+        self.view['real_n'] = 0
+        self.view['real_pf'] = 0
+        self.view['net_avg'] = 0
+        self.p._hist_test_owns_catalog = lambda: True
+        self.p.sets.hist_test_set_ids = {self.st.id}
+        r = self.plan()
+        self.assertIsNotNone(r)
+        self.assertAlmostEqual(r['requestedQty'], 2)
+        self.assertEqual(r['normalQtyExecuted'], 0)
+
+    def test_active_indication_set_uses_specified_ratio(self):
+        self.st.kind = 'active'
+        self.p.block.volume_ratio = 0.5
+        r = self.plan()
+        self.assertAlmostEqual(r['requestedQty'], 4)
+        self.assertEqual(r['normalQtyExecuted'], 0)
+
+    def test_count_step_pyramid_is_idle_while_active_owns_extras(self):
+        self.p.block_active = True
+        self.p.halted = False
+        self.p.available = 100
+        self.p.block_last_emit = 0
+        self.p.maybe_block_adds()
 
     def test_restart_stale_reverse_and_reversal_restart_observation(self):
         a={}
