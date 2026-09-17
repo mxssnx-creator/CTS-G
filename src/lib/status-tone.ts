@@ -53,7 +53,7 @@ export function engineStatusLabel(opts: {
   mode?: string;
 }): { text: string; sub: string } {
   if (opts.paused) return { text: "PAUSE", sub: "PAUSED" };
-  if (opts.running && !opts.halted) return { text: "LIVE", sub: opts.mode ?? "LIVE" };
+  if (opts.running && !opts.halted) return { text: "ON", sub: opts.mode ?? "RUNNING" };
   if (opts.halted) return { text: "HALT", sub: opts.mode ?? "HALTED" };
   if (opts.running == null && opts.halted == null) return { text: "…", sub: "CONNECTING" };
   return { text: "OFFLINE", sub: "OFFLINE" };

@@ -65,6 +65,8 @@ export function DeskShell({
     { id: "live", label: "Live", short: "Live" },
     { id: "vst", label: "VST demo", short: "VST" },
   ];
+  const connLabel = types.find((t) => t.id === conn)?.label ?? conn;
+  const status = engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode });
 
   return (
     <main
@@ -76,57 +78,6 @@ export function DeskShell({
       suppressHydrationWarning
     >
       <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 sm:py-7">
-        <div className="grid min-w-0 grid-cols-3 gap-1 rounded-radius border border-border bg-surface p-1" data-testid="conn-switch">
-          {types.map((t) => {
-            const lane = catalog?.types.find((x) => x.type === t.id);
-            const on = conn === t.id;
-            const running = Boolean(lane?.running);
-            const realPair = realPosOrders(lane);
-            const livePair = livePosOrders(lane);
-            const livePos = knownCount(lane?.livePositionCount) ?? knownCount(lane?.exchangeOpenCount);
-            const liveOrd = knownCount(lane?.liveOrderCount);
-            const xchN = knownCount(lane?.exchangeOpenCount) ?? -1;
-            const liveN = knownCount(lane?.livePositionCount) ?? -1;
-            const simN = lane?.simOpenCount ?? -1;
-            const xchMismatch = xchN >= 0 && liveN >= 0 && xchN !== liveN;
-            const dot = engineDotClass({
-              running,
-              halted: Boolean(lane?.halted),
-              paused: Boolean(lane?.paused),
-              alive: lane?.alive !== false,
-            });
-            return (
-              <button
-                key={t.id}
-                type="button"
-                data-testid={`conn-${t.id}`}
-                aria-pressed={on}
-                aria-label={`${t.label} · Positions/Orders R ${realPair}${livePos != null || liveOrd != null ? ` · L ${livePair}` : ""}`}
-                onClick={() => setConn(t.id)}
-                className={`flex min-h-12 min-w-0 flex-col items-center justify-center overflow-hidden rounded-lg px-1 py-1.5 text-center sm:px-2 ${
-                  on ? "bg-bg2 text-fg" : "text-muted"
-                }`}
-              >
-                <div className="flex max-w-full items-center justify-center gap-1.5">
-                  <span className={`size-2 shrink-0 rounded-full ${dot}`} />
-                  <span className="truncate text-sm font-medium">
-                    <span className="sm:hidden">{t.short}</span>
-                    <span className="hidden sm:inline">{t.label}</span>
-                  </span>
-                </div>
-                <div
-                  className={`mt-0.5 flex max-w-full flex-wrap items-center justify-center gap-x-1.5 font-mono text-[10px] leading-tight ${xchMismatch ? "text-danger" : ""}`}
-                  title="Positions = unique symbol+direction · Orders = complete working book · R Real · L Live"
-                >
-                  <span className="whitespace-nowrap">R {realPair}</span>
-                  {livePos != null || liveOrd != null ? <span className="whitespace-nowrap">L {livePair}</span> : null}
-                  {simN > 0 ? <span className="whitespace-nowrap">S {simN}</span> : null}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
         <header className="flex min-w-0 flex-col gap-3 border-b border-border pb-4">
           <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
             <div className="min-w-0">
@@ -142,15 +93,69 @@ export function DeskShell({
               </h1>
               <p className="mt-1 max-w-xl text-sm text-muted">{sub}</p>
             </div>
-            <div className="flex min-w-0 items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2">
+            <div
+              className="flex min-w-0 items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2"
+              data-testid="conn-status"
+              title={`${connLabel} engine`}
+            >
               <span className={`size-2.5 shrink-0 rounded-full ${engineLive && !engineHalted && !enginePaused ? "live-dot" : ""} ${engineDotClass({ running: engineLive, halted: engineHalted, paused: enginePaused, alive: engineAlive })}`} />
               <div className="min-w-0 leading-tight">
-                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).sub}</div>
-                <div className="truncate text-sm font-medium">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).text}</div>
+                <div className="font-mono text-xs text-muted uppercase">{connLabel}</div>
+                <div className="truncate text-sm font-medium">{status.text}</div>
               </div>
             </div>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:flex-wrap lg:items-center">
+            <div className="grid min-w-0 grid-cols-3 gap-1 rounded-radius border border-border bg-surface p-1 lg:max-w-md lg:flex-1" data-testid="conn-switch">
+              {types.map((t) => {
+                const lane = catalog?.types.find((x) => x.type === t.id);
+                const on = conn === t.id;
+                const running = Boolean(lane?.running);
+                const realPair = realPosOrders(lane);
+                const livePair = livePosOrders(lane);
+                const livePos = knownCount(lane?.livePositionCount) ?? knownCount(lane?.exchangeOpenCount);
+                const liveOrd = knownCount(lane?.liveOrderCount);
+                const xchN = knownCount(lane?.exchangeOpenCount) ?? -1;
+                const liveN = knownCount(lane?.livePositionCount) ?? -1;
+                const simN = lane?.simOpenCount ?? -1;
+                const xchMismatch = xchN >= 0 && liveN >= 0 && xchN !== liveN;
+                const dot = engineDotClass({
+                  running,
+                  halted: Boolean(lane?.halted),
+                  paused: Boolean(lane?.paused),
+                  alive: lane?.alive !== false,
+                });
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    data-testid={`conn-${t.id}`}
+                    aria-pressed={on}
+                    aria-label={`${t.label} · Positions/Orders R ${realPair}${livePos != null || liveOrd != null ? ` · L ${livePair}` : ""}`}
+                    onClick={() => setConn(t.id)}
+                    className={`flex min-h-12 min-w-0 flex-col items-center justify-center overflow-hidden rounded-lg px-1 py-1.5 text-center sm:px-2 ${
+                      on ? "bg-bg2 text-fg" : "text-muted"
+                    }`}
+                  >
+                    <div className="flex max-w-full items-center justify-center gap-1.5">
+                      <span className={`size-2 shrink-0 rounded-full ${dot}`} />
+                      <span className="truncate text-sm font-medium">
+                        <span className="sm:hidden">{t.short}</span>
+                        <span className="hidden sm:inline">{t.label}</span>
+                      </span>
+                    </div>
+                    <div
+                      className={`mt-0.5 flex max-w-full flex-wrap items-center justify-center gap-x-1.5 font-mono text-[10px] leading-tight ${xchMismatch ? "text-danger" : ""}`}
+                      title="Positions = unique symbol+direction · Orders = complete working book · R Real · L Live"
+                    >
+                      <span className="whitespace-nowrap">R {realPair}</span>
+                      {livePos != null || liveOrd != null ? <span className="whitespace-nowrap">L {livePair}</span> : null}
+                      {simN > 0 ? <span className="whitespace-nowrap">S {simN}</span> : null}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
             <nav className="flex min-w-0 flex-wrap rounded-radius border border-border bg-surface p-1">
               <NavLink to="/" on={onDesk} icon={<LayoutDashboard className="size-4" />} label="Desk" />
               <NavLink to="/results" on={onResults} icon={<LineChart className="size-4" />} label="Results" />
@@ -237,7 +242,7 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
           <Square className="size-4" /> Stop
         </button>
       </div>
-      {msg || anyBusy ? <span className="max-w-72 text-right font-mono text-[10px] text-muted [overflow-wrap:anywhere]">{anyBusy ? "…" : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
+      {msg || anyBusy ? <span className="max-w-72 text-right font-mono text-[10px] text-muted [overflow-wrap:anywhere]">{anyBusy ? "…" : msg}</span> : null}
     </div>
   );
 }

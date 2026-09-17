@@ -70,7 +70,7 @@ async function uiPass(browser, pass) {
     }
     const desk = await page.locator("main").innerText();
     if (/NaN|undefined|\[object Object\]/.test(desk)) fails.push("desk NaN");
-    if (pass > 1 && /CONNECTING/.test(desk) && !/HALT|LIVE|PAUSE|OFFLINE/.test(desk)) fails.push("stuck CONNECTING");
+    if (pass > 1 && /CONNECTING/.test(desk) && !/HALT|LIVE|ON|PAUSE|OFFLINE/.test(desk)) fails.push("stuck CONNECTING");
     await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !window.$_TSR || window.$_TSR.hydrated === true, null, { timeout: 30000 });
     await page.waitForTimeout(700);

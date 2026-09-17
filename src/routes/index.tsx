@@ -165,12 +165,6 @@ function DeskPage() {
           <VariantsStrip stats={stats} />
           <EngineStrip stats={stats} />
           <WorkStrip stats={stats} />
-          <IndicationStrip stats={stats} />
-          <KindStrategyStrip stats={stats} />
-          <ComboEvalPanel job={stats} compact />
-          <div className="mt-3">
-            <ActivityPanel stats={stats} compact />
-          </div>
         </div>
         <div className="rounded-radius border border-border bg-surface p-5">
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
@@ -185,6 +179,13 @@ function DeskPage() {
             <span className="text-right">{stats?.activityPerMin ?? 0}/min</span>
           </div>
         </div>
+      </section>
+
+      <section className="grid gap-3">
+        <IndicationStrip stats={stats} />
+        <KindStrategyStrip stats={stats} />
+        <ComboEvalPanel job={stats} compact />
+        <ActivityPanel stats={stats} compact />
       </section>
 
       <StatsOverview data={overview} compact live={stats} />
@@ -217,7 +218,7 @@ function DeskPage() {
                     <div className="text-lg font-medium">{p.symbol.replace("-USDT", "")}</div>
                     <div className="flex items-center gap-1">
                       <SideChip side={p.side} />
-                      {p.connType ? (
+                      {p.connType && conn === "overall" ? (
                         <span className="rounded-full bg-bg2 px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
                           {p.connType}
                         </span>
@@ -915,7 +916,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px]">
-        {(["state", "signals", "active", "direction", "move", "common"] as const).map((k) => {
+        {(["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const).map((k) => {
           const row = kinds[k];
           const on = ind?.types?.[k] !== false;
           return (
