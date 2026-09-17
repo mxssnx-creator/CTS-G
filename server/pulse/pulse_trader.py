@@ -8529,15 +8529,23 @@ class Pulse:
     def block_intern_pf(self, pos: Position) -> float:
         """Real-stage PF of this parent Set/side. Intern 1.00 is not extra size."""
         st = self.sets.sets.get(pos.set_id) if pos.set_id else None
+        allow = getattr(self.sets, "hist_test_set_ids", None)
+        hist_ok = False
+        try:
+            hist_ok = bool(self._hist_test_owns_catalog()) and allow is not None and str(getattr(pos, "set_id", "") or "") in allow
+        except Exception:
+            hist_ok = False
         if st is None:
-            return 0.0
+            return float(POSITIVE_PF) if hist_ok else 0.0
         view = self.sets._side_view(st, pos.side)
-        if not self.sets._real_metrics_ok(view):
-            return 0.0
-        pf = view.get("real_pf")
-        if pf is None:
-            return 0.0
-        return float(pf or 0)
+        if self.sets._real_metrics_ok(view):
+            return float(view.get("real_pf") or 0)
+        if hist_ok:
+            pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
+            if pf + 1e-9 >= POSITIVE_PF:
+                return pf
+            return float(POSITIVE_PF)
+        return 0.0
 
     def _block_core_qty(self, symbol: str, side: str) -> float:
         """Own parent size for Overall Block: non-block-active lots on this side."""
@@ -8597,7 +8605,8 @@ class Pulse:
         """One Overall Block Real tape: closes (gross) or parent ring (net), never mixed.
 
         ``n`` is the tape that produced ``pf``. Intern 1.00 returns pf=0 so extra
-        size cannot use cost-neutral evidence.
+        size cannot use cost-neutral evidence. Insufficient samples are marked
+        separately so a live hist-test parent is not frozen at intern_pf=0.
         """
         rows = self.overall_side_closes(symbol, side)
         need = 3
@@ -8618,25 +8627,25 @@ class Pulse:
                 # last_n_cost_pf sort by t so a newest-first tape cannot fake Real.
                 blob = last_n_cost_pf(rows, need, cost, ordered=False)
             except Exception:
-                return {"pf": 0.0, "n": len(rows), "source": "closes"}
+                return {"pf": 0.0, "n": len(rows), "source": "closes", "insufficient": False, "ok": False}
             ratio = float(blob.get("ratio") or 0)
             if int(blob.get("count") or 0) < need or not clears_pf(ratio, floor):
-                return {"pf": 0.0, "n": len(rows), "source": "closes"}
-            return {"pf": ratio, "n": len(rows), "source": "closes"}
+                return {"pf": 0.0, "n": len(rows), "source": "closes", "insufficient": int(blob.get("count") or 0) < need, "ok": False}
+            return {"pf": ratio, "n": len(rows), "source": "closes", "insufficient": False, "ok": True}
         try:
             lane = self.block.lanes.get(self.block.key(symbol, side))
         except Exception:
             lane = None
         extra = list(getattr(lane, "parent_pf_ring", None) or []) if lane is not None else []
         if len(extra) < need:
-            return {"pf": 0.0, "n": len(extra) if extra else len(rows), "source": "ring" if extra else "closes"}
+            return {"pf": 0.0, "n": len(extra) if extra else len(rows), "source": "ring" if extra else "closes", "insufficient": True, "ok": False}
         try:
             ratio = float(cost_pf_from_net_fracs(extra[-need:], cost) or 0)
         except Exception:
-            return {"pf": 0.0, "n": len(extra), "source": "ring"}
+            return {"pf": 0.0, "n": len(extra), "source": "ring", "insufficient": False, "ok": False}
         if not clears_pf(ratio, floor):
-            return {"pf": 0.0, "n": len(extra), "source": "ring"}
-        return {"pf": ratio, "n": len(extra), "source": "ring"}
+            return {"pf": 0.0, "n": len(extra), "source": "ring", "insufficient": False, "ok": False}
+        return {"pf": ratio, "n": len(extra), "source": "ring", "insufficient": False, "ok": True}
 
     def block_overall_real_n(self, symbol: str, side: str) -> int:
         """Sample count backing Overall Block Real PF (closes, else net ring)."""
@@ -8653,9 +8662,19 @@ class Pulse:
 
     def _block_snapshot_intern_pf(self, lane) -> float:
         """Live intern for Block snapshot counts: Overall Real, else Set Real."""
+        symbol = getattr(lane, "symbol", "")
+        side = getattr(lane, "side", "")
         if bool(getattr(self, "block_overall", True)):
-            return self.block_overall_real_pf(getattr(lane, "symbol", ""), getattr(lane, "side", ""))
-        for pos in self.positions_for(getattr(lane, "symbol", ""), getattr(lane, "side", "")):
+            pf = self.block_overall_real_pf(symbol, side)
+            if pf > 0:
+                return pf
+            try:
+                state = self._block_overall_real_state(symbol, side)
+            except Exception:
+                state = {}
+            if not bool((state or {}).get("insufficient")):
+                return 0.0
+        for pos in self.positions_for(symbol, side):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
             return self.block_intern_pf(pos)
@@ -8831,6 +8850,16 @@ class Pulse:
                 self.block_overall_real_pf(pos.symbol, pos.side)
                 if overall else self.block_intern_pf(pos)
             )
+            if intern_pf <= 0 and overall:
+                # Cold Overall Real (n < need) must not freeze Block on a live
+                # hist-test parent. Proven-negative Real (n ≥ need, PF < floor)
+                # still returns 0 and stays intern-only.
+                try:
+                    state = self._block_overall_real_state(pos.symbol, pos.side)
+                except Exception:
+                    state = {}
+                if bool((state or {}).get("insufficient")):
+                    intern_pf = self.block_intern_pf(pos)
             if intern_pf <= 0 and not overall:
                 kind = str(getattr(pos, "ind_kind", "") or "")
                 if kind:

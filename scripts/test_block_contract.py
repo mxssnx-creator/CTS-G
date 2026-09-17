@@ -78,7 +78,7 @@ class BlockContractTests(unittest.TestCase):
         from position_cost import INTERN_PF, POSITIVE_PF, cost_as_frac
         b = self.book(positionCostPct=0.15, defaultMinPF=POSITIVE_PF)
         lane = BlockLane("PF-USDT", "LONG", 10, 100)
-        one_r = cost_as_frac(0.15)
+        one_r = cost_as_frac(0.15) * 1.5
         lane.pf_ring[1] = [one_r] * 50
         lane.parent_pf_ring = [one_r] * 50
         d = b.pf_decision(lane, 1, intern_pf=INTERN_PF)

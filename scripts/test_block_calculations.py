@@ -127,9 +127,10 @@ class BlockCalculationTests(unittest.TestCase):
         lane = BlockLane("X", "LONG", 9.0, 100.0, confirmed_add=6.0, satisfied={1: True, 2: True})
         f = b.formula(9.0, 3)
         self.assertAlmostEqual(f["volumeIncrement"], 1.0)
-        self.assertAlmostEqual(f["blockMinPF"], 1.11)
+        self.assertAlmostEqual(f["blockMinPF"], 1 + (POSITIVE_PF - 1) * 1.1 * 1.0)
         self.assertIsNone(b.pick_emit(b.evaluate_counts(lane, 1, intern_pf=POSITIVE_PF)))
-        self.assertIsNotNone(b.pick_emit(b.evaluate_counts(lane, 1, intern_pf=1.11)))
+        want = 1 + (POSITIVE_PF - 1) * 1.1 * 1.0
+        self.assertIsNotNone(b.pick_emit(b.evaluate_counts(lane, 1, intern_pf=want)))
 
     def test_partial_fill_requests_only_the_leftover(self):
         b = self.book(blockCounts=[1], blockVolumeRatio=1.0, blockMaxStack=1)
@@ -184,9 +185,9 @@ class BlockCalculationTests(unittest.TestCase):
         b = self.book(blockMaxStack=1, blockVolumeRatio=2.0, blockCounts=[1], blockProfitFactorRatio=1.1)
         f = b.formula(10.0, 1)
         self.assertAlmostEqual(f["volumeIncrement"], 1.0)
-        self.assertAlmostEqual(f["blockMinPF"], 1.11)
+        self.assertAlmostEqual(f["blockMinPF"], 1 + (POSITIVE_PF - 1) * 1.1 * 1.0)
         d = b.pf_decision(BlockLane("W", "LONG", 10.0, 100.0), 1, intern_pf=1.5)
-        self.assertAlmostEqual(d["configuredMinimumProfitFactor"], 1.11)
+        self.assertAlmostEqual(d["configuredMinimumProfitFactor"], 1 + (POSITIVE_PF - 1) * 1.1 * 1.0)
 
     def test_intern_one_cannot_pass_real_floor(self):
         b = self.book()
@@ -198,7 +199,7 @@ class BlockCalculationTests(unittest.TestCase):
 
     def test_cost_net_one_r_is_real_pf_at_any_position_cost(self):
         for cost in (0.10, 0.15, 0.20):
-            net = cost_as_frac(cost)
+            net = cost_as_frac(cost) * 1.5
             self.assertAlmostEqual(cost_pf_from_net_fracs([net] * 8, cost), POSITIVE_PF)
             gross = net + cost_as_frac(cost)
             via_rows = last_n_cost_pf([{"t": i, "pnl_pct": gross} for i in range(8)], 8, cost)
@@ -214,8 +215,8 @@ class BlockCalculationTests(unittest.TestCase):
         self.assertFalse(loss["coldStart"])
         self.assertFalse(loss["passesProfitFactor"])
         self.assertTrue(loss["internOnly"])
-        lane.pf_ring[2] = [0.001] * 50
-        lane.parent_pf_ring = [0.001] * 50
+        lane.pf_ring[2] = [0.0015] * 50
+        lane.parent_pf_ring = [0.0015] * 50
         win = b.pf_decision(lane, 2, intern_pf=INTERN_PF)
         self.assertTrue(win["passesProfitFactor"])
         self.assertFalse(win["internOnly"])
@@ -230,8 +231,8 @@ class BlockCalculationTests(unittest.TestCase):
         lane.parent_pf_ring = [net] * 50
         cheap_d = cheap.pf_decision(lane, 1, intern_pf=INTERN_PF)
         dear_d = dear.pf_decision(lane, 1, intern_pf=INTERN_PF)
-        self.assertAlmostEqual(dear_d["observedProfitFactor"], POSITIVE_PF)
-        self.assertAlmostEqual(cheap_d["observedProfitFactor"], 1.15)
+        self.assertAlmostEqual(dear_d["observedProfitFactor"], 1.10)
+        self.assertAlmostEqual(cheap_d["observedProfitFactor"], POSITIVE_PF)
         self.assertNotAlmostEqual(cheap_d["observedProfitFactor"], dear_d["observedProfitFactor"])
 
     def test_close_stores_cost_net_and_opposite_side_stays_live(self):
@@ -365,10 +366,10 @@ class BlockCalculationTests(unittest.TestCase):
 
     def test_formula_matches_hand_calc_for_known_examples(self):
         b = self.book(blockVolumeRatio=0.25, blockMaxStack=6, blockProfitFactorRatio=1.1)
-        # base=1, n=1: extra 0.25, tot 1.25, minPF = 1 + 0.1*1.1*0.25 = 1.0275
+        # base=1, n=1: extra 0.25, tot 1.25, minPF = 1 + 0.15*1.1*0.25
         f = b.formula(1.0, 1)
         self.assertAlmostEqual(f["targetBlockQty"], 1.25)
-        self.assertAlmostEqual(f["blockMinPF"], 1.0275)
+        self.assertAlmostEqual(f["blockMinPF"], 1 + (POSITIVE_PF - 1) * 1.1 * 0.25)
         # original 3/4-count example: base 3, n=4 hits 2×
         self.assertAlmostEqual(b.formula(3.0, 4)["targetBlockQty"], 6.0)
         self.assertAlmostEqual(b.formula(3.0, 6)["targetBlockQty"], 6.0)
@@ -430,6 +431,29 @@ class BlockCalculationTests(unittest.TestCase):
         self.assertGreaterEqual(p.block_overall_real_pf("BCH-USDT", "LONG") + 1e-9, 1.10)
         self.assertEqual(p.block_overall_real_n("BCH-USDT", "LONG"), 8)
         self.assertEqual(p._block_overall_real_state("BCH-USDT", "LONG")["source"], "ring")
+
+    def test_insufficient_overall_real_is_not_a_proven_negative(self):
+        from types import SimpleNamespace
+        import pulse_trader as pt
+
+        p = object.__new__(pt.Pulse)
+        p.position_cost_pct = 0.10
+        p.coord = SimpleNamespace(min_pf=POSITIVE_PF, real_eval=3, stage_min_pf={"real": POSITIVE_PF})
+        p.block = self.book("overall-insufficient.json")
+        p.block.register_parent("SEI-USDT", "LONG", 47.0, 0.3)
+        p.closed = []
+        state = p._block_overall_real_state("SEI-USDT", "LONG")
+        self.assertTrue(state["insufficient"])
+        self.assertFalse(state.get("ok"))
+        self.assertEqual(p.block_overall_real_pf("SEI-USDT", "LONG"), 0.0)
+        p.closed = [
+            SimpleNamespace(symbol="SEI-USDT", side="LONG", pnl=-0.003, pnl_pct=-0.003, t=float(i),
+                            ours=True, member_count=1)
+            for i in range(5)
+        ]
+        failed = p._block_overall_real_state("SEI-USDT", "LONG")
+        self.assertFalse(failed.get("insufficient"))
+        self.assertEqual(failed.get("pf"), 0.0)
 
     def test_overall_real_last_n_is_chronological_not_insertion_order(self):
         from types import SimpleNamespace
