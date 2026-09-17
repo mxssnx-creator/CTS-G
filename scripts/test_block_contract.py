@@ -151,13 +151,16 @@ class BlockContractTests(unittest.TestCase):
 
     def test_historic_and_live_use_same_absolute_target(self):
         s = object.__new__(SetBook)
+        s.block_vr_specified = 0.25
         s.block_vr, s.block_stack, s.block_max_multiplier, s.block_counts = .25, 6, 2, list(range(1, 7))
         s._rearm_stops = lambda *args: None
         p = {"parent": 3, "qty": 3, "entry": 100, "side": 1, "adds": 0}
         b = self.book()
-        for n in range(1, 7):
-            s._maybe_block_add(p, [110, 110, 110, 110], .01, .01)
-            self.assertAlmostEqual(p["qty"], b.formula(3, n)["targetBlockQty"])
+        s._maybe_block_add(p, [110, 110, 110, 110], .01, .01)
+        self.assertAlmostEqual(b.active_increment(), 0.25)
+        self.assertAlmostEqual(p["qty"], 3 * (1 + b.active_increment()))
+        s._maybe_block_add(p, [110, 110, 110, 110], .01, .01)
+        self.assertAlmostEqual(p["qty"], 3.75)
 
     def test_control_repair_stops_immediately_when_parent_is_retired(self):
         for phase in ["pair", "banned", "normal"]:

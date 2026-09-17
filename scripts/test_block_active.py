@@ -216,6 +216,11 @@ class BlockActiveTests(unittest.TestCase):
         self.p.halted = False
         self.p.available = 100
         self.p.block_last_emit = 0
+        self.p.entries_blocked = lambda: False
+        self.p.open = {}
+        self.p.cooldown = {}
+        self.p.api = NS(path_cd={})
+        self.p.block.lanes = {}
         self.p.maybe_block_adds()
 
     def test_restart_stale_reverse_and_reversal_restart_observation(self):

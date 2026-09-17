@@ -385,9 +385,10 @@ def merge_kind_stats(
             blob["netAvg"] = g.get("netAvg", blob.get("netAvg"))
             if isinstance(g.get("bySide"), dict) and g.get("bySide"):
                 blob["bySide"] = g.get("bySide")
-            blob["validated"] = bool(g.get("validated"))
-            blob["profitable"] = bool(g.get("profitable"))
-        blob["ok"] = g.get("ok") if "ok" in g else bool(blob.get("validated") and float(blob.get("pf") or 0) >= 1.0)
+            blob["validated"] = bool(g.get("validated")) if hist_n else bool(int(blob.get("n") or 0) >= LAST_N_DEFAULT)
+            blob["profitable"] = bool(clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
+        blob["ok"] = bool(int(blob.get("n") or 0) >= 8 and clears_pf(float(blob.get("pf") or 0), POSITIVE_PF))
+        blob["gateOpen"] = g.get("ok") if "ok" in g else None
         blob["hits"] = int(live.get("hits") or hits.get(k) or 0)
         blob["scanSymbols"] = int(live.get("symbols") or 0)
         blob["scanLong"] = int(live.get("long") or 0)

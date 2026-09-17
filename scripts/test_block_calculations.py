@@ -352,14 +352,17 @@ class BlockCalculationTests(unittest.TestCase):
     def test_historic_set_engine_matches_live_book_targets(self):
         from set_engine import SetBook
         s = object.__new__(SetBook)
+        s.block_vr_specified = 1.0
         s.block_vr = shared_block_volume_ratio(1.0, 3, 1.0)
         s.block_stack, s.block_max_multiplier, s.block_counts = 3, 2.0, [1, 2, 3]
         s._rearm_stops = lambda *args: None
         pos = {"parent": 9.0, "qty": 9.0, "entry": 100.0, "side": 1, "adds": 0}
         live = self.book(blockMaxStack=3, blockVolumeRatio=1.0)
-        for n in range(1, 4):
-            s._maybe_block_add(pos, [110, 110, 110, 110], 0.01, 0.01)
-            self.assertAlmostEqual(pos["qty"], live.formula(9.0, n)["targetBlockQty"])
+        s._maybe_block_add(pos, [110, 110, 110, 110], 0.01, 0.01)
+        self.assertAlmostEqual(live.active_increment(), 1.0)
+        self.assertAlmostEqual(pos["qty"], 9.0 * (1.0 + live.active_increment()))
+        self.assertEqual(pos["adds"], 1)
+        s._maybe_block_add(pos, [110, 110, 110, 110], 0.01, 0.01)
         self.assertAlmostEqual(pos["qty"], 18.0)
 
     def test_grid_never_exceeds_cap_across_ratios(self):

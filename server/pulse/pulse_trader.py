@@ -8842,9 +8842,7 @@ class Pulse:
         return bool(allow), int(cap), last_pf, list(reasons or [])
 
     def maybe_block_adds(self) -> None:
-        """Count-step pyramid. Disabled while Block Active owns continuous extras."""
-        if bool(getattr(self, "block_active", True)):
-            return
+        """Continuous extra-size on overall active parents (Block Active)."""
         if self.halted or not self.block.enabled or not self.strat_block:
             return
         if self.entries_blocked():
@@ -8969,7 +8967,6 @@ class Pulse:
                 u = ((px_now - pos.entry) / pos.entry) * (1 if pos.side == "LONG" else -1)
             if u < 0.002:
                 continue
-            # Live book losing → don't pyramid more size.
             try:
                 close_rows = (
                     self.overall_side_closes(pos.symbol, pos.side)
@@ -8981,11 +8978,31 @@ class Pulse:
                     continue
             except Exception:
                 pass
-            rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
-            row = self.block.pick_emit(rows)
-            if not row:
+            c = self.contracts.get(pos.symbol)
+            px = self.px.get(pos.symbol) or pos.entry
+            if not c or px <= 0:
                 continue
-            count_n = int(row.get("blockCount") or 0)
+            if bool(getattr(self, "block_active", True)):
+                specified = 0.25
+                try:
+                    specified = float(self.block.active_increment())
+                except Exception:
+                    specified = min(1.0, float(getattr(self.block, "volume_ratio", 0.25) or 0.25))
+                parent = float(self._block_core_qty(pos.symbol, pos.side) or lane.base_qty or 0) or self.size_qty(c, px)
+                confirmed = float(lane.confirmed_add or 0)
+                extra_room = max(0.0, parent * float(self.block.extra_cap()) - confirmed)
+                raw = max(0.0, min(parent * specified, extra_room))
+                if raw <= 0:
+                    continue
+                inc = specified
+                count_n = 1
+                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw}
+            else:
+                rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
+                row = self.block.pick_emit(rows)
+                if not row:
+                    continue
+                count_n = int(row.get("blockCount") or 0)
             try:
                 ind_kind = str(getattr(pos, "ind_kind", "") or "")
                 if not self.sets.block_main_live_ok(
@@ -9015,6 +9032,14 @@ class Pulse:
             if not c or px <= 0:
                 continue
             parent = float(lane.base_qty or 0) or self.size_qty(c, px)
+            if bool(getattr(self, "block_active", True)):
+                core = 0.0
+                try:
+                    core = float(self._block_core_qty(pos.symbol, pos.side) or 0)
+                except Exception:
+                    core = 0.0
+                if core > 0:
+                    parent = core
             inc = float(row.get("volumeIncrement") or 0.0)
             raw = float(row.get("requestedAddQty") or 0)
             target = float(row.get("targetAddQty") or 0)

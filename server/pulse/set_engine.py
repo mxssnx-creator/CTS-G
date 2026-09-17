@@ -1489,7 +1489,7 @@ class SetBook:
         self.hist_honor_tp = bool(ov.get("setHonorTp", True))
         self.hist_block = bool(ov.get("histSimulateBlock", ov.get("stratBlock", True)))
         self.hist_dca = bool(ov.get("histSimulateDca", True))
-        self.block_vr = max(0.05, min(2.0, finite_number(ov.get("blockVolumeRatio"), 0.25)))
+        self.block_vr_specified = max(0.05, min(2.0, finite_number(ov.get("blockVolumeRatio"), 0.25)))
         self.block_stack = clamp_stack(ov.get("blockMaxStack"))
         self.block_max_multiplier = max(1.0, min(2.0, finite_number(ov.get("blockMaxVolumeMultiplier"), 2.0)))
         self.block_counts = normalize_block_counts(ov.get("blockCounts"))
@@ -1500,7 +1500,7 @@ class SetBook:
             self.block_eval_pos = 50
         live_block = [n for n in self.block_counts if n <= self.block_stack]
         self.block_vr = shared_block_volume_ratio(
-            self.block_vr, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
+            self.block_vr_specified, len(live_block), max(0.0, self.block_max_multiplier - 1.0),
         )
         self.dca_dist = [0.012, 0.016, 0.020, 0.024]
         self.dca_mult = [1.5, 2.0, 2.3, 2.5]
@@ -1690,6 +1690,7 @@ class SetBook:
             bool(self.hist_block),
             bool(self.hist_dca),
             round(float(self.block_vr), 12),
+            round(float(getattr(self, "block_vr_specified", self.block_vr) or 0), 12),
             int(self.block_stack),
             round(float(self.block_max_multiplier), 12),
             tuple(self.block_counts),
@@ -2848,30 +2849,81 @@ class SetBook:
             pos["sl"] = e * (1 + sl_frac)
             pos["tp"] = e * (1 - tp_frac)
 
+    def _block_specified_ratio(self) -> float:
+        extra = max(0.0, float(self.block_max_multiplier) - 1.0)
+        specified = float(getattr(self, "block_vr_specified", self.block_vr) or 0.25)
+        return min(extra, max(0.05, specified))
+
+    def _try_block_extra(
+        self,
+        parent: Dict[str, Any],
+        bar: Sequence[float],
+        i: int,
+        sl_frac: float,
+        tp_frac: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Open one extra-size lot after 0.2% continuation. Never a parent clone.
+
+        Extra size is the specified overlay ratio (capped at extra 2×), not
+        shared 6-count crumbs. Extra SL locks at the parent entry so a failed
+        continuation cannot take a fresh full stop. Extra TP is the parent's
+        remaining target so extras inherit the proven move instead of a new
+        full-risk trade from the add price.
+        """
+        close = float(bar[3])
+        entry = float(parent.get("entry") or 0)
+        side = int(parent.get("side") or 0)
+        if entry <= 0 or close <= 0 or side == 0:
+            return None
+        try:
+            opened = int(parent["i"])
+        except Exception:
+            opened = i
+        if i - opened < 1:
+            return None
+        if ((close - entry) / entry) * side < 0.002:
+            return None
+        parent_tp = float(parent.get("tp") or 0.0)
+        if parent_tp <= 0:
+            parent_tp = close * (1 + tp_frac) if side > 0 else close * (1 - tp_frac)
+        remaining = ((parent_tp - close) / close) * side if close > 0 else 0.0
+        if remaining <= 1e-12:
+            return None
+        extra = self._seed_pos(side, close, 0.0, 0.0, i, "block:active")
+        extra["qty"] = self._block_specified_ratio()
+        extra["parent"] = 1.0
+        extra["adds"] = 1
+        extra["peak"] = close
+        extra["anchor"] = entry
+        lock = 0.0015
+        if side > 0:
+            extra["sl"] = close * (1.0 - lock)
+            extra["tp"] = parent_tp
+        else:
+            extra["sl"] = close * (1.0 + lock)
+            extra["tp"] = parent_tp
+        return extra
+
     def _maybe_block_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
-        n = int(pos.get("adds") or 0)
-        counts = [c for c in self.block_counts if n < c <= self.block_stack]
-        if not counts:
+        if int(pos.get("adds") or 0) >= 1:
             return
-        count = counts[0]
         close = float(bar[3])
         entry = float(pos["entry"])
         side = int(pos["side"])
         if entry <= 0 or close <= 0:
             return
-        u = ((close - entry) / entry) * side
-        if u < 0.002:
+        if ((close - entry) / entry) * side < 0.002:
             return
-        # Always size off original parent, never the last add.
-        target = float(pos["parent"]) * (1 + calculate_block_max_additional_ratio(
-            count, self.block_vr, self.block_max_multiplier))
+        specified = self._block_specified_ratio()
+        add = float(pos["parent"]) * specified
         qty = float(pos["qty"])
-        add = max(0.0, target - qty)
+        extra_cap = float(pos["parent"]) * max(0.0, float(self.block_max_multiplier) - 1.0)
+        add = min(add, max(0.0, extra_cap - max(0.0, qty - float(pos["parent"]))))
         if add <= 0:
             return
         pos["entry"] = (entry * qty + close * add) / (qty + add)
         pos["qty"] = qty + add
-        pos["adds"] = count
+        pos["adds"] = 1
         self._rearm_stops(pos, sl_frac, tp_frac)
 
     def _maybe_dca_add(self, pos: Dict[str, Any], bar: Sequence[float], sl_frac: float, tp_frac: float) -> None:
@@ -2917,7 +2969,9 @@ class SetBook:
         side = int(pos["side"])
         entry = float(pos["entry"])
         held = i - int(pos["i"])
-        if strategy == "block" and held >= 1:
+        tags = str(pos.get("tags") or "")
+        already_extra = int(pos.get("adds") or 0) >= 1 or tags.startswith("block")
+        if strategy == "block" and held >= 1 and not already_extra:
             self._maybe_block_add(pos, bar, sl_frac, tp_frac)
             entry = float(pos["entry"])
         elif strategy == "dca" and held >= 1:
@@ -2944,14 +2998,17 @@ class SetBook:
         why, px = hit_exit(side, entry, pos["sl"], pos["tp"], pos.get("trail"), bar, ignore_tp=not honor_tp)
         if why is None and held >= time_bars:
             why, px = "time", float(bar[3])
-        if why is None and held >= scratch_bars:
+        if why is None and held >= scratch_bars and strategy != "block":
             move = (float(bar[3]) - entry) / entry * side
             if move >= self.scratch_min:
                 why, px = "scratch+", float(bar[3])
         if not why:
             return pos, None
         raw = (px - entry) / entry * side
-        qty = max(0.25, float(pos.get("qty") or 1.0))
+        qty = max(0.0, float(pos.get("qty") or 1.0))
+        parent = max(1e-9, float(pos.get("parent") or 1.0))
+        if strategy in ("block", "dca"):
+            raw = raw * (qty / parent)
         rec = hist_fill(ts, symbol, side, raw, held * BAR_S, why)
         rec["strategy"] = _intern(strategy or "core")
         if strategy in ("block", "dca"):
@@ -3293,6 +3350,13 @@ class SetBook:
                             opens[sid] = pos
                     for sid in dead:
                         opens.pop(sid, None)
+                    parent_open = representative if vector_core else (
+                        opens.get(strat_seed.id) if strat_seed is not None else None
+                    )
+                    if do_block and blk_pos is None and parent_open is not None and strat_seed is not None:
+                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
+                        blk_pos = self._try_block_extra(parent_open, bar, i, sl_frac, tp_frac)
                     if vector_core and strat_seed is not None:
                         if representative is None and representative_cool > 0:
                             representative_cool -= 1
@@ -3308,7 +3372,7 @@ class SetBook:
                             )
                             if rep_rec:
                                 representative_cool = self.cooldown_bars
-                    if blk_pos is not None and strat_seed is not None:
+                    if blk_pos is not None and strat_seed is not None and int(blk_pos.get("i") or -1) != i:
                         sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
                         tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
                         blk_pos, recb = self._advance_pos(
@@ -3356,14 +3420,10 @@ class SetBook:
                             # the independent Block/DCA lanes.
                             if st is strat_seed:
                                 representative = dict(seed)
-                                if do_block and blk_pos is None:
-                                    blk_pos = dict(seed)
                                 if do_dca and dca_pos is None:
                                     dca_pos = dict(seed)
                             continue
                         opens[st.id] = dict(seed)
-                        if do_block and blk_pos is None and st is strat_seed:
-                            blk_pos = dict(seed)
                         if do_dca and dca_pos is None and st is strat_seed:
                             dca_pos = dict(seed)
                     if on_step and i % 80 == 0:
@@ -3424,14 +3484,17 @@ class SetBook:
         tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
         sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
         for want_side in (1, -1):
-            open_pos: Optional[Dict[str, Any]] = None
+            parent_pos: Optional[Dict[str, Any]] = None
+            extra_pos: Optional[Dict[str, Any]] = None
             cool = 0
             for i in range(warmup, n):
                 bar = bars[i]
                 ts = base_ts + i * BAR_S
-                if open_pos is not None:
-                    open_pos, rec = self._advance_pos(
-                        open_pos, bar, i, strategy="block",
+                if extra_pos is None and parent_pos is not None:
+                    extra_pos = self._try_block_extra(parent_pos, bar, i, sl_frac, tp_frac)
+                if extra_pos is not None and int(extra_pos.get("i") or -1) != i:
+                    extra_pos, rec = self._advance_pos(
+                        extra_pos, bar, i, strategy="block",
                         sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
                         arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
                         honor_tp=honor_tp, ts=ts, symbol=symbol,
@@ -3443,9 +3506,18 @@ class SetBook:
                         rec["pack"] = "block"
                         rec["reason"] = f"block:{kind}:{rec.get('reason') or 'exit'}"
                         output.append(rec)
+                        extra_pos = None
                         cool = self.cooldown_bars
-                    if open_pos is not None:
-                        continue
+                if parent_pos is not None:
+                    parent_pos, _prec = self._advance_pos(
+                        parent_pos, bar, i, strategy="core",
+                        sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
+                        arm=0.0, give=0.0, time_bars=time_bars, scratch_bars=scratch_bars,
+                        honor_tp=honor_tp, ts=ts, symbol=symbol,
+                        st_id=f"indications:{kind}:core", pack="indications",
+                    )
+                if parent_pos is not None or extra_pos is not None:
+                    continue
                 if cool > 0:
                     cool -= 1
                     continue
@@ -3457,7 +3529,7 @@ class SetBook:
                     continue
                 sl = close * (1 - sl_frac) if d > 0 else close * (1 + sl_frac)
                 tp = close * (1 + tp_frac) if d > 0 else close * (1 - tp_frac)
-                open_pos = self._seed_pos(d, close, sl, tp, i, f"ind:{kind}")
+                parent_pos = self._seed_pos(d, close, sl, tp, i, f"ind:{kind}")
 
     def _replay_kind_tapes(
         self,

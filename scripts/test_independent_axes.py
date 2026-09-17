@@ -53,6 +53,21 @@ OVERLAY = {
 }
 
 
+def synth_days(n: int = 4320, start: float = 80.0, step: float = 0.07, noise: float = 0.02, cycle: int = 120):
+    """Multi-day local trends. 18-bar oscillators hide Block continuation extras."""
+    bars = []
+    px = start
+    for i in range(n):
+        drift = step if (i // cycle) % 2 == 0 else -step * 0.4
+        o = px
+        c = px + drift + ((i % 5) - 2) * noise
+        h = max(o, c) + abs(noise)
+        l = min(o, c) - abs(noise) * 0.6
+        bars.append([o, h, l, c, 1000.0 + (i % 7) * 40])
+        px = c
+    return bars
+
+
 class IndependentAxesTests(unittest.TestCase):
     def test_trade_simulation_scores_every_independent_axis(self):
         book = SetBook()
@@ -152,6 +167,11 @@ class IndependentAxesTests(unittest.TestCase):
         p.block = book
         p.strat_block = True
         p.available = 100
+        p.entries_blocked = lambda: False
+        p.ctrl_skip = {}
+        p.open = {}
+        p.cooldown = {}
+        p.api = NS(path_cd={})
         p.block_last_emit = 0
         p.maybe_block_adds()
 
@@ -172,6 +192,81 @@ class IndependentAxesTests(unittest.TestCase):
         self.assertGreater(blob["withWithout"]["block"]["with"]["pf"], blob["withWithout"]["block"]["without"]["pf"])
         self.assertEqual(blob["pfStats"]["block"]["n"], 8)
         self.assertEqual(blob["pfStats"]["normal"]["n"], 10)
+
+    def test_block_specified_ratio_is_not_shared_crumbs(self):
+        book = SetBook()
+        book.load({
+            "histEnabled": True, "stratIndications": True, "stratGeneral": False, "stratTrailing": False,
+            "slToTpRatios": [0.6], "setMinStep": 7, "setStepMax": 7,
+            "blockVolumeRatio": 1.0, "blockMaxStack": 6, "blockMaxVolumeMultiplier": 2.0,
+            "histSimulateBlock": True,
+        })
+        self.assertAlmostEqual(book._block_specified_ratio(), 1.0)
+        parent = book._seed_pos(1, 100.0, 99.4, 100.6, 0, "core")
+        extra = book._try_block_extra(parent, [100.3, 100.4, 100.2, 100.3], 2, 0.004, 0.006)
+        self.assertIsNotNone(extra)
+        self.assertAlmostEqual(extra["qty"], 1.0)
+        self.assertAlmostEqual(extra["entry"], 100.3)
+        self.assertAlmostEqual(extra["anchor"], 100.0)
+        self.assertAlmostEqual(extra["sl"], 100.3 * (1 - 0.0015))
+        self.assertAlmostEqual(extra["tp"], 100.6)
+        self.assertEqual(extra["adds"], 1)
+        too_soon = book._try_block_extra(parent, [100.3, 100.4, 100.2, 100.3], 0, 0.004, 0.006)
+        self.assertIsNone(too_soon)
+        crumbs = SetBook()
+        crumbs.load({
+            "histEnabled": True, "stratIndications": True, "stratGeneral": False, "stratTrailing": False,
+            "slToTpRatios": [0.6], "setMinStep": 7, "setStepMax": 7,
+            "blockVolumeRatio": 0.25, "blockMaxStack": 6, "blockMaxVolumeMultiplier": 2.0,
+            "histSimulateBlock": True,
+        })
+        self.assertAlmostEqual(crumbs._block_specified_ratio(), 0.25)
+        crumb_extra = crumbs._try_block_extra(parent, [100.3, 100.4, 100.2, 100.3], 2, 0.004, 0.006)
+        self.assertIsNotNone(crumb_extra)
+        self.assertAlmostEqual(crumb_extra["qty"], 0.25)
+
+    def test_block_with_beats_without_over_multi_day_trend(self):
+        book = SetBook()
+        book.load({
+            "histEnabled": True,
+            "histLookbackBars": 4320,
+            "histMinBars": 200,
+            "histWarmup": 40,
+            "setMinStep": 7,
+            "setStepMax": 7,
+            "slToTpRatios": [0.6],
+            "stratTrailing": False,
+            "stratIndications": True,
+            "stratGeneral": False,
+            "stratBlock": True,
+            "histSimulateBlock": True,
+            "histSimulateDca": False,
+            "blockVolumeRatio": 1.0,
+            "blockMaxStack": 6,
+            "blockMaxVolumeMultiplier": 2.0,
+            "positionCostPct": 0.10,
+            "setMinPf": POSITIVE_PF,
+            "baseEvalPosCount": 50,
+            "indTypeState": True,
+            "indTypeSignals": True,
+            "indTypeDirection": True,
+            "indTypeMove": True,
+            "indTypeActive": True,
+            "indTypeCommon": True,
+            "indTypeTrend": True,
+            "indTypeBreak": True,
+        })
+        bars = synth_days(4320, start=80.0, step=0.07, noise=0.02, cycle=120)
+        book.ingest_bars("SIM-USDT", bars)
+        book.replay_all(symbols=["SIM-USDT"], workers=1, merge=True, score=True)
+        blob = ce.evaluate_book(book, min_pf=POSITIVE_PF)
+        ww = blob["withWithout"]["block"]
+        block_pf = blob["pfStats"]["block"]
+        self.assertGreater(ww["with"]["n"], ww["without"]["n"], ww)
+        self.assertGreater(ww["with"]["pf"], ww["without"]["pf"], ww)
+        self.assertGreater(block_pf["n"], 0, block_pf)
+        self.assertGreater(block_pf["pf"], ww["without"]["pf"], {"block": block_pf, "without": ww["without"]})
+        self.assertAlmostEqual(book._block_specified_ratio(), 1.0)
 
 
 if __name__ == "__main__":

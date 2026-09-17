@@ -1916,7 +1916,7 @@ def merge_overall() -> dict:
     tests.sort(key=lambda test: (test.get("pass") is True, -float(test.get("t") or 0)))
     closed.sort(key=lambda r: r.get("t") or 0, reverse=True)
     policy = overall_pf_policy(stats_by_id.values())
-    closed = closed[:max(40, policy["n"])]
+    closed = closed[:max(150, int(policy["n"] or 15))]
     live = next((x for x in lanes if x["type"] == "live"), {})
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
