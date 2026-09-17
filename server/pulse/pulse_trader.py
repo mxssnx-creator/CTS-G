@@ -3305,7 +3305,11 @@ class Pulse:
             return strategy
         if getattr(pos, "axis_key", ""):
             return "axis"
-        if getattr(pos, "trail_key", "") not in ("", "0", "off"):
+        kind = str(getattr(pos, "kind", "") or "").lower()
+        if strategy in ("trail", "trailing") or kind in ("trail", "trailing"):
+            return "trailing"
+        trail = str(getattr(pos, "trail_key", "") or "").strip().lower()
+        if trail not in ("", "0", "off", "none", "base", "false", "core") and ":" in trail and kind == "trail":
             return "trailing"
         return str(getattr(pos, "pack", "") or "normal")
 
@@ -5667,7 +5671,8 @@ class Pulse:
         trail_key = str(meta.get("trail_key") or meta.get("trailKey") or "")
         trail_arm = float(meta.get("trail_arm") or meta.get("trailArm") or 0.0)
         trail_give = float(meta.get("trail_give") or meta.get("trailGive") or 0.0)
-        if not trail_key:
+        kind = str(meta.get("kind") or "").strip().lower()
+        if not trail_key and kind in ("trail", "trailing"):
             trail_key, default_arm, default_give = self.variants.current_trail()
             trail_arm = trail_arm or default_arm / 100.0
             trail_give = trail_give or default_give / 100.0
@@ -10006,6 +10011,15 @@ class Pulse:
                         "pack": getattr(best_st, "pack", "") or "",
                         "setId": getattr(best_st, "id", "") or "",
                     }
+                for pack_name in ("indications", "general"):
+                    try:
+                        pack_st = source(pack_name)
+                    except TypeError:
+                        pack_st = None
+                    if pack_st is None:
+                        continue
+                    intern_metrics[pack_name] = float(getattr(pack_st, "last15_ratio", 0) or 0)
+                    intern_metrics[f"{pack_name}N"] = float(getattr(pack_st, "last15_n", 0) or 0)
             if not intern_metrics.get("n"):
                 for pack_name in ("indications", "general"):
                     for side_n in ("LONG", "SHORT"):

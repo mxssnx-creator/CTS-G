@@ -4698,11 +4698,15 @@ class SetBook:
             }
         return blob
 
-    def intern_metric_source(self) -> Optional[SetState]:
-        """Best Base row for intern coordination. Hist-test gate restricts to selected configs."""
+    def intern_metric_source(self, pack: Optional[str] = None) -> Optional[SetState]:
+        """Best Base row for intern coordination. Hist-test gate restricts to selected configs.
+
+        Pack is independent: indications intern PF never substitutes for general.
+        """
         allow = getattr(self, "hist_test_set_ids", None)
         sets_map = self.sets or {}
         ids = list((self._ids_by_kind or {}).get("base") or [])
+        want = str(pack or "").strip().lower()
         if allow is not None:
             allow_set = allow
             ranked = [sid for sid in ids if sid in allow_set]
@@ -4713,6 +4717,8 @@ class SetBook:
         for sid in ids:
             cand = sets_map.get(sid)
             if cand is None:
+                continue
+            if want and str(getattr(cand, "pack", "") or "").strip().lower() != want:
                 continue
             n = int(getattr(cand, "last15_n", 0) or 0)
             if best is None or n > best_n:
@@ -5322,6 +5328,8 @@ class SetBook:
             st = self.ind_stats(k, side=side)
             if st["validated"]:
                 return bool(st["profitable"])
+            # Unproven kinds stay independent: they do not inherit pack open/close.
+            return False
         return self.pack_open("indications", side=side)
 
     def ind_gate_snapshot(self) -> Dict[str, Any]:
@@ -6327,7 +6335,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g4._score_one(gb[0])
     out.append(("set-strict-cold-closes", g4.pick("general") is None and not g4.pack_open("general"), f"pick={g4.pick('general')}"))
     # indication-kind gate: proven loser off, validated winner on, unproven
-    # kind rides the pack, pack closed -> everything off
+    # kind stays independent (does not inherit pack open)
     gb[0].hist = [{"t": 8000 + i * 60, "pnl": 0.003, "pnl_pct": 0.006, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     g4._score_one(gb[0])
     ib = [x for x in g4.by_idx if x.pack == "indications" and x.kind == "base"]
@@ -6337,7 +6345,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     for x in g4.by_idx:
         if x.pack == "indications":
             g4._score_one(x)
-    out.append(("ind-gate-unproven-rides-pack", g4.indication_ok("common") and g4.pack_open("indications"), f"common={g4.indication_ok('common')} indOpen={g4.pack_open('indications')}"))
+    out.append(("ind-gate-unproven-independent", (not g4.indication_ok("common")) and g4.pack_open("indications"), f"common={g4.indication_ok('common')} indOpen={g4.pack_open('indications')}"))
     g4.ind_live["move"] = [{"t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(12)]
     g4.ind_live["state"] = [{"t": 9000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(12)]
     out.append(("ind-gate-loser-off", not g4.indication_ok("move"), f"move pf={g4.ind_stats('move')}"))
