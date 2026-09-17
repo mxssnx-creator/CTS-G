@@ -8324,8 +8324,8 @@ class Pulse:
             "volumeFactor": float(getattr(self, "volume_factor", 1.0) or 1.0),
             "leverage": LEVERAGE,
             "useMaxLeverage": True,
-            "leverageMap": dict(getattr(self, "lev_map", {})),
-            "leverageMax": dict(getattr(self, "lev_max", {})),
+            "leverageMap": self._intern_leverage_map(),
+            "leverageMax": self._intern_leverage_map(max_map=True),
             "maxOpen": MAX_OPEN,
             "logicalPositionCap": MAX_OPEN,
             "maxPerGroup": MAX_PER_GROUP,
@@ -9391,8 +9391,20 @@ class Pulse:
             dynamic_ms = max(50.0, float(getattr(governor_budget, "entry_budget_ms", configured_ms)))
         except (TypeError, ValueError, OverflowError):
             dynamic_ms = configured_ms
+        intern_n = 0
+        try:
+            intern_n = len(self._intern_symbols())
+        except Exception:
+            intern_n = len(SYMBOLS)
+        if intern_n and intern_n <= 64:
+            dynamic_batch = min(dynamic_batch, 8)
+            dynamic_ms = min(dynamic_ms, 180.0)
         scan_s = max(0.05, float(globals().get("SCAN_S", 5.0) or 5.0))
-        return min(configured_batch, dynamic_batch), max(0.05, min(2.0, scan_s, configured_ms / 1000.0, dynamic_ms / 1000.0))
+        # Intern desks: keep the hot loop under a quarter-second of entry
+        # POSTs so SL/TP still run. Wider books may use the 2s ceiling.
+        ceiling = 0.25 if intern_n and intern_n <= 64 else 2.0
+        budget_s = max(0.08, min(ceiling, scan_s if intern_n > 64 else ceiling, configured_ms / 1000.0, dynamic_ms / 1000.0))
+        return min(configured_batch, dynamic_batch), budget_s
 
     def _hist_peer_path(self) -> str:
         return os.path.join(DIR, "hist-busy.json")
@@ -10077,6 +10089,17 @@ class Pulse:
                 break
             if float(self.available or 0) <= 0 or time.time() < self.cooldown.get("__book__", 0):
                 break
+            contract = self.contracts.get(s)
+            px = self.px.get(s) or 0.0
+            if contract and px > 0:
+                try:
+                    lev = max(1.0, float(self.lev_map.get(s) or LEVERAGE or 1))
+                    min_margin = self.min_order_qty(contract, px) * px / lev
+                    if min_margin > float(self.available or 0) * 0.95:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
             before = len(self.open)
             try:
                 self.place(s, d, why, conf, selected_set=selected)
@@ -11764,8 +11787,8 @@ class Pulse:
             "haltReason": self.halt_reason,
             "leverage": LEVERAGE,
             "useMaxLeverage": True,
-            "leverageMap": dict(getattr(self, "lev_map", {})),
-            "leverageMax": dict(getattr(self, "lev_max", {})),
+            "leverageMap": self._intern_leverage_map(),
+            "leverageMax": self._intern_leverage_map(max_map=True),
             "slPct": SL_PCT * 100,
             "tpPct": TP_PCT * 100,
             "targetNotional": TARGET_NOTIONAL,
@@ -13871,6 +13894,19 @@ class Pulse:
                     names.append(token)
                     have.add(token.upper())
         return names
+
+    def _intern_leverage_map(self, max_map: bool = False) -> Dict[str, Any]:
+        src = getattr(self, "lev_max" if max_map else "lev_map", {}) or {}
+        want = set()
+        try:
+            want.update(self._intern_symbols())
+        except Exception:
+            want.update(list(SYMBOLS)[:50])
+        for pos in (getattr(self, "open", {}) or {}).values():
+            name = getattr(pos, "symbol", "")
+            if name:
+                want.add(name)
+        return {k: src[k] for k in want if k in src}
 
     def _intern_symbols(self) -> List[str]:
         """When Test Historic owns the catalog, intern overlay + open symbols."""
