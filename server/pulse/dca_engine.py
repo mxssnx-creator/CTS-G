@@ -495,6 +495,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
     parent.on_close({"symbol": "QQQ-USDT", "side": "LONG", "reason": "sl", "client_id": "Gx01og060308000ab", "pnl": -0.02, "pnl_pct": -0.002})
     t19 = (len(parent.closes) == 1, f"parent-close n={len(parent.closes)}")
     t20 = (parent.distances[0] >= 0.012 - 1e-12, f"minDist={parent.distances}")
+    ov = DcaBook()
+    ov.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
+    a = ov.attach("SEI-USDT", "LONG", 47.0, 0.04, group_key="")
+    ov.merge_parent("SEI-USDT", "LONG", 47.0, 0.04, group_key="")
+    t21 = (ov.key("SEI-USDT", "LONG") == "SEI-USDT:LONG" and abs(a.parent_qty - 94.0) < 1e-9 and ":group:" not in ov.key("SEI-USDT", "LONG", ""), f"parent={a.parent_qty} key={ov.key('SEI-USDT','LONG')}")
+    # Cold empty tape stays active; intern 1.00 evidence does not fire extra size via score deact
+    cold = ov.due("SEI-USDT", "LONG", 94.0, 0.04, 0.04 * 0.987, now=t0, group_key="", evidence=[])
+    t22 = (cold is not None and cold["n"] == 1, f"cold={None if cold is None else cold.get('n')}")
     return [
         ("dca-flat", t1[0], t1[1]),
         ("dca-below", t2[0], t2[1]),
@@ -517,6 +525,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-cooldown-elapsed", t18[0], t18[1]),
         ("dca-parent-close-scores", t19[0], t19[1]),
         ("dca-min-first-dist", t20[0], t20[1]),
+        ("dca-overall-merge", t21[0], t21[1]),
+        ("dca-cold-adverse-emits", t22[0], t22[1]),
     ]
 
 

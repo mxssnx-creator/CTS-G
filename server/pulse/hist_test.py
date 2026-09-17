@@ -713,6 +713,10 @@ def intern_liquid_pool(
             return
         if name.startswith(("NCCO", "NCS", "NCFX")):
             return
+        if keep_open and name in open_keys:
+            used.add(name)
+            out.append(name)
+            return
         if name not in major_keys and not allow_validated:
             return
         if allow_validated and name not in major_keys and name not in open_keys:
@@ -724,6 +728,8 @@ def intern_liquid_pool(
         used.add(name)
         out.append(name)
 
+    for s in opens or []:
+        add(s, keep_open=True)
     for s in PREFERRED_SYMBOLS:
         add(s)
     for s in validated or []:
@@ -735,8 +741,6 @@ def intern_liquid_pool(
         add(s)
     for s in overlay:
         add(s)
-    for s in opens or []:
-        add(s, keep_open=True)
     limit = int(cap or 0) or SYMBOL_CAP
     if vol and (not limit or len(out) < limit):
         ranked_vol = sorted(

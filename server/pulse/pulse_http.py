@@ -365,6 +365,9 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
     out["blockEnabled"] = True
     out["blockOverall"] = True
     out["blockActive"] = True
+    out["dcaEnabled"] = True
+    out["dcaOverall"] = True
+    out["stratDca"] = True
     try:
         stack = int(out.get("blockMaxStack") or 0)
     except (TypeError, ValueError):

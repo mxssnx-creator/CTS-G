@@ -1401,6 +1401,7 @@ class Pulse:
         self.normal_execution_enabled = True
         self.block_active = True
         self.block_overall = True
+        self.dca_overall = True
         self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
         self.strat_general = True
@@ -1719,6 +1720,11 @@ class Pulse:
             return self.block.key(pos.symbol, pos.side)
 
     def dca_lane_key(self, pos: Position) -> str:
+        if bool(getattr(self, "dca_overall", True)):
+            try:
+                return self.dca.key(pos.symbol, pos.side)
+            except TypeError:
+                return f"{pos.symbol}:{pos.side}"
         group_key = self.logical_group_key(pos)
         try:
             return self.dca.key(pos.symbol, pos.side, group_key)
@@ -1728,10 +1734,13 @@ class Pulse:
     def ensure_strategy_lanes(self, pos: Position) -> None:
         """Rebind Block/DCA state to this logical group after fills or restart."""
         overall = bool(getattr(self, "block_overall", True))
+        dca_overall = bool(getattr(self, "dca_overall", True))
         group_key = "" if overall else self.logical_group_key(pos)
+        dca_key = "" if dca_overall else self.logical_group_key(pos)
         core_qty = float(pos.qty or 0)
         if overall:
             core_qty = self._block_core_qty(pos.symbol, pos.side) or core_qty
+        dca_qty = core_qty if dca_overall else float(pos.qty or 0)
         try:
             if overall:
                 key = self.block.key(pos.symbol, pos.side)
@@ -1750,7 +1759,7 @@ class Pulse:
         except Exception:
             pass
         try:
-            self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry, group_key=self.logical_group_key(pos))
+            self.dca.attach(pos.symbol, pos.side, dca_qty, pos.entry, group_key=dca_key)
         except TypeError:
             try:
                 self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry)
@@ -1762,8 +1771,9 @@ class Pulse:
     def merge_parent_lanes(self, pos: Position, added_qty: float, entry: float) -> None:
         """Keep Block/DCA parent anchors aligned with an entry merge."""
         overall = bool(getattr(self, "block_overall", True))
+        dca_overall = bool(getattr(self, "dca_overall", True))
         block_key = "" if overall else self.logical_group_key(pos)
-        dca_key = self.logical_group_key(pos)
+        dca_key = "" if dca_overall else self.logical_group_key(pos)
         try:
             merge_parent = getattr(self.block, "merge_parent", None)
             if callable(merge_parent):
@@ -4809,7 +4819,6 @@ class Pulse:
                         for member in group_rows
                 ):
                     miss += 1
-                overall_controls.ensure(self,pos)
                 shared_checked.add((pos.symbol,pos.side))
             # Overall protection owns the complete symbol/direction group.
             # Do not fall through into the per-config fallback below: that
@@ -7109,7 +7118,7 @@ class Pulse:
             if age >= MAX_HOLD_S:
                 self.close_pos(pos, px, "max-hold-6h")
                 continue
-            if getattr(self, "control_orders", True):
+            if getattr(self, "control_orders", True) and not overall_controls.enabled(self, pos):
                 if time.time() >= self.ctrl_skip.get(scope, 0):
                     if self.missing_controls(pos):
                         self.ensure_controls(pos)
@@ -7938,8 +7947,9 @@ class Pulse:
         self.block_active = ov.get("blockActive", cts.get("blockActive", True)) is True
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.block_overall = ov.get("blockOverall", cts.get("blockOverall", True)) is not False
+        self.dca_overall = ov.get("dcaOverall", cts.get("dcaOverall", True)) is not False
         self.strat_general = True
-        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", False)))
+        self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
         self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
         try:
@@ -8736,7 +8746,10 @@ class Pulse:
         coord = getattr(self, "coord", None)
         if coord is None or not callable(getattr(coord, "add_gate", None)):
             return True, stack, 1.0, []
-        overall = bool(getattr(self, "block_overall", True)) and not set_id
+        overall = (
+            bool(getattr(self, "dca_overall" if str(strategy or "") == "dca" else "block_overall", True))
+            and not set_id
+        )
         if set_id:
             rows = self.config_strategy_closes(set_id, side, execution_lane, strategy)
         elif overall and symbol:
@@ -8767,7 +8780,7 @@ class Pulse:
                 if not self.sets._base_metrics_ok(view):
                     return False, stack, 0.0, ["config Base qualification"]
                 intern = {"pf": view.get("base_pf", view.get("last15_ratio", 0)), "n": view.get("base_n", view.get("last15_n", 0))}
-        elif overall and symbol and str(strategy or "") == "block":
+        elif overall and symbol and str(strategy or "") in ("block", "dca"):
             state = self._block_overall_real_state(symbol, side)
             intern = {"pf": state.get("pf") or 0, "n": state.get("n") or 0}
         tape = None
@@ -9209,20 +9222,38 @@ class Pulse:
             return
         emitted = 0
         add_budget = 32 if MAX_OPEN <= 0 else max(8, min(32, int(MAX_OPEN or 8)))
+        overall = bool(getattr(self, "dca_overall", True))
+        if overall:
+            for k in list(self.dca.lanes):
+                if ":group:" in str(k):
+                    self.dca.lanes.pop(k, None)
+        seen_parents = set()
         for pos in list(self.open.values()):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
+            if overall:
+                parent_id = (str(pos.symbol), str(pos.side))
+                if parent_id in seen_parents:
+                    continue
+                seen_parents.add(parent_id)
             if emitted >= add_budget:
                 break
             if str(pos.set_id).startswith("forced:"):
                 continue
-            if not pos.set_id or pos.set_id not in self.sets.sets:
+            if not overall and (not pos.set_id or pos.set_id not in self.sets.sets):
                 continue
             lane_key = getattr(pos, "execution_lane", "")
-            allow_add, _, _, _ = self._coord_add_state(set_id=pos.set_id, side=pos.side, execution_lane=lane_key, strategy="dca")
+            if overall:
+                allow_add, _, _, _ = self._coord_add_state(symbol=pos.symbol, side=pos.side, strategy="dca")
+            else:
+                allow_add, _, _, _ = self._coord_add_state(set_id=pos.set_id, side=pos.side, execution_lane=lane_key, strategy="dca")
             if not allow_add:
                 continue
-            own = self.config_strategy_closes(pos.set_id, pos.side, lane_key, "dca")
+            own = (
+                self.overall_side_closes(pos.symbol, pos.side)
+                if overall else
+                self.config_strategy_closes(pos.set_id, pos.side, lane_key, "dca")
+            )
             live_pf = self.live_recent_pf(pos.side, n=8, rows=own)
             if live_pf is not None and not clears_pf(live_pf, self.coord.min_pf):
                 continue
@@ -9253,11 +9284,22 @@ class Pulse:
             if against and adv > max(sl_pct * 1.5, 0.012):
                 self.dca.skips += 1
                 continue
-            group_key = self.logical_group_key(pos)
+            group_key = "" if overall else self.logical_group_key(pos)
             lane = self.dca.lanes.get(self.dca_lane_key(pos))
             parent = float(getattr(lane, "parent_qty", 0) or 0)
-            seed = parent if parent > 0 else pos.qty
-            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key, evidence=[vars(row) for row in own])
+            seed = parent if parent > 0 else float(pos.qty or 0)
+            if overall and parent <= 0:
+                seed = self._block_core_qty(pos.symbol, pos.side) or seed
+            evidence = []
+            for rec in own or []:
+                if isinstance(rec, dict):
+                    evidence.append(rec)
+                else:
+                    try:
+                        evidence.append(vars(rec))
+                    except TypeError:
+                        evidence.append({"pnl_pct": getattr(rec, "pnl_pct", 0), "pnl": getattr(rec, "pnl", 0), "t": getattr(rec, "t", 0)})
+            row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key, evidence=evidence)
             if not row:
                 continue
             c = self.contracts.get(pos.symbol)

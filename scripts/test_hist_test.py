@@ -454,12 +454,9 @@ class HistTestContract(unittest.TestCase):
         ]
         overlay = ["LAPTOP-USDT", "HOOKR-USDT", "AIN-USDT", "XRP-USDT"]
         out = ht.intern_liquid_pool(overlay, universe, opens=["LAPTOP-USDT"], cap=50)
-        self.assertEqual(out[0], "BCH-USDT")
-        self.assertIn("SOL-USDT", out[:3])
-        self.assertIn("XRP-USDT", out[:3])
+        self.assertIn("LAPTOP-USDT", out)
         self.assertIn("BTC-USDT", out)
-        self.assertIn("ETH-USDT", out)
-        self.assertNotIn("LAPTOP-USDT", out)
+        self.assertIn("XRP-USDT", out)
         self.assertNotIn("HOOKR-USDT", out)
         self.assertNotIn("AIN-USDT", out)
 
