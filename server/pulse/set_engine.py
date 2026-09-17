@@ -92,7 +92,7 @@ PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 30
-LOOKBACK_DEFAULT = 3000  # 50 hours of 1m bars
+LOOKBACK_DEFAULT = 2880  # two days of 1m bars
 LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
@@ -2653,9 +2653,16 @@ class SetBook:
             for sid, counts in self._hist_counts.items():
                 if name_set.intersection(counts):
                     touched.add(sid)
+            if not touched:
+                # Empty replay of a symbol must still clear that symbol from
+                # owners whose hist tape was never indexed in _hist_counts.
+                for st in self.by_idx:
+                    if any(str(row.get("symbol") or "") in name_set for row in (st.hist or ())):
+                        touched.add(st.id)
             states = [self.sets[sid] for sid in touched if sid in self.sets]
         else:
             states = self.by_idx if (not merge or names) else []
+        updated: List[str] = []
         for st in states:
             # A bounded replay may commit one configuration slice at a time.
             # Do not treat a not-yet-replayed set as an empty result or erase
@@ -2690,6 +2697,7 @@ class SetBook:
                 if score and (score_set is None or st.id in score_set):
                     self._score_one(st)
                 st.n = sum(counts.values())
+                updated.append(st.id)
             else:
                 full.sort(key=lambda r: finite(r.get("t")))
                 st.hist = full
@@ -2706,8 +2714,10 @@ class SetBook:
                     n_full = int(hist_counts.get(st.id, len(full))) if hist_counts is not None else len(full)
                 st.hist = trim_hist(full, HIST_CAP)
                 st.n = n_full
+                updated.append(st.id)
         if score:
             self._cap_active()
+        return updated
 
     def _score_all(self) -> None:
         """Score the complete catalog once after a batched replay commit."""

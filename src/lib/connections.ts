@@ -12,8 +12,13 @@ export type ConnLane = {
   halted?: boolean;
   equity?: number;
   openCount?: number;
+  realPositionCount?: number;
+  realPositionGroupCount?: number;
+  realOrderCount?: number;
   exchangeOpenCount?: number;
   livePositionCount?: number;
+  liveOrderCount?: number;
+  liveTotalOrderCount?: number;
   simOpenCount?: number;
   simUPnl?: number;
   alive?: boolean;
@@ -103,7 +108,18 @@ export async function fetchConnections(signal?: AbortSignal): Promise<ConnCatalo
   return requestPreferredJson("/connections.json", "/live-stats.json", (value) => {
     const live = value as ConnCatalog;
     if (Array.isArray(live.types) && live.types.length) return live;
-    const s = value as { lanes?: ConnLane[]; slots?: ConnCatalog["slots"]; running?: boolean; openCount?: number; equity?: number };
+    const s = value as {
+      lanes?: ConnLane[];
+      slots?: ConnCatalog["slots"];
+      running?: boolean;
+      openCount?: number;
+      equity?: number;
+      realPositionCount?: number;
+      realPositionGroupCount?: number;
+      realOrderCount?: number;
+      livePositionCount?: number;
+      liveOrderCount?: number;
+    };
     if (typeof s.running !== "boolean" || !Array.isArray(s.lanes)) return null;
     const lanes = Array.isArray(s.lanes) ? s.lanes : [];
     const types: ConnLane[] = [
@@ -114,6 +130,11 @@ export async function fetchConnections(signal?: AbortSignal): Promise<ConnCatalo
         running: Boolean(s.running),
         equity: s.equity,
         openCount: s.openCount,
+        realPositionCount: s.realPositionCount ?? s.realPositionGroupCount,
+        realPositionGroupCount: s.realPositionGroupCount ?? s.realPositionCount,
+        realOrderCount: s.realOrderCount,
+        livePositionCount: s.livePositionCount,
+        liveOrderCount: s.liveOrderCount,
         alive: true,
       },
       ...lanes.map((l) => ({

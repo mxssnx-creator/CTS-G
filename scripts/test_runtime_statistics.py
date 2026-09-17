@@ -116,6 +116,10 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual({row["symbol"] for row in report["open"]}, {"OWN-USDT"})
         self.assertEqual(report["pfCost"]["n"], 30)
         self.assertEqual(report["pfCost"]["minPf"], 1.1)
+        self.assertIn("realOrderCount", report)
+        self.assertIn("liveOrderCount", report)
+        self.assertIn("realPositionCount", report)
+        self.assertIn("livePositionCount", report)
 
         live, vst = lane("bingx-x01", 100, 130), lane("bingx-x02", 200, 240)
         live.update(logicalPositionCount=700, pfCost={"n": 75, "minPf": 1.2})
@@ -125,6 +129,25 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(report["openCount"], 1000)
         self.assertEqual(report["pfCost"]["n"], 75)
         self.assertEqual(report["pfCost"]["minPf"], 1.2)
+        live.update(realPositionCount=700, realOrderCount=1400, livePositionCount=50, liveOrderCount=100)
+        vst.update(realPositionCount=300, realOrderCount=20, livePositionCount=10, liveOrderCount=12)
+        report = ph.overall_report_state(live, vst)
+        # Lane copies of openCount are not Positions. Unique symbol+direction
+        # counts arrive via realPositionGroupCount below.
+        self.assertNotEqual(report["realPositionCount"], 1000)
+        self.assertEqual(report["realOrderCount"], 112)
+        self.assertEqual(report["livePositionCount"], 60)
+        self.assertEqual(report["liveOrderCount"], 112)
+        live.update(realPositionGroupCount=18, realPositionCount=700, realOrderCount=36, liveOrderCount=100)
+        vst.update(realPositionGroupCount=7, realPositionCount=300, realOrderCount=14, liveOrderCount=12)
+        report = ph.overall_report_state(live, vst)
+        self.assertEqual(report["realPositionCount"], 25)
+        self.assertEqual(report["realPositionGroupCount"], 25)
+        self.assertEqual(report["realOrderCount"], 112)
+        self.assertEqual(report["liveOrderCount"], 112)
+        self.assertEqual(report["openCount"], 1000)
+        self.assertNotEqual(report["realPositionCount"], report["openCount"])
+        self.assertNotEqual(report["realPositionCount"], report["realOrderCount"])
 
     def test_report_uses_configured_window_floor_and_enough_evidence(self):
         from stats_report import build, render_html

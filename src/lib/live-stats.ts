@@ -82,6 +82,7 @@ export type LiveClosed = {
   relative_count?: number;
   volume_ratio?: number;
   pack?: string;
+  strategy?: string;
   sl_ratio?: number;
   trail_key?: string;
   ind_kind?: string;
@@ -1070,6 +1071,10 @@ export function statsTickKey(s: LiveStats): string {
     Number(s.paused),
     s.haltReason || "",
     s.openCount ?? "",
+    s.realPositionCount ?? "",
+    s.realOrderCount ?? "",
+    s.livePositionCount ?? "",
+    s.liveOrderCount ?? "",
     s.wins ?? "",
     s.losses ?? "",
     s.equity ?? "",
@@ -1227,4 +1232,67 @@ export async function fetchLiveStats(conn = "overall", signal?: AbortSignal): Pr
     if (typeof stats.running !== "boolean") return null;
     return viewFromSnapshot(stats, conn);
   }, signal);
+}
+
+export function knownCount(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+/** Positions/Orders pair. Never falls order counts back onto position counts. */
+export function formatPosOrders(
+  positions?: number | null,
+  orders?: number | null,
+  positionFallback?: number | null,
+): string {
+  const p = knownCount(positions) ?? knownCount(positionFallback);
+  const o = knownCount(orders);
+  return `${p ?? "—"}/${o ?? "—"}`;
+}
+
+export function posOrdersCounts(stats: {
+  realPositionCount?: number;
+  realPositionGroupCount?: number;
+  realOrderCount?: number;
+  livePositionCount?: number;
+  liveOrderCount?: number;
+  exchangeOpenCount?: number;
+  openCount?: number;
+} | null | undefined): {
+  realPositions: number | null;
+  livePositions: number | null;
+  realOrders: number | null;
+  liveOrders: number | null;
+} {
+  const realPositions =
+    knownCount(stats?.realPositionGroupCount) ?? knownCount(stats?.realPositionCount);
+  const livePositions =
+    knownCount(stats?.livePositionCount) ?? knownCount(stats?.exchangeOpenCount);
+  const liveOrders = knownCount(stats?.liveOrderCount);
+  const realOrd = knownCount(stats?.realOrderCount);
+  const lanes = knownCount(stats?.openCount);
+  let realOrders = realOrd;
+  if (realOrders != null && lanes != null && realOrders === lanes) realOrders = liveOrders;
+  if (liveOrders != null) realOrders = liveOrders;
+  return { realPositions, livePositions, realOrders, liveOrders };
+}
+
+export function realPosOrders(stats: {
+  realPositionCount?: number;
+  realPositionGroupCount?: number;
+  realOrderCount?: number;
+  liveOrderCount?: number;
+  openCount?: number;
+} | null | undefined): string {
+  const { realPositions, realOrders } = posOrdersCounts(stats);
+  return formatPosOrders(realPositions, realOrders);
+}
+
+export function livePosOrders(stats: {
+  livePositionCount?: number;
+  liveOrderCount?: number;
+  exchangeOpenCount?: number;
+} | null | undefined): string {
+  const { livePositions, liveOrders } = posOrdersCounts(stats);
+  return formatPosOrders(livePositions, liveOrders);
 }

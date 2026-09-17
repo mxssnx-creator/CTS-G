@@ -85,7 +85,7 @@
   "histRefreshS": 90,
   "histTestEnabled": true,
   "histTestHours": 20,
-  "histTestMinPf": 1.18,
+  "histTestMinPf": 1.14,
   "histTestRefreshHours": 2,
   "histWarmup": 30,
   "indAtrMult": 0.85,
@@ -297,5 +297,5 @@
   "useMaxLeverage": true,
   "variantBlockOnly": true,
   "volWeight": 0.3,
-  "volumeFactor": 0.3
+  "volumeFactor": 0.1
 }

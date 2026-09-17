@@ -174,6 +174,8 @@ class ComboEvalTests(unittest.TestCase):
         self.assertEqual(sig["n"], 20)
         self.assertTrue(all(not str(r["setId"]).startswith("core") or r["strategy"] != "block" for r in blob["successful"] if r["strategy"] == "block") or True)
         self.assertTrue(all(r["setId"] != "core" for r in blob["successful"] if r["strategy"] == "block"))
+        self.assertFalse(any(r["setId"] == "indications:signals" for r in blob["successful"]))
+        self.assertEqual(blob["pfStats"]["block"]["n"], 5)
 
     def test_overlay_meta_set_id_does_not_inherit_seed(self):
         core = [{"t": i, "pnl_pct": 0.02, "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "pack": "indications"} for i in range(12)]
@@ -183,6 +185,32 @@ class ComboEvalTests(unittest.TestCase):
         self.assertIn("indications:1m:sl0.6:st8", ids)
         self.assertIn("block:indications:1m:sl0.6:st8", ids)
         self.assertTrue(all(r["indication"] in ce.INDICATIONS for r in blob["successful"]))
+
+    def test_core_pack_identity_ignores_fill_kind_vote(self):
+        rows = [{"t": i, "pnl_pct": 0.02, "ind_kind": "signals", "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "pack": "indications", "sl_ratio": 0.6, "step": 8} for i in range(12)]
+        meta = {"pack": "indications", "ind_kind": "combined", "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "combo_lane": "core"}
+        blob = ce.evaluate_fills([(row, meta) for row in rows], min_pf=1.1, pf_n=10)
+        combined = next(c for c in blob["matrix"] if c["indication"] == "combined" and c["strategy"] == "normal")
+        signals = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "normal")
+        self.assertEqual(combined["n"], 12)
+        self.assertEqual(signals["n"], 0)
+        self.assertTrue(all(r["indication"] == "combined" for r in blob["successful"]))
+
+    def test_kind_overlay_is_not_a_catalog_coordination_or_affection(self):
+        core = [{"t": i, "pnl_pct": 0.02, "pack": "indications", "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "sl_ratio": 0.6, "step": 8} for i in range(10)]
+        kind_block = [({"t": 50 + i, "pnl_pct": 0.05, "strategy": "block", "pack": "block", "ind_kind": "signals"}, {"combo_lane": "kind-overlay", "strategy": "block", "ind_kind": "signals", "pack": "indications", "set_id": "block:signals"}) for i in range(8)]
+        pack_block = [({"t": 80 + i, "pnl_pct": 0.03, "strategy": "block", "pack": "indications", "set_id": "indications:1m:sl0.6:st8"}, {"combo_lane": "overlay", "strategy": "block", "ind_kind": "combined", "pack": "indications", "set_id": "block:indications:1m:sl0.6:st8"}) for i in range(5)]
+        blob = ce.evaluate_fills(core + kind_block + pack_block, min_pf=1.1, pf_n=8)
+        self.assertEqual(blob["withWithout"]["block"]["with"]["n"], 15)
+        self.assertEqual(blob["withWithout"]["block"]["without"]["n"], 10)
+        self.assertEqual(blob["pfStats"]["block"]["n"], 5)
+        self.assertEqual(blob["pfStats"]["overall"]["n"], 15)
+        sig_block = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "block")
+        self.assertEqual(sig_block["n"], 8)
+        ids = {r["setId"] for r in blob["successful"]}
+        self.assertNotIn("block:signals", ids)
+        self.assertIn("block:indications:1m:sl0.6:st8", ids)
+        self.assertIn("indications:1m:sl0.6:st8", ids)
 
     def test_high_volume_fills_score_in_memory(self):
         rows = []

@@ -451,11 +451,53 @@ class HistTestContract(unittest.TestCase):
         self.assertNotIn("BONER-USDT", out)
         self.assertNotIn("SYN-USDT", out)
 
-    def test_select_intern_symbols_inflight_uses_overlap(self):
+    def test_intern_liquid_pool_interns_fifty_majors(self):
+        overlay = ["FLYBRAIN-USDT", "AIN-USDT", "BCH-USDT"]
+        out = ht.intern_liquid_pool(overlay, None, cap=50)
+        self.assertEqual(len(out), 50)
+        self.assertEqual(set(out), set(ht.HIST_TEST_MAJORS))
+        self.assertNotIn("FLYBRAIN-USDT", out)
+        self.assertNotIn("AIN-USDT", out)
+
+    def test_intern_liquid_pool_drops_offline_contracts(self):
+        tradable = [s for s in ht.HIST_TEST_MAJORS if s not in ("EOS-USDT", "MKR-USDT")]
+        out = ht.intern_liquid_pool(["EOS-USDT", "MKR-USDT", "BTC-USDT"], None, cap=50, tradable=tradable)
+        self.assertNotIn("EOS-USDT", out)
+        self.assertNotIn("MKR-USDT", out)
+        self.assertIn("BTC-USDT", out)
+        self.assertEqual(out[0], "BCH-USDT")
+        self.assertIn("SOL-USDT", out[:3])
+        self.assertIn("XRP-USDT", out[:3])
+
+    def test_intern_liquid_pool_keeps_open_offline_lots(self):
+        tradable = ["BTC-USDT", "ETH-USDT", "BCH-USDT", "SOL-USDT", "XRP-USDT"]
+        out = ht.intern_liquid_pool(None, None, opens=["EOS-USDT"], cap=50, tradable=tradable)
+        self.assertIn("EOS-USDT", out)
+        self.assertIn("BTC-USDT", out)
+        self.assertNotIn("MKR-USDT", out)
+
+    def test_select_intern_symbols_inflight_keeps_overlay(self):
         overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT"]
         job = {"phase": "score", "ready": False, "positive": ["BCH-USDT", "BONER-USDT"]}
         out = ht.select_intern_symbols(overlay, job, cap=50)
-        self.assertEqual(out, ["BCH-USDT"])
+        self.assertEqual(out, overlay)
+        self.assertNotIn("BONER-USDT", out)
+
+    def test_progress_view_does_not_mark_ready_on_batch_error(self):
+        view = ht.job_progress_view({
+            "phase": "ready",
+            "ready": True,
+            "pct": 100,
+            "validatedCount": 1000,
+            "successfulConfigs": [{"setId": "indications:1m:sl0.6:st12", "validated": True, "pf": 1.3, "n": 96, "indication": "combined", "strategy": "normal"}],
+            "error": "ValueError: calculation pipeline exceeds batch limit",
+            "positive": ["ETH-USDT", "ADA-USDT"],
+        })
+        self.assertEqual(view["phase"], "error")
+        self.assertFalse(view["ready"])
+        self.assertIn("batch limit", view["detail"])
+        self.assertEqual(len(view["internSymbols"]), 50)
+        self.assertIn("BTC-USDT", view["internSymbols"])
 
     def test_select_intern_symbols_keeps_open_lots(self):
         overlay = ["XRP-USDT", "SOL-USDT"]
@@ -593,6 +635,38 @@ class HistTestContract(unittest.TestCase):
             ]
         })
         self.assertEqual(ids, ["indications:1m:sl0.6:st8", "general:1m:sl0.6:st4"])
+        overlay = ht.identity_from_set_id("block:indications:1m:sl0.6:st8")
+        self.assertEqual(overlay["indication"], "combined")
+        self.assertEqual(overlay["strategy"], "block")
+        self.assertEqual(overlay["pack"], "indications")
+        self.assertEqual(ht.identity_from_set_id("dca:base"), {"pack": "", "indication": "", "strategy": ""})
+        self.assertEqual(ht.identity_from_set_id("block:signals")["indication"], "")
+        self.assertFalse(ht.is_coordination_set_id("indications:signals"))
+        self.assertFalse(ht.is_coordination_set_id("block:signals"))
+        self.assertTrue(ht.is_coordination_set_id("block:indications:1m:sl0.6:st8"))
+        false_coords = ht.selected_coordinations({
+            "successfulConfigs": [
+                {"setId": "indications:signals", "validated": True, "indication": "signals", "strategy": "normal", "pf": 2.0, "n": 40},
+                {"setId": "block:signals", "validated": True, "indication": "signals", "strategy": "block", "pf": 2.2, "n": 12},
+                {"setId": "block:indications:1m:sl0.6:st8", "validated": True, "indication": "combined", "strategy": "block", "pf": 1.6, "n": 18},
+            ],
+            "comboMatrix": [
+                {"indication": "signals", "strategy": "normal", "validated": True, "pf": 2.0, "n": 40},
+                {"indication": "signals", "strategy": "block", "validated": True, "pf": 2.2, "n": 12},
+            ],
+        })
+        false_keys = {(c["indication"], c["strategy"], c["id"]) for c in false_coords}
+        self.assertEqual(false_keys, {("combined", "block", "block:indications:1m:sl0.6:st8")})
+
+    def test_selected_coordinations_keep_catalog_payload_rows(self):
+        coords = ht.selected_coordinations({
+            "successfulConfigs": [{"setId": "indications:1m:sl0.6:st8", "validated": True}],
+            "selectedCoordinations": [{"id": "indications:1m:sl0.6:st8", "strategy": "block"}],
+        })
+        self.assertEqual(len(coords), 1)
+        self.assertEqual(coords[0]["id"], "indications:1m:sl0.6:st8")
+        self.assertEqual(coords[0]["strategy"], "block")
+        self.assertEqual(coords[0]["indication"], "combined")
 
     def test_cap_active_cannot_drop_hist_test_validated(self):
         from set_engine import SetBook

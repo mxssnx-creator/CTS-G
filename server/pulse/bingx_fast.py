@@ -69,7 +69,29 @@ RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
 # asked about an object that the venue has already removed. They must not make
 # a healthy continuous loop look failed; the caller still receives the
 # response and applies its normal stale-state recovery.
-SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 109421, 101205, 109500}
+SKIP_API_LOG = {110424, 101204, 100421, 101209, 109429, 109400, 109420, 109421, 101205, 109500, 109418}
+_OFFLINE_RE = re.compile(r"([A-Z0-9]+-USDT)\s+is offline", re.I)
+
+
+def offline_symbol_from_body(body: Any, extra: Optional[Dict[str, Any]] = None) -> str:
+    """Return the USDT-M symbol BingX just declared offline, else empty."""
+    if not isinstance(body, dict):
+        return ""
+    try:
+        code = int(body.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    msg = str(body.get("msg") or "")
+    low = msg.lower()
+    if code != 109418 and "is offline currently" not in low and "all validted symbols" not in low:
+        return ""
+    token = str((extra or {}).get("symbol") or "").strip().upper()
+    if token.endswith("-USDT"):
+        return token
+    match = _OFFLINE_RE.search(msg)
+    if match:
+        return str(match.group(1) or "").upper()
+    return token if token.endswith("-USDT") else ""
 
 
 class TokenBucket:
@@ -343,6 +365,7 @@ class FastBingX:
         self.bridge.on_response = self._trip
         self._ts_lock = threading.Lock()
         self._last_ts = 0
+        self.offline_hits: List[str] = []
         self._restore_retry_deadlines()
 
     def request_latency(self):
@@ -523,6 +546,14 @@ class FastBingX:
                 if body.get("code") not in (109400, 100404, *SKIP_API_LOG):
                     self.err.write("api", method=method, path=path, code=body.get("code"), msg=str(body.get("msg"))[:220])
             self._trip(path, body)
+            hit = offline_symbol_from_body(body, extra)
+            if hit:
+                hits = getattr(self, "offline_hits", None)
+                if not isinstance(hits, list):
+                    hits = []
+                    self.offline_hits = hits
+                if hit not in hits:
+                    hits.append(hit)
         if isinstance(body, dict) and body.get("code") in (0, "0", None):
             data = body.get("data") or {}
             rows = data.get("orders", []) if isinstance(data, dict) else data
@@ -613,6 +644,14 @@ class FastBingX:
             if body.get("error") and not body.get("cooled"):
                 self.stats["err"] += 1
             self._trip(path, body)
+            hit = offline_symbol_from_body(body, extra)
+            if hit:
+                hits = getattr(self, "offline_hits", None)
+                if not isinstance(hits, list):
+                    hits = []
+                    self.offline_hits = hits
+                if hit not in hits:
+                    hits.append(hit)
         return body
 
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:

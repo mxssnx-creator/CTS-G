@@ -8,13 +8,14 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
 import { DeskShell } from "@/components/desk-shell";
+import { PosOrdersBlock, PosOrdersLine } from "@/components/pos-orders";
 import { useConnection } from "@/components/connection-provider";
 import {
   BlockHeat,
@@ -29,7 +30,7 @@ import { KindStrategyStrip } from "@/components/kind-strategy-stats";
 import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { ActivityPanel } from "@/components/activity-overview";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { enabledAxes, setMetric, setRowKey } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import type { ConnType } from "@/lib/connections";
 import { pnlClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
@@ -96,8 +97,8 @@ function DeskPage() {
 
       <section className="grid gap-3 lg:grid-cols-3">
         <div className="min-w-0 rounded-radius border border-border bg-surface p-5 lg:col-span-2">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
+          <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
               <p className="font-mono text-xs tracking-wide text-muted uppercase">System equity</p>
               <p className="mt-1 font-mono text-3xl tabular-nums">
                 {conn === "overall"
@@ -112,7 +113,7 @@ function DeskPage() {
               </p>
               <p className="mt-1 text-xs text-muted">System book only; wallet equity and foreign exposure stay diagnostic.</p>
               {conn === "overall" ? (
-                <p className="mt-1 font-mono text-sm text-muted">
+                <p className="mt-1 min-w-0 font-mono text-sm text-muted [overflow-wrap:anywhere]">
                   live {fmt(stats?.equityLive, 4)} · vst {fmt(stats?.equityVst, 4)} · live pnl {fmt(stats?.sessionPnlLive, 4)} (g {fmt(stats?.systemGrowLive, 4)} / l {fmt(stats?.systemLossLive, 4)}) · vst pnl {fmt(stats?.sessionPnlVst, 4)} (g {fmt(stats?.systemGrowVst, 4)} / l {fmt(stats?.systemLossVst, 4)})
                 </p>
               ) : null}
@@ -121,30 +122,32 @@ function DeskPage() {
                 {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {fmt(stats?.pnlPct, 2)}%
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-              <span className="text-muted">Wallet equity</span>
-              <span className="font-mono text-right tabular-nums">{stats?.walletEquity != null ? `$${fmt(stats.walletEquity, 3)}` : "—"}</span>
-              <span className="text-muted">Wallet available</span>
-              <span className="font-mono text-right tabular-nums">${fmt(stats?.available, 3)}</span>
-              <span className="text-muted">Wallet used margin</span>
-              <span className="font-mono text-right tabular-nums">${fmt(stats?.usedMargin, 3)}</span>
-              <span className="text-muted">System unrealized</span>
-              <span className={`font-mono text-right tabular-nums ${pnlClass(stats?.systemUnrealized ?? stats?.unrealized ?? 0)}`}>
+            <dl className="stat-rows w-full max-w-sm text-sm sm:w-auto">
+              <dt className="text-muted">Wallet equity</dt>
+              <dd className="font-mono text-fg">{stats?.walletEquity != null ? `$${fmt(stats.walletEquity, 3)}` : "—"}</dd>
+              <dt className="text-muted">Wallet available</dt>
+              <dd className="font-mono text-fg">${fmt(stats?.available, 3)}</dd>
+              <dt className="text-muted">Wallet used margin</dt>
+              <dd className="font-mono text-fg">${fmt(stats?.usedMargin, 3)}</dd>
+              <dt className="text-muted">System unrealized</dt>
+              <dd className={`font-mono ${pnlClass(stats?.systemUnrealized ?? stats?.unrealized ?? 0)}`}>
                 {fmt(stats?.systemUnrealized ?? stats?.unrealized, 4)}
-              </span>
+              </dd>
               {foreignCount > 0 ? (
                 <>
-                  <span className="text-muted">Foreign exposure</span>
-                  <span className="font-mono text-right tabular-nums text-warn">{fmt(stats?.foreignExposure, 3)} · {foreignCount} items</span>
-                  <span className="text-muted">Foreign PnL</span>
-                  <span className={`font-mono text-right tabular-nums ${pnlClass((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0))}`}>
+                  <dt className="text-muted">Foreign exposure</dt>
+                  <dd className="font-mono text-warn">{fmt(stats?.foreignExposure, 3)}</dd>
+                  <dt className="text-muted">Foreign Positions/Orders</dt>
+                  <dd className="font-mono text-warn">{formatPosOrders(stats?.foreignPositionCount, stats?.foreignOpenOrderCount)}</dd>
+                  <dt className="text-muted">Foreign PnL</dt>
+                  <dd className={`font-mono ${pnlClass((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0))}`}>
                     {fmt((stats?.foreignRealized ?? 0) + (stats?.foreignUnrealized ?? 0), 4)}
-                  </span>
+                  </dd>
                 </>
               ) : null}
-              <span className="text-muted">Uptime</span>
-              <span className="font-mono text-right">{stats ? ago(stats.uptimeS) : "—"}</span>
-            </div>
+              <dt className="text-muted">Uptime</dt>
+              <dd className="font-mono text-fg">{stats ? ago(stats.uptimeS) : "—"}</dd>
+            </dl>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <Meter label="Margin used" value={d.marginPct} danger={d.marginPct > 85} />
@@ -196,10 +199,10 @@ function DeskPage() {
       </section>
 
       <section className="rounded-radius border border-border bg-surface p-4">
-        <div className="mb-4 flex items-center justify-between">
+        <div className="mb-4 flex min-w-0 flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-medium tracking-wide text-muted uppercase">Open book</h2>
-          <span className="font-mono text-xs text-muted">
-            {stats?.openCount ?? 0}/{stats?.maxOpen ? stats.maxOpen : "∞"} · {stats?.regime}
+          <span className="min-w-0 font-mono text-xs text-muted">
+            <PosOrdersLine stats={stats} extra={<> · {stats?.maxOpen ? `cap ${stats.maxOpen}` : "∞"} · {stats?.regime}</>} />
           </span>
         </div>
         {(stats?.open ?? []).length === 0 ? (
@@ -226,33 +229,33 @@ function DeskPage() {
                     {fmt(p.uPnlPct, 3)}%
                   </div>
                 </div>
-                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
+                <dl className="stat-rows mt-3 font-mono text-xs text-muted">
                   <dt>Qty</dt>
-                  <dd className="text-right text-fg">{fmt(p.qty, 4)}</dd>
+                  <dd className="text-fg">{fmt(p.qty, 4)}</dd>
                   <dt>Entry</dt>
-                  <dd className="text-right text-fg">{fmtPx(p.entry)}</dd>
+                  <dd className="text-fg">{fmtPx(p.entry)}</dd>
                   <dt>Mark</dt>
-                  <dd className="text-right text-fg">{fmtPx(p.px)}</dd>
+                  <dd className="text-fg">{fmtPx(p.px)}</dd>
                   <dt>Age</dt>
-                  <dd className="text-right text-fg">{ago(p.ageS)}</dd>
+                  <dd className="text-fg">{ago(p.ageS)}</dd>
                   <dt>Controls</dt>
-                  <dd className={`text-right ${p.controls ? "text-primary" : "text-danger"}`}>
+                  <dd className={p.controls ? "text-primary" : "text-danger"}>
                     {p.controls ? "SL+TP" : "none"}
                   </dd>
                   <dt>Security</dt>
-                  <dd className={`text-right ${p.secSlOid && p.secTpOid ? "text-primary" : "text-danger"}`}>
+                  <dd className={p.secSlOid && p.secTpOid ? "text-primary" : "text-danger"}>
                     {p.secSlOid && p.secTpOid ? "SEC" : "gap"}
                   </dd>
                   <dt>Control mode</dt>
-                  <dd className="text-right text-fg">{p.controlMode || "aggregate"}</dd>
+                  <dd className="text-fg">{p.controlMode || "aggregate"}</dd>
                   <dt>Range</dt>
-                  <dd className="text-right text-fg">{p.controlRangeKey || "aggregate"}</dd>
+                  <dd className="min-w-0 truncate text-fg" title={p.controlRangeKey || "aggregate"}>{p.controlRangeKey || "aggregate"}</dd>
                   <dt>Members</dt>
-                  <dd className="text-right text-fg">{p.memberCount ?? 1}</dd>
+                  <dd className="text-fg">{p.memberCount ?? 1}</dd>
                   <dt>SL:TP</dt>
-                  <dd className="text-right text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
+                  <dd className="text-fg">{p.slRatio != null ? p.slRatio.toFixed(1) : "—"}</dd>
                   <dt>Trail</dt>
-                  <dd className="text-right text-fg">{p.trailKey || "—"}</dd>
+                  <dd className="text-fg">{p.trailKey || "—"}</dd>
                 </dl>
                 <SlTpTape p={p} />
               </article>
@@ -307,12 +310,12 @@ function DeskPage() {
                   return (
                     <div
                       key={s}
-                      className={`rounded-lg border px-2 py-2 ${
+                      className={`min-w-0 rounded-lg border px-2 py-2 ${
                         open ? "border-primary bg-primary-dim/20" : "border-border bg-bg2"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="font-mono text-xs">{s.replace("-USDT", "")}</span>
+                      <div className="flex min-w-0 items-center justify-between gap-1">
+                        <span className="min-w-0 truncate font-mono text-xs">{s.replace("-USDT", "")}</span>
                         {open ? <SideChip side={open.side} compact /> : null}
                       </div>
                       <div className="mt-1 font-mono text-[11px] text-muted tabular-nums">{fmtPx(px)}</div>
@@ -451,8 +454,12 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
 function LaneBoard({ stats }: { stats: LiveStats }) {
   const { setConn } = useConnection();
   return (
-    <section className="grid gap-3 sm:grid-cols-2" data-testid="lane-board">
+    <section className="grid min-w-0 gap-3 sm:grid-cols-2" data-testid="lane-board">
       {(stats.lanes ?? []).map((l) => {
+        const liveMismatch =
+          typeof l.exchangeOpenCount === "number" &&
+          l.exchangeOpenCount >= 0 &&
+          l.exchangeOpenCount !== (l.livePositionCount ?? l.exchangeOpenCount);
         return (
           <article
             key={l.id}
@@ -463,14 +470,14 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") setConn(l.type as ConnType);
             }}
-            className="cursor-pointer rounded-radius border border-border bg-surface p-4 text-left"
+            className="min-w-0 cursor-pointer rounded-radius border border-border bg-surface p-4 text-left"
           >
-            <div className="flex items-start justify-between gap-2">
-              <div>
+            <div className="flex min-w-0 items-start justify-between gap-2">
+              <div className="min-w-0">
                 <p className="font-mono text-xs tracking-wide text-muted uppercase">{l.label}</p>
-                <p className="mt-1 text-lg font-medium">{l.exchange}</p>
+                <p className="mt-1 truncate text-lg font-medium">{l.exchange}</p>
               </div>
-              <span className={`rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-danger/15 text-danger"}`}>
+              <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-danger/15 text-danger"}`}>
                 {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : "off"}
               </span>
             </div>
@@ -480,33 +487,21 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               {l.unit === "VST" ? " VST" : ""}
             </p>
             <p className="mt-1 text-xs text-muted">System equity · wallet {l.walletEquity != null ? fmt(l.walletEquity, 2) : "—"}</p>
-            <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs text-muted">
-              <dt>Real pos</dt>
-              <dd className="text-right text-fg" title="Internal config/set position lanes; groups are unique symbol+direction">
-                {l.realPositionCount ?? l.openCount}{l.maxOpen ? `/${l.maxOpen}` : ""} <span className="text-muted">({l.realPositionGroupCount ?? "—"} groups)</span>
-              </dd>
-              <dt>Live pos</dt>
-              <dd
-                className={`text-right ${
-                  typeof l.exchangeOpenCount === "number" &&
-                  l.exchangeOpenCount >= 0 &&
-                  l.exchangeOpenCount !== (l.livePositionCount ?? l.exchangeOpenCount)
-                    ? "text-danger"
-                    : "text-fg"
-                }`}
-                title="Exchange-owned aggregate position groups; compare with Real groups, not config lanes"
-              >
-                {typeof (l.livePositionCount ?? l.exchangeOpenCount) === "number" && (l.livePositionCount ?? l.exchangeOpenCount)! >= 0
-                  ? (l.livePositionCount ?? l.exchangeOpenCount)
-                  : "—"}
-              </dd>
-              <dt>Orders R/L</dt>
-              <dd className="text-right text-fg" title="Real = internal logical lanes; Live = exchange-owned open orders">
-                {l.realOrderCount ?? l.openCount} / {typeof l.liveOrderCount === "number" && l.liveOrderCount >= 0 ? l.liveOrderCount : "—"}
+            <div className="mt-3">
+              <PosOrdersBlock
+                stats={l}
+                realExtra={l.maxOpen ? `cap ${l.maxOpen}` : undefined}
+                liveClassName={liveMismatch ? "text-danger" : "text-fg"}
+              />
+            </div>
+            <dl className="stat-rows mt-3 font-mono text-xs text-muted">
+              <dt>Lanes</dt>
+              <dd className="text-fg" title="Independent intern / Block / DCA / config slots inside the symbol+direction parents">
+                {l.openCount ?? "—"}
               </dd>
               <dt>Sim</dt>
               <dd
-                className={`text-right ${(l.simOpenCount ?? 0) > 0 ? "text-warn" : "text-fg"}`}
+                className={(l.simOpenCount ?? 0) > 0 ? "text-warn" : "text-fg"}
                 title="Simulated — Real positions not on the exchange; system-internal calcs (count · unrealized PnL)"
               >
                 {typeof l.simOpenCount === "number" && l.simOpenCount >= 0
@@ -514,30 +509,30 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
                   : "—"}
               </dd>
               <dt>W / L</dt>
-              <dd className="text-right text-fg">
+              <dd className="text-fg">
                 {l.wins} / {l.losses}
               </dd>
               <dt>Grow / Loss</dt>
-              <dd className={`text-right ${pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}`}>
+              <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
                 {fmt(l.systemGrow, 3)} / {fmt(l.systemLoss, 3)}
               </dd>
               <dt>System PnL</dt>
-              <dd className={`text-right ${pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}`}>
+              <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
                 {fmt(l.systemPnl ?? l.sessionPnl, 3)}
               </dd>
               <dt>PF</dt>
-              <dd className="text-right text-fg">{l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
+              <dd className="text-fg">{l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
               <dt>Scan</dt>
-              <dd className="text-right text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
+              <dd className="text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>
-              <dd className={`text-right ${(l.controlPairsMissing ?? l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"}`} title={l.controlPairsExpected != null ? `Overall-Paare; Member: ${l.controlMemberOk ?? l.controlsOk ?? 0}/${l.openCount}` : undefined}>
+              <dd className={(l.controlPairsMissing ?? l.controlsMissing ?? 0) > 0 ? "text-danger" : "text-fg"} title={l.controlPairsExpected != null ? `Overall-Paare; Member: ${l.controlMemberOk ?? l.controlsOk ?? 0}/${l.openCount}` : undefined}>
                 {l.controlPairsExpected != null ? `${l.controlPairsOk ?? 0}/${l.controlPairsExpected}` : `${l.controlsOk ?? 0}/${l.openCount}`}
               </dd>
               <dt>Symbols</dt>
-              <dd className="text-right text-fg">{l.symbolCount ?? "—"}{l.symbolCap ? `/${l.symbolCap}` : ""}</dd>
+              <dd className="text-fg">{l.symbolCount ?? "—"}{l.symbolCap ? `/${l.symbolCap}` : ""}</dd>
             </dl>
             <LaneProgress l={l} />
-            {l.haltReason ? <p className={`mt-2 text-xs ${haltClass(l.haltReason, l.halted)}`}>{l.haltReason}</p> : null}
+            {l.haltReason ? <p className={`mt-2 text-xs [overflow-wrap:anywhere] ${haltClass(l.haltReason, l.halted)}`}>{l.haltReason}</p> : null}
           </article>
         );
       })}
@@ -670,7 +665,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   );
   const phase = String((htOn ? ht?.phase : p?.phase) ?? ht?.phase ?? p?.phase ?? "idle");
   const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
-  const gate = (htOn ? ht?.ready : p?.ready) ? (phase === "ready" ? "" : " · gate ready") : " · gate closed";
+  const gateReady = Boolean(htOn ? ht?.ready : p?.ready);
   const active = s?.activeCount ?? 0;
   const lanes = s?.lanes ?? [];
   const proc = htOn
@@ -680,17 +675,18 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
   const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className={(htOn ? ht?.ready : p?.ready) ? "text-primary" : "text-warn"}>
-          sets · {phaseLabel} · valid {validN}/{htOn ? (ht?.processedSetCount ?? s?.setCount ?? 0) : (s?.setCount ?? 0)} · active {active}/{s?.setCount ?? 0}
-          {proc ? ` · proc ${proc}` : ""}
-          {updating ? " · updating" : ""}{gate}
-          {stats?.detailType ? ` · from ${stats.detailType}` : ""}
-          {` · ${histTestIsEnabled(stats?.histTest) ? "test historic ON" : "test historic OFF"}`}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className={gateReady ? "text-primary" : "text-warn"}>
+          sets · {phaseLabel}
         </span>
-        <span className="text-muted">
-          last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}
-        </span>
+        <span className="whitespace-nowrap">valid {validN}/{htOn ? (ht?.processedSetCount ?? s?.setCount ?? 0) : (s?.setCount ?? 0)}</span>
+        <span className="whitespace-nowrap">active {active}/{s?.setCount ?? 0}</span>
+        {proc ? <span className="whitespace-nowrap">proc {proc}</span> : null}
+        {updating ? <span>updating</span> : null}
+        <span>{gateReady ? (phase === "ready" ? "ready" : "gate ready") : "gate closed"}</span>
+        {stats?.detailType ? <span className="whitespace-nowrap">from {stats.detailType}</span> : null}
+        <span className="whitespace-nowrap">{histTestIsEnabled(stats?.histTest) ? "test historic ON" : "test historic OFF"}</span>
+        <span className="ml-auto text-muted">last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}</span>
       </div>
       {histTestIsEnabled(ht) && ((ht?.runningSets && ht.runningSets.length) || (ht?.symbols && ht.symbols.length) || ht?.detail) ? (
         <p className="mt-1 text-muted" data-testid="hist-test-sets-line">
@@ -706,12 +702,12 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             return (
               <div key={ln.id || ln.type}>
-                <div className="flex justify-between text-muted">
-                  <span className={ln.running && !ln.halted ? "text-primary" : "text-faint"}>
+                <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-muted">
+                  <span className={`min-w-0 ${ln.running && !ln.halted ? "text-primary" : "text-faint"}`}>
                     {ln.type} valid {ln.validatedCount ?? 0}/{ln.setCount ?? 0} · active {ln.activeCount ?? 0}/{ln.setCount ?? 0}
                     {(ln as { processingCount?: number }).processingCount ? ` · proc ${(ln as { processingCount?: number }).processingCount}` : ""}
                   </span>
-                  <span>{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
+                  <span className="shrink-0">{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>
                 <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
                   <div className="h-full rounded-full bg-primary" style={{ width: `${lp}%` }} />
@@ -736,8 +732,8 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
       <div className="mt-3">
         <SetGroups sets={s} axesEnabled={enabledAxes(stats).length > 0} limit={8}>{(rows) => (
         <div className="mt-2 grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
-          {rows.map((r) => (
-            <div key={r.id} className="min-w-0 rounded-md border border-border px-2 pb-2">
+          {rows.map((r, i) => (
+            <div key={setRowKey(r, i)} className="min-w-0 rounded-md border border-border px-2 pb-2">
               <SetIdentity row={r} />
               <div className={`flex min-w-0 flex-wrap gap-x-3 gap-y-1 [overflow-wrap:anywhere] ${r.active ? "text-primary" : "text-muted"}`}>
                 <span>PF {r.n ? setMetric(r.last15Ratio) : "—"}</span>

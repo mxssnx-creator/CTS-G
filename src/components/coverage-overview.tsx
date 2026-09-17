@@ -1,7 +1,9 @@
 import type { LiveStats } from "@/lib/live-stats";
+import { posOrdersCounts } from "@/lib/live-stats";
 import { formatDuration } from "@/lib/analytics";
 import { HistTestStatus } from "@/components/hist-test-controls";
 import { histTestIsEnabled } from "@/lib/hist-test";
+import { PosOrdersLine } from "@/components/pos-orders";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
 const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break"] as const;
@@ -50,12 +52,12 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
   const laneFlags = (live.pulse?.strategyLanes ?? {}) as Record<string, boolean>;
   const miss = ctrl?.missing ?? 0;
   return (
-    <div className="rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="coverage-strip">
+    <div className="min-w-0 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="coverage-strip">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={full ? "text-primary" : "text-warn"}>
           coverage · px {px}/{n || "—"} · 1m {scan?.kl1m ?? "—"} · 5m {scan?.kl5m ?? "—"} · 15m {scan?.kl15m ?? "—"} · ind {scan?.indications ?? "—"}
         </span>
-        <span className="text-muted">
+        <span className="min-w-0 text-muted [overflow-wrap:anywhere]">
           valid {sets.validatedCount ?? 0}/{sets.setCount ?? 0} · active {sets.activeCount ?? 0}/{sets.setCount ?? 0}
           {sets.families ? ` · base ${sets.families.base ?? 0}/trail ${sets.families.trail ?? 0}` : ""}
           {sets.liveProcessed != null ? ` · live ${sets.liveActive ?? 0}/${sets.liveProcessed} PF ${Number(sets.livePf ?? 0).toFixed(2)}` : ""}
@@ -84,29 +86,32 @@ export function CoverageBar({ live }: { live: LiveStats | null }) {
           );
         })}
       </div>
-      <div className="mt-1 flex flex-wrap gap-2 text-muted">
-        <span className={miss ? "text-danger" : "text-primary"}>
-          controls {controlMode} · {ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} logical SL+TP · {ctrl?.exchangePositionGroups ?? recon?.exchangePositionGroups ?? "—"} exchange groups · {pairCount} pairs · {ctrl?.security ?? 0} sec
-          {mergedMembers != null ? ` · ${mergedMembers} members` : ""}
-          {Object.keys(laneFlags).length ? ` · lanes ${Object.entries(laneFlags).filter(([, enabled]) => enabled).map(([name]) => name).join(",") || "none"}` : ""}
-        </span>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
+        <PosOrdersLine stats={live} className={miss ? "text-danger" : "text-primary"} />
+        <span className="whitespace-nowrap">controls {controlMode}</span>
+        <span className="whitespace-nowrap">{ctrl?.ok ?? 0}/{ctrl?.open ?? live.openCount ?? 0} logical SL+TP</span>
+        <span className="whitespace-nowrap">{ctrl?.exchangePositionGroups ?? recon?.exchangePositionGroups ?? "—"} exchange groups</span>
+        <span className="whitespace-nowrap">{pairCount} pairs</span>
+        <span className="whitespace-nowrap">{ctrl?.security ?? 0} sec</span>
+        {mergedMembers != null ? <span className="whitespace-nowrap">{mergedMembers} members</span> : null}
+        {Object.keys(laneFlags).length ? <span className="min-w-0 [overflow-wrap:anywhere]">lanes {Object.entries(laneFlags).filter(([, enabled]) => enabled).map(([name]) => name).join(",") || "none"}</span> : null}
         <span className={recon?.ok === false ? "text-danger" : recon?.pending ? "text-warn" : "text-primary"}>
           recon {recon?.ok === false ? recon.detail || "gap" : recon?.pending ? recon.detail || "pending" : "ok"}
         </span>
-        <span>
+        <span className="whitespace-nowrap">
           block {cov?.block?.enabled ? "on" : "off"} · {cov?.block?.countN ?? 0} counts · {cov?.block?.liveLanes ?? 0} lanes
           {cov?.block?.overall !== false ? " · overall Real" : ""}
         </span>
         {sets.trailCover === false ? <span className="text-warn">trail cover gap</span> : null}
         {stages.intern || stages.main || stages.real ? (
-          <span>
+          <span className="whitespace-nowrap">
             intern {Number(stages.intern?.pf ?? 0).toFixed(2)}/{stages.intern?.n ?? 0}
             {stages.intern?.open ? " open" : ""} · main {Number(stages.main?.pf ?? 0).toFixed(2)} · real{" "}
             {Number(stages.real?.pf ?? 0).toFixed(2)}
           </span>
         ) : null}
         {track ? (
-          <span>
+          <span className="whitespace-nowrap">
             track {track.withCid ?? 0}/{track.ours ?? 0} cid · {track.withSet ?? 0} set · foreign {track.foreign ?? 0}
           </span>
         ) : null}
@@ -168,6 +173,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
   const groupCount = ctrl?.groupCount ?? ctrl?.open ?? open.length;
   const pairCount = ctrl?.pairCount ?? (live?.pulse?.controlOrders === false ? 0 : groupCount);
   const mergedMembers = ctrl?.mergedMembers;
+  const po = posOrdersCounts(live);
   const groupGaps = (ctrl?.groups ?? []).filter((group) => !group.protected).slice(0, 10);
   const gaps = open.filter((p) => !p.controls || !(p.secSlOid && p.secTpOid)).slice(0, 10);
   return (
@@ -178,6 +184,7 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
         <KV k="Klines 1/5/15" v={`${scan?.kl1m ?? "—"} / ${scan?.kl5m ?? "—"} / ${scan?.kl15m ?? "—"}`} ok={Boolean(scan && scan.kl1m && scan.kl5m && scan.kl15m)} />
         <KV k="Indications" v={`${scan?.indications ?? 0}${scan?.missingInd?.length ? ` · gap ${scan.missingInd.length}` : ""}`} ok={!scan?.missingInd?.length} />
         <KV k="Recon" v={String(recon?.detail || (recon?.pending ? "pending" : recon?.ok ? "ok" : "—"))} ok={recon?.ok !== false && !recon?.pending} problem={recon?.ok === false} />
+        <KV k="Positions/Orders" v={`Pos R ${po.realPositions ?? "—"} L ${po.livePositions ?? "—"} · Ord R ${po.realOrders ?? "—"} L ${po.liveOrders ?? "—"}`} />
         <KV k="Controls" v={`${ctrl?.ok ?? 0}/${ctrl?.open ?? open.length} SL+TP · ${pairCount} pairs · ${ctrl?.security ?? 0} security`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
         <KV k="Control groups" v={`${controlMode} · ${groupCount} groups${mergedMembers != null ? ` · ${mergedMembers} members` : ""}`} ok={!(ctrl?.missing)} problem={Boolean(ctrl?.missing)} />
         <KV k="Sets" v={`valid ${sets.validatedCount ?? 0}/${sets.setCount ?? 0} · active ${sets.activeCount ?? 0}/${sets.setCount ?? 0} · hist ${sets.histFills ?? 0}`} ok={(sets.validatedCount ?? 0) > 0} />
@@ -320,9 +327,9 @@ export function CoveragePanel({ live }: { live: LiveStats | null }) {
 
 function KV({ k, v, ok, problem }: { k: string; v: string; ok?: boolean; problem?: boolean }) {
   return (
-    <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+    <div className="min-w-0 rounded-lg border border-border bg-bg2 px-3 py-2">
       <div className="font-mono text-xs text-muted">{k}</div>
-      <div className={`mt-0.5 break-all text-sm ${problem ? "text-danger" : ok === false ? "text-warn" : ok ? "text-primary" : ""}`}>{v || "—"}</div>
+      <div className={`mt-0.5 break-words text-sm leading-snug ${problem ? "text-danger" : ok === false ? "text-warn" : ok ? "text-primary" : ""}`}>{v || "—"}</div>
     </div>
   );
 }

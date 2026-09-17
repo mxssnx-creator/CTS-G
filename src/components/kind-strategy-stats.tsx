@@ -180,7 +180,7 @@ function Card({ title, hint, testId, children }: { title: string; hint?: string;
     <section className="min-w-0 rounded-radius border border-border bg-surface p-4" data-testid={testId}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <h2 className="text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
-        {hint ? <p className="font-mono text-[11px] text-muted">{hint}</p> : null}
+        {hint ? <p className="min-w-0 font-mono text-[11px] text-muted [overflow-wrap:anywhere]">{hint}</p> : null}
       </div>
       {children}
     </section>
@@ -191,7 +191,7 @@ export function IndicationKindsPanel({ stats }: { stats: LiveStats | null }) {
   const kinds = resolveKindStats(stats);
   return (
     <Card title="Indication types · PF / DDT" hint="Every type is scored independently · 1.00=neutral after cost" testId="indication-types">
-      <div className="overflow-x-auto">
+      <div className="max-w-full overflow-x-auto">
         <table className="w-full min-w-[720px] text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>
@@ -248,7 +248,7 @@ export function StrategyStatsPanel({ stats }: { stats: LiveStats | null }) {
   const rows = resolveStrategyStats(stats);
   return (
     <Card title="Strategies · PF / DDT" hint="Indications · general · block · trail · DCA · exits" testId="strategy-stats">
-      <div className="overflow-x-auto">
+      <div className="max-w-full overflow-x-auto">
         <table className="w-full min-w-[640px] text-left text-sm">
           <thead className="font-mono text-[11px] text-muted">
             <tr>

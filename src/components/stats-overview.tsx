@@ -4,6 +4,7 @@ import { formatDuration, type buildOverview } from "@/lib/analytics";
 import type { LiveStats } from "@/lib/live-stats";
 import { pfClass, pnlClass } from "@/lib/status-tone";
 import { HistTestStatus } from "@/components/hist-test-controls";
+import { PosOrdersLine } from "@/components/pos-orders";
 
 type Overview = ReturnType<typeof buildOverview>;
 
@@ -46,7 +47,7 @@ export function StatsOverview({
   const shownCount = cost.count || liveCount;
   const shownRatio = shownCount ? cost.ratio : liveRatio;
   const heroes = (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
           k="Last 15 cost PF"
           v={shownCount || shownRatio ? shownRatio.toFixed(2) : "—"}
@@ -72,15 +73,24 @@ export function StatsOverview({
         />
       </div>
   );
-  if (compact) return heroes;
+  if (compact) {
+    return (
+      <div className="grid gap-3">
+        {heroes}
+        {live ? <PosOrdersLine stats={live} className="font-mono text-xs text-muted" /> : null}
+      </div>
+    );
+  }
   return (
     <section className="grid gap-3">
       {heroes}
+      {live ? <PosOrdersLine stats={live} className="font-mono text-xs text-muted" /> : null}
       {live ? <HistTestStatus histTest={live.histTest} /> : null}
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card title="Profit factor · cost PF scale plus classic PF">
-          <table className="w-full text-sm">
+          <div className="max-w-full overflow-x-auto">
+          <table className="w-full min-w-[32rem] text-sm">
             <thead className="font-mono text-[11px] text-muted">
               <tr>
                 <th className="pb-2 text-left font-medium">Window</th>
@@ -101,6 +111,7 @@ export function StatsOverview({
               <PfRow label="48 hours" m={data.timeWindows["48h"]} />
             </tbody>
           </table>
+          </div>
         </Card>
         <Card title="Drawdown time">
           <Dl
@@ -154,17 +165,17 @@ function Hero({
 }) {
   const cls = tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : "text-fg";
   return (
-    <div className="rounded-radius border border-border bg-surface p-4">
+    <div className="min-w-0 rounded-radius border border-border bg-surface p-4">
       <p className="font-mono text-xs tracking-wide text-muted uppercase">{k}</p>
       <p className={`mt-1 font-mono text-2xl tabular-nums ${cls}`}>{v}</p>
-      <p className="mt-1 text-xs text-muted">{s}</p>
+      <p className="mt-1 min-w-0 truncate text-xs leading-snug text-muted" title={s}>{s}</p>
     </div>
   );
 }
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="rounded-radius border border-border bg-surface p-4">
+    <div className="min-w-0 rounded-radius border border-border bg-surface p-4">
       <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">{title}</h2>
       {children}
     </div>
@@ -173,11 +184,11 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 
 function Dl({ rows }: { rows: [string, string][] }) {
   return (
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+    <dl className="stat-rows text-sm">
       {rows.map(([k, v]) => (
         <div key={k} className="contents">
           <dt className="text-muted">{k}</dt>
-          <dd className="text-right font-mono tabular-nums">{v}</dd>
+          <dd className="font-mono text-fg">{v}</dd>
         </div>
       ))}
     </dl>

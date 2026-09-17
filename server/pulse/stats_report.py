@@ -594,8 +594,8 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "losses": st.get("losses"),
         "winRate": st.get("winRate"),
         "openCount": st.get("openCount"),
-        "realPositionCount": st.get("realPositionCount", st.get("openCount")),
-        "realPositionGroupCount": st.get("realPositionGroupCount"),
+        "realPositionCount": st.get("realPositionGroupCount", st.get("realPositionCount")),
+        "realPositionGroupCount": st.get("realPositionGroupCount", st.get("realPositionCount")),
         "realOrderCount": st.get("realOrderCount"),
         "livePositionCount": st.get("livePositionCount", st.get("exchangeOpenCount")),
         "liveOrderCount": st.get("liveOrderCount"),
@@ -832,7 +832,7 @@ def render_html(blob: Dict[str, Any]) -> str:
     running = bool(blob.get("running", False))
     status = "RUNNING" if running else "STOPPED"
     status_class = "positive" if running else "muted"
-    real_pos = count(blob.get("realPositionCount", blob.get("openCount")))
+    real_pos = count(blob.get("realPositionCount", blob.get("realPositionGroupCount")))
     real_ord = count(blob.get("realOrderCount"))
     live_pos = count(blob.get("livePositionCount", blob.get("exchangeOpenCount")))
     live_ord = count(blob.get("liveOrderCount"))
@@ -1085,7 +1085,7 @@ footer {{ padding-top: 20px; color: var(--muted); font-size: 12px; }}
   <div class="label">CTS-G · canonical live stats export</div>
   <h1>Pulse results · {connection}</h1>
   <p class="muted">One self-contained HTML report generated from the same canonical stats blob as the JSON and Markdown exports. Generated {generated}.</p>
-  <div class="status-line"><span>status <b class="{status_class}">{status}</b></span><span>mode <b>{mode}</b></span><span>unit <b>{unit}</b></span><span>closed <b>{number(blob.get("closedN"), 0)}</b></span><span>positions/orders <b>{pos_orders}</b></span><span>live P/O <b>{live_pos_orders}</b></span></div>
+  <div class="status-line"><span>status <b class="{status_class}">{status}</b></span><span>mode <b>{mode}</b></span><span>unit <b>{unit}</b></span><span>closed <b>{number(blob.get("closedN"), 0)}</b></span><span>Positions/Orders <b>R {pos_orders}</b></span><span>Live <b>L {live_pos_orders}</b></span></div>
 </header>
 <section class="card-grid">{overview_cards}</section>
 <section class="panel"><div class="panel-head"><h2>Profit factor windows</h2><span class="muted">PositionCost deducted · neutral 1.00 · +1× cost 1.10</span></div>{table(["Window", "N", "Wins", "Losses", "Cost PF", "Classic PF", "Net", "Avg hold s"], window_rows)}</section>
@@ -1122,7 +1122,7 @@ def render_md(blob: Dict[str, Any]) -> str:
         "",
         "## Overview",
         f"- Equity **{blob.get('equity')}** {blob.get('unit')} · session {blob.get('sessionPnl')} · {blob.get('wins')}W/{blob.get('losses')}L ({blob.get('winRate')}%)",
-        f"- Symbols **{blob.get('symbolCount')}** · positions/orders {blob.get('realPositionCount', blob.get('openCount'))}/{blob.get('realOrderCount') if blob.get('realOrderCount') not in (None, -1) else '—'} · live P/O {blob.get('livePositionCount', blob.get('exchangeOpenCount')) if blob.get('livePositionCount', blob.get('exchangeOpenCount')) not in (None, -1) else '—'}/{blob.get('liveOrderCount') if blob.get('liveOrderCount') not in (None, -1) else '—'} · RSS {blob.get('rssMb')}MB · scan {blob.get('scanMs')}ms · cycle {blob.get('cycle')}",
+        f"- Symbols **{blob.get('symbolCount')}** · Positions/Orders {blob.get('realPositionCount', blob.get('realPositionGroupCount'))}/{blob.get('realOrderCount') if blob.get('realOrderCount') not in (None, -1) else '—'} · Live {blob.get('livePositionCount', blob.get('exchangeOpenCount')) if blob.get('livePositionCount', blob.get('exchangeOpenCount')) not in (None, -1) else '—'}/{blob.get('liveOrderCount') if blob.get('liveOrderCount') not in (None, -1) else '—'} · RSS {blob.get('rssMb')}MB · scan {blob.get('scanMs')}ms · cycle {blob.get('cycle')}",
         f"- Occupancy unique={occ.get('uniqueSlots')} dup={occ.get('duplicateSlots')} max1={occ.get('maxOnePerSymbolDirSet')}",
         "",
         "## Open book",

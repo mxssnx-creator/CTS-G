@@ -1297,6 +1297,8 @@ class Pulse:
         self.owned_syms = BoundedSet(800)
         self.load = LoadGovernor()
         self._scan_keep: List[str] = []
+        self._offline_symbols: set = set()
+        self._contracts_refresh_at = 0.0
         self.ignore_syms: Dict[str, float] = {}
         self.last_px: Dict[str, float] = {}
         self.recon_ok = True
@@ -2105,7 +2107,12 @@ class Pulse:
         self.use_max_leverage = True
         if not hasattr(self, "_lev_retry"):
             self._lev_retry = {}
+        offline = getattr(self, "_offline_symbols", set()) or set()
+        if symbol in offline:
+            return int(self.lev_map.get(symbol) or 0)
         c = self.contracts.get(symbol)
+        if c is None and not force:
+            return int(self.lev_map.get(symbol) or 0)
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
         applied = int(self.lev_map.get(symbol) or 0)
         now = time.time()
@@ -2119,6 +2126,9 @@ class Pulse:
             return applied or mx
         if mx <= 0 or force or applied < mx:
             got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
+            self._drain_offline_hits()
+            if symbol in (getattr(self, "_offline_symbols", set()) or set()):
+                return applied or mx
             if got_mx > 0:
                 mx = got_mx
                 self.lev_max[symbol] = mx
@@ -2137,7 +2147,10 @@ class Pulse:
             r = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
             if not self.ok(r):
                 ok_both = False
-                if r.get("code") in (100410, 101209, 100421):
+                self._drain_offline_hits()
+                if symbol in (getattr(self, "_offline_symbols", set()) or set()):
+                    return applied or want
+                if r.get("code") in (100410, 101209, 100421, 109418):
                     # adopt()/set_leverage() can observe the same transient
                     # response repeatedly; back off this pair independently.
                     self._lev_retry[symbol] = time.time() + 180.0
@@ -2187,6 +2200,13 @@ class Pulse:
     def fetch_symbol_leverage(self, symbol: str) -> Tuple[int, int, int]:
         r = self.api.get("/openApi/swap/v2/trade/leverage", {"symbol": symbol})
         if not self.ok(r):
+            try:
+                from bingx_fast import offline_symbol_from_body
+                hit = offline_symbol_from_body(r, {"symbol": symbol})
+            except Exception:
+                hit = ""
+            if hit:
+                self.mark_symbol_offline(hit or symbol)
             return 0, 0, 0
         return self.parse_lev_payload(r.get("data"))
 
@@ -2348,6 +2368,59 @@ class Pulse:
         self.owned_syms.discard(sym)
         if clear_open:
             self.remove_symbol_positions(sym)
+
+    def mark_symbol_offline(self, symbol: str, hold_s: float = 12 * 3600.0) -> None:
+        """Stop scanning/leverage on a venue-offline pair. Never flatten opens."""
+        token = str(symbol or "").strip()
+        if not token:
+            return
+        offline = getattr(self, "_offline_symbols", None)
+        if not isinstance(offline, set):
+            offline = set()
+            self._offline_symbols = offline
+        if token in offline:
+            self.ignore_syms[token] = time.time() + max(60.0, float(hold_s or 0) or 12 * 3600.0)
+            return
+        offline.add(token)
+        offline.add(token.upper())
+        self.ignore_syms[token] = time.time() + max(60.0, float(hold_s or 0) or 12 * 3600.0)
+        retries = getattr(self, "_lev_retry", None)
+        if isinstance(retries, dict):
+            retries[token] = time.time() + max(60.0, float(hold_s or 0) or 12 * 3600.0)
+        open_syms = {
+            str(getattr(row, "symbol", "") or "")
+            for row in (self.open.values() if isinstance(getattr(self, "open", None), dict) else [])
+        }
+        if token not in open_syms:
+            try:
+                SYMBOLS[:] = [s for s in SYMBOLS if str(s) != token]
+            except Exception:
+                pass
+        log(f"OFFLINE {token} dropped from intern/leverage", every=30.0, key=f"offline:{token}")
+
+    def _drain_offline_hits(self) -> None:
+        api = getattr(self, "api", None)
+        hits = list(getattr(api, "offline_hits", []) or []) if api is not None else []
+        if hits and api is not None:
+            try:
+                api.offline_hits = []
+            except Exception:
+                pass
+        for token in hits:
+            self.mark_symbol_offline(str(token))
+
+    def _tradable_contract_names(self) -> List[str]:
+        offline = {str(s).upper() for s in (getattr(self, "_offline_symbols", set()) or set())}
+        out: List[str] = []
+        for name in (getattr(self, "contracts", None) or {}):
+            token = str(name or "").strip()
+            if token and token.upper() not in offline:
+                out.append(token)
+        return out
+
+    def _intern_tradable(self) -> Optional[List[str]]:
+        names = self._tradable_contract_names()
+        return names or None
 
     def clear_position_controls(self, pos: Position) -> None:
         """Forget only this group's local control IDs after a confirmed cancel/close."""
@@ -3234,7 +3307,7 @@ class Pulse:
         owned_closed = [c for c in (getattr(self, "closed", ()) or ()) if self.row_is_ours(asdict(c))]
         return ledger.summary(
             internal_open=len(owned_positions),
-            internal_position_groups=len({(p.symbol, p.side) for p in owned_positions if float(p.qty or 0) > 0}),
+            internal_position_groups=self.internal_position_group_count(),
             exchange_open=exchange_open,
             internal_closed=len(owned_closed),
             pending_count=len(getattr(self, "pending_orders", {}) or {}),
@@ -3246,7 +3319,7 @@ class Pulse:
 
     def ingest_ws_px(self) -> int:
         n = 0
-        want = set(SYMBOLS)
+        want = set(self._live_scan_names())
         for s, px in list(getattr(self.api, "px", {}).items()):
             if px and s in want:
                 self.px[s] = px
@@ -3255,20 +3328,21 @@ class Pulse:
         return n
 
     def refresh_tickers(self) -> None:
-        want = set(SYMBOLS)
+        scan = self._live_scan_names()
+        want = set(scan)
         copied = self.ingest_ws_px()
         hub = getattr(self.api, "hub", None)
         ws_age = (time.time() - getattr(hub, "last_msg", 0)) if hub and getattr(hub, "last_msg", 0) else 99
         ws_ok = bool(getattr(hub, "ok", False) and ws_age < 4.0)
-        covered = sum(1 for s in SYMBOLS if (self.px.get(s) or 0) > 0)
-        if ws_ok and covered >= max(8, len(SYMBOLS) - 2):
+        covered = sum(1 for s in scan if (self.px.get(s) or 0) > 0)
+        if ws_ok and covered >= max(8, len(scan) - 2):
             return
         self.did_io = True
         r = self.api.public("/openApi/swap/v2/quote/ticker")
         rows = r.get("data") or []
         if not isinstance(rows, list):
             return
-        want = set(SYMBOLS)
+        want = set(scan)
         write_uni = (time.time() - self.last_uni) >= UNIVERSE_EVERY
         uni: List[Dict[str, Any]] = []
         for tck in rows:
@@ -3428,16 +3502,12 @@ class Pulse:
         if not force and now - float(getattr(self, "last_dyn_sel", 0) or 0) < 18.0:
             return
         rows = list(self.universe or [])
-        if not rows:
-            return
-        ranked = sorted(rows, key=lambda r: symbol_rank_key(r, self.symbol_sort))
+        ranked = sorted(rows, key=lambda r: symbol_rank_key(r, self.symbol_sort)) if rows else []
         names = [
             str(r.get("symbol"))
             for r in ranked
             if r.get("symbol") and str(r.get("symbol")).endswith("-USDT") and not str(r.get("symbol")).startswith(("NCCO", "NCS", "NCFX"))
         ]
-        if not names:
-            return
         open_syms = []
         seen_open = set()
         for p in list(self.open.values()):
@@ -3448,7 +3518,35 @@ class Pulse:
         cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
         wild = bool(getattr(self, "overlay_wild", False))
         dyn = bool(getattr(self, "symbols_dynamic", True))
-        if dyn:
+        hist_owns = False
+        try:
+            hist_owns = bool(self._hist_test_owns_catalog())
+        except Exception:
+            hist_owns = False
+        intern_book: Optional[List[str]] = None
+        if hist_owns or wild:
+            try:
+                intern_book = hist_test_mod.intern_liquid_pool(
+                    names or list(SYMBOLS),
+                    rows,
+                    opens=open_syms,
+                    cap=cap or 50,
+                    tradable=self._intern_tradable(),
+                )
+            except Exception:
+                intern_book = [str(s) for s in (getattr(hist_test_mod, "HIST_TEST_MAJORS", ()) or ())][: cap or 50]
+            if intern_book:
+                rank = {s: i for i, s in enumerate(names)}
+                preferred = {str(s).upper() for s in (getattr(hist_test_mod, "PREFERRED_SYMBOLS", ()) or ())}
+                intern_book = sorted(
+                    intern_book,
+                    key=lambda s: (0 if s.upper() in preferred else 1, rank.get(s, 10**9)),
+                )
+        if intern_book:
+            pool = intern_book
+        elif not names:
+            return
+        elif dyn:
             pool = names
         else:
             have = set(SYMBOLS)
@@ -3456,7 +3554,11 @@ class Pulse:
             pool.extend(s for s in SYMBOLS if s not in set(pool))
         must = []
         seen_must = set()
-        for s in open_syms + [str(x) for x in FORCED_SYMBOLS if x in self.contracts or x in pool]:
+        pin = list(open_syms)
+        pin.extend(str(x) for x in FORCED_SYMBOLS if x in self.contracts or x in pool or (intern_book and x in intern_book))
+        if intern_book:
+            pin.extend(intern_book)
+        for s in pin:
             if s and s not in seen_must:
                 must.append(s)
                 seen_must.add(s)
@@ -3480,6 +3582,7 @@ class Pulse:
         membership = set(chosen) != set(old)
         SYMBOLS[:] = chosen
         self.last_dyn_sel = now
+        self._intern_scan_cache = None
         if membership:
             try:
                 self.ensure_contracts()
@@ -3531,7 +3634,7 @@ class Pulse:
     def seed_px_bars(self) -> None:
         """Keep 1m OHLC from live WS/mark so all symbols can start without REST klines."""
         minute = int(time.time() // 60)
-        scan = set(SYMBOLS)
+        scan = set(self._live_scan_names())
         for s, px in list(self.px.items()):
             if px <= 0 or s not in scan:
                 continue
@@ -3606,8 +3709,9 @@ class Pulse:
             self._kline_deferred = f"load budget {getattr(budget, 'level', 'unknown')}"
             return
         self._kline_deferred = ""
-        ready1 = sum(1 for s in SYMBOLS if len(self.klines_tf.get("1m", {}).get(s) or []) >= 20)
-        need1 = len(SYMBOLS) if len(SYMBOLS) <= 48 else max(32, len(SYMBOLS) // 2)
+        scan = self._live_scan_names()
+        ready1 = sum(1 for s in scan if len(self.klines_tf.get("1m", {}).get(s) or []) >= 20)
+        need1 = len(scan) if len(scan) <= 48 else max(32, len(scan) // 2)
         filling = ready1 < max(1, need1)
         reqs = []
         if filling:
@@ -3622,7 +3726,7 @@ class Pulse:
             every = TF_EVERY.get(tf, 2.0)
             if not self.tf_on.get(tf, True):
                 continue
-            due = [s for s in SYMBOLS if now - self.kline_ts_tf[tf].get(s, 0) >= every]
+            due = [s for s in scan if now - self.kline_ts_tf[tf].get(s, 0) >= every]
             if not due:
                 continue
             due.sort(key=lambda s: self.kline_ts_tf[tf].get(s, 0))
@@ -3875,6 +3979,67 @@ class Pulse:
     def our_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         rows = self.list_orders(symbol)
         return [o for o in rows if self.cid_ours(self.order_cid(o))]
+
+    def internal_working_order_count(self) -> int:
+        """Complete working orders we own — same book Live reports.
+
+        Prefer the confirmed exchange open-order snapshot (every owned working
+        order). Unique attached SL/TP oids are only a fallback while that
+        snapshot is pending; they under-count leftover/unlinked orders.
+        Pending rows without an exchange id still occupy an order slot.
+        """
+        oids: set = set()
+        pending_without_oid = 0
+        for pos in (getattr(self, "open", {}) or {}).values():
+            if not self.position_is_ours(pos):
+                continue
+            for attr in ("sl_oid", "tp_oid", "sec_sl_oid", "sec_tp_oid"):
+                oid = real_oid(getattr(pos, attr, ""))
+                if oid:
+                    oids.add(oid)
+        for cid, row in (getattr(self, "pending_orders", {}) or {}).items():
+            if not isinstance(row, dict):
+                pending_without_oid += 1
+                continue
+            oid = real_oid(row.get("order_id") or row.get("orderId"))
+            if oid:
+                oids.add(oid)
+            else:
+                pending_without_oid += 1
+        book = len(oids) + pending_without_oid
+        pending_snap = bool(getattr(self, "exchange_order_snapshot_pending", True))
+        try:
+            live_n = int(getattr(self, "exchange_order_own_count", -1))
+        except (TypeError, ValueError):
+            live_n = -1
+        if not pending_snap and live_n >= 0:
+            return live_n + pending_without_oid
+        return book
+
+    def internal_position_group_count(self) -> int:
+        """Unique Real positions: one owned symbol+direction parent with qty > 0.
+
+        Intern, Block, DCA and config/set lanes on the same parent collapse to
+        one exchange position. Live Positions match this count when in parity.
+        """
+        groups = set()
+        for pos in (getattr(self, "open", {}) or {}).values():
+            if not self.position_is_ours(pos):
+                continue
+            if bool(getattr(pos, "_overall_proxy", False)):
+                continue
+            try:
+                qty = float(getattr(pos, "qty", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0:
+                continue
+            symbol = str(getattr(pos, "symbol", "") or "").strip()
+            side = str(getattr(pos, "side", "") or "").strip().upper()
+            if not symbol or side not in ("LONG", "SHORT"):
+                continue
+            groups.add((symbol, side))
+        return len(groups)
 
     def _oid_in_book(self, order_id: str) -> bool:
         oid = str(order_id or "")
@@ -7789,7 +7954,21 @@ class Pulse:
             if wild:
                 extra = load_contracts(None)
                 names = [s for s in extra.keys() if str(s).endswith("-USDT") and not str(s).startswith(("NCCO", "NCS", "NCFX"))]
-                names.sort()
+                intern_book: List[str] = []
+                try:
+                    intern_book = hist_test_mod.intern_liquid_pool(
+                        names,
+                        getattr(self, "universe", None) or [],
+                        opens=[getattr(p, "symbol", "") for p in list(self.open.values()) if getattr(p, "symbol", "")],
+                        cap=self.symbol_cap or 50,
+                        tradable=self._intern_tradable(),
+                    )
+                except Exception:
+                    intern_book = list(getattr(hist_test_mod, "HIST_TEST_MAJORS", ()) or [])[: self.symbol_cap or 50]
+                if intern_book:
+                    names = intern_book
+                else:
+                    names.sort()
                 if names:
                     SYMBOLS[:] = names[: self.symbol_cap] if self.symbol_cap > 0 else names
                     self.contracts.update(extra)
@@ -8035,11 +8214,27 @@ class Pulse:
                 self.lev_map[s] = mx
 
     def ensure_contracts(self) -> None:
+        now = time.time()
+        last = float(getattr(self, "_contracts_refresh_at", 0.0) or 0.0)
         missing = [s for s in SYMBOLS if s not in self.contracts]
-        if missing:
-            extra = load_contracts(set(SYMBOLS))
-            self.contracts.update(extra)
-            log(f"contracts +{len(extra)} now={len(self.contracts)}")
+        refresh = last <= 0.0 or (now - last) >= 300.0
+        if missing or refresh:
+            extra = load_contracts(None if refresh else set(SYMBOLS) | set(missing))
+            if refresh and extra:
+                open_syms = {
+                    str(getattr(row, "symbol", "") or "")
+                    for row in (self.open.values() if isinstance(getattr(self, "open", None), dict) else [])
+                }
+                for name in list(self.contracts):
+                    if name not in extra and name not in open_syms:
+                        self.contracts.pop(name, None)
+                        self.mark_symbol_offline(name)
+                self.contracts.update(extra)
+                self._contracts_refresh_at = now
+            elif extra:
+                self.contracts.update(extra)
+            if missing:
+                log(f"contracts +{len(extra or {})} now={len(self.contracts)}")
         self.seed_lev_from_contracts()
 
     def maybe_reload_config(self) -> None:
@@ -9302,16 +9497,23 @@ class Pulse:
     def process_indications(self) -> None:
         if not bool(self.indications.settings.get("enabled", True)):
             return
+        self._drain_offline_hits()
         b = self._budget()
         open_syms = [p.symbol for p in list(self.open.values()) if p.symbol]
-        ranked = [r.get("symbol") for r in (self.universe or []) if r.get("symbol")]
-        window, nxt = self.load.scan_window(list(SYMBOLS), open_syms, b.scan_chunk, int(getattr(self.load, "cursor_ind", 0) or 0), ranked)
+        scan_names = list(self._live_scan_names())
+        allowed = {str(s).upper() for s in scan_names}
+        ranked = [
+            r.get("symbol")
+            for r in (self.universe or [])
+            if r.get("symbol") and str(r.get("symbol")).upper() in allowed
+        ]
+        window, nxt = self.load.scan_window(scan_names, open_syms, b.scan_chunk, int(getattr(self.load, "cursor_ind", 0) or 0), ranked)
         self.load.cursor_ind = nxt
         self._scan_keep = list(window)
         extra_n = int(b.extra_n or 0) if b.extra_sources else 0
         extra_syms = []
         if extra_n and self.indications.settings.get("extraSources"):
-            rot = list(window) or list(SYMBOLS)
+            rot = list(window) or list(self._live_scan_names())
             n = len(rot) or 1
             start = self.indications.extra_cursor % n
             extra_syms = rot[start:start + extra_n] or rot[:extra_n]
@@ -9326,7 +9528,10 @@ class Pulse:
             fp_map = {}
             self._ind_fp = fp_map
         effective_tfs = effective_indication_timeframes(self.tf_on, b)
+        offline = getattr(self, "_offline_symbols", set()) or set()
         for s in window:
+            if s in offline or (self.contracts and s not in self.contracts):
+                continue
             bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
             if len(bars) < 20:
                 continue
@@ -10955,14 +11160,19 @@ class Pulse:
         global LEVERAGE
         self.use_max_leverage = True
         self._load_lev_file()
+        self._drain_offline_hits()
         if not hasattr(self, "_lev_retry"):
             self._lev_retry = {}
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > time.time():
             return
         now = time.time()
+        offline = getattr(self, "_offline_symbols", set()) or set()
+        contracts = getattr(self, "contracts", None) or {}
         need = [
             s for s in SYMBOLS
-            if self._lev_retry.get(s, 0.0) <= now
+            if s not in offline
+            and s in contracts
+            and self._lev_retry.get(s, 0.0) <= now
             and (int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max)
         ]
         if not need:
@@ -10972,9 +11182,10 @@ class Pulse:
             if now - getattr(self, "_lev_rot_ts", 0) > 90 and SYMBOLS:
                 self._lev_rot_ts = now
                 rot = SYMBOLS[int(now / 90) % len(SYMBOLS)]
-                # Cached applied/max agreement needs no forced POST. Forced
-                # rotations caused recurring 100410 noise on busy accounts.
-                self.ensure_max_leverage(rot, force=False)
+                if rot in contracts and rot not in offline:
+                    # Cached applied/max agreement needs no forced POST. Forced
+                    # rotations caused recurring 100410 noise on busy accounts.
+                    self.ensure_max_leverage(rot, force=False)
             return
         for s in need[:12]:
             self.ensure_max_leverage(s, force=s not in self.lev_max)
@@ -11345,20 +11556,18 @@ class Pulse:
         exchange_own_open = -1 if position_snapshot_pending else _known_count(exchange_own_raw)
         exchange_total_open = -1 if position_snapshot_pending else _known_count(exchange_total_raw)
         internal_open = int(len(self.open))
-        internal_position_groups = len({
-            (p.symbol, p.side)
-            for p in self.open.values()
-            if self.position_is_ours(p) and float(p.qty or 0) > 0
-        })
+        internal_position_groups = int(self.internal_position_group_count())
         # Keep internal/config lanes separate from exchange aggregates.  The
         # exchange reports one position group per symbol+side, while the
         # engine can track many independent config/set lanes in that group.
+        # Real Positions are those symbol+direction groups, never lane count.
         order_snapshot_pending = bool(getattr(self, "exchange_order_snapshot_pending", False))
         live_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_own_count", -1))
         live_total_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_total_count", -1))
         foreign_order_count = _known_count(getattr(self, "foreign_open_order_count", -1))
         if live_order_count < 0 and live_total_order_count >= 0 and foreign_order_count >= 0:
             live_order_count = max(0, live_total_order_count - foreign_order_count)
+        internal_orders = int(self.internal_working_order_count())
         if position_snapshot_pending or bool(getattr(self, "recon_pending", False)):
             open_parity = "pending"
         elif exchange_own_open == internal_position_groups:
@@ -11378,9 +11587,10 @@ class Pulse:
             "systemRealized": round(realized, 4),
             "systemUnrealized": round(float(act.get("unrealized") or 0), 4),
             "internalOpen": internal_open,
-            "realPositionCount": internal_open,
+            "internalOrderCount": internal_orders,
+            "realPositionCount": internal_position_groups,
             "realPositionGroupCount": internal_position_groups,
-            "realOrderCount": internal_open,
+            "realOrderCount": internal_orders,
             "livePositionCount": exchange_own_open,
             "liveOrderCount": live_order_count,
             "liveTotalOrderCount": live_total_order_count,
@@ -11508,9 +11718,9 @@ class Pulse:
             "winRate": round(wr, 1),
             "openCount": len(self.open),
             "logicalPositionCount": len(self.open),
-            "realPositionCount": internal_open,
+            "realPositionCount": internal_position_groups,
             "realPositionGroupCount": internal_position_groups,
-            "realOrderCount": internal_open,
+            "realOrderCount": internal_orders,
             "exchangeOpenCount": exchange_own_open,
             "exchangePositionGroupCount": exchange_own_open,
             "exchangeOwnOpenCount": exchange_own_open,
@@ -11520,13 +11730,6 @@ class Pulse:
             "liveTotalOrderCount": live_total_order_count,
             "livePositionSnapshotPending": position_snapshot_pending,
             "liveOrderSnapshotPending": order_snapshot_pending,
-            "exchangeOpenCount": int(getattr(self, "exchange_open_count", -1)),
-            "exchangePositionGroupCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
-            "exchangeOwnOpenCount": int(getattr(self, "exchange_own_open_count", getattr(self, "exchange_open_count", -1))),
-            "exchangeTotalOpenCount": int(getattr(self, "exchange_total_open_count", getattr(self, "exchange_open_count", -1))),
-            "livePositionCount": exchange_own_open,
-            "liveOrderCount": live_order_count,
-            "liveTotalOrderCount": live_total_order_count,
             "simOpenCount": sim_n,
             "simUPnl": round(sim_upnl, 4),
             "maxOpen": MAX_OPEN,
@@ -12606,7 +12809,13 @@ class Pulse:
             out.append(token)
         if wild or not out:
             out = list(scan)
-        if cap > 0 and len(out) > cap:
+        hist_owns = False
+        try:
+            hist_owns = bool(self._hist_test_owns_catalog())
+        except Exception:
+            hist_owns = False
+        intern_replace = bool(hist_owns or wild)
+        if cap > 0 and (len(out) > cap or intern_replace):
             must: List[str] = []
             seen_must: set[str] = set()
             raw_open = getattr(self, "open", None)
@@ -12626,7 +12835,23 @@ class Pulse:
                 if token and token not in seen_must and (token in out or token in scan):
                     must.append(token)
                     seen_must.add(token)
-            rest = [s for s in out if s not in seen_must]
+            intern_pin: List[str] = []
+            try:
+                if intern_replace:
+                    intern_pin = hist_test_mod.intern_liquid_pool(
+                        out or scan,
+                        getattr(self, "universe", None) or [],
+                        opens=must,
+                        cap=cap or 50,
+                        tradable=self._intern_tradable(),
+                    )
+            except Exception:
+                intern_pin = []
+            for token in intern_pin:
+                if token and token not in seen_must:
+                    must.append(token)
+                    seen_must.add(token)
+            rest = [] if intern_replace else [s for s in out if s not in seen_must]
             out = (must + rest)[: max(cap, len(must))]
         return out
 
@@ -13267,7 +13492,7 @@ class Pulse:
                             continue
                         incoming[sid] = list(tape)
                         affected.add(sid)
-                source._commit_hist(
+                updated_ids = source._commit_hist(
                     incoming,
                     replay_book.ind_hist,
                     merge=True,
@@ -13299,7 +13524,7 @@ class Pulse:
                 source._snap_cache = None
                 source._live_ov_cache = None
                 self._stats_force = True
-                affected_ids = sorted(affected)
+                affected_ids = sorted(set(affected) | {str(sid) for sid in (updated_ids or [])})
                 published = True
             if published:
                 try:
@@ -13607,6 +13832,22 @@ class Pulse:
                 return True
         return False
 
+    def _live_scan_names(self) -> List[str]:
+        """SYMBOLS plus intern majors so klines/indications never drop BTC/ETH/etc."""
+        names = [str(s) for s in SYMBOLS if s]
+        try:
+            intern = self._intern_symbols()
+        except Exception:
+            intern = []
+        if intern:
+            have = {s.upper() for s in names}
+            for s in intern:
+                token = str(s or "").strip()
+                if token and token.upper() not in have:
+                    names.append(token)
+                    have.add(token.upper())
+        return names
+
     def _intern_symbols(self) -> List[str]:
         """When Test Historic owns the catalog, intern overlay + open symbols."""
         now = time.monotonic()
@@ -13639,18 +13880,47 @@ class Pulse:
             pool = hist_test_mod.intern_liquid_pool(
                 list(SYMBOLS),
                 getattr(self, "universe", None) or [],
+                opens=opens,
                 cap=cap,
+                tradable=self._intern_tradable(),
             )
         except Exception:
-            pool = list(hist_test_mod.PREFERRED_SYMBOLS) + list(opens)
+            pool = list(getattr(hist_test_mod, "HIST_TEST_MAJORS", hist_test_mod.PREFERRED_SYMBOLS))[:cap]
+            pool = list(dict.fromkeys(list(hist_test_mod.PREFERRED_SYMBOLS) + list(opens) + pool))[:cap]
         if not pool:
-            pool = list(hist_test_mod.PREFERRED_SYMBOLS) or list(SYMBOLS)[:cap]
+            pool = list(getattr(hist_test_mod, "HIST_TEST_MAJORS", hist_test_mod.PREFERRED_SYMBOLS))[:cap]
+        must: List[str] = []
+        seen_pin: set[str] = set()
+
+        def pin(raw: Any) -> None:
+            token = str(raw or "").strip()
+            key = token.upper()
+            if not token or key in seen_pin or token in ("*", "ALL", "UNLIMITED"):
+                return
+            seen_pin.add(key)
+            must.append(token)
+
+        for s in opens:
+            pin(s)
+        tradable_keys = {str(s).upper() for s in (self._intern_tradable() or [])}
+        offline = {str(s).upper() for s in (getattr(self, "_offline_symbols", set()) or set())}
+        for s in SYMBOLS:
+            key = str(s or "").strip().upper()
+            if key in offline:
+                continue
+            if tradable_keys and key not in tradable_keys:
+                continue
+            pin(s)
+        rest = [s for s in pool if str(s).upper() not in seen_pin]
+        combined = must + rest
+        if cap > 0:
+            combined = combined[: max(cap, len(must))]
         try:
-            out = hist_test_mod.select_intern_symbols(pool, job, cap=cap)
+            out = hist_test_mod.select_intern_symbols(combined, job, opens=opens, cap=max(cap, len(must)) if cap > 0 else 0)
         except Exception:
-            out = list(pool)[:cap] if cap > 0 else list(pool)
+            out = list(combined)
         if not out:
-            out = list(pool)[:cap] if cap > 0 else list(pool)
+            out = list(combined)
         self._intern_scan_cache = out
         self._intern_scan_at = now
         return list(out)
@@ -14685,7 +14955,10 @@ def load_contracts(want: Optional[set] = None) -> Dict[str, Contract]:
         if not take_all and s not in want_set:
             continue
         st = str(c.get("status") or c.get("apiState") or c.get("symbolStatus") or "").lower()
-        if st in ("offline", "close", "closed", "delisted"):
+        open_state = str(c.get("apiStateOpen") or "").lower()
+        if st in ("0", "offline", "close", "closed", "delisted", "false"):
+            continue
+        if open_state in ("false", "0", "offline"):
             continue
         qprec = int(c.get("quantityPrecision") or 0)
         step = 10 ** -qprec if qprec >= 0 else 1.0

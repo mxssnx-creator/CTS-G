@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from combo_eval import evaluate_book as combo_evaluate
 from combo_eval import INDICATIONS, STRATEGIES
@@ -421,9 +421,53 @@ def normalize_catalog_set_id(sid: Any) -> str:
     return raw
 
 
+def is_catalog_set_id(sid: Any) -> bool:
+    """True for real catalog Set ids (general|indications : 1m : sl… : st…)."""
+    raw = normalize_catalog_set_id(sid)
+    if not raw:
+        return False
+    parts = [p for p in raw.split(":") if p]
+    if not parts:
+        return False
+    pack = parts[0].lower()
+    if pack in CATALOG_PACKS:
+        return True
+    return len(parts) >= 3 and str(parts[1]).lower() == "1m" and str(parts[2]).lower().startswith("sl")
+
+
+def is_coordination_set_id(sid: Any) -> bool:
+    """Catalog Set, or a Block/DCA overlay wrapping a catalog Set."""
+    raw = str(sid or "").strip()
+    if not raw:
+        return False
+    if is_catalog_set_id(raw):
+        return True
+    parts = [p for p in raw.split(":") if p]
+    if parts and parts[0].lower() in VALID_STRATEGIES:
+        return is_catalog_set_id(":".join(parts[1:]))
+    # Test dummies without a colon (e.g. "a") are allowed as identity carriers.
+    return ":" not in raw
+
+
 def identity_from_set_id(sid: str) -> Dict[str, str]:
     """Parse pack / indication / strategy from a catalog Set id."""
-    clean = normalize_catalog_set_id(sid) or str(sid or "").strip()
+    empty = {"pack": "", "indication": "", "strategy": ""}
+    raw = str(sid or "").strip()
+    if not raw:
+        return empty
+    clean = normalize_catalog_set_id(raw)
+    if not clean:
+        parts = [p for p in raw.split(":") if p]
+        if parts and parts[-1].lower() in ("long", "short"):
+            parts = parts[:-1]
+        if parts and parts[0].lower() in VALID_STRATEGIES:
+            remainder = ":".join(parts[1:])
+            if is_catalog_set_id(remainder):
+                inner = identity_from_set_id(remainder)
+                if inner.get("indication"):
+                    inner["strategy"] = parts[0].lower()
+                    return inner
+        return empty
     parts = [p for p in clean.split(":") if p]
     if parts and parts[-1].lower() in ("long", "short"):
         parts = parts[:-1]
@@ -447,10 +491,10 @@ def identity_from_set_id(sid: str) -> Dict[str, str]:
 
 
 def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[Dict[str, Any]]:
-    """Indication × strategy cells Test Historic scored (PF + DDT).
+    """Validated catalog indication × strategy pairs (PF + DDT).
 
-    Only validated, named indication × strategy pairs. Config strings and
-    unvalidated matrix cells are not coordinations.
+    Independent kind tapes and unvalidated matrix cells are not coordinations.
+    Overlay Block/DCA ids must wrap a real catalog Set.
     """
     blob = job if isinstance(job, dict) else {}
     out: List[Dict[str, Any]] = []
@@ -462,6 +506,12 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
         if require_validated and row.get("validated") is False:
             return
         sid = str(row.get("setId") or row.get("set_id") or row.get("id") or "").strip()
+        if sid.endswith(":long") or sid.endswith(":short") or sid.endswith(":LONG") or sid.endswith(":SHORT"):
+            sid = sid.rsplit(":", 1)[0]
+        if sid and not is_coordination_set_id(sid):
+            return
+        if not sid:
+            return
         indication = str(row.get("indication") or row.get("ind_kind") or "").strip().lower()
         strategy = str(row.get("strategy") or "").strip().lower()
         if strategy not in VALID_STRATEGIES:
@@ -485,9 +535,9 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
             n = 0
         if require_validated and row.get("validated") is not True and not is_positive_pf(pf):
             return
-        if n <= 0 and not sid:
+        if n <= 0 and require_validated:
             return
-        key = f"{indication}:{strategy}:{sid}" if sid else f"{indication}:{strategy}"
+        key = f"{indication}:{strategy}:{sid}"
         if key in seen:
             return
         seen.add(key)
@@ -507,9 +557,12 @@ def selected_coordinations(job: Optional[Dict[str, Any]] = None, limit: int = 24
 
     for row in blob.get("successfulConfigs") or []:
         add(row, require_validated=True)
+    for row in blob.get("selectedCoordinations") or []:
+        add(row, require_validated=False)
     cells = [
         c for c in (blob.get("comboMatrix") or [])
         if isinstance(c, dict) and int(c.get("n") or 0) > 0 and c.get("validated") is True
+        and str(c.get("setId") or c.get("set_id") or c.get("id") or "").strip()
     ]
     cells.sort(key=lambda c: (-float(c.get("pf") or 0), -int(c.get("n") or 0)))
     for cell in cells:
@@ -550,7 +603,12 @@ def successful_from_ranked(ranked_sets: Any, min_pf: float, limit: int = 60) -> 
             strategy = "dca"
         else:
             strategy = "normal"
-        indication = "combined" if pack == "indications" else (pack if pack == "general" else (kind or pack or "combined"))
+        if pack == "indications":
+            indication = "combined"
+        elif pack == "general":
+            indication = "general"
+        else:
+            indication = "combined"
         try:
             pf = float(getattr(st, "last15_ratio", 0) or 0)
         except (TypeError, ValueError):
@@ -598,31 +656,59 @@ def intern_liquid_pool(
     opens: Optional[List[str]] = None,
     cap: int = SYMBOL_CAP,
     min_quote: float = MIN_QUOTE_VOLUME,
+    tradable: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Intern preferred + majors only. Scan dust stays out of new intern entries."""
-    major_keys = {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
+    """Intern preferred + 50 majors. Scan dust stays out of new intern entries.
+
+    `tradable` is the live exchange contract book. Offline/delisted majors
+    (EOS, MKR, ...) must not enter intern scan or leverage POSTs.
+    Open lots stay scannable even when the venue later marks them offline.
+    """
+    major_keys = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
     overlay = [
         str(s).strip().upper()
         for s in (overlay_symbols or [])
         if str(s or "").strip() and str(s).strip() not in ("*", "ALL", "UNLIMITED") and ":" not in str(s)
     ]
+    vol: Dict[str, float] = {}
+    for row in universe or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("symbol") or "").strip().upper()
+        if not name:
+            continue
+        try:
+            vol[name] = float(row.get("quoteVolume") or 0)
+        except (TypeError, ValueError):
+            continue
     out: List[str] = []
     used: set[str] = set()
+    open_keys = {str(s).strip().upper() for s in (opens or []) if str(s or "").strip()}
+    apply_tradable = tradable is not None
+    tradable_keys = {str(s).strip().upper() for s in (tradable or []) if str(s or "").strip()}
 
-    def add(raw: Any) -> None:
+    def add(raw: Any, *, keep_open: bool = False) -> None:
         name = str(raw or "").strip().upper()
         if not name.endswith("-USDT") or name in used or ":" in name:
+            return
+        if name not in major_keys:
+            return
+        if apply_tradable and name not in tradable_keys and not (keep_open and name in open_keys):
             return
         used.add(name)
         out.append(name)
 
     for s in PREFERRED_SYMBOLS:
         add(s)
-    for s in INTERN_MAJORS:
+    ranked_majors = list(HIST_TEST_MAJORS)
+    if vol:
+        ranked_majors = sorted(ranked_majors, key=lambda s: -float(vol.get(s.upper(), 0)))
+    for s in ranked_majors:
         add(s)
     for s in overlay:
-        if s in major_keys:
-            add(s)
+        add(s)
+    for s in opens or []:
+        add(s, keep_open=True)
     limit = int(cap or 0) or SYMBOL_CAP
     if limit > 0:
         out = out[:limit]
@@ -638,21 +724,14 @@ def select_intern_symbols(
 ) -> List[str]:
     """Intern universe while Test Historic owns the catalog.
 
-    Ready jobs (or positives that fail the PF floor) intern the overlay ranked
-    list so validated configs trade the live universe, not leftover microcaps.
-    In-flight jobs intern overlay ∩ positives when that overlap exists.
-    Open lots always stay scannable.
+    Validated configs trade the liquid major book, not leftover microcaps and
+    not a 3-symbol preferred-only fallback. Open lots always stay scannable.
     """
-    overlay = [str(s).strip() for s in (overlay_symbols or []) if str(s or "").strip() and str(s).strip() not in ("*", "ALL", "UNLIMITED") and ":" not in str(s)]
-    blob = job if isinstance(job, dict) else {}
-    positives = validated_symbols(blob)
-    phase = str(blob.get("phase") or "")
-    ready = bool(blob.get("ready") or phase == "ready")
-    running = phase in IN_FLIGHT_PHASES
-    floor_failed = intern_audit_floor_failed(blob)
-    pos_keys = {s.upper() for s in positives}
-    overlap = [s for s in overlay if s.upper() in pos_keys]
-
+    overlay = [
+        str(s).strip()
+        for s in (overlay_symbols or [])
+        if str(s or "").strip() and str(s).strip() not in ("*", "ALL", "UNLIMITED") and ":" not in str(s)
+    ]
     out: List[str] = []
     used: set[str] = set()
 
@@ -666,18 +745,23 @@ def select_intern_symbols(
         used.add(key)
         out.append(name)
 
-    use_overlay = bool(overlay) and (ready or floor_failed or (positives and not running) or not overlap)
-    if use_overlay:
-        for s in overlay:
-            add(s)
-    else:
-        for s in overlap or positives:
-            add(s)
+    for s in overlay:
+        add(s)
     for s in opens or []:
         add(s)
     limit = int(cap or 0) or SYMBOL_CAP
-    if limit > 0:
-        out = out[:limit]
+    if limit > 0 and len(out) > limit:
+        must: List[str] = []
+        must_keys: set[str] = set()
+        for s in opens or []:
+            name = str(s or "").strip()
+            key = name.upper()
+            if not name or key in must_keys or name in ("*", "ALL", "UNLIMITED"):
+                continue
+            must_keys.add(key)
+            must.append(name)
+        rest = [s for s in out if s.upper() not in must_keys]
+        out = (must + rest)[: max(limit, len(must))]
     return out
 
 
@@ -694,6 +778,8 @@ def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[
             return
         sid = str(row.get("id") or row.get("setId") or row.get("set_id") or "").strip()
         if not sid or sid in seen:
+            return
+        if ":" in sid and not is_coordination_set_id(sid):
             return
         seen.add(sid)
         try:
@@ -1160,26 +1246,34 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         sets_total = int(sets_cov.get("requested") or sets_cov.get("total") or blob.get("setsTotal") or max(n_ids, 1 if running or n_ids else 0))
     except (TypeError, ValueError):
         sets_total = max(n_ids, 1 if running or n_ids else 0)
+    err = str(blob.get("error") or "")
+    err_line = ""
+    if err and not err.startswith("audit:"):
+        err_line = next((ln.strip() for ln in reversed(err.splitlines()) if ln.strip()), err.strip())[:180]
     if running:
         detail = f"Test Historic {phase} {int(pct)}% · {raw_detail} · {n_ids} validated · {len(symbols)} symbols"
     elif paused:
         detail = f"Test Historic paused · {raw_detail}"
+    elif err_line:
+        if phase in ("ready", "idle", ""):
+            phase = "error"
+        pct = min(float(pct or 0), 99.0)
+        detail = f"Test Historic error · {n_ids} validated · {len(symbols)} symbols · {err_line}"
     elif n_ids:
         detail = f"Test Historic · {n_ids} validated configs · {len(symbols)} symbols · skip full catalog · refresh {refresh_h}h"
-    elif running:
-        detail = f"Test Historic owns calcs · {raw_detail} · skip full catalog"
     else:
         detail = "Test Historic owns calcs · waiting validated configs · skip full catalog"
     if stale:
         detail += " · waiting on Test Historic refresh"
-    err = str(blob.get("error") or "")
-    if err and not running and not err.startswith("audit:"):
-        detail = f"{detail} · {err}"
     running_set_rows = running_sets(blob)
+    intern = intern_liquid_pool(list(HIST_TEST_MAJORS), None, cap=SYMBOL_CAP)
+    ready_flag = bool(ids) or bool(blob.get("ready")) or (phase == "ready" and n_ids > 0)
+    if err_line and not running and not paused:
+        ready_flag = False
     return {
         "phase": phase,
         "pct": pct,
-        "ready": bool(ids) or bool(blob.get("ready")) or (phase == "ready" and n_ids > 0),
+        "ready": ready_flag,
         "running": running,
         "paused": paused,
         "validatedCount": n_ids,
@@ -1200,7 +1294,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "runningSets": running_set_rows,
         "processedSetCount": n_ids,
         "processingCount": n_ids,
-        "internSymbols": symbols[:SYMBOL_CAP],
+        "internSymbols": intern[:SYMBOL_CAP],
         "selectedCoordinations": selected_coordinations(blob),
         "withWithout": blob.get("withWithout") or {},
         "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],

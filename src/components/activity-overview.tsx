@@ -1,5 +1,6 @@
 import type { ActivityCounts, ActivityEvent, ActivitySummary, LiveStats } from "@/lib/live-stats";
 import { enabledAxes } from "@/lib/set-overview";
+import { PosOrdersLine } from "@/components/pos-orders";
 
 const EVENT_TYPES = [
   "entry_intent",
@@ -63,6 +64,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
         </div>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
           <span>events {activity.eventCount ?? 0}</span>
+          <PosOrdersLine stats={stats} />
           <span>fills {activity.fillCount ?? 0}</span>
           <span>requests {activity.requestCount ?? 0}</span>
           <span>errors {activity.errorCount ?? 0}</span>
@@ -108,6 +110,7 @@ export function ActivityPanel({ stats, compact = false }: { stats: LiveStats | n
       </div>
 
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 border-t border-border pt-3 font-mono text-xs text-muted">
+        <PosOrdersLine stats={stats} />
         <span>internal open {activity.internalOpen ?? 0}</span>
         {activity.internalPositionGroups == null ? null : <span>symbol + direction groups {activity.internalPositionGroups}</span>}
         <span>exchange open {activity.exchangeOpen == null || activity.exchangeOpen < 0 ? "—" : activity.exchangeOpen}</span>

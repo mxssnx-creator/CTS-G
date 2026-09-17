@@ -758,10 +758,24 @@ class LoadGovernor:
         out: List[str] = []
         seen = set()
         name_set = set(names)
+        open_unique: List[str] = []
+        open_seen = set()
         for s in open_syms:
-            if s and s in name_set and s not in seen:
-                out.append(s)
-                seen.add(s)
+            if s and s in name_set and s not in open_seen:
+                open_unique.append(s)
+                open_seen.add(s)
+        # Open lots stay scannable, but they cannot consume the whole chunk.
+        # Ranked intern majors (BTC/ETH/...) must keep rotating even when
+        # BCH/SOL/XRP already have many independent lots.
+        min_rotate = 1 if take <= 2 else max(take // 2, 2)
+        if open_unique:
+            min_rotate = min(min_rotate, take - 1)
+        else:
+            min_rotate = take
+        open_budget = min(len(open_unique), max(0, take - min_rotate))
+        for s in open_unique[:open_budget]:
+            out.append(s)
+            seen.add(s)
         remaining = max(0, take - len(out))
         ranked_n = min(4, remaining // 2) if remaining >= 2 else remaining
         head_src = list(ranked or names)
@@ -769,11 +783,13 @@ class LoadGovernor:
         for s in head_src:
             if added >= ranked_n:
                 break
-            if s and s not in seen:
+            if s and s in name_set and s not in seen and s not in open_seen:
                 out.append(s)
                 seen.add(s)
                 added += 1
-        rot = [s for s in names if s not in seen]
+        rot_rest = [s for s in names if s not in seen and s not in open_seen]
+        rot_opens = [s for s in names if s not in seen and s in open_seen]
+        rot = rot_rest + rot_opens
         if not rot:
             return out[:take], 0
         n = len(rot)
@@ -896,6 +912,19 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("load-window-open-first", keep[:1] == ["C"] and len(keep) == 3, f"keep={keep} cur={cur}"))
     keep2, cur2 = g.scan_window(["A", "B", "C", "D", "E", "F"], ["C"], chunk=3, cursor=cur)
     out.append(("load-window-rotate", keep2[0] == "C" and keep2 != keep and cur2 != cur, f"keep2={keep2} cur2={cur2}"))
+    junk, _ = g.scan_window(
+        ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"],
+        ["SOL-USDT", "XRP-USDT"],
+        chunk=3,
+        cursor=0,
+        ranked=["AIN-USDT", "FLYBRAIN-USDT", "BTC-USDT"],
+    )
+    out.append(("load-window-ranked-in-book", "AIN-USDT" not in junk and "FLYBRAIN-USDT" not in junk and "BTC-USDT" in junk, f"keep={junk}"))
+    majors = [f"S{i}" for i in range(20)]
+    hog = majors[:12]
+    mixed, _ = g.scan_window(majors, hog, chunk=12, cursor=0, ranked=["JUNK"] + majors)
+    rotated = [s for s in mixed if s not in hog]
+    out.append(("load-window-opens-do-not-starve", "JUNK" not in mixed and len(mixed) == 12 and len(rotated) >= 3, f"keep={mixed} rot={rotated}"))
     d = {"A": 1, "B": 2, "C": 3, "D": 4}
     n = trim_map(d, {"A", "C"})
     out.append(("load-trim-map", n == 2 and set(d) == {"A", "C"}, f"n={n} keys={sorted(d)}"))

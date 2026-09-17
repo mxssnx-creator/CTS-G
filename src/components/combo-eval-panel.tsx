@@ -116,9 +116,9 @@ export function ComboEvalPanel({
       ) : null}
 
       {hasMatrix ? (
-        <section className="overflow-auto rounded-lg border border-border bg-bg2 p-3" data-testid="combo-matrix">
+        <section className="min-w-0 overflow-auto rounded-lg border border-border bg-bg2 p-3" data-testid="combo-matrix">
           <h3 className="mb-2 text-sm font-medium">Indication × strategy · independent last-N PF</h3>
-          <p className="mb-2 text-xs text-muted">Every cell is its own book. Empty cells stay at PF 1.00 with n=0 rather than inheriting another lane. Validated cells are the selected coordinations.</p>
+          <p className="mb-2 text-xs text-muted">Every cell is its own book. Empty cells stay at PF 1.00 with n=0 rather than inheriting another lane. Highlighted cells cleared the PF floor. Selected coordinations are catalog Set × strategy pairs only — kind tapes never count as coordinations.</p>
           <table className="w-max min-w-full text-center font-mono text-[11px]">
             <thead>
               <tr>

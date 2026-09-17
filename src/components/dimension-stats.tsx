@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { CartesianGrid, ReferenceLine, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis } from "recharts";
 import type { LiveStats } from "@/lib/live-stats";
 import { formatDuration } from "@/lib/analytics";
-import { enabledAxes, INDICATION_GROUPS, setLabel, setMetric, STRATEGY_GROUPS, type SetOverviewRow } from "@/lib/set-overview";
+import { enabledAxes, INDICATION_GROUPS, setLabel, setMetric, setRowKey, STRATEGY_GROUPS, type SetOverviewRow } from "@/lib/set-overview";
 import { detailsCsv, dimensionMatrix, metricPoints, sortSetDetails, STRATEGY_COLORS, type DetailSort, type MetricPoint } from "@/lib/dimension-stats";
 import { SetGroups, type SetGroupContext } from "./set-groups";
 import { ClientChart } from "./visual-stats";
@@ -88,7 +88,7 @@ function PointTip({ active, payload }: { active?: boolean; payload?: Array<{ pay
   if (!active || !row) return null;
   return <div className="max-w-72 rounded-lg border border-border bg-surface p-3 text-xs shadow-lg">
     <p className="mb-2 break-words text-fg">{setLabel(row)}</p>
-    <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
+    <dl className="stat-rows font-mono">
       <dt>Cost PF</dt><dd className="text-right">{setMetric(row.pf)}</dd>
       <dt>Max DDT</dt><dd className="text-right">{duration(row.maxDdS)}</dd>
       <dt>Average DDT</dt><dd className="text-right">{duration(row.avgDdS)}</dd>
@@ -125,7 +125,7 @@ function Details({ rows }: { rows: SetOverviewRow[] }) {
       <table className="w-full min-w-[1000px] text-left text-xs">
         <caption className="sr-only">Independent per-set measurements for the selected source, indication, range and strategy</caption>
         <thead className="bg-bg2 text-muted"><tr>{["Set / configuration", "Samples", "Cost PF", "Last 25 R", "Max DDT", "Avg DDT", "Win rate", "Net E %", "Avg hold", "Calculation"].map((title) => <th key={title} scope="col" className="p-2 font-normal">{title}</th>)}</tr></thead>
-        <tbody>{ordered.slice(current * 25, (current + 1) * 25).map((row) => <tr key={row.id} className="border-t border-border font-mono tabular-nums">
+        <tbody>{ordered.slice(current * 25, (current + 1) * 25).map((row, i) => <tr key={setRowKey(row, i)} className="border-t border-border font-mono tabular-nums">
           <td className="w-64 max-w-64 p-2"><SetIdentity row={row} /></td>
           <td className="p-2">{row.n}</td><td className="p-2">{row.n ? setMetric(row.last15Ratio) : "—"}</td><td className="p-2">{row.n ? setMetric(row.last25AvgR) : "—"}</td>
           <td className="p-2">{row.n ? duration(row.maxDdS) : "—"}</td><td className="p-2">{row.n ? duration(row.avgDdS) : "—"}</td><td className="p-2">{row.n && row.wr != null ? `${setMetric(row.wr, 1)}%` : "—"}</td>

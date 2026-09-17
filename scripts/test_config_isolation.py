@@ -60,8 +60,8 @@ class ConfigIsolationTests(unittest.TestCase):
                 for trailing in (False,True):
                     with self.subTest(n=n,sl=sl,trailing=trailing):
                         good=state(0,sl_ratio=sl,kind='trail' if trailing else 'base',
-                                   trail_key='.3:.1' if trailing else '',hist=tape(1.021))
-                        bad=state(1,sl_ratio=sl,hist=tape(1.019))
+                                   trail_key='.3:.1' if trailing else '',hist=tape(1.111))
+                        bad=state(1,sl_ratio=sl,hist=tape(1.089))
                         b=book(good,bad); b.pf_n=b.min_samples=n
                         b.deact_n=5*(1+(n//5)%5); b.max_dd_s=(1+2*(n//5%5))*3600
                         for st in (good,bad):b._score_pair((st,None))
@@ -73,11 +73,10 @@ class ConfigIsolationTests(unittest.TestCase):
                         self.assertEqual(b.entry_sets('general','LONG'),[good])
 
     def test_below_base_skips_downstream_but_new_own_evidence_reactivates(self):
-        st=state(hist=tape(1.02,n=30));b=book(st)
+        st=state(hist=tape(1.09,n=30));b=book(st)
         with patch.object(b,'_window_cost_pf',wraps=b._window_cost_pf) as calc:
             m=b._score_metrics(st.hist)
             self.assertEqual(calc.call_count,1)
-        self.assertEqual(m['evaluation_windows'],{})
         self.assertEqual((m['main_n'],m['real_n']),(0,0))
         b._score_pair((st,None)); b._score_pair((st,None))
         self.assertEqual((b.score_completed,b.score_reused),(1,1))

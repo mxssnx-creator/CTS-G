@@ -39,6 +39,10 @@ export const INITIAL_SET_SELECTION: SetSelection = { scope: "system", indication
 export const INDICATION_GROUPS = ["general", "state", "signals", "active", "direction", "move", "common", "trend", "break", "combined"];
 export const STRATEGY_GROUPS = ["normal", "trailing", "axis", "block", "dca"];
 
+export function setRowKey(row: SetOverviewRow, index: number): string {
+  return [row.scope, row.connection, row.side, row.setId || row.id, row.axisKey, String(index)].filter((part) => part != null && part !== "").join(":");
+}
+
 export function matchesSetGroup(row: SetGroup | SetOverviewRow, selection: SetSelection) {
   return row.scope === selection.scope
     && (selection.indication === "all" || row.indicationKind === selection.indication)

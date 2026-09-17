@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import { useConnection } from "@/components/connection-provider";
 import { postControl, type ConnType } from "@/lib/connections";
 import { engineDotClass, engineStatusLabel } from "@/lib/status-tone";
+import { knownCount, livePosOrders, realPosOrders } from "@/lib/live-stats";
 
 export function DeskShell({
   children,
@@ -54,30 +55,33 @@ export function DeskShell({
         : onSweep
           ? "Historic test · 4–64h · fill until positive count · steps 3–12"
           : "Independent desks in parallel · pick Overall, Live or VST";
-  const types: { id: ConnType; label: string; hint: string }[] = [
-    { id: "overall", label: "Overall", hint: "all" },
-    { id: "live", label: "Live", hint: "USDT" },
-    { id: "vst", label: "VST demo", hint: "VST" },
+  const types: { id: ConnType; label: string; short: string }[] = [
+    { id: "overall", label: "Overall", short: "Overall" },
+    { id: "live", label: "Live", short: "Live" },
+    { id: "vst", label: "VST demo", short: "VST" },
   ];
 
   return (
     <main
-      className="desk-grid min-h-screen"
+      className="desk-grid min-h-screen overflow-x-clip"
       data-testid="desk-root"
       data-conn={conn}
       data-stats-type={statsType || ""}
       data-stats-id={statsId || ""}
       suppressHydrationWarning
     >
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 sm:py-7">
-        <div className="grid grid-cols-3 gap-1 rounded-radius border border-border bg-surface p-1" data-testid="conn-switch">
+      <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 sm:py-7">
+        <div className="grid min-w-0 grid-cols-3 gap-1 rounded-radius border border-border bg-surface p-1" data-testid="conn-switch">
           {types.map((t) => {
             const lane = catalog?.types.find((x) => x.type === t.id);
             const on = conn === t.id;
             const running = Boolean(lane?.running);
-            const openN = lane?.openCount ?? 0;
-            const liveN = lane?.livePositionCount ?? -1;
-            const xchN = lane?.exchangeOpenCount ?? -1;
+            const realPair = realPosOrders(lane);
+            const livePair = livePosOrders(lane);
+            const livePos = knownCount(lane?.livePositionCount) ?? knownCount(lane?.exchangeOpenCount);
+            const liveOrd = knownCount(lane?.liveOrderCount);
+            const xchN = knownCount(lane?.exchangeOpenCount) ?? -1;
+            const liveN = knownCount(lane?.livePositionCount) ?? -1;
             const simN = lane?.simOpenCount ?? -1;
             const xchMismatch = xchN >= 0 && liveN >= 0 && xchN !== liveN;
             const dot = engineDotClass({
@@ -92,58 +96,64 @@ export function DeskShell({
                 type="button"
                 data-testid={`conn-${t.id}`}
                 aria-pressed={on}
+                aria-label={`${t.label} · Positions/Orders R ${realPair}${livePos != null || liveOrd != null ? ` · L ${livePair}` : ""}`}
                 onClick={() => setConn(t.id)}
-                className={`min-h-12 rounded-lg px-2 py-2 text-center ${
+                className={`flex min-h-12 min-w-0 flex-col items-center justify-center overflow-hidden rounded-lg px-1 py-1.5 text-center sm:px-2 ${
                   on ? "bg-bg2 text-fg" : "text-muted"
                 }`}
               >
-                <div className="flex items-center justify-center gap-2">
-                  <span className={`size-2 rounded-full ${dot}`} />
-                  <span className="text-sm font-medium">{t.label}</span>
+                <div className="flex max-w-full items-center justify-center gap-1.5">
+                  <span className={`size-2 shrink-0 rounded-full ${dot}`} />
+                  <span className="truncate text-sm font-medium">
+                    <span className="sm:hidden">{t.short}</span>
+                    <span className="hidden sm:inline">{t.label}</span>
+                  </span>
                 </div>
                 <div
-                  className={`mt-0.5 font-mono text-[10px] tracking-wide uppercase ${xchMismatch ? "text-danger" : ""}`}
+                  className={`mt-0.5 flex max-w-full flex-wrap items-center justify-center gap-x-1.5 font-mono text-[10px] leading-tight ${xchMismatch ? "text-danger" : ""}`}
+                  title="Positions = unique symbol+direction · Orders = complete working book · R Real · L Live"
                 >
-                  {t.hint}
-                  {` · R ${openN}`}
-                  {xchN >= 0 ? ` · L ${xchN}` : ""}
-                  {simN > 0 ? ` · S ${simN}` : ""}
+                  <span className="whitespace-nowrap">R {realPair}</span>
+                  {livePos != null || liveOrd != null ? <span className="whitespace-nowrap">L {livePair}</span> : null}
+                  {simN > 0 ? <span className="whitespace-nowrap">S {simN}</span> : null}
                 </div>
               </button>
             );
           })}
         </div>
 
-        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
-          <div>
-            <p className="font-mono text-xs tracking-[0.22em] text-muted uppercase">
-              {conn === "overall"
-                ? "All desks · independent · parallel"
-                : conn === "vst"
-                  ? "BingX X02 · Prod-VST demo"
-                  : "BingX X01 · live mainnet"}
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
-              {title}
-            </h1>
-            <p className="mt-1 text-sm text-muted">{sub}</p>
+        <header className="flex min-w-0 flex-col gap-3 border-b border-border pb-4">
+          <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-mono text-xs tracking-[0.22em] text-muted uppercase">
+                {conn === "overall"
+                  ? "All desks · independent · parallel"
+                  : conn === "vst"
+                    ? "BingX X02 · Prod-VST demo"
+                    : "BingX X01 · live mainnet"}
+              </p>
+              <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+                {title}
+              </h1>
+              <p className="mt-1 max-w-xl text-sm text-muted">{sub}</p>
+            </div>
+            <div className="flex min-w-0 items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2">
+              <span className={`size-2.5 shrink-0 rounded-full ${engineLive && !engineHalted && !enginePaused ? "live-dot" : ""} ${engineDotClass({ running: engineLive, halted: engineHalted, paused: enginePaused, alive: engineAlive })}`} />
+              <div className="min-w-0 leading-tight">
+                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).sub}</div>
+                <div className="truncate text-sm font-medium">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).text}</div>
+              </div>
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <nav className="flex flex-wrap rounded-radius border border-border bg-surface p-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <nav className="flex min-w-0 flex-wrap rounded-radius border border-border bg-surface p-1">
               <NavLink to="/" on={onDesk} icon={<LayoutDashboard className="size-4" />} label="Desk" />
               <NavLink to="/results" on={onResults} icon={<LineChart className="size-4" />} label="Results" />
-              <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="Historic test" />
+              <NavLink to="/step-sweep" on={onSweep} icon={<ChartSpline className="size-4" />} label="Historic test" short="Historic" />
               <NavLink to="/system" on={onSystem} icon={<Blocks className="size-4" />} label="System" />
               <NavLink to="/settings" on={onSettings} icon={<SlidersHorizontal className="size-4" />} label="Settings" />
             </nav>
             <EngineControls conn={conn} live={engineLive} paused={enginePaused} />
-            <div className="flex items-center gap-3 rounded-radius border border-border bg-surface px-3 py-2">
-              <span className={`size-2.5 rounded-full ${engineLive && !engineHalted && !enginePaused ? "live-dot" : ""} ${engineDotClass({ running: engineLive, halted: engineHalted, paused: enginePaused, alive: engineAlive })}`} />
-              <div className="leading-tight">
-                <div className="font-mono text-xs text-muted">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).sub}</div>
-                <div className="text-sm font-medium">{engineStatusLabel({ running: engineLive, halted: engineHalted, paused: enginePaused, mode }).text}</div>
-              </div>
-            </div>
           </div>
         </header>
         {children}
@@ -183,13 +193,13 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
       setBusy((b) => ({ ...b, [action]: false }));
     }
   };
-  const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-3 text-sm disabled:opacity-40";
+  const btn = "inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2.5 text-sm sm:px-3 disabled:opacity-40";
   const active = Boolean(live) && !paused;
   const startAction = paused ? "resume" : "start";
   const anyBusy = Object.values(busy).some(Boolean);
   return (
-    <div className="flex flex-col items-end gap-1">
-      <div className="flex rounded-radius border border-border bg-surface p-1">
+    <div className="flex min-w-0 flex-col items-stretch gap-1 sm:items-end">
+      <div className="flex flex-wrap rounded-radius border border-border bg-surface p-1">
         <button
           type="button"
           data-testid="engine-start"
@@ -221,7 +231,7 @@ function EngineControls({ conn, live, paused }: { conn: ConnType; live?: boolean
           <Square className="size-4" /> Stop
         </button>
       </div>
-      {msg || anyBusy ? <span className="max-w-72 text-right font-mono text-[10px] text-muted">{anyBusy ? "…" : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
+      {msg || anyBusy ? <span className="max-w-72 text-right font-mono text-[10px] text-muted [overflow-wrap:anywhere]">{anyBusy ? "…" : msg}</span> : <span className="font-mono text-[10px] text-muted uppercase">{conn}</span>}
     </div>
   );
 }
@@ -231,21 +241,30 @@ function NavLink({
   on,
   icon,
   label,
+  short,
 }: {
   to: "/" | "/results" | "/settings" | "/step-sweep" | "/system";
   on: boolean;
   icon: ReactNode;
   label: string;
+  short?: string;
 }) {
   return (
     <Link
       to={to}
-      className={`inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm ${
+      className={`inline-flex min-h-11 min-w-0 items-center gap-1.5 rounded-lg px-2.5 text-sm sm:gap-2 sm:px-3 ${
         on ? "bg-bg2 text-fg" : "text-muted"
       }`}
     >
       {icon}
-      {label}
+      {short ? (
+        <>
+          <span className="sm:hidden">{short}</span>
+          <span className="hidden sm:inline">{label}</span>
+        </>
+      ) : (
+        label
+      )}
     </Link>
   );
 }

@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveClosed, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, type LiveClosed, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -17,7 +17,7 @@ import type { EvaluationWindow } from "@/lib/hist-calc";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setMetric, type SetOverviewRow } from "@/lib/set-overview";
+import { enabledAxes, setMetric, setRowKey, type SetOverviewRow } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import { pnlClass, pfClass, activeClass, sideChipClass, haltClass, isBenignError } from "@/lib/status-tone";
 
@@ -98,8 +98,8 @@ function ResultsPage() {
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
-      <p className="font-mono text-[11px] tracking-wide text-muted uppercase" data-testid="results-identity">
-        {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · {stats?.openCount ?? 0} open · {closedN} closed
+      <p className="min-w-0 font-mono text-[11px] tracking-wide text-muted uppercase [overflow-wrap:anywhere]" data-testid="results-identity">
+        {stats?.connType || conn} · {stats?.connection || conn} · {stats?.unit || ""} · Pos R {posOrdersCounts(stats).realPositions ?? "—"} L {posOrdersCounts(stats).livePositions ?? "—"} · Ord R {posOrdersCounts(stats).realOrders ?? "—"} L {posOrdersCounts(stats).liveOrders ?? "—"} · {closedN} closed
       </p>
       <StatsOverview data={overview} live={stats} />
 
@@ -365,9 +365,14 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
         <span className="font-mono text-xs text-muted">mode {mode}</span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <HealthMetric label="Open positions" value={open} />
-        <HealthMetric label="Real / Live positions" value={`${stats?.realPositionCount ?? stats?.openCount ?? 0} / ${stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"}`} />
-        <HealthMetric label="Real / Live orders" value={`${stats?.realOrderCount ?? stats?.openCount ?? 0} / ${stats?.liveOrderCount ?? "—"}`} />
+        <div className="col-span-2 min-w-0 rounded-lg border border-border bg-bg2 px-3 py-2">
+          <div className="font-mono text-[10px] tracking-wide text-muted uppercase">Positions/Orders</div>
+          <div className="mt-1 flex flex-wrap gap-x-4 font-mono text-sm tabular-nums">
+            <span className="whitespace-nowrap">Pos R {posOrdersCounts(stats).realPositions ?? "—"} L {posOrdersCounts(stats).livePositions ?? "—"}</span>
+            <span className="whitespace-nowrap">Ord R {posOrdersCounts(stats).realOrders ?? "—"} L {posOrdersCounts(stats).liveOrders ?? "—"}</span>
+          </div>
+        </div>
+        <HealthMetric label="Open groups" value={open} />
         <HealthMetric label="SL + TP protected" value={`${protectedCount}/${open}`} good={missing === 0} problem={missing > 0} />
         <HealthMetric label="Control groups" value={Number(controls?.groupCount ?? controls?.groups?.length ?? 0)} />
         <HealthMetric label="Reconciliation" value={stats?.coverage?.recon?.pending ? "pending" : stats?.coverage?.recon?.ok === false ? "review" : "ok"} good={stats?.coverage?.recon?.ok !== false && !stats?.coverage?.recon?.pending} problem={stats?.coverage?.recon?.ok === false} />
@@ -379,9 +384,9 @@ function ControlHealthPanel({ stats }: { stats: LiveStats | null }) {
 
 function HealthMetric({ label, value, good, problem }: { label: string; value: number | string; good?: boolean; problem?: boolean }) {
   return (
-    <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-      <div className="font-mono text-[10px] text-muted uppercase">{label}</div>
-      <div className={`mt-1 font-mono text-lg tabular-nums ${problem ? "text-danger" : good === true ? "text-primary" : ""}`}>{value}</div>
+    <div className="min-w-0 rounded-lg border border-border bg-bg2 px-3 py-2">
+      <div className="font-mono text-[10px] leading-tight tracking-wide text-muted uppercase">{label}</div>
+      <div className={`mt-1 truncate font-mono text-lg tabular-nums ${problem ? "text-danger" : good === true ? "text-primary" : ""}`} title={String(value)}>{value}</div>
     </div>
   );
 }
@@ -534,8 +539,8 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} className="border-t border-border font-mono text-xs">
+            {rows.map((r, i) => (
+              <tr key={`${r.id}-${r.kind || r.pack || ""}-${i}`} className="border-t border-border font-mono text-xs">
                 <td className="py-1.5">{r.id}</td>
                 <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                 <td className={`py-1.5 text-right ${pfClass(r.last15Ratio, r.n)}`}>{r.last15Ratio.toFixed(2)}</td>
@@ -592,8 +597,8 @@ function SetRows({ rows }: { rows: SetOverviewRow[] }) {
                 </td>
               </tr>
             ) : (
-              rows.slice(current * 25, (current + 1) * 25).map((r) => (
-                <tr key={r.id} className="border-t border-border font-mono text-xs">
+              rows.slice(current * 25, (current + 1) * 25).map((r, i) => (
+                <tr key={setRowKey(r, i)} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">

@@ -286,6 +286,11 @@ class AllValidEntries(unittest.TestCase):
         p = pt.Pulse.__new__(pt.Pulse)
         p.sets = book or self.book()
         p.api = Exchange()
+        p.overlay = {"histTestEnabled": False}
+        p.overlay_wild = False
+        p.symbols_dynamic = False
+        p.symbol_cap = 50
+        p.universe = []
         p.normal_execution_enabled = True
         p.block_active = False
         p.halted = False

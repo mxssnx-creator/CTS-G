@@ -25,7 +25,7 @@ export function SystemHealth({ status }: { status: SystemStatus | null }) {
     <details aria-label="System resources" data-testid="system-health" className="min-w-0 rounded-radius border border-border bg-surface p-4">
       <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 text-sm font-medium [&::-webkit-details-marker]:hidden">
         <span>System info</span>
-        <span className="font-mono text-xs text-muted">
+        <span className="min-w-0 font-mono text-xs text-muted [overflow-wrap:anywhere]">
           {status ? `${currentLanes.length}/${lanes.length || 1} current` : "loading"} · {requestSummary} · {redisSummary}
         </span>
         <span className="ml-auto text-xs text-muted">expand</span>

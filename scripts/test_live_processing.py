@@ -130,6 +130,51 @@ class LiveProcessingTests(unittest.TestCase):
         self.assertNotEqual(result.get("code"), 0)
         self.assertFalse(result.get("complete", False))
 
+    def test_offline_symbol_from_body_parses_bingx_109418(self):
+        msg = "MKR-USDT is offline currently,all validted symbols in api:/openApi/swap/v2/quote/contracts, please verify it"
+        self.assertEqual(
+            bingx_fast.offline_symbol_from_body({"code": 109418, "msg": msg}, {"symbol": "MKR-USDT"}),
+            "MKR-USDT",
+        )
+        self.assertEqual(bingx_fast.offline_symbol_from_body({"code": 109418, "msg": msg}, {}), "MKR-USDT")
+        self.assertEqual(bingx_fast.offline_symbol_from_body({"code": 0, "msg": "ok"}, {"symbol": "BTC-USDT"}), "")
+
+    def test_mark_symbol_offline_drops_intern_and_keeps_opens(self):
+        p = _pulse()
+        p._offline_symbols = set()
+        p.ignore_syms = {}
+        p._lev_retry = {}
+        p.open = {}
+        with patch.object(pt, "SYMBOLS", ["BTC-USDT", "EOS-USDT", "ETH-USDT"]):
+            p.mark_symbol_offline("EOS-USDT")
+            self.assertIn("EOS-USDT", p._offline_symbols)
+            self.assertNotIn("EOS-USDT", pt.SYMBOLS)
+            self.assertIn("BTC-USDT", pt.SYMBOLS)
+
+    def test_tradable_contract_names_exclude_offline(self):
+        p = _pulse()
+        p._offline_symbols = {"MKR-USDT"}
+        p.contracts = {"BTC-USDT": object(), "MKR-USDT": object(), "ETH-USDT": object()}
+        names = p._tradable_contract_names()
+        self.assertEqual(set(names), {"BTC-USDT", "ETH-USDT"})
+
+    def test_set_leverage_skips_offline_and_missing_contracts(self):
+        p = _pulse()
+        p._offline_symbols = {"EOS-USDT"}
+        p._lev_retry = {}
+        p.lev_map = {"BTC-USDT": 150}
+        p.lev_max = {"BTC-USDT": 150}
+        p.contracts = {"BTC-USDT": p.contracts["X-USDT"]}
+        p.api = NS(path_cd={})
+        p._load_lev_file = lambda: None
+        p._drain_offline_hits = lambda: None
+        called = []
+        p.ensure_max_leverage = lambda s, force=False: called.append(s) or 150
+        with patch.object(pt, "SYMBOLS", ["BTC-USDT", "EOS-USDT", "MKR-USDT"]), patch.object(pt, "LEVERAGE", 150):
+            p.set_leverage()
+        self.assertNotIn("EOS-USDT", called)
+        self.assertNotIn("MKR-USDT", called)
+
 
 if __name__ == "__main__":
     unittest.main()

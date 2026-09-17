@@ -133,23 +133,49 @@ def _f(value: Any, default: float = 0.0) -> float:
     return number if number == number and abs(number) != float("inf") else default
 
 
-def _indication_of(row: Any, meta: Optional[Dict[str, Any]] = None, pack: str = "") -> str:
-    kind = str(_pick(row, meta, "ind_kind", "indKind", default="")).strip().lower()
-    if kind in IND_KINDS:
-        return kind
-    reason = str(_pick(row, meta, "reason", default=""))
-    if reason.startswith("ind:") or reason.startswith("block:"):
-        bits = reason.split(":")
-        cand = (bits[1] if len(bits) > 1 else "").strip().lower()
-        if cand in IND_KINDS:
-            return cand
-    pack = str(pack or _pick(row, meta, "pack", default="") or "").lower()
+def _lane_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
+    lane = str((meta or {}).get("combo_lane") or _row_get(row, "combo_lane") or _row_get(row, "lane") or "").strip().lower()
+    return lane if lane else "core"
+
+
+def _pack_indication(pack: str) -> str:
+    pack = str(pack or "").strip().lower()
     if pack == "general":
         return "general"
     if pack == "indications":
         return "combined"
-    if pack in INDICATION_SET:
+    if pack in INDICATION_SET and pack not in STRATEGY_SET:
         return pack
+    return ""
+
+
+def _indication_of(row: Any, meta: Optional[Dict[str, Any]] = None, pack: str = "", lane: str = "") -> str:
+    """Catalog/overlay identity is the pack. Fill-level votes only score kind tapes."""
+    lane = str(lane or _lane_of(row, meta) or "core").strip().lower()
+    pack = str(pack or (meta or {}).get("pack") or _row_get(row, "pack") or "").strip().lower()
+    kind = str(
+        (meta or {}).get("ind_kind")
+        or (meta or {}).get("indKind")
+        or _row_get(row, "ind_kind")
+        or _row_get(row, "indKind")
+        or ""
+    ).strip().lower()
+    if kind not in IND_KINDS:
+        reason = str(_pick(row, meta, "reason", default="") or "")
+        if reason.startswith("ind:") or reason.startswith("block:"):
+            bits = reason.split(":")
+            cand = (bits[1] if len(bits) > 1 else "").strip().lower()
+            if cand in IND_KINDS:
+                kind = cand
+    # Independent kind / kind-overlay books keep their own type.
+    if lane in KIND_LANES:
+        return kind if kind in IND_KINDS else "combined"
+    packed = _pack_indication(pack)
+    if packed:
+        return packed
+    # Untagged fills (unit tests, live closed without pack): fill-level kind.
+    if kind in IND_KINDS:
+        return kind
     # Never treat a strategy pack (block/dca/axis/core) as an indication.
     return "combined"
 
@@ -254,7 +280,7 @@ def evaluate_fills(
         set_id = str((meta or {}).get("set_id") or _pick(row, None, "set_id", "setId", "id", default="") or "")
         if not set_id:
             set_id = f"{indication}:{config}:{strategy}"
-        lane = str((meta or {}).get("combo_lane") or _pick(row, meta, "combo_lane", "lane", default="core") or "core").strip().lower()
+        lane = _lane_of(row, meta)
         t = _f(_pick(row, meta, "t", default=0))
         pnl_pct = _f(_pick(row, meta, "pnl_pct", "pnlPct", default=0))
         hold = _f(_pick(row, meta, "hold_s", "holdS", default=0))
@@ -267,6 +293,7 @@ def evaluate_fills(
                 "sl": _f(_pick(row, meta, "sl_ratio", "slRatio", default=0)),
                 "step": int(_f(_pick(row, meta, "step", default=0))),
                 "trail": str(_pick(row, meta, "trail_key", "trailKey", default="")),
+                "lane": lane,
             }
         acc.add(t, pnl_pct, hold)
         mkey = (indication, strategy)
@@ -276,7 +303,7 @@ def evaluate_fills(
             matrix_acc[mkey] = matt
         matt.add(t, pnl_pct, hold)
         # Independent kind tapes are their own relation books. Mixing them
-        # into overall / with-without is a false affection.
+        # into overall / with-without / families is a false affection.
         if lane not in KIND_LANES:
             family_acc["overall"].add(t, pnl_pct, hold)
             if strategy in family_acc:
@@ -287,8 +314,6 @@ def evaluate_fills(
                 with_acc["block"]["without"].add(t, pnl_pct, hold)
             if strategy != "dca":
                 with_acc["dca"]["without"].add(t, pnl_pct, hold)
-        elif strategy in ("block", "dca") and strategy in family_acc:
-            family_acc[strategy].add(t, pnl_pct, hold)
 
     db = open_combo_db()
     meta = db_pragmas(db)
@@ -298,6 +323,9 @@ def evaluate_fills(
         indication, config, strategy, set_id = key
         scored = _score(acc, cost_pct, pf_n, min_pf)
         info = combo_meta[key]
+        # Kind tapes score the matrix only. They are not catalog coordinations.
+        if str(info.get("lane") or "") in KIND_LANES:
+            scored = dict(scored, validated=False)
         rows.append(
             (
                 indication,
@@ -315,7 +343,7 @@ def evaluate_fills(
                 1 if scored["validated"] else 0,
             )
         )
-        if scored["validated"]:
+        if scored["validated"] and str(info.get("lane") or "") not in KIND_LANES:
             public_combos.append(
                 {
                     "indication": indication,
@@ -426,7 +454,7 @@ def _set_meta(st: Any) -> Dict[str, Any]:
     elif pack == "indications":
         indication = "combined"
     else:
-        indication = pack if pack in INDICATION_SET else "combined"
+        indication = "combined"
     return {
         "set_id": str(getattr(st, "id", "") or ""),
         "pack": pack,
@@ -435,7 +463,7 @@ def _set_meta(st: Any) -> Dict[str, Any]:
         "sl_ratio": _f(getattr(st, "sl_ratio", 0)),
         "step": int(_f(getattr(st, "step", 0))),
         "strategy": strategy,
-        "ind_kind": str(getattr(st, "indication_kind", "") or "") or indication,
+        "ind_kind": indication,
         "combo_lane": "core",
     }
 
@@ -482,19 +510,11 @@ def iter_book_fills(book: Any) -> Iterable[Tuple[Any, Dict[str, Any]]]:
         for row in tape or []:
             if row is None:
                 continue
-            row_kind = str(_pick(row, None, "ind_kind", "indKind", default="") or "")
-            if row_kind in IND_KINDS:
-                cell_ind = row_kind
-            elif indication in IND_KINDS:
-                cell_ind = indication
+            if lane == "kind-overlay":
+                cell_ind = indication if indication in IND_KINDS else "combined"
             else:
                 pack = str(_pick(row, None, "pack", default="") or "")
-                if pack == "general":
-                    cell_ind = "general"
-                elif pack in INDICATION_SET:
-                    cell_ind = pack
-                else:
-                    cell_ind = "combined"
+                cell_ind = _pack_indication(pack) or "combined"
             row_sid = str(_pick(row, None, "set_id", "setId", "id", default="") or "")
             if lane == "kind-overlay":
                 set_id = label
@@ -505,7 +525,7 @@ def iter_book_fills(book: Any) -> Iterable[Tuple[Any, Dict[str, Any]]]:
             meta = {
                 "strategy": strategy,
                 "ind_kind": cell_ind,
-                "pack": "indications" if cell_ind != "general" else "general",
+                "pack": "general" if cell_ind == "general" else "indications",
                 "set_id": set_id,
                 "combo_lane": lane,
             }

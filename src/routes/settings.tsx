@@ -33,10 +33,11 @@ import {
   type CtsSettings,
   type PulseOverlay,
 } from "@/lib/config-model";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, posOrdersCounts, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { formatDuration } from "@/lib/analytics";
 import { DeskShell } from "@/components/desk-shell";
+import { PosOrdersLine } from "@/components/pos-orders";
 import { HistTestControls, HistTestStatus } from "@/components/hist-test-controls";
 import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { useConnection } from "@/components/connection-provider";
@@ -62,7 +63,7 @@ import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRu
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
-import { enabledAxes, setMetric } from "@/lib/set-overview";
+import { enabledAxes, setMetric, setRowKey } from "@/lib/set-overview";
 import { SetIdentity } from "@/components/set-identity";
 import { SystemSettingsPanel } from "@/components/system-settings";
 import { SystemHealthFooter } from "@/components/system-health";
@@ -607,9 +608,9 @@ function SettingsPage() {
       statsType={stats?.connType}
       statsId={stats?.connection}
     >
-      <div className="flex flex-col gap-4 lg:flex-row">
-        <aside className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
-          <nav className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row">
+        <aside className="min-w-0 lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:w-56 lg:shrink-0 lg:overflow-y-auto">
+          <nav className="flex min-w-0 gap-1 overflow-x-auto pb-1 lg:flex-col lg:pb-0">
             {SECTIONS.map((id) => (
               <button
                 key={id}
@@ -1181,8 +1182,8 @@ function SettingsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {(calcJob.rows || []).slice(0, 16).map((r) => (
-                            <tr key={r.id} className={`border-t border-border font-mono ${r.validated ? "text-fg" : "text-muted"}`}>
+                          {(calcJob.rows || []).slice(0, 16).map((r, i) => (
+                            <tr key={`${r.id}-${r.direction || "BOTH"}-${i}`} className={`border-t border-border font-mono ${r.validated ? "text-fg" : "text-muted"}`}>
                               <td className="py-1.5">{r.id.replace("-USDT", "")}</td>
                               <td className="py-1.5">{r.direction || "BOTH"}</td>
                               <td className="py-1.5">{r.pack}</td>
@@ -2772,17 +2773,18 @@ function TestHistoricCard({
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
               <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Positive · {histTestJob?.filled ?? histTestJob?.positive?.length ?? 0}/{histTestJob?.targetCount ?? histTestTarget}</p>
-              <p className="mt-1 font-mono text-xs text-fg break-all">{(histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
+              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{(histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
             </div>
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
               <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Rejected · evaluated {histTestJob?.evaluated ?? 0}</p>
-              <p className="mt-1 font-mono text-xs text-muted break-all">
+              <p className="mt-1 font-mono text-xs text-muted [overflow-wrap:anywhere]">
                 {(Array.isArray(histTestJob?.rejected) ? histTestJob.rejected.map((r) => typeof r === "string" ? r : r.symbol) : []).join(" · ") || "none"}
               </p>
             </div>
           </div>
         ) : null}
         {(histTestJob?.bySymbol || []).length > 0 ? (
+          <div className="max-w-full overflow-x-auto">
           <table className="w-full text-sm" data-testid="hist-test-symbols">
             <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
               <tr>
@@ -2805,9 +2807,11 @@ function TestHistoricCard({
               ))}
             </tbody>
           </table>
+          </div>
         ) : null}
         <ComboEvalPanel job={histTestJob} compact />
         {Object.keys(histTestJob?.byIndication || histTestJob?.kinds || {}).length ? (
+          <div className="max-w-full overflow-x-auto">
           <table className="w-full text-sm" data-testid="hist-test-indications">
             <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
               <tr>
@@ -2828,8 +2832,10 @@ function TestHistoricCard({
               ))}
             </tbody>
           </table>
+          </div>
         ) : null}
         {Object.keys(histTestJob?.byStrategy || {}).length ? (
+          <div className="max-w-full overflow-x-auto">
           <table className="w-full text-sm" data-testid="hist-test-strategies">
             <thead className="font-mono text-[11px] uppercase tracking-wide text-muted">
               <tr>
@@ -2850,6 +2856,7 @@ function TestHistoricCard({
               ))}
             </tbody>
           </table>
+          </div>
         ) : null}
       </section>
     </div>
@@ -2874,9 +2881,9 @@ function Grid({ children }: { children: React.ReactNode }) {
 
 function KV({ k, v }: { k: string; v: string }) {
   return (
-    <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+    <div className="min-w-0 rounded-lg border border-border bg-bg2 px-3 py-2">
       <div className="font-mono text-xs text-muted">{k}</div>
-      <div className="mt-0.5 break-all text-sm">{v || "—"}</div>
+      <div className="mt-0.5 break-words text-sm leading-snug">{v || "—"}</div>
     </div>
   );
 }
@@ -3167,11 +3174,11 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                 </td>
               </tr>
             ) : (
-              rows.map((r) => {
+              rows.map((r, i) => {
                 const pf = r.last15Ratio;
                 const ddt = r.maxDdS;
                 return (
-                <tr key={r.id} className="border-t border-border font-mono text-xs">
+                <tr key={setRowKey(r, i)} className="border-t border-border font-mono text-xs">
                   <td className="py-1.5 pr-3"><SetIdentity row={r} /></td>
                   <td className={`py-1.5 ${activeClass(Boolean(r.active))}`}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">
@@ -3294,8 +3301,8 @@ function ControlsLive({ stats }: { stats: LiveStats | null }) {
       <p className="mt-1 text-muted">
         {c?.groupCount ?? groups.length} logical range groups · {c?.mergedMembers ?? groups.reduce((sum, group) => sum + (group.memberCount ?? 1), 0)} merged members
       </p>
-      <p className="mt-1 text-muted">
-        Real positions {stats?.realPositionCount ?? stats?.openCount ?? 0} ({stats?.realPositionGroupCount ?? "—"} groups) · Live positions {stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · Orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}
+      <p className="mt-1 min-w-0 text-muted">
+        <PosOrdersLine stats={stats} extra={<> · {stats?.openCount ?? 0} lanes</>} />
       </p>
       {groups.length ? (
         <div className="mt-2 grid gap-1 sm:grid-cols-2">
@@ -3370,7 +3377,7 @@ function LiveApplied({
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
         <span>{tf}</span>
         <span>controls {controlMode} · {controlPairs} SL+TP pairs · {controlGroups} groups</span>
-        <span>positions R/L {stats?.realPositionCount ?? stats?.openCount ?? 0}/{stats?.livePositionCount ?? stats?.exchangeOpenCount ?? "—"} · orders {stats?.realOrderCount ?? stats?.openCount ?? 0}/{stats?.liveOrderCount ?? "—"}</span>
+        <PosOrdersLine stats={stats} />
         <span>auto sl {v?.slAuto ? "on" : "off"} / tr {v?.trailAuto ? "on" : "off"}</span>
         <span>
           qa {stats?.engine?.qaPass ?? 0}P / {stats?.engine?.qaFail ?? 0}F
@@ -3435,6 +3442,8 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Set step · active" value={`${remote(pulse?.configuredMinStep ?? pulse?.effectiveMinStep)}–${remote(pulse?.setStepMax)} · ${remote(setCoverage?.activeCount)}/${remote(setCoverage?.setCount)}`} />
         <AppliedKV label="SL / TP · ranges" value={`${remote(pulse?.slPct, "%")} / ${remote(pulse?.tpPct, "%")} · ${remote(pulse?.slMinPct, "–")}–${remote(pulse?.slMaxPct, "%")}`} />
         <AppliedKV label="Control orders" value={`${remote(pulse?.controlOrders)} · ${remote(controls?.mode)} · ${remote(controlPairs)} SL+TP pairs`} />
+        <AppliedKV label="Positions" value={`R ${posOrdersCounts(stats).realPositions ?? "—"} · L ${posOrdersCounts(stats).livePositions ?? "—"}`} />
+        <AppliedKV label="Orders" value={`R ${posOrdersCounts(stats).realOrders ?? "—"} · L ${posOrdersCounts(stats).liveOrders ?? "—"}`} />
         <AppliedKV label="Effective cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
         <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
         <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
@@ -3443,12 +3452,12 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />
         <AppliedKV label="Symbols · cap" value={`${remote(stats?.symbolCount)} ranked · ${remote(scan?.px)} active · ${remote(pulse?.symbolCap)} cap`} />
         <AppliedKV label="Connection" value={`${remote(stats?.connection)} · ${remote(stats?.connType)} · age ${remote(stats?.statsAgeS, "s")}`} />
-  <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} �� ready ${remote(stats?.progressReady)}`} />
-  <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
-  <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
-  <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
-  <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
-  <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
+        <AppliedKV label="Progress" value={`${remote(stats?.progressPhase)} · ${remote(stats?.progressPct, "%")} · ready ${remote(stats?.progressReady)}`} />
+        <AppliedKV label="Sets · fills" value={`${remote(setCoverage?.setCount)} total · ${remote(setCoverage?.activeCount)} active · ${remote(setCoverage?.validatedCount)} validated · ${remote(setCoverage?.histFills)} hist`} />
+        <AppliedKV label="Entry policy" value={`${remote((pulse as Record<string, unknown> | undefined)?.entryPolicy ?? stats?.sets?.entryPolicy)} · normal ${remote((pulse as Record<string, unknown> | undefined)?.normalExecutionEnabled)} · cold min ${remote((pulse as Record<string, unknown> | undefined)?.entryPolicyMinLiveSamples ?? stats?.sets?.entryPolicyMinLiveSamples)}`} />
+        <AppliedKV label="System vs wallet" value={`${remote(stats?.systemEquity)} system eq · ${remote(stats?.walletEquity)} wallet eq · ${remote(stats?.executionEvidence?.foreignPositionCount)} foreign pos · ${remote(stats?.executionEvidence?.foreignOpenOrderCount)} foreign orders`} />
+        <AppliedKV label="Health" value={`${remote(stats?.svcActive)} · overrun ${remote(stats?.engine?.cycleOverrun)} · errors ${remote(stats?.errors)}`} />
+        <AppliedKV label="Stages" value={`base ${remote(stages?.base?.pf)} · main ${remote(stages?.main?.pf)} · real ${remote(stages?.real?.pf)}`} />
       </div>
       <p className="mt-2 font-mono text-[11px] text-muted">
         {dirty
@@ -3478,7 +3487,7 @@ function AppliedKV({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-md border border-border bg-surface px-2.5 py-2">
       <div className="font-mono text-[11px] text-muted">{label}</div>
-      <div className="mt-0.5 break-words text-xs text-fg">{value}</div>
+      <div className="mt-0.5 break-words text-xs leading-snug text-fg" title={value}>{value}</div>
     </div>
   );
 }

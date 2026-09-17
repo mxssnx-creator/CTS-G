@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
-import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, type LiveStats } from "./live-stats.ts";
+import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, type LiveStats } from "./live-stats.ts";
 import { fetchConnections } from "./connections.ts";
 import { fetchCtsBundle } from "./config-model.ts";
 
@@ -137,6 +137,42 @@ test("frozen sidecar-down snapshots do not retrigger renders and poll slower", (
   assert.equal(deskPollMs(a), 12000);
   assert.equal(deskPollMs(a, true), 8000);
   assert.equal(deskPollMs({ running: true, halted: false }), 3500);
+});
+
+test("positions/orders never fall order counts back onto positions", () => {
+  assert.equal(knownCount(-1), null);
+  assert.equal(knownCount(0), 0);
+  assert.equal(formatPosOrders(12, 24), "12/24");
+  assert.equal(formatPosOrders(12, undefined, 12), "12/—");
+  assert.equal(realPosOrders({ openCount: 12, realPositionCount: 12 }), "12/—");
+  assert.equal(realPosOrders({ openCount: 12, realPositionCount: 12, realOrderCount: 24 }), "12/24");
+  assert.equal(realPosOrders({ openCount: 298, realPositionCount: 298, realPositionGroupCount: 12, realOrderCount: 24 }), "12/24");
+  assert.equal(realPosOrders({ openCount: 298, realPositionGroupCount: 12, realOrderCount: 24 }), "12/24");
+  assert.equal(realPosOrders({ openCount: 298 }), "—/—");
+  assert.equal(
+    realPosOrders({ realPositionGroupCount: 13, realOrderCount: 30, liveOrderCount: 178, openCount: 149 }),
+    "13/178",
+  );
+  assert.equal(
+    realPosOrders({ realPositionGroupCount: 13, realOrderCount: 149, liveOrderCount: 178, openCount: 149 }),
+    "13/178",
+  );
+  assert.equal(
+    realPosOrders({ realPositionGroupCount: 12, realOrderCount: 24, liveOrderCount: 24, openCount: 700 }),
+    "12/24",
+  );
+  assert.equal(livePosOrders({ livePositionCount: 8, exchangeOpenCount: 8, liveOrderCount: 16 }), "8/16");
+  assert.equal(livePosOrders({ exchangeOpenCount: -1, liveOrderCount: -1 }), "—/—");
+  assert.deepEqual(
+    posOrdersCounts({
+      realPositionGroupCount: 5,
+      livePositionCount: 4,
+      realOrderCount: 10,
+      liveOrderCount: 26,
+      openCount: 40,
+    }),
+    { realPositions: 5, livePositions: 4, realOrders: 26, liveOrders: 26 },
+  );
 });
 
 test("stalled config reads time out and malformed settings cannot replace good values", async (t) => {

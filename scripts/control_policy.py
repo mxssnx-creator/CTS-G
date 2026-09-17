@@ -39,7 +39,7 @@ class ControlRule:
         if m.ndim!=2 or m.shape[1]!=len(METRICS) or not np.all(np.isfinite(m[:,[8,9,16]])):
             raise ValueError('Expected finite training results')
         pf=1+.1*np.divide(m[:,16],m[:,8],out=np.zeros(len(m)),where=m[:,8]>0)
-        return ((m[:,8]>0) & (m[:,8]>=self.training_n)) & (m[:,9]>1e-12) & (pf>self.training_pf+1e-9)
+        return ((m[:,8]>0) & (m[:,8]>=self.training_n)) & (m[:,9]>1e-12) & (pf+1e-9>=self.training_pf)
 
     def masks(self, metrics):
         m=np.asarray(metrics,dtype=float)
@@ -49,7 +49,7 @@ class ControlRule:
         control_pf=1+.1*np.divide(m[:,19],m[:,10],out=np.zeros(len(m)),where=m[:,10]>0)
         sample=(m[:,8]>0) & (m[:,8]>=self.training_n)
         positive=m[:,9]>1e-12
-        training=sample & positive & (train_pf>self.training_pf+1e-9)
+        training=sample & positive & (train_pf+1e-9>=self.training_pf)
         complete=m[:,10]>=self.control_n
         control_positive=m[:,11]>1e-12
         control_ok=control_pf>self.control_pf+1e-9

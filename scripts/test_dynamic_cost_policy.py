@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'server'/'pulse'))
 import pulse_trader as pt
-from position_cost import effective_position_cost_pct
+from position_cost import POSITIVE_PF, effective_position_cost_pct
 from set_engine import SetBook
 from coord_engine import Coordinator
 from hist_calc import overlay_from_options, parse_options
@@ -45,10 +45,10 @@ class DynamicCostPolicyTests(unittest.TestCase):
         self.assertEqual(effective_position_cost_pct([])['costPct'],.1)
         b=SetBook();b.load({});c=Coordinator();c.load({},{})
         self.assertEqual(b.max_dd_s,57600)
-        self.assertEqual(b.stage_min_pf,dict(base=1.02,main=1.02,real=1.02))
-        self.assertEqual(c.min_pf,1.02)
+        self.assertEqual(b.stage_min_pf,dict(base=POSITIVE_PF,main=POSITIVE_PF,real=POSITIVE_PF))
+        self.assertEqual(c.min_pf,POSITIVE_PF)
         h=overlay_from_options(parse_options({}))
-        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(1.02,57600,.1))
+        self.assertEqual((h['setMinPf'],h['setMaxDdTimeS'],h['positionCostPct']),(POSITIVE_PF,57600,.1))
 
     def test_measured_cost_propagates_to_all_calculators(self):
         p=pt.Pulse.__new__(pt.Pulse);p.manual_position_cost_pct=.1

@@ -162,6 +162,87 @@ class ContinuousTests(AllValidEntries):
         self.assertEqual(p.errors,0,p.last_error)
         self.assertTrue(ban['injected'])
 
+    def test_simulated_overall_trading_progress(self):
+        """Replay → score → Base/Main/Real → intern scan → entries → overall SL/TP."""
+        from set_engine import synth_trend
+        from combo_eval import evaluate_book
+        import hist_test as ht
+
+        book = SetBook()
+        book.load({
+            "histLookbackBars": 2880,
+            "baseEvalPosCount": 30,
+            "setMinPf": 1.1,
+            "minPf": 1.1,
+            "slToTpRatios": [0.6],
+            "setMinStep": 8,
+            "setStepMax": 8,
+            "stratTrailing": False,
+            "stratBlock": False,
+            "stratDca": False,
+            "histTestEnabled": False,
+        })
+        self.assertEqual(book.lookback, 2880)
+        self.assertGreaterEqual(len(book.by_idx), 1)
+        bars = synth_trend(220)
+        for symbol in ("XRP-USDT", "BCH-USDT", "SOL-USDT"):
+            book.ingest_bars(symbol, bars)
+        book.replay_all(symbols=["XRP-USDT", "BCH-USDT", "SOL-USDT"], workers=1, merge=True, score=True)
+        self.assertTrue(book.progress.ready)
+        self.assertEqual(book.progress.phase, "ready")
+        self.assertGreaterEqual(book.progress.pct, 99.0)
+        qualified = [st for st in book.by_idx if (st.stage_ledger or {}).get("base")]
+        self.assertTrue(qualified, "synth trend must admit at least one Base set")
+        winner = qualified[0]
+        led = winner.stage_ledger or {}
+        self.assertGreaterEqual(int(led.get("baseN") or 0), 30)
+        self.assertGreaterEqual(float(led.get("basePf") or 0), 1.1)
+        # Main/Real use independent last-N windows — they must not inherit Base PF.
+        if not led.get("main"):
+            self.assertGreaterEqual(int(led.get("mainN") or 0), 1)
+            self.assertLess(float(led.get("mainPf") or 0), 1.1)
+        tape_book = self.book(1)
+        tape_book.pf_n = tape_book.min_samples = 30
+        st = tape_book.by_idx[0]
+        st.hist = self.tape()
+        tape_book._score_one(st)
+        self.assertTrue(st.stage_ledger["base"])
+        self.assertTrue(st.stage_ledger["main"])
+        self.assertTrue(st.stage_ledger["real"])
+        combo = evaluate_book(book, min_pf=1.1, cost_pct=0.1, pf_n=30)
+        selected = ht.selected_coordinations({
+            "successfulConfigs": combo.get("successful") or combo.get("successfulConfigs") or [],
+            "combo": combo,
+        })
+        for row in selected:
+            sid = str(row.get("id") or "")
+            self.assertTrue(ht.is_coordination_set_id(sid) or ht.is_catalog_set_id(sid), sid)
+            self.assertFalse(sid.startswith("block:"), sid)
+            self.assertFalse(sid.startswith("dca:"), sid)
+        intern = ht.intern_liquid_pool(["FLYBRAIN-USDT", "XRP-USDT"], None, cap=50)
+        self.assertEqual(len(intern), 50)
+        self.assertEqual(set(intern), set(ht.HIST_TEST_MAJORS))
+        p = self.pulse(self.book(4))
+        for st in p.sets.by_idx:
+            st.hist = self.tape()
+            p.sets._score_pair((st, None))
+        p.overlay = {"histTestEnabled": True, "symbolCap": 50}
+        p.symbol_cap = 50
+        with patch.object(pt, "SYMBOLS", ["X-USDT"]):
+            scan = p._intern_symbols()
+            self.assertIn("X-USDT", scan)
+            self.assertIn("BTC-USDT", scan)
+            self.assertIn("BCH-USDT", scan)
+            p.maybe_entries()
+        self.assertGreaterEqual(len(p.open), 1, p.last_error)
+        pos = next(iter(p.open.values()))
+        self.assertTrue(pos.sl_oid and pos.tp_oid)
+        self.assertEqual(pos.symbol, "X-USDT")
+        flow = book.stage_flow()
+        stages = flow.get("stages") or flow
+        self.assertIn("Base", stages)
+        self.assertGreaterEqual(int((stages.get("Base") or {}).get("qualified") or 0), 1)
+
 
 if __name__=='__main__':
     names=[name for name in ContinuousTests.__dict__ if name.startswith('test_')]
