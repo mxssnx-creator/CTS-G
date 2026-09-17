@@ -4772,7 +4772,25 @@ class Pulse:
         miss = 0
         now = time.time()
         shared_checked = set()
-        for pos in list(self.open.values()):
+        intern_n = 0
+        try:
+            intern_n = len(SYMBOLS)
+        except Exception:
+            intern_n = 0
+        # Intern desk: do not spend 13s placing already-protected pairs.
+        # Unprotected lots always go first; leftover work continues next cycle.
+        deadline = time.monotonic() + (0.45 if intern_n and intern_n <= 64 else 1.6)
+        rows = list(self.open.values())
+
+        def _unprotected(p) -> bool:
+            return not (real_oid(getattr(p, "sl_oid", "")) and real_oid(getattr(p, "tp_oid", "")))
+
+        rows.sort(key=lambda p: (0 if _unprotected(p) else 1, str(getattr(p, "symbol", ""))))
+        for index, pos in enumerate(rows):
+            if time.monotonic() >= deadline and index > 0:
+                if _unprotected(pos):
+                    miss += 1
+                continue
             group_key = (pos.symbol, pos.side)
             if overall_controls.enabled(self,pos) and group_key not in shared_checked:
                 # Run group migration before the member-level exchange snapshot
