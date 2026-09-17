@@ -354,7 +354,7 @@
   "histTestValidateCap": 250,
   "setUseHistoricGate": false,
   "setStrictGate": false,
-  "histTestEnabled": false,
+  "histTestEnabled": true,
   "histTestHours": 20,
   "histTestMinPf": 1.15,
   "dcaEnabled": true,

@@ -138,7 +138,7 @@ def overlay_test() -> None:
         rec(f"{name}-max-open", int(ov.get("maxOpen") or 0) == 100, str(ov.get("maxOpen")))
         rec(f"{name}-symbol-cap", int(ov.get("symbolCap") or 0) == 50, str(ov.get("symbolCap")))
         if "x02" in name:
-            rec(f"{name}-hist-test-enabled", ov.get("histTestEnabled", True) is False, str(ov.get("histTestEnabled")))
+            rec(f"{name}-hist-test-enabled", ov.get("histTestEnabled", True) is True, str(ov.get("histTestEnabled")))
             rec(f"{name}-dynamic", ov.get("symbolsDynamic", True) is False)
             rec(f"{name}-dca-on", ov.get("dcaEnabled") is True)
             rec(f"{name}-symbols-listed", isinstance(ov.get("symbols"), list) and len(ov.get("symbols") or []) == 50)

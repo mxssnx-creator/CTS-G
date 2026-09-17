@@ -73,6 +73,9 @@ def patch_overlays() -> list[str]:
             blob["symbolsAll"] = True
             blob["symbolsDynamic"] = True
             blob["symbolCap"] = 50
+        if name.endswith("x02.json"):
+            blob["histTestEnabled"] = True
+            blob["symbolCap"] = 50
         if changed:
             tmp = str(path) + ".tmp"
             Path(tmp).write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")

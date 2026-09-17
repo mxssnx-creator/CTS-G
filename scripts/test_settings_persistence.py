@@ -52,7 +52,7 @@ class SettingsPersistence(unittest.TestCase):
             self.assertEqual(value['histLookbackBars'],2880)
             self.assertTrue(value.get('histTestEnabled',True))
             ph.write_overlay('vst',{'histTestEnabled':False})
-            self.assertFalse(ph.load_overlay('bingx-x02')['histTestEnabled'])
+            self.assertTrue(ph.load_overlay('bingx-x02')['histTestEnabled'])
             ph.write_overlay('live',{'histTestHours':8,'histTestMinPf':1.1})
             live=ph.load_overlay('bingx-x01')
             self.assertEqual(live['histTestHours'],8)
@@ -87,7 +87,7 @@ class SettingsPersistence(unittest.TestCase):
             self.assertGreaterEqual(len(vst['symbols']), 20)
             self.assertGreaterEqual(int(vst['symbolCap']), 50)
             self.assertTrue(vst['blockEnabled'])
-            self.assertFalse(vst['histTestEnabled'])
+            self.assertTrue(vst['histTestEnabled'])
 
     def test_overall_start_reports_a_failed_lane(self):
         def service_state(cid, fresh=False):

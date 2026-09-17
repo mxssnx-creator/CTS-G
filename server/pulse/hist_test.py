@@ -676,12 +676,13 @@ def intern_liquid_pool(
     cap: int = SYMBOL_CAP,
     min_quote: float = MIN_QUOTE_VOLUME,
     tradable: Optional[Sequence[str]] = None,
+    validated: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Intern preferred + 50 majors. Scan dust stays out of new intern entries.
+    """Intern preferred + hist-test positives + 50 liquid names.
 
-    `tradable` is the live exchange contract book. Offline/delisted majors
-    (EOS, MKR, ...) must not enter intern scan or leverage POSTs.
-    Open lots stay scannable even when the venue later marks them offline.
+    `validated` is Test Historic's positive/filled book and is auto-assigned
+    even when a name is not in the major list (JUP/ZEC/…). NCCO-style contracts
+    and overlay dust stay out. Offline majors stay out unless already open.
     """
     major_keys = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
     overlay = [
@@ -706,12 +707,18 @@ def intern_liquid_pool(
     apply_tradable = tradable is not None
     tradable_keys = {str(s).strip().upper() for s in (tradable or []) if str(s or "").strip()}
 
-    def add(raw: Any, *, keep_open: bool = False) -> None:
+    def add(raw: Any, *, keep_open: bool = False, allow_validated: bool = False) -> None:
         name = str(raw or "").strip().upper()
         if not name.endswith("-USDT") or name in used or ":" in name:
             return
-        if name not in major_keys:
+        if name.startswith(("NCCO", "NCS", "NCFX")):
             return
+        if name not in major_keys and not allow_validated:
+            return
+        if allow_validated and name not in major_keys and name not in open_keys:
+            overlay_keys = {str(s).strip().upper() for s in (overlay or [])}
+            if name not in overlay_keys and float(vol.get(name) or 0) < float(min_quote or 0):
+                return
         if apply_tradable and name not in tradable_keys and not (keep_open and name in open_keys):
             return
         used.add(name)
@@ -719,6 +726,8 @@ def intern_liquid_pool(
 
     for s in PREFERRED_SYMBOLS:
         add(s)
+    for s in validated or []:
+        add(s, allow_validated=True)
     ranked_majors = list(HIST_TEST_MAJORS)
     if vol:
         ranked_majors = sorted(ranked_majors, key=lambda s: -float(vol.get(s.upper(), 0)))
@@ -785,6 +794,16 @@ def select_intern_symbols(
         add(s)
     for s in opens or []:
         add(s)
+    if not intern_audit_floor_failed(job):
+        overlay_keys = {str(s).strip().upper() for s in overlay}
+        open_keys = {str(s).strip().upper() for s in (opens or []) if str(s or "").strip()}
+        for s in validated_symbols(job):
+            name = str(s or "").strip().upper()
+            if name.startswith(("NCCO", "NCS", "NCFX")):
+                continue
+            if name not in _MAJOR_KEYS and name not in overlay_keys and name not in open_keys:
+                continue
+            add(s)
     limit = int(cap or 0) or SYMBOL_CAP
     if limit > 0 and len(out) > limit:
         must: List[str] = []
@@ -1306,6 +1325,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         symbols,
         blob.get("universe") or blob.get("ranked"),
         cap=SYMBOL_CAP,
+        validated=symbols,
     )
     remaining = max(0, int(sets_total) - int(sets_done))
     if running:
@@ -1609,7 +1629,8 @@ def rank_universe(n: int = VALIDATION_CAP) -> tuple:
     have = set()
 
     def add_symbol(symbol: str) -> None:
-        if symbol in have:
+        name = str(symbol or "").strip().upper()
+        if not name or name in have or name.startswith(("NCCO", "NCS", "NCFX")):
             return
         row = dict(by_sym.get(symbol) or {
             "symbol": symbol, "last": 0, "vol24h": 0, "quoteVolume": 0, "changePct": 0, "vol1h": 0,
@@ -1671,6 +1692,8 @@ def fill_positive(
     selected: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
+    assigned_ids: List[str] = []
+    assigned_seen: set[str] = set()
     for row in queue:
         symbol = str(row.get("symbol") or "").strip().upper()
         snapshot = {
@@ -1680,6 +1703,8 @@ def fill_positive(
             "symbols": [r["symbol"] for r in selected] + ([symbol] if symbol else []),
             "positive": [r["symbol"] for r in selected],
             "rejected": [r["symbol"] for r in rejected],
+            "validatedIds": list(assigned_ids)[:PUBLIC_VALIDATED_IDS_CAP],
+            "validatedCount": len(assigned_ids),
         }
         wait_if_paused(on_progress, snapshot)
         if stop_requested() or len(selected) >= target:
@@ -1699,6 +1724,7 @@ def fill_positive(
         if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
             skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
             continue
+        probe = None
         if score_fn is not None:
             stats = dict(score_fn(symbol, bars) or {})
         else:
@@ -1723,6 +1749,36 @@ def fill_positive(
         if record["positive"]:
             record["_bars"] = bars
             selected.append(record)
+            if probe is not None:
+                try:
+                    ranked = _rank_set_rows(probe)
+                    for item in ranked or []:
+                        try:
+                            _key, st, _side, valid, _low = item
+                        except (TypeError, ValueError):
+                            continue
+                        if not valid:
+                            continue
+                        sid = str(getattr(st, "id", "") or "")
+                        if not sid or sid in assigned_seen:
+                            continue
+                        assigned_seen.add(sid)
+                        assigned_ids.append(sid)
+                except Exception:
+                    pass
+            if assigned_ids:
+                persist_validated_ids(assigned_ids)
+            if on_progress:
+                on_progress({
+                    "phase": "evaluate",
+                    "pct": 8 + int(52 * len(selected) / max(1, target)),
+                    "detail": f"evaluate {symbol} · {len(selected)}/{target} positive · {len(assigned_ids)} configs",
+                    "symbols": [r["symbol"] for r in selected],
+                    "positive": [r["symbol"] for r in selected],
+                    "rejected": [r["symbol"] for r in rejected],
+                    "validatedIds": list(assigned_ids)[:PUBLIC_VALIDATED_IDS_CAP],
+                    "validatedCount": len(assigned_ids),
+                })
         else:
             rejected.append(record)
     return {

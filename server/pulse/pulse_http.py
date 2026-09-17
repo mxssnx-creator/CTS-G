@@ -394,8 +394,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         out["symbolCap"] = 50
         out["histTestValidateCap"] = 250
         out["histTestTargetCount"] = max(1, min(250, int(out.get("histTestTargetCount") or 50)))
-        if junk:
-            out["histTestEnabled"] = False
+        out["histTestEnabled"] = True
         return out
     if cleaned:
         out["symbols"] = cleaned
@@ -416,6 +415,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         out["histTestTargetCount"] = 50
     else:
         out["histTestTargetCount"] = max(1, min(250, hist_target))
+    out["histTestEnabled"] = True
     return out
 
 

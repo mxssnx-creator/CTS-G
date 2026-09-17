@@ -3527,6 +3527,11 @@ class Pulse:
             hist_owns = False
         intern_book: Optional[List[str]] = None
         if hist_owns or wild:
+            validated: List[str] = []
+            try:
+                validated = hist_test_mod.validated_symbols(hist_test_mod.read_job())
+            except Exception:
+                validated = []
             try:
                 intern_book = hist_test_mod.intern_liquid_pool(
                     names or list(SYMBOLS),
@@ -3534,6 +3539,7 @@ class Pulse:
                     opens=open_syms,
                     cap=cap or 50,
                     tradable=self._intern_tradable(),
+                    validated=validated,
                 )
             except Exception:
                 intern_book = [str(s) for s in (getattr(hist_test_mod, "HIST_TEST_MAJORS", ()) or ())][: cap or 50]
@@ -13894,6 +13900,11 @@ class Pulse:
             if name:
                 opens.append(str(name))
         cap = int(getattr(self, "symbol_cap", 0) or 0) or 50
+        validated = []
+        try:
+            validated = hist_test_mod.validated_symbols(job)
+        except Exception:
+            validated = []
         try:
             pool = hist_test_mod.intern_liquid_pool(
                 list(SYMBOLS),
@@ -13901,6 +13912,7 @@ class Pulse:
                 opens=opens,
                 cap=cap,
                 tradable=self._intern_tradable(),
+                validated=validated,
             )
         except Exception:
             pool = list(getattr(hist_test_mod, "HIST_TEST_MAJORS", hist_test_mod.PREFERRED_SYMBOLS))[:cap]
@@ -13922,8 +13934,10 @@ class Pulse:
             pin(s)
         tradable_keys = {str(s).upper() for s in (self._intern_tradable() or [])}
         offline = {str(s).upper() for s in (getattr(self, "_offline_symbols", set()) or set())}
-        for s in SYMBOLS:
+        for s in validated:
             key = str(s or "").strip().upper()
+            if key.startswith(("NCCO", "NCS", "NCFX")):
+                continue
             if key in offline:
                 continue
             if tradable_keys and key not in tradable_keys:

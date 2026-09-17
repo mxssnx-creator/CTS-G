@@ -472,6 +472,24 @@ class HistTestContract(unittest.TestCase):
         self.assertNotIn("LAPTOP-USDT", out)
         self.assertNotIn("MICRODUCK-USDT", out)
 
+    def test_intern_liquid_pool_assigns_validated_symbols(self):
+        universe = [
+            {"symbol": "ZEC-USDT", "quoteVolume": 5e9},
+            {"symbol": "BTC-USDT", "quoteVolume": 9e9},
+            {"symbol": "BONER-USDT", "quoteVolume": 12},
+        ]
+        out = ht.intern_liquid_pool(
+            ["BTC-USDT"],
+            universe,
+            cap=50,
+            tradable=["BTC-USDT", "ETH-USDT", "ZEC-USDT", "BCH-USDT", "SOL-USDT", "XRP-USDT"],
+            validated=["ZEC-USDT", "BONER-USDT", "NCCOXAG2USD-USDT"],
+        )
+        self.assertIn("ZEC-USDT", out)
+        self.assertNotIn("BONER-USDT", out)
+        self.assertNotIn("NCCOXAG2USD-USDT", out)
+        self.assertEqual(out[0], "BCH-USDT")
+
     def test_select_intern_symbols_ready_uses_overlay_not_junk(self):
         overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT", "BTC-USDT"]
         job = {
@@ -533,7 +551,8 @@ class HistTestContract(unittest.TestCase):
         overlay = ["XRP-USDT", "BCH-USDT", "SOL-USDT"]
         job = {"phase": "score", "ready": False, "positive": ["BCH-USDT", "BONER-USDT"]}
         out = ht.select_intern_symbols(overlay, job, cap=50)
-        self.assertEqual(out, overlay)
+        self.assertEqual(out[:3], overlay)
+        self.assertIn("BCH-USDT", out)
         self.assertNotIn("BONER-USDT", out)
 
     def test_progress_view_does_not_mark_ready_on_batch_error(self):
@@ -556,7 +575,8 @@ class HistTestContract(unittest.TestCase):
         overlay = ["XRP-USDT", "SOL-USDT"]
         job = {"phase": "ready", "ready": True, "positive": ["SYN-USDT"]}
         out = ht.select_intern_symbols(overlay, job, opens=["AAVE-USDT", "XRP-USDT"], cap=50)
-        self.assertEqual(out, ["XRP-USDT", "SOL-USDT", "AAVE-USDT"])
+        self.assertEqual(out[:3], ["XRP-USDT", "SOL-USDT", "AAVE-USDT"])
+        self.assertNotIn("SYN-USDT", out)
 
     def test_apply_scores_empty_ids_keeps_gate_closed(self):
         from set_engine import SetBook
