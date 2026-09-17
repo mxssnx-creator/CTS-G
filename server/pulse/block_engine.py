@@ -389,10 +389,27 @@ class BlockBook:
         if total > 0:
             if entry > 0:
                 lane.base_entry = ((lane.base_entry * old_qty) + float(entry) * add) / total
-            lane.base_qty = total
+            self.refresh_parent_qty(lane, total, lane.base_entry)
             lane.active = True
             self.save()
         return lane
+
+    def refresh_parent_qty(self, lane: BlockLane, qty: float, entry: float = 0.0) -> None:
+        """Keep Overall parent size in sync. Uncover counts the new 2× cap can still fill."""
+        new_qty = max(0.0, float(qty or 0.0))
+        if new_qty <= 0:
+            return
+        lane.base_qty = new_qty
+        if entry > 0:
+            lane.base_entry = float(entry)
+        confirmed = float(lane.confirmed_add or 0.0)
+        for n in list(lane.satisfied.keys()):
+            try:
+                target = float(self.formula(new_qty, int(n), lane).get("targetAddQty") or 0.0)
+            except Exception:
+                continue
+            if confirmed + 1e-12 < target:
+                lane.satisfied.pop(n, None)
 
     def last_n_avg(self, count: int, lane: Optional[BlockLane] = None) -> Tuple[float, int]:
         """Independent last-`count` average for this block count only."""

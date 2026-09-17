@@ -163,6 +163,25 @@ class BlockCalculationTests(unittest.TestCase):
         self.assertAlmostEqual(lane.base_entry, (100.0 * 10 + 130.0 * 5) / 15.0)
         self.assertAlmostEqual(b.formula(lane.base_qty, 1)["targetAddQty"], 3.75)
 
+    def test_overall_parent_growth_uncovers_counts_still_inside_two_x(self):
+        b = self.book(blockVolumeRatio=0.25, blockMaxStack=6)
+        lane = b.register_parent("XRP-USDT", "SHORT", 2.0, 1.0)
+        pick = b.pick_emit(b.evaluate_counts(lane, 1, 2.0))
+        b.record_fill(lane, pick, pick["requestedAddQty"], "a", "1")
+        while True:
+            nxt = b.pick_emit(b.evaluate_counts(lane, 1, 2.0))
+            if nxt is None:
+                break
+            b.record_fill(lane, nxt, nxt["requestedAddQty"], "b", "2")
+        self.assertIsNone(b.next_unsatisfied(lane))
+        b.refresh_parent_qty(lane, 8.0, 1.0)
+        self.assertAlmostEqual(lane.base_qty, 8.0)
+        self.assertIsNotNone(b.next_unsatisfied(lane))
+        rows = b.evaluate_counts(lane, 1, 2.0)
+        requested = [r for r in rows if r.get("kind") == "regular" and float(r.get("requestedAddQty") or 0) > 0]
+        self.assertGreaterEqual(len(requested), 1)
+        self.assertEqual(int(b.pick_emit(rows)["blockCount"]), b.next_unsatisfied(lane))
+
     def test_held_factor_does_not_change_size(self):
         b = self.book(blockVolumeRatio=0.25, blockMaxStack=3)
         lane = BlockLane("H", "LONG", 10.0, 100.0)

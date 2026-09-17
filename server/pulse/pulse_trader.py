@@ -1746,8 +1746,12 @@ class Pulse:
                 key = self.block.key(pos.symbol, pos.side)
                 lane = self.block.lanes.get(key)
                 if lane and lane.base_qty > 0:
-                    if abs(float(lane.base_qty or 0) - core_qty) > 1e-12 and core_qty > 0:
-                        lane.base_qty = core_qty
+                    if core_qty > 0:
+                        refresh = getattr(self.block, "refresh_parent_qty", None)
+                        if callable(refresh):
+                            refresh(lane, core_qty, pos.entry)
+                        elif abs(float(lane.base_qty or 0) - core_qty) > 1e-12:
+                            lane.base_qty = core_qty
                         lane.active = True
                         self.block.save()
                 else:
@@ -8783,6 +8787,15 @@ class Pulse:
         elif overall and symbol and str(strategy or "") in ("block", "dca"):
             state = self._block_overall_real_state(symbol, side)
             intern = {"pf": state.get("pf") or 0, "n": state.get("n") or 0}
+            if bool(state.get("insufficient")):
+                try:
+                    for pos in self.positions_for(symbol, side):
+                        pf = float(self.block_intern_pf(pos) or 0)
+                        if pf > 0:
+                            intern = {"pf": pf, "n": max(int(intern.get("n") or 0), 1)}
+                            break
+                except Exception:
+                    pass
         tape = None
         if count is not None:
             try:
@@ -9000,11 +9013,21 @@ class Pulse:
             qty = self.cap_order_qty(c, px, raw, qty_cap_usdt)
             qty = min(qty, self.round_qty(c, placed_limit))
             if qty > placed_limit + 1e-12 or qty < min_q or qty <= 0:
-                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
-                continue
+                bumped = self.raise_to_min_qty(c, px, max(raw, qty, 0.0))
+                if bumped >= min_q and bumped <= extra_room + 1e-12 and bumped * px >= float(c.min_usdt or 0) * 0.98:
+                    qty = min(bumped, self.round_qty(c, extra_room))
+                    placed_limit = extra_room
+                else:
+                    self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                    continue
             if qty * px < float(c.min_usdt or 0) * 0.98:
-                self.block.mark_nearly_filled(lane, int(row["blockCount"]))
-                continue
+                bumped = self.raise_to_min_qty(c, px, qty)
+                if bumped >= min_q and bumped <= extra_room + 1e-12:
+                    qty = bumped
+                    placed_limit = extra_room
+                else:
+                    self.block.mark_nearly_filled(lane, int(row["blockCount"]))
+                    continue
             if (pos.qty + qty) * px > self.max_book_notional() * 1.05:
                 key = f"{pos.symbol}:{row['blockCount']}:cap"
                 now = time.time()
