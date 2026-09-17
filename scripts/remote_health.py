@@ -102,7 +102,7 @@ def lane_brief(conn: str) -> dict:
     for row in opens:
         if not isinstance(row, dict):
             continue
-        if not (row.get("sl") or row.get("slOid")) or not (row.get("tp") or row.get("tpOid")):
+        if not (row.get("slOid") or row.get("sl_oid")) or not (row.get("tpOid") or row.get("tp_oid")):
             miss += 1
     load = d.get("load") if isinstance(d.get("load"), dict) else {}
     sets = d.get("sets") if isinstance(d.get("sets"), dict) else {}
