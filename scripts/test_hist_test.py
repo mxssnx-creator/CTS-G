@@ -330,6 +330,26 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("LOSER", [r["symbol"] for r in fill["rejected"]])
         self.assertNotIn("WIN3", [r["symbol"] for r in fill["selected"] + fill["rejected"]])
 
+    def test_fill_positive_majors_first_before_alts(self):
+        queue = [
+            {"symbol": "BONER-USDT"},
+            {"symbol": "BTC-USDT"},
+            {"symbol": "FLYBRAIN-USDT"},
+            {"symbol": "ETH-USDT"},
+        ]
+
+        def fetch(symbol, limit):
+            return [[0, 1, 1, 1, 1, 1]] * 80
+
+        def score(symbol, bars):
+            return {"n": 12, "pf": 1.3}
+
+        fill = ht.fill_positive(queue, 2, 1.1, {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0}, fetch, score_fn=score)
+        self.assertEqual([r["symbol"] for r in fill["selected"]], ["BTC-USDT", "ETH-USDT"])
+        self.assertNotIn("BONER-USDT", [r["symbol"] for r in fill["selected"]])
+        self.assertNotIn("FLYBRAIN-USDT", [r["symbol"] for r in fill["selected"]])
+        self.assertEqual(fill["evaluated"], 2)
+
     def test_start_stop_does_not_touch_hist_calc_lane(self):
         with tempfile.TemporaryDirectory() as tmp:
             public = os.path.join(tmp, "hist-test.json")
@@ -607,6 +627,7 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("last-15 validated", view["detail"])
         self.assertIn("50 intern symbols", view["detail"])
         self.assertEqual(view["internSetCount"], 7962)
+        self.assertEqual(view["validatedCount"], 1)
         self.assertNotIn("5 symbols", view["detail"])
 
     def test_select_intern_symbols_keeps_open_lots(self):
@@ -775,7 +796,8 @@ class HistTestContract(unittest.TestCase):
         })
         self.assertTrue(view["selectedCoordinations"])
         self.assertIn("block", view["withWithout"])
-        self.assertEqual(view["validatedCount"], 2)
+        self.assertEqual(view["internSetCount"], 2)
+        self.assertEqual(view["validatedCount"], 1)
         self.assertEqual(view["processedSetCount"], 2)
         self.assertLessEqual(view["processingCount"], 2)
 

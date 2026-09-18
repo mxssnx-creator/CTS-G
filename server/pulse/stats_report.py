@@ -853,6 +853,8 @@ def render_html(blob: Dict[str, Any]) -> str:
     )
     intern_n = int(sets_coverage.get("internSetCount") or 0)
     if intern_n <= 0:
+        intern_n = int(hist_test.get("internSetCount") or 0)
+    if intern_n <= 0:
         intern_n = int(hist_test.get("validatedCount") or 0)
     if sets_coverage.get("validatedCount") is not None:
         validated_n = int(sets_coverage.get("validatedCount") or 0)
@@ -1224,6 +1226,8 @@ def render_md(blob: Dict[str, Any]) -> str:
     ht = blob.get("histTest") or {}
     ht_on = bool((ht.get("enabled") is True or ht.get("ownsCatalog") is True) and ht.get("phase") != "off")
     intern_n = scov.get("internSetCount") or 0
+    if not intern_n:
+        intern_n = ht.get("internSetCount") or 0
     if not intern_n:
         intern_n = ht.get("validatedCount") or 0
     validated_n = scov.get("validatedCount") if scov.get("validatedCount") is not None else 0

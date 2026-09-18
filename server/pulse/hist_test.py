@@ -345,6 +345,80 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
     return out
 
 
+def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
+    """Last-15 proven configs: n≥8 and PF≥floor. Empty/intern-neutral tapes are not validated."""
+    blob = job if isinstance(job, dict) else {}
+    proven = 0
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict) or row.get("validated") is False:
+            continue
+        try:
+            n_row = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
+        except (TypeError, ValueError):
+            n_row = 0
+        try:
+            pf = float(row.get("pf") or row.get("last15Ratio") or 0)
+        except (TypeError, ValueError):
+            pf = 0.0
+        if n_row >= 8 and is_positive_pf(pf):
+            proven += 1
+    return proven
+
+
+def intern_assigned_count(job: Optional[Dict[str, Any]] = None) -> int:
+    """Intern book size: assigned/sidecar IDs. Not last-15 proven."""
+    blob = job if isinstance(job, dict) else {}
+    ids = collect_validated_ids(blob)
+    reported = 0
+    try:
+        reported = int(blob.get("internSetCount") or 0)
+    except (TypeError, ValueError):
+        reported = 0
+    if reported <= 0:
+        try:
+            # Legacy jobs stored the intern book in validatedCount.
+            reported = int(blob.get("validatedCount") or 0)
+        except (TypeError, ValueError):
+            reported = 0
+        proven = last15_proven_count(blob)
+        if proven and reported and reported <= proven:
+            reported = 0
+    return max(len(ids), reported)
+
+
+def _stamp_honesty(payload: Dict[str, Any], *, assigned_ids: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """Write intern book vs last-15 proven as separate fields. Never alias them."""
+    if not isinstance(payload, dict):
+        return payload
+    if assigned_ids:
+        try:
+            cur = int(payload.get("internSetCount") or 0)
+        except (TypeError, ValueError):
+            cur = 0
+        payload["internSetCount"] = max(cur, len(list(assigned_ids)))
+        if not payload.get("validatedIds"):
+            payload["validatedIds"] = [str(s) for s in assigned_ids if str(s or "").strip()][:PUBLIC_VALIDATED_IDS_CAP]
+    intern_n = intern_assigned_count(payload)
+    proven = last15_proven_count(payload)
+    try:
+        prev = int(payload.get("internSetCount") or 0)
+    except (TypeError, ValueError):
+        prev = 0
+    payload["internSetCount"] = max(intern_n, prev)
+    payload["validatedCount"] = proven
+    intern_syms = intern_liquid_pool(
+        None,
+        payload.get("universe") or payload.get("ranked"),
+        cap=SYMBOL_CAP,
+        validated=[
+            s for s in (payload.get("positive") or payload.get("symbols") or [])
+            if str(s).upper() in _MAJOR_KEYS
+        ],
+    )
+    payload["internSymbols"] = intern_syms
+    return payload
+
+
 def validated_symbols(job: Optional[Dict[str, Any]] = None) -> List[str]:
     """Positive / filled Test Historic symbols. Never the full rank queue."""
     blob = job if isinstance(job, dict) else {}
@@ -920,6 +994,7 @@ def off_progress_view() -> Dict[str, Any]:
         "symbols": [],
         "internSymbols": [],
         "validatedCount": 0,
+        "internSetCount": 0,
         "processedSetCount": 0,
         "processingCount": 0,
         "detail": "Test Historic off · full catalog in play",
@@ -1076,6 +1151,9 @@ def idle_job() -> Dict[str, Any]:
         "positivePf": POSITIVE_PF,
         "refreshHours": REFRESH_DEFAULT,
         "continuous": False,
+        "internSetCount": 0,
+        "validatedCount": 0,
+        "internSymbols": [],
     }
 
 
@@ -1190,18 +1268,25 @@ def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
     if not ids:
         ids = collect_validated_ids(blob)
     persist_validated_ids(ids)
+    stamped = _stamp_honesty(dict(blob), assigned_ids=ids)
+    intern_syms = list(stamped.get("internSymbols") or [])
+    positive = [s for s in (blob.get("positive") or blob.get("symbols") or []) if str(s).upper() in _MAJOR_KEYS]
+    if not positive:
+        positive = intern_syms
     return {
         "phase": "ready",
         "ready": True,
         "winner": winner,
         "validatedIds": ids,
-        "validatedCount": blob.get("validatedCount") or len(ids),
+        "internSetCount": stamped.get("internSetCount") or intern_assigned_count(blob),
+        "validatedCount": stamped.get("validatedCount") if stamped.get("validatedCount") is not None else last15_proven_count(blob),
+        "internSymbols": intern_syms,
         "successfulConfigs": list(blob.get("successfulConfigs") or [])[:60],
         "hours": blob.get("hours"),
         "minPf": blob.get("minPf"),
         "n": (winner or {}).get("n"),
-        "symbols": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
-        "positive": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
+        "symbols": list(positive)[:SYMBOL_CAP],
+        "positive": list(positive)[:SYMBOL_CAP],
         "pfStats": blob.get("pfStats") or {},
         "withWithout": blob.get("withWithout") or {},
         "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
@@ -1233,13 +1318,14 @@ def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
                     payload["winner"] = last.get("winner") or {}
                 if not payload.get("validatedIds"):
                     payload["validatedIds"] = list(last.get("validatedIds") or [])
-                if payload.get("validatedCount") in (None, 0) and last.get("validatedCount"):
-                    payload["validatedCount"] = last.get("validatedCount")
+                if payload.get("internSetCount") in (None, 0) and last.get("internSetCount"):
+                    payload["internSetCount"] = last.get("internSetCount")
                 if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
                     payload["successfulConfigs"] = last.get("successfulConfigs")
                 payload["lastReady"] = True
             else:
                 payload["lastReady"] = last
+    _stamp_honesty(payload)
     for dest in job_paths():
         try:
             atomic_write(dest, payload)
@@ -1294,7 +1380,16 @@ def job_age_s(blob: Optional[Dict[str, Any]] = None) -> float:
 def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Engine/UI progress for Test Historic: in-flight pct plus last validated gate."""
     blob = job if isinstance(job, dict) else read_job()
+    last_ready = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
+    if not isinstance(last_ready, dict) or not (last_ready.get("pfStats") or last_ready.get("withWithout") or last_ready.get("successfulConfigs")):
+        try:
+            last_ready = read_last_ready()
+        except Exception:
+            last_ready = last_ready if isinstance(last_ready, dict) else {}
+    _merge_last_ready_stats(blob, last_ready if isinstance(last_ready, dict) else None)
     ids = collect_validated_ids(blob)
+    intern_n = intern_assigned_count(blob)
+    proven = last15_proven_count(blob)
     phase = str(blob.get("phase") or "idle")
     paused = bool(blob.get("paused") or phase == "paused")
     running = (phase in RUNNING_PHASES and not paused) or (paused and str(blob.get("resumePhase") or "") in RUNNING_PHASES)
@@ -1302,11 +1397,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         pct = float(blob.get("pct") or 0)
     except (TypeError, ValueError):
         pct = 0.0
-    try:
-        reported = int(blob.get("validatedCount") or 0)
-    except (TypeError, ValueError):
-        reported = 0
-    n_ids = max(len(ids), reported)
+    n_ids = max(len(ids), intern_n)
     if running:
         if pct <= 0:
             pct = 1.0
@@ -1360,17 +1451,6 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         cap=SYMBOL_CAP,
         validated=[s for s in symbols if str(s).upper() in _MAJOR_KEYS],
     )
-    proven = 0
-    for row in blob.get("successfulConfigs") or []:
-        if not isinstance(row, dict) or row.get("validated") is False:
-            continue
-        try:
-            n_row = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
-        except (TypeError, ValueError):
-            n_row = 0
-        if n_row >= 8:
-            proven += 1
-    intern_n = n_ids
     if running:
         detail = f"Test Historic {phase} {int(pct)}% · {raw_detail} · {intern_n} intern · {proven} last-15 validated · {len(intern_syms)} intern symbols"
     elif paused:
@@ -1387,13 +1467,6 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if stale:
         detail += " · waiting on Test Historic refresh"
     running_set_rows = running_sets(blob)
-    last_ready = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
-    if not isinstance(last_ready, dict) or not (last_ready.get("pfStats") or last_ready.get("withWithout")):
-        try:
-            last_ready = read_last_ready()
-        except Exception:
-            last_ready = last_ready if isinstance(last_ready, dict) else {}
-    _merge_last_ready_stats(blob, last_ready if isinstance(last_ready, dict) else None)
     remaining = max(0, int(sets_total) - int(sets_done))
     if running:
         processing_n = remaining if remaining else (1 if pct < 100.0 else 0)
@@ -1401,7 +1474,9 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         processing_n = remaining
     else:
         processing_n = 0
-    ready_flag = bool(ids) or bool(blob.get("ready")) or (phase == "ready" and n_ids > 0)
+    ready_flag = (not running and not paused and not err_line) and (
+        phase == "ready" or bool(blob.get("ready"))
+    )
     if err_line and not running and not paused:
         ready_flag = False
     return {
@@ -1410,7 +1485,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ready": ready_flag,
         "running": running,
         "paused": paused,
-        "validatedCount": n_ids,
+        "validatedCount": proven,
         "internSetCount": intern_n,
         "setsDone": sets_done if running else n_ids,
         "setsTotal": sets_total if running else max(n_ids, 1 if running or n_ids else 0),
@@ -1743,6 +1818,21 @@ def symbol_clears_floor(stats: Dict[str, Any], min_pf: float) -> bool:
     return n > 0 and is_positive_pf(pf, min_pf)
 
 
+def _majors_first_queue(queue: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Evaluate intern majors before junk alts; extras fill only if still short of target."""
+    majors: List[Dict[str, Any]] = []
+    extras: List[Dict[str, Any]] = []
+    for row in queue or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol in _MAJOR_KEYS:
+            majors.append(row)
+        else:
+            extras.append(row)
+    return majors + extras
+
+
 def fill_positive(
     queue: List[Dict[str, Any]],
     target: int,
@@ -1765,6 +1855,11 @@ def fill_positive(
     intern_ids = cap_replay_ids(read_persisted_validated_ids())
     probe: Optional[SetBook] = None
     last_beat = [0.0]
+    queue = _majors_first_queue(queue)
+    try:
+        prev_intern = intern_assigned_count(read_job())
+    except Exception:
+        prev_intern = 0
     for row in queue:
         symbol = str(row.get("symbol") or "").strip().upper()
         snapshot = {
@@ -1775,8 +1870,9 @@ def fill_positive(
             "positive": [r["symbol"] for r in selected],
             "rejected": [r["symbol"] for r in rejected],
             "validatedIds": list(assigned_ids)[:PUBLIC_VALIDATED_IDS_CAP],
-            "validatedCount": len(assigned_ids),
+            "internSetCount": max(len(assigned_ids), len(intern_ids), prev_intern),
         }
+        _stamp_honesty(snapshot, assigned_ids=assigned_ids)
         wait_if_paused(on_progress, snapshot)
         if stop_requested() or len(selected) >= target:
             break
@@ -1869,7 +1965,8 @@ def fill_positive(
                     "positive": [r["symbol"] for r in selected],
                     "rejected": [r["symbol"] for r in rejected],
                     "validatedIds": list(assigned_ids)[:PUBLIC_VALIDATED_IDS_CAP],
-                    "validatedCount": len(assigned_ids),
+                    "internSetCount": len(assigned_ids),
+                    "validatedCount": 0,
                 })
         else:
             rejected.append(record)
@@ -1982,7 +2079,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
     tape_names = [str(s).strip().upper() for s in (job.get("positive") or job.get("symbols") or []) if str(s or "").strip()]
     if not tape_names:
         tape_names = [str(r.get("symbol") or "").upper() for r in (public_ranked or scored) if r.get("symbol")]
-    tape_names = [s for s in tape_names if s in _MAJOR_KEYS] or tape_names
+    tape_names = [s for s in tape_names if s in _MAJOR_KEYS]
+    if not tape_names:
+        tape_names = intern_liquid_pool(None, None, cap=SYMBOL_CAP)
     name_keys = {s.upper() for s in tape_names}
     by_sym_rows: List[Dict[str, Any]] = []
     for row in (job.get("bySymbol") or []):
@@ -2001,11 +2100,8 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
     names = tape_names or positive_names
     ids = list(job.get("validatedIds") or []) or collect_validated_ids(job)
     persist_validated_ids(ids)
-    try:
-        validated_count = int(job.get("validatedCount") or 0)
-    except (TypeError, ValueError):
-        validated_count = 0
-    validated_count = max(validated_count, len(ids))
+    intern_n = intern_assigned_count({**job, "validatedIds": ids, "internSetCount": job.get("internSetCount") or len(ids)})
+    proven = last15_proven_count(job)
     out = {
         "ok": True,
         "phase": str(job.get("phase") or "ready"),
@@ -2057,7 +2153,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             "independentConfigs": True,
             "independentCombo": True,
         },
-        "validatedCount": validated_count or job.get("validatedCount"),
+        "validatedCount": proven,
+        "internSetCount": intern_n,
+        "internSymbols": intern_liquid_pool(None, None, cap=SYMBOL_CAP, validated=names),
         "rowCount": job.get("rowCount"),
         "winner": {
             "id": normalize_catalog_set_id(winner.get("id")) or winner.get("id"),
@@ -2095,7 +2193,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "evaluated": job.get("evaluated") or (job.get("fill") or {}).get("evaluated"),
         "fill": job.get("fill") or {},
     }
-    return out
+    return _stamp_honesty(out)
 
 
 def audit_test(book: Any, symbols: List[str], summary: Dict[str, Any], min_pf: float, hours: int, target: int) -> Dict[str, Any]:
@@ -2193,7 +2291,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "symbols": list(seed_syms),
         "positive": list(seed_syms),
         "validatedIds": list(seed_ids)[:PUBLIC_VALIDATED_IDS_CAP],
-        "validatedCount": len(seed_ids),
+        "internSetCount": len(seed_ids),
+        "validatedCount": last15_proven_count(prior_ready),
         "rejected": [],
     }
     publish(seed)
@@ -2212,8 +2311,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         blob["ready"] = False
         if not blob.get("validatedIds"):
             blob["validatedIds"] = list(seed.get("validatedIds") or seed_ids or [])[:PUBLIC_VALIDATED_IDS_CAP]
-        if not blob.get("validatedCount"):
-            blob["validatedCount"] = int(seed.get("validatedCount") or len(blob.get("validatedIds") or seed_ids or []))
+        if blob.get("internSetCount") in (None, 0):
+            blob["internSetCount"] = int(seed.get("internSetCount") or len(blob.get("validatedIds") or seed_ids or []))
         if not blob.get("positive"):
             blob["positive"] = list(seed.get("positive") or seed_syms or [])
         if not blob.get("symbols"):
@@ -2473,7 +2572,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "evaluations": coverage_counter(set_n, set_n),
             "tasks": coverage_counter(len(symbols), len(symbols)),
         },
-        "validatedCount": len(validated_ids) or sum(1 for item in ranked_sets if item[3]),
+        "validatedCount": last15_proven_count({"successfulConfigs": combo.get("successful") or []}),
+        "internSetCount": intern_assigned_count({"validatedIds": validated_ids, "internSetCount": len(validated_ids)}),
         "rowCount": len(ranked_sets),
         "rows": [set_row(st, side) for _k, st, side, _v, _l in ranked_sets[:80]],
         "winner": winner or {},
@@ -2503,7 +2603,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         },
         "detail": (
             f"{len(symbols)}/{target} positive · evaluated {fill['evaluated']} · "
-            f"{len(validated_ids)} validated configs"
+            f"{intern_assigned_count({'validatedIds': validated_ids, 'internSetCount': len(validated_ids)})} intern · "
+            f"{last15_proven_count({'successfulConfigs': combo.get('successful') or []})} last-15 validated"
         ),
         "pct": 100,
     }
@@ -2757,7 +2858,8 @@ def self_test() -> Dict[str, Any]:
             flying.get("phase") == "evaluate" and abs(float(flying.get("pct") or 0) - 22) < 1e-6 and flying.get("running") is True,
             flying,
         )
-        rec("progress-uses-validated-count", int(flying.get("validatedCount") or 0) >= 40, flying.get("validatedCount"))
+        rec("progress-uses-intern-set-count", int(flying.get("internSetCount") or 0) >= 40, flying.get("internSetCount"))
+        rec("progress-validated-is-proven", int(flying.get("validatedCount") or 0) == 0, flying.get("validatedCount"))
         persist_validated_ids(["indications:1m:sl0.6:st3", "general:1m:sl0.6:st4"])
         rec("persist-ids", read_persisted_validated_ids()[:2] == ["indications:1m:sl0.6:st3", "general:1m:sl0.6:st4"], read_persisted_validated_ids())
         persist_validated_ids([f"set:{i}" for i in range(VALIDATED_IDS_CAP + 40)])

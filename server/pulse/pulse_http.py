@@ -489,6 +489,8 @@ def _apply_effective_set_counts(out: dict) -> None:
     if _hist_test_on(ht):
         intern = int(sets.get("internSetCount") or 0)
         if intern <= 0:
+            intern = int(ht.get("internSetCount") or 0)
+        if intern <= 0:
             intern = int(ht.get("validatedCount") or 0)
         sets["internSetCount"] = intern
         sets["setCount"] = intern
@@ -2166,14 +2168,26 @@ def merge_overall() -> dict:
                     off_blob = blob
         if on_blob:
             view = dict(on_blob)
+            try:
+                fresh = job_progress_view()
+            except Exception:
+                fresh = {}
+            if fresh:
+                for key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "ready", "detail"):
+                    if fresh.get(key) is not None:
+                        view[key] = fresh.get(key)
             if view.get("running") or not view.get("runningSets"):
                 try:
-                    fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy"):
+                    if not fresh:
+                        fresh = job_progress_view()
+                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready"):
                         if fresh.get(key) is None:
                             continue
                         existing = view.get(key)
                         if key == "processingCount" and existing is not None:
+                            continue
+                        if key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "ready", "detail"):
+                            view[key] = fresh.get(key)
                             continue
                         if key in ("internSymbols", "symbols") and existing not in (None, [], ""):
                             continue
@@ -2455,13 +2469,25 @@ class Handler(SimpleHTTPRequestHandler):
                 blob["paused"] = job_is_paused(blob)
                 blob["independent"] = True
                 blob["shared"] = False
-                if view.get("validatedCount") and not blob.get("validatedCount"):
+                if view.get("internSetCount") is not None:
+                    blob["internSetCount"] = view.get("internSetCount")
+                if view.get("validatedCount") is not None:
                     blob["validatedCount"] = view.get("validatedCount")
-                if view.get("symbols") and not blob.get("positive"):
-                    blob["positive"] = view.get("symbols")
-                    blob.setdefault("symbols", view.get("symbols"))
-                for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats"):
-                    if view.get(key) and not blob.get(key):
+                if view.get("internSymbols") is not None:
+                    blob["internSymbols"] = view.get("internSymbols")
+                if view.get("symbols"):
+                    intern_keys = {str(s).upper() for s in (view.get("internSymbols") or view.get("symbols") or [])}
+                    for key in ("positive", "symbols"):
+                        raw = blob.get(key) or []
+                        if isinstance(raw, list) and intern_keys:
+                            kept = [s for s in raw if str(s).upper() in intern_keys]
+                            blob[key] = kept or list(view.get("symbols") or [])
+                        elif not blob.get(key):
+                            blob[key] = view.get("symbols")
+                if view.get("ready") is not None:
+                    blob["ready"] = view.get("ready")
+                for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
+                    if view.get(key) is not None and (key in ("internSymbols", "processedSetCount", "processingCount") or not blob.get(key)):
                         blob[key] = view.get(key)
                 if view.get("detail"):
                     blob["detail"] = view.get("detail")

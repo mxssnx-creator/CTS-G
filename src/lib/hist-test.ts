@@ -64,6 +64,7 @@ export type HistTestJob = {
   enabled?: boolean;
   ownsCatalog?: boolean;
   catalogSkipped?: boolean;
+  internSetCount?: number;
   validatedCount?: number;
   processingCount?: number;
   processedSetCount?: number;
@@ -79,6 +80,7 @@ export type HistTestLive = {
   phase?: string;
   pct?: number;
   detail?: string;
+  internSetCount?: number;
   validatedCount?: number;
   processingCount?: number;
   processedSetCount?: number;
@@ -110,13 +112,18 @@ export function histTestIsEnabled(ht?: HistTestLive | null): boolean {
 
 export function histTestOverviewLine(ht?: HistTestLive | null): string {
   if (!histTestIsEnabled(ht)) return "Test Historic · OFF · full catalog in play";
-  const n = ht?.validatedCount ?? ht?.processedSetCount ?? (ht?.runningSets?.length ?? 0);
+  const intern = ht?.internSetCount ?? 0;
+  const n = ht?.validatedCount ?? 0;
   const ids = (ht?.runningSets || []).map((r) => r.id).filter(Boolean).slice(0, 6);
   const coords = (ht?.selectedCoordinations || ht?.successfulConfigs || []).length;
   const proc = ht?.processingCount ?? 0;
-  const book = Array.isArray(ht?.symbols) ? ht.symbols : [];
+  const book = Array.isArray(ht?.internSymbols) && ht.internSymbols.length
+    ? ht.internSymbols
+    : (Array.isArray(ht?.symbols) ? ht.symbols : []);
   const syms = book.slice(0, 8);
-  const parts = ["Test Historic · ON", `${n} validated`];
+  const parts = ["Test Historic · ON"];
+  if (intern) parts.push(`${intern} intern`);
+  parts.push(`${n} validated`);
   if (proc) parts.push(`${proc} processing`);
   if (coords) parts.push(`${coords} coordinations`);
   if (ids.length) parts.push(`sets ${ids.join(" ")}`);

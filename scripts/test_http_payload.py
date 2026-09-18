@@ -125,6 +125,7 @@ class HttpPayloadTests(unittest.TestCase):
                 "enabled": True,
                 "ownsCatalog": True,
                 "phase": "ready",
+                "internSetCount": 0,
                 "validatedCount": 7962,
             },
         }
@@ -133,3 +134,26 @@ class HttpPayloadTests(unittest.TestCase):
         self.assertEqual(sets["internSetCount"], 7962)
         self.assertEqual(sets["setCount"], 7962)
         self.assertEqual(sets["validatedCount"], 0)
+
+    def test_hist_test_view_counts_prefer_intern_set_count(self):
+        blob = {
+            "sets": {
+                "setCount": 8000,
+                "catalogSetCount": 8000,
+                "internSetCount": 0,
+                "validatedCount": 61,
+            },
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "phase": "ready",
+                "internSetCount": 8192,
+                "validatedCount": 61,
+            },
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["internSetCount"], 8192)
+        self.assertEqual(sets["setCount"], 8192)
+        self.assertEqual(sets["validatedCount"], 61)
+        self.assertNotEqual(sets["internSetCount"], sets["validatedCount"])

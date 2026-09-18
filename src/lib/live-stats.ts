@@ -1102,6 +1102,7 @@ export function statsTickKey(s: LiveStats): string {
     s.block?.lanes?.length ?? "",
     s.stale ? 1 : 0,
     s.histTest?.enabled,
+    s.histTest?.internSetCount ?? "",
     s.histTest?.validatedCount ?? "",
     s.histTest?.phase || "",
   ].join("|");
@@ -1307,6 +1308,7 @@ export function effectiveSetCounts(stats: {
     enabled?: boolean;
     ownsCatalog?: boolean;
     phase?: string;
+    internSetCount?: number;
     validatedCount?: number;
     processingCount?: number;
     internSymbols?: string[];
@@ -1336,17 +1338,25 @@ export function effectiveSetCounts(stats: {
   const cov = stats?.coverage?.sets;
   const catalog =
     knownCount(sets?.catalogSetCount) ?? knownCount(sets?.setCount) ?? knownCount(cov?.catalogSetCount) ?? knownCount(cov?.setCount);
-  const intern =
+  let intern =
     knownCount(sets?.internSetCount) ??
     knownCount(cov?.internSetCount) ??
-    (on ? knownCount(ht?.validatedCount) : null);
-  const validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount);
-  const setCount = on ? intern ?? catalog : catalog;  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
+    null;
+  if (on && !(intern && intern > 0)) {
+    intern = knownCount(ht?.internSetCount) ?? intern;
+    if (!(intern && intern > 0)) intern = knownCount(ht?.validatedCount) ?? intern;
+  }
+  const validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount) ?? (on ? knownCount(ht?.validatedCount) : null);
+  const setCount = on ? intern ?? catalog : catalog;
+  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
   let processing = knownCount(sets?.processingCount) ?? knownCount(ht?.processingCount);
   if (on && intern != null && processing != null && processing > intern) processing = intern;
+  const internSymbols = Array.isArray(ht?.internSymbols) && ht.internSymbols.length
+    ? ht.internSymbols
+    : (Array.isArray(ht?.symbols) ? ht.symbols : null);
   const symbols =
     knownCount(sets?.internSymbolCount) ??
-    (Array.isArray(ht?.symbols) ? ht.symbols.length : null);
+    (internSymbols ? internSymbols.length : null);
   const coordinations = Array.isArray(ht?.selectedCoordinations) ? ht.selectedCoordinations.length : null;
   return { on, catalog, intern, validated, active, processing, setCount, symbols, coordinations };
 }
@@ -1354,7 +1364,8 @@ export function effectiveSetCounts(stats: {
 export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>[0]): string {
   const c = effectiveSetCounts(stats);
   if (c.on) {
-    const parts = [`intern ${c.intern ?? 0} · validated ${c.validated ?? 0}`];    if (c.processing != null) parts.push(`processing ${c.processing}`);
+    const parts = [`intern ${c.intern ?? 0} · validated ${c.validated ?? 0}`];
+    if (c.processing != null) parts.push(`processing ${c.processing}`);
     if (c.active != null) parts.push(`active ${c.active}`);
     if (c.symbols) parts.push(`${c.symbols} symbols`);
     if (c.coordinations) parts.push(`${c.coordinations} coord`);
