@@ -4018,12 +4018,11 @@ class Pulse:
         return [o for o in rows if self.cid_ours(self.order_cid(o))]
 
     def internal_working_order_count(self) -> int:
-        """Complete working orders we own — same book Live reports.
+        """Internal working orders we own: unique attached SL/TP plus pending intents.
 
-        Prefer the confirmed exchange open-order snapshot (every owned working
-        order). Unique attached SL/TP oids are only a fallback while that
-        snapshot is pending; they under-count leftover/unlinked orders.
-        Pending rows without an exchange id still occupy an order slot.
+        Live is the confirmed exchange snapshot, published separately. Intern
+        extras, pending without oid, and leftover venue orders are why Real
+        and Live differ — never replace this book with Live.
         """
         oids: set = set()
         pending_without_oid = 0
@@ -4043,15 +4042,7 @@ class Pulse:
                 oids.add(oid)
             else:
                 pending_without_oid += 1
-        book = len(oids) + pending_without_oid
-        pending_snap = bool(getattr(self, "exchange_order_snapshot_pending", True))
-        try:
-            live_n = int(getattr(self, "exchange_order_own_count", -1))
-        except (TypeError, ValueError):
-            live_n = -1
-        if not pending_snap and live_n >= 0:
-            return live_n + pending_without_oid
-        return book
+        return len(oids) + pending_without_oid
 
     def internal_position_group_count(self) -> int:
         """Unique Real positions: one owned symbol+direction parent with qty > 0.

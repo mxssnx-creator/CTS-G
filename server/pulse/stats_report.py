@@ -857,7 +857,8 @@ def render_html(blob: Dict[str, Any]) -> str:
     if sets_coverage.get("validatedCount") is not None:
         validated_n = int(sets_coverage.get("validatedCount") or 0)
     else:
-        validated_n = 0    catalog_n = int(sets_coverage.get("catalogSetCount") or sets_coverage.get("setCount") or blob.get("setCount") or 0)
+        validated_n = 0
+    catalog_n = int(sets_coverage.get("catalogSetCount") or sets_coverage.get("setCount") or blob.get("setCount") or 0)
     proc_n = int(sets_coverage.get("processingCount") if sets_coverage.get("processingCount") is not None else (hist_test.get("processingCount") or 0))
     active_n = int(sets_coverage.get("activeCount", blob.get("setActive")) or 0)
     if hist_on:
@@ -1225,7 +1226,8 @@ def render_md(blob: Dict[str, Any]) -> str:
     intern_n = scov.get("internSetCount") or 0
     if not intern_n:
         intern_n = ht.get("validatedCount") or 0
-    validated_n = scov.get("validatedCount") if scov.get("validatedCount") is not None else 0    catalog_n = scov.get("catalogSetCount") or scov.get("setCount")
+    validated_n = scov.get("validatedCount") if scov.get("validatedCount") is not None else 0
+    catalog_n = scov.get("catalogSetCount") or scov.get("setCount")
     if ht_on:
         lines.append(
             f"- intern {intern_n} · validated {validated_n} · processing {scov.get('processingCount') if scov.get('processingCount') is not None else ht.get('processingCount')} · active {scov.get('activeCount')}"

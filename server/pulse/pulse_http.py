@@ -1318,7 +1318,7 @@ def _live_position_count(state, default: int = -1) -> int:
 
 
 def _real_order_count(state, default: int = -1) -> int:
-    """Complete working orders we own. Same book Live reports; never a lane copy."""
+    """Internal working orders we own. Live is the exchange snapshot — keep them apart."""
     if not isinstance(state, dict):
         return default
     evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
@@ -1344,9 +1344,6 @@ def _real_order_count(state, default: int = -1) -> int:
     )
     if copied:
         published = default
-    # Complete exchange snapshot is the Real order book (same as Live).
-    if live >= 0:
-        return live
     if published >= 0:
         return published
     if snapshot >= 0:

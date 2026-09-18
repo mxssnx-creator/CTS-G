@@ -138,10 +138,10 @@ class ActivityGroupTests(unittest.TestCase):
         # Unique working: SL1, TP1, SL2, TP2, pending 111, pending without oid.
         # Shared overall SL/TP and filled entry ids are not extra orders.
         self.assertEqual(p.internal_working_order_count(), 6)
-        # Confirmed Live snapshot is the complete owned working-order book.
+        # Confirmed Live snapshot stays Live. Real keeps the internal book.
         p.exchange_order_snapshot_pending = False
         p.exchange_order_own_count = 178
-        self.assertEqual(p.internal_working_order_count(), 179)  # 178 + pending without oid
+        self.assertEqual(p.internal_working_order_count(), 6)
         p.exchange_order_snapshot_pending = True
         self.assertEqual(p.internal_working_order_count(), 6)
         # Real Positions collapse intern/config lanes onto symbol+direction.
@@ -244,11 +244,14 @@ class ActivityGroupTests(unittest.TestCase):
         self.assertEqual(ph._symbol_direction_count_from_snapshot(complete, exchange_only=True), 4)
         self.assertEqual(ph._position_group_count(complete), 5)
         self.assertEqual(ph._live_position_count(complete), 4)
-        self.assertEqual(ph._real_order_count(complete), 178)
+        self.assertEqual(ph._real_order_count(complete), 30)
         slim_complete = ph.slim_for_ui(complete)
         self.assertEqual(slim_complete["realPositionCount"], 5)
         self.assertEqual(slim_complete["livePositionCount"], 4)
-        self.assertEqual(slim_complete["realOrderCount"], 178)
+        self.assertEqual(slim_complete["realOrderCount"], 30)
+        self.assertEqual(slim_complete["liveOrderCount"], 178)
+        self.assertNotEqual(slim_complete["realPositionCount"], slim_complete["livePositionCount"])
+        self.assertNotEqual(slim_complete["realOrderCount"], slim_complete["liveOrderCount"])
 
     def test_strategy_attribution_uses_execution_and_not_parent_pack(self):
         base = dict(pack="general", strategy="core", axis_key="", trail_key="")

@@ -151,7 +151,7 @@ test("positions/orders never fall order counts back onto positions", () => {
   assert.equal(realPosOrders({ openCount: 298 }), "—/—");
   assert.equal(
     realPosOrders({ realPositionGroupCount: 13, realOrderCount: 30, liveOrderCount: 178, openCount: 149 }),
-    "13/178",
+    "13/30",
   );
   assert.equal(
     realPosOrders({ realPositionGroupCount: 13, realOrderCount: 149, liveOrderCount: 178, openCount: 149 }),
@@ -171,7 +171,7 @@ test("positions/orders never fall order counts back onto positions", () => {
       liveOrderCount: 26,
       openCount: 40,
     }),
-    { realPositions: 5, livePositions: 4, realOrders: 26, liveOrders: 26 },
+    { realPositions: 5, livePositions: 4, realOrders: 10, liveOrders: 26 },
   );
 });
 

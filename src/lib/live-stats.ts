@@ -1285,8 +1285,8 @@ export function posOrdersCounts(stats: {
   const realOrd = knownCount(stats?.realOrderCount);
   const lanes = knownCount(stats?.openCount);
   let realOrders = realOrd;
+  // Older engines copied lane/openCount onto realOrderCount. That is not orders.
   if (realOrders != null && lanes != null && realOrders === lanes) realOrders = liveOrders;
-  if (liveOrders != null) realOrders = liveOrders;
   return { realPositions, livePositions, realOrders, liveOrders };
 }
 
