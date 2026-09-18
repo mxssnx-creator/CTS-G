@@ -2473,17 +2473,29 @@ class Handler(SimpleHTTPRequestHandler):
                     blob["internSetCount"] = view.get("internSetCount")
                 if view.get("validatedCount") is not None:
                     blob["validatedCount"] = view.get("validatedCount")
-                if view.get("internSymbols") is not None:
+                intern_syms = [str(s).strip().upper() for s in (view.get("internSymbols") or []) if str(s or "").strip()]
+                intern_keys = {s.upper() for s in intern_syms}
+                if intern_syms:
+                    blob["internSymbols"] = intern_syms
+                    blob["symbols"] = intern_syms
+                    raw_pos = blob.get("positive") or []
+                    if isinstance(raw_pos, list):
+                        kept = []
+                        for item in raw_pos:
+                            name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
+                            if str(name or "").strip().upper() in intern_keys:
+                                kept.append(item if isinstance(item, str) else name)
+                        blob["positive"] = kept or intern_syms
+                    raw_rej = blob.get("rejected") or []
+                    if isinstance(raw_rej, list):
+                        cleaned = []
+                        for item in raw_rej:
+                            name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
+                            if str(name or "").strip().upper() in intern_keys:
+                                cleaned.append(item)
+                        blob["rejected"] = cleaned
+                elif view.get("internSymbols") is not None:
                     blob["internSymbols"] = view.get("internSymbols")
-                if view.get("symbols"):
-                    intern_keys = {str(s).upper() for s in (view.get("internSymbols") or view.get("symbols") or [])}
-                    for key in ("positive", "symbols"):
-                        raw = blob.get(key) or []
-                        if isinstance(raw, list) and intern_keys:
-                            kept = [s for s in raw if str(s).upper() in intern_keys]
-                            blob[key] = kept or list(view.get("symbols") or [])
-                        elif not blob.get(key):
-                            blob[key] = view.get("symbols")
                 if view.get("ready") is not None:
                     blob["ready"] = view.get("ready")
                 for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats", "processedSetCount"):

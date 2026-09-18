@@ -322,7 +322,7 @@ class HistTestContract(unittest.TestCase):
         def score(symbol, bars):
             return {"n": 12, "pf": 1.3 if symbol.startswith("WIN") else 0.7}
 
-        fill = ht.fill_positive(queue, 2, 1.1, {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0}, fetch, score_fn=score)
+        fill = ht.fill_positive(queue, 2, 1.1, {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0}, fetch, score_fn=score, allow_extras=True)
         self.assertEqual([r["symbol"] for r in fill["selected"]], ["WIN1", "WIN2"])
         self.assertEqual(fill["filled"], 2)
         self.assertEqual(fill["evaluated"], 3)
@@ -349,6 +349,28 @@ class HistTestContract(unittest.TestCase):
         self.assertNotIn("BONER-USDT", [r["symbol"] for r in fill["selected"]])
         self.assertNotIn("FLYBRAIN-USDT", [r["symbol"] for r in fill["selected"]])
         self.assertEqual(fill["evaluated"], 2)
+
+    def test_fill_positive_does_not_pad_intern_with_alts(self):
+        queue = [
+            {"symbol": "BTC-USDT"},
+            {"symbol": "BONER-USDT"},
+            {"symbol": "PUMP-USDT"},
+            {"symbol": "VVV-USDT"},
+        ]
+
+        def fetch(symbol, limit):
+            return [[0, 1, 1, 1, 1, 1]] * 80
+
+        def score(symbol, bars):
+            return {"n": 12, "pf": 0.7 if symbol == "BTC-USDT" else 1.4}
+
+        fill = ht.fill_positive(queue, 2, 1.1, {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0}, fetch, score_fn=score)
+        self.assertEqual([r["symbol"] for r in fill["selected"]], [])
+        self.assertEqual([r["symbol"] for r in fill["rejected"]], ["BTC-USDT"])
+        self.assertNotIn("BONER-USDT", [r["symbol"] for r in fill["selected"] + fill["rejected"]])
+        self.assertNotIn("PUMP-USDT", [r["symbol"] for r in fill["selected"] + fill["rejected"]])
+        self.assertNotIn("VVV-USDT", [r["symbol"] for r in fill["selected"] + fill["rejected"]])
+        self.assertEqual(fill["filled"], 0)
 
     def test_start_stop_does_not_touch_hist_calc_lane(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,6 +468,7 @@ class HistTestContract(unittest.TestCase):
                         {"histTestHours": 4, "histLookbackBars": 80, "histWarmup": 0},
                         fetch,
                         score_fn=score,
+                        allow_extras=True,
                     )
 
                 thread = threading.Thread(target=worker, name="hist-pause-fill", daemon=True)

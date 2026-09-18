@@ -365,6 +365,36 @@ def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
     return proven
 
 
+def _clear_unproven(row: Any) -> None:
+    """Last-15 identity is not validation. n<8 or PF below floor is unproven."""
+    if not isinstance(row, dict):
+        return
+    try:
+        n_row = int(row.get("evalN") or row.get("last15N") or row.get("n") or 0)
+    except (TypeError, ValueError):
+        n_row = 0
+    try:
+        pf = float(row.get("pf") or row.get("last15Ratio") or 0)
+    except (TypeError, ValueError):
+        pf = 0.0
+    if n_row < 8 or not is_positive_pf(pf):
+        row["validated"] = False
+
+
+def _stamp_result_flags(payload: Dict[str, Any]) -> None:
+    for key in ("pfStats", "byIndication", "byStrategy", "kinds"):
+        blob = payload.get(key)
+        if not isinstance(blob, dict):
+            continue
+        for row in blob.values():
+            _clear_unproven(row)
+            if isinstance(row, dict) and isinstance(row.get("bySide"), dict):
+                for side in row["bySide"].values():
+                    _clear_unproven(side)
+    for row in payload.get("successfulConfigs") or []:
+        _clear_unproven(row)
+
+
 def intern_assigned_count(job: Optional[Dict[str, Any]] = None) -> int:
     """Intern book size: assigned/sidecar IDs. Not last-15 proven."""
     blob = job if isinstance(job, dict) else {}
@@ -416,6 +446,7 @@ def _stamp_honesty(payload: Dict[str, Any], *, assigned_ids: Optional[Sequence[s
         ],
     )
     payload["internSymbols"] = intern_syms
+    _stamp_result_flags(payload)
     return payload
 
 
@@ -1225,7 +1256,7 @@ def read_last_ready() -> Dict[str, Any]:
         with open(LAST_READY_PATH, encoding="utf-8") as handle:
             loaded = json.load(handle)
         if isinstance(loaded, dict) and (loaded.get("winner") or loaded.get("validatedIds")):
-            return loaded
+            return _stamp_honesty(dict(loaded))
     except Exception:
         pass
     return {}
@@ -1818,8 +1849,8 @@ def symbol_clears_floor(stats: Dict[str, Any], min_pf: float) -> bool:
     return n > 0 and is_positive_pf(pf, min_pf)
 
 
-def _majors_first_queue(queue: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Evaluate intern majors before junk alts; extras fill only if still short of target."""
+def _majors_first_queue(queue: List[Dict[str, Any]], *, allow_extras: bool = False) -> List[Dict[str, Any]]:
+    """Intern evaluates majors only. Extras never pad the intern book."""
     majors: List[Dict[str, Any]] = []
     extras: List[Dict[str, Any]] = []
     for row in queue or []:
@@ -1830,7 +1861,9 @@ def _majors_first_queue(queue: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             majors.append(row)
         else:
             extras.append(row)
-    return majors + extras
+    if allow_extras:
+        return majors + extras
+    return majors
 
 
 def fill_positive(
@@ -1842,8 +1875,9 @@ def fill_positive(
     *,
     on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     score_fn: Optional[Callable[[str, List[List[float]]], Dict[str, Any]]] = None,
+    allow_extras: bool = False,
 ) -> Dict[str, Any]:
-    """Evaluate ranked symbols rawly until `target` positive results fill."""
+    """Evaluate intern majors until `target` positive results fill. Junk alts never pad intern."""
     hours = clamp_hours(overlay.get("histTestHours") or overlay.get("hours") or HOURS_DEFAULT)
     lookback = int(overlay.get("histLookbackBars") or lookback_bars(hours))
     fetch_bars = lookback + int(overlay.get("histWarmup") or HIST_WARMUP_BARS)
@@ -1855,7 +1889,7 @@ def fill_positive(
     intern_ids = cap_replay_ids(read_persisted_validated_ids())
     probe: Optional[SetBook] = None
     last_beat = [0.0]
-    queue = _majors_first_queue(queue)
+    queue = _majors_first_queue(queue, allow_extras=allow_extras)
     try:
         prev_intern = intern_assigned_count(read_job())
     except Exception:
@@ -1965,8 +1999,8 @@ def fill_positive(
                     "positive": [r["symbol"] for r in selected],
                     "rejected": [r["symbol"] for r in rejected],
                     "validatedIds": list(assigned_ids)[:PUBLIC_VALIDATED_IDS_CAP],
-                    "internSetCount": len(assigned_ids),
-                    "validatedCount": 0,
+                    "internSetCount": max(len(assigned_ids), len(intern_ids), prev_intern),
+                    "internSymbols": intern_liquid_pool(None, None, cap=SYMBOL_CAP),
                 })
         else:
             rejected.append(record)
@@ -2311,8 +2345,19 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         blob["ready"] = False
         if not blob.get("validatedIds"):
             blob["validatedIds"] = list(seed.get("validatedIds") or seed_ids or [])[:PUBLIC_VALIDATED_IDS_CAP]
-        if blob.get("internSetCount") in (None, 0):
-            blob["internSetCount"] = int(seed.get("internSetCount") or len(blob.get("validatedIds") or seed_ids or []))
+        try:
+            incoming = int(blob.get("internSetCount") or 0)
+        except (TypeError, ValueError):
+            incoming = 0
+        try:
+            seed_n = int(seed.get("internSetCount") or 0)
+        except (TypeError, ValueError):
+            seed_n = 0
+        blob["internSetCount"] = max(incoming, seed_n, len(blob.get("validatedIds") or seed_ids or []))
+        if blob.get("validatedCount") in (None, 0):
+            blob.pop("validatedCount", None)
+        if not blob.get("internSymbols"):
+            blob["internSymbols"] = intern_liquid_pool(None, None, cap=SYMBOL_CAP)
         if not blob.get("positive"):
             blob["positive"] = list(seed.get("positive") or seed_syms or [])
         if not blob.get("symbols"):
@@ -2349,6 +2394,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             overlay,
             fetch_fn,
             on_progress=progress,
+            allow_extras=False,
         )
         selected = fill["selected"]
         skipped = fill["skipped"]
@@ -2374,7 +2420,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 "evaluated": len(selected) + len(fill.get("rejected") or []) + len(skipped),
             }
     else:
-        fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress)
+        fill = fill_positive(queue, target, min_pf, overlay, fetch_fn, on_progress=progress, allow_extras=bool(synth))
     selected = fill["selected"]
 
     def stopped_job(detail: str = "historic test stopped") -> Dict[str, Any]:
@@ -2894,7 +2940,7 @@ def self_test() -> Dict[str, Any]:
         positive = symbol in {"AAA-USDT", "CCC-USDT", "EEE-USDT"}
         return {"n": 30, "evalN": 30, "pf": 1.28 if positive else 0.82, "wr": 60 if positive else 40, "maxDdS": 120}
 
-    fill = fill_positive(queue, 2, 1.1, ov, fake_fetch, score_fn=fake_score)
+    fill = fill_positive(queue, 2, 1.1, ov, fake_fetch, score_fn=fake_score, allow_extras=True)
     fills = [r["symbol"] for r in fill["selected"]]
     rejected = [r["symbol"] for r in fill["rejected"]]
     rec("fill-stops-at-target", len(fills) == 2, fills)
@@ -2906,7 +2952,7 @@ def self_test() -> Dict[str, Any]:
 
     live_fill = fill_positive(
         [{"symbol": "AAA-USDT"}, {"symbol": "BBB-USDT"}],
-        2, 1.1, ov, fake_fetch,
+        2, 1.1, ov, fake_fetch, allow_extras=True,
     )
     rec("live-eval-runs", live_fill["evaluated"] == 2, live_fill)
     rec("live-eval-records-pf", all("pf" in r for r in live_fill["selected"] + live_fill["rejected"]), live_fill)

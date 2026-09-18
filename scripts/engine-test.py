@@ -165,6 +165,7 @@ def overlay_test() -> None:
         {"histTestHours": 20, "histLookbackBars": 80, "histWarmup": 0},
         _hist_fetch,
         score_fn=_hist_score,
+        allow_extras=True,
     )
     rec(
         "hist-test-fill-until-count",

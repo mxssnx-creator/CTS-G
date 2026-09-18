@@ -485,7 +485,7 @@ function SettingsPage() {
   };
 
   const onApplyPositiveSymbols = () => {
-    const names = (histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
+    const names = (histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
     const majors = names.filter((s) => MAJOR_USDT.has(String(s).toUpperCase()));
     setOverlay((o) => {
       const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
@@ -2711,7 +2711,7 @@ function TestHistoricCard({
           enabled={enabled}
         />
         <p className="text-sm text-muted">
-          Replay the step book on a {overlay.histTestHours}h tape. Symbols are evaluated in rank order until {histTestTarget} clear min PF {overlay.histTestMinPf.toFixed(2)}.
+          Replay intern majors on a {overlay.histTestHours}h tape. Last-15 proven configs (n≥8 and PF ≥ {overlay.histTestMinPf.toFixed(2)}) are validated. Intern extras never replace the 50 majors.
         </p>
         <Grid>
           <Slider
@@ -2774,8 +2774,8 @@ function TestHistoricCard({
         {(histTestJob?.positive?.length || (Array.isArray(histTestJob?.rejected) && histTestJob.rejected.length) || histTestIsRunning(histTestJob?.phase) || histTestJob?.ready) ? (
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
-              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Positive · {histTestJob?.filled ?? histTestJob?.positive?.length ?? 0}/{histTestJob?.targetCount ?? histTestTarget}</p>
-              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{(histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
+              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Intern majors · {(histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).length}/{histTestJob?.targetCount ?? histTestTarget}</p>
+              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{(histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).join(" · ") || "—"}</p>
             </div>
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
               <p className="font-mono text-[10px] uppercase tracking-wide text-muted">Rejected · evaluated {histTestJob?.evaluated ?? 0}</p>
