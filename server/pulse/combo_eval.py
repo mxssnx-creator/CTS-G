@@ -28,7 +28,7 @@ TRAIL_OFF = {"", "0", "off", "none", "base", "false", "core"}
 KIND_LANES = {"kind", "kind-overlay"}
 TAIL_CAP = 80
 SUCCESSFUL_CAP = 80
-MATRIX_EMPTY = {"n": 0, "evalN": 0, "pf": 1.0, "wr": 0.0, "netAvg": 0.0, "validated": False, "maxDdS": 0.0, "avgDdS": 0.0, "pfDdRatio": 0.0}
+MATRIX_EMPTY = {"n": 0, "evalN": 0, "pf": 0.0, "wr": 0.0, "netAvg": 0.0, "validated": False, "maxDdS": 0.0, "avgDdS": 0.0, "pfDdRatio": 0.0}
 
 
 def open_combo_db() -> sqlite3.Connection:
@@ -217,8 +217,16 @@ def _config_of(row: Any, meta: Optional[Dict[str, Any]] = None) -> str:
 def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     tail = list(acc.tail)
     window = last_n_cost_pf(tail, max(1, pf_n), cost_pct, ordered=True, simple=True) if tail else last_n_cost_pf([], 1, cost_pct)
-    pf = float(window.get("ratio") or 1.0)
-    eval_n = int(window.get("count") or 0)
+    try:
+        eval_n = int(window.get("count") or 0)
+    except (TypeError, ValueError):
+        eval_n = 0
+    try:
+        pf = float(window.get("ratio"))
+    except (TypeError, ValueError):
+        pf = 0.0
+    if eval_n <= 0 or pf != pf:
+        pf = 0.0
     wr = round(100.0 * acc.wins / acc.decided, 1) if acc.decided else 0.0
     dd = drawdown_time(tail, ordered=True) if tail else {"maxS": 0.0, "avgS": 0.0}
     max_dd = float(dd.get("maxS") or 0)
@@ -584,6 +592,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("combo-family-ddt", all("maxDdS" in ((blob.get("pfStats") or {}).get(k) or {}) for k in PF_FAMILIES), blob.get("pfStats"))
     rec("combo-matrix-ddt", all("maxDdS" in (c or {}) for c in (blob.get("matrix") or [])[:5]), (blob.get("matrix") or [])[:1])
     rec("combo-successful-ddt", all("maxDdS" in r for r in (blob.get("successful") or [])) or not blob.get("successful"), blob.get("successful")[:1])
+    axis = (blob.get("pfStats") or {}).get("axis") or {}
+    rec("combo-empty-not-intern-one", int(axis.get("n") or 0) == 0 and float(axis.get("pf") or 0) == 0.0 and not axis.get("validated"), axis)
     return out
 
 

@@ -90,6 +90,26 @@ SYMBOL_CAP = 50
 GATE_SET_CAP = 512
 JOB_CACHE_TTL_S = 1.5
 
+
+def cap_replay_ids(ids: Optional[Sequence[str]] = None, cap: int = GATE_SET_CAP) -> List[str]:
+    """Bound catalog replay so Test Historic cannot hang on an unbounded intern book."""
+    try:
+        limit = max(1, int(cap or GATE_SET_CAP))
+    except (TypeError, ValueError):
+        limit = GATE_SET_CAP
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in ids or []:
+        sid = str(raw or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
+        if len(out) >= limit:
+            break
+    return out
+
+
 _JOB_CACHE: Optional[Dict[str, Any]] = None
 _JOB_CACHE_AT = 0.0
 
@@ -1742,6 +1762,9 @@ def fill_positive(
     skipped: List[Dict[str, Any]] = []
     assigned_ids: List[str] = []
     assigned_seen: set[str] = set()
+    intern_ids = cap_replay_ids(read_persisted_validated_ids())
+    probe: Optional[SetBook] = None
+    last_beat = [0.0]
     for row in queue:
         symbol = str(row.get("symbol") or "").strip().upper()
         snapshot = {
@@ -1772,14 +1795,35 @@ def fill_positive(
         if not isinstance(bars, list) or len(bars) < min(80, max(40, lookback // 2)):
             skipped.append({"symbol": symbol, "reason": f"bars {len(bars) if isinstance(bars, list) else 0}"})
             continue
-        probe = None
         if score_fn is not None:
             stats = dict(score_fn(symbol, bars) or {})
         else:
-            probe = SetBook()
-            probe.load(overlay)
+            if probe is None:
+                probe = SetBook()
+                probe.load(overlay)
+                if intern_ids:
+                    probe.restrict_to_ids(intern_ids)
+            def on_step() -> None:
+                now = time.time()
+                if now - last_beat[0] < 2.0:
+                    return
+                last_beat[0] = now
+                if on_progress:
+                    on_progress({
+                        **snapshot,
+                        "detail": f"evaluate {symbol} · catalog replay · {len(selected)}/{target} positive",
+                    })
+                wait_if_paused(on_progress, snapshot)
             probe.ingest_bars(symbol, bars)
-            probe.replay_all(symbols=[symbol], workers=1, merge=True, score=True)
+            probe.replay_all(
+                symbols=[symbol],
+                workers=1,
+                merge=True,
+                score=True,
+                abort=stop_requested,
+                on_step=on_step,
+                set_ids=intern_ids or None,
+            )
             roll = {r.get("symbol"): r for r in symbol_rollup(probe) if isinstance(r, dict)}
             stats = dict(roll.get(symbol) or {})
         record = {
@@ -2292,18 +2336,21 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     book = SetBook()
     book.load(overlay)
     if recalc_only:
-        kept = book.restrict_to_ids(recalc_ids)
+        kept = book.restrict_to_ids(cap_replay_ids(recalc_ids))
         progress({
             "phase": "replay",
             "pct": 64,
             "detail": f"recalc {kept}/{len(recalc_ids)} configs · {len(symbols)} symbols",
             "symbols": symbols,
             "positive": symbols,
-            "validatedIds": recalc_ids,
+            "validatedIds": cap_replay_ids(recalc_ids),
             "recalcOnly": True,
         })
     for row in selected:
         book.ingest_bars(row["symbol"], row["_bars"])
+
+    replay_ids = cap_replay_ids(recalc_ids) if recalc_only else None
+    last_beat = [0.0]
 
     def on_symbol(symbol: str, done: int, total: int) -> None:
         progress({
@@ -2316,15 +2363,34 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "setsTotal": max(total, 1),
         })
 
+    def on_step() -> None:
+        now = time.time()
+        if now - last_beat[0] < 2.0:
+            return
+        last_beat[0] = now
+        wait_if_paused(progress, {
+            "phase": "replay",
+            "pct": 60,
+            "detail": f"replay catalog · {len(symbols)} symbols",
+            "symbols": symbols,
+            "positive": symbols,
+        })
+
+    if stop_requested():
+        return stopped_job()
     book.replay_all(
         symbols=symbols,
         workers=1,
         merge=True,
         progress_total=len(symbols),
         score=True,
-        set_ids=recalc_ids if recalc_only else None,
+        set_ids=replay_ids or None,
         on_symbol=on_symbol,
+        abort=stop_requested,
+        on_step=on_step,
     )
+    if stop_requested():
+        return stopped_job()
     progress({
         "phase": "score",
         "pct": 90,
@@ -2467,7 +2533,7 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if thread_alive() and stop_requested():
             winding = _THREAD
     if winding is not None:
-        winding.join(0.25)
+        winding.join(2.0)
     with _LOCK:
         if thread_alive() and pause_requested():
             clear_pause()
@@ -2591,23 +2657,7 @@ def pause_test() -> Dict[str, Any]:
 
 
 def resume_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Resume a paused live worker, or Start a new run if nothing is in flight."""
-    if thread_alive():
-        return start_test(body)
-    job = read_job()
-    was_live = bool(job.get("running")) or str(job.get("resumePhase") or "") in RUNNING_PHASES
-    if was_live:
-        clear_pause()
-        clear_stop()
-        resume_phase = str(job.get("resumePhase") or "evaluate")
-        if resume_phase not in RUNNING_PHASES:
-            resume_phase = "evaluate"
-        job["ok"] = True
-        job["paused"] = False
-        job["running"] = True
-        job["phase"] = resume_phase
-        job["detail"] = "historic test resumed"
-        return publish(job)
+    """Resume a paused live worker, or Start a new run if the worker is gone."""
     return start_test(body)
 
 

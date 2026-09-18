@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "server", "pulse"))
 
 import hist_test as ht  # noqa: E402
+import combo_eval as ce  # noqa: E402
 from position_cost import PF_MAX, PF_MIN, POSITIVE_PF  # noqa: E402
 
 
@@ -364,10 +365,12 @@ class HistTestContract(unittest.TestCase):
                 # by using resume_test's idle path: was_live is False, so start_test
                 # would spawn. Instead clear via resume_test after marking live.
                 live = ht.publish({**paused, "running": True, "resumePhase": "evaluate", "phase": "paused", "paused": True})
-                resumed = ht.resume_test()
+                with patch.object(ht, "start_test", return_value={"phase": "queued", "paused": False, "running": True, "ok": True}) as start:
+                    resumed = ht.resume_test()
+                start.assert_called()
                 self.assertFalse(resumed.get("paused"))
-                self.assertEqual(resumed.get("phase"), "evaluate")
-                self.assertFalse(os.path.exists(os.path.join(tmp, "PAUSE")))
+                self.assertIn(resumed.get("phase"), ("queued", "evaluate"))
+                ht.clear_pause()
                 ht.pause_test()
                 stopped = ht.stop_test()
                 self.assertEqual(stopped.get("phase"), "stopped")
@@ -965,6 +968,34 @@ class HistTestContract(unittest.TestCase):
             ht.LAST_READY_PATH = prev_last
             ht.VALIDATED_IDS_PATH = prev_ids
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_replay_ids_cap_stops_unbounded_intern_book(self):
+        ids = [f"cfg:{i}" for i in range(ht.GATE_SET_CAP + 80)]
+        capped = ht.cap_replay_ids(ids)
+        self.assertEqual(len(capped), ht.GATE_SET_CAP)
+        self.assertEqual(capped[0], "cfg:0")
+        self.assertEqual(capped[-1], f"cfg:{ht.GATE_SET_CAP - 1}")
+        self.assertEqual(ht.cap_replay_ids([]), [])
+
+    def test_dead_resume_starts_a_new_run_instead_of_staying_stuck(self):
+        with patch.object(ht, "thread_alive", return_value=False), patch.object(
+            ht, "start_test", return_value={"phase": "queued", "running": True, "paused": False}
+        ) as start:
+            out = ht.resume_test({"hours": 8})
+        start.assert_called()
+        self.assertEqual(out["phase"], "queued")
+        self.assertTrue(out["running"])
+
+    def test_combo_empty_family_is_not_intern_one(self):
+        blob = ce.evaluate_fills([], min_pf=1.15, pf_n=8)
+        axis = (blob.get("pfStats") or {}).get("axis") or {}
+        self.assertEqual(int(axis.get("n") or 0), 0)
+        self.assertEqual(float(axis.get("pf") or 0), 0.0)
+        self.assertFalse(axis.get("validated"))
+        empty = next((c for c in blob.get("matrix") or [] if c.get("n") == 0), None)
+        self.assertIsNotNone(empty)
+        self.assertEqual(float(empty.get("pf") or 0), 0.0)
+        self.assertFalse(empty.get("validated"))
 
 
 if __name__ == "__main__":
