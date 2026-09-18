@@ -29,7 +29,7 @@ import overall_controls
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
 from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
-from block_active import ContinuationBook, adjusted_quantity, observe_continuation
+from block_active import ContinuationBook, adjusted_quantity, executable_parent_qty, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog, dumps as fast_json_dumps
@@ -1749,11 +1749,11 @@ class Pulse:
                 key = self.block.key(pos.symbol, pos.side)
                 lane = self.block.lanes.get(key)
                 if lane and lane.base_qty > 0:
-                    if core_qty > 0:
+                    if core_qty > float(lane.base_qty or 0) + 1e-12:
                         refresh = getattr(self.block, "refresh_parent_qty", None)
                         if callable(refresh):
                             refresh(lane, core_qty, pos.entry)
-                        elif abs(float(lane.base_qty or 0) - core_qty) > 1e-12:
+                        else:
                             lane.base_qty = core_qty
                         lane.active = True
                         self.block.save()
@@ -1766,7 +1766,15 @@ class Pulse:
         except Exception:
             pass
         try:
-            self.dca.attach(pos.symbol, pos.side, dca_qty, pos.entry, group_key=dca_key)
+            min_q = 0.0
+            try:
+                c = self.contracts.get(pos.symbol)
+                px = self.px.get(pos.symbol) or pos.entry
+                if c is not None and px:
+                    min_q = float(self.min_order_qty(c, px) or 0.0)
+            except Exception:
+                min_q = 0.0
+            self.dca.attach(pos.symbol, pos.side, dca_qty, pos.entry, group_key=dca_key, min_qty=min_q)
         except TypeError:
             try:
                 self.dca.attach(pos.symbol, pos.side, pos.qty, pos.entry)
@@ -5812,7 +5820,7 @@ class Pulse:
         )
         return pos
 
-    def block_active_plan(self, sym, side, chosen, reference_qty, px, execution_lane=""):
+    def block_active_plan(self, sym, side, chosen, reference_qty, px, execution_lane="", min_qty=0.0, extra_cap=1.0):
         """Plan one overall quantity delta, with no normal exchange parent."""
         self._execution_decision = {"mode": "block-active", "allowed": False, "reason": "disabled"}
         if not (getattr(self, "block_active", True) and self.block.enabled
@@ -5920,7 +5928,7 @@ class Pulse:
                    and r.axis_key == f"block-active:{count}" and r.symbol == sym and r.side == side]
             if own and sum(float(r.pnl) for r in own[-25:]) <= 0:
                 continue
-            qty = adjusted_quantity(reference_qty, specified, owned, pending)
+            qty = adjusted_quantity(reference_qty, specified, owned, pending, min_qty, extra_cap)
             if qty <= 0:
                 continue
             decision = {"mode": "block-active", "allowed": True, "reason": "qualified adjusted delta",
@@ -6123,12 +6131,21 @@ class Pulse:
         # selected Set's volume with that executable floor before submitting
         # the market entry.  This prevents creating a position whose later
         # SL/TP close can only be rejected as below the exchange minimum.
+        floor = 0.0
         if c is not None and qty > 0:
-            qty = max(qty, self.min_order_qty(c, px))
+            floor = self.min_order_qty(c, px)
+            qty = max(qty, floor)
             qty = self.round_qty_up(c, qty)
         execution_plan = None
         if execution_strategy == "block-active":
-            execution_plan = self.block_active_plan(sym, side, chosen, qty, px, execution_lane=execution_lane)
+            extra_cap = 1.0
+            try:
+                extra_cap = float(self.block.extra_cap())
+            except Exception:
+                extra_cap = 1.0
+            execution_plan = self.block_active_plan(
+                sym, side, chosen, qty, px, execution_lane=execution_lane, min_qty=floor, extra_cap=extra_cap,
+            )
         if execution_plan:
             qty = self.round_qty(c, execution_plan["requestedQty"])
             if c is not None and qty > 0:
@@ -9008,10 +9025,18 @@ class Pulse:
                     specified = float(self.block.active_increment())
                 except Exception:
                     specified = min(1.0, float(getattr(self.block, "volume_ratio", 0.25) or 0.25))
+                min_q = self.min_order_qty(c, px)
                 parent = float(self._block_core_qty(pos.symbol, pos.side) or lane.base_qty or 0) or self.size_qty(c, px)
+                parent = executable_parent_qty(parent, min_q)
+                if parent > float(lane.base_qty or 0) + 1e-12:
+                    try:
+                        self.block.refresh_parent_qty(lane, parent, pos.entry)
+                    except Exception:
+                        lane.base_qty = parent
                 confirmed = float(lane.confirmed_add or 0)
-                extra_room = max(0.0, parent * float(self.block.extra_cap()) - confirmed)
-                raw = max(0.0, min(parent * specified, extra_room))
+                extra_cap = float(self.block.extra_cap())
+                extra_room = max(0.0, parent * extra_cap - confirmed)
+                raw = adjusted_quantity(parent, specified, confirmed, 0.0, min_q, extra_cap)
                 if raw <= 0:
                     continue
                 inc = specified
@@ -9060,18 +9085,25 @@ class Pulse:
                     core = 0.0
                 if core > 0:
                     parent = core
+            min_q = self.min_order_qty(c, px)
+            parent = executable_parent_qty(parent, min_q)
             inc = float(row.get("volumeIncrement") or 0.0)
+            extra_cap = float(self.block.extra_cap())
+            confirmed = float(lane.confirmed_add or 0)
             raw = float(row.get("requestedAddQty") or 0)
             target = float(row.get("targetAddQty") or 0)
             if target <= 0 and parent > 0 and inc > 0:
                 target = parent * inc
-            leftover = max(0.0, target - float(lane.confirmed_add or 0))
-            raw = min(raw, leftover) if leftover > 0 else 0.0
+            leftover = max(0.0, target - confirmed)
+            if bool(getattr(self, "block_active", True)):
+                raw = adjusted_quantity(parent, inc, confirmed, 0.0, min_q, extra_cap)
+                leftover = extra_cap * parent - confirmed
+                target = parent * inc
+            else:
+                raw = min(raw, leftover) if leftover > 0 else 0.0
             if raw <= 0:
                 continue
-            confirmed = float(lane.confirmed_add or 0)
-            extra_room = max(0.0, parent * float(self.block.extra_cap()) - confirmed)
-            min_q = self.min_order_qty(c, px)
+            extra_room = max(0.0, parent * extra_cap - confirmed)
             step = float(row.get("stepQty") or raw)
             placed_limit = leftover
             # True dust is a leftover remainder of an already-filled target.
@@ -9391,6 +9423,15 @@ class Pulse:
             seed = parent if parent > 0 else float(pos.qty or 0)
             if overall and parent <= 0:
                 seed = self._block_core_qty(pos.symbol, pos.side) or seed
+            c = self.contracts.get(pos.symbol)
+            if not c or px <= 0:
+                continue
+            floor = self.min_order_qty(c, px)
+            seed = executable_parent_qty(seed, floor)
+            try:
+                self.dca.attach(pos.symbol, pos.side, seed, pos.entry, group_key=group_key, min_qty=floor)
+            except TypeError:
+                self.dca.attach(pos.symbol, pos.side, seed, pos.entry, group_key=group_key)
             evidence = []
             for rec in own or []:
                 if isinstance(rec, dict):
@@ -9403,14 +9444,10 @@ class Pulse:
             row = self.dca.due(pos.symbol, pos.side, seed, pos.entry, px, group_key=group_key, evidence=evidence)
             if not row:
                 continue
-            c = self.contracts.get(pos.symbol)
-            if not c or px <= 0:
-                continue
             want = min(float(row["qty"]), seed * 2.5)
             room = max(0.0, self.max_book_notional() - pos.qty * px)
             add_cap = min(self.notional_cap() * max(1.0, min(2.5, float(row.get("mult") or 1))), room)
             qty = self.cap_order_qty(c, px, want, add_cap)
-            floor = self.min_order_qty(c, px)
             if qty < floor:
                 if floor * px > add_cap * 1.08 or floor > seed * 2.5:
                     self.dca.skips += 1

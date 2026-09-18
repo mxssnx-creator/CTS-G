@@ -188,7 +188,7 @@ class DcaBook:
             return self.max_steps
         return max(len(self.distances), len(self.mults), 4)
 
-    def attach(self, symbol: str, side: str, qty: float, entry: float, group_key: str = "") -> DcaLane:
+    def attach(self, symbol: str, side: str, qty: float, entry: float, group_key: str = "", min_qty: float = 0.0) -> DcaLane:
         k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if lane is None:
@@ -197,10 +197,17 @@ class DcaBook:
                 DcaStep(n=i + 1, distance_pct=self._dist_at(i), mult=self._mult_at(i))
                 for i in range(n)
             ]
+            parent = max(0.0, float(qty or 0.0))
+            try:
+                floor = float(min_qty or 0.0)
+            except (TypeError, ValueError):
+                floor = 0.0
+            if parent > 0 and floor > parent:
+                parent = floor
             lane = DcaLane(
                 symbol=symbol,
                 side=side,
-                parent_qty=qty,
+                parent_qty=parent,
                 avg_entry=entry,
                 steps=steps,
                 group_key=str(group_key or ""),
@@ -210,6 +217,12 @@ class DcaBook:
         else:
             if lane.parent_qty <= 0 and qty > 0:
                 lane.parent_qty = qty
+            try:
+                floor = float(min_qty or 0.0)
+            except (TypeError, ValueError):
+                floor = 0.0
+            if floor > 0 and 0 < float(lane.parent_qty or 0) + 1e-12 < floor:
+                lane.parent_qty = floor
             if float(lane.last_add or 0) <= 0:
                 lane.last_add = time.time()
         return lane

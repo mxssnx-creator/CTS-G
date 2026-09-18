@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server' / 'pulse'))
 import pulse_trader as pt
-from block_active import ContinuationBook, adjusted_quantity, observe_continuation
+from block_active import ContinuationBook, adjusted_quantity, executable_parent_qty, observe_continuation
 from block_engine import BlockBook
 from set_engine import SetBook, SetState
 
@@ -240,6 +240,37 @@ class BlockActiveTests(unittest.TestCase):
             self.assertEqual(adjusted_quantity(8,v),0)
         self.assertEqual(adjusted_quantity(8,2),8)
         self.assertEqual(adjusted_quantity(8,.25,3),0)
+
+    def test_min_qty_lifts_add_over_executable_parent(self):
+        self.assertEqual(executable_parent_qty(0.04, 3), 3)
+        self.assertEqual(executable_parent_qty(8, 3), 8)
+        self.assertEqual(executable_parent_qty(0, 3), 0)
+        self.assertEqual(adjusted_quantity(8, .25, min_qty=0.01), 2)
+        self.assertEqual(adjusted_quantity(8, .25, min_qty=3, extra_cap=1.0), 3)
+        self.assertEqual(adjusted_quantity(0.04, .25, min_qty=3, extra_cap=1.0), 3)
+        self.assertEqual(adjusted_quantity(3, 1.0, owned_qty=3, min_qty=3, extra_cap=1.0), 0)
+        self.assertAlmostEqual(adjusted_quantity(3, 1.0, owned_qty=0, min_qty=3, extra_cap=1.0), 3)
+
+    def test_block_register_parent_lifts_intern_crumb_to_min_fill(self):
+        lane = self.p.block.register_parent('X-USDT', 'LONG', 0.04, 100.0)
+        self.assertAlmostEqual(lane.base_qty, 0.04)
+        self.p.block.register_parent('X-USDT', 'LONG', 3.0, 100.0)
+        self.assertAlmostEqual(lane.base_qty, 3.0)
+        nxt = adjusted_quantity(lane.base_qty, 1.0, owned_qty=0, min_qty=3.0, extra_cap=1.0)
+        self.assertAlmostEqual(nxt, 3.0)
+
+    def test_dca_parent_lifts_to_venue_min_without_rewriting_after_add(self):
+        from dca_engine import DcaBook
+        book = DcaBook()
+        book.load({"dcaEnabled": True, "dcaMaxSteps": 2, "dcaStepDistancesPct": [0.5, 1],
+                   "dcaStepVolumeMultipliers": [1.5, 2], "dcaCooldownSeconds": 0})
+        lane = book.attach('PPP-USDT', 'LONG', 0.04, 100.0, min_qty=3.0)
+        self.assertAlmostEqual(lane.parent_qty, 3.0)
+        due = book.due('PPP-USDT', 'LONG', lane.parent_qty, 100.0, 98.7, now=0)
+        self.assertIsNotNone(due)
+        self.assertAlmostEqual(due['qty'], 4.5)
+        book.attach('PPP-USDT', 'LONG', 7.5, 98.7)
+        self.assertAlmostEqual(book.lanes['PPP-USDT:LONG'].parent_qty, 3.0)
 
     def entry_fixture(self):
         p=self.p
