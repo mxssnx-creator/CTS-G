@@ -1566,7 +1566,7 @@ function SettingsPage() {
                   onChange={(v) => patch("slToTpRecalcEvery", v)}
                 />
                 <Slider label="SL min" value={overlay.slMinPct} min={SL_MIN_PCT} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
-                <Slider label="SL max" value={overlay.slMaxPct} min={0.1} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
+                <Slider label="SL max" value={overlay.slMaxPct} min={SL_MIN_PCT} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
                 <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
                 <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
@@ -2416,8 +2416,8 @@ function SettingsPage() {
                 <Num label="Min agreement" value={overlay.indMinAgreement} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinAgreement", v)} />
                 <Num label="Min confidence" value={overlay.indMinConfidence} min={0.5} max={0.95} step={0.05} onChange={(v) => patch("indMinConfidence", v)} />
                 <Num label="Min strength" value={overlay.indMinStrength} min={0.05} max={0.6} step={0.05} onChange={(v) => patch("indMinStrength", v)} />
-                <Num label="SL min %" value={overlay.indStopMinPct} min={0.1} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
-                <Num label="SL max %" value={overlay.indStopMaxPct} min={0.4} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
+                <Num label="SL min %" value={overlay.indStopMinPct} min={SL_MIN_PCT} max={1} step={0.05} onChange={(v) => patch("indStopMinPct", v)} />
+                <Num label="SL max %" value={overlay.indStopMaxPct} min={SL_MIN_PCT} max={3} step={0.05} onChange={(v) => patch("indStopMaxPct", v)} />
                 <Num label="ATR × SL" value={overlay.indAtrMult} min={0.4} max={2} step={0.05} onChange={(v) => patch("indAtrMult", v)} />
                 <Num label="Reward / risk" value={overlay.indRewardRisk} min={1.1} max={4} step={0.1} onChange={(v) => patch("indRewardRisk", v)} />
                 <KV k="Outbreak ranges" v={arrJoin(cts?.activeOutbreakRanges, "3, 5, 10")} />

@@ -27,6 +27,12 @@ class RangeTests(unittest.TestCase):
         self.assertEqual({row.mode for row in ranges}, {"trend:ema8/21", "trend:ema13/34"})
         self.assertEqual(indication_ranges([8, 8, "bad", 100, 32], [16]), [8, 32])
 
+    def test_indication_min_sl_floor_is_point_four(self):
+        self.assertGreaterEqual(float(DEFAULT_SETTINGS["stopLossMinPct"]), 0.4)
+        book = IndicationBook()
+        book.load({"indStopMinPct": 0.2, "indStopMaxPct": 1.5})
+        self.assertGreaterEqual(float(book.settings["stopLossMinPct"]), 0.4)
+
     def test_replay_keeps_each_config_and_configuration_change_invalidates_history(self):
         book = SetBook()
         settings = {"histLookbackBars": 120, "histMinBars": 60, "histWarmup": 30,

@@ -71,15 +71,17 @@ test("risk and step limits preserve unlimited TP and the 0.4 percent SL floor", 
     assert.equal(value.tpMinPct, .3);
     assert.equal(value.tpMaxPct, 0);
     assert.equal(value.slMinPct, .4);
+    assert.equal(value.indStopMinPct, .4);
     assert.equal(value.slMaxPct, 3);
     assert.equal(value.setMinStep, 7);
     assert.equal(value.minStep, 7);
     assert.equal(value.trailingMinStep, 7);
     assert.equal(value.setStepMax, 30);
   }
-  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, setStepMax: 70, minPf: 2.5, setMinPf: .8, minStep: 1, trailingMinStep: 1 });
+  const value = overlayFromCts({}, { tpMaxPct: 12, slMinPct: .15, indStopMinPct: .2, setStepMax: 70, minPf: 2.5, setMinPf: .8, minStep: 1, trailingMinStep: 1 });
   assert.equal(value.tpMaxPct, 12);
   assert.equal(value.slMinPct, .4);
+  assert.equal(value.indStopMinPct, .4);
   assert.equal(value.setStepMax, 30);
   assert.equal(value.setMinStep, 7);
   assert.equal(value.minStep, 7);

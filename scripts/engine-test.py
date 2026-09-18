@@ -127,6 +127,7 @@ def overlay_test() -> None:
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 7 and int(ov.get("trailingMinStep") or 0) == 7)
         rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.4) < 1e-9, str(ov.get("slMinPct")))
+        rec(f"{name}-ind-sl-min", abs(float(ov.get("indStopMinPct") or 0) - 0.4) < 1e-9, str(ov.get("indStopMinPct")))
         rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - 1.15) < 1e-9, str(ov.get("minPf")))
         rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
         rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))

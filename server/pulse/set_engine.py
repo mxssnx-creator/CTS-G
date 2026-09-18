@@ -24,6 +24,7 @@ from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
+    SL_MIN_PCT,
     cost_aware_metrics,
     clears_pf,
     EVALUATION_WINDOWS,
@@ -39,6 +40,7 @@ from position_cost import (
     SL_TP_MAX,
     SL_TP_STEP,
     sl_tp_grid,
+    bind_ratio_sl_tp,
     cost_as_frac,
     clamp_pct,
     gross_move_pct,
@@ -937,7 +939,7 @@ class SetState:
     stage_ledger: Dict[str, Any] = field(default_factory=dict)
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
-    last15_ratio: float = 1.0
+    last15_ratio: float = 0.0
     last15_classic: float = 0.0
     last15_n: int = 0
     last15_r: float = 0.0
@@ -1135,7 +1137,7 @@ class SetBook:
         self._ids_by_kind: Dict[str, List[str]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         self.progress = Progress()
-        self.sl_min, self.sl_max = 0.0015, 0.03
+        self.sl_min, self.sl_max = SL_MIN_PCT / 100.0, 0.03
         self.tp_min, self.tp_max = 0.003, 0.0
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
@@ -1394,7 +1396,7 @@ class SetBook:
         ov = shared_pf_settings(ov)
         from system_settings import normalize_system_settings
         self.system_workers = normalize_system_settings(ov)["systemWorkers"]
-        self.sl_min = min(.03, max(0.004, finite(ov.get("slMinPct"), 0.4) / 100))
+        self.sl_min = min(.03, max(SL_MIN_PCT / 100.0, finite(ov.get("slMinPct"), SL_MIN_PCT) / 100))
         self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
         self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
         cap = finite(ov.get("tpMaxPct"), 0.) / 100
@@ -1561,7 +1563,7 @@ class SetBook:
             "minimumStrength": float(ov.get("indMinStrength") or 0.2),
             "minimumConfidence": float(ov.get("indMinConfidence") or 0.6),
             "minimumAgreement": float(ov.get("indMinAgreement") or 0.55),
-            "stopLossMinPct": float(ov.get("indStopMinPct") or 0.4),
+            "stopLossMinPct": max(SL_MIN_PCT, float(ov.get("indStopMinPct") or SL_MIN_PCT)),
             "stopLossMaxPct": float(ov.get("indStopMaxPct") or 1.5),
             "stopLossAtrMultiplier": float(ov.get("indAtrMult") or 0.85),
             "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
@@ -1716,6 +1718,9 @@ class SetBook:
             int(self.max_active),
         )
 
+    def pair_sl_tp(self, tp: float, ratio: float) -> Tuple[float, float]:
+        return bind_ratio_sl_tp(tp, ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max)
+
     def _rebuild_sets(self) -> None:
         keep = {sid: st for sid, st in self.sets.items()}
         next_sets: Dict[str, SetState] = {}
@@ -1733,7 +1738,7 @@ class SetBook:
             pack = _intern(pack)
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(self.steps):
-                    tp = clamp_pct(step_tp_pct(step, self.cost_pct), self.tp_min, self.tp_max)
+                    _, tp = self.pair_sl_tp(step_tp_pct(step, self.cost_pct), sl)
                     sid = make_set_id(pack, sl, "", step)
                     prev = keep.get(sid)
                     if prev:
@@ -1833,7 +1838,7 @@ class SetBook:
                     st.wins = 0
                     st.gp = st.gl = st.wr = st.expectancy = 0.0
                     st.avg_hold_s = st.classic_all = 0.0
-                    st.last15_ratio = 1.0
+                    st.last15_ratio = 0.0
                     st.last15_classic = st.last15_r = 0.0
                     st.last15_n = st.last25_n = 0
                     st.last25_avg_r = st.last25_avg_pnl = 0.0
@@ -3098,14 +3103,9 @@ class SetBook:
         n = len(bars)
         m = len(pack_sets)
         side_values = (1, -1)
-        tp_frac = np.asarray(
-            [clamp_pct(float(st.tp_pct), self.tp_min, self.tp_max) for st in pack_sets],
-            dtype=float,
-        )
-        sl_frac = np.asarray(
-            [clamp_pct(float(tp) * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max) for st, tp in zip(pack_sets, tp_frac)],
-            dtype=float,
-        )
+        tp_sl = [self.pair_sl_tp(float(st.tp_pct), float(st.sl_ratio or 0.6)) for st in pack_sets]
+        tp_frac = np.asarray([pair[1] for pair in tp_sl], dtype=float)
+        sl_frac = np.asarray([pair[0] for pair in tp_sl], dtype=float)
         trailing = np.asarray([str(st.kind or "") == "trail" for st in pack_sets], dtype=bool)
         arms = np.asarray([
             (float(st.trail_arm) / 100.0 if float(st.trail_arm or 0) > 0.05 else float(st.trail_arm or 0))
@@ -3329,8 +3329,7 @@ class SetBook:
                     dead: List[str] = []
                     for sid, pos in opens.items():
                         st = set_map[sid]
-                        sl_frac = clamp_pct(st.tp_pct * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max)
-                        tp_frac = clamp_pct(st.tp_pct, self.tp_min, self.tp_max)
+                        sl_frac, tp_frac = self.pair_sl_tp(st.tp_pct, float(st.sl_ratio or 0.6))
                         use_trail = st.kind == "trail"
                         arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
                         give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
@@ -3354,15 +3353,13 @@ class SetBook:
                         opens.get(strat_seed.id) if strat_seed is not None else None
                     )
                     if do_block and blk_pos is None and parent_open is not None and strat_seed is not None:
-                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
-                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
+                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
                         blk_pos = self._try_block_extra(parent_open, bar, i, sl_frac, tp_frac)
                     if vector_core and strat_seed is not None:
                         if representative is None and representative_cool > 0:
                             representative_cool -= 1
                         if representative is not None:
-                            rep_tp = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
-                            rep_sl = clamp_pct(rep_tp * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
+                            rep_sl, rep_tp = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
                             representative, rep_rec = self._advance_pos(
                                 representative, bar, i, strategy="core",
                                 sl_frac=rep_sl, tp_frac=rep_tp, use_trail=False,
@@ -3373,8 +3370,7 @@ class SetBook:
                             if rep_rec:
                                 representative_cool = self.cooldown_bars
                     if blk_pos is not None and strat_seed is not None and int(blk_pos.get("i") or -1) != i:
-                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
-                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
+                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
                         blk_pos, recb = self._advance_pos(
                             blk_pos, bar, i, strategy="block",
                             sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
@@ -3384,8 +3380,7 @@ class SetBook:
                         if recb and strat_hist is not None:
                             strat_hist["block"].append(recb)
                     if dca_pos is not None and strat_seed is not None:
-                        sl_frac = clamp_pct(strat_seed.tp_pct * float(strat_seed.sl_ratio or 0.6), self.sl_min, self.sl_max)
-                        tp_frac = clamp_pct(strat_seed.tp_pct, self.tp_min, self.tp_max)
+                        sl_frac, tp_frac = self.pair_sl_tp(strat_seed.tp_pct, float(strat_seed.sl_ratio or 0.6))
                         dca_pos, recd = self._advance_pos(
                             dca_pos, bar, i, strategy="dca",
                             sl_frac=sl_frac, tp_frac=tp_frac, use_trail=False,
@@ -3405,8 +3400,7 @@ class SetBook:
                             continue
                         if vector_core and st is strat_seed and (representative is not None or representative_cool > 0):
                             continue
-                        sl_frac = clamp_pct(st.tp_pct * float(st.sl_ratio or 0.6), self.sl_min, self.sl_max)
-                        tp_frac = clamp_pct(st.tp_pct, self.tp_min, self.tp_max)
+                        sl_frac, tp_frac = self.pair_sl_tp(st.tp_pct, float(st.sl_ratio or 0.6))
                         if d > 0:
                             sl = close * (1 - sl_frac)
                             tp = close * (1 + tp_frac)
@@ -3481,8 +3475,7 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
-        sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
+        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
         for want_side in (1, -1):
             parent_pos: Optional[Dict[str, Any]] = None
             extra_pos: Optional[Dict[str, Any]] = None
@@ -3552,8 +3545,7 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        tp_frac = clamp_pct(step_tp_pct(self.min_step_cfg, self.cost_pct), self.tp_min, self.tp_max)
-        sl_frac = clamp_pct(tp_frac * 0.6, self.sl_min, self.sl_max)
+        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
         for config_key, sigs in kind_sigs.items():
                 kind, _, config = config_key.partition("|")
                 if not any(d != 0 for d, _ in sigs):
@@ -4323,7 +4315,7 @@ class SetBook:
         st.stage_ledger = self._stage_qualification(st, m)
         empty_live = {
             "last15_n": 0,
-            "last15_ratio": 1.0,
+            "last15_ratio": 0.0,
             "last15_r": 0.0,
             "evaluation_windows": {},
             "net_avg": 0.0,
@@ -4349,7 +4341,7 @@ class SetBook:
             live_m = empty_live
             live_ordered = []
             live_opt_window = []
-            live_opt_pf = {"ratio": 1.0, "costPct": self.cost_pct, "costSource": self.cost_source}
+            live_opt_pf = {"ratio": 0.0, "costPct": self.cost_pct, "costSource": self.cost_source}
             live_opt_dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
             live_opt_avg = 0.0
         st.live_eval = {
@@ -4688,7 +4680,7 @@ class SetBook:
         intern_n = 0 if hist_ids is None else len(hist_ids)
         if hist_ids is not None:
             intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
-            intern_validated = intern_n
+            intern_validated = self.intern_validated_count(hist_ids)
             intern_fills = sum(int(getattr(self.sets.get(sid), "n", 0) or 0) for sid in hist_ids if sid in self.sets)
         else:
             intern_active = sum(1 for st in self.sets.values() if st.active)
@@ -4770,10 +4762,29 @@ class SetBook:
             }
         return blob
 
+    def intern_validated_count(self, hist_ids: Optional[Sequence[str]] = None) -> int:
+        """Proven intern configs: n>=need and PF>=real floor. Empty tape is not validated."""
+        ids = hist_ids if hist_ids is not None else getattr(self, "hist_test_set_ids", None)
+        if ids is None:
+            return 0
+        need = self.eval_need()
+        floor = float(self.real_min_pf or self.min_pf or POSITIVE_PF)
+        n_ok = 0
+        for sid in ids:
+            st = self.sets.get(sid)
+            if st is None:
+                continue
+            n = max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
+            pf = float(getattr(st, "last15_ratio", 0) or 0)
+            if n >= need and pf + 1e-9 >= floor:
+                n_ok += 1
+        return n_ok
+
     def intern_metric_source(self, pack: Optional[str] = None) -> Optional[SetState]:
         """Best Base row for intern coordination. Hist-test gate restricts to selected configs.
 
         Pack is independent: indications intern PF never substitutes for general.
+        Empty n=0 / n<8 tapes are not intern evidence. Proven PF beats max-n.
         """
         allow = getattr(self, "hist_test_set_ids", None)
         sets_map = self.sets or {}
@@ -4784,8 +4795,10 @@ class SetBook:
             ranked = [sid for sid in ids if sid in allow_set]
             extra = [sid for sid in allow_set if sid not in set(ranked) and sid in sets_map]
             ids = ranked + extra
+        need = self.eval_need()
+        floor = float(self.real_min_pf or self.min_pf or POSITIVE_PF)
         best: Optional[SetState] = None
-        best_n = -1
+        best_key: Optional[Tuple[int, float, int]] = None
         for sid in ids:
             cand = sets_map.get(sid)
             if cand is None:
@@ -4793,9 +4806,14 @@ class SetBook:
             if want and str(getattr(cand, "pack", "") or "").strip().lower() != want:
                 continue
             n = int(getattr(cand, "last15_n", 0) or 0)
-            if best is None or n > best_n:
+            if n < 8:
+                continue
+            pf = float(getattr(cand, "last15_ratio", 0) or 0)
+            proven = 1 if (n >= need and pf + 1e-9 >= floor) else 0
+            key = (proven, pf, n)
+            if best is None or best_key is None or key > best_key:
                 best = cand
-                best_n = n
+                best_key = key
         return best
 
     def pick(self, pack: str, kind: str = "base", side: Optional[str] = None, *, all_valid: bool = False):
@@ -5673,7 +5691,7 @@ class SetBook:
         catalog_n = len(self.sets)
         if hist_ids is not None:
             intern_active = sum(1 for sid in hist_ids if (self.sets.get(sid) is not None and self.sets[sid].active))
-            intern_validated = intern_n
+            intern_validated = self.intern_validated_count(hist_ids)
         else:
             intern_active = sum(1 for s in self.sets.values() if s.active)
             intern_validated = validated_count
@@ -5930,6 +5948,12 @@ def self_test() -> List[Tuple[str, bool, str]]:
     live_sl = max(trail_floor.sl_min, step_tp_pct(7, 0.10) * 0.6)
     out.append(("set-sl-bound-to-step-tp", abs(live_sl - 0.0042) < 1e-9 and trail_floor.sl_min >= 0.004 - 1e-12,
                 f"sl={live_sl} floor={trail_floor.sl_min}"))
+    tight_sl, tight_tp = trail_floor.pair_sl_tp(0.003, 0.6)
+    r04_sl, r04_tp = trail_floor.pair_sl_tp(0.003, 0.4)
+    out.append(("set-tp-lifts-to-sl-floor", abs(tight_sl - 0.004) < 1e-9 and abs(tight_tp - 0.004 / 0.6) < 1e-9,
+                f"sl={tight_sl} tp={tight_tp}"))
+    out.append(("set-ratio-adjusts-tp", abs(r04_tp - 0.01) < 1e-9 and abs(r04_tp - tight_tp) > 1e-9,
+                f"r0.4={r04_tp} r0.6={tight_tp}"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
     trail_only = [s for s in book.sets.values() if s.kind == "trail"]
     out.append(("set-step-floor", bool(base_only) and all(s.step >= 3 for s in base_only) and min(s.step for s in base_only) == 3, f"steps={sorted({s.step for s in base_only})} trails={len(trail_only)}"))

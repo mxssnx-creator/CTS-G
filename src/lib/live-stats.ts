@@ -1337,13 +1337,11 @@ export function effectiveSetCounts(stats: {
   const catalog =
     knownCount(sets?.catalogSetCount) ?? knownCount(sets?.setCount) ?? knownCount(cov?.catalogSetCount) ?? knownCount(cov?.setCount);
   const intern =
-    knownCount(ht?.validatedCount) ??
     knownCount(sets?.internSetCount) ??
     knownCount(cov?.internSetCount) ??
-    knownCount(sets?.validatedCount);
-  const validated = on ? intern : (knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount));
-  const setCount = on ? intern : catalog;
-  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
+    (on ? knownCount(ht?.validatedCount) : null);
+  const validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount);
+  const setCount = on ? intern ?? catalog : catalog;  const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
   let processing = knownCount(sets?.processingCount) ?? knownCount(ht?.processingCount);
   if (on && intern != null && processing != null && processing > intern) processing = intern;
   const symbols =
@@ -1356,8 +1354,7 @@ export function effectiveSetCounts(stats: {
 export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>[0]): string {
   const c = effectiveSetCounts(stats);
   if (c.on) {
-    const parts = [`intern ${c.validated ?? 0} validated`];
-    if (c.processing != null) parts.push(`processing ${c.processing}`);
+    const parts = [`intern ${c.intern ?? 0} · validated ${c.validated ?? 0}`];    if (c.processing != null) parts.push(`processing ${c.processing}`);
     if (c.active != null) parts.push(`active ${c.active}`);
     if (c.symbols) parts.push(`${c.symbols} symbols`);
     if (c.coordinations) parts.push(`${c.coordinations} coord`);

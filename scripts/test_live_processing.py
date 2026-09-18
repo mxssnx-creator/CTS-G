@@ -87,6 +87,23 @@ class LiveProcessingTests(unittest.TestCase):
         self.assertAlmostEqual(pos.sl, 99.40, places=4)
         self.assertGreaterEqual(pos.sl_pct, 0.002)
 
+    def test_tp_lifts_with_sl_floor_and_strategy_ratio_still_adjusts(self):
+        p = _pulse(sl_min=0.004, sl_max=0.03, tp_min=0.003, tp_max=0.0, sl_to_tp=0.6)
+        tight = _long(sl_pct=0.0015, sl=99.85, tp=100.30)
+        tight.tp_pct = 0.003
+        tight.sl_ratio = 0.6
+        p.open["a"] = tight
+        p._refresh_open_risk_floors()
+        self.assertGreaterEqual(tight.sl_pct, 0.004 - 1e-12)
+        self.assertAlmostEqual(tight.tp_pct, 0.004 / 0.6, places=8)
+        wide = _long(sl_pct=0.0015, sl=99.85, tp=100.30)
+        wide.tp_pct = 0.003
+        wide.sl_ratio = 0.4
+        p.open = {"b": wide}
+        p._refresh_open_risk_floors()
+        self.assertAlmostEqual(wide.tp_pct, 0.01, places=8)
+        self.assertGreater(abs(wide.tp_pct - tight.tp_pct), 1e-6)
+
     def test_raise_to_min_qty_does_not_inflate_a_lot_already_above_the_floor(self):
         p = _pulse()
         c = p.contracts["X-USDT"]

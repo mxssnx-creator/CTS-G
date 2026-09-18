@@ -16,6 +16,7 @@ from threading import RLock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from contracts import INDICATION_KINDS
+from position_cost import SL_MIN_PCT
 
 try:
     import httpx
@@ -360,7 +361,7 @@ def evaluate_signal_candles(
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     if raw_sl > sl_max * 1.25:
         return None
-    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", 0.2)), sl_max)
+    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", SL_MIN_PCT)), sl_max)
     rr = float(settings.get("takeProfitRewardRisk", 1.8))
     min_tp = sl * rr
     tp_max = float(settings.get("takeProfitMaxPct", 5.0))
@@ -410,7 +411,7 @@ def evaluate_ta_pack(
     strength = abs(raw)
     if strength < float(settings.get("minimumStrength", 0.2)):
         return None
-    sl_min = float(settings.get("stopLossMinPct", 0.2))
+    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     sl = clamp(sl_min * 1.6, sl_min, sl_max)
     tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
@@ -600,7 +601,7 @@ def _kind_indication(
     mode: Optional[str] = None,
     conf: Optional[float] = None,
 ) -> Indication:
-    sl_min = float(settings.get("stopLossMinPct", 0.2))
+    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     sl = clamp(sl_pct if sl_pct is not None else sl_min * 1.4, sl_min, sl_max)
     rr = float(settings.get("takeProfitRewardRisk", 1.8))
@@ -911,7 +912,7 @@ def evaluate_active_range(
     vol_w = clamp(float(settings.get("activeVolatilityWeight") or 0.3), 0.0, 1.0)
     cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
     vol_risk = max(cost * 2.0, cur_act * (0.75 + vol_w * 0.75))
-    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.4)), float(settings.get("stopLossMaxPct", 1.5)))
+    sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", SL_MIN_PCT)), float(settings.get("stopLossMaxPct", 1.5)))
     tp = clamp(max(cost * 3.0, price_chg * 1.25, sl * 1.1), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
     n_move = price_chg / threshold
     n_brk = breakout / max(noise, 0.01)
@@ -1307,8 +1308,8 @@ class IndicationBook:
         s["minimumAgreement"] = float(overlay.get("indMinAgreement", s["minimumAgreement"]))
         s["minimumConfidence"] = float(overlay.get("indMinConfidence", s["minimumConfidence"]))
         s["minimumStrength"] = float(overlay.get("indMinStrength", s["minimumStrength"]))
-        s["stopLossMinPct"] = float(overlay.get("indStopMinPct", s["stopLossMinPct"]))
-        s["stopLossMaxPct"] = float(overlay.get("indStopMaxPct", s["stopLossMaxPct"]))
+        s["stopLossMinPct"] = max(SL_MIN_PCT, float(overlay.get("indStopMinPct", s["stopLossMinPct"])))
+        s["stopLossMaxPct"] = max(s["stopLossMinPct"], float(overlay.get("indStopMaxPct", s["stopLossMaxPct"])))
         s["stopLossAtrMultiplier"] = float(overlay.get("indAtrMult", s["stopLossAtrMultiplier"]))
         s["takeProfitRewardRisk"] = float(overlay.get("indRewardRisk", s["takeProfitRewardRisk"]))
         s["extraSources"] = bool(overlay.get("indExtraSources", s["extraSources"]))

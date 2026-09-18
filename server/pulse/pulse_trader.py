@@ -41,8 +41,11 @@ from position_cost import (
     completed_roundtrips,
     accumulate_close,
     resolve_sl_tp,
+    bind_ratio_sl_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
+    INTERN_PF,
+    SL_MIN_PCT,
     clears_pf,
     SL_TP_RATIOS,
     SL_TP_MIN,
@@ -1388,7 +1391,7 @@ class Pulse:
         self._config_evidence_cache_ts = 0.0
         self._load_config_evidence()
         self.pf_window = 15
-        self.sl_min = 0.0015
+        self.sl_min = SL_MIN_PCT / 100.0
         self.sl_max = 0.0300
         self.tp_min = 0.0030
         self.tp_max = 0.0
@@ -4207,6 +4210,10 @@ class Pulse:
         tp_hi = float(self.tp_max) if self.tp_max > 0 else float("inf")
         tp = float(pos.tp_pct) if pos and pos.tp_pct > 0 else TP_PCT
         tp = max(tp_lo, min(tp_hi, tp))
+        ratio = float(getattr(pos, "sl_ratio", 0) or getattr(self, "sl_to_tp", 0) or 0.6)
+        bound_sl, bound_tp = bind_ratio_sl_tp(tp, ratio, sl_lo, sl_hi, tp_lo, 0.0 if tp_hi == float("inf") else tp_hi)
+        if bound_tp > tp:
+            tp = bound_tp
         return sl, tp, sl_lo, sl_hi
 
     def _refresh_open_risk_floors(self) -> int:
@@ -4240,8 +4247,16 @@ class Pulse:
                 pos.sl_pct = floor_sl_pct
             tp_lo = float(self.tp_min)
             tp_hi = float(self.tp_max) if self.tp_max > 0 else float("inf")
-            if float(pos.tp_pct or 0) > 0:
-                pos.tp_pct = max(tp_lo, min(tp_hi, float(pos.tp_pct)))
+            ratio = float(getattr(pos, "sl_ratio", 0) or getattr(self, "sl_to_tp", 0) or 0.6)
+            live_tp = float(pos.tp_pct or 0) or tp_lo
+            bound_sl, bound_tp = bind_ratio_sl_tp(
+                live_tp, ratio, sl_lo, sl_hi, tp_lo, 0.0 if tp_hi == float("inf") else tp_hi,
+            )
+            pos.tp_pct = max(tp_lo, bound_tp, live_tp)
+            if tp_hi < float("inf"):
+                pos.tp_pct = min(tp_hi, pos.tp_pct)
+            if bool(getattr(self.exits, "enabled", False)) and bool(getattr(self.exits, "ignore_tp", False)):
+                pos.tp_pct = min(tp_hi, max(pos.tp_pct, float(pos.sl_pct or sl_lo) * 3.0))
             try:
                 want_sl, want_tp = self.security_prices(pos)
             except Exception:
@@ -5826,18 +5841,20 @@ class Pulse:
             intern_ok = bool(self._hist_test_owns_catalog()) and allow is not None and str(getattr(chosen, "id", "") or "") in allow
         except Exception:
             intern_ok = False
+        intern_n = int(view.get("last15_n") or view.get("real_n") or 0)
+        intern_pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
         if intern_ok and not real_ok:
-            intern_n = int(view.get("last15_n") or view.get("real_n") or 0)
-            intern_pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
-            if intern_n < 8:
-                intern_pf = float(POSITIVE_PF)
-            if intern_pf + 1e-9 >= float(POSITIVE_PF):
-                real_ok = True
-                pf = intern_pf
-                n = max(n, intern_n, 3)
-                if not math.isfinite(net) or net <= 0:
-                    net = 1e-12
-        if (not chosen.active or not real_ok or n < max(3, int(getattr(self.sets, "real_eval", 3) or 3))
+            # Intern parents may emit extras without Real tape. Never invent Real PF 1.15.
+            if intern_n < 8 or not math.isfinite(intern_pf) or intern_pf <= 0:
+                intern_pf = float(INTERN_PF)
+            pf = intern_pf
+            n = max(n, intern_n)
+            if not math.isfinite(net) or net <= 0:
+                net = 1e-12
+        if intern_ok:
+            if not math.isfinite(ddt) or ddt > self.sets.max_dd_s:
+                return reject("reference intern qualification failed")
+        elif (not chosen.active or not real_ok or n < max(3, int(getattr(self.sets, "real_eval", 3) or 3))
                 or not math.isfinite(pf) or not clears_pf(pf, float(getattr(self.sets, "real_min_pf", POSITIVE_PF) or POSITIVE_PF))
                 or not math.isfinite(net) or net <= 0
                 or not math.isfinite(ddt) or ddt > self.sets.max_dd_s):
@@ -6172,8 +6189,9 @@ class Pulse:
         if forced_row is not None:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
         elif chosen and getattr(chosen, "step", 0):
-            tp_pct_a = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
-            sl_pct_a = max(self.sl_min, min(self.sl_max, tp_pct_a * sl_ratio))
+            sl_pct_a, tp_pct_a = bind_ratio_sl_tp(
+                chosen.tp_pct, sl_ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max,
+            )
             if self.exits.enabled and self.exits.ignore_tp:
                 tp_pct_a = min(self.tp_max or float("inf"), max(tp_pct_a, sl_pct_a * 3.0))
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
@@ -6483,8 +6501,9 @@ class Pulse:
             bind_sl_to_tp=True,
         )
         if chosen and getattr(chosen, "step", 0):
-            tp_pct = max(self.tp_min, min(self.tp_max or float("inf"), chosen.tp_pct))
-            sl_pct = max(self.sl_min, min(self.sl_max, tp_pct * sl_ratio))
+            sl_pct, tp_pct = bind_ratio_sl_tp(
+                chosen.tp_pct, sl_ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max,
+            )
             src = f"step{chosen.step}xcost"
         if forced_row is not None:
             sl_pct, tp_pct, src = forced_row["slPct"] / 100, forced_row["tpPct"] / 100, "forced-baseline"
@@ -7956,7 +7975,7 @@ class Pulse:
                 value = fallback
             return max(0.1, min(3.0, value)) / 100.0
 
-        self.sl_min = max(0.004, _risk_pct("slMinPct", 0.4))
+        self.sl_min = max(SL_MIN_PCT / 100.0, _risk_pct("slMinPct", SL_MIN_PCT))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
         self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
         tp_cap = finite_number(ov.get("tpMaxPct"), 0.0)
@@ -8581,15 +8600,16 @@ class Pulse:
         except Exception:
             hist_ok = False
         if st is None:
-            return float(POSITIVE_PF) if hist_ok else 0.0
+            return float(INTERN_PF) if hist_ok else 0.0
         view = self.sets._side_view(st, pos.side)
         if self.sets._real_metrics_ok(view):
             return float(view.get("real_pf") or 0)
         if hist_ok:
+            n = int(view.get("last15_n") or view.get("real_n") or 0)
             pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
-            if pf + 1e-9 >= POSITIVE_PF:
+            if n >= 8 and math.isfinite(pf) and pf > 0:
                 return pf
-            return float(POSITIVE_PF)
+            return float(INTERN_PF)
         return 0.0
 
     def _block_core_qty(self, symbol: str, side: str) -> float:

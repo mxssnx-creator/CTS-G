@@ -763,6 +763,27 @@ def clamp_pct(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value) if hi > 0 else value)
 
 
+def bind_ratio_sl_tp(
+    tp: float,
+    ratio: float,
+    sl_min: float,
+    sl_max: float,
+    tp_min: float,
+    tp_max: float,
+) -> tuple[float, float]:
+    """TP is primary. If the SL floor would bind, lift TP so the strategy ratio still holds."""
+    ratio = max(SL_TP_MIN, min(SL_TP_MAX, round(finite(ratio, 0.6), 1)))
+    if ratio <= 0:
+        ratio = 0.6
+    tp = clamp_pct(finite(tp, tp_min), tp_min, tp_max)
+    sl = tp * ratio
+    if sl + 1e-12 < sl_min and ratio > 0:
+        tp = clamp_pct(sl_min / ratio, tp_min, tp_max)
+        sl = tp * ratio
+    sl = clamp_pct(sl, sl_min, sl_max)
+    return sl, tp
+
+
 def resolve_sl_tp(
     *,
     base_sl: float,
@@ -794,7 +815,7 @@ def resolve_sl_tp(
         tp = clamp_pct(cost_tp, tp_min, tp_max)
         src = "cost"
     if bind_sl_to_tp:
-        sl = clamp_pct(tp * ratio, sl_min, sl_max)
+        sl, tp = bind_ratio_sl_tp(tp, ratio, sl_min, sl_max, tp_min, tp_max)
         src = f"{src}:r{ratio:.1f}"
         return sl, tp, src
     cost_sl = max(sl_min, cost_tp * ratio)
@@ -862,5 +883,15 @@ if __name__ == "__main__":
     )
     assert src40.startswith("cost") and abs(tp70 - 0.007) < 1e-9
     assert abs(sl40 - 0.0042) < 1e-9, (sl40, tp70, src40)
+    tight_sl, tight_tp, _ = resolve_sl_tp(
+        base_sl=0.0, base_tp=0.003,
+        sl_min=0.004, sl_max=0.03, tp_min=0.003, tp_max=0.0,
+        sl_to_tp=0.6,
+    )
+    assert abs(tight_sl - 0.004) < 1e-9 and abs(tight_tp - 0.004 / 0.6) < 1e-9, (tight_sl, tight_tp)
+    r04_sl, r04_tp = bind_ratio_sl_tp(0.003, 0.4, 0.004, 0.03, 0.003, 0.0)
+    r10_sl, r10_tp = bind_ratio_sl_tp(0.003, 1.0, 0.004, 0.03, 0.003, 0.0)
+    assert abs(r04_tp - 0.01) < 1e-9 and abs(r10_tp - 0.004) < 1e-9
+    assert abs(r04_tp - r10_tp) > 1e-9
     assert abs(snap_ratio(0.64) - 0.6) < 1e-9
     print("position_cost ok", got, src, src15)

@@ -796,7 +796,7 @@ class BlockBook:
         for lane in self.lanes.values():
             if not lane.active and not lane.legs:
                 continue
-            intern = float(self.default_min_pf or POSITIVE_PF)
+            intern = 0.0
             if callable(intern_pf_lookup):
                 try:
                     intern = float(intern_pf_lookup(lane) or 0.0)
@@ -838,6 +838,7 @@ class BlockBook:
             })
         catalog = []
         vr_eff = self.effective_volume_ratio()
+        vr_spec = self.specified_volume_ratio()
         for n in self._eval_range():
             f = self.formula(1.0, n)
             avg, n_avg = self.count_avg(n)
@@ -861,8 +862,9 @@ class BlockBook:
             "evalN": int(self.eval_n or BLOCK_EVAL_N),
             "countN": len(catalog),
             "allCounts": catalog,
-            "volumeRatio": vr_eff,
+            "volumeRatio": vr_spec,
             "configuredVolumeRatio": self.volume_ratio,
+            "effectiveVolumeRatio": vr_eff,
             "maxVolumeMultiplier": self.max_volume_multiplier,
             "enabledCounts": self.counts,
             "profitFactorRatio": self.pf_ratio,

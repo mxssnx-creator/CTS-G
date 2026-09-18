@@ -83,5 +83,53 @@ class HttpPayloadTests(unittest.TestCase):
         self.assertEqual(compact["selectedCoordinations"][0]["strategy"], "block")
 
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_hist_test_keeps_intern_and_validated_counts_separate(self):
+        blob = {
+            "sets": {
+                "setCount": 12,
+                "internSetCount": 12,
+                "validatedCount": 2,
+                "catalogSetCount": 8000,
+                "activeCount": 2,
+                "processingCount": 1,
+            },
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "phase": "evaluate",
+                "validatedCount": 7962,
+                "processingCount": 40,
+                "symbols": ["BTC-USDT", "ETH-USDT"],
+            },
+            "coverage": {"sets": {}},
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["internSetCount"], 12)
+        self.assertEqual(sets["setCount"], 12)
+        self.assertEqual(sets["validatedCount"], 2)
+        self.assertEqual(sets["catalogSetCount"], 8000)
+        self.assertNotEqual(sets["internSetCount"], sets["validatedCount"])
+        self.assertEqual(compact["coverage"]["sets"]["internSetCount"], 12)
+        self.assertEqual(compact["coverage"]["sets"]["validatedCount"], 2)
+
+    def test_hist_test_intern_book_fallback_does_not_mark_unproven_validated(self):
+        blob = {
+            "sets": {
+                "setCount": 8000,
+                "catalogSetCount": 8000,
+                "internSetCount": 0,
+                "validatedCount": 0,
+            },
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "phase": "ready",
+                "validatedCount": 7962,
+            },
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["internSetCount"], 7962)
+        self.assertEqual(sets["setCount"], 7962)
+        self.assertEqual(sets["validatedCount"], 0)

@@ -228,7 +228,7 @@ def _score(acc: _Acc, cost_pct: float, pf_n: int, min_pf: float = POSITIVE_PF) -
         "pf": round(pf, 4),
         "wr": wr,
         "netAvg": round(float(window.get("netAvg") or 0), 6),
-        "validated": eval_n > 0 and is_positive_pf(pf, min_pf),
+        "validated": eval_n >= 8 and is_positive_pf(pf, min_pf),
         "costSubtracted": True,
         "maxDdS": round(max_dd, 1),
         "avgDdS": round(float(dd.get("avgS") or 0), 1),

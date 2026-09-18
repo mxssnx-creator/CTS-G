@@ -310,7 +310,7 @@ def _bucket_stats(items: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str,
         sw["direction"] = d
         by_side[d] = sw
     w["bySide"] = by_side
-    w["validated"] = int(w.get("n") or 0) > 0 and float(w.get("pf") or 0) + 1e-9 >= 1.0
+    w["validated"] = int(w.get("n") or 0) >= 8 and clears_pf(float(w.get("pf") or 0), POSITIVE_PF)
     return w
 
 
@@ -851,12 +851,17 @@ def render_html(blob: Dict[str, Any]) -> str:
         (hist_test.get("enabled") is True or hist_test.get("ownsCatalog") is True)
         and hist_test.get("phase") != "off"
     )
-    intern_n = int(sets_coverage.get("internSetCount") or hist_test.get("validatedCount") or sets_coverage.get("validatedCount") or 0)
-    catalog_n = int(sets_coverage.get("catalogSetCount") or sets_coverage.get("setCount") or blob.get("setCount") or 0)
+    intern_n = int(sets_coverage.get("internSetCount") or 0)
+    if intern_n <= 0:
+        intern_n = int(hist_test.get("validatedCount") or 0)
+    if sets_coverage.get("validatedCount") is not None:
+        validated_n = int(sets_coverage.get("validatedCount") or 0)
+    else:
+        validated_n = 0    catalog_n = int(sets_coverage.get("catalogSetCount") or sets_coverage.get("setCount") or blob.get("setCount") or 0)
     proc_n = int(sets_coverage.get("processingCount") if sets_coverage.get("processingCount") is not None else (hist_test.get("processingCount") or 0))
     active_n = int(sets_coverage.get("activeCount", blob.get("setActive")) or 0)
     if hist_on:
-        set_card_strong = f"intern {number(intern_n, 0)} validated"
+        set_card_strong = f"intern {number(intern_n, 0)} · validated {number(validated_n, 0)}"
         set_card_small = (
             f"processing {number(proc_n, 0)} · {number(active_n, 0)} active"
             + (f" · catalog {number(catalog_n, 0)} skipped" if catalog_n and intern_n and catalog_n > intern_n else "")
@@ -1217,11 +1222,13 @@ def render_md(blob: Dict[str, Any]) -> str:
     scov = cov.get("sets") or {}
     ht = blob.get("histTest") or {}
     ht_on = bool((ht.get("enabled") is True or ht.get("ownsCatalog") is True) and ht.get("phase") != "off")
-    intern_n = scov.get("internSetCount") or ht.get("validatedCount") or scov.get("validatedCount")
-    catalog_n = scov.get("catalogSetCount") or scov.get("setCount")
+    intern_n = scov.get("internSetCount") or 0
+    if not intern_n:
+        intern_n = ht.get("validatedCount") or 0
+    validated_n = scov.get("validatedCount") if scov.get("validatedCount") is not None else 0    catalog_n = scov.get("catalogSetCount") or scov.get("setCount")
     if ht_on:
         lines.append(
-            f"- intern {intern_n} validated · processing {scov.get('processingCount') if scov.get('processingCount') is not None else ht.get('processingCount')} · active {scov.get('activeCount')}"
+            f"- intern {intern_n} · validated {validated_n} · processing {scov.get('processingCount') if scov.get('processingCount') is not None else ht.get('processingCount')} · active {scov.get('activeCount')}"
             + (f" · catalog {catalog_n} skipped" if catalog_n and intern_n and catalog_n > intern_n else "")
             + f" histFills={scov.get('histFills')} families={scov.get('families')} trailCover={scov.get('trailCover')}"
         )

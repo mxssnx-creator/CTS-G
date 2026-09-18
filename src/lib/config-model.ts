@@ -1005,6 +1005,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     Math.round(Math.max(0.1, Math.min(3.0, num(value, fallback))) * 100) / 100;
   out.slMinPct = Math.max(SL_MIN_PCT, pct(out.slMinPct, SL_MIN_PCT));
   out.slMaxPct = Math.max(out.slMinPct, pct(out.slMaxPct, 3.0));
+  out.indStopMinPct = Math.max(SL_MIN_PCT, num(out.indStopMinPct, SL_MIN_PCT));
+  out.indStopMaxPct = Math.max(out.indStopMinPct, num(out.indStopMaxPct, 1.5));
   out.tpMinPct = Math.max(0.3, pct(out.tpMinPct, 0.3));
   out.tpMaxPct = num(out.tpMaxPct, 0) <= 0 ? 0 : Math.max(out.tpMinPct, num(out.tpMaxPct, 0));
   out.slToTpMin = SL_TP_MIN;
@@ -1149,6 +1151,8 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
   next.slMinPct = Math.max(SL_MIN_PCT, Math.min(3, num(next.slMinPct, SL_MIN_PCT)));
   next.slMaxPct = Math.max(next.slMinPct, Math.min(3, num(next.slMaxPct, 3)));
+  next.indStopMinPct = Math.max(SL_MIN_PCT, num(next.indStopMinPct, SL_MIN_PCT));
+  next.indStopMaxPct = Math.max(next.indStopMinPct, num(next.indStopMaxPct, 1.5));
   next.tpMinPct = Math.max(.3, num(next.tpMinPct, .3));
   next.tpMaxPct = num(next.tpMaxPct, 0) <= 0 ? 0 : Math.max(next.tpMinPct, next.tpMaxPct);
   next.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.setMinStep, DEFAULT_MIN_STEP))));

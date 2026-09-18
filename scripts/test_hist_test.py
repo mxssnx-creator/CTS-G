@@ -510,9 +510,9 @@ class HistTestContract(unittest.TestCase):
         self.assertNotIn("AIN-USDT", out)
 
     def test_intern_liquid_pool_fills_cap_with_liquid_volume(self):
-        tradable = list(ht.HIST_TEST_MAJORS[:48]) + ["AAA-USDT", "BBB-USDT", "NCCOGOLD2USD-USDT"]
+        tradable = list(ht.HIST_TEST_MAJORS) + ["AAA-USDT", "BBB-USDT", "NCCOGOLD2USD-USDT"]
         universe = (
-            [{"symbol": s, "quoteVolume": 5e9} for s in ht.HIST_TEST_MAJORS[:48]]
+            [{"symbol": s, "quoteVolume": 5e9} for s in ht.HIST_TEST_MAJORS]
             + [
                 {"symbol": "AAA-USDT", "quoteVolume": 9e9},
                 {"symbol": "BBB-USDT", "quoteVolume": 8e9},
@@ -522,11 +522,11 @@ class HistTestContract(unittest.TestCase):
         )
         out = ht.intern_liquid_pool(None, universe, cap=50, tradable=tradable)
         self.assertEqual(len(out), 50)
-        self.assertIn("AAA-USDT", out)
-        self.assertIn("BBB-USDT", out)
+        self.assertEqual(set(out), set(ht.HIST_TEST_MAJORS))
+        self.assertNotIn("AAA-USDT", out)
+        self.assertNotIn("BBB-USDT", out)
         self.assertNotIn("DUST-USDT", out)
         self.assertNotIn("NCCOGOLD2USD-USDT", out)
-
     def test_intern_liquid_pool_drops_offline_contracts(self):
         tradable = [s for s in ht.HIST_TEST_MAJORS if s not in ("EOS-USDT", "MKR-USDT")]
         out = ht.intern_liquid_pool(["EOS-USDT", "MKR-USDT", "BTC-USDT"], None, cap=50, tradable=tradable)
@@ -644,6 +644,62 @@ class HistTestContract(unittest.TestCase):
         self.assertTrue(set(keep) <= intern_ids)
         self.assertFalse(set(other) & intern_ids)
         self.assertFalse(set(other) & proc_ids)
+
+    def test_intern_unproven_ids_are_not_validated(self):
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8,
+                   "stratIndications": True, "stratGeneral": True})
+        keep = [st.id for st in book.by_idx[:3]]
+        for st in book.by_idx:
+            st.last15_n = 0
+            st.last15_ratio = 0.0
+            st.active = False
+            st.n = 0
+        with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
+            ids = ht.apply_scores_to_book(book, {
+                "validatedIds": keep,
+                "successfulConfigs": [
+                    {"setId": keep[0], "validated": True, "pf": 0, "evalN": 0, "n": 0},
+                    {"setId": keep[1], "validated": True, "pf": 1.15, "evalN": 0, "n": 0},
+                    {"setId": keep[2], "validated": True, "pf": 1.8, "evalN": 4, "n": 4},
+                ],
+            })
+        self.assertEqual(ids, keep)
+        self.assertEqual(book.hist_test_set_ids, set(keep))
+        self.assertIsNone(book.intern_metric_source())
+        self.assertEqual(book.intern_validated_count(keep), 0)
+        snap = book.snapshot()
+        self.assertEqual(snap["internSetCount"], 3)
+        self.assertEqual(snap["validatedCount"], 0)
+        self.assertEqual(snap["setCount"], 3)
+        for sid in keep:
+            self.assertFalse(book.sets[sid].active, sid)
+            self.assertEqual(book.sets[sid].last15_ratio, 0.0)
+
+    def test_last_ready_keeps_combo_stats_during_evaluate(self):
+        last = {
+            "pfStats": {"overall": {"pf": 1.4, "n": 40, "validated": True}},
+            "withWithout": {"block": {"with": {"pf": 1.5, "n": 20}, "without": {"pf": 1.1, "n": 18}}},
+            "comboMatrix": [{"indication": "combined", "strategy": "block", "pf": 1.5, "n": 20}],
+            "combo": {"engine": "combo", "cells": 12},
+            "validatedIds": ["a"],
+            "validatedCount": 1,
+        }
+        flying = {
+            "phase": "evaluate",
+            "ready": False,
+            "pct": 40,
+            "validatedIds": ["a"],
+            "validatedCount": 1,
+            "lastReady": last,
+        }
+        view = ht.job_progress_view(flying)
+        self.assertEqual(view["phase"], "evaluate")
+        self.assertEqual(view["pfStats"]["overall"]["pf"], 1.4)
+        self.assertEqual(view["withWithout"]["block"]["with"]["pf"], 1.5)
+        self.assertEqual(view["comboMatrix"][0]["strategy"], "block")
+        self.assertEqual(view["combo"]["engine"], "combo")
         coords = ht.selected_coordinations({
             "successfulConfigs": [
                 {"setId": keep[0], "validated": True, "indication": "combined", "strategy": "block", "pf": 1.51, "n": 40},

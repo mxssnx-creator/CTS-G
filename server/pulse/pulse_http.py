@@ -487,10 +487,13 @@ def _apply_effective_set_counts(out: dict) -> None:
     if catalog:
         sets["catalogSetCount"] = catalog
     if _hist_test_on(ht):
-        intern = int(ht.get("validatedCount") or sets.get("internSetCount") or sets.get("validatedCount") or 0)
+        intern = int(sets.get("internSetCount") or 0)
+        if intern <= 0:
+            intern = int(ht.get("validatedCount") or 0)
         sets["internSetCount"] = intern
         sets["setCount"] = intern
-        sets["validatedCount"] = intern
+        if sets.get("validatedCount") is None:
+            sets["validatedCount"] = 0
         proc = sets.get("processingCount")
         if proc is None:
             proc = ht.get("processingCount")
@@ -570,8 +573,8 @@ def slim_for_ui(st: dict) -> dict:
         if closed and not out.get("pfStats"):
             try:
                 from combo_eval import evaluate_fills
-                min_pf = float(((out.get("coord") or {}) if isinstance(out.get("coord"), dict) else {}).get("minPf") or 1.1)
-                combo = evaluate_fills(closed, min_pf=min_pf or 1.1)
+                min_pf = float(((out.get("coord") or {}) if isinstance(out.get("coord"), dict) else {}).get("minPf") or POSITIVE_PF)
+                combo = evaluate_fills(closed, min_pf=min_pf or POSITIVE_PF)
                 out["pfStats"] = combo.get("pfStats")
                 out["withWithout"] = combo.get("withWithout")
                 out["comboMatrix"] = combo.get("matrix")

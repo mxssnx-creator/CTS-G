@@ -700,9 +700,8 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             const internN = ln.internSetCount ?? 0;
             const laneSets = internN || htOn
-              ? `intern ${ln.validatedCount ?? internN} validated · active ${ln.activeCount ?? 0}`
-              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;
-            return (
+              ? `intern ${internN} · validated ${ln.validatedCount ?? 0} · active ${ln.activeCount ?? 0}`
+              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;            return (
               <div key={ln.id || ln.type}>
                 <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-muted">
                   <span className={`min-w-0 ${ln.running && !ln.halted ? "text-primary" : "text-faint"}`}>

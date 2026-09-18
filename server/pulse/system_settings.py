@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import json
-from position_cost import shared_pf_settings, normalize_pf, POSITIVE_PF
+from position_cost import shared_pf_settings, normalize_pf, POSITIVE_PF, SL_MIN_PCT
 from validation_policy import control_min_trades
 from pathlib import Path
 
@@ -70,5 +70,22 @@ def calculation_overlay(overlay, cts=None):
             return fallback
     stack = level(result.get("blockMaxStack", 6), 6) or 6
     result["blockActiveMinLevel"] = min(stack, level(result.get("blockActiveMinLevel", (cts or {}).get("blockActiveMinLevel", 0)), 0))
+    def sl_min_pct(value, fallback=SL_MIN_PCT):
+        try:
+            n = float(fallback if value is None else value)
+        except (TypeError, ValueError, OverflowError):
+            n = fallback
+        if not math.isfinite(n):
+            n = fallback
+        return max(SL_MIN_PCT, min(3.0, n))
+    result["slMinPct"] = sl_min_pct(result.get("slMinPct"))
+    result["indStopMinPct"] = sl_min_pct(result.get("indStopMinPct"))
+    try:
+        sl_pct = float(result["slMinPct"] if result.get("slPct") is None else result.get("slPct"))
+        if not math.isfinite(sl_pct):
+            sl_pct = result["slMinPct"]
+    except (TypeError, ValueError, OverflowError):
+        sl_pct = result["slMinPct"]
+    result["slPct"] = max(result["slMinPct"], sl_pct)
     result.update(normalize_system_settings(result))
     return result

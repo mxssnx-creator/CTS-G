@@ -678,12 +678,11 @@ def intern_liquid_pool(
     tradable: Optional[Sequence[str]] = None,
     validated: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Intern preferred + hist-test positives + 50 liquid names.
+    """Intern preferred + hist-test majors. Cap 50 liquid majors.
 
-    `validated` is Test Historic's positive/filled book and is auto-assigned
-    even when a name is not in the major list (JUP/ZEC/…). NCCO-style contracts
-    and overlay dust stay out. Offline majors stay out unless already open.
-    """
+    Volume padding never adds junk alts. Open lots always stay scannable.
+    `validated` hist-test names still join when they are majors, already open,
+    or quote volume is at least MIN_QUOTE_VOLUME.    """
     major_keys = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
     overlay = [
         str(s).strip().upper()
@@ -744,21 +743,13 @@ def intern_liquid_pool(
     limit = int(cap or 0) or SYMBOL_CAP
     if vol and (not limit or len(out) < limit):
         ranked_vol = sorted(
-            (s for s, qv in vol.items() if float(qv or 0) >= float(min_quote or 0)),
+            (s for s in HIST_TEST_MAJORS if float(vol.get(str(s).upper(), 0) or 0) >= float(min_quote or 0)),
             key=lambda s: (-float(vol.get(s, 0) or 0), s),
         )
         for s in ranked_vol:
             if limit and len(out) >= limit:
                 break
-            name = str(s or "").strip().upper()
-            if not name.endswith("-USDT") or name in used or ":" in name:
-                continue
-            if name.startswith(("NCCO", "NCS", "NCFX")):
-                continue
-            if apply_tradable and name not in tradable_keys and name not in open_keys:
-                continue
-            used.add(name)
-            out.append(name)
+            add(s)
     if limit > 0:
         out = out[:limit]
     return out
@@ -849,6 +840,8 @@ def running_sets(job: Optional[Dict[str, Any]] = None, limit: int = 24) -> List[
             n = int(row.get("n") or row.get("evalN") or row.get("last15N") or row.get("last15_n") or 0)
         except (TypeError, ValueError):
             n = 0
+        if n <= 0:
+            return
         try:
             step = int(row.get("step") or 0)
         except (TypeError, ValueError):
@@ -982,46 +975,59 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         except (TypeError, ValueError):
             pf = 0.0
         st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
-        st.last15_ratio = pf if pf > 0 else max(float(getattr(st, "last15_ratio", 0) or 0), 1.0)
-        st.n = max(int(getattr(st, "n", 0) or 0), n)
-        st.active = bool(row.get("validated", True))
-        st.deact_reason = ""
+        if pf > 0:
+            st.last15_ratio = pf
+        if n > 0:
+            st.n = max(int(getattr(st, "n", 0) or 0), n)
+        try:
+            need = int(book.eval_need()) if callable(getattr(book, "eval_need", None)) else 8
+        except Exception:
+            need = 8
+        try:
+            floor = float(getattr(book, "real_min_pf", None) or getattr(book, "min_pf", None) or POSITIVE_PF)
+        except (TypeError, ValueError):
+            floor = float(POSITIVE_PF)
+        proven = n >= need and pf + 1e-9 >= floor
+        st.active = bool(proven)
+        st.deact_reason = "" if proven else (st.deact_reason or "hist-test intern")
         st.processing_active = True
-        st.processing_reason = "hist-test validated"
+        st.processing_reason = "hist-test validated" if proven else "hist-test intern"
         try:
             dd = float(row.get("maxDdS") or row.get("max_dd_s") or getattr(st, "max_dd_s", 0) or 0)
         except (TypeError, ValueError):
             dd = float(getattr(st, "max_dd_s", 0) or 0)
         st.max_dd_s = dd
         ledger = dict(getattr(st, "stage_ledger", None) or {})
-        ledger["base"] = True
-        ledger["main"] = True
-        ledger["real"] = True
+        if proven:
+            ledger["base"] = True
+            ledger["main"] = True
+            ledger["real"] = True
         st.stage_ledger = ledger
-        # Per-side flags must follow the hist-test winner. Empty live tapes
-        # would otherwise keep LONG/SHORT inactive and starve intern/live size.
-        side_view = {
-            "last15_n": int(st.last15_n or 0),
-            "last15_ratio": float(st.last15_ratio or 0),
-            "n": int(st.n or 0),
-            "base_n": int(st.last15_n or 0),
-            "base_pf": float(st.last15_ratio or 0),
-            "main_n": int(st.last15_n or 0),
-            "main_pf": float(st.last15_ratio or 0),
-            "real_n": int(st.last15_n or 0),
-            "real_pf": float(st.last15_ratio or 0),
-            "max_dd_s": float(st.max_dd_s or 0),
-            "ddOk": True,
-            "validated": True,
-            "active": True,
-            "deact_reason": "",
-        }
-        sides = dict(getattr(st, "by_side", None) or {})
-        for direction in ("LONG", "SHORT"):
-            blob = dict(sides.get(direction) or {})
-            blob.update(side_view)
-            sides[direction] = blob
-        st.by_side = sides
+        # Proven hist-test evidence seeds sides so intern size is not starved.
+        # n=0 / pf=0 never invents intern-neutral 1.0 or Real stages.
+        if n > 0 and pf > 0:
+            side_view = {
+                "last15_n": int(st.last15_n or 0),
+                "last15_ratio": float(st.last15_ratio or 0),
+                "n": int(st.n or 0),
+                "base_n": int(st.last15_n or 0),
+                "base_pf": float(st.last15_ratio or 0),
+                "main_n": int(st.last15_n or 0) if proven else 0,
+                "main_pf": float(st.last15_ratio or 0) if proven else 0.0,
+                "real_n": int(st.last15_n or 0) if proven else 0,
+                "real_pf": float(st.last15_ratio or 0) if proven else 0.0,
+                "max_dd_s": float(st.max_dd_s or 0),
+                "ddOk": True,
+                "validated": bool(proven),
+                "active": bool(proven),
+                "deact_reason": "" if proven else "hist-test intern",
+            }
+            sides = dict(getattr(st, "by_side", None) or {})
+            for direction in ("LONG", "SHORT"):
+                blob = dict(sides.get(direction) or {})
+                blob.update(side_view)
+                sides[direction] = blob
+            st.by_side = sides
     cap = getattr(book, "_cap_active", None)
     if callable(cap):
         try:
@@ -1149,6 +1155,19 @@ def seed_recalc_prior() -> Dict[str, Any]:
     return prior or {}
 
 
+def _merge_last_ready_stats(payload: Dict[str, Any], last: Optional[Dict[str, Any]]) -> None:
+    """Keep combo/PF families from the last ready run while a refresh is in flight."""
+    if not isinstance(payload, dict) or not isinstance(last, dict) or not last:
+        return
+    for key in ("pfStats", "withWithout", "combo", "byIndication", "byStrategy"):
+        if not payload.get(key) and last.get(key):
+            payload[key] = last.get(key)
+    if not payload.get("comboMatrix") and last.get("comboMatrix"):
+        payload["comboMatrix"] = last.get("comboMatrix")
+    if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
+        payload["successfulConfigs"] = last.get("successfulConfigs")
+
+
 def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
     winner = blob.get("winner") if isinstance(blob.get("winner"), dict) else {}
     ids = list(blob.get("validatedIds") or [])
@@ -1167,6 +1186,12 @@ def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
         "n": (winner or {}).get("n"),
         "symbols": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
         "positive": list(blob.get("positive") or blob.get("symbols") or [])[:SYMBOL_CAP],
+        "pfStats": blob.get("pfStats") or {},
+        "withWithout": blob.get("withWithout") or {},
+        "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
+        "combo": blob.get("combo") or {},
+        "byIndication": blob.get("byIndication") or blob.get("kinds") or {},
+        "byStrategy": blob.get("byStrategy") or {},
     }
 
 
@@ -1183,18 +1208,22 @@ def publish(blob: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
         persist_validated_ids(list(payload.get("validatedIds") or []))
-    elif not in_flight:
+    else:
         last = read_last_ready()
         if last:
-            if not payload.get("winner"):
-                payload["winner"] = last.get("winner") or {}
-            if not payload.get("validatedIds"):
-                payload["validatedIds"] = list(last.get("validatedIds") or [])
-            if payload.get("validatedCount") in (None, 0) and last.get("validatedCount"):
-                payload["validatedCount"] = last.get("validatedCount")
-            if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
-                payload["successfulConfigs"] = last.get("successfulConfigs")
-            payload["lastReady"] = True
+            _merge_last_ready_stats(payload, last)
+            if not in_flight:
+                if not payload.get("winner"):
+                    payload["winner"] = last.get("winner") or {}
+                if not payload.get("validatedIds"):
+                    payload["validatedIds"] = list(last.get("validatedIds") or [])
+                if payload.get("validatedCount") in (None, 0) and last.get("validatedCount"):
+                    payload["validatedCount"] = last.get("validatedCount")
+                if not payload.get("successfulConfigs") and last.get("successfulConfigs"):
+                    payload["successfulConfigs"] = last.get("successfulConfigs")
+                payload["lastReady"] = True
+            else:
+                payload["lastReady"] = last
     for dest in job_paths():
         try:
             atomic_write(dest, payload)
@@ -1331,6 +1360,13 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         cap=SYMBOL_CAP,
         validated=symbols,
     )
+    last_ready = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
+    if not isinstance(last_ready, dict) or not (last_ready.get("pfStats") or last_ready.get("withWithout")):
+        try:
+            last_ready = read_last_ready()
+        except Exception:
+            last_ready = last_ready if isinstance(last_ready, dict) else {}
+    _merge_last_ready_stats(blob, last_ready if isinstance(last_ready, dict) else None)
     remaining = max(0, int(sets_total) - int(sets_done))
     if running:
         processing_n = remaining if remaining else (1 if pct < 100.0 else 0)

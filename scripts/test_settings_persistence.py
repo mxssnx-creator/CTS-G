@@ -89,6 +89,18 @@ class SettingsPersistence(unittest.TestCase):
             self.assertTrue(vst['blockEnabled'])
             self.assertTrue(vst['histTestEnabled'])
 
+    def test_min_sl_floor_is_systemwide_point_four(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            ph.write_overlay('live', {'slMinPct': 0.15, 'indStopMinPct': 0.2, 'slPct': 0.2})
+            live = ph.load_overlay('bingx-x01')
+            self.assertGreaterEqual(float(live['slMinPct']), 0.4)
+            self.assertGreaterEqual(float(live['indStopMinPct']), 0.4)
+            self.assertGreaterEqual(float(live['slPct']), float(live['slMinPct']))
+            ph.write_overlay('vst', {'slMinPct': 0.4, 'indStopMinPct': 0.4})
+            vst = ph.load_overlay('bingx-x02')
+            self.assertAlmostEqual(float(vst['slMinPct']), 0.4)
+            self.assertAlmostEqual(float(vst['indStopMinPct']), 0.4)
+
     def test_overall_start_reports_a_failed_lane(self):
         def service_state(cid, fresh=False):
             return 'active' if cid == 'bingx-x01' else 'failed'
