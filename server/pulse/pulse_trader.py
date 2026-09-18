@@ -14167,13 +14167,23 @@ class Pulse:
 
         for s in opens:
             pin(s)
+        overlay_scan = [str(s) for s in (list(SYMBOLS) if SYMBOLS else [])]
+        if 0 < len(overlay_scan) <= 8:
+            for s in overlay_scan:
+                pin(s)
         tradable_keys = {str(s).upper() for s in (self._intern_tradable() or [])}
         offline = {str(s).upper() for s in (getattr(self, "_offline_symbols", set()) or set())}
+        major_keys = {str(s).upper() for s in (getattr(hist_test_mod, "HIST_TEST_MAJORS", ()) or ())}
+        major_keys.update(str(s).upper() for s in (getattr(hist_test_mod, "INTERN_MAJORS", ()) or ()))
+        major_keys.update(str(s).upper() for s in (getattr(hist_test_mod, "PREFERRED_SYMBOLS", ()) or ()))
+        open_keys = {str(s).strip().upper() for s in opens if str(s or "").strip()}
         for s in validated:
             key = str(s or "").strip().upper()
             if key.startswith(("NCCO", "NCS", "NCFX")):
                 continue
             if key in offline:
+                continue
+            if key not in major_keys and key not in open_keys:
                 continue
             if tradable_keys and key not in tradable_keys:
                 continue
