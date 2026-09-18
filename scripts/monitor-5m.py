@@ -111,6 +111,9 @@ for path in sorted(glob.glob("/var/lib/cts-ga/stats-bingx-x0*.json")):
     junk = [s for s in intern_syms if s.endswith("-USDT") and s not in MAJORS]
     intern_n = int(sets.get("internSetCount") or 0)
     valid_n = int(sets.get("validatedCount") or 0)
+    opens = d.get("open") if isinstance(d.get("open"), list) else []
+    open_keys = {str(row.get("symbol") or "").upper() for row in opens if isinstance(row, dict)}
+    stray = [s for s in junk if s not in open_keys]
     row = {
         "age": round(now - os.stat(path).st_mtime, 1),
         "running": d.get("running"),
@@ -124,11 +127,12 @@ for path in sorted(glob.glob("/var/lib/cts-ga/stats-bingx-x0*.json")):
         "active": sets.get("activeCount"),
         "ht": ht.get("phase"),
         "internSym": len(intern_syms),
-        "junk": junk[:8],
+        "junk": stray[:8],
+        "openJunk": [s for s in junk if s in open_keys][:8],
         "detail": str(ht.get("detail") or "")[:160],
     }
-    if junk:
-        out["issues"].append("intern-junk " + os.path.basename(path) + " " + ",".join(junk[:6]))
+    if stray:
+        out["issues"].append("intern-junk " + os.path.basename(path) + " " + ",".join(stray[:6]))
     if intern_n and valid_n and intern_n == valid_n and intern_n > 100:
         out["issues"].append("intern-aliased-validated " + os.path.basename(path))
     if d.get("halted"):
