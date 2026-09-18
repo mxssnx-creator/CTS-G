@@ -1450,7 +1450,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
                 "n": dir_n or len(sub),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) >= 8 and is_positive_pf(spf["ratio"]),
                 "costSubtracted": True,
                 "evaluationWindows": evaluation_windows(
                     stail, book.cost_pct, required_samples=need, ordered=True, simple=True
@@ -1465,7 +1465,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             "last15N": int(pf["count"]),
             "maxDdS": round(max(float(dd.get("maxS") or 0), float(group_dd.get(key) or 0)), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) >= 8 and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 bounded, book.cost_pct, required_samples=need, ordered=True, simple=True

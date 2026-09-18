@@ -2173,20 +2173,20 @@ def merge_overall() -> dict:
             except Exception:
                 fresh = {}
             if fresh:
-                for key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "ready", "detail"):
+                for key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "positive", "ready", "detail", "byIndication", "byStrategy"):
                     if fresh.get(key) is not None:
                         view[key] = fresh.get(key)
             if view.get("running") or not view.get("runningSets"):
                 try:
                     if not fresh:
                         fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready"):
+                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "positive", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready"):
                         if fresh.get(key) is None:
                             continue
                         existing = view.get(key)
                         if key == "processingCount" and existing is not None:
                             continue
-                        if key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "ready", "detail"):
+                        if key in ("internSetCount", "validatedCount", "internSymbols", "symbols", "positive", "ready", "detail", "byIndication", "byStrategy"):
                             view[key] = fresh.get(key)
                             continue
                         if key in ("internSymbols", "symbols") and existing not in (None, [], ""):

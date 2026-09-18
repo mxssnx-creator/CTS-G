@@ -5396,7 +5396,7 @@ class SetBook:
             "evaluationWindows": windows,
             "netAvg": round(net_avg, 6),
             "costSubtracted": True,
-            "validated": n >= need,
+            "validated": n >= need and clears_pf(pf, self.min_pf),
             "profitable": clears_pf(pf, self.min_pf),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),

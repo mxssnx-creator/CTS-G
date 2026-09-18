@@ -985,6 +985,42 @@ class HistTestContract(unittest.TestCase):
         self.assertFalse(view["running"])
         self.assertEqual(view["phase"], "ready")
         self.assertIn("signals", view.get("byIndication") or {})
+        self.assertIn("state", view.get("byIndication") or {})
+        self.assertEqual(len(view.get("positive") or []), 50)
+        self.assertNotIn("BONER-USDT", view.get("positive") or [])
+
+    def test_indication_calc_view_covers_all_kinds_and_proven_floor(self):
+        kinds = {k: {"n": 30, "pf": 0.9, "tapeN": 160, "maxDdS": 100} for k in ht.IND_KINDS}
+        kinds["signals"] = {"n": 30, "pf": 1.4, "tapeN": 160, "maxDdS": 90}
+        combo = {"matrix": [
+            {"indication": "signals", "strategy": "trailing", "n": 40, "evalN": 30, "pf": 1.4, "validated": True, "maxDdS": 90, "wr": 70},
+            {"indication": "state", "strategy": "normal", "n": 40, "evalN": 30, "pf": 0.9, "validated": False, "maxDdS": 80, "wr": 40},
+        ]}
+        view = ht.indication_calc_view(kinds, combo)
+        for kind in ht.IND_KINDS:
+            self.assertIn(kind, view)
+            self.assertIn("pf", view[kind])
+            self.assertIn("validated", view[kind])
+        self.assertTrue(view["signals"]["validated"])
+        self.assertFalse(view["state"]["validated"])
+        self.assertFalse(view["common"]["validated"])
+        self.assertIn("trailing", view["signals"].get("byStrategy") or {})
+        self.assertTrue(view["signals"]["byStrategy"]["trailing"]["validated"])
+
+    def test_strategy_calc_view_requires_last15_proven(self):
+        view = ht.strategy_calc_view(
+            {
+                "core": {"n": 100, "evalN": 30, "pf": 1.4, "bySide": {"LONG": {"n": 50, "evalN": 30, "pf": 1.4}}},
+                "block": {"n": 8, "evalN": 3, "pf": 1.5},
+            },
+            {"pfStats": {"dca": {"n": 20, "evalN": 20, "pf": 1.22}, "axis": {"n": 0, "evalN": 0, "pf": 0.0}}},
+        )
+        self.assertTrue(view["core"]["validated"])
+        self.assertTrue(view["core"]["bySide"]["LONG"]["validated"])
+        self.assertFalse(view["block"]["validated"])
+        self.assertIn("dca", view)
+        self.assertTrue(view["dca"]["validated"])
+        self.assertNotIn("axis", view)
 
     def test_seed_recalc_prior_keeps_last_ready_ids(self):
         import tempfile, os, shutil

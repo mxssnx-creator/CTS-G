@@ -32,7 +32,7 @@ from hist_calc import (
     _rank_set_rows,
 )
 from position_cost import PF_MAX, PF_MIN, POSITIVE_PF, is_positive_pf
-from set_engine import SetBook, synth_trend
+from set_engine import IND_KINDS, SetBook, synth_trend
 from storage_paths import atomic_write
 
 HOURS_MIN = 4
@@ -1536,14 +1536,21 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "processedSetCount": n_ids,
         "processingCount": processing_n,
         "internSymbols": intern_syms,
+        "positive": intern_syms,
         "selectedCoordinations": selected_coordinations(blob),
         "withWithout": blob.get("withWithout") or {},
         "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
         "successfulConfigs": (blob.get("successfulConfigs") or [])[:24] if isinstance(blob.get("successfulConfigs"), list) else [],
         "pfStats": blob.get("pfStats") or {},
         "combo": blob.get("combo") or {},
-        "byIndication": _compact_stat_map(blob.get("byIndication") or blob.get("kinds") or {}, 16),
-        "byStrategy": _compact_stat_map(blob.get("byStrategy") or {}, 16),
+        "byIndication": _compact_stat_map(
+            indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}),
+            16,
+        ),
+        "byStrategy": _compact_stat_map(
+            strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}),
+            16,
+        ),
         "error": blob.get("error") or "",
     }
 
@@ -2015,6 +2022,102 @@ def fill_positive(
     }
 
 
+def _cell_n(cell: Dict[str, Any]) -> int:
+    try:
+        return int(cell.get("evalN") or cell.get("last15N") or cell.get("n") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cell_pf(cell: Dict[str, Any]) -> float:
+    try:
+        return float(cell.get("pf") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Last-15 indication types: n≥8 and PF≥floor. Combo strategies attach per kind."""
+    gate = kinds if isinstance(kinds, dict) else {}
+    matrix = (combo or {}).get("matrix") if isinstance(combo, dict) else None
+    by_kind_cells: Dict[str, List[Dict[str, Any]]] = {}
+    for cell in matrix or []:
+        if not isinstance(cell, dict):
+            continue
+        kind = str(cell.get("indication") or "").strip()
+        if kind:
+            by_kind_cells.setdefault(kind, []).append(cell)
+    out: Dict[str, Any] = {}
+    for kind in list(IND_KINDS) + ["general", "combined"]:
+        row = dict(gate.get(kind) or {})
+        cells = by_kind_cells.get(kind) or []
+        n = _cell_n(row)
+        pf = _cell_pf(row)
+        if n <= 0 and cells:
+            scored = [c for c in cells if _cell_n(c) > 0 or int(c.get("n") or 0) > 0]
+            if scored:
+                best = max(scored, key=lambda c: (bool(c.get("validated")), _cell_pf(c), int(c.get("n") or 0)))
+                n = _cell_n(best) or int(best.get("n") or 0)
+                pf = _cell_pf(best)
+                row.setdefault("maxDdS", best.get("maxDdS") or 0)
+                row.setdefault("avgDdS", best.get("avgDdS") or 0)
+                row.setdefault("wr", best.get("wr") or 0)
+                row.setdefault("tapeN", best.get("n") or n)
+        if n <= 0 and kind in ("general", "combined") and kind not in gate and not cells:
+            continue
+        row["kind"] = kind
+        row["n"] = n
+        row["pf"] = round(pf, 4)
+        row["evalN"] = n
+        row["validated"] = n >= 8 and is_positive_pf(pf)
+        row["profitable"] = is_positive_pf(pf)
+        by_st: Dict[str, Any] = {}
+        for cell in cells:
+            st = str(cell.get("strategy") or "").strip()
+            if not st or int(cell.get("n") or 0) <= 0:
+                continue
+            cn = _cell_n(cell) or int(cell.get("n") or 0)
+            cpf = _cell_pf(cell)
+            by_st[st] = {
+                "strategy": st,
+                "n": int(cell.get("n") or 0),
+                "evalN": cn,
+                "pf": round(cpf, 4),
+                "validated": cn >= 8 and is_positive_pf(cpf),
+                "maxDdS": cell.get("maxDdS") or 0,
+                "wr": cell.get("wr") or 0,
+            }
+        if by_st:
+            row["byStrategy"] = by_st
+        out[kind] = row
+    return out
+
+
+def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Strategy / pack books keep last-15 proven. Combo PF families fill gaps."""
+    out: Dict[str, Any] = dict(by_strat or {})
+    pf_stats = (combo or {}).get("pfStats") if isinstance(combo, dict) else {}
+    if isinstance(pf_stats, dict):
+        for name, row in pf_stats.items():
+            if name not in out and isinstance(row, dict) and int(row.get("n") or 0) > 0:
+                out[name] = dict(row, strategy=name)
+    for name, row in list(out.items()):
+        if not isinstance(row, dict):
+            continue
+        n = _cell_n(row)
+        pf = _cell_pf(row)
+        row["evalN"] = n
+        row["validated"] = n >= 8 and is_positive_pf(pf)
+        if isinstance(row.get("bySide"), dict):
+            for side in row["bySide"].values():
+                if not isinstance(side, dict):
+                    continue
+                sn = _cell_n(side)
+                spf = _cell_pf(side)
+                side["validated"] = sn >= 8 and is_positive_pf(spf)
+    return out
+
+
 def _compact_stat_map(blob: Any, limit: int = 40) -> Dict[str, Any]:
     """Keep PF + DDT identity for relations/types. Drop window dumps."""
     if not isinstance(blob, dict):
@@ -2029,16 +2132,22 @@ def _compact_stat_map(blob: Any, limit: int = 40) -> Dict[str, Any]:
     keys = [k for k in prefer if k in blob] + [k for k in blob if k not in prefer]
     out: Dict[str, Any] = {}
     keep = {"n", "evalN", "pf", "wr", "netAvg", "validated", "maxDdS", "avgDdS", "pfDdRatio",
-            "last15N", "costSubtracted", "kind", "strategy", "indication", "direction", "tapeN"}
+            "last15N", "costSubtracted", "kind", "strategy", "indication", "direction", "tapeN",
+            "profitable", "source", "liveN"}
     for key in keys[: max(1, int(limit or 40))]:
         row = blob.get(key)
         if not isinstance(row, dict):
             continue
-        slim = {kk: vv for kk, vv in row.items() if kk in keep or kk == "bySide"}
+        slim = {kk: vv for kk, vv in row.items() if kk in keep or kk in ("bySide", "byStrategy")}
         if isinstance(slim.get("bySide"), dict):
             slim["bySide"] = {
                 side: {kk: vv for kk, vv in (stats or {}).items() if kk in keep}
                 for side, stats in slim["bySide"].items() if isinstance(stats, dict)
+            }
+        if isinstance(row.get("byStrategy"), dict):
+            slim["byStrategy"] = {
+                name: {kk: vv for kk, vv in (stats or {}).items() if kk in keep}
+                for name, stats in row["byStrategy"].items() if isinstance(stats, dict)
             }
         out[str(key)] = slim
     return out
@@ -2206,9 +2315,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
             for k, v in (job.get("byDirection") or {}).items() if isinstance(v, dict)
         },
-        "byStrategy": _compact_stat_map(job.get("byStrategy") or {}, 40),
-        "byIndication": _compact_stat_map(job.get("byIndication") or job.get("kinds") or {}, 24),
-        "kinds": _compact_stat_map(job.get("kinds") or job.get("byIndication") or {}, 24),
+        "byStrategy": _compact_stat_map(strategy_calc_view(job.get("byStrategy") or {}, {"pfStats": job.get("pfStats") or {}, "matrix": job.get("comboMatrix") or []}), 40),
+        "byIndication": _compact_stat_map(indication_calc_view(job.get("byIndication") or job.get("kinds") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
+        "kinds": _compact_stat_map(indication_calc_view(job.get("kinds") or job.get("byIndication") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
         "pfStats": job.get("pfStats") or {},
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
@@ -2554,6 +2663,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         kinds = book.ind_gate_snapshot() if hasattr(book, "ind_gate_snapshot") else {}
     except Exception:
         kinds = {}
+    kinds = indication_calc_view(kinds, combo)
+    by_strat = strategy_calc_view(by_strat, combo)
     progress({
         "phase": "score",
         "pct": 96,
