@@ -544,10 +544,37 @@ npm_install_desk() {
 }
 
 fast_forward_app() {
-  [[ -z "$(git -C "$CTS_G_ROOT" status --porcelain --untracked-files=no)" ]] || die "tracked edits present; preserve and commit/review them first"
-  [[ "$(git -C "$CTS_G_ROOT" branch --show-current)" == "$BRANCH" ]] || die "branch differs; no forced checkout"
+  local preserve_dir file
+  local -a live_files=(
+    "public/hist-test.json"
+    "public/step-sweep-24h.json"
+    "reports/hist-test/summary.json"
+    "reports/hist-test/last-ready.json"
+    "reports/hist-test/validated-ids.json"
+  )
+  preserve_dir="$(mktemp -d "${TMPDIR:-/tmp}/cts-ga-live-job.XXXXXX")"
+  for file in "${live_files[@]}"; do
+    if [[ -f "$CTS_G_ROOT/$file" ]]; then
+      mkdir -p "$preserve_dir/$(dirname "$file")"
+      cp -a "$CTS_G_ROOT/$file" "$preserve_dir/$file"
+    fi
+  done
+  # Live Test Historic / intern sidecar must not block ff-only merge.
+  git -C "$CTS_G_ROOT" checkout -- "${live_files[@]}" 2>/dev/null || true
+  if [[ -n "$(git -C "$CTS_G_ROOT" status --porcelain --untracked-files=no)" ]]; then
+    rm -rf "$preserve_dir"
+    die "tracked edits present; preserve and commit/review them first"
+  fi
+  [[ "$(git -C "$CTS_G_ROOT" branch --show-current)" == "$BRANCH" ]] || { rm -rf "$preserve_dir"; die "branch differs; no forced checkout"; }
   git -C "$CTS_G_ROOT" fetch "$GIT_REMOTE" "$BRANCH"
-  git -C "$CTS_G_ROOT" merge --ff-only "$GIT_REMOTE/$BRANCH" || die "non-fast-forward update blocked"
+  git -C "$CTS_G_ROOT" merge --ff-only "$GIT_REMOTE/$BRANCH" || { rm -rf "$preserve_dir"; die "non-fast-forward update blocked"; }
+  for file in "${live_files[@]}"; do
+    if [[ -f "$preserve_dir/$file" ]]; then
+      mkdir -p "$CTS_G_ROOT/$(dirname "$file")"
+      cp -a "$preserve_dir/$file" "$CTS_G_ROOT/$file"
+    fi
+  done
+  rm -rf "$preserve_dir"
 }
 
 redis_has_keys() {
