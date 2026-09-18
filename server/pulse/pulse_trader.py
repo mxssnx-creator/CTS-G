@@ -83,7 +83,7 @@ from system_settings import calculation_overlay, normalize_system_settings
 from runtime_statistics import RuntimeMonitor, persistent_activity
 from redis_coordination import coordinator as redis_config
 from calculation_cache import CalculationCache
-from connection_profile import connection_endpoint
+from connection_profile import connection_endpoint, ENDPOINTS
 
 _CID_SEQUENCE_LOCK = threading.Lock()
 _CID_SEQUENCES: Dict[str, Tuple[int, int]] = {}
@@ -15323,9 +15323,23 @@ def main() -> None:
     secret = redis_hget("api_secret")
     if not key or not secret:
         raise SystemExit(f"missing {CONN_SHORT} credentials")
+    raw_testnet = redis_hget("is_testnet")
+    raw_base_url = redis_hget("base_url")
+    if CONN_SHORT == "bingx-x01" and str(raw_testnet).strip().lower() in ("1", "true", "yes"):
+        # Defense in depth: bingx-x01 is a hard-coded mainnet-only connection.
+        # Never merely refuse and exit on a stray testnet flag -- actively
+        # repair the stored configuration so the same bad value cannot keep
+        # recurring on every subsequent restart.
+        print(f"[v0] [connection-guard] {CONN_SHORT}: corrected stray is_testnet={raw_testnet!r} back to mainnet defaults")
+        try:
+            redis_config.write_hash(f"connection:{CONN_SHORT}", {"is_testnet": "0", "base_url": ENDPOINTS[CONN_SHORT]})
+        except Exception as exc:
+            print(f"[v0] [connection-guard] {CONN_SHORT}: failed to persist correction: {exc}")
+        raw_testnet = "0"
+        raw_base_url = ENDPOINTS[CONN_SHORT]
     try:
         BASE = connection_endpoint(
-            CONN_SHORT, redis_hget("base_url"), redis_hget("is_testnet"),
+            CONN_SHORT, raw_base_url, raw_testnet,
             vst_only=str(os.environ.get("CTS_VST_ONLY") or "").lower() in ("1", "true", "yes"),
         )
     except ValueError as exc:
