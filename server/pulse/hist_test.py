@@ -716,11 +716,10 @@ def intern_liquid_pool(
             used.add(name)
             out.append(name)
             return
-        if name not in major_keys and not allow_validated:
-            return
-        if allow_validated and name not in major_keys and name not in open_keys:
-            overlay_keys = {str(s).strip().upper() for s in (overlay or [])}
-            if name not in overlay_keys and float(vol.get(name) or 0) < float(min_quote or 0):
+        if name not in major_keys:
+            if not allow_validated:
+                return
+            if float(vol.get(name) or 0) < float(min_quote or 0):
                 return
         if apply_tradable and name not in tradable_keys and not (keep_open and name in open_keys):
             return
@@ -974,11 +973,6 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
             pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
             pf = 0.0
-        st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
-        if pf > 0:
-            st.last15_ratio = pf
-        if n > 0:
-            st.n = max(int(getattr(st, "n", 0) or 0), n)
         try:
             need = int(book.eval_need()) if callable(getattr(book, "eval_need", None)) else 8
         except Exception:
@@ -988,6 +982,11 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         except (TypeError, ValueError):
             floor = float(POSITIVE_PF)
         proven = n >= need and pf + 1e-9 >= floor
+        if n >= need:
+            st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
+            st.n = max(int(getattr(st, "n", 0) or 0), n)
+            if pf > 0:
+                st.last15_ratio = pf
         st.active = bool(proven)
         st.deact_reason = "" if proven else (st.deact_reason or "hist-test intern")
         st.processing_active = True
@@ -1338,28 +1337,39 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     err_line = ""
     if err and not err.startswith("audit:"):
         err_line = next((ln.strip() for ln in reversed(err.splitlines()) if ln.strip()), err.strip())[:180]
+    intern_syms = intern_liquid_pool(
+        None,
+        blob.get("universe") or blob.get("ranked"),
+        cap=SYMBOL_CAP,
+        validated=[s for s in symbols if str(s).upper() in _MAJOR_KEYS],
+    )
+    proven = 0
+    for row in blob.get("successfulConfigs") or []:
+        if not isinstance(row, dict) or row.get("validated") is False:
+            continue
+        try:
+            n_row = int(row.get("n") or row.get("evalN") or row.get("last15N") or 0)
+        except (TypeError, ValueError):
+            n_row = 0
+        if n_row >= 8:
+            proven += 1
+    intern_n = n_ids
     if running:
-        detail = f"Test Historic {phase} {int(pct)}% · {raw_detail} · {n_ids} validated · {len(symbols)} symbols"
+        detail = f"Test Historic {phase} {int(pct)}% · {raw_detail} · {intern_n} intern · {proven} last-15 validated · {len(intern_syms)} intern symbols"
     elif paused:
         detail = f"Test Historic paused · {raw_detail}"
     elif err_line:
         if phase in ("ready", "idle", ""):
             phase = "error"
         pct = min(float(pct or 0), 99.0)
-        detail = f"Test Historic error · {n_ids} validated · {len(symbols)} symbols · {err_line}"
-    elif n_ids:
-        detail = f"Test Historic · {n_ids} validated configs · {len(symbols)} symbols · skip full catalog · refresh {refresh_h}h"
+        detail = f"Test Historic error · {intern_n} intern · {proven} last-15 validated · {len(intern_syms)} intern symbols · {err_line}"
+    elif intern_n:
+        detail = f"Test Historic · {intern_n} intern configs · {proven} last-15 validated · {len(intern_syms)} intern symbols · skip full catalog · refresh {refresh_h}h"
     else:
-        detail = "Test Historic owns calcs · waiting validated configs · skip full catalog"
+        detail = "Test Historic owns calcs · waiting intern configs · skip full catalog"
     if stale:
         detail += " · waiting on Test Historic refresh"
     running_set_rows = running_sets(blob)
-    intern_syms = intern_liquid_pool(
-        symbols,
-        blob.get("universe") or blob.get("ranked"),
-        cap=SYMBOL_CAP,
-        validated=symbols,
-    )
     last_ready = blob.get("lastReady") if isinstance(blob.get("lastReady"), dict) else None
     if not isinstance(last_ready, dict) or not (last_ready.get("pfStats") or last_ready.get("withWithout")):
         try:
@@ -1384,6 +1394,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "running": running,
         "paused": paused,
         "validatedCount": n_ids,
+        "internSetCount": intern_n,
         "setsDone": sets_done if running else n_ids,
         "setsTotal": sets_total if running else max(n_ids, 1 if running or n_ids else 0),
         "histFills": n_fills,
@@ -2670,11 +2681,11 @@ def self_test() -> Dict[str, Any]:
         rec("validated-symbols-no-rank-fallback", validated_symbols(long_rank) == [], validated_symbols(long_rank))
         short_rank = {"ranked": [{"symbol": "AAA-USDT"}, {"symbol": "BBB-USDT"}]}
         rec("validated-symbols-short-rank", validated_symbols(short_rank) == ["AAA-USDT", "BBB-USDT"], validated_symbols(short_rank))
-        run_job = {"successfulConfigs": [{"id": "indications:1m:sl0.6:st3", "validated": True, "pf": 1.4}]}
+        run_job = {"successfulConfigs": [{"id": "indications:1m:sl0.6:st3", "validated": True, "pf": 1.4, "n": 20}]}
         run_rows = running_sets(run_job)
         rec("running-sets", bool(run_rows) and run_rows[0].get("id") == "indications:1m:sl0.6:st3", run_rows)
         view = job_progress_view({
-            "successfulConfigs": [{"id": "a", "validated": True}],
+            "successfulConfigs": [{"id": "indications:1m:sl0.6:st8", "setId": "indications:1m:sl0.6:st8", "validated": True, "pf": 1.4, "n": 20}],
             "positive": ["AAA-USDT"],
             "phase": "ready",
         })

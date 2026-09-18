@@ -567,6 +567,44 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("batch limit", view["detail"])
         self.assertEqual(len(view["internSymbols"]), 50)
         self.assertIn("BTC-USDT", view["internSymbols"])
+        self.assertNotIn("BONER-USDT", view["internSymbols"])
+        self.assertIn("intern", view["detail"])
+
+    def test_intern_liquid_pool_drops_overlay_validated_junk(self):
+        out = ht.intern_liquid_pool(
+            ["BONER-USDT", "FLYBRAIN-USDT", "4STOCK-USDT", "BTC-USDT"],
+            [{"symbol": "BONER-USDT", "quoteVolume": 12}, {"symbol": "FLYBRAIN-USDT", "quoteVolume": 40}],
+            cap=50,
+            validated=["BONER-USDT", "FLYBRAIN-USDT", "4STOCK-USDT", "BCH-USDT"],
+        )
+        self.assertNotIn("BONER-USDT", out)
+        self.assertNotIn("FLYBRAIN-USDT", out)
+        self.assertNotIn("4STOCK-USDT", out)
+        self.assertIn("BTC-USDT", out)
+        self.assertIn("BCH-USDT", out)
+
+    def test_progress_view_intern_pool_is_majors_not_filled_junk(self):
+        view = ht.job_progress_view({
+            "phase": "ready",
+            "ready": True,
+            "validatedCount": 7962,
+            "positive": ["BONER-USDT", "FLYBRAIN-USDT", "CTO-USDT", "BCH-USDT", "SOL-USDT"],
+            "symbols": ["BONER-USDT", "FLYBRAIN-USDT", "CTO-USDT", "BCH-USDT", "SOL-USDT"],
+            "successfulConfigs": [
+                {"setId": "indications:1m:sl0.6:st12", "validated": True, "pf": 1.4, "n": 40},
+                {"setId": "general:1m:sl0.6:st8", "validated": True, "pf": 1.2, "n": 3},
+            ],
+        })
+        self.assertEqual(len(view["internSymbols"]), 50)
+        self.assertEqual(set(view["internSymbols"]), set(ht.HIST_TEST_MAJORS))
+        self.assertNotIn("BONER-USDT", view["internSymbols"])
+        self.assertNotIn("FLYBRAIN-USDT", view["internSymbols"])
+        self.assertNotIn("CTO-USDT", view["internSymbols"])
+        self.assertIn("intern configs", view["detail"])
+        self.assertIn("last-15 validated", view["detail"])
+        self.assertIn("50 intern symbols", view["detail"])
+        self.assertEqual(view["internSetCount"], 7962)
+        self.assertNotIn("5 symbols", view["detail"])
 
     def test_select_intern_symbols_keeps_open_lots(self):
         overlay = ["XRP-USDT", "SOL-USDT"]
@@ -651,6 +689,12 @@ class HistTestContract(unittest.TestCase):
         book.load({"slToTpRatios": [0.6], "stratTrailing": False, "setMinStep": 8, "setStepMax": 8,
                    "stratIndications": True, "stratGeneral": True})
         keep = [st.id for st in book.by_idx[:3]]
+        self.assertGreaterEqual(len(keep), 1)
+        cfgs = [{"setId": sid, "validated": True, "pf": 0, "evalN": 0, "n": 0} for sid in keep]
+        if len(cfgs) >= 2:
+            cfgs[1].update({"pf": 1.15, "evalN": 0, "n": 0})
+        if len(cfgs) >= 3:
+            cfgs[2].update({"pf": 1.8, "evalN": 4, "n": 4})
         for st in book.by_idx:
             st.last15_n = 0
             st.last15_ratio = 0.0
@@ -659,23 +703,23 @@ class HistTestContract(unittest.TestCase):
         with patch.object(ht, "read_persisted_validated_ids", return_value=[]), patch.object(ht, "read_last_ready", return_value={}):
             ids = ht.apply_scores_to_book(book, {
                 "validatedIds": keep,
-                "successfulConfigs": [
-                    {"setId": keep[0], "validated": True, "pf": 0, "evalN": 0, "n": 0},
-                    {"setId": keep[1], "validated": True, "pf": 1.15, "evalN": 0, "n": 0},
-                    {"setId": keep[2], "validated": True, "pf": 1.8, "evalN": 4, "n": 4},
-                ],
+                "successfulConfigs": cfgs,
             })
         self.assertEqual(ids, keep)
         self.assertEqual(book.hist_test_set_ids, set(keep))
         self.assertIsNone(book.intern_metric_source())
         self.assertEqual(book.intern_validated_count(keep), 0)
         snap = book.snapshot()
-        self.assertEqual(snap["internSetCount"], 3)
+        self.assertEqual(snap["internSetCount"], len(keep))
         self.assertEqual(snap["validatedCount"], 0)
-        self.assertEqual(snap["setCount"], 3)
+        self.assertEqual(snap["setCount"], len(keep))
         for sid in keep:
-            self.assertFalse(book.sets[sid].active, sid)
-            self.assertEqual(book.sets[sid].last15_ratio, 0.0)
+            st = book.sets[sid]
+            self.assertEqual(st.last15_ratio, 0.0)
+            self.assertIn("intern", str(getattr(st, "processing_reason", "") or ""))
+            ledger = getattr(st, "stage_ledger", None)
+            if isinstance(ledger, dict):
+                self.assertFalse(bool(ledger.get("real")))
 
     def test_last_ready_keeps_combo_stats_during_evaluate(self):
         last = {
@@ -700,6 +744,7 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(view["withWithout"]["block"]["with"]["pf"], 1.5)
         self.assertEqual(view["comboMatrix"][0]["strategy"], "block")
         self.assertEqual(view["combo"]["engine"], "combo")
+        keep = ["indications:1m:sl0.6:st8", "general:1m:sl0.6:st8"]
         coords = ht.selected_coordinations({
             "successfulConfigs": [
                 {"setId": keep[0], "validated": True, "indication": "combined", "strategy": "block", "pf": 1.51, "n": 40},
@@ -753,7 +798,7 @@ class HistTestContract(unittest.TestCase):
         ident = ht.identity_from_set_id("indications:1m:sl2.7:tr0.9:0.1:st11")
         self.assertEqual(ident["indication"], "combined")
         self.assertEqual(ident["strategy"], "trailing")
-        run = ht.running_sets({"validatedIds": ["general:1m:sl0.6:st8"]})
+        run = ht.running_sets({"successfulConfigs": [{"setId": "general:1m:sl0.6:st8", "validated": True, "n": 20, "pf": 1.4}]})
         self.assertEqual(run[0]["indication"], "general")
         self.assertEqual(run[0]["strategy"], "normal")
         self.assertNotEqual(run[0]["strategy"], "sl0.6:st8:trbase")
