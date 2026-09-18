@@ -13,7 +13,7 @@ from system_settings import calculation_overlay
 
 def row(**kw):
     m={k:0. for k in METRICS}
-    m.update(trainN=10,trainNet=.02,trainCostRSum=10,testN=5,testNet=.005,testCostRSum=5)
+    m.update(trainN=10,trainNet=.02,trainCostRSum=15,testN=5,testNet=.005,testCostRSum=8)
     m.update(kw)
     return [m[k] for k in METRICS]
 

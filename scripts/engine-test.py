@@ -28,7 +28,7 @@ from user_presets import self_test as user_presets_self_test
 from storage_paths import self_test as storage_self_test
 from block_engine import BlockBook, BlockLane, parse_block_count, self_test as block_self_test, calculate_block_max_additional_ratio
 from bingx_fast import ErrorLog, FastBingX
-from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct
+from position_cost import last_n_cost_pf, ratio_from_r, resolve_sl_tp, net_pnl_pct, POSITIVE_PF
 from pulse_trader import (
     coerce_symbol_sort,
     symbol_metric,
@@ -149,7 +149,7 @@ def overlay_test() -> None:
             rec(f"{name}-dca-off", ov.get("dcaEnabled") is False)
     rec("hist-test-hours-clamp", clamp_hours(1) == 4 and clamp_hours(20) == 20 and clamp_hours(99) == 64)
     rec("hist-test-bars", lookback_bars(20) == 1200 and lookback_bars(4) == 240)
-    rec("hist-test-min-pf", abs(clamp_min_pf(None) - 1.1) < 1e-9)
+    rec("hist-test-min-pf", abs(clamp_min_pf(None) - POSITIVE_PF) < 1e-9)
     rec("hist-test-positive-gate", symbol_clears_floor({"n": 12, "pf": 1.2}, 1.1) and not symbol_clears_floor({"n": 12, "pf": 1.02}, 1.1))
 
     def _hist_fetch(symbol, limit):
@@ -1404,11 +1404,12 @@ def phantom_recon_test() -> None:
     Regression for "dashboard shows open positions, exchange has none":
     adopt_exchange_positions used to return early whenever the exchange reported
     ZERO live positions, so a fully-flat exchange left phantom positions in the
-    book (and in the UI counts) forever. Now: the first empty read only arms the
-    glitch guard (streak), the second consecutive empty read confirms the flat
+    book (and in the UI counts) forever. Now: the first empty reads only arm the
+    glitch guard (streak), eight consecutive empty reads confirm the flat
     exchange and the stale-local sweep drops tracked positions (age >= 180s,
     per-position _exchange_flat re-check for controlled ones), and stats expose
-    the real exchange count via exchangeOpenCount.
+    the real exchange count via exchangeOpenCount. Intern leftover lots stay
+    managed through the 8-read confirm so a glitchy snapshot cannot wipe them.
     """
     import tempfile
     import pulse_trader as pt
@@ -1457,8 +1458,9 @@ def phantom_recon_test() -> None:
         p.exchange_open_count == -1 and p.exchange_position_snapshot_pending,
         f"exchange_open_count={p.exchange_open_count} pending={p.exchange_position_snapshot_pending}")
 
-    # 2) second consecutive empty read: confirmed flat -> phantoms dropped
-    p.adopt_exchange_positions()
+    # 2) eight consecutive empty reads: confirmed flat -> phantoms dropped
+    for _ in range(7):
+        p.adopt_exchange_positions()
     rec("phantom-drop-on-confirm", len(p.open) == 0 and p.recon_ok,
         f"book={len(p.open)} recon={p.recon_detail}")
 
@@ -1476,8 +1478,8 @@ def phantom_recon_test() -> None:
     # 5) controlled phantom: sweep double-checks via _exchange_flat, then drops
     p3 = mk([])
     p3.open["CTL-USDT"] = pos("CTL-USDT", age=3600, sl_oid="sl-1")
-    p3.adopt_exchange_positions()  # streak 1
-    p3.adopt_exchange_positions()  # streak 2 -> flat-ex drop
+    for _ in range(8):
+        p3.adopt_exchange_positions()
     rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and p3.cooldown.get("CTL-USDT", 0) > time.time(),
         f"book={list(p3.open)} cool={bool(p3.cooldown.get('CTL-USDT'))}")
 

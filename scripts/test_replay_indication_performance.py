@@ -264,6 +264,7 @@ class ReplayIndicationTests(unittest.TestCase):
         pulse.open = {}
         pulse.universe = []
         pulse.px = {"SHED-USDT": 100.0}
+        pulse.contracts = {"SHED-USDT": object()}
         pulse.klines_tf = {tf: {"SHED-USDT": bars} for tf in ("1m", "5m", "15m")}
         pulse.klines = pulse.klines_tf["1m"]
         pulse._ind_fp = {}
@@ -296,9 +297,14 @@ class ReplayIndicationTests(unittest.TestCase):
         dict_metrics = book._fast_historic_metrics([dict(row) for row in rows], ordered=True)
         self.assertEqual(compact_metrics["last15_n"], dict_metrics["last15_n"])
         self.assertAlmostEqual(compact_metrics["last15_ratio"], dict_metrics["last15_ratio"], places=6)
-        self.assertEqual(book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"], {})
+        cold = book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"]
+        self.assertIn("last30", cold)
+        self.assertFalse(cold["last30"]["available"])
+        self.assertFalse(cold["last30"]["validated"])
         book.pf_n = book.min_samples = 15
-        self.assertEqual(len(book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"]), 6)
+        ready = book._fast_historic_metrics(rows, ordered=True)["evaluation_windows"]
+        self.assertEqual(list(ready), ["last15"])
+        self.assertTrue(ready["last15"]["available"])
 
     def test_prepared_frame_matches_public_vote_wrapper(self):
         settings = dict(DEFAULT_SETTINGS)
@@ -534,7 +540,9 @@ class HistoricScoreBundleTests(unittest.TestCase):
         book._score_one(sample)
         self.assertEqual(sample.n, 24)
         # Twelve closes per direction cannot meet the default last-30 Base gate.
-        self.assertEqual(sample.evaluation_windows, {})
+        last30 = sample.evaluation_windows.get("last30") or {}
+        self.assertFalse(last30.get("available"))
+        self.assertFalse(last30.get("validated"))
         self.assertFalse(sample.stage_ledger["base"])
         self.assertIn("LONG", sample.by_side)
         self.assertIn("SHORT", sample.by_side)

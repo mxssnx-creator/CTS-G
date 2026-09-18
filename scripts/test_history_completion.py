@@ -51,6 +51,7 @@ class HistoryCompletionTests(unittest.TestCase):
         p._hist_replay_chunk_size = Mock(return_value=1)
         p._hist_write_status = Mock(); p.write_stats = Mock(); p.trim_caches = Mock()
         p.symbol_cap = 20
+        p.overlay = {"histTestEnabled": False}
         p.names = [f'S{i}-USDT' for i in range(20)]
         p._hist_selected_snapshot = Mock(return_value=(p.names, []))
         p._history_bounds = Mock(return_value=(10, 129))

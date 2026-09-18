@@ -3319,8 +3319,11 @@ class Pulse:
         kind = str(getattr(pos, "kind", "") or "").lower()
         if strategy in ("trail", "trailing") or kind in ("trail", "trailing"):
             return "trailing"
+        # A Base/core close may carry a trail_key field without being a trail lot.
+        if kind in ("base", "core"):
+            return str(getattr(pos, "pack", "") or "normal")
         trail = str(getattr(pos, "trail_key", "") or "").strip().lower()
-        if trail not in ("", "0", "off", "none", "base", "false", "core") and ":" in trail and kind == "trail":
+        if trail not in ("", "0", "off", "none", "base", "false", "core") and ":" in trail:
             return "trailing"
         return str(getattr(pos, "pack", "") or "normal")
 
@@ -9614,13 +9617,14 @@ class Pulse:
             intern_n = len(self._intern_symbols())
         except Exception:
             intern_n = len(SYMBOLS)
-        if intern_n and intern_n <= 64:
+        # Overlay pin (≤8 names): keep the operator batch. Intern 50-major
+        # desks shrink so SL/TP still run. Wider books use the 2s ceiling.
+        intern_desk = intern_n > 8 and intern_n <= 64
+        if intern_desk:
             dynamic_batch = min(dynamic_batch, 8)
             dynamic_ms = min(dynamic_ms, 180.0)
         scan_s = max(0.05, float(globals().get("SCAN_S", 5.0) or 5.0))
-        # Intern desks: keep the hot loop under a quarter-second of entry
-        # POSTs so SL/TP still run. Wider books may use the 2s ceiling.
-        ceiling = 0.25 if intern_n and intern_n <= 64 else 2.0
+        ceiling = 0.25 if intern_desk else 2.0
         budget_s = max(0.08, min(ceiling, scan_s if intern_n > 64 else ceiling, configured_ms / 1000.0, dynamic_ms / 1000.0))
         return min(configured_batch, dynamic_batch), budget_s
 
@@ -9780,8 +9784,9 @@ class Pulse:
             self._ind_fp = fp_map
         effective_tfs = effective_indication_timeframes(self.tf_on, b)
         offline = getattr(self, "_offline_symbols", set()) or set()
+        contracts = getattr(self, "contracts", None)
         for s in window:
-            if s in offline or (self.contracts and s not in self.contracts):
+            if s in offline or (contracts and s not in contracts):
                 continue
             bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
             if len(bars) < 20:
@@ -10132,6 +10137,16 @@ class Pulse:
         ranked: List[Tuple[float, str, int, str]] = []
         candidates: Dict[Tuple[str, int, str], Tuple[float, str, int, str]] = {}
         intern_scan = self._intern_symbols()
+        def _intern_placeable(name: str) -> bool:
+            token = str(name or "")
+            px_map = getattr(self, "px", None) or {}
+            try:
+                if float(px_map.get(token) or 0) <= 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            contracts = getattr(self, "contracts", None) or {}
+            return contracts.get(token) is not None
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
             def _ind_allow(kind: str, direction: str = "") -> bool:
                 gate = getattr(self.sets, "indication_ok", None)
@@ -10145,6 +10160,8 @@ class Pulse:
                 except Exception:
                     return True
             for s in intern_scan:
+                if not _intern_placeable(s):
+                    continue
                 picked_lanes = []
                 try:
                     pick_lanes = getattr(self.indications, "pick_entries", None)
@@ -10171,6 +10188,8 @@ class Pulse:
                     candidates[(s, d, why)] = (float(conf), s, d, why)
         if self.strat_general:
             for s in intern_scan:
+                if not _intern_placeable(s):
+                    continue
                 d, why, conf = self.score(s)
                 if d == 0:
                     continue
@@ -10213,9 +10232,9 @@ class Pulse:
         hist_test_ids = getattr(self.sets, "hist_test_set_ids", None)
         for pack in ("indications", "general"):
             if hist_test_owns:
-                # Test Historic owns the catalog: intern calcs stay on, but
-                # Real/Live size is only the validated config allow-list.
-                intern[pack] = False
+                # Intern extras stay on while Test Historic owns the catalog.
+                # Real/Live extra size is intern_ok (validated allow-list).
+                intern[pack] = True
                 if hist_test_ids:
                     try:
                         entry_open = getattr(self.sets, "entry_pack_open", None)
@@ -10224,7 +10243,7 @@ class Pulse:
                     except TypeError:
                         intern[pack] = bool(self.sets.pack_open(pack))
                     except Exception:
-                        intern[pack] = False
+                        intern[pack] = True
             elif self.sets.enabled and self.sets.use_historic_gate and hist_ready:
                 try:
                     entry_open = getattr(self.sets, "entry_pack_open", None)
@@ -14168,6 +14187,7 @@ class Pulse:
             validated = hist_test_mod.validated_symbols(job)
         except Exception:
             validated = []
+        tradable_keys = {str(s).upper() for s in (self._intern_tradable() or [])}
         try:
             pool = hist_test_mod.intern_liquid_pool(
                 list(SYMBOLS),
@@ -14199,7 +14219,6 @@ class Pulse:
         if 0 < len(overlay_scan) <= 8:
             for s in overlay_scan:
                 pin(s)
-        tradable_keys = {str(s).upper() for s in (self._intern_tradable() or [])}
         offline = {str(s).upper() for s in (getattr(self, "_offline_symbols", set()) or set())}
         major_keys = {str(s).upper() for s in (getattr(hist_test_mod, "HIST_TEST_MAJORS", ()) or ())}
         major_keys.update(str(s).upper() for s in (getattr(hist_test_mod, "INTERN_MAJORS", ()) or ()))

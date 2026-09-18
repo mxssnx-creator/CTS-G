@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server/pulse'))
 from set_engine import SetBook, SetState
-from position_cost import last_n_cost_pf
+from position_cost import last_n_cost_pf, POSITIVE_PF
 from set_overview import build_overview, qualified_strategy_results
 from pulse_trader import Pulse
 
@@ -60,7 +60,7 @@ class ConfigIsolationTests(unittest.TestCase):
                 for trailing in (False,True):
                     with self.subTest(n=n,sl=sl,trailing=trailing):
                         good=state(0,sl_ratio=sl,kind='trail' if trailing else 'base',
-                                   trail_key='.3:.1' if trailing else '',hist=tape(1.111))
+                                   trail_key='.3:.1' if trailing else '',hist=tape(POSITIVE_PF))
                         bad=state(1,sl_ratio=sl,hist=tape(1.089))
                         b=book(good,bad); b.pf_n=b.min_samples=n
                         b.deact_n=5*(1+(n//5)%5); b.max_dd_s=(1+2*(n//5%5))*3600

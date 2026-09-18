@@ -85,7 +85,7 @@ test("start posts hours, min PF and selected count", async (t) => {
   assert.equal(body.symbolCap, 20);
   assert.equal(body.refreshHours, HIST_TEST_REFRESH_DEFAULT);
   assert.equal(body.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
-  assert.equal(HIST_TEST_TARGET_DEFAULT, 20);
+  assert.equal(HIST_TEST_TARGET_DEFAULT, 50);
 });
 
 test("pause and stop post the same control actions as the engine bar", async (t) => {

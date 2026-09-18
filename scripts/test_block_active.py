@@ -254,10 +254,13 @@ class BlockActiveTests(unittest.TestCase):
     def test_block_register_parent_lifts_intern_crumb_to_min_fill(self):
         lane = self.p.block.register_parent('X-USDT', 'LONG', 0.04, 100.0)
         self.assertAlmostEqual(lane.base_qty, 0.04)
+        # Frozen parent: a later larger register must not rewrite the intern lot.
+        # Venue-min extras still size over the executable parent, not the crumb.
         self.p.block.register_parent('X-USDT', 'LONG', 3.0, 100.0)
-        self.assertAlmostEqual(lane.base_qty, 3.0)
+        self.assertAlmostEqual(lane.base_qty, 0.04)
         nxt = adjusted_quantity(lane.base_qty, 1.0, owned_qty=0, min_qty=3.0, extra_cap=1.0)
         self.assertAlmostEqual(nxt, 3.0)
+        self.assertAlmostEqual(executable_parent_qty(lane.base_qty, 3.0), 3.0)
 
     def test_dca_parent_lifts_to_venue_min_without_rewriting_after_add(self):
         from dca_engine import DcaBook

@@ -357,11 +357,7 @@ class BlockBook:
         k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if lane and lane.base_qty > 0:
-            incoming = max(0.0, float(qty or 0.0))
-            if incoming > float(lane.base_qty) + 1e-12:
-                self.refresh_parent_qty(lane, incoming, entry)
             lane.active = True
-            self.save()
             return lane
         if lane:
             # Re-entry on the same side: keep per-count tapes and last increased factor.

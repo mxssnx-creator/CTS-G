@@ -199,12 +199,12 @@ class ComboEvalTests(unittest.TestCase):
     def test_kind_overlay_is_not_a_catalog_coordination_or_affection(self):
         core = [{"t": i, "pnl_pct": 0.02, "pack": "indications", "strategy": "normal", "set_id": "indications:1m:sl0.6:st8", "sl_ratio": 0.6, "step": 8} for i in range(10)]
         kind_block = [({"t": 50 + i, "pnl_pct": 0.05, "strategy": "block", "pack": "block", "ind_kind": "signals"}, {"combo_lane": "kind-overlay", "strategy": "block", "ind_kind": "signals", "pack": "indications", "set_id": "block:signals"}) for i in range(8)]
-        pack_block = [({"t": 80 + i, "pnl_pct": 0.03, "strategy": "block", "pack": "indications", "set_id": "indications:1m:sl0.6:st8"}, {"combo_lane": "overlay", "strategy": "block", "ind_kind": "combined", "pack": "indications", "set_id": "block:indications:1m:sl0.6:st8"}) for i in range(5)]
+        pack_block = [({"t": 80 + i, "pnl_pct": 0.03, "strategy": "block", "pack": "indications", "set_id": "indications:1m:sl0.6:st8"}, {"combo_lane": "overlay", "strategy": "block", "ind_kind": "combined", "pack": "indications", "set_id": "block:indications:1m:sl0.6:st8"}) for i in range(8)]
         blob = ce.evaluate_fills(core + kind_block + pack_block, min_pf=1.1, pf_n=8)
-        self.assertEqual(blob["withWithout"]["block"]["with"]["n"], 15)
+        self.assertEqual(blob["withWithout"]["block"]["with"]["n"], 18)
         self.assertEqual(blob["withWithout"]["block"]["without"]["n"], 10)
-        self.assertEqual(blob["pfStats"]["block"]["n"], 5)
-        self.assertEqual(blob["pfStats"]["overall"]["n"], 15)
+        self.assertEqual(blob["pfStats"]["block"]["n"], 8)
+        self.assertEqual(blob["pfStats"]["overall"]["n"], 18)
         sig_block = next(c for c in blob["matrix"] if c["indication"] == "signals" and c["strategy"] == "block")
         self.assertEqual(sig_block["n"], 8)
         ids = {r["setId"] for r in blob["successful"]}

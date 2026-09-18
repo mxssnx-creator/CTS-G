@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 import numpy as np
-from sweep_seven_days import kernel
+from sweep_seven_days import kernel, POSITIVE_PF
 
 
 def oracle(entry, close, net, cost, policy, end, split):
@@ -23,8 +23,10 @@ def oracle(entry, close, net, cost, policy, end, split):
             continue
         if checked < 0 or len(past) - checked >= cadence:
             checked = len(past)
-            valid = all(1 + .1 * np.mean([net[k]/cost[k] for k in past[-n:]]) > 1.02 + 1e-9
-                        for n in (window, main, real))
+            def ok(n):
+                pf = 1 + .1 * np.mean([net[k]/cost[k] for k in past[-n:]])
+                return pf > 1.02 + 1e-9 and pf + 1e-9 >= POSITIVE_PF
+            valid = all(ok(n) for n in (window, main, real))
         shadow = high = 0.
         dd = None
         for k in past:
