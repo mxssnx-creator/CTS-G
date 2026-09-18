@@ -681,8 +681,8 @@ def intern_liquid_pool(
     """Intern preferred + hist-test majors. Cap 50 liquid majors.
 
     Volume padding never adds junk alts. Open lots always stay scannable.
-    `validated` hist-test names still join when they are majors, already open,
-    or quote volume is at least MIN_QUOTE_VOLUME.    """
+    Validated hist-test names join only when they are majors or already open.
+    """
     major_keys = {s.upper() for s in HIST_TEST_MAJORS} | {s.upper() for s in INTERN_MAJORS} | {s.upper() for s in PREFERRED_SYMBOLS}
     overlay = [
         str(s).strip().upper()
@@ -717,10 +717,7 @@ def intern_liquid_pool(
             out.append(name)
             return
         if name not in major_keys:
-            if not allow_validated:
-                return
-            if float(vol.get(name) or 0) < float(min_quote or 0):
-                return
+            return
         if apply_tradable and name not in tradable_keys and not (keep_open and name in open_keys):
             return
         used.add(name)

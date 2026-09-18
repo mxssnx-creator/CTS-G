@@ -482,7 +482,7 @@ class HistTestContract(unittest.TestCase):
             tradable=["BTC-USDT", "ETH-USDT", "ZEC-USDT", "BCH-USDT", "SOL-USDT", "XRP-USDT"],
             validated=["ZEC-USDT", "BONER-USDT", "NCCOXAG2USD-USDT"],
         )
-        self.assertIn("ZEC-USDT", out)
+        self.assertNotIn("ZEC-USDT", out)
         self.assertNotIn("BONER-USDT", out)
         self.assertNotIn("NCCOXAG2USD-USDT", out)
         self.assertEqual(out[0], "BCH-USDT")
