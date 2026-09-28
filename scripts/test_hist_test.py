@@ -1174,6 +1174,14 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertEqual(blob.get("positive"), [])
         self.assertTrue(blob.get("internSymbols"))
 
+    def test_hist_test_get_copies_running_sets(self):
+        ht.publish({
+            "phase": "ready", "ready": True, "pct": 100, "positive": ["BTC-USDT"],
+            "successfulConfigs": [{"setId": "cfg-1", "n": 10, "pf": 1.3, "validated": True}],
+        })
+        blob = self._get_hist_test()
+        self.assertEqual([row.get("id") for row in blob.get("runningSets") or []], ["cfg-1"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2498,7 +2498,7 @@ class Handler(SimpleHTTPRequestHandler):
                     blob["internSymbols"] = view.get("internSymbols")
                 if view.get("ready") is not None:
                     blob["ready"] = view.get("ready")
-                for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
+                for key in ("byIndication", "byStrategy", "selectedCoordinations", "runningSets", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
                     if view.get(key) is not None and (key in ("internSymbols", "processedSetCount", "processingCount") or not blob.get(key)):
                         blob[key] = view.get(key)
                 if view.get("detail"):
