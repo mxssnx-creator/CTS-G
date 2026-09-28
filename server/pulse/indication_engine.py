@@ -635,7 +635,15 @@ def evaluate_direction(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window."""
+    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window.
+
+    Qualified reversal (post-Base research, train-chosen, valid/sim-confirmed):
+    the first window must be a strong move for this symbol (|d1| >= dirMinFirstZ
+    sigma-units, sigma = per-bar log-return stdev of the <=60-bar frame), the
+    frame must be active enough to pay the fixed cost (sigma >= dirMinSigma),
+    and the new window must be an early, partial turn (|d2| <= dirMaxRetrace *
+    |d1|), not an already-completed V. Confidence is calibrated on that z.
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     rng = max(4, int(settings.get("dirRange") or 10))
@@ -650,16 +658,33 @@ def evaluate_direction(
         return None
     if d1 * d2 >= 0:
         return None
+    max_retrace = float(settings.get("dirMaxRetrace", 0.5))
+    if abs(d2) > max_retrace * abs(d1):
+        return None
+    from math import log, sqrt  # local: keeps this kind's diff self-contained
+
+    tail = [px for px in closes[-60:] if px > 0]
+    rets = [log(tail[i] / tail[i - 1]) for i in range(1, len(tail))]
+    if len(rets) < 2:
+        return None
+    mean = sum(rets) / len(rets)
+    sigma = sqrt(max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean))
+    if sigma < float(settings.get("dirMinSigma", 0.0012)):
+        return None
+    z1 = abs(d1) / max(1e-9, sigma * sqrt(rng - 1))
+    if z1 < float(settings.get("dirMinFirstZ", 0.8)):
+        return None
     steps = [second[i] - second[i - 1] for i in range(1, len(second))]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.5)
     want = "long" if d2 > 0 else "short"
     if ev["selected"] and ev["selected"] != want:
         return None
-    strength = clamp(abs(d1) + abs(d2), 0.0, 1.0)
+    strength = clamp(z1 / 4.0, 0.0, 1.0)
+    conf = clamp(0.52 + 0.05 * min(z1, 6.0), 0.52, 0.82)
     agr = float((ev.get(want) or {}).get("agreement") or 1.0)
     return _kind_indication(
-        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}"],
-        agreement=agr, mode="direction",
+        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}:z{z1:.2f}"],
+        agreement=agr, mode="direction", conf=conf,
     )
 
 
@@ -1906,13 +1931,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # Independence: 1m-only still produces a 1m lane without combined
     rows3 = book.process("CCC-USDT", up, bars_by_tf={"1m": up, "5m": [], "15m": []})
     t6 = (any(r.mode == "direct_tf" and r.timeframe == "1m" for r in rows3) and not any(r.mode == "tf_combined" for r in rows3), f"modes={[r.mode+':'+r.timeframe for r in rows3]}")
-    # Direction: down then up reversal
+    # Direction: strong drop, then an early partial up-turn (qualified reversal)
     rev = []
-    for i in range(12):
+    for i in range(16):
         c = base * (1 - i * 0.004)
         rev.append([c, c * 1.0004, c * 0.9996, c, 800])
-    for i in range(12):
-        c = base * (0.952 + i * 0.005)
+    for i in range(8):
+        c = base * (0.938 + i * 0.0015)
         rev.append([c, c * 1.0004, c * 0.9996, c, 900])
     st2 = dict(DEFAULT_SETTINGS)
     st2["dirRange"] = 8
