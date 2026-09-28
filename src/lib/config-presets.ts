@@ -1,5 +1,5 @@
-import type { PulseOverlay } from "@/lib/config-model";
-import { syncOverlayFlags } from "@/lib/config-model";
+import type { PulseOverlay } from "./config-model.ts";
+import { syncOverlayFlags } from "./config-model.ts";
 
 export type ConfigPreset = {
   id: string;
@@ -34,7 +34,7 @@ const SHARED: Partial<PulseOverlay> = {
   setStrictGate: true,
   setAutoDeact: true,
   setReactivate: true,
-  setMinSamples: 12,
+  // No setMinSamples: presets keep the lane's Base Last-N validation window.
   exitEnabled: true,
   exitIgnoreTp: true,
   exitBestOf: true,

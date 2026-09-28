@@ -11,7 +11,16 @@ import {
   sharedBlockVolumeRatio,
   clampHistTestRefreshHours,
   HIST_TEST_REFRESH_DEFAULT,
+  overlayEdits,
+  SCRATCH_S_MAX,
+  type PulseOverlay,
 } from "./config-model.ts";
+import { CONFIG_PRESETS, applyPresetPatch } from "./config-presets.ts";
+import { applyUserPreset } from "./user-presets.ts";
+import { readFileSync } from "node:fs";
+
+const laneFile = (id: string) =>
+  JSON.parse(readFileSync(new URL(`../../server/pulse/overlay-${id}.json`, import.meta.url), "utf8")) as Partial<PulseOverlay>;
 
 test("General basis cannot be disabled and Normal is independent of Block Active levels", () => {
   assert.equal(DEFAULT_OVERLAY.normalExecutionEnabled, true);
@@ -246,4 +255,76 @@ test("historic test refresh interval is 1–8 hours default 2", () => {
   assert.equal(syncOverlayFlags(overlayFromCts({}, { histTestRefreshHours: 0 })).histTestRefreshHours, 1);
   assert.equal(syncOverlayFlags(overlayFromCts({}, { histTestRefreshHours: 99 })).histTestRefreshHours, 8);
   assert.equal(clampHistTestRefreshHours(undefined), 2);
+});
+
+test("an Overall save applies only its edits on top of the target lane", () => {
+  // The Overall form is built without any lane overlay (defaults).
+  const baseline = overlayFromCts({}, {});
+  const form = { ...baseline, minPf: 1.2, baseMinPf: 1.2, mainMinPf: 1.2, realMinPf: 1.2, setMinPf: 1.2, dcaMinPf: 1.2, exitMinPf: 1.2 };
+  const edits = overlayEdits(baseline, form);
+  assert.deepEqual(Object.keys(edits).sort(), ["baseMinPf", "dcaMinPf", "exitMinPf", "mainMinPf", "minPf", "realMinPf", "setMinPf"]);
+  for (const id of ["bingx-x01", "bingx-x02"]) {
+    const lane = overlayFromCts({}, laneFile(id));
+    const saved = syncOverlayFlags({ ...lane, ...edits });
+    assert.equal(saved.minPf, 1.2);
+    for (const key of ["slPct", "tpPct", "slToTpRatio", "blockVolumeRatio", "setStrictGate", "setUseHistoricGate",
+      "histRefreshS", "tpMaxPct", "setStepMax", "symbols", "symbolsAll", "symbolsDynamic"] as const) {
+      assert.deepEqual(saved[key], lane[key], `${id} ${key}`);
+    }
+  }
+  assert.deepEqual(overlayEdits(baseline, { ...baseline }), {});
+  // A preset value equal to the loaded default is still an explicit edit.
+  const vst = overlayFromCts({}, laneFile("bingx-x02"));
+  const preset = applyPresetPatch(baseline, "tight-guard");
+  const touched = Object.keys(CONFIG_PRESETS.find((p) => p.id === "tight-guard")?.patch ?? {});
+  const saved = syncOverlayFlags({ ...vst, ...overlayEdits(baseline, preset, touched) });
+  assert.equal(vst.setUseHistoricGate, false);
+  assert.equal(saved.setUseHistoricGate, true);
+  assert.equal(saved.setStrictGate, true);
+  assert.deepEqual(saved.symbols, vst.symbols);
+});
+
+test("a shared preset never copies one lane's universe or forced winners to another", () => {
+  const live = overlayFromCts({}, laneFile("bingx-x01"));
+  const vst = overlayFromCts({}, laneFile("bingx-x02"));
+  const preset = { id: "up-x", name: "Preset-Live", hint: "", overview: "", overlay: { ...live, slToTpRatio: 0.9 } };
+  const applied = applyUserPreset(vst, preset);
+  assert.equal(applied.slToTpRatio, 0.9);
+  assert.deepEqual(applied.symbols, vst.symbols);
+  assert.equal(applied.symbolsAll, false);
+  assert.equal(applied.symbolsDynamic, false);
+  assert.deepEqual(applied.forcedSymbols, vst.forcedSymbols);
+  assert.deepEqual(applied.forcedBest, vst.forcedBest);
+  const back = applyUserPreset(live, { ...preset, overlay: { ...vst } });
+  assert.deepEqual(back.symbols, ["*"]);
+  assert.equal(back.symbolsAll, true);
+  assert.equal(back.forcedBest, undefined);
+});
+
+test("config presets keep the Base Last-N 30 validation window", () => {
+  const lane = syncOverlayFlags(overlayFromCts({}, {}));
+  assert.equal(lane.setMinSamples, 30);
+  for (const preset of CONFIG_PRESETS) {
+    assert.equal(applyPresetPatch(lane, preset.id).setMinSamples, 30, preset.id);
+  }
+});
+
+test("saved trail ranges equal the reloaded full grid, so the catalog cannot flip-flop", () => {
+  for (const preset of CONFIG_PRESETS) {
+    const saved = applyPresetPatch(syncOverlayFlags(overlayFromCts({}, {})), preset.id);
+    const reloaded = overlayFromCts({}, saved);
+    for (const key of ["trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax"] as const) {
+      assert.equal(saved[key], reloaded[key], `${preset.id} ${key}`);
+    }
+    assert.equal(saved.trailArmMin, 0.3);
+    assert.equal(saved.trailArmMax, 1.5);
+  }
+});
+
+test("the Scratch s control range covers the engine default and saved overlays", () => {
+  assert.equal(DEFAULT_OVERLAY.scratchS, 600);
+  assert.ok(SCRATCH_S_MAX >= DEFAULT_OVERLAY.scratchS);
+  for (const id of ["bingx-x01", "bingx-x02"]) {
+    assert.ok(Number(laneFile(id).scratchS) <= SCRATCH_S_MAX, id);
+  }
 });
