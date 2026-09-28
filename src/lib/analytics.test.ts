@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { calculateDrawdownTime, lastNCostPf } from "./analytics.ts";
+import { calculateDrawdownTime, costAsFrac, lastNCostPf } from "./analytics.ts";
 
 test("drawdown time isolates interleaved symbols", () => {
   const metric = calculateDrawdownTime(
@@ -47,4 +47,16 @@ test("drawdown time uses cost-net pnl_pct when pnl is zero", () => {
   assert.equal(metric.samples, 3);
   assert.ok(metric.episodes >= 1);
   assert.ok(metric.maxDurationMs >= 60_000);
+});
+
+test("PositionCost between 0.02% and 0.05% stays a percent, matching the engine", () => {
+  // Engine (position_cost.cost_as_frac) treats values above 0.02 as percent.
+  assert.equal(costAsFrac(0.04), 0.0004);
+  assert.equal(costAsFrac(0.05), 0.0005);
+  assert.equal(costAsFrac(0.02), 0.02);
+  const rows = Array.from({ length: 10 }, (_, i) => ({ t: 1_790_000_000 - i * 60, pnl: 0.26, pnl_pct: 0.003 }));
+  const metric = lastNCostPf(rows, 15, 0.04);
+  assert.equal(metric.classicPf, 99);
+  assert.equal(metric.netAvg, 0.0026);
+  assert.equal(metric.ratio, 1.65);
 });
