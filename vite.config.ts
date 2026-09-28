@@ -13,6 +13,7 @@ import { grokPwaPlugin } from "./scripts/grok-pwa-plugin.mjs";
 // @ts-expect-error JS plugin alongside the TS vite config
 import { appEnvPlugin } from "./scripts/app-env-plugin.mjs";
 import { isMigrationFile } from "./scripts/migration-plan.mjs";
+import { laneFallbackRows } from "./scripts/stats-fallback.mjs";
 
 const PULSE = (process.env.PULSE_URL || "http://152.53.114.112:3102").replace(/\/$/, "");
 const CTS = (process.env.CTS_URL || "").replace(/\/$/, "");
@@ -1066,7 +1067,7 @@ function statsFallback(conn: string): Record<string, unknown> {
   if (conn === "live") {
     return {
       ...base,
-      ...snap,
+      ...laneFallbackRows(snap, "live", "bingx-x01"),
       ...liveLane,
       connType: "live",
       connection: "bingx-x01",
@@ -1082,7 +1083,7 @@ function statsFallback(conn: string): Record<string, unknown> {
   if (conn === "vst") {
     return {
       ...base,
-      ...snap,
+      ...laneFallbackRows(snap, "vst", "bingx-x02"),
       ...vstLane,
       connType: "vst",
       connection: "bingx-x02",
