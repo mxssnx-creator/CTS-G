@@ -3130,7 +3130,11 @@ def process_guard_test() -> None:
     slice_result = unittest.TestResult()
     ContinuousTests("test_middle_history_slices_publish_qualification").run(slice_result)
     rec("hist-score-each-slice", slice_result.wasSuccessful(), str(slice_result.failures + slice_result.errors))
-    rec("ctrl-px-widens-not-abort", "for extra in extras:" in trader and "if px_failed:" in trader)
+    from test_overall_controls import OverallTests
+    ctrl_result = unittest.TestResult()
+    for name in ("test_price_rejection_still_reprices", "test_non_price_rejection_is_not_repriced_per_step"):
+        OverallTests(name).run(ctrl_result)
+    rec("ctrl-px-widens-not-abort", ctrl_result.wasSuccessful(), str(ctrl_result.failures + ctrl_result.errors))
     rec("size-qty-rounds-up-to-floor", "q = self.round_qty_up(c, max(want_n / px, floor))" in trader)
     rec("raise-to-min-qty-helper", "def raise_to_min_qty" in trader)
     rec("entry-min-qty-retries", "raise_to_min_qty" in trader.split("def _entry_body", 1)[-1][:4000] or "min_tries" in trader)

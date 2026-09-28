@@ -4706,10 +4706,11 @@ class Pulse:
                         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
                     px_failed = True
                     break
-            if oid:
+            if oid or not px_failed:
+                # Only a trigger-price rejection earns a re-priced retry. Any
+                # other rejection would repeat identically for every price
+                # step (8 x forms requests) and move the stop off its range.
                 break
-            if px_failed:
-                continue
         if not oid:
             short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
@@ -8578,7 +8579,6 @@ class Pulse:
             "rearrange": self.coord.rearrange,
             "rearrangeGap": self.coord.rearrange_gap,
             "modules": getattr(self, "mods", {}),
-            "indEnabled": self.indications.settings.get("enabled"),
             "indMinSources": self.indications.settings.get("minimumSourceSignals"),
             "indMinAgreement": self.indications.settings.get("minimumAgreement"),
             "indMinConfidence": self.indications.settings.get("minimumConfidence"),
@@ -8588,12 +8588,10 @@ class Pulse:
             "indAtrMult": self.indications.settings.get("stopLossAtrMultiplier"),
             "indRewardRisk": self.indications.settings.get("takeProfitRewardRisk"),
             "indExtraSources": self.indications.settings.get("extraSources"),
-            "dcaEnabled": self.dca.enabled,
             "dcaMaxSteps": self.dca.max_steps,
             "dcaCooldownSeconds": self.dca.cooldown_s,
             "dcaBreakevenProfitPct": self.dca.be_pct * 100,
             "dcaTakeProfitMode": self.dca.tp_mode,
-            "blockActiveReal": self.block.active_real,
             "symbols": list(SYMBOLS),
             "symbolsAll": bool(getattr(self, "overlay_wild", False)),
             "symbolsDynamic": bool(getattr(self, "symbols_dynamic", True)),
@@ -11945,22 +11943,6 @@ class Pulse:
             by_ind = getattr(self, "_by_ind_cache", {}) or {}
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
         pulse_view = self.pulse_snapshot()
-        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        if overall_controls.enabled(self):
-            control_mode = "overall"
-        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
-        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
-        overall_group_rows: Dict[Tuple[str, str], List[Any]] = {}
-        if control_mode == "overall":
-            for row in self.open.values():
-                overall_group_rows.setdefault((row.symbol, row.side), []).append(row)
-        overall_pair_ok = 0
-        if control_mode == "overall":
-            for rows in overall_group_rows.values():
-                pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
-                if len(pairs) == 1 and next(iter(pairs)) != ("", ""):
-                    overall_pair_ok += 1
-        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -12165,7 +12147,6 @@ class Pulse:
             ],
             "closed": closed_out,
             "signals": list(self.signals)[::-1][:16],
-            "symbolCount": len(SYMBOLS),
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
             "rssMb": round(rss_mb(), 1),
@@ -12212,22 +12193,28 @@ class Pulse:
             "byStrategy": by_strat,
         }
 
-    def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _control_pair_counts(self) -> Tuple[str, int, int, int, int]:
+        """(mode, groups, expected pairs, protected overall pairs, pair gaps)."""
         control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        if overall_controls.enabled(self):
+        overall = overall_controls.enabled(self)
+        if overall:
             control_mode = "overall"
-        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
-        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
-        overall_pair_ok = 0
-        if control_mode == "overall":
-            groups: Dict[Tuple[str, str], List[Any]] = {}
-            for row in self.open.values():
-                groups.setdefault((row.symbol, row.side), []).append(row)
+        groups: Dict[Tuple[str, str], List[Any]] = {}
+        for row in self.open.values():
+            groups.setdefault((row.symbol, row.side), []).append(row)
+        pair_count = len(groups) if overall else len(self.open)
+        expected = pair_count if bool(getattr(self, "control_orders", True)) else 0
+        protected = 0
+        if overall:
             for rows in groups.values():
                 pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
-                if len(pairs) == 1 and next(iter(pairs), ("", "")) != ("", ""):
-                    overall_pair_ok += 1
-        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
+                # A lone SL or TP is not a protected pair.
+                if len(pairs) == 1 and all(next(iter(pairs))):
+                    protected += 1
+        return control_mode, pair_count, expected, protected, max(0, expected - protected)
+
+    def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        control_mode, pair_count, expected_control_pairs, overall_pair_ok, overall_pair_gaps = self._control_pair_counts()
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)

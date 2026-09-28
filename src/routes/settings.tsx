@@ -3448,7 +3448,7 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Orders" value={`R ${posOrdersCounts(stats).realOrders ?? "—"} · L ${posOrdersCounts(stats).liveOrders ?? "—"}`} />
         <AppliedKV label="Effective cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
         <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
-        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
+        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.pairGaps ?? controls?.missing)} missing · ${remote(controls?.security)} security`} />
         <AppliedKV label="Live ranges" value={controlRanges} />
         <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />
         <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />

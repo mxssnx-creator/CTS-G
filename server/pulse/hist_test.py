@@ -2262,8 +2262,6 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "stepLo": job.get("stepLo") or STEP_LO,
         "stepHi": job.get("stepHi") or STEP_HI,
         "targetCount": job.get("targetCount"),
-        "filled": job.get("filled"),
-        "evaluated": job.get("evaluated"),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsedMs": job.get("elapsedMs"),
         "workers": job.get("workers") or 1,

@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlparse, unquote
 from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, last_n_cost_pf
 from user_presets import UserPresetStore
@@ -1770,7 +1771,6 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "maxOpen": int(st.get("maxOpen") or 0),
         "drawdownPct": _report_number(st.get("drawdownPct")),
         "lastError": _short_err(st.get("lastError")),
-        "trackPrefix": eng.get("trackPrefix"),
         "cycle": st.get("cycle"),
         "loadLevel": (st.get("load") or {}).get("level") if isinstance(st.get("load"), dict) else (eng.get("load") or {}).get("level") if isinstance(eng.get("load"), dict) else st.get("loadLevel"),
         "load": st.get("load") if isinstance(st.get("load"), dict) else (eng.get("load") if isinstance(eng.get("load"), dict) else {}),

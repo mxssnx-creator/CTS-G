@@ -393,10 +393,28 @@ def ensure(pulse, pos):
         else:
             pulse.place_ctrl_pair(proxy)
         if not (proxy.sl_oid and proxy.tp_oid):
-            # Keep previous confirmed protection when a replacement fails.
-            for oid in {proxy.sl_oid,proxy.tp_oid}-{''}:
-                if not pulse.cancel_order(pos.symbol,oid):
-                    rows[0].retired_control_ids = sorted(set(rows[0].retired_control_ids) | {oid})
+            # A fresh pair got only one leg. That leg is real, quantity-matched
+            # protection: bind it to every member so the next pass completes
+            # only the missing leg. Cancelling an accepted SL because its TP
+            # was rejected would leave the whole group without a stop.
+            binding = {p.client_id:p.qty for p in rows}
+            for field,kind in (('sl_oid','sl'),('tp_oid','tp')):
+                oid = getattr(proxy,field,'')
+                if not oid:
+                    continue
+                leg_sig = [signature[0],signature[1 if kind=='sl' else 2]]
+                for p in rows:
+                    prior = getattr(p,field,'')
+                    if prior and prior != oid:
+                        p.retired_control_ids = sorted(set(p.retired_control_ids) | {prior})
+                    setattr(p,field,oid)
+                    setattr(p,'sec_'+field,oid)
+                    setattr(p,'overall_'+kind+'_signature',list(leg_sig))
+                    setattr(p,'overall_'+kind,float(getattr(proxy,kind)))
+                    p.overall_controls = True
+                    p.overall_qty = qty
+                    p.controls_ok = p.ctrl_verified = False
+                rows[0].overall_bindings = {**rows[0].overall_bindings,oid:dict(binding)}
             pulse.save_open_book()
             return False
         cache[key] = dict(signature=signature,sl=proxy.sl_oid,tp=proxy.tp_oid,verify_after=time.monotonic()+15)

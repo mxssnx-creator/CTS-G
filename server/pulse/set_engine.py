@@ -5609,7 +5609,6 @@ class SetBook:
                     "netAvg": round(st.expectancy, 6),
                     "live": st.live_eval or {},
                     "source": "live-exchange" if st.live else "hist-sim",
-                    "evaluationWindows": st.evaluation_windows,
                     "bySide": {
                         d: {
                             "n": int(v.get("n") or 0),
