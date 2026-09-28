@@ -1633,6 +1633,22 @@ def thread_alive() -> bool:
     return _THREAD is not None and _THREAD.is_alive()
 
 
+def _runner_alive() -> bool:
+    """Another CLI process (the desk dev fallback) is running a test."""
+    try:
+        with open(_pid_file(), encoding="utf-8") as handle:
+            pid = int(handle.read().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    if pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def wait_if_paused(on_progress: Optional[Callable[[Dict[str, Any]], None]] = None, snapshot: Optional[Dict[str, Any]] = None) -> None:
     """Hold a live run at the next checkpoint until Resume or Stop. Idle pause is a flag only."""
     if not pause_requested() or stop_requested():
@@ -3180,10 +3196,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(pause_test()))
             return 0
         if token == "--resume":
-            print(json.dumps(resume_test(body)))
-            return 0
+            if _runner_alive():
+                # The runner polls the PAUSE latch; clearing it resumes that process.
+                clear_stop()
+                clear_pause()
+                job = read_job()
+                resume_phase = str(job.get("resumePhase") or "evaluate")
+                if resume_phase not in RUNNING_PHASES:
+                    resume_phase = "evaluate"
+                job.update(ok=True, paused=False, running=True, phase=resume_phase, detail="historic test resumed")
+                print(json.dumps(publish(job)))
+                return 0
+            # No runner left: a daemon thread would die with this process, so
+            # rerun the paused job in the foreground instead.
+            prior = read_job()
+            for key in ("hours", "minPf", "targetCount"):
+                if body.get(key) is None and prior.get(key) is not None:
+                    body[key] = prior.get(key)
+            i += 1
+            continue
         i += 1
-    job = run_test(body)
+    _ensure_dir()
+    try:
+        with open(_pid_file(), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        job = run_test(body)
+    finally:
+        try:
+            os.remove(_pid_file())
+        except OSError:
+            pass
     print(json.dumps({
         "ok": bool(job.get("ready")) and not job.get("error"),
         "phase": job.get("phase"),

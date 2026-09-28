@@ -1274,6 +1274,34 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertTrue(ht.strategy_calc_view(strat, {}, min_pf=1.05)["normal"]["validated"])
         self.assertFalse(ht.strategy_calc_view(strat, {}, min_pf=1.30)["normal"]["validated"])
 
+    def test_cli_resume_without_runner_runs_in_the_foreground(self):
+        rank, fetch = self._offline()
+        spawn = AssertionError("CLI resume must not spawn a daemon worker that dies with the process")
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "hours": 8, "minPf": 1.2, "targetCount": 50})
+        ht.pause_test()
+        with rank, fetch, patch.object(ht, "start_test", side_effect=spawn):
+            code = ht.main(["--resume"])
+        self.assertEqual(code, 1)
+        job = ht.read_job()
+        self.assertEqual(job["phase"], "error")
+        self.assertEqual(job["hours"], 8)
+        self.assertFalse(ht.pause_requested())
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "hist-test.pid")))
+
+    def test_cli_resume_with_live_runner_only_clears_the_pause(self):
+        with open(os.path.join(self._tmp, "hist-test.pid"), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getppid()))
+        ht.publish({"phase": "replay", "pct": 60, "running": True})
+        ht.pause_test()
+        spawn = AssertionError("a live runner must not be duplicated")
+        with patch.object(ht, "start_test", side_effect=spawn), patch.object(ht, "run_test", side_effect=spawn):
+            code = ht.main(["--resume"])
+        self.assertEqual(code, 0)
+        self.assertFalse(ht.pause_requested())
+        job = ht.read_job()
+        self.assertEqual(job["phase"], "replay")
+        self.assertFalse(job.get("paused"))
+
 
 if __name__ == "__main__":
     unittest.main()
