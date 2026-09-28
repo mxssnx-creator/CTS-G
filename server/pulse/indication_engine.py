@@ -297,6 +297,124 @@ def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period
     return build_indication_frame(bars, now=now, period_s=period_s).candles
 
 
+# Signals "revert" model (volatility-normalized fade with turn confirmation).
+# Chosen on the TRAIN split of the 48-symbol research week and confirmed once on
+# VALID and SIM against the legacy composite; see scripts/test_indication_signals.py.
+# Keys are read with settings.get(key, default) so the shared defaults stay untouched.
+SIGNALS_REVERT_DEFAULTS: Dict[str, Any] = {
+    "signalsModel": "revert",      # "revert" | "trend" (legacy composite)
+    "signalsFrameBars": 60,        # the model is defined on the full engine frame
+    "signalsZWindow": 20,          # displacement window R (bars)
+    "signalsZMin": 1.5,            # |z| = |ln(c/c[-R])| / (sigma_prior * sqrt(R))
+    "signalsAtrMinPct": 0.15,      # ATR band (% of price, 1m): below it cost dominates
+    "signalsAtrMaxPct": 0.6,       # above it fades get run over
+    "signalsTurnConfirm": True,    # last bar must already move in the fade direction
+}
+
+
+def _signals_setting(settings: Dict[str, Any], key: str) -> Any:
+    value = settings.get(key)
+    return SIGNALS_REVERT_DEFAULTS[key] if value is None else value
+
+
+def signal_revert_features(closes: Sequence[float], window: int) -> Optional[Dict[str, float]]:
+    """Causal fade features on one frame of closes (oldest first).
+
+    z compares the last ``window`` log returns with the dispersion of the
+    returns *before* that window (own volatility), so a move is only extreme
+    relative to how the symbol was trading before it started.
+    """
+    from math import log, sqrt
+
+    n = len(closes)
+    window = int(window)
+    prior = n - 1 - window
+    if window < 2 or prior < 20:
+        return None
+    if any(c <= 0 for c in closes):
+        return None
+    rets = [log(closes[i] / closes[i - 1]) for i in range(1, n)]
+    before = rets[:prior]
+    mean = sum(before) / prior
+    var = max(0.0, sum(r * r for r in before) / prior - mean * mean)
+    sigma = sqrt(var)
+    if not sigma > 0:
+        return None
+    move = log(closes[-1] / closes[-1 - window])
+    return {"z": move / (sigma * sqrt(window)), "move": move, "sigma": sigma, "last": rets[-1]}
+
+
+def _signals_revert_applies(candles: Sequence[Candle], settings: Dict[str, Any]) -> bool:
+    """Revert model needs the full engine frame; shorter (warm-up) frames keep the legacy composite.
+
+    Deliberately independent of candle timestamps: a prepared frame and the
+    public vote wrapper must score the same bars identically.
+    """
+    if str(_signals_setting(settings, "signalsModel")).strip().lower() != "revert":
+        return False
+    return len(candles) >= max(2, int(_signals_setting(settings, "signalsFrameBars")))
+
+
+def _evaluate_signal_revert(
+    source_id: str,
+    source_name: str,
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    weight: float,
+    atr_pct: float,
+) -> Optional[SignalEval]:
+    candles = frame.candles
+    latest = candles[-1]
+    lo = float(_signals_setting(settings, "signalsAtrMinPct"))
+    hi = float(_signals_setting(settings, "signalsAtrMaxPct"))
+    if not (lo <= atr_pct < hi):
+        return None
+    feat = signal_revert_features(frame.closes, int(_signals_setting(settings, "signalsZWindow")))
+    if feat is None:
+        return None
+    z = feat["z"]
+    if not abs(z) >= float(_signals_setting(settings, "signalsZMin")):
+        return None
+    direction = -1 if z > 0 else 1
+    if bool(_signals_setting(settings, "signalsTurnConfirm")) and not feat["last"] * direction > 0:
+        return None
+    # TRAIN win rate was flat across |z| >= 1.5, so confidence stays in a narrow
+    # band just above the default minimumConfidence instead of implying skill.
+    strength = clamp(abs(z) / 4.0, 0.0, 1.0)
+    if not (strength >= float(settings.get("minimumStrength", 0.2))):
+        return None
+    confidence = clamp(0.6 + 0.1 * strength, 0.5, 0.99)
+    if confidence < float(settings.get("minimumConfidence", 0.6)):
+        return None
+    cost = max(0.0, float(settings.get("positionCostPct", 0.1))) + 0.08
+    raw_sl = atr_pct * float(settings.get("stopLossAtrMultiplier", 0.85)) + cost
+    sl_max = float(settings.get("stopLossMaxPct", 1.5))
+    if raw_sl > sl_max * 1.25:
+        return None
+    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", SL_MIN_PCT)), sl_max)
+    rr = float(settings.get("takeProfitRewardRisk", 1.8))
+    min_tp = sl * rr
+    tp_max = float(settings.get("takeProfitMaxPct", 5.0))
+    if min_tp > tp_max:
+        return None
+    # A fade targets part of the stretched move, never less than the RR floor.
+    tp = clamp(max(min_tp, abs(feat["move"]) * 100.0 * 0.5), min_tp, tp_max)
+    return SignalEval(
+        source_id=source_id,
+        source_name=source_name,
+        direction="long" if direction > 0 else "short",
+        confidence=confidence,
+        strength=strength,
+        stop_loss_pct=sl,
+        take_profit_pct=tp,
+        reward_risk=tp / sl if sl else rr,
+        atr_pct=atr_pct,
+        last_price=latest.close,
+        candle_count=len(candles),
+        weight=clamp(weight, 0.1, 2.0),
+    )
+
+
 def evaluate_signal_candles(
     source_id: str,
     source_name: str,
@@ -317,6 +435,8 @@ def evaluate_signal_candles(
     average_true_range = frame.atr()
     fallback = sum(abs(c.close - c.open) for c in candles[-10:]) / min(10, len(candles))
     atr_pct = (max(average_true_range, fallback) / latest.close) * 100.0
+    if _signals_revert_applies(candles, settings):
+        return _evaluate_signal_revert(source_id, source_name, frame, settings, weight, atr_pct)
     fast = frame.ema(5, 30)
     slow = frame.ema(13, 45)
     trend_scale = max(average_true_range, latest.close * 0.0005)
