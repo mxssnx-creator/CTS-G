@@ -385,9 +385,14 @@ class Coordinator:
                 continue
             n = int(getattr(st, "last15_n", 0) or 0)
             pf = float(getattr(st, "last15_ratio", 1.0) or 1.0)
-            ok = n >= need and clears_pf(pf, floor)
-            if ok:
-                qualified += 1
+            ledger = getattr(st, "stage_ledger", None) or {}
+            # The scored Base ledger (sample, PF and DD-time) owns the parent
+            # decision; bare vars are only a fallback for unscored books.
+            ok = bool(ledger.get("base")) if "base" in ledger else (n >= need and clears_pf(pf, floor))
+            if not ok:
+                # Base-rejected Sets stay in Base evaluation, not coordination.
+                continue
+            qualified += 1
             parent_rows.append({
                 "parentSetId": sid,
                 "childCount": 0,

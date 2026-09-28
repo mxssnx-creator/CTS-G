@@ -4243,7 +4243,9 @@ class SetBook:
         dd = float((m or {}).get("max_dd_s") or 0.0)
         if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
             return False, "dd_cap"
-        if not is_positive_pf(pf, 1.0):
+        # Non-strict still needs this side's own Base qualification. An intern
+        # 1.00 floor let Base-rejected Sets (1.00 <= PF < Base floor) trade.
+        if not self._base_metrics_ok(m or {}):
             return False, "stage qualification"
         return True, ""
 
@@ -4459,8 +4461,11 @@ class SetBook:
                     st.deact_reason = "locked"
                     continue
                 if st.id in allow:
-                    st.active = True
-                    st.deact_reason = ""
+                    # Allow-listed Sets still need their current Base ledger;
+                    # later own evidence can revoke a Test Historic pass.
+                    base_ok = bool((st.stage_ledger or {}).get("base"))
+                    st.active = base_ok
+                    st.deact_reason = "" if base_ok else "stage qualification"
                     continue
                 if getattr(st, "processing_active", False):
                     continue
@@ -4774,6 +4779,11 @@ class SetBook:
             st = self.sets.get(sid)
             if st is None:
                 continue
+            ledger = getattr(st, "stage_ledger", None) or {}
+            if "base" in ledger:
+                # A scored/seeded Base ledger is authoritative for counts.
+                n_ok += int(bool(ledger.get("base")))
+                continue
             n = max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
             pf = float(getattr(st, "last15_ratio", 0) or 0)
             if n >= need and pf + 1e-9 >= floor:
@@ -5025,11 +5035,13 @@ class SetBook:
 
         def side_active(state: SetState) -> bool:
             allow_ids = getattr(self, "hist_test_set_ids", None)
-            if allow_ids is not None and state.id in allow_ids and state.active:
+            blob = (state.by_side or {}).get(want_side) if use_side else None
+            has_side = isinstance(blob, dict) and "active" in blob
+            # Test Historic scope never overrides this direction's own flag.
+            if allow_ids is not None and state.id in allow_ids and state.active and not has_side:
                 return True
             if use_side:
-                blob = (state.by_side or {}).get(want_side)
-                if isinstance(blob, dict) and "active" in blob:
+                if has_side:
                     if blob.get("active"):
                         return True
                     # Cached "unproven" / "stage qualification" is not a
@@ -5037,14 +5049,16 @@ class SetBook:
                     # dispatcher (matrix=0 while hundreds of signals fired).
                     reason = str(blob.get("deact_reason") or "")
                     if reason in ("unproven", "stage qualification", ""):
-                        return not self.strict_gate
+                        return not self.strict_gate and self._base_metrics_ok(blob)
                     return False
             if self.strict_gate:
                 return bool(state.active)
             reason = str(state.deact_reason or "")
             if state.locked or reason == "locked":
                 return False
-            return True
+            # No side blob: only Base evidence on the Set itself qualifies.
+            # Unscored catalog rows are not entry-matrix candidates.
+            return self._base_metrics_ok(self._side_view(state, want_side if use_side else None))
 
         # A permissive replay may publish qualified Sets before the aggregate
         # catalog is complete.  That does not make the aggregate ``ready``
@@ -5070,7 +5084,7 @@ class SetBook:
 
         need = self.eval_need()
         floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
-        intern_floor = 1.0 if not self.strict_gate else floor
+        intern_floor = floor
         result: List[SetState] = []
         rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
         for state in rows:
@@ -5309,12 +5323,12 @@ class SetBook:
             if not self._real_metrics_ok(view):
                 return False
             return True
-        # Non-strict intern: Base-qualified positive-PF Sets enter even when
-        # the cached side flag still says unproven/stage. Empty tape is not
-        # evidence. Intern PF 1.00 is first-entry only, never extra size.
+        # Non-strict intern: Base-qualified Sets enter even when the cached
+        # side flag still says unproven/stage. Empty tape is not evidence and
+        # a Base-rejected Set (PF below the Base floor) never enters.
         if n < self.eval_need():
             return False
-        return clears_pf(pf, 1.0)
+        return self._base_metrics_ok(view)
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
