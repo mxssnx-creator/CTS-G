@@ -538,7 +538,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
             <tr>
               <th className="pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
-              <th className="pb-2 text-right font-medium">PF15</th>
+              <th className="pb-2 text-right font-medium">PF{sets?.pfWindow ?? 15}</th>
               <th className="pb-2 text-right font-medium">R25</th>
               <th className="pb-2 text-right font-medium">n</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
-import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, type LiveStats } from "./live-stats.ts";
+import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, kindGateOpen, costPfWindow, type LiveStats } from "./live-stats.ts";
 import { fetchConnections } from "./connections.ts";
 import { fetchCtsBundle } from "./config-model.ts";
 
@@ -183,4 +183,57 @@ test("stalled config reads time out and malformed settings cannot replace good v
   const invalid = fetchCtsBundle("vst");
   calls[1].reply({ ok: false, detail: "offline" });
   assert.equal((await invalid).ok, false);
+});
+
+test("stats changes without position movement still re-render the desk", () => {
+  const a = { running: true, halted: false, openCount: 0, equity: 100, unrealized: 0, wins: 5, losses: 3, errors: 0,
+    lastError: "", cycle: 10, tests: [{ name: "qa", pass: true, detail: "" }], activity: { eventCount: 50, errorCount: 0 },
+    sets: { activeCount: 10, histFills: 500, validatedCount: 20 } } as unknown as LiveStats;
+  assert.equal(statsUnchanged(a, { ...a } as LiveStats), true);
+  for (const next of [
+    { errors: 1 },
+    { lastError: "order rejected" },
+    { cycle: 11 },
+    { tests: [{ name: "qa", pass: false, detail: "gap" }] },
+    { activity: { eventCount: 51, errorCount: 0 } },
+    { activity: { eventCount: 50, errorCount: 1 } },
+    { sets: { activeCount: 10, histFills: 500, validatedCount: 21 } },
+  ]) assert.equal(statsUnchanged(a, { ...a, ...next } as LiveStats), false, JSON.stringify(next));
+});
+
+test("a flat book reports zero Real orders instead of an unknown", () => {
+  assert.deepEqual(
+    posOrdersCounts({ openCount: 0, realPositionGroupCount: 0, realOrderCount: 0, livePositionCount: -1, liveOrderCount: -1 }),
+    { realPositions: 0, livePositions: null, realOrders: 0, liveOrders: null },
+  );
+  assert.equal(realPosOrders({ openCount: 0, realPositionGroupCount: 0, realOrderCount: 0, liveOrderCount: -1 }), "0/0");
+  // The legacy copied-count guard still applies to a non-empty book.
+  assert.equal(realPosOrders({ realPositionGroupCount: 13, realOrderCount: 149, liveOrderCount: 178, openCount: 149 }), "13/178");
+});
+
+test("indication Gate column follows the engine gate, not the profitability flag", () => {
+  assert.equal(kindGateOpen({ ok: false, gateOpen: true }, { ok: false }), true);
+  assert.equal(kindGateOpen({ ok: true, gateOpen: false }), false);
+  assert.equal(kindGateOpen({ ok: false, gateOpen: null }, { ok: false }), false);
+  assert.equal(kindGateOpen({ ok: false }), undefined);
+  assert.equal(kindGateOpen(undefined, undefined), undefined);
+});
+
+test("cost PF labels use the configured evaluation window", () => {
+  assert.equal(costPfWindow({ pfCost: { n: 30 }, sets: { pfWindow: 20 } }), 30);
+  assert.equal(costPfWindow({ sets: { pfWindow: 20 } }), 20);
+  assert.equal(costPfWindow(null), 15);
+});
+
+test("lane view keeps realized, foreign and unknown PnL % from the lane summary", () => {
+  const overall = { running: true, connType: "overall", pnlPct: null,
+    lanes: [{ type: "live", id: "bingx-x01", running: true, equity: 10, wins: 1, losses: 0, openCount: 0,
+      realizedPnl: 1.5, systemRealized: 1.5, foreignRealized: 0.75, foreignUnrealized: -0.25, pnlPct: null }],
+    open: [], closed: [] } as unknown as LiveStats;
+  const lane = viewFromSnapshot(overall, "live")!;
+  assert.equal(lane.realizedPnl, 1.5);
+  assert.equal(lane.foreignRealized, 0.75);
+  assert.equal(lane.pnlPct, null);
+  const reported = viewFromSnapshot({ ...overall, lanes: [{ ...overall.lanes![0], pnlPct: 2.5 }] } as LiveStats, "live")!;
+  assert.equal(reported.pnlPct, 2.5);
 });

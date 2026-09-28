@@ -50,7 +50,7 @@ export function StatsOverview({
   const heroes = (
     <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
-          k="Last 15 cost PF"
+          k={`Last ${cost.n} cost PF`}
           v={shownCount || shownRatio ? shownRatio.toFixed(2) : "—"}
           s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${shownCount} · ${cost.pass ? "pass" : "block"}`}
           tone={shownCount < 8 ? "ok" : cost.pass ? "good" : "ok"}

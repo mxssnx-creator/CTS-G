@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
-import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, type LiveStats } from "@/lib/live-stats";
+import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
 import { derive } from "@/lib/derive-stats";
@@ -119,7 +119,7 @@ function DeskPage() {
               ) : null}
               <p className={`mt-1 font-mono text-sm ${pnlClass(session)}`}>
                 system {session >= 0 ? "+" : ""}
-                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {fmt(stats?.pnlPct, 2)}%
+                {fmt(session, 4)} · grow {fmt(grow, 4)} / loss {fmt(loss, 4)} · {stats?.pnlPct == null ? "—" : `${fmt(stats.pnlPct, 2)}%`}
               </p>
             </div>
             <dl className="stat-rows w-full max-w-sm text-sm sm:w-auto">
@@ -554,7 +554,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={allow ? "text-primary" : "text-warn"}>{allow ? "coord open" : "coord pause"}</span>
         <span className="text-muted">
-          last15 {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
+          last{costPfWindow(stats)} {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">
@@ -684,7 +684,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
         <span>{gateReady ? (phase === "ready" ? "ready" : "gate ready") : "gate closed"}</span>
         {stats?.detailType ? <span className="whitespace-nowrap">from {stats.detailType}</span> : null}
         <span className="whitespace-nowrap">{histTestIsEnabled(stats?.histTest) ? "test historic ON" : "test historic OFF"}</span>
-        <span className="ml-auto text-muted">last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}</span>
+        <span className="ml-auto text-muted">last{s?.pfWindow ?? 15} PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}</span>
       </div>
       {histTestIsEnabled(ht) && ((ht?.runningSets && ht.runningSets.length) || (ht?.symbols && ht.symbols.length) || ht?.detail) ? (
         <p className="mt-1 text-muted" data-testid="hist-test-sets-line">

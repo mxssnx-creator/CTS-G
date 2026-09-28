@@ -11,7 +11,7 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse, unquote
-from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, last_n_cost_pf
+from position_cost import POSITION_COST_PCT_DEFAULT, LAST_N_DEFAULT, POSITIVE_PF, clears_pf, evaluation_windows, last_n_cost_pf
 from user_presets import UserPresetStore
 from storage_paths import (
     DATA_DIR,
@@ -577,7 +577,13 @@ def slim_for_ui(st: dict) -> dict:
             try:
                 from combo_eval import evaluate_fills
                 min_pf = float(((out.get("coord") or {}) if isinstance(out.get("coord"), dict) else {}).get("minPf") or POSITIVE_PF)
-                combo = evaluate_fills(closed, min_pf=min_pf or POSITIVE_PF)
+                policy = out.get("pfCost") if isinstance(out.get("pfCost"), dict) else {}
+                combo = evaluate_fills(
+                    closed,
+                    min_pf=min_pf or POSITIVE_PF,
+                    cost_pct=_report_number(policy.get("costPct"), POSITION_COST_PCT_DEFAULT) or POSITION_COST_PCT_DEFAULT,
+                    pf_n=int(_report_number(policy.get("n"), LAST_N_DEFAULT)) or LAST_N_DEFAULT,
+                )
                 out["pfStats"] = combo.get("pfStats")
                 out["withWithout"] = combo.get("withWithout")
                 out["comboMatrix"] = combo.get("matrix")
@@ -1220,7 +1226,8 @@ def _symbol_direction_count_from_snapshot(state, exchange_only: bool = False) ->
 
     3 symbols both long and short = 6. One of those only short = 5.
     Config/set lanes on the same parent collapse. Proxies and zero-qty dust
-    are ignored. ``exchange_only`` keeps rows with venue qty.
+    are ignored. ``exchange_only`` keeps rows with venue qty. Rows from
+    different connections (merged Overall tape) never share a parent.
     """
     if not isinstance(state, dict):
         return -1
@@ -1256,7 +1263,7 @@ def _symbol_direction_count_from_snapshot(state, exchange_only: bool = False) ->
         side = str(row.get("side") or "").strip().upper()
         if not symbol or side not in ("LONG", "SHORT"):
             continue
-        groups.add((symbol, side))
+        groups.add((str(row.get("connection") or ""), symbol, side))
     if groups:
         return len(groups)
     if exchange_only and not saw_exchange_qty:
@@ -1271,7 +1278,7 @@ def _position_group_count(state, default: int = -1) -> int:
     if not isinstance(state, dict):
         return default
     evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
-    published = default
+    published = -1
     for value in (
         state.get("realPositionGroupCount"),
         evidence.get("internalPositionGroups"),
@@ -1285,7 +1292,7 @@ def _position_group_count(state, default: int = -1) -> int:
     snapshot = _symbol_direction_count_from_snapshot(state)
     lanes = _known_int(state.get("logicalPositionCount", state.get("openCount")))
     if published >= 0 and lanes >= 0 and published == lanes:
-        published = default
+        published = -1
     if snapshot >= 0 and (published < 0 or published < snapshot):
         return snapshot
     if published >= 0:
@@ -1325,7 +1332,7 @@ def _real_order_count(state, default: int = -1) -> int:
     if not isinstance(state, dict):
         return default
     evidence = state.get("executionEvidence") if isinstance(state.get("executionEvidence"), dict) else {}
-    published = default
+    published = -1
     for value in (
         state.get("realOrderCount"),
         evidence.get("internalOrderCount"),
@@ -1346,7 +1353,7 @@ def _real_order_count(state, default: int = -1) -> int:
         (lanes >= 0 and published == lanes) or (groups >= 0 and published == groups and live >= 0 and live != published)
     )
     if copied:
-        published = default
+        published = -1
     if published >= 0:
         return published
     if snapshot >= 0:
@@ -1709,6 +1716,13 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "available": _report_number(st.get("available")),
         "usedMargin": _report_number(st.get("usedMargin")),
         "unrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
+        "systemUnrealized": _report_number(st.get("systemUnrealized", st.get("unrealized"))),
+        "walletUnrealized": _report_number(st.get("walletUnrealized", st.get("unrealized"))),
+        "realizedPnl": _report_number(st.get("systemRealized", st.get("realizedPnl"))),
+        "systemRealized": _report_number(st.get("systemRealized", st.get("realizedPnl"))),
+        "pnlPct": st.get("pnlPct"),
+        "tradedNotional": st.get("tradedNotional"),
+        "foreignRealized": st.get("foreignRealized") or 0,
         "foreignUnrealized": st.get("foreignUnrealized") or 0,
         "foreignExposure": st.get("foreignExposure") or 0,
         "foreignPositionCount": st.get("foreignPositionCount") or 0,
@@ -1926,26 +1940,43 @@ def merge_overall() -> dict:
     pc["minPf"] = policy["minPf"]
     pc["requiredSamples"] = policy["requiredSamples"]
     pc["pass"] = bool(pc["count"] >= pc["requiredSamples"] and clears_pf(pc["ratio"], pc["minPf"]))
+    eval_need = max((int(_report_number((st.get("sets") or {}).get("enableNeed"))) for st in stats_by_id.values()), default=0)
+    pc["evaluationWindows"] = evaluation_windows(list(reversed(closed)), policy["costPct"], required_samples=eval_need or policy["requiredSamples"])
     detail_lane, detail_st = _pick_detail(LANES, stats_by_id)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     activity = merge_activity_summaries(activity_summaries)
     sets = dict(detail_st.get("sets") or {})
     sets["lanes"] = sets_lanes
+    # One desk's intern gate is not Overall evidence (PF is never merged across desks).
+    sets.pop("indGate", None)
     overview = merge_overviews([(lane["label"], (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("overview")) for lane in LANES])
     if overview is not None:
         sets["overview"] = overview
-        for key in ("setCount", "activeCount", "validatedCount"):
-            sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
-        intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
-        catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
-        sets["internSetCount"] = max(intern_vals) if intern_vals else 0
-        sets["catalogSetCount"] = max(catalog_vals) if catalog_vals else 0
-        sets["processingCount"] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES)
+    # Each desk owns an independent catalog: valid/active numerators and the
+    # catalog/intern denominators are summed over the same lanes.
+    for key in ("setCount", "activeCount", "validatedCount"):
+        sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
+    intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
+    catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
+    sets["internSetCount"] = sum(intern_vals)
+    sets["catalogSetCount"] = sum(catalog_vals)
+    sets["processingCount"] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES)
     system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in lanes)
     wallet_equity = sum(_report_number(l.get("walletEquity")) for l in lanes)
     session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in lanes)
     system_grow = sum(_report_number(l.get("systemGrow")) for l in lanes)
     system_loss = sum(_report_number(l.get("systemLoss")) for l in lanes)
+    # Overall PnL % = summed system PnL over summed traded notional. A lane
+    # with PnL but no published notional makes the ratio unknown, not 0%.
+    traded = 0.0
+    for l in lanes:
+        if l.get("tradedNotional") is None:
+            if _report_number(l.get("systemPnl", l.get("sessionPnl"))):
+                traded = None
+                break
+            continue
+        traded += _report_number(l.get("tradedNotional"))
+    pnl_pct = round(session_pnl / traded * 100.0, 3) if traded and traded > 1e-12 else None
     caps = [int(l.get("maxOpen") or 0) for l in lanes]
     max_open = 0 if any(c <= 0 for c in caps) else sum(caps)
     symbol_cap = max((int(l.get("symbolCap") or 0) for l in lanes), default=0)
@@ -1988,15 +2019,20 @@ def merge_overall() -> dict:
         "systemLossLive": _report_number(live.get("systemLoss")),
         "systemGrowVst": _report_number(vst.get("systemGrow")),
         "systemLossVst": _report_number(vst.get("systemLoss")),
-        "pnlPct": 0,
+        "pnlPct": pnl_pct,
         "drawdownPct": max((_report_number(l.get("drawdownPct")) for l in lanes), default=0),
+        "foreignUnrealized": sum(_report_number(l.get("foreignUnrealized")) for l in lanes),
+        "foreignRealized": sum(_report_number(l.get("foreignRealized")) for l in lanes),
+        "foreignExposure": sum(_report_number(l.get("foreignExposure")) for l in lanes),
+        "foreignPositionCount": sum(int(_report_number(l.get("foreignPositionCount"))) for l in lanes),
+        "foreignOpenOrderCount": sum(int(_report_number(l.get("foreignOpenOrderCount"))) for l in lanes),
         "wins": wins,
         "losses": losses,
         "winRate": round(wr, 1),
         "openCount": len(opens),
-        "realPositionCount": _sum_known_int(_position_group_count(l, default=-1) for l in lanes),
-        "realPositionGroupCount": _sum_known_int(_position_group_count(l, default=-1) for l in lanes),
-        "realOrderCount": _sum_known_int((_real_order_count(l) for l in lanes), unknown=0),
+        "realPositionCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+        "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+        "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
         "exchangeOpenCount": _sum_known_int(_live_position_count(l) for l in lanes),
         "livePositionCount": _sum_known_int(_live_position_count(l) for l in lanes),
         "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
@@ -2036,7 +2072,7 @@ def merge_overall() -> dict:
         out["byIndication"] = merge_kind_stats(
             closed,
             cost,
-            gate=(sets.get("indGate") or cov.get("indicationGate") or {}),
+            gate={},
             hits=cov.get("indicationHits") or ind.get("typeHits") or {},
             types=cov.get("indicationTypes") or ind.get("types") or {},
             kind_live=ind.get("kindStats") or {},
@@ -2231,9 +2267,9 @@ def connections_blob() -> dict:
                 "blurb": "All desks in parallel",
                 "running": any(l["running"] and not l["halted"] for l in lanes),
                 "openCount": sum(l["openCount"] for l in lanes),
-                "realPositionCount": _sum_known_int(_position_group_count(l) for l in lanes),
-                "realPositionGroupCount": _sum_known_int(_position_group_count(l) for l in lanes),
-                "realOrderCount": _sum_known_int((_real_order_count(l) for l in lanes), unknown=0),
+                "realPositionCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+                "realPositionGroupCount": _sum_known_int(l.get("realPositionGroupCount") for l in lanes),
+                "realOrderCount": _sum_known_int((l.get("realOrderCount") for l in lanes), unknown=0),
                 "exchangeOpenCount": _sum_known_int(_live_position_count(l) for l in lanes),
                 "livePositionCount": _sum_known_int(_live_position_count(l) for l in lanes),
                 "liveOrderCount": _sum_known_int(l.get("liveOrderCount") for l in lanes),
@@ -2257,9 +2293,10 @@ def connections_blob() -> dict:
                     "paused": l.get("paused"),
                     "equity": l["equity"],
                     "openCount": l["openCount"],
-                    "realPositionCount": _position_group_count(l, default=0),
-                    "realPositionGroupCount": _position_group_count(l, default=0),
-                    "realOrderCount": _real_order_count(l, default=0),
+                    # lane_summary already derived these from the raw snapshot.
+                    "realPositionCount": l["realPositionGroupCount"],
+                    "realPositionGroupCount": l["realPositionGroupCount"],
+                    "realOrderCount": l["realOrderCount"],
                     "exchangeOpenCount": _live_position_count(l, default=-1),
                     "livePositionCount": _live_position_count(l, default=-1),
                     "liveOrderCount": l.get("liveOrderCount", -1),

@@ -112,6 +112,7 @@ export type KindStat = {
   validated?: boolean;
   profitable?: boolean;
   ok?: boolean;
+  gateOpen?: boolean | null;
   enabled?: boolean;
   processed?: boolean;
   evaluated?: number;
@@ -313,7 +314,7 @@ export type LiveStats = {
     snapshotAt?: number;
   };
   walletUnrealized?: number;
-  pnlPct: number;
+  pnlPct: number | null;
   drawdownPct: number;
   wins: number;
   losses: number;
@@ -659,7 +660,7 @@ export type LiveStats = {
     systemRealized?: number;
     systemUnrealized?: number;
     drawdownPct?: number;
-    pnlPct?: number;
+    pnlPct?: number | null;
     openCount: number;
     realPositionCount?: number;
     realPositionGroupCount?: number;
@@ -1076,7 +1077,8 @@ export function pickView(stats: LiveStats | null, conn: string): LiveStats | nul
   return null;
 }
 
-/** Cheap identity for poll skip — omits wall-clock `now` so a frozen snapshot does not re-render. */
+/** Cheap identity for poll skip — omits wall-clock `now` so a frozen snapshot does not re-render.
+ * Engine cycle, errors, failing tests and ledger/validation counters are included so a flat desk still updates. */
 export function statsTickKey(s: LiveStats): string {
   return [
     Number(s.running),
@@ -1105,6 +1107,13 @@ export function statsTickKey(s: LiveStats): string {
     s.histTest?.internSetCount ?? "",
     s.histTest?.validatedCount ?? "",
     s.histTest?.phase || "",
+    s.errors ?? "",
+    s.lastError || "",
+    s.cycle ?? "",
+    (s.tests ?? []).filter((t) => !t.pass).map((t) => t.name).join(","),
+    s.activity?.eventCount ?? "",
+    s.activity?.errorCount ?? "",
+    s.sets?.validatedCount ?? "",
   ].join("|");
 }
 
@@ -1191,7 +1200,7 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
   systemLoss: lane.systemLoss,
   systemRealized: lane.systemRealized,
   systemUnrealized: lane.systemUnrealized,
-  pnlPct: lane.pnlPct ?? 0,
+  pnlPct: lane.pnlPct ?? null,
   drawdownPct: lane.drawdownPct ?? 0,
   executionEvidence: lane.executionEvidence,
   wins: lane.wins,
@@ -1253,6 +1262,17 @@ export function knownCount(value: number | null | undefined): number | null {
   return value;
 }
 
+/** Engine gate for an indication kind. `ok` is the profitability flag; the gate is `gateOpen`. */
+export function kindGateOpen(blob?: KindStat, gate?: KindStat): boolean | undefined {
+  const open = blob?.gateOpen ?? gate?.ok;
+  return typeof open === "boolean" ? open : undefined;
+}
+
+/** Last-N window behind the headline cost PF (configured pfWindow, not a fixed 15). */
+export function costPfWindow(stats: { pfCost?: { n?: number }; sets?: { pfWindow?: number } } | null | undefined): number {
+  return knownCount(stats?.pfCost?.n) || knownCount(stats?.sets?.pfWindow) || 15;
+}
+
 /** Positions/Orders pair. Never falls order counts back onto position counts. */
 export function formatPosOrders(
   positions?: number | null,
@@ -1287,7 +1307,7 @@ export function posOrdersCounts(stats: {
   const lanes = knownCount(stats?.openCount);
   let realOrders = realOrd;
   // Older engines copied lane/openCount onto realOrderCount. That is not orders.
-  if (realOrders != null && lanes != null && realOrders === lanes) realOrders = liveOrders;
+  if (realOrders != null && lanes != null && lanes > 0 && realOrders === lanes) realOrders = liveOrders;
   return { realPositions, livePositions, realOrders, liveOrders };
 }
 
