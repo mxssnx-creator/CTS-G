@@ -42,6 +42,7 @@ from position_cost import (
     accumulate_close,
     resolve_sl_tp,
     bind_ratio_sl_tp,
+    cap_sl_to_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
     INTERN_PF,
@@ -4223,6 +4224,7 @@ class Pulse:
         bound_sl, bound_tp = bind_ratio_sl_tp(tp, ratio, sl_lo, sl_hi, tp_lo, 0.0 if tp_hi == float("inf") else tp_hi)
         if bound_tp > tp:
             tp = bound_tp
+        sl, tp = cap_sl_to_tp(sl, tp, sl_lo)
         return sl, tp, sl_lo, sl_hi
 
     def _refresh_open_risk_floors(self) -> int:
@@ -4338,6 +4340,7 @@ class Pulse:
             sl_w = max(sl_lo, min(sl_hi, member_sl or sl_f))
             tp_cap = float(self.tp_max) if float(self.tp_max) > 0 else float("inf")
             tp_w = max(float(self.tp_min), min(tp_cap, member_tp or tp_f))
+        sl_w, tp_w = cap_sl_to_tp(sl_w, tp_w, sl_lo)
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
@@ -8268,7 +8271,8 @@ class Pulse:
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
-        self.control_orders = _bool_setting(ov.get("controlOrders", cts.get("control_orders", True)), True)
+        # Operator rule: exchange SL/TP protection is always on for our positions.
+        self.control_orders = True
         # Overall symbol+direction protection is the safe high-throughput
         # default.  A missing key must not silently fall back to per-config
         # TP/SL pairs: hundreds of qualified Sets would then consume the
@@ -8350,7 +8354,7 @@ class Pulse:
             self.block.enabled = False
         elif self.strat_block and ov.get("blockEnabled", True):
             self.block.enabled = True
-        self.control_orders = _bool_setting(self.mods.get("exec.controls", self.control_orders), self.control_orders)
+        self.control_orders = True
         self._set_control_mode(control_orders_per_config or self.control_orders_overall)
         for position in list(self.open.values()):
             try:

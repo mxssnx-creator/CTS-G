@@ -43,8 +43,8 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
     if "dcaEnabled" in overlay or "stratDca" in overlay:
         flags["strategy.dca"] = bool(overlay.get("stratDca", True))
-    if "controlOrders" in overlay:
-        flags["exec.controls"] = bool(overlay["controlOrders"])
+    # SL/TP protection is always on; a stored false can no longer disable it.
+    flags["exec.controls"] = True
     if "rearrange" in overlay:
         flags["strategy.rearrange"] = bool(overlay["rearrange"])
     if "indEnabled" in overlay:

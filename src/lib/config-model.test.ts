@@ -328,3 +328,8 @@ test("the Scratch s control range covers the engine default and saved overlays",
     assert.ok(Number(laneFile(id).scratchS) <= SCRATCH_S_MAX, id);
   }
 });
+
+test("SL/TP control orders are always on, even when a stored overlay says off", () => {
+  const saved = syncOverlayFlags(overlayFromCts({ control_orders: false }, { controlOrders: false }));
+  assert.equal(saved.controlOrders, true);
+});

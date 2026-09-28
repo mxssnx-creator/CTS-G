@@ -786,7 +786,7 @@ function SettingsPage() {
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
+                <p className="text-sm text-muted">Control orders (SL/TP on exchange) · always on</p>
                 <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
@@ -2402,8 +2402,10 @@ function SettingsPage() {
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
-                  on={overlay.controlOrders}
-                  onChange={(v) => patch("controlOrders", v)}
+                  hint="Always on · SL at most 3× TP"
+                  on
+                  locked
+                  onChange={() => patch("controlOrders", true)}
                 />
                 <Toggle
                   label="Overall SL/TP by symbol and direction"

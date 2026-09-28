@@ -830,7 +830,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     ...DEFAULT_OVERLAY,
     trailArmPct: arm,
     trailGivePct: give,
-    controlOrders: bool(cts.control_orders, true),
+    controlOrders: true, // SL/TP protection is always on
     controlOrdersOverall: bool(cts.controlOrdersOverall, true),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
@@ -1198,6 +1198,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   delete next.preferMinimalPositive;
   delete next.minimalPositiveCoordination;
   next.symbolSort = coerceSymbolSort(next.symbolSort);
+  next.controlOrders = true;
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
   next.blockOverall = bool(next.blockOverall, true);
@@ -1232,7 +1233,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   const m: Record<string, boolean> = { ...(next.modules ?? {}) };
   m["strategy.block"] = Boolean(next.blockEnabled && next.stratBlock);
   m["strategy.dca"] = next.stratDca !== false;
-  m["exec.controls"] = Boolean(next.controlOrders);
+  m["exec.controls"] = true;
   m["strategy.rearrange"] = Boolean(next.rearrange);
   m["strategy.indications"] = Boolean(next.indEnabled && next.stratIndications);
   m["feed.tf1m"] = Boolean(next.tf1m);
