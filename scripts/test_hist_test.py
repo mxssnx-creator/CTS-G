@@ -1255,6 +1255,25 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertIn("setMinStep", options["deskKeys"])
         self.assertNotIn("baseMinPf", options["deskKeys"])
 
+    def test_validated_flags_use_the_configured_min_pf(self):
+        low = {"minPf": 1.05, "successfulConfigs": [{"setId": "a", "pf": 1.10, "n": 12, "validated": True}]}
+        ht._stamp_honesty(low)
+        self.assertTrue(low["successfulConfigs"][0]["validated"])
+        self.assertEqual(low["validatedCount"], 1)
+        high = {"minPf": 1.30, "successfulConfigs": [{"setId": "a", "pf": 1.20, "n": 12, "validated": True}]}
+        ht._stamp_honesty(high)
+        self.assertFalse(high["successfulConfigs"][0]["validated"])
+        self.assertEqual(high["validatedCount"], 0)
+        floor = {"minPf": 0.5, "successfulConfigs": [{"setId": "a", "pf": 1.01, "n": 12, "validated": True}]}
+        ht._stamp_honesty(floor)
+        self.assertFalse(floor["successfulConfigs"][0]["validated"])
+        kinds = {"state": {"n": 10, "pf": 1.10}}
+        self.assertTrue(ht.indication_calc_view(kinds, {}, min_pf=1.05)["state"]["validated"])
+        self.assertFalse(ht.indication_calc_view(kinds, {}, min_pf=1.30)["state"]["validated"])
+        strat = {"normal": {"n": 10, "pf": 1.10}}
+        self.assertTrue(ht.strategy_calc_view(strat, {}, min_pf=1.05)["normal"]["validated"])
+        self.assertFalse(ht.strategy_calc_view(strat, {}, min_pf=1.30)["normal"]["validated"])
+
 
 if __name__ == "__main__":
     unittest.main()

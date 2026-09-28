@@ -348,9 +348,16 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
     return out
 
 
+def _job_pf_floor(job: Optional[Dict[str, Any]] = None) -> float:
+    """The run's configured min PF, never below the PF_MIN contract floor."""
+    blob = job if isinstance(job, dict) else {}
+    return clamp_min_pf(blob.get("minPf") or blob.get("positivePf") or POSITIVE_PF)
+
+
 def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
     """Last-15 proven configs: n≥8 and PF≥floor. Empty/intern-neutral tapes are not validated."""
     blob = job if isinstance(job, dict) else {}
+    floor = _job_pf_floor(blob)
     proven = 0
     for row in blob.get("successfulConfigs") or []:
         if not isinstance(row, dict) or row.get("validated") is False:
@@ -363,12 +370,12 @@ def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
             pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
             pf = 0.0
-        if n_row >= 8 and is_positive_pf(pf):
+        if n_row >= 8 and is_positive_pf(pf, floor):
             proven += 1
     return proven
 
 
-def _clear_unproven(row: Any) -> None:
+def _clear_unproven(row: Any, floor: float = POSITIVE_PF) -> None:
     """Last-15 identity is not validation. n<8 or PF below floor is unproven."""
     if not isinstance(row, dict):
         return
@@ -380,22 +387,23 @@ def _clear_unproven(row: Any) -> None:
         pf = float(row.get("pf") or row.get("last15Ratio") or 0)
     except (TypeError, ValueError):
         pf = 0.0
-    if n_row < 8 or not is_positive_pf(pf):
+    if n_row < 8 or not is_positive_pf(pf, floor):
         row["validated"] = False
 
 
 def _stamp_result_flags(payload: Dict[str, Any]) -> None:
+    floor = _job_pf_floor(payload)
     for key in ("pfStats", "byIndication", "byStrategy", "kinds"):
         blob = payload.get(key)
         if not isinstance(blob, dict):
             continue
         for row in blob.values():
-            _clear_unproven(row)
+            _clear_unproven(row, floor)
             if isinstance(row, dict) and isinstance(row.get("bySide"), dict):
                 for side in row["bySide"].values():
-                    _clear_unproven(side)
+                    _clear_unproven(side, floor)
     for row in payload.get("successfulConfigs") or []:
-        _clear_unproven(row)
+        _clear_unproven(row, floor)
 
 
 def intern_assigned_count(job: Optional[Dict[str, Any]] = None) -> int:
@@ -1548,11 +1556,11 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "pfStats": blob.get("pfStats") or {},
         "combo": blob.get("combo") or {},
         "byIndication": _compact_stat_map(
-            indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}),
+            indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}, min_pf=_job_pf_floor(blob)),
             16,
         ),
         "byStrategy": _compact_stat_map(
-            strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}),
+            strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}, min_pf=_job_pf_floor(blob)),
             16,
         ),
         "error": blob.get("error") or "",
@@ -2061,8 +2069,9 @@ def _cell_pf(cell: Dict[str, Any]) -> float:
         return 0.0
 
 
-def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     """Last-15 indication types: n≥8 and PF≥floor. Combo strategies attach per kind."""
+    floor = clamp_min_pf(min_pf)
     gate = kinds if isinstance(kinds, dict) else {}
     matrix = (combo or {}).get("matrix") if isinstance(combo, dict) else None
     by_kind_cells: Dict[str, List[Dict[str, Any]]] = {}
@@ -2094,8 +2103,8 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
         row["n"] = n
         row["pf"] = round(pf, 4)
         row["evalN"] = n
-        row["validated"] = n >= 8 and is_positive_pf(pf)
-        row["profitable"] = is_positive_pf(pf)
+        row["validated"] = n >= 8 and is_positive_pf(pf, floor)
+        row["profitable"] = is_positive_pf(pf, floor)
         by_st: Dict[str, Any] = {}
         for cell in cells:
             st = str(cell.get("strategy") or "").strip()
@@ -2108,7 +2117,7 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
                 "n": int(cell.get("n") or 0),
                 "evalN": cn,
                 "pf": round(cpf, 4),
-                "validated": cn >= 8 and is_positive_pf(cpf),
+                "validated": cn >= 8 and is_positive_pf(cpf, floor),
                 "maxDdS": cell.get("maxDdS") or 0,
                 "wr": cell.get("wr") or 0,
             }
@@ -2118,8 +2127,9 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
     return out
 
 
-def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     """Strategy / pack books keep last-15 proven. Combo PF families fill gaps."""
+    floor = clamp_min_pf(min_pf)
     out: Dict[str, Any] = dict(by_strat or {})
     pf_stats = (combo or {}).get("pfStats") if isinstance(combo, dict) else {}
     if isinstance(pf_stats, dict):
@@ -2132,14 +2142,14 @@ def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optiona
         n = _cell_n(row)
         pf = _cell_pf(row)
         row["evalN"] = n
-        row["validated"] = n >= 8 and is_positive_pf(pf)
+        row["validated"] = n >= 8 and is_positive_pf(pf, floor)
         if isinstance(row.get("bySide"), dict):
             for side in row["bySide"].values():
                 if not isinstance(side, dict):
                     continue
                 sn = _cell_n(side)
                 spf = _cell_pf(side)
-                side["validated"] = sn >= 8 and is_positive_pf(spf)
+                side["validated"] = sn >= 8 and is_positive_pf(spf, floor)
     return out
 
 
@@ -2338,9 +2348,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
             for k, v in (job.get("byDirection") or {}).items() if isinstance(v, dict)
         },
-        "byStrategy": _compact_stat_map(strategy_calc_view(job.get("byStrategy") or {}, {"pfStats": job.get("pfStats") or {}, "matrix": job.get("comboMatrix") or []}), 40),
-        "byIndication": _compact_stat_map(indication_calc_view(job.get("byIndication") or job.get("kinds") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
-        "kinds": _compact_stat_map(indication_calc_view(job.get("kinds") or job.get("byIndication") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
+        "byStrategy": _compact_stat_map(strategy_calc_view(job.get("byStrategy") or {}, {"pfStats": job.get("pfStats") or {}, "matrix": job.get("comboMatrix") or []}, min_pf=min_pf), 40),
+        "byIndication": _compact_stat_map(indication_calc_view(job.get("byIndication") or job.get("kinds") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}, min_pf=min_pf), 24),
+        "kinds": _compact_stat_map(indication_calc_view(job.get("kinds") or job.get("byIndication") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}, min_pf=min_pf), 24),
         "pfStats": job.get("pfStats") or {},
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
@@ -2688,8 +2698,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         kinds = book.ind_gate_snapshot() if hasattr(book, "ind_gate_snapshot") else {}
     except Exception:
         kinds = {}
-    kinds = indication_calc_view(kinds, combo)
-    by_strat = strategy_calc_view(by_strat, combo)
+    kinds = indication_calc_view(kinds, combo, min_pf=min_pf)
+    by_strat = strategy_calc_view(by_strat, combo, min_pf=min_pf)
     progress({
         "phase": "score",
         "pct": 96,
@@ -2756,7 +2766,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "evaluations": coverage_counter(set_n, set_n),
             "tasks": coverage_counter(len(symbols), len(symbols)),
         },
-        "validatedCount": last15_proven_count({"successfulConfigs": combo.get("successful") or []}),
+        "validatedCount": last15_proven_count({"successfulConfigs": combo.get("successful") or [], "minPf": min_pf}),
         "internSetCount": intern_assigned_count({"validatedIds": validated_ids, "internSetCount": len(validated_ids)}),
         "rowCount": len(ranked_sets),
         "rows": [set_row(st, side) for _k, st, side, _v, _l in ranked_sets[:80]],
@@ -2788,7 +2798,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "detail": (
             f"{len(symbols)}/{target} positive · evaluated {fill['evaluated']} · "
             f"{intern_assigned_count({'validatedIds': validated_ids, 'internSetCount': len(validated_ids)})} intern · "
-            f"{last15_proven_count({'successfulConfigs': combo.get('successful') or []})} last-15 validated"
+            f"{last15_proven_count({'successfulConfigs': combo.get('successful') or [], 'minPf': min_pf})} last-15 validated"
         ),
         "pct": 100,
     }
