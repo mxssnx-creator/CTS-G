@@ -13096,12 +13096,15 @@ class Pulse:
             "updatedAt": time.time(),
         })
 
-    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> List[str]:
+    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None,
+                           explicit: bool = False) -> List[str]:
         """Bound any symbol list to the configured scan book / symbolCap.
 
         0 = unlimited. Missing cap defaults to 50. Wildcards and stale
         all-universe snapshots collapse to the live scan book, not the
         full exchange catalog. A historic request may pass an explicit cap.
+        An explicit operator selection keeps its own picks (cap only); the
+        intern pool only fills wildcard or empty selections.
         """
         if cap is None:
             cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
@@ -13134,7 +13137,8 @@ class Pulse:
             hist_owns = bool(self._hist_test_owns_catalog())
         except Exception:
             hist_owns = False
-        intern_replace = bool(hist_owns or wild)
+        picked = bool(explicit and not wild and out)
+        intern_replace = bool((hist_owns or wild) and not picked)
         if cap > 0 and (len(out) > cap or intern_replace):
             must: List[str] = []
             seen_must: set[str] = set()
@@ -13152,7 +13156,7 @@ class Pulse:
                     seen_must.add(s)
             for s in FORCED_SYMBOLS:
                 token = str(s or "")
-                if token and token not in seen_must and (token in out or token in scan):
+                if token and token not in seen_must and (token in out or (token in scan and not picked)):
                     must.append(token)
                     seen_must.add(token)
             intern_pin: List[str] = []
@@ -13175,8 +13179,9 @@ class Pulse:
             out = (must + rest)[: max(cap, len(must))]
         return out
 
-    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> Tuple[List[str], List[Dict[str, str]]]:
-        names = self._capped_scan_names(requested, cap=cap)
+    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None,
+                                explicit: bool = False) -> Tuple[List[str], List[Dict[str, str]]]:
+        names = self._capped_scan_names(requested, cap=cap, explicit=explicit)
         invalid = [
             {"symbol": symbol, "reason": "missing active exchange contract"}
             for symbol in names
@@ -14543,6 +14548,7 @@ class Pulse:
                 raw_symbols = request.get("symbols")
                 selected_symbols = request.get("selectedSymbols")
                 requested_symbols = selected_symbols or raw_symbols or list(SYMBOLS)
+                explicit_selection = bool(selected_symbols or raw_symbols)
                 wildcard_requested = bool(request.get("allSymbols")) or any(
                     isinstance(values, list)
                     and any(str(value).strip().upper() in ("*", "ALL", "UNLIMITED") for value in values)
@@ -14552,6 +14558,7 @@ class Pulse:
                     # A wildcard is an explicit request for the frozen dynamic
                     # universe; do not let a stale selectedSymbols mirror win.
                     requested_symbols = list(SYMBOLS)
+                    explicit_selection = False
                 request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
                 request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
                 req_cap = None
@@ -14562,15 +14569,15 @@ class Pulse:
                             break
                         except (TypeError, ValueError):
                             req_cap = None
-                ov_cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
-                if ov_cap <= 0:
-                    ov_cap = DEFAULT_SYMBOL_CAP
+                # 0 keeps its meaning: unlimited.
+                ov_cap = max(0, int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0))
                 # Overlay owns the ranked book. A hist generation must never
                 # assign symbol_cap — stale 25-cap jobs were shrinking a 50 book.
                 use_cap = ov_cap
                 valid, invalid = self._hist_selected_snapshot(
                     requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS),
                     cap=use_cap,
+                    explicit=explicit_selection and isinstance(requested_symbols, list),
                 )
                 self._hist_snapshot_symbols = list(valid)
                 self._hist_invalid_symbols = list(invalid)
