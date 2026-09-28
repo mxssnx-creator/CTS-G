@@ -114,7 +114,8 @@ class ExitBook:
         self.rev_on = bool(ov.get("exitRevOn", False))
         self.time_on = bool(ov.get("exitTimeOn", False))
         self.lock_pct = pct_to_frac(float(ov.get("exitLockPct") or 0.15))
-        self.be_buffer = pct_to_frac(float(ov.get("exitBeBuffer") or 0.04))
+        # Percent (0.01-0.2 on the desk); every value is divided, none is guessed a fraction.
+        self.be_buffer = float(ov.get("exitBeBuffer") or 0.04) / 100.0
         self.opt_sl = pct_to_frac(float(ov.get("exitOptSlPct") or 0.30))
         self.opt_sl_min = pct_to_frac(float(ov.get("exitOptSlMin") or 0.10))
         self.opt_sl_max = pct_to_frac(float(ov.get("exitOptSlMax") or 0.90))

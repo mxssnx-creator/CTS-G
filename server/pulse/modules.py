@@ -49,6 +49,10 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags["strategy.rearrange"] = bool(overlay["rearrange"])
     if "indEnabled" in overlay:
         flags["strategy.indications"] = bool(overlay["indEnabled"])
+    if "stratIndications" in overlay and not overlay["stratIndications"]:
+        # The Indications pack switch also gates live indication entries:
+        # effective = indEnabled && stratIndications.
+        flags["strategy.indications"] = False
     if "tf1m" in overlay:
         flags["feed.tf1m"] = bool(overlay["tf1m"])
     if "tf5m" in overlay:

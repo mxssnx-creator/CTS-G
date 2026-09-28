@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 import overall_controls
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_pause_count_ratio, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
 from block_active import ContinuationBook, adjusted_quantity, executable_parent_qty, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
@@ -207,6 +207,12 @@ def _bool_setting(value: Any, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def drawdown_halt_fraction(value: Any) -> float:
+    """drawdownHaltPct is a percent (1 = 1%), as entered on the desk; 0 or negative disables."""
+    raw = float(value)
+    return 0.0 if raw <= 0 else max(0.01, min(0.80, raw / 100.0))
 
 
 def normalize_control_pct(value: Any, default: float = 0.0) -> int:
@@ -7956,9 +7962,8 @@ class Pulse:
         if ov.get("staggerS") is not None:
             STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
         if ov.get("drawdownHaltPct") is not None:
-            raw_dd = float(ov["drawdownHaltPct"])
             # 0 (or negative) disables the drawdown halt entirely.
-            DD_HALT = 0.0 if raw_dd <= 0 else max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+            DD_HALT = drawdown_halt_fraction(ov["drawdownHaltPct"])
         else:
             DD_HALT = 0.0
         if ov.get("minimumEquity") is not None:
@@ -8110,7 +8115,7 @@ class Pulse:
             b_stack = 0
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
-        b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
+        b_pause = clamp_pause_count_ratio(ov.get("blockPauseCountRatio", cts.get("blockPauseCountRatio")))
         real_pf = POSITIVE_PF
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
@@ -8244,7 +8249,6 @@ class Pulse:
             self.indications.settings["enabled"] = False
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
-            self.strat_ind = True
         self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", True))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
@@ -12371,7 +12375,7 @@ class Pulse:
                 "stages": stages,
                 "mainEval": int(getattr(self.coord, "main_eval", 5)),
                 "realEval": int(getattr(self.coord, "real_eval", 3)),
-                "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05) or 0.05),
+                "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05)),
                 "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),
                 "openN": len(self.open),
                 "axes": {k: {"enabled": bool(getattr(v, "enabled", False)), "maxWindow": int(getattr(v, "max_window", 0) or 0)} for k, v in coord_axes.items()},

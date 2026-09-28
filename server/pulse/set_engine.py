@@ -1585,7 +1585,7 @@ class SetBook:
             "moveRange": int(ov.get("indMoveRange") or 10),
             "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
             "activeThreshold": float(ov.get("indActiveThreshold") or 1.0),
-            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.0005),
+            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.05),
             "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
             "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
         }

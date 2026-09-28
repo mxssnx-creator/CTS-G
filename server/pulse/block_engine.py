@@ -66,6 +66,11 @@ def clamp_stack(n: Any) -> int:
     return max(1, min(BLOCK_STACK_MAX, v))
 
 
+def clamp_pause_count_ratio(value: Any, fallback: int = 1) -> int:
+    """An explicit 0 is honored; only a missing value uses the default."""
+    return max(0, int(finite_number(fallback if value is None else value, float(fallback))))
+
+
 def clamp_eval_pos_count(value: Any, fallback: int = BLOCK_EVAL_POS_DEFAULT) -> int:
     try:
         n = int(value)
@@ -217,7 +222,7 @@ class BlockBook:
         self.max_volume_multiplier = clamp(finite_number(cfg.get("blockMaxVolumeMultiplier"), BLOCK_MAX_VOLUME_MULTIPLIER), 1.0, BLOCK_MAX_VOLUME_MULTIPLIER)
         self.counts = normalize_block_counts(cfg.get("blockCounts"))
         self.pf_ratio = clamp(finite_number(cfg.get("blockProfitFactorRatio", 1.1) or 1.1, 1.1), BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX)
-        self.pause_ratio = max(0, int(finite_number(cfg.get("blockPauseCountRatio", 1) or 1, 1.0)))
+        self.pause_ratio = clamp_pause_count_ratio(cfg.get("blockPauseCountRatio"))
         self.active_real = bool(cfg.get("blockActiveRealEnabled", True))
         self.active_live = bool(cfg.get("blockActiveLiveEnabled", True))
         self.default_min_pf = float(cfg.get("defaultMinPF", POSITIVE_PF) or POSITIVE_PF)
