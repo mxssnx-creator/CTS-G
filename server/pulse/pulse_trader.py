@@ -6165,7 +6165,14 @@ class Pulse:
         except TypeError:
             max_book = self.max_book_notional()
         if notional > max_book * 1.02:
-            return
+            # size_qty rounds up to the venue step. Less than one step over
+            # the book room is rounding, not oversizing (with no Block/DCA
+            # room it dropped every entry at some volume factors). A min-lot
+            # lift above the room is still skipped.
+            step = float(getattr(c, "step", 0) or 0) if c is not None else 0.0
+            below = qty - step
+            if step <= 0 or below + 1e-12 < floor or below * px > max_book * 1.02:
+                return
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
@@ -7918,14 +7925,14 @@ class Pulse:
                     apply(None)
         except Exception:
             pass
-        if ov.get("targetNotional"):
-            # Clamp desk-supplied target notional: a corrupt or absurd overlay
-            # value must never translate into impossible order volume.
-            TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
-        try:
-            self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
-        except Exception:
-            self.volume_factor = 1.0
+        # Clamp desk-supplied target notional and volume factor: a corrupt or
+        # absurd overlay value must never translate into impossible order
+        # volume. NaN passes min(), so non-finite values keep the defaults
+        # instead of saturating at 500 USDT / 10x.
+        target_notional = finite_number(ov.get("targetNotional"), 0.0)
+        if target_notional:
+            TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
+        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
         if ov.get("leverage"):
@@ -9037,7 +9044,11 @@ class Pulse:
                     continue
                 inc = specified
                 count_n = 1
-                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw}
+                # Same row shape as evaluate_counts: record_fill attributes the
+                # leg by setKey, so a missing key lost the filled add.
+                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw,
+                       "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:1",
+                       "blockMinPF": float(self.block.formula(parent, 1, lane).get("blockMinPF") or 0.0)}
             else:
                 rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
                 row = self.block.pick_emit(rows)
