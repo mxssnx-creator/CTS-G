@@ -1117,7 +1117,17 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         except (TypeError, ValueError):
             floor = float(POSITIVE_PF)
         proven = n >= need and pf + 1e-9 >= floor
-        if n >= need:
+        # A direction whose own completed live Base window fails the floor is
+        # not re-seeded from the replay: current own evidence revokes the pass.
+        revoked = set()
+        for direction in ("LONG", "SHORT"):
+            own = ((getattr(st, "by_side", None) or {}).get(direction) or {}).get("live") or {}
+            own_n = int(own.get("last15_n") or 0)
+            if own_n >= need and not is_positive_pf(own.get("last15_ratio"), floor):
+                revoked.add(direction)
+        if len(revoked) == 2:
+            proven = False
+        if n >= need and len(revoked) < 2:
             st.last15_n = max(int(getattr(st, "last15_n", 0) or 0), n)
             st.n = max(int(getattr(st, "n", 0) or 0), n)
             if pf > 0:
@@ -1158,6 +1168,8 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
             }
             sides = dict(getattr(st, "by_side", None) or {})
             for direction in ("LONG", "SHORT"):
+                if direction in revoked:
+                    continue
                 blob = dict(sides.get(direction) or {})
                 blob.update(side_view)
                 sides[direction] = blob
