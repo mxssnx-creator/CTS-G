@@ -14348,12 +14348,14 @@ class Pulse:
                 except Exception:
                     pass
             for st in states:
+                # Evidence count alone is not Base qualification. Only a Set
+                # whose scored/seeded Base ledger passed is (re)activated; an
+                # allow-listed Set that failed Base stays system-intern.
+                if not bool((getattr(st, "stage_ledger", None) or {}).get("base")):
+                    continue
                 if int(getattr(st, "n", 0) or 0) or int(getattr(st, "last15_n", 0) or 0):
                     st.active = True
                     st.deact_reason = ""
-                    ledger = dict(getattr(st, "stage_ledger", None) or {})
-                    ledger["base"] = True
-                    st.stage_ledger = ledger
             cap = getattr(book, "_cap_active", None)
             if callable(cap):
                 try:
