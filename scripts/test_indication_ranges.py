@@ -17,11 +17,14 @@ class RangeTests(unittest.TestCase):
 
     def test_all_six_ranges_and_exact_enabled_subset(self):
         bars = self.rising(100)
-        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], DEFAULT_SETTINGS)
+        # Identity plumbing uses the legacy follower (fires on a clean rise); the
+        # default fade lane is covered by test_indication_trend_common.py.
+        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], {**DEFAULT_SETTINGS, "trendMode": "follow"})
         self.assertEqual(len(rows), 6)
         self.assertEqual(len({row.entry_key for row in rows}), 6)
         book = IndicationBook()
         book.load({"indTrendRanges": [21, 34], "indBreakRanges": [16], "indTypeBreak": False})
+        book.settings["trendMode"] = "follow"
         rows = book.process("X-USDT", bars)
         ranges = [row for row in rows if row.kind in ("trend", "break")]
         self.assertEqual({row.mode for row in ranges}, {"trend:ema8/21", "trend:ema13/34"})
@@ -38,6 +41,7 @@ class RangeTests(unittest.TestCase):
         settings = {"histLookbackBars": 120, "histMinBars": 60, "histWarmup": 30,
                     "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [.6], "stratTrailing": False}
         book.load(settings)
+        book.ind_settings["trendMode"] = "follow"
         book.ingest_bars("X-USDT", self.rising(120))
         prepared = book.prepare_replay_signals("X-USDT", now=1800000000)
         configs = [key for key in prepared[1] if "|" in key]

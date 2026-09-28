@@ -693,19 +693,54 @@ def evaluate_move(
     )
 
 
+def _frame_sigma(closes: List[float]) -> float:
+    """Population std of the frame's 1-bar log returns (own-volatility unit)."""
+    from math import log
+
+    rets = []
+    for i in range(1, len(closes)):
+        a, b = closes[i - 1], closes[i]
+        if a > 0 and b > 0:
+            rets.append(log(b / a))
+    if len(rets) < 2:
+        return 0.0
+    mean = sum(rets) / len(rets)
+    return max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean) ** 0.5
+
+
+def _turned(closes: List[float], direction: str, bars: int) -> bool:
+    """The last `bars` close steps all point in `direction` (the stretch has started to revert)."""
+    if bars <= 0:
+        return True
+    if len(closes) < bars + 1:
+        return False
+    sign = 1.0 if direction == "long" else -1.0
+    return all((closes[-i] - closes[-i - 1]) * sign > 0 for i in range(1, bars + 1))
+
+
 def evaluate_trend(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """Independent configurable EMA pair with consecutive bar confirmation."""
+    """Independent configurable EMA pair: fade a volatility-stretched trend once it turns.
+
+    Default ("fade"): the fast/slow EMA spread, measured in the frame's own 1-bar
+    volatility, must be >= trendFadeZ; the lane then trades AGAINST the spread
+    once the last trendFadeTurn closes already step that way. Research on 48
+    symbols (train-selected, valid/sim-confirmed) showed following 1m EMA trends
+    loses gross edge while fading stretched ones keeps it. trendMode="follow"
+    restores the legacy EMA-cross follower.
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     slow_period = max(8, min(55, int(settings.get("trendSlow") or 21)))
     fast_period = max(2, min(slow_period - 1, int(settings.get("trendFast") or 8)))
     if len(closes) < max(30, slow_period + 1):
         return None
+    if str(settings.get("trendMode") or "fade").lower() != "follow":
+        return _evaluate_trend_fade(symbol, frame, settings, fast_period, slow_period)
     fast = frame.ema_series(fast_period)
     slow = frame.ema_series(slow_period)
     if len(fast) < 6 or len(slow) < 6:
@@ -738,6 +773,47 @@ def evaluate_trend(
         return None
     return _kind_indication(
         symbol, "trend", want, strength, last, settings, [f"trend:ema{fast_period}/{slow_period}:{consec}"],
+        agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
+    )
+
+
+def _evaluate_trend_fade(
+    symbol: str,
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    fast_period: int,
+    slow_period: int,
+) -> Optional[Indication]:
+    closes = frame.closes
+    last = closes[-1]
+    if last <= 0:
+        return None
+    fast = frame.ema_series(fast_period)
+    slow = frame.ema_series(slow_period)
+    spread = (fast[-1] - slow[-1]) / last
+    sigma = _frame_sigma(closes)
+    if sigma <= 0 or spread == 0:
+        return None
+    z = abs(spread) / sigma
+    z_min = float(settings.get("trendFadeZ", 1.5))
+    if z < z_min:
+        return None
+    want = "short" if spread > 0 else "long"
+    turn = max(0, int(settings.get("trendFadeTurn", 3)))
+    if not _turned(closes, want, turn):
+        return None
+    steps = [closes[i] - closes[i - 1] for i in range(-min(10, len(closes) - 1), 0)]
+    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.0)
+    agr = float((ev.get(want) or {}).get("agreement") or 0.0)
+    over = min(1.0, (z - z_min) / max(z_min, 1e-9))
+    strength = clamp(0.4 + over * 0.6, 0.0, 1.0)
+    # Out-of-sample edge was flat across z >= trendFadeZ, so confidence stays modest.
+    conf = clamp(0.62 + over * 0.08, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
+        return None
+    return _kind_indication(
+        symbol, "trend", want, strength, last, settings,
+        [f"trend:ema{fast_period}/{slow_period}:fade:z{z:.2f}:turn{turn}"],
         agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
     )
 
@@ -988,13 +1064,23 @@ def evaluate_common(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Common / indication-stage: RSI + MACD + EMA + Bollinger, independent of State."""
+    """CTS Common / indication-stage, independent of State.
+
+    Default ("fade"): common EMA20/EMA50 stretch consensus in own-volatility
+    units -- (EMA20-EMA50)/sigma >= commonFadeEmaZ or (close-EMA50)/sigma >=
+    commonFadeCloseZ votes against the stretch -- confirmed by the last
+    commonFadeTurn closes already reverting. The legacy RSI + MACD + EMA +
+    Bollinger majority (mostly trend-following votes, which lost gross edge
+    on 1m) stays available as commonMode="vote".
+    """
     frame = frame or frame_from_candles(candles)
     candles = frame.candles
     if len(candles) < 26:
         return None
     closes = frame.closes
     latest = candles[-1]
+    if str(settings.get("commonMode") or "fade").lower() != "vote":
+        return _evaluate_common_fade(symbol, frame, settings)
     r = frame.rsi(14)
     macd_fast = frame.ema_series(12)
     macd_slow = frame.ema_series(26)
@@ -1043,6 +1129,41 @@ def evaluate_common(
         symbol, "common", direction, strength, latest.close, settings,
         [f"rsi:{r:.1f}", f"macd:{hist:.5f}", "ema20-50", "ema200", "bb"],
         agreement=strength, mode="rsi-macd-ema-bb", conf=conf,
+    )
+
+
+def _evaluate_common_fade(symbol: str, frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[Indication]:
+    closes = frame.closes
+    last = closes[-1]
+    sigma = _frame_sigma(closes)
+    if last <= 0 or sigma <= 0:
+        return None
+    ema20 = frame.ema(20)
+    ema50 = frame.ema(50)
+    ema_z = (ema20 - ema50) / last / sigma
+    close_z = (last - ema50) / last / sigma
+    ez = float(settings.get("commonFadeEmaZ", 2.0))
+    cz = float(settings.get("commonFadeCloseZ", 4.0))
+    buy = int(ema_z <= -ez) + int(close_z <= -cz)
+    sell = int(ema_z >= ez) + int(close_z >= cz)
+    if buy == sell:
+        return None
+    direction = "long" if buy > sell else "short"
+    votes = max(buy, sell)
+    turn = max(0, int(settings.get("commonFadeTurn", 2)))
+    if not _turned(closes, direction, turn):
+        return None
+    stretch = max(abs(ema_z) / ez, abs(close_z) / cz)
+    strength = clamp(votes / 2.0 * min(1.0, stretch / 1.5), 0.0, 1.0)
+    if strength < float(settings.get("minimumStrength", 0.2)):
+        return None
+    conf = clamp(0.6 + (votes - 1) * 0.08 + min(0.1, (stretch - 1.0) * 0.1), 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
+        return None
+    return _kind_indication(
+        symbol, "common", direction, strength, last, settings,
+        [f"ema20-50z:{ema_z:.2f}", f"close-ema50z:{close_z:.2f}", f"turn{turn}"],
+        agreement=votes / 2.0, mode="ema-stretch-fade", conf=conf,
     )
 
 
@@ -2041,7 +2162,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
     t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6),
            f"kinds={sorted({r.kind for r in rows6})}")
-    tr = evaluate_trend("TR-USDT", [b[3] for b in up], st)
+    tr = evaluate_trend("TR-USDT", [b[3] for b in up], {**st, "trendMode": "follow"})
     t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
     brk_px = [100.0] * 20 + [102.2]
     br = evaluate_break("BR-USDT", brk_px, st)
