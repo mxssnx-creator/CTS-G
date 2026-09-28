@@ -5,14 +5,16 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'server/pulse'))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import pulse_trader as pt
 import storage_paths
 from block_engine import BlockBook, parse_block_count
 from dca_engine import DcaBook
 from set_engine import SetBook, SetState
+import test_all_valid_entries as fixtures
 
 
 class _StopAfterVolume(Exception):
@@ -64,6 +66,52 @@ class VolumeFactorOverlayLoad(unittest.TestCase):
             target, factor = self.load({'volumeFactor': bad, 'targetNotional': bad})
             self.assertEqual(factor, 1.0, bad)
             self.assertEqual(target, 2.15, bad)
+
+
+class VolumeFactorEntries(unittest.TestCase):
+    def place(self, vf, contract, px, block=False, dca=False):
+        t = fixtures.AllValidEntries()
+        p = t.pulse(t.book(1))
+        for name in ('size_qty', 'max_book_notional', 'avail_notional'):
+            p.__dict__.pop(name, None)  # the real sizing chain, not fixture stubs
+        p.volume_factor = vf
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.block = NS(enabled=block, max_stack=6, volume_ratio=.25, max_volume_multiplier=2.0,
+                     register_parent=Mock(), on_parent_close=Mock())
+        p.dca = NS(enabled=dca, max_steps=4, _mult_at=lambda i: [1.5, 2, 2.3, 2.5][i],
+                   attach=Mock(), on_close=Mock(), drop=Mock())
+        p.contracts = {'X-USDT': contract}
+        p.px = {'X-USDT': px}
+        p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+        entries = [float(b['quantity']) for b in p.api.posts if b.get('type') == 'MARKET']
+        controls = {float(b['quantity']) for batch in p.api.batches for b in batch}
+        pos = next(iter(p.open.values()), None)
+        return entries, controls, pos
+
+    def test_entry_and_control_quantity_follow_the_factor_once(self):
+        lot = pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)
+        for vf, want in ((.5, .011), (1., .022), (2., .043), (4., .086)):
+            entries, controls, pos = self.place(vf, lot, 100., block=True, dca=True)
+            self.assertEqual(entries, [want], vf)
+            self.assertEqual(controls, {want}, vf)
+            self.assertAlmostEqual(pos.qty, want)
+
+    def test_step_rounding_is_not_dropped_when_no_add_on_room_is_configured(self):
+        # Block and DCA off: book room equals the target. The venue step lifts
+        # 2.15 USDT to 2.20; that rounding must not cancel the whole entry.
+        lot = pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)
+        for vf, want in ((1., .022), (1.5, .033), (2., .043)):
+            entries, controls, pos = self.place(vf, lot, 100.)
+            self.assertEqual(entries, [want], vf)
+            self.assertEqual(controls, {want}, vf)
+
+    def test_min_lot_parent_above_the_book_room_stays_skipped(self):
+        # Policy unchanged: an 8 USDT venue minimum is not rounding noise.
+        btc = pt.Contract('X-USDT', .0001, .0001, 4, 1, 2., 100)
+        self.assertEqual(self.place(1., btc, 80000.)[0], [])
+        self.assertEqual(self.place(1., btc, 80000., block=True)[0], [])
+        self.assertEqual(self.place(1., btc, 80000., block=True, dca=True)[0], [.0001])
 
 
 class VolumeFactorAdds(unittest.TestCase):

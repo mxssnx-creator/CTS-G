@@ -6159,7 +6159,14 @@ class Pulse:
         except TypeError:
             max_book = self.max_book_notional()
         if notional > max_book * 1.02:
-            return
+            # size_qty rounds up to the venue step. Less than one step over
+            # the book room is rounding, not oversizing (with no Block/DCA
+            # room it dropped every entry at some volume factors). A min-lot
+            # lift above the room is still skipped.
+            step = float(getattr(c, "step", 0) or 0) if c is not None else 0.0
+            below = qty - step
+            if step <= 0 or below + 1e-12 < floor or below * px > max_book * 1.02:
+                return
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
