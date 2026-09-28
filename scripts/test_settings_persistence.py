@@ -52,7 +52,7 @@ class SettingsPersistence(unittest.TestCase):
             self.assertEqual(value['histLookbackBars'],2880)
             self.assertTrue(value.get('histTestEnabled',True))
             ph.write_overlay('vst',{'histTestEnabled':False})
-            self.assertTrue(ph.load_overlay('bingx-x02')['histTestEnabled'])
+            self.assertFalse(ph.load_overlay('bingx-x02')['histTestEnabled'])
             ph.write_overlay('live',{'histTestHours':8,'histTestMinPf':1.1})
             live=ph.load_overlay('bingx-x01')
             self.assertEqual(live['histTestHours'],8)
@@ -67,27 +67,38 @@ class SettingsPersistence(unittest.TestCase):
                 self.assertEqual(value['systemSqliteCheckpointS'],seconds)
                 self.assertTrue(value['stratGeneral'])
 
-    def test_hist_test_junk_symbols_cannot_collapse_live_book(self):
+    def test_operator_symbol_and_toggle_choices_are_honored(self):
         with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
             ph.write_overlay('live', {'symbols': ['*'], 'symbolCap': 50, 'blockEnabled': True, 'histTestEnabled': True})
-            ph.write_overlay('live', {'symbols': ['BONER-USDT', 'CTO-USDT', 'ZZZRH-USDT'], 'symbolCap': 3, 'blockEnabled': False})
+            ph.write_overlay('live', {'symbols': ['HYPE-USDT', 'kas-usdt', 'bad name', 'HYPE-USDT'], 'symbolsAll': False, 'symbolCap': 3,
+                                      'blockEnabled': False, 'blockMaxStack': 2, 'dcaEnabled': False, 'stratDca': False})
             live = ph.load_overlay('bingx-x01')
-            self.assertEqual(live['symbols'], ['*'])
-            self.assertEqual(live['symbolCap'], 50)
+            self.assertEqual(live['symbols'], ['HYPE-USDT', 'KAS-USDT'])
+            self.assertFalse(live['symbolsAll'])
+            self.assertEqual(live['symbolCap'], 3)
+            self.assertEqual(live['blockMaxStack'], 2)
+            self.assertFalse(live['dcaEnabled'])
+            self.assertFalse(live['stratDca'])
             self.assertTrue(live['blockEnabled'])
             self.assertTrue(live['blockOverall'])
-            self.assertGreaterEqual(int(live['blockMaxStack']), 6)
-            ph.write_overlay('live', {'symbols': ['BCH-USDT', 'SOL-USDT', 'XRP-USDT', 'AIN-USDT', 'FLYBRAIN-USDT', 'BONER-USDT'], 'symbolCap': 40})
+            ph.write_overlay('live', {'symbolCap': 0, 'blockMaxStack': 99})
             live = ph.load_overlay('bingx-x01')
-            self.assertEqual(live['symbols'], ['*'])
-            self.assertGreaterEqual(int(live['symbolCap']), 50)
-            ph.write_overlay('vst', {'symbols': ['FLYBRAIN-USDT'], 'symbolCap': 5, 'histTestEnabled': True})
+            self.assertEqual(live['symbolCap'], 0)
+            self.assertEqual(live['blockMaxStack'], 6)
+            ph.write_overlay('vst', {'symbols': ['FLYBRAIN-USDT'], 'symbolCap': 5, 'histTestEnabled': False})
             vst = ph.load_overlay('bingx-x02')
-            self.assertEqual(vst['symbols'][:4], ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'])
-            self.assertGreaterEqual(len(vst['symbols']), 20)
-            self.assertGreaterEqual(int(vst['symbolCap']), 50)
-            self.assertTrue(vst['blockEnabled'])
-            self.assertTrue(vst['histTestEnabled'])
+            self.assertEqual(vst['symbols'], ['FLYBRAIN-USDT'])
+            self.assertEqual(vst['symbolCap'], 5)
+            self.assertFalse(vst['histTestEnabled'])
+            ph.write_overlay('vst', {'symbols': ['not a symbol']})
+            self.assertEqual(ph.load_overlay('bingx-x02')['symbols'][:4], ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'])
+
+    def test_absent_keys_keep_lane_defaults(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            out = ph.guard_runtime_overlay('bingx-x02', {})
+            self.assertTrue(out['dcaEnabled'] and out['stratDca'] and out['histTestEnabled'])
+            self.assertEqual(out['symbolCap'], 50)
+            self.assertEqual(out['blockMaxStack'], 6)
 
     def test_min_sl_floor_is_systemwide_point_four(self):
         with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
@@ -138,5 +149,93 @@ class SettingsPersistence(unittest.TestCase):
             self.assertTrue(out['stale'])
             self.assertEqual(out['progressPhase'], 'error')
             self.assertIn('service failed', out['progressDetail'])
+
+
+ROOT=pathlib.Path(__file__).resolve().parents[1]
+LANE_FILES={'bingx-x01':ROOT/'server/pulse/overlay-bingx-x01.json','bingx-x02':ROOT/'server/pulse/overlay-bingx-x02.json'}
+
+
+class SettingsContract(unittest.TestCase):
+    """Desk settings mean the same thing to every engine reader."""
+
+    def test_indications_pack_switch_gates_live_indication_entries(self):
+        import modules
+        on={'indEnabled':True,'stratIndications':True,'modules':{'strategy.indications':True}}
+        self.assertTrue(modules.resolve(on)['strategy.indications'])
+        self.assertFalse(modules.resolve({**on,'stratIndications':False})['strategy.indications'])
+        self.assertFalse(modules.resolve({**on,'indEnabled':False})['strategy.indications'])
+        self.assertTrue(modules.resolve({'modules':{}})['strategy.indications'])
+
+    def test_percent_settings_have_one_unit_inside_the_desk_range(self):
+        import pulse_trader as pt
+        from exit_engine import ExitBook
+        from dca_engine import DcaBook
+        for pct in (1,2,5,25,80):
+            self.assertAlmostEqual(pt.drawdown_halt_fraction(pct),pct/100)
+        self.assertEqual(pt.drawdown_halt_fraction(0),0.0)
+        for pct in (0.01,0.02,0.03,0.04,0.2):
+            book=ExitBook();book.load({'exitBeBuffer':pct})
+            self.assertAlmostEqual(book.be_buffer,pct/100)
+        for pct in (0.05,0.1,0.2,1.0):
+            dca=DcaBook();dca.load({'dcaBreakevenProfitPct':pct})
+            self.assertAlmostEqual(dca.be_pct,pct/100)
+
+    def test_noise_is_a_percent_for_coordination_and_indications(self):
+        from coord_engine import Coordinator
+        from indication_engine import DEFAULT_SETTINGS, IndicationBook, evaluate_break
+        coord=Coordinator();coord.load({},{'noise':0.05})
+        bar=lambda span:[100.0,100.0+span/2,100.0-span/2,100.0,1.0]
+        self.assertTrue(coord.outbreak_ok([bar(0.1)]*12))      # 0.1% range clears 0.05%
+        self.assertFalse(coord.outbreak_ok([bar(0.008)]*12))   # 0.008% does not
+        closes=[100.0]*19+[100.5]
+        for noise in (0.02,0.03,0.05):  # 0.5% break clears every desk noise value
+            # Classic break fixture (reversal-mode noise is covered in test_indication_break).
+            settings={**DEFAULT_SETTINGS,'breakRange':16,'activeNoise':noise,'breakContextSigma':0}
+            self.assertIsNotNone(evaluate_break('X-USDT',closes,settings),noise)
+        book=IndicationBook();book.load({'noise':0.02})
+        self.assertEqual(book.settings['activeNoise'],0.02)
+
+    def test_stored_overlays_keep_their_effective_percent_values(self):
+        import pulse_trader as pt
+        from exit_engine import ExitBook
+        from dca_engine import DcaBook
+        from indication_engine import IndicationBook
+        for lane,path in LANE_FILES.items():
+            ov=json.loads(path.read_text())
+            self.assertEqual(pt.drawdown_halt_fraction(ov['drawdownHaltPct']),0.0,lane)
+            book=ExitBook();book.load(ov);self.assertAlmostEqual(book.be_buffer,0.0004)
+            dca=DcaBook();dca.load(ov);self.assertAlmostEqual(dca.be_pct,0.002)
+            ind=IndicationBook();ind.load(ov);self.assertEqual(ind.settings['activeNoise'],0.05)
+
+    def test_explicit_zero_is_honored(self):
+        from block_engine import BlockBook, clamp_pause_count_ratio
+        from coord_engine import Coordinator
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(BlockBook(str(pathlib.Path(d)/'a.json'),{'blockPauseCountRatio':0}).pause_ratio,0)
+            self.assertEqual(BlockBook(str(pathlib.Path(d)/'b.json'),{}).pause_ratio,1)
+        self.assertEqual(clamp_pause_count_ratio(0),0)
+        self.assertEqual(clamp_pause_count_ratio(None),1)
+        self.assertEqual(clamp_pause_count_ratio(3),3)
+        coord=Coordinator();coord.load({},{'posCountsVolumeRatio':0})
+        self.assertEqual(coord.pos_count_vol_ratio,0.0)
+        self.assertEqual(coord.size_mult(40),1.0)
+        coord.load({},{})
+        self.assertAlmostEqual(coord.pos_count_vol_ratio,0.05)
+
+    def test_preset_load_keeps_each_lane_universe_and_forced_winners(self):
+        from user_presets import UserPresetStore
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            for lane,path in LANE_FILES.items():
+                ph.write_overlay(lane,json.loads(path.read_text()))
+            live=ph.load_overlay('bingx-x01');vst=ph.load_overlay('bingx-x02')
+            store=UserPresetStore(str(pathlib.Path(d)/'presets.json'),write_overlay=ph.write_overlay,lane_ids=list(LANE_FILES))
+            row=store.save({**live,'slToTpRatio':0.9},name='FromLive')
+            _,applied=store.apply(row['id'])
+            self.assertEqual(applied,list(LANE_FILES))
+            after=ph.load_overlay('bingx-x02')
+            self.assertEqual(after['slToTpRatio'],0.9)
+            for key in ('symbols','symbolsAll','symbolsDynamic','forcedSymbols','forcedVariant','forcedEligible','forcedBest'):
+                self.assertEqual(after.get(key),vst.get(key),key)
+            self.assertEqual(ph.load_overlay('bingx-x01')['symbols'],live['symbols'])
 
 if __name__=='__main__':unittest.main()

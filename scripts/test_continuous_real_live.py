@@ -184,6 +184,14 @@ class ContinuousTests(AllValidEntries):
         })
         self.assertEqual(book.lookback, 2880)
         self.assertGreaterEqual(len(book.by_idx), 1)
+        # synth_trend is a monotone continuation fixture; keep its classic Break votes
+        # (reversal breaks, the live default, by design never fire on it).
+        book.ind_settings["breakContextSigma"] = 0
+        # Same for the other kinds: their default lanes fade stretched moves, so
+        # this mechanics fixture pins each kind's documented legacy follow mode.
+        book.ind_settings.update(trendMode="follow", stateMode="follow", commonMode="vote",
+                                 signalsModel="trend", activeModel="legacy",
+                                 dirMinFirstZ=0, dirMinSigma=0, dirMaxRetrace=float("inf"))
         bars = synth_trend(220)
         for symbol in ("XRP-USDT", "BCH-USDT", "SOL-USDT"):
             book.ingest_bars(symbol, bars)

@@ -346,11 +346,11 @@ class AllValidEntries(unittest.TestCase):
         trailing.trail_key = '0.3:0.1'
         book.by_idx[2].last15_n = 7
         book.by_idx[2].active = True
-        book.by_idx[3].last15_ratio = 1.02
+        book.by_idx[3].last15_ratio = 1.02  # below the Base floor: stays system-intern
         book.by_idx[3].active = True
         base_ids = {state.id for state in book.by_idx if state.kind == 'base'}
         entry_ids = {state.id for state in book.entry_sets('general', 'LONG')}
-        self.assertEqual(entry_ids, {book.by_idx[0].id, trailing.id, book.by_idx[3].id})
+        self.assertEqual(entry_ids, {book.by_idx[0].id, trailing.id})
         self.assertNotEqual(entry_ids, base_ids)
         self.assertIn(trailing.id, entry_ids)
         # The broader catalogue API remains intentionally unchanged for
@@ -373,8 +373,10 @@ class AllValidEntries(unittest.TestCase):
         """Cached unproven/stage flags must not empty the live matrix.
 
         Runtime was rejecting every row as side_inactive while 200+ signals
-        fired, so intern-open packs placed nothing. Intern 1.00 first-entry
-        still requires the Base last-N tape; empty evidence stays out.
+        fired, so intern-open packs placed nothing. The flag is re-derived
+        from the side's own Base evidence: a Base-qualified side enters, a
+        side below the Base floor (former intern 1.00 first entry) and empty
+        evidence stay system-intern.
         """
         book = self.book(3)
         book.strict_gate = False
@@ -403,9 +405,9 @@ class AllValidEntries(unittest.TestCase):
         }
         book._invalidate_entry_cache()
         admitted = {row.id for row in book.entry_sets("general", "LONG")}
-        self.assertEqual(admitted, {winner.id, intern.id})
+        self.assertEqual(admitted, {winner.id})
         self.assertTrue(book.execution_allowed(winner, "general", "LONG"))
-        self.assertTrue(book.execution_allowed(intern, "general", "LONG"))
+        self.assertFalse(book.execution_allowed(intern, "general", "LONG"))
         self.assertFalse(book.execution_allowed(empty, "general", "LONG"))
         book.strict_gate = True
         book._invalidate_entry_cache()

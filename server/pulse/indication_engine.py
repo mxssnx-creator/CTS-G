@@ -175,7 +175,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "moveMinChange": 0.001,
     "activeOutbreak": [3, 5, 10],
     "activeThreshold": 1.0,
-    "activeNoise": 0.0005,
+    "activeNoise": 0.05,  # percent, like the desk's Noise setting
     "activeMovePct": 0.5,
     "activeVolatilityWeight": 0.3,
 }
@@ -297,6 +297,124 @@ def bars_to_candles(bars: List[List[float]], now: Optional[float] = None, period
     return build_indication_frame(bars, now=now, period_s=period_s).candles
 
 
+# Signals "revert" model (volatility-normalized fade with turn confirmation).
+# Chosen on the TRAIN split of the 48-symbol research week and confirmed once on
+# VALID and SIM against the legacy composite; see scripts/test_indication_signals.py.
+# Keys are read with settings.get(key, default) so the shared defaults stay untouched.
+SIGNALS_REVERT_DEFAULTS: Dict[str, Any] = {
+    "signalsModel": "revert",      # "revert" | "trend" (legacy composite)
+    "signalsFrameBars": 60,        # the model is defined on the full engine frame
+    "signalsZWindow": 20,          # displacement window R (bars)
+    "signalsZMin": 1.5,            # |z| = |ln(c/c[-R])| / (sigma_prior * sqrt(R))
+    "signalsAtrMinPct": 0.15,      # ATR band (% of price, 1m): below it cost dominates
+    "signalsAtrMaxPct": 0.6,       # above it fades get run over
+    "signalsTurnConfirm": True,    # last bar must already move in the fade direction
+}
+
+
+def _signals_setting(settings: Dict[str, Any], key: str) -> Any:
+    value = settings.get(key)
+    return SIGNALS_REVERT_DEFAULTS[key] if value is None else value
+
+
+def signal_revert_features(closes: Sequence[float], window: int) -> Optional[Dict[str, float]]:
+    """Causal fade features on one frame of closes (oldest first).
+
+    z compares the last ``window`` log returns with the dispersion of the
+    returns *before* that window (own volatility), so a move is only extreme
+    relative to how the symbol was trading before it started.
+    """
+    from math import log, sqrt
+
+    n = len(closes)
+    window = int(window)
+    prior = n - 1 - window
+    if window < 2 or prior < 20:
+        return None
+    if any(c <= 0 for c in closes):
+        return None
+    rets = [log(closes[i] / closes[i - 1]) for i in range(1, n)]
+    before = rets[:prior]
+    mean = sum(before) / prior
+    var = max(0.0, sum(r * r for r in before) / prior - mean * mean)
+    sigma = sqrt(var)
+    if not sigma > 0:
+        return None
+    move = log(closes[-1] / closes[-1 - window])
+    return {"z": move / (sigma * sqrt(window)), "move": move, "sigma": sigma, "last": rets[-1]}
+
+
+def _signals_revert_applies(candles: Sequence[Candle], settings: Dict[str, Any]) -> bool:
+    """Revert model needs the full engine frame; shorter (warm-up) frames keep the legacy composite.
+
+    Deliberately independent of candle timestamps: a prepared frame and the
+    public vote wrapper must score the same bars identically.
+    """
+    if str(_signals_setting(settings, "signalsModel")).strip().lower() != "revert":
+        return False
+    return len(candles) >= max(2, int(_signals_setting(settings, "signalsFrameBars")))
+
+
+def _evaluate_signal_revert(
+    source_id: str,
+    source_name: str,
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    weight: float,
+    atr_pct: float,
+) -> Optional[SignalEval]:
+    candles = frame.candles
+    latest = candles[-1]
+    lo = float(_signals_setting(settings, "signalsAtrMinPct"))
+    hi = float(_signals_setting(settings, "signalsAtrMaxPct"))
+    if not (lo <= atr_pct < hi):
+        return None
+    feat = signal_revert_features(frame.closes, int(_signals_setting(settings, "signalsZWindow")))
+    if feat is None:
+        return None
+    z = feat["z"]
+    if not abs(z) >= float(_signals_setting(settings, "signalsZMin")):
+        return None
+    direction = -1 if z > 0 else 1
+    if bool(_signals_setting(settings, "signalsTurnConfirm")) and not feat["last"] * direction > 0:
+        return None
+    # TRAIN win rate was flat across |z| >= 1.5, so confidence stays in a narrow
+    # band just above the default minimumConfidence instead of implying skill.
+    strength = clamp(abs(z) / 4.0, 0.0, 1.0)
+    if not (strength >= float(settings.get("minimumStrength", 0.2))):
+        return None
+    confidence = clamp(0.6 + 0.1 * strength, 0.5, 0.99)
+    if confidence < float(settings.get("minimumConfidence", 0.6)):
+        return None
+    cost = max(0.0, float(settings.get("positionCostPct", 0.1))) + 0.08
+    raw_sl = atr_pct * float(settings.get("stopLossAtrMultiplier", 0.85)) + cost
+    sl_max = float(settings.get("stopLossMaxPct", 1.5))
+    if raw_sl > sl_max * 1.25:
+        return None
+    sl = clamp(raw_sl, float(settings.get("stopLossMinPct", SL_MIN_PCT)), sl_max)
+    rr = float(settings.get("takeProfitRewardRisk", 1.8))
+    min_tp = sl * rr
+    tp_max = float(settings.get("takeProfitMaxPct", 5.0))
+    if min_tp > tp_max:
+        return None
+    # A fade targets part of the stretched move, never less than the RR floor.
+    tp = clamp(max(min_tp, abs(feat["move"]) * 100.0 * 0.5), min_tp, tp_max)
+    return SignalEval(
+        source_id=source_id,
+        source_name=source_name,
+        direction="long" if direction > 0 else "short",
+        confidence=confidence,
+        strength=strength,
+        stop_loss_pct=sl,
+        take_profit_pct=tp,
+        reward_risk=tp / sl if sl else rr,
+        atr_pct=atr_pct,
+        last_price=latest.close,
+        candle_count=len(candles),
+        weight=clamp(weight, 0.1, 2.0),
+    )
+
+
 def evaluate_signal_candles(
     source_id: str,
     source_name: str,
@@ -317,6 +435,8 @@ def evaluate_signal_candles(
     average_true_range = frame.atr()
     fallback = sum(abs(c.close - c.open) for c in candles[-10:]) / min(10, len(candles))
     atr_pct = (max(average_true_range, fallback) / latest.close) * 100.0
+    if _signals_revert_applies(candles, settings):
+        return _evaluate_signal_revert(source_id, source_name, frame, settings, weight, atr_pct)
     fast = frame.ema(5, 30)
     slow = frame.ema(13, 45)
     trend_scale = max(average_true_range, latest.close * 0.0005)
@@ -388,12 +508,92 @@ def evaluate_signal_candles(
     )
 
 
+STATE_FRAME_BARS = 60
+
+
+def _ta_signal(
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    raw: float,
+    strength: float,
+    source_name: str,
+) -> Optional[SignalEval]:
+    """Shared State risk/confidence envelope for both TA pack modes."""
+    latest = frame.candles[-1]
+    if strength < float(settings.get("minimumStrength", 0.2)):
+        return None
+    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
+    sl_max = float(settings.get("stopLossMaxPct", 1.5))
+    sl = clamp(sl_min * 1.6, sl_min, sl_max)
+    tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
+    conf = clamp(0.5 + strength * 0.45, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)):
+        return None
+    return SignalEval(
+        source_id="ta-rsi-macd-ema",
+        source_name=source_name,
+        direction="long" if raw >= 0 else "short",
+        confidence=conf,
+        strength=strength,
+        stop_loss_pct=sl,
+        take_profit_pct=tp,
+        reward_risk=tp / sl if sl else 1.8,
+        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
+        last_price=latest.close,
+        candle_count=len(frame.candles),
+        weight=1.0,
+    )
+
+
 def evaluate_ta_pack(
     candles: List[Candle],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[SignalEval]:
+    """State TA pack.
+
+    Default ``stateMode="fade"``: fade an over-extended EMA20/EMA50 trend once
+    the short-term move has turned.  Research (1m, 48 symbols, engine kind-tape
+    exits) found that following RSI/MACD/EMA extension loses (PF ~0.57), while
+    fading it is consistently better, more so when the stretch is large in ATR
+    units, the symbol is volatile enough to reach the step TP, and RSI(7) has
+    already crossed back toward the fade side.  Conditions (60-bar frame):
+
+    * stretch = (EMA20 - EMA50) / ATR14, |stretch| >= ``stateStretchAtr`` (1.5)
+    * ATR14 / close >= ``stateMinAtrPct`` % (0.25): own-volatility gate
+    * direction = -sign(stretch) and direction * (RSI7 - 50) > ``stateTurnRsi`` (0)
+
+    ``stateMode="follow"`` keeps the previous RSI/MACD/EMA follow pack.
+    """
     frame = frame or frame_from_candles(candles)
+    mode = str(settings.get("stateMode", "fade") or "fade").lower()
+    if mode in ("follow", "legacy"):
+        return evaluate_ta_pack_follow(frame, settings)
+    frame = frame.tail(STATE_FRAME_BARS)
+    candles = frame.candles
+    if len(candles) < 50:
+        return None
+    latest = candles[-1]
+    atr14 = frame.atr(14)
+    if latest.close <= 0 or atr14 <= 0:
+        return None
+    if atr14 / latest.close * 100.0 < float(settings.get("stateMinAtrPct", 0.25)):
+        return None
+    threshold = max(1e-9, float(settings.get("stateStretchAtr", 1.5)))
+    stretch = (frame.ema(20) - frame.ema(50)) / atr14
+    if abs(stretch) < threshold:
+        return None
+    direction = -1.0 if stretch > 0 else 1.0
+    if direction * (frame.rsi(7) - 50.0) <= float(settings.get("stateTurnRsi", 0.0)):
+        return None
+    # Calibrated so the threshold stretch maps to strength 0.5 (confidence
+    # 0.725) and twice the threshold saturates at 1.0.
+    strength = clamp(abs(stretch) / (2.0 * threshold), 0.0, 1.0)
+    return _ta_signal(frame, settings, direction, strength, "State stretch fade")
+
+
+def evaluate_ta_pack_follow(frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[SignalEval]:
+    """Previous State pack: follow the RSI/MACD/EMA composite."""
     candles = frame.candles
     if len(candles) < 26:
         return None
@@ -408,30 +608,7 @@ def evaluate_ta_pack(
     macd_score = clamp(macd / max(latest.close * 0.0008, 1e-9), -1, 1)
     ema_score = clamp((ema20 - ema50) / max(latest.close * 0.001, 1e-9), -1, 1)
     raw = rsi_score * 0.4 + macd_score * 0.3 + ema_score * 0.3
-    strength = abs(raw)
-    if strength < float(settings.get("minimumStrength", 0.2)):
-        return None
-    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
-    sl_max = float(settings.get("stopLossMaxPct", 1.5))
-    sl = clamp(sl_min * 1.6, sl_min, sl_max)
-    tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
-    conf = clamp(0.5 + strength * 0.45, 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)):
-        return None
-    return SignalEval(
-        source_id="ta-rsi-macd-ema",
-        source_name="RSI/MACD/EMA pack",
-        direction="long" if raw >= 0 else "short",
-        confidence=conf,
-        strength=strength,
-        stop_loss_pct=sl,
-        take_profit_pct=tp,
-        reward_risk=tp / sl if sl else 1.8,
-        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
-        last_price=latest.close,
-        candle_count=len(candles),
-        weight=1.0,
-    )
+    return _ta_signal(frame, settings, raw, abs(raw), "RSI/MACD/EMA pack")
 
 
 def evaluate_pulse_local(
@@ -635,7 +812,15 @@ def evaluate_direction(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window."""
+    """CTS Direction: two equal windows, opposite sign, independent Long/Short on the new window.
+
+    Qualified reversal (post-Base research, train-chosen, valid/sim-confirmed):
+    the first window must be a strong move for this symbol (|d1| >= dirMinFirstZ
+    sigma-units, sigma = per-bar log-return stdev of the <=60-bar frame), the
+    frame must be active enough to pay the fixed cost (sigma >= dirMinSigma),
+    and the new window must be an early, partial turn (|d2| <= dirMaxRetrace *
+    |d1|), not an already-completed V. Confidence is calibrated on that z.
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     rng = max(4, int(settings.get("dirRange") or 10))
@@ -650,17 +835,63 @@ def evaluate_direction(
         return None
     if d1 * d2 >= 0:
         return None
+    max_retrace = float(settings.get("dirMaxRetrace", 0.5))
+    if abs(d2) > max_retrace * abs(d1):
+        return None
+    from math import log, sqrt  # local: keeps this kind's diff self-contained
+
+    tail = [px for px in closes[-60:] if px > 0]
+    rets = [log(tail[i] / tail[i - 1]) for i in range(1, len(tail))]
+    if len(rets) < 2:
+        return None
+    mean = sum(rets) / len(rets)
+    sigma = sqrt(max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean))
+    if sigma < float(settings.get("dirMinSigma", 0.0012)):
+        return None
+    z1 = abs(d1) / max(1e-9, sigma * sqrt(rng - 1))
+    if z1 < float(settings.get("dirMinFirstZ", 0.8)):
+        return None
     steps = [second[i] - second[i - 1] for i in range(1, len(second))]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.5)
     want = "long" if d2 > 0 else "short"
     if ev["selected"] and ev["selected"] != want:
         return None
-    strength = clamp(abs(d1) + abs(d2), 0.0, 1.0)
+    strength = clamp(z1 / 4.0, 0.0, 1.0)
+    conf = clamp(0.52 + 0.05 * min(z1, 6.0), 0.52, 0.82)
     agr = float((ev.get(want) or {}).get("agreement") or 1.0)
     return _kind_indication(
-        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}"],
-        agreement=agr, mode="direction",
+        symbol, "direction", want, strength, closes[-1], settings, [f"dir:{rng}:z{z1:.2f}"],
+        agreement=agr, mode="direction", conf=conf,
     )
+
+
+import math  # noqa: E402  (kept with the Move block)
+
+MOVE_FRAME = 60  # engine frame: current bar + 59 prior closes
+MOVE_MIN_PRIOR_RETURNS = 10
+
+
+def move_fade_stats(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
+    """Move extreme statistics inside the engine frame (last 60 closes).
+
+    d  = R-bar displacement close[-R] -> close[-1]
+    sd = sample std of the 1m log returns strictly before the R-bar window
+    z  = |d| / (sd * sqrt(R - 1))
+    last = last-bar return (reversal confirmation when opposite to d)
+    """
+    c = [float(x) for x in list(closes)[-MOVE_FRAME:]]
+    rng = int(rng)
+    if rng < 2 or len(c) < rng or any(x <= 0 for x in c):
+        return None
+    prior = c[: len(c) - rng + 1]
+    rets = [math.log(prior[i] / prior[i - 1]) for i in range(1, len(prior))]
+    if len(rets) < MOVE_MIN_PRIOR_RETURNS:
+        return None
+    mean = sum(rets) / len(rets)
+    sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+    d = c[-1] / c[-rng] - 1.0
+    z = abs(d) / (sd * math.sqrt(rng - 1)) if sd > 0 else float("inf")
+    return {"d": d, "sd": sd, "z": z, "last": c[-1] / c[-2] - 1.0}
 
 
 def evaluate_move(
@@ -669,28 +900,60 @@ def evaluate_move(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Move: same-window displacement, independent direction agrees with the net move."""
+    """CTS Move: fade volatility-normalized extreme R-bar moves.
+
+    Fires opposite to the R-bar displacement when moveZMin <= z < moveZMax
+    (z vs the frame's pre-window 1m sigma) and the last bar already ticks
+    against the move. Extreme z (>= moveZMax) keeps running, so it is skipped.
+    Each range is its own config identity: mode "move:<R>".
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
-    rng = max(4, int(settings.get("moveRange") or 10))
-    if len(closes) < rng:
+    rng = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
+    st = move_fade_stats(closes, rng)
+    if st is None:
         return None
-    window = closes[-rng:]
-    d = _dir_of(window)
+    d, z = st["d"], st["z"]
     min_ch = float(settings.get("moveMinChange") or 0.001)
-    if abs(d) < min_ch:
+    z_min = float(settings.get("moveZMin", 2.0))
+    z_max = float(settings.get("moveZMax", 3.0))
+    if abs(d) < min_ch or not (z_min <= z < z_max):
         return None
-    steps = [window[i] - window[i - 1] for i in range(1, len(window))]
-    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
-    want = "long" if d > 0 else "short"
-    if ev["selected"] and ev["selected"] != want:
+    if bool(settings.get("moveConfirm", True)) and st["last"] * d >= 0:
         return None
-    strength = clamp(abs(d) * 25.0, 0.0, 1.0)
-    agr = float((ev.get(want) or {}).get("agreement") or 1.0)
+    want = "short" if d > 0 else "long"
+    band = clamp((z - z_min) / max(1e-9, z_max - z_min), 0.0, 1.0)
+    strength = clamp(z / max(1e-9, z_max), 0.0, 1.0)
+    conf = clamp(0.6 + 0.1 * band, 0.5, 0.99)
     return _kind_indication(
-        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}"],
-        agreement=agr, mode="move",
+        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}:z{z:.2f}"],
+        agreement=1.0, mode=f"move:{rng}", conf=conf,
     )
+
+
+def _frame_sigma(closes: List[float]) -> float:
+    """Population std of the frame's 1-bar log returns (own-volatility unit)."""
+    from math import log
+
+    rets = []
+    for i in range(1, len(closes)):
+        a, b = closes[i - 1], closes[i]
+        if a > 0 and b > 0:
+            rets.append(log(b / a))
+    if len(rets) < 2:
+        return 0.0
+    mean = sum(rets) / len(rets)
+    return max(0.0, sum(r * r for r in rets) / len(rets) - mean * mean) ** 0.5
+
+
+def _turned(closes: List[float], direction: str, bars: int) -> bool:
+    """The last `bars` close steps all point in `direction` (the stretch has started to revert)."""
+    if bars <= 0:
+        return True
+    if len(closes) < bars + 1:
+        return False
+    sign = 1.0 if direction == "long" else -1.0
+    return all((closes[-i] - closes[-i - 1]) * sign > 0 for i in range(1, bars + 1))
 
 
 def evaluate_trend(
@@ -699,13 +962,23 @@ def evaluate_trend(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """Independent configurable EMA pair with consecutive bar confirmation."""
+    """Independent configurable EMA pair: fade a volatility-stretched trend once it turns.
+
+    Default ("fade"): the fast/slow EMA spread, measured in the frame's own 1-bar
+    volatility, must be >= trendFadeZ; the lane then trades AGAINST the spread
+    once the last trendFadeTurn closes already step that way. Research on 48
+    symbols (train-selected, valid/sim-confirmed) showed following 1m EMA trends
+    loses gross edge while fading stretched ones keeps it. trendMode="follow"
+    restores the legacy EMA-cross follower.
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     slow_period = max(8, min(55, int(settings.get("trendSlow") or 21)))
     fast_period = max(2, min(slow_period - 1, int(settings.get("trendFast") or 8)))
     if len(closes) < max(30, slow_period + 1):
         return None
+    if str(settings.get("trendMode") or "fade").lower() != "follow":
+        return _evaluate_trend_fade(symbol, frame, settings, fast_period, slow_period)
     fast = frame.ema_series(fast_period)
     slow = frame.ema_series(slow_period)
     if len(fast) < 6 or len(slow) < 6:
@@ -742,13 +1015,75 @@ def evaluate_trend(
     )
 
 
+def _evaluate_trend_fade(
+    symbol: str,
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    fast_period: int,
+    slow_period: int,
+) -> Optional[Indication]:
+    closes = frame.closes
+    last = closes[-1]
+    if last <= 0:
+        return None
+    fast = frame.ema_series(fast_period)
+    slow = frame.ema_series(slow_period)
+    spread = (fast[-1] - slow[-1]) / last
+    sigma = _frame_sigma(closes)
+    if sigma <= 0 or spread == 0:
+        return None
+    z = abs(spread) / sigma
+    z_min = float(settings.get("trendFadeZ", 1.5))
+    if z < z_min:
+        return None
+    want = "short" if spread > 0 else "long"
+    turn = max(0, int(settings.get("trendFadeTurn", 3)))
+    if not _turned(closes, want, turn):
+        return None
+    steps = [closes[i] - closes[i - 1] for i in range(-min(10, len(closes) - 1), 0)]
+    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.0)
+    agr = float((ev.get(want) or {}).get("agreement") or 0.0)
+    over = min(1.0, (z - z_min) / max(z_min, 1e-9))
+    strength = clamp(0.4 + over * 0.6, 0.0, 1.0)
+    # Out-of-sample edge was flat across z >= trendFadeZ, so confidence stays modest.
+    conf = clamp(0.62 + over * 0.08, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
+        return None
+    return _kind_indication(
+        symbol, "trend", want, strength, last, settings,
+        [f"trend:ema{fast_period}/{slow_period}:fade:z{z:.2f}:turn{turn}"],
+        agreement=agr, mode=f"trend:ema{fast_period}/{slow_period}", conf=conf,
+    )
+
+
+def _break_prior_sigma(closes: List[float], bars: int = 30) -> float:
+    """Population std of the last ``bars`` 1m log returns before the current bar."""
+    import math
+
+    window = closes[-(bars + 2) : -1]
+    if len(window) < bars + 1 or min(window) <= 0:
+        return 0.0
+    rets = [math.log(window[i] / window[i - 1]) for i in range(1, len(window))]
+    mean = sum(rets) / len(rets)
+    return math.sqrt(sum((r - mean) ** 2 for r in rets) / len(rets))
+
+
 def evaluate_break(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """Independent structure break: close beyond the prior N-bar high/low."""
+    """Reversal break: a fresh close beyond the prior N-bar high/low that runs
+    against the frame's larger move.
+
+    Research (48 BingX symbols, 1 week, engine kind-tape exits, train-only
+    selection): plain N-bar breaks carry ~zero gross edge in either direction,
+    but a break that turns against the 59-bar move by >= ``breakContextSigma``
+    prior-bar sigmas has a clearly positive gross edge (1m mean reversion
+    triggered by structure). ``breakContextSigma`` <= 0 restores the classic
+    break (any context, no freshness gate).
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     rng = max(8, int(settings.get("breakRange") or settings.get("dirRange") or 16))
@@ -764,13 +1099,32 @@ def evaluate_break(
     if long_brk == short_brk:
         return None
     want = "long" if long_brk else "short"
+    sign = 1.0 if want == "long" else -1.0
     ref = hi if want == "long" else lo
     brk = abs(_pct(ref, last))
-    noise = float(settings.get("activeNoise") or 0.0005)
-    if noise <= 0.02:
-        noise *= 100.0
+    noise = float(settings.get("activeNoise") or 0.05)
     if brk + 1e-12 < max(0.04, noise * 0.5):
         return None
+    ctx_sigma = float(settings.get("breakContextSigma", 6.0) or 0.0)
+    ctx_z = 0.0
+    if ctx_sigma > 0:
+        # Stay inside the 60-bar frame: context return spans bars[-60..-1].
+        ctx_bars = max(20, min(59, int(settings.get("breakContextBars", 59) or 59)))
+        if len(closes) < max(ctx_bars + 1, 32, rng + 2):
+            return None
+        # Freshness: fire on the first bar of the break only.
+        if settings.get("breakFresh", True):
+            prev = closes[-2]
+            p_prior = closes[-(rng + 2) : -2]
+            if (want == "long" and prev > max(p_prior)) or (want == "short" and prev < min(p_prior)):
+                return None
+        sigma = _break_prior_sigma(closes, 30)
+        base = closes[-(ctx_bars + 1)]
+        if sigma <= 0 or base <= 0:
+            return None
+        ctx_z = (last / base - 1.0) * sign / sigma
+        if ctx_z > -ctx_sigma:
+            return None
     steps = [closes[i] - closes[i - 1] for i in range(-min(8, len(closes) - 1), 0)]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
     if ev["selected"] and ev["selected"] != want:
@@ -780,8 +1134,9 @@ def evaluate_break(
     conf = clamp(0.55 + min(0.35, brk * 8.0) + agr * 0.08, 0.5, 0.99)
     if conf < float(settings.get("minimumConfidence", 0.6)) * 0.88:
         return None
+    source = f"break:{rng}:{brk:.3f}" + (f":rev{ctx_z:.1f}" if ctx_sigma > 0 else "")
     return _kind_indication(
-        symbol, "break", want, strength, last, settings, [f"break:{rng}:{brk:.3f}"],
+        symbol, "break", want, strength, last, settings, [source],
         agreement=agr, mode=f"break:{rng}", conf=conf,
     )
 
@@ -812,6 +1167,15 @@ def evaluate_range_configs(symbol, closes, settings, frame=None):
     if settings.get("typeBreak", True):
         for period in indication_ranges(settings.get("breakRanges"), (8, 16, 32)):
             row = evaluate_break(symbol, closes, {**settings, "breakRange": period}, frame)
+            if row:
+                rows.append(row)
+    if settings.get("typeMove", True):
+        # The primary Move range (moveFadeRange) runs through evaluate_move itself.
+        primary = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
+        for period in indication_ranges(settings.get("moveRanges"), (20, 30, 40)):
+            if period == primary:
+                continue
+            row = evaluate_move(symbol, closes, {**settings, "moveFadeRange": period}, frame)
             if row:
                 rows.append(row)
     return rows
@@ -897,8 +1261,6 @@ def evaluate_active_range(
     ref_hi, ref_lo = max(ref), min(ref)
     breakout = max(0.0, _pct(ref_hi, newest)) if direction == "long" else max(0.0, -_pct(ref_lo, newest))
     noise = max(0.0, float(settings.get("activeNoise") or 0.05))
-    if noise <= 0.02:
-        noise *= 100.0
     if breakout + 1e-12 < noise:
         return None
     agr = _dir_agree(current, direction)
@@ -942,19 +1304,117 @@ def evaluate_active_range(
     )
 
 
+# Active "z" model (default). Research on 48 BingX symbols x 1 week with the
+# engine kind-tape exit model (parameters chosen on the first 4 days only):
+# * a 3-5 sigma move (sigma = the frame's own prior 1m steps) over 10-20 bars
+#   mean-reverts more often than it continues -> "fade:<range>" lanes;
+# * a >= 5 sigma move over 8-12 bars is a real outbreak -> "outbreak:<range>".
+# The legacy follow-every-0.5%-move lanes (evaluate_active_range) did barely
+# better than random entries and stay available with activeModel="legacy".
+# Every lane is an independent configuration (kind "active", mode lane:range).
+ACTIVE_FRAME_BARS = 60
+ACTIVE_MIN_PRIOR_STEPS = 20
+ACTIVE_FADE_RANGES = (10, 15, 20)
+ACTIVE_OUTBREAK_RANGES = (8, 10, 12)
+
+
+def _active_z_ranges(values: Any, defaults: Sequence[int]) -> List[int]:
+    """Parse z-lane ranges; every range must leave enough prior steps in the 60-bar frame."""
+    if not isinstance(values, (list, tuple)):
+        return list(defaults)
+    top = ACTIVE_FRAME_BARS - 1 - ACTIVE_MIN_PRIOR_STEPS
+    parsed: List[int] = []
+    for value in values[:8]:
+        try:
+            n = int(value)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if 2 <= n <= top and n not in parsed:
+            parsed.append(n)
+    return sorted(parsed) or list(defaults)
+
+
+def active_z_features(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
+    """Causal features for one range inside the 60-bar frame.
+
+    signed: % move over the last ``rng`` bars; sigma: population sigma (%) of
+    the 1m close steps *before* that window; z: signed / (sigma * sqrt(rng)).
+    """
+    closes = list(closes)[-ACTIVE_FRAME_BARS:]
+    rng = int(rng)
+    if rng < 2 or len(closes) < rng + 1 + ACTIVE_MIN_PRIOR_STEPS:
+        return None
+    prior = closes[:-rng]
+    steps = [_pct(prior[k - 1], prior[k]) for k in range(1, len(prior))]
+    if len(steps) < ACTIVE_MIN_PRIOR_STEPS or closes[-rng - 1] <= 0:
+        return None
+    mean = sum(steps) / len(steps)
+    sigma = max(0.0, sum(v * v for v in steps) / len(steps) - mean * mean) ** 0.5
+    signed = _pct(closes[-rng - 1], closes[-1])
+    return {"signed": signed, "sigma": sigma, "z": signed / max(sigma * (rng ** 0.5), 1e-9)}
+
+
+def evaluate_active_z(
+    symbol: str,
+    closes: List[float],
+    rng: int,
+    lane: str,
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Volatility-normalized Active lane: "fade" (3-5 sigma stretch) or "outbreak" (>= 5 sigma)."""
+    frame = frame or IndicationFrame([], list(closes))
+    feat = active_z_features(frame.closes, rng)
+    if feat is None:
+        return None
+    if feat["sigma"] + 1e-12 < max(0.0, float(settings.get("activeMinSigmaPct", 0.08))):
+        # Too quiet: fixed-% exits cannot pay the position cost.
+        return None
+    fade_z = max(0.5, float(settings.get("activeFadeZ", 3.0)))
+    out_z = max(fade_z, float(settings.get("activeOutbreakZ", 5.0)))
+    az = abs(feat["z"])
+    move_dir = "long" if feat["signed"] >= 0 else "short"
+    if lane == "fade":
+        if not fade_z <= az < out_z:
+            return None
+        direction = "short" if move_dir == "long" else "long"
+        conf = 0.58 + 0.16 * clamp((az - fade_z) / max(out_z - fade_z, 1e-9), 0.0, 1.0)
+        strength = clamp(az / out_z, 0.0, 1.0)
+    elif lane == "outbreak":
+        if az < out_z:
+            return None
+        direction = move_dir
+        conf = 0.62 + 0.04 * min(7.0, az - out_z)
+        strength = clamp(az / (out_z * 2.0), 0.0, 1.0)
+    else:
+        return None
+    conf = clamp(conf, 0.0, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.85:
+        return None
+    cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
+    sl = clamp(max(cost * 2.0, feat["sigma"] * (rng ** 0.5)), float(settings.get("stopLossMinPct", SL_MIN_PCT)), float(settings.get("stopLossMaxPct", 1.5)))
+    tp = clamp(max(cost * 3.0, sl * float(settings.get("takeProfitRewardRisk", 1.8))), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
+    return _kind_indication(
+        symbol, "active", direction, strength, frame.closes[-1], settings,
+        [f"active:{lane}:{rng}", f"z:{feat['z']:.2f}", f"sig:{feat['sigma']:.3f}"],
+        sl_pct=sl, tp_pct=tp, agreement=1.0, mode=f"{lane}:{rng}", conf=conf,
+    )
+
+
+def active_model(settings: Dict[str, Any]) -> str:
+    return "legacy" if str(settings.get("activeModel", "z") or "z").strip().lower() == "legacy" else "z"
+
+
 def evaluate_active(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    outbreaks = settings.get("activeOutbreak") or [3, 5, 10]
+    """Strongest Active lane (vote summary). Live and replay trade every lane independently."""
     best: Optional[Indication] = None
-    for raw in outbreaks:
-        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
-        if cand and (best is None or cand.confidence > best.confidence):
+    for cand in evaluate_active_all(symbol, closes, settings, frame=frame):
+        if best is None or cand.confidence > best.confidence:
             best = cand
     return best
 
@@ -965,14 +1425,24 @@ def evaluate_active_all(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> List[Indication]:
-    """Independent Active indication per outbreak range (3 / 5 / 10)."""
+    """Independent Active indication per configuration (mode lane:range)."""
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     out: List[Indication] = []
-    for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
-        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
-        if cand:
-            out.append(cand)
+    if active_model(settings) == "legacy":
+        for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
+            cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
+            if cand:
+                out.append(cand)
+        return out
+    for lane, key, defaults in (
+        ("fade", "activeFadeRanges", ACTIVE_FADE_RANGES),
+        ("outbreak", "activeOutbreakZRanges", ACTIVE_OUTBREAK_RANGES),
+    ):
+        for rng in _active_z_ranges(settings.get(key), defaults):
+            cand = evaluate_active_z(symbol, closes, rng, lane, settings, frame=frame)
+            if cand:
+                out.append(cand)
     return out
 
 
@@ -992,13 +1462,23 @@ def evaluate_common(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Common / indication-stage: RSI + MACD + EMA + Bollinger, independent of State."""
+    """CTS Common / indication-stage, independent of State.
+
+    Default ("fade"): common EMA20/EMA50 stretch consensus in own-volatility
+    units -- (EMA20-EMA50)/sigma >= commonFadeEmaZ or (close-EMA50)/sigma >=
+    commonFadeCloseZ votes against the stretch -- confirmed by the last
+    commonFadeTurn closes already reverting. The legacy RSI + MACD + EMA +
+    Bollinger majority (mostly trend-following votes, which lost gross edge
+    on 1m) stays available as commonMode="vote".
+    """
     frame = frame or frame_from_candles(candles)
     candles = frame.candles
     if len(candles) < 26:
         return None
     closes = frame.closes
     latest = candles[-1]
+    if str(settings.get("commonMode") or "fade").lower() != "vote":
+        return _evaluate_common_fade(symbol, frame, settings)
     r = frame.rsi(14)
     macd_fast = frame.ema_series(12)
     macd_slow = frame.ema_series(26)
@@ -1047,6 +1527,41 @@ def evaluate_common(
         symbol, "common", direction, strength, latest.close, settings,
         [f"rsi:{r:.1f}", f"macd:{hist:.5f}", "ema20-50", "ema200", "bb"],
         agreement=strength, mode="rsi-macd-ema-bb", conf=conf,
+    )
+
+
+def _evaluate_common_fade(symbol: str, frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[Indication]:
+    closes = frame.closes
+    last = closes[-1]
+    sigma = _frame_sigma(closes)
+    if last <= 0 or sigma <= 0:
+        return None
+    ema20 = frame.ema(20)
+    ema50 = frame.ema(50)
+    ema_z = (ema20 - ema50) / last / sigma
+    close_z = (last - ema50) / last / sigma
+    ez = float(settings.get("commonFadeEmaZ", 2.0))
+    cz = float(settings.get("commonFadeCloseZ", 4.0))
+    buy = int(ema_z <= -ez) + int(close_z <= -cz)
+    sell = int(ema_z >= ez) + int(close_z >= cz)
+    if buy == sell:
+        return None
+    direction = "long" if buy > sell else "short"
+    votes = max(buy, sell)
+    turn = max(0, int(settings.get("commonFadeTurn", 2)))
+    if not _turned(closes, direction, turn):
+        return None
+    stretch = max(abs(ema_z) / ez, abs(close_z) / cz)
+    strength = clamp(votes / 2.0 * min(1.0, stretch / 1.5), 0.0, 1.0)
+    if strength < float(settings.get("minimumStrength", 0.2)):
+        return None
+    conf = clamp(0.6 + (votes - 1) * 0.08 + min(0.1, (stretch - 1.0) * 0.1), 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.9:
+        return None
+    return _kind_indication(
+        symbol, "common", direction, strength, last, settings,
+        [f"ema20-50z:{ema_z:.2f}", f"close-ema50z:{close_z:.2f}", f"turn{turn}"],
+        agreement=votes / 2.0, mode="ema-stretch-fade", conf=conf,
     )
 
 
@@ -1334,11 +1849,12 @@ class IndicationBook:
         s["moveRange"] = int(overlay.get("indMoveRange") or s.get("moveRange") or 10)
         s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
         s["breakRanges"] = indication_ranges(overlay.get("indBreakRanges", s.get("breakRanges")), (8, 16, 32))
+        s["moveRanges"] = indication_ranges(overlay.get("indMoveRanges", s.get("moveRanges")), (20, 30, 40))
         outbreaks = overlay.get("activeOutbreakRanges") or overlay.get("indActiveOutbreak")
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
         s["activeThreshold"] = float(overlay.get("indActiveThreshold") or s.get("activeThreshold") or 1.0)
-        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.0005
+        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.05
         s["activeNoise"] = float(noise)
         s["activeMovePct"] = float(overlay.get("indActiveMovePct") or overlay.get("activeMovePct") or 0.5)
         s["activeVolatilityWeight"] = float(overlay.get("volWeight") or overlay.get("activeVolatilityWeight") or 0.3)
@@ -1381,11 +1897,13 @@ class IndicationBook:
             frame = build_indication_frame(rows, period_s=TF_SECONDS[tf])
             frames_by_tf[tf] = frame
             candles = frame.candles
+            # The volatility-normalized revert model is validated on 1m only;
+            # higher timeframes keep the legacy composite.
             ev = evaluate_signal_candles(
                 f"bingx-{tf}",
                 f"BingX {tf}",
                 candles,
-                self.settings,
+                self.settings if tf == "1m" else {**self.settings, "signalsModel": "trend"},
                 weight=TF_WEIGHT[tf],
                 frame=frame,
             )
@@ -1910,13 +2428,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # Independence: 1m-only still produces a 1m lane without combined
     rows3 = book.process("CCC-USDT", up, bars_by_tf={"1m": up, "5m": [], "15m": []})
     t6 = (any(r.mode == "direct_tf" and r.timeframe == "1m" for r in rows3) and not any(r.mode == "tf_combined" for r in rows3), f"modes={[r.mode+':'+r.timeframe for r in rows3]}")
-    # Direction: down then up reversal
+    # Direction: strong drop, then an early partial up-turn (qualified reversal)
     rev = []
-    for i in range(12):
+    for i in range(16):
         c = base * (1 - i * 0.004)
         rev.append([c, c * 1.0004, c * 0.9996, c, 800])
-    for i in range(12):
-        c = base * (0.952 + i * 0.005)
+    for i in range(8):
+        c = base * (0.938 + i * 0.0015)
         rev.append([c, c * 1.0004, c * 0.9996, c, 900])
     st2 = dict(DEFAULT_SETTINGS)
     st2["dirRange"] = 8
@@ -1924,11 +2442,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st2["minimumConfidence"] = 0.4
     drow = evaluate_direction("REV-USDT", [b[3] for b in rev], st2)
     t7 = (drow is not None and drow.direction == "long" and drow.kind == "direction", f"dir={drow.direction if drow else None} str={drow.strength if drow else 0:.3f}")
-    # Move: persistent up
-    mrow = evaluate_move("MOV-USDT", [b[3] for b in up], st2)
-    t8 = (mrow is not None and mrow.direction == "long" and mrow.kind == "move", f"move={mrow.direction if mrow else None}")
-    # Move must not require reversal (same-dir)
-    t8b = (mrow is not None, "move-same-dir")
+    # Move: fade a 2-3 sigma 30-bar spike once the last bar ticks back
+    fade_px = [100.0 * (1.001 if i % 2 else 1.0) for i in range(31)]
+    fade_px += [fade_px[-1] * (1 + 0.0155 * (i + 1) / 28) for i in range(28)]
+    fade_px.append(fade_px[-1] * 0.9995)
+    mrow = evaluate_move("MOV-USDT", fade_px, st2)
+    t8 = (mrow is not None and mrow.direction == "short" and mrow.kind == "move" and mrow.mode == "move:30",
+          f"move={mrow.direction if mrow else None} mode={mrow.mode if mrow else None}")
+    # Beyond the z cap (runaway move) Move stays out
+    runaway = fade_px[:31] + [fade_px[30] * (1 + 0.04 * (i + 1) / 28) for i in range(28)]
+    runaway.append(runaway[-1] * 0.9995)
+    t8b = (evaluate_move("MOV-USDT", runaway, st2) is None, "move-z-cap")
     # Active outbreak: quiet then sharp breakout
     act_px = [100.0] * 12
     for i in range(8):
@@ -1941,8 +2465,19 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st3["activeThreshold"] = 1.0
     st3["activeNoise"] = 0.05
     st3["minimumConfidence"] = 0.3
-    arows = evaluate_active_all("ACT-USDT", act_px, st3)
-    t9 = (len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in arows), f"n={len(arows)} dirs={[r.mode for r in arows]}")
+    legacy_rows = evaluate_active_all("ACT-USDT", act_px, {**st3, "activeModel": "legacy"})
+    # Default z model: noisy tape, then a >= 5 sigma run -> outbreak lanes follow it.
+    z_px = [100.0]
+    for i in range(47):
+        z_px.append(z_px[-1] * (1.0015 if i % 2 == 0 else 0.9985))
+    for _ in range(12):
+        z_px.append(z_px[-1] * 1.004)
+    arows = evaluate_active_all("ACT-USDT", z_px, st3)
+    t9 = (
+        len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" and r.mode.startswith("outbreak:") for r in arows)
+        and len(legacy_rows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in legacy_rows),
+        f"n={len(arows)} modes={[r.mode for r in arows]} legacy={[r.mode for r in legacy_rows]}",
+    )
     # Common: oversold then bounce-shaped rsi via steep drop
     drop = []
     px = 100.0
@@ -1989,9 +2524,15 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.settings["minimumConfidence"] = 0.4
     book.settings["minimumStrength"] = 0.05
     rows_ta = book.process("TA-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
-    ta_rows = [r for r in rows_ta if r.mode == "ta_pack"]
-    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" for r in ta_rows), f"ta={[r.kind+':'+r.mode for r in ta_rows]}")
-    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
+    # State fades a stretched EMA trend once it turns: 55 volatile up bars, 5 down.
+    fade = []
+    for i in range(60):
+        c = base * (1 + min(i, 54) * 0.004 - max(0, i - 54) * 0.004)
+        fade.append([c, c * 1.0015, c * 0.9985, c, 1000])
+    rows_fade = book.process("TAF-USDT", fade, bars_by_tf={"1m": fade})
+    ta_rows = [r for r in rows_fade if r.mode == "ta_pack"]
+    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" and r.direction == "short" for r in ta_rows), f"ta={[r.kind+':'+r.mode+':'+r.direction for r in ta_rows]}")
+    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta + rows_fade), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
     snap = book.snapshot()
     ks = snap.get("kindStats") or {}
     t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common", "trend", "break"}, f"keys={sorted(ks)}")
@@ -2043,11 +2584,16 @@ def self_test() -> List[Tuple[str, bool, str]]:
         f"n5={len(c5)} n6={len(c6)} o6={c6[-1].open if c6 else None} c6={c6[-1].close if c6 else None}",
     )
     rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
-    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6),
-           f"kinds={sorted({r.kind for r in rows6})}")
-    tr = evaluate_trend("TR-USDT", [b[3] for b in up], st)
+    six_fade = [[ts0 + i * 60] + list(b) for i, b in enumerate(fade)]
+    rows6f = book.process("SIXF-USDT", six_fade, bars_by_tf={"1m": six_fade})
+    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6f),
+           f"kinds={sorted({r.kind for r in rows6})} fade={sorted({r.kind for r in rows6f})}")
+    tr = evaluate_trend("TR-USDT", [b[3] for b in up], {**st, "trendMode": "follow"})
     t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
-    brk_px = [100.0] * 20 + [102.2]
+    # Reversal break: 40-bar decline, basing, then a fresh close above the base.
+    brk_px = [106.0 - 0.15 * i + (0.03 if i % 2 else -0.03) for i in range(40)]
+    brk_px += [100.0 + 0.02 * i + (0.08 if i % 2 else 0.0) for i in range(19)]
+    brk_px.append(max(brk_px[-16:]) + 0.3)
     br = evaluate_break("BR-USDT", brk_px, st)
     t32 = (br is not None and br.kind == "break" and br.direction == "long", f"br={br.kind if br else None} {br.direction if br else None}")
     book.settings["typeTrend"] = True
@@ -2120,7 +2666,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-tf-majority", t5[0], t5[1]),
         ("ind-tf-independent", t6[0], t6[1]),
         ("ind-direction-reversal", t7[0], t7[1]),
-        ("ind-move-same-dir", t8[0] and t8b[0], t8[1]),
+        ("ind-move-fade-extreme", t8[0] and t8b[0], t8[1]),
         ("ind-active-outbreak", t9[0], t9[1]),
         ("ind-common-ta", t10[0], t10[1]),
         ("ind-type-flags", t11[0], t11[1]),

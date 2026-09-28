@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { lastNCostPf, formatDuration } from "@/lib/analytics";
-import type { KindStat, LiveClosed, LiveStats, SideStat, StrategyStat } from "@/lib/live-stats";
+import { kindGateOpen, type KindStat, type LiveClosed, type LiveStats, type SideStat, type StrategyStat } from "@/lib/live-stats";
 import { pfClass } from "@/lib/status-tone";
 
 const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const;
@@ -121,7 +121,7 @@ function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
       netAvg: Number(a.netAvg ?? g.netAvg ?? 0),
       validated: Boolean(a.validated ?? g.validated),
       profitable: Boolean(a.profitable ?? g.profitable),
-      ok: a.ok ?? g.ok,
+      ok: kindGateOpen(a, g),
       enabled: types[k] !== false && l.enabled !== false,
       processed: true,
       hits: Number(a.hits ?? l.hits ?? hits[k] ?? 0),

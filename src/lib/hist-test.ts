@@ -138,7 +138,8 @@ export const HIST_TEST_HOURS_DEFAULT = 20;
 export const HIST_TEST_HOURS_STEP = 1;
 export const HIST_TEST_MIN_PF = 1.1;
 export const HIST_TEST_TARGET_DEFAULT = 50;
-export const HIST_TEST_TARGET_MAX = 250;
+/** Test Historic evaluates the 50 intern majors only; a larger fill target can never be met. */
+export const HIST_TEST_TARGET_MAX = 50;
 export const HIST_TEST_VALIDATE_CAP = 250;
 export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
@@ -158,6 +159,12 @@ export function clampHistTestRefreshHours(value: unknown, fallback = HIST_TEST_R
   return Math.max(HIST_TEST_REFRESH_MIN, Math.min(HIST_TEST_REFRESH_MAX, base));
 }
 
+export function clampHistTestTarget(value: unknown, fallback = HIST_TEST_TARGET_DEFAULT): number {
+  const n = Math.round(Number(value));
+  const base = Number.isFinite(n) && n > 0 ? n : fallback;
+  return Math.max(1, Math.min(HIST_TEST_TARGET_MAX, base));
+}
+
 export function histTestLookbackBars(hours: unknown): number {
   return clampHistTestHours(hours) * 60;
 }
@@ -173,7 +180,8 @@ export function histTestIsPaused(job?: HistTestJob | null): boolean {
 
 export function normalizeHistTestJob(job: HistTestJob): HistTestJob {
   const phase = String(job.phase || "idle");
-  const positives = (job.positive?.length ? job.positive : job.symbols) || [];
+  // An explicit empty positive list means nothing cleared the floor; symbols is the intern book.
+  const positives = (Array.isArray(job.positive) ? job.positive : job.symbols) || [];
   const ready = Boolean(job.ready) || phase === "ready";
   let pct = Number(job.pct);
   if (!Number.isFinite(pct)) pct = 0;
@@ -263,7 +271,7 @@ export async function startHistTest(body: {
     histTestMinPf: body.minPf,
     histTestRefreshHours: refreshHours,
     refreshHours,
-    symbolCap: Math.max(1, Math.min(HIST_TEST_TARGET_MAX, Math.round(Number(body.symbolCap) || HIST_TEST_TARGET_DEFAULT))),
+    symbolCap: clampHistTestTarget(body.symbolCap),
     overlay: { ...(body.overlay || {}), histTestRefreshHours: refreshHours },
   });
 }

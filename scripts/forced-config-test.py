@@ -61,7 +61,14 @@ class ForcedTests(unittest.TestCase):
             from set_engine import IND_TAG_KIND
             tag = next(k for k,v in IND_TAG_KIND.items() if v == "signals")
             with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,tag)]):
-                for _ in range(4): p.maybe_forced_entries()
+                # The per-cycle batch is load-governed (an intern desk caps it
+                # so SL/TP keep running); coverage must still be complete.
+                batch, _ = p._entry_window_limits()
+                for _ in range(2 * (len(rows) // batch + 2)):
+                    p.maybe_forced_entries()
+                    self.assertLessEqual(p._forced_entry_queue["examined"], batch)
+                    if len(accepted) == len(rows):
+                        break
         self.assertEqual(len(accepted),700)
         self.assertEqual(attempts["0"],2)
         self.assertTrue(all(n==1 for sid,n in attempts.items() if sid != "0"))
@@ -73,6 +80,16 @@ class ForcedTests(unittest.TestCase):
 
     def test_forced_symbols_are_mandatory_not_duplicate(self):
         self.assertEqual(resolve_symbols({"symbols": ["XRPUSDT"], "allSymbols": False}), list(forced.FORCED_SYMBOLS))
+
+    def test_forced_symbols_never_push_out_capped_picks(self):
+        picks = ["BTC-USDT", "ETH-USDT"]
+        out = resolve_symbols({"symbols": picks, "allSymbols": False, "symbolCap": 2})
+        self.assertEqual(out[:2], picks)
+        self.assertEqual(out[2:], list(forced.FORCED_SYMBOLS))
+        many = [f"S{i}-USDT" for i in range(40)]
+        out = resolve_symbols({"symbols": many, "allSymbols": False, "symbolCap": 25})
+        self.assertEqual(out[:25], many[:25])
+        self.assertEqual(out[25:], list(forced.FORCED_SYMBOLS))
 
     def test_forced_cli(self):
         self.assertTrue(cli_options(["--forced-only", "--hours", "24"])["forcedOnly"])

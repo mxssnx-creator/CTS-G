@@ -763,6 +763,23 @@ def clamp_pct(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value) if hi > 0 else value)
 
 
+SL_TP_MAX_FACTOR = SL_TP_MAX  # operator rule: a stop never exceeds 3x its take-profit
+
+
+def cap_sl_to_tp(sl: float, tp: float, sl_min: float = 0.0) -> tuple[float, float]:
+    """Keep SL <= 3x TP. Tighten SL first (never below the SL floor); if the
+    floor still binds, lift TP so the ratio holds."""
+    sl = finite(sl)
+    tp = finite(tp)
+    if sl <= 0 or tp <= 0:
+        return sl, tp
+    if sl > SL_TP_MAX_FACTOR * tp + 1e-12:
+        sl = max(SL_TP_MAX_FACTOR * tp, finite(sl_min))
+        if sl > SL_TP_MAX_FACTOR * tp + 1e-12:
+            tp = sl / SL_TP_MAX_FACTOR
+    return sl, tp
+
+
 def bind_ratio_sl_tp(
     tp: float,
     ratio: float,
@@ -817,6 +834,7 @@ def resolve_sl_tp(
     if bind_sl_to_tp:
         sl, tp = bind_ratio_sl_tp(tp, ratio, sl_min, sl_max, tp_min, tp_max)
         src = f"{src}:r{ratio:.1f}"
+        sl, tp = cap_sl_to_tp(sl, tp, sl_min)
         return sl, tp, src
     cost_sl = max(sl_min, cost_tp * ratio)
     sl, chosen_tp = cost_sl, cost_tp
@@ -830,6 +848,7 @@ def resolve_sl_tp(
         src = "overlay"
     if chosen_tp < sl * 1.05:
         chosen_tp = clamp_pct(sl * rr, tp_min, tp_max)
+    sl, chosen_tp = cap_sl_to_tp(sl, chosen_tp, sl_min)
     return sl, chosen_tp, src
 
 

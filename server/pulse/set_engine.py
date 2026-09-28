@@ -60,7 +60,7 @@ from block_engine import (
     normalize_block_counts,
     shared_block_volume_ratio,
 )
-from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 
@@ -788,8 +788,39 @@ def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float
     return 0, max(long_w, short_w), "split"
 
 
+def core_pack_votes(
+    votes: Sequence[Tuple[int, float, str]],
+    frame: Optional[IndicationFrame],
+    settings: Dict[str, Any],
+) -> List[Tuple[int, float, str]]:
+    """Votes for the combined core ``indications`` pack.
+
+    The State kind lane (tag ``ta``) fades stretched trends by default. The
+    combined core pack keeps the previous RSI/MACD/EMA follow vote in the same
+    slot so core Sets are unaffected by the State lane change.
+    """
+    votes = list(votes)
+    if frame is None or not frame.candles or not settings.get("typeState", True):
+        return votes
+    if str(settings.get("stateMode", "fade") or "fade").lower() in ("follow", "legacy"):
+        return votes
+    out = [v for v in votes if v[2] != "ta"]
+    try:
+        ta = evaluate_ta_pack_follow(frame, settings)
+    except Exception:
+        ta = None
+    if ta:
+        at = 1 if out and out[0][2] == "sig" else 0
+        out.insert(at, (1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
+    return out
+
+
 def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
-    return votes_to_signal(indication_kind_votes(bars, settings, now))
+    votes = indication_kind_votes(bars, settings, now)
+    if indication_kind_votes is not _DEFAULT_INDICATION_KIND_VOTES:
+        return votes_to_signal(votes)
+    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
+    return votes_to_signal(core_pack_votes(votes, frame, settings))
 
 
 def hit_exit(
@@ -1581,11 +1612,12 @@ class SetBook:
             "dirRange": int(ov.get("indDirRange") or 10),
             "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
             "breakRanges": indication_ranges(ov.get("indBreakRanges"), (8, 16, 32)),
+            "moveRanges": indication_ranges(ov.get("indMoveRanges"), (20, 30, 40)),
             "dirMinChange": float(ov.get("indDirMinChange") or 0.001),
             "moveRange": int(ov.get("indMoveRange") or 10),
             "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
             "activeThreshold": float(ov.get("indActiveThreshold") or 1.0),
-            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.0005),
+            "activeNoise": float(ov.get("indActiveNoise") or ov.get("noise") or 0.05),
             "activeMovePct": float(ov.get("indActiveMovePct") or ov.get("activeMovePct") or 0.5),
             "activeVolatilityWeight": float(ov.get("volWeight") or ov.get("activeVolatilityWeight") or 0.3),
         }
@@ -3052,22 +3084,33 @@ class SetBook:
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
             if "indications" in self.packs and indication_frame is not None:
+                vote_frame = None
                 if indication_kind_votes is _DEFAULT_INDICATION_KIND_VOTES:
-                    votes = indication_kind_votes_frame(indication_frame.window(lo, i + 1), self.ind_settings)
+                    vote_frame = indication_frame.window(lo, i + 1)
+                    votes = indication_kind_votes_frame(vote_frame, self.ind_settings)
                 else:
                     ts = frame_now - (n - 1 - i) * BAR_S
                     votes = indication_kind_votes(window, self.ind_settings, ts)
-                signals["indications"][i] = votes_to_signal(votes)
+                signals["indications"][i] = votes_to_signal(core_pack_votes(votes, vote_frame, self.ind_settings))
                 for d, conf, tag in votes:
                     kind = IND_TAG_KIND.get(tag.strip())
                     if kind:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
-                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True):
+                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True) or self.ind_settings.get("typeMove", True):
                     config_frame = indication_frame.window(lo, i + 1)
                     for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
                         key = row.kind + "|" + row.mode
+                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
+                if self.ind_settings.get("typeActive", True):
+                    # Live enters every Active configuration independently
+                    # (evaluate_active_all, cfg per mode); replay the same
+                    # lanes instead of one best-of-ranges tape.
+                    kind_sigs["active"][i] = (0, 0.0)
+                    act_frame = indication_frame.window(lo, i + 1)
+                    for row in evaluate_active_all(symbol, act_frame.closes, self.ind_settings, act_frame):
+                        key = "active|" + row.mode
                         kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
             if on_step and i % 50 == 0:
                 on_step()
@@ -4243,7 +4286,9 @@ class SetBook:
         dd = float((m or {}).get("max_dd_s") or 0.0)
         if not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9:
             return False, "dd_cap"
-        if not is_positive_pf(pf, 1.0):
+        # Non-strict still needs this side's own Base qualification. An intern
+        # 1.00 floor let Base-rejected Sets (1.00 <= PF < Base floor) trade.
+        if not self._base_metrics_ok(m or {}):
             return False, "stage qualification"
         return True, ""
 
@@ -4459,8 +4504,11 @@ class SetBook:
                     st.deact_reason = "locked"
                     continue
                 if st.id in allow:
-                    st.active = True
-                    st.deact_reason = ""
+                    # Allow-listed Sets still need their current Base ledger;
+                    # later own evidence can revoke a Test Historic pass.
+                    base_ok = bool((st.stage_ledger or {}).get("base"))
+                    st.active = base_ok
+                    st.deact_reason = "" if base_ok else "stage qualification"
                     continue
                 if getattr(st, "processing_active", False):
                     continue
@@ -4774,6 +4822,11 @@ class SetBook:
             st = self.sets.get(sid)
             if st is None:
                 continue
+            ledger = getattr(st, "stage_ledger", None) or {}
+            if "base" in ledger:
+                # A scored/seeded Base ledger is authoritative for counts.
+                n_ok += int(bool(ledger.get("base")))
+                continue
             n = max(int(getattr(st, "n", 0) or 0), int(getattr(st, "last15_n", 0) or 0))
             pf = float(getattr(st, "last15_ratio", 0) or 0)
             if n >= need and pf + 1e-9 >= floor:
@@ -5025,11 +5078,13 @@ class SetBook:
 
         def side_active(state: SetState) -> bool:
             allow_ids = getattr(self, "hist_test_set_ids", None)
-            if allow_ids is not None and state.id in allow_ids and state.active:
+            blob = (state.by_side or {}).get(want_side) if use_side else None
+            has_side = isinstance(blob, dict) and "active" in blob
+            # Test Historic scope never overrides this direction's own flag.
+            if allow_ids is not None and state.id in allow_ids and state.active and not has_side:
                 return True
             if use_side:
-                blob = (state.by_side or {}).get(want_side)
-                if isinstance(blob, dict) and "active" in blob:
+                if has_side:
                     if blob.get("active"):
                         return True
                     # Cached "unproven" / "stage qualification" is not a
@@ -5037,14 +5092,16 @@ class SetBook:
                     # dispatcher (matrix=0 while hundreds of signals fired).
                     reason = str(blob.get("deact_reason") or "")
                     if reason in ("unproven", "stage qualification", ""):
-                        return not self.strict_gate
+                        return not self.strict_gate and self._base_metrics_ok(blob)
                     return False
             if self.strict_gate:
                 return bool(state.active)
             reason = str(state.deact_reason or "")
             if state.locked or reason == "locked":
                 return False
-            return True
+            # No side blob: only Base evidence on the Set itself qualifies.
+            # Unscored catalog rows are not entry-matrix candidates.
+            return self._base_metrics_ok(self._side_view(state, want_side if use_side else None))
 
         # A permissive replay may publish qualified Sets before the aggregate
         # catalog is complete.  That does not make the aggregate ``ready``
@@ -5070,7 +5127,7 @@ class SetBook:
 
         need = self.eval_need()
         floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
-        intern_floor = 1.0 if not self.strict_gate else floor
+        intern_floor = floor
         result: List[SetState] = []
         rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
         for state in rows:
@@ -5309,12 +5366,12 @@ class SetBook:
             if not self._real_metrics_ok(view):
                 return False
             return True
-        # Non-strict intern: Base-qualified positive-PF Sets enter even when
-        # the cached side flag still says unproven/stage. Empty tape is not
-        # evidence. Intern PF 1.00 is first-entry only, never extra size.
+        # Non-strict intern: Base-qualified Sets enter even when the cached
+        # side flag still says unproven/stage. Empty tape is not evidence and
+        # a Base-rejected Set (PF below the Base floor) never enters.
         if n < self.eval_need():
             return False
-        return clears_pf(pf, 1.0)
+        return self._base_metrics_ok(view)
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
@@ -5609,7 +5666,6 @@ class SetBook:
                     "netAvg": round(st.expectancy, 6),
                     "live": st.live_eval or {},
                     "source": "live-exchange" if st.live else "hist-sim",
-                    "evaluationWindows": st.evaluation_windows,
                     "bySide": {
                         d: {
                             "n": int(v.get("n") or 0),
@@ -6452,9 +6508,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
-    # hist replay scores each indication kind independently (not pack-consensus copies)
+    # hist replay scores each indication kind independently (not pack-consensus copies).
+    # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
+    # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]

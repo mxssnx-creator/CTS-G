@@ -509,7 +509,9 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
 
 def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, conn: str = "") -> Dict[str, Any]:
     cost_pct = float(cost_pct or POSITION_COST_PCT_DEFAULT)
-    closed = [enrich(_row(c), cost_pct) for c in (st.get("closed") or [])]
+    # Snapshots publish closes newest-first (and Overall concatenates lanes);
+    # every tail slice below assumes one chronological tape.
+    closed = sorted((enrich(_row(c), cost_pct) for c in (st.get("closed") or [])), key=lambda r: r["t"])
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
     policy = st.get("pfCost") or {}

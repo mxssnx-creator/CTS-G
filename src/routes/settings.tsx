@@ -13,8 +13,10 @@ import {
   PF_MIN,
   PF_STEP,
   POSITIVE_PF,
+  overlayEdits,
   overlayFromCts,
   saveOverlay,
+  SCRATCH_S_MAX,
   slTpGrid,
   trailGrid,
   trailGiveFromArm,
@@ -61,7 +63,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -158,6 +160,10 @@ function SettingsPage() {
   const histTestJobRef = useRef<HistTestJob | null>(null);
   const histTestSeqRef = useRef(0);
   const rawRef = useRef<LiveStats | null>(null);
+  // The overlay the form was last loaded from and the keys set since then;
+  // an Overall save applies only these edits to the target lane.
+  const baselineRef = useRef<PulseOverlay>(DEFAULT_OVERLAY);
+  const touchedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setCts(null);
@@ -179,7 +185,9 @@ function SettingsPage() {
     setResetAsk(false);
     setCleanupAsk(false);
     const local = loadLocalOverlay(conn);
-    setOverlay(overlayFromCts({}, local || {}));
+    baselineRef.current = overlayFromCts({}, local || {});
+    touchedRef.current = new Set();
+    setOverlay(baselineRef.current);
     const delay = () => deskPollMs(rawRef.current, document.hidden);
     const statsPoll = startPolling(async (signal) => {
       const s = await fetchLiveStats(conn, signal);
@@ -195,7 +203,9 @@ function SettingsPage() {
       if (c.ok) setCts(c.cts);
       if (c.ok && !dirtyRef.current) {
         const stored = loadLocalOverlay(conn);
-        setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
+        baselineRef.current = overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) });
+        touchedRef.current = new Set();
+        setOverlay(baselineRef.current);
       }
       setReady(true);
     }, delay);
@@ -283,6 +293,7 @@ function SettingsPage() {
 
   const patch = <K extends keyof PulseOverlay>(k: K, v: PulseOverlay[K]) => {
     dirtyRef.current = true;
+    touchedRef.current.add(k);
     setOverlay((o) => {
       const next = { ...o, [k]: v };
       if (["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"].includes(k)) {
@@ -310,6 +321,7 @@ function SettingsPage() {
   const onApplyPreset = (id: string) => {
     const preset = CONFIG_PRESETS.find((p) => p.id === id);
     dirtyRef.current = true;
+    for (const key of Object.keys(preset?.patch ?? {})) touchedRef.current.add(key);
     setOverlay((o) => applyPresetPatch(o, id));
     setPresetId(id);
     setDirty(true);
@@ -368,7 +380,8 @@ function SettingsPage() {
       setSaveMsg(r.detail);
       return;
     }
-    const next = applyUserPreset(overlay, r.preset);
+    const preset = r.preset;
+    const next = applyUserPreset(overlay, preset);
     dirtyRef.current = false;
     setOverlay(next);
     setDirty(false);
@@ -376,8 +389,15 @@ function SettingsPage() {
     setUserSel(id);
     const nextCalcOpt = r.calcOpt ? { ...calcOpt, ...r.calcOpt } : calcOpt;
     if (r.calcOpt) setCalcOpt(nextCalcOpt);
-    const live = await saveOverlay(next, "live");
-    const vst = await saveOverlay(next, "vst");
+    // Apply the preset on top of each lane's own overlay so neither lane
+    // receives the other's universe or forced winners.
+    const saveLane = async (lane: "live" | "vst") => {
+      const bundle = await fetchCtsBundle(lane);
+      if (!bundle.ok || !bundle.overlay) return { ok: false };
+      return saveOverlay(applyUserPreset(overlayFromCts(bundle.cts ?? {}, bundle.overlay), preset), lane);
+    };
+    const live = await saveLane("live");
+    const vst = await saveLane("vst");
     setUserBusy(false);
     const lanes = [live.ok ? "Live" : null, vst.ok ? "VST" : null].filter(Boolean).join(" + ");
     setSaveMsg(`${r.preset.name} loaded · set up on ${lanes || "form"} · historic replay stays continuous on the shared lane`);
@@ -449,7 +469,7 @@ function SettingsPage() {
     calcPollRef.current?.refresh();
   };
 
-  const histTestTarget = overlay.symbolCap > 0 ? overlay.symbolCap : HIST_TEST_TARGET_DEFAULT;
+  const histTestTarget = clampHistTestTarget(overlay.symbolCap);
 
   const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
     if (action === "start" && overlay.histTestEnabled === false) return;
@@ -524,6 +544,7 @@ function SettingsPage() {
     const apply = calcJob?.apply;
     if (!apply || typeof apply !== "object") return;
     dirtyRef.current = true;
+    for (const key of Object.keys(apply)) touchedRef.current.add(key);
     setOverlay((o) => syncOverlayFlags({ ...o, ...(apply as Partial<typeof o>) }));
     setDirty(true);
     setSaveMsg("Winner applied · Block on · DCA off · save to persist");
@@ -548,14 +569,32 @@ function SettingsPage() {
       setSaveMsg("Wait for overlay to load");
       return;
     }
+    let payload = overlay;
+    if (conn === "overall") {
+      // The Overall form holds no lane's values. Apply only its edits on top
+      // of the target lane's saved overlay instead of overwriting the lane.
+      const edits = overlayEdits(baselineRef.current, overlay, touchedRef.current);
+      if (!Object.keys(edits).length) {
+        setSaveMsg(`No edited settings to save to ${target}`);
+        return;
+      }
+      setSaving(true);
+      const lane = await fetchCtsBundle(target);
+      if (!lane.ok || !lane.overlay) {
+        setSaving(false);
+        setSaveMsg(`Could not load ${target} settings · nothing saved`);
+        return;
+      }
+      payload = { ...overlayFromCts(lane.cts ?? {}, lane.overlay), ...edits };
+    }
     setSaving(true);
-    const r = await saveOverlay(overlay, target);
+    const r = await saveOverlay(payload, target);
     setSaving(false);
     setSaveMsg(r.detail);
     if (r.ok) {
       dirtyRef.current = false;
       setDirty(false);
-      if (r.overlay) setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
+      if (r.overlay && conn !== "overall") setOverlay((o) => overlayFromCts(cts ?? {}, { ...o, ...r.overlay }));
       setSaveMsg(`${r.detail} · coordinations rebound`);
       try {
         window.dispatchEvent(new Event("pulse:control"));
@@ -747,7 +786,7 @@ function SettingsPage() {
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
-                <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
+                <p className="text-sm text-muted">Control orders (SL/TP on exchange) · always on</p>
                 <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
               </Grid>
@@ -2277,7 +2316,7 @@ function SettingsPage() {
               </div>
               <Grid>
                 <ThresholdReadout label="Overall PF · all stages" value={overlay.minPf.toFixed(2)} tone="text-primary" />
-                <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} onChange={(v) => patch("noise", v)} />
+                <Num label="Noise" value={overlay.noise} min={0.01} max={0.2} step={0.01} unit="%" onChange={(v) => patch("noise", v)} />
                 <Num label="Vol weight" value={overlay.volWeight} min={0.05} max={1} step={0.05} onChange={(v) => patch("volWeight", v)} />
                 <Num label="Min step" value={Math.max(DEFAULT_MIN_STEP, overlay.minStep)} min={DEFAULT_MIN_STEP} max={30} step={1} hint="Search floor only; effective minimum requires live evidence" onChange={(v) => patch("minStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))} />
                 <Num label="Max SL ratio" value={overlay.maxStopLossRatio} min={1} max={5} step={0.1} onChange={(v) => patch("maxStopLossRatio", v)} />
@@ -2363,8 +2402,10 @@ function SettingsPage() {
               <div className="flex flex-col gap-2">
                 <Toggle
                   label="Place SL/TP on exchange"
-                  on={overlay.controlOrders}
-                  onChange={(v) => patch("controlOrders", v)}
+                  hint="Always on · SL at most 3× TP"
+                  on
+                  locked
+                  onChange={() => patch("controlOrders", true)}
                 />
                 <Toggle
                   label="Overall SL/TP by symbol and direction"
@@ -2440,7 +2481,7 @@ function SettingsPage() {
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
                 <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
-                <Num label="Scratch s" value={overlay.scratchS} min={20} max={300} step={5} onChange={(v) => patch("scratchS", v)} />
+                <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>
             </Card>
@@ -2757,14 +2798,14 @@ function TestHistoricCard({
           onControl={onControl}
           testId="hist-test-start-settings"
         >
-          {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
+          {histTestJob?.positive?.length ? (
             <button
               type="button"
               data-testid="hist-test-apply"
               onClick={onApply}
               className="min-h-11 rounded-lg border border-border px-3 text-sm"
             >
-              Apply {histTestJob?.positive?.length || histTestJob?.symbols?.length} positive
+              Apply {histTestJob.positive.length} positive
             </button>
           ) : null}
           <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">
@@ -3448,7 +3489,7 @@ function EffectiveSettingsSummary({
         <AppliedKV label="Orders" value={`R ${posOrdersCounts(stats).realOrders ?? "—"} · L ${posOrdersCounts(stats).liveOrders ?? "—"}`} />
         <AppliedKV label="Effective cap · members" value={`${remoteReady ? formatLogicalCap(logicalCap) : "—"} · ${remote(controls?.mergedMembers)} merged`} />
         <AppliedKV label="Strategy lanes" value={`general ${remote(pulse?.stratGeneral)} · normal ${remote(pulse?.normalExecutionEnabled)} · ind ${remote(pulse?.stratIndications)} · trail ${remote(pulse?.stratTrailing)} · block ${remote(pulse?.stratBlock)} · DCA ${remote(pulse?.stratDca)}`} />
-        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.missing)} missing · ${remote(controls?.security)} security`} />
+        <AppliedKV label="Protection" value={`${remote(controls?.protectedGroups ?? controls?.ok)} protected · ${remote(controls?.pairGaps ?? controls?.missing)} missing · ${remote(controls?.security)} security`} />
         <AppliedKV label="Live ranges" value={controlRanges} />
         <AppliedKV label="Volume · target" value={`${remote(pulse?.volumeFactor, "×")} · ${remote(pulse?.targetNotional, " USDT")}`} />
         <AppliedKV label="Block · DCA" value={`${remote(pulse?.blockVolumeRatio, "×")} / cap ${remote(pulse?.blockMaxVolumeMultiplier, "×")} · DCA ${remote(pulse?.dcaEnabled)}`} />

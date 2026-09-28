@@ -43,12 +43,16 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
     if "dcaEnabled" in overlay or "stratDca" in overlay:
         flags["strategy.dca"] = bool(overlay.get("stratDca", True))
-    if "controlOrders" in overlay:
-        flags["exec.controls"] = bool(overlay["controlOrders"])
+    # SL/TP protection is always on; a stored false can no longer disable it.
+    flags["exec.controls"] = True
     if "rearrange" in overlay:
         flags["strategy.rearrange"] = bool(overlay["rearrange"])
     if "indEnabled" in overlay:
         flags["strategy.indications"] = bool(overlay["indEnabled"])
+    if "stratIndications" in overlay and not overlay["stratIndications"]:
+        # The Indications pack switch also gates live indication entries:
+        # effective = indEnabled && stratIndications.
+        flags["strategy.indications"] = False
     if "tf1m" in overlay:
         flags["feed.tf1m"] = bool(overlay["tf1m"])
     if "tf5m" in overlay:

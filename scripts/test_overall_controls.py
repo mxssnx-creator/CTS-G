@@ -318,4 +318,72 @@ class OverallTests(unittest.TestCase):
         self.assertAlmostEqual(sum(f[1] for f in fills),total)
         self.assertFalse(p.open)
 
+    def fresh_unprotected(self,p):
+        p.place('X-USDT',1,'trend',.9,selected_set=p.sets.by_idx[0])
+        pos=next(iter(p.open.values()))
+        for oid in {pos.sl_oid,pos.tp_oid}:p.api.orders.pop(oid,None)
+        pos.sl_oid=pos.tp_oid=pos.sec_sl_oid=pos.sec_tp_oid=''
+        pos.overall_controls=False;p._overall_pairs={};p.ctrl_skip.clear()
+        return pos
+
+    def test_rejected_tp_keeps_accepted_sl_and_next_pass_adds_only_tp(self):
+        p=self.pulse(1)
+        pos=self.fresh_unprotected(p)
+        inner=p.api.post;reject_tp=[True];posted=[]
+        def post(path,body):
+            if path.endswith('/trade/order'):posted.append(body.get('type'))
+            if reject_tp[0] and path.endswith('/trade/order') and body.get('type') in ('TAKE_PROFIT_MARKET','TAKE_PROFIT'):
+                return {'code':80012,'msg':'system busy'}
+            return inner(path,body)
+        p.api.post=post
+        with patch.object(p,'cancel_order',wraps=p.cancel_order) as cancel:
+            self.assertFalse(overall.ensure(p,pos))
+        cancel.assert_not_called()
+        sl_oid=pos.sl_oid
+        self.assertTrue(sl_oid)
+        self.assertIn(sl_oid,p.api.orders)
+        self.assertEqual(pos.tp_oid,'')
+        self.assertIn(sl_oid,pos.overall_bindings)
+        self.assertFalse(pos.controls_ok)
+        mode,groups,expected,protected,gaps=p._control_pair_counts()
+        self.assertEqual((mode,groups,expected,protected,gaps),('overall',1,1,0,1))
+        reject_tp[0]=False;posted.clear()
+        p.ctrl_skip.clear()  # the rejected leg's retry pause has elapsed
+        self.assertTrue(overall.ensure(p,pos))
+        self.assertEqual(pos.sl_oid,sl_oid)
+        self.assertTrue(pos.tp_oid)
+        self.assertEqual(posted,['TAKE_PROFIT_MARKET'])
+        self.assertEqual(p._control_pair_counts()[3:],(1,0))
+        self.assertEqual(sorted(o.get('type') for o in p.api.orders.values()),['STOP_MARKET','TAKE_PROFIT_MARKET'])
+
+    def test_non_price_rejection_is_not_repriced_per_step(self):
+        p=self.pulse(1)
+        pos=self.fresh_unprotected(p)
+        inner=p.api.post;prices=[]
+        def post(path,body):
+            if path.endswith('/trade/order') and body.get('type') in ('STOP_MARKET','STOP'):
+                prices.append(body.get('stopPrice'))
+                return {'code':101204,'msg':'Insufficient margin'}
+            return inner(path,body)
+        p.api.post=post
+        self.assertEqual(p.place_ctrl(pos,'sl',pos.sl),'')
+        # One attempt per payload form, all at the Set's own stop price.
+        self.assertLessEqual(len(prices),4)
+        self.assertEqual(len(set(prices)),1)
+
+    def test_price_rejection_still_reprices(self):
+        p=self.pulse(1)
+        pos=self.fresh_unprotected(p)
+        inner=p.api.post;prices=[]
+        def post(path,body):
+            if path.endswith('/trade/order') and body.get('type') in ('STOP_MARKET','STOP'):
+                prices.append(body.get('stopPrice'))
+                if len(prices)==1:
+                    return {'code':110400,'msg':'Stop loss price should be less than current price'}
+            return inner(path,body)
+        p.api.post=post
+        self.assertTrue(p.place_ctrl(pos,'sl',pos.sl))
+        self.assertEqual(len(prices),2)
+        self.assertNotEqual(prices[0],prices[1])
+
 if __name__=='__main__':unittest.main()

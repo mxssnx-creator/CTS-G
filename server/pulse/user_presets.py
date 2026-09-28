@@ -13,6 +13,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 MAX_PRESETS = 24
 NAME_PREFIX = "Preset-"
 DEFAULT_ID = "up-default"
+# Universe and forced-winner keys belong to one connection; a shared preset
+# is applied to every lane without them.
+LANE_KEYS = ("symbols", "symbolsAll", "symbolsDynamic", "forcedSymbols", "forcedVariant", "forcedEligible", "forcedBest")
 
 WriteFn = Callable[[str, Dict[str, Any]], None]
 
@@ -256,6 +259,7 @@ class UserPresetStore:
             return None, []
         applied: List[str] = []
         ov = row.get("overlay") if isinstance(row.get("overlay"), dict) else {}
+        ov = {k: v for k, v in ov.items() if k not in LANE_KEYS}
         if apply_all and self.write_overlay:
             for cid in self.lane_ids:
                 try:

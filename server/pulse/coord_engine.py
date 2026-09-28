@@ -177,6 +177,7 @@ class Coordinator:
             ov.get("additionalCoordination", ov.get("minimalPositiveCoordination", False))
         )
         self.minimal_positive_coordination = self.additional_coordination
+        # Percent, like the indication engine and the desk: 0.05 = 0.05%.
         self.noise = float(ov.get("noise") or cts.get("activeNoiseFilter") or 0.05)
         self.vol_weight = float(ov.get("volWeight") or cts.get("activeVolatilityWeight") or 0.3)
         raw_ob = ov.get("outbreak") or cts.get("activeOutbreakRanges") or [3, 5, 10]
@@ -198,7 +199,9 @@ class Coordinator:
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or self.min_step)
-        self.pos_count_vol_ratio = float(ov.get("posCountsVolumeRatio") or coord.get("posCountsVolumeRatio") or cts.get("posCountsVolumeRatio") or 0.05)
+        # An explicit 0 disables count-based trimming; only a missing value defaults.
+        raw_pcv = next((v for v in (ov.get("posCountsVolumeRatio"), coord.get("posCountsVolumeRatio"), cts.get("posCountsVolumeRatio")) if v is not None), 0.05)
+        self.pos_count_vol_ratio = float(raw_pcv)
         self.rearrange = bool(ov.get("rearrange", True))
         self.rearrange_gap = float(ov.get("rearrangeGap") or 0.22)
 
@@ -213,7 +216,7 @@ class Coordinator:
             w = bars[-n:]
             hi = max(b[1] for b in w)
             lo = min(b[2] for b in w)
-            if (hi - lo) / last >= self.noise:
+            if (hi - lo) / last * 100.0 >= self.noise:
                 hits += 1
         return hits >= 1
 
@@ -382,9 +385,14 @@ class Coordinator:
                 continue
             n = int(getattr(st, "last15_n", 0) or 0)
             pf = float(getattr(st, "last15_ratio", 1.0) or 1.0)
-            ok = n >= need and clears_pf(pf, floor)
-            if ok:
-                qualified += 1
+            ledger = getattr(st, "stage_ledger", None) or {}
+            # The scored Base ledger (sample, PF and DD-time) owns the parent
+            # decision; bare vars are only a fallback for unscored books.
+            ok = bool(ledger.get("base")) if "base" in ledger else (n >= need and clears_pf(pf, floor))
+            if not ok:
+                # Base-rejected Sets stay in Base evaluation, not coordination.
+                continue
+            qualified += 1
             parent_rows.append({
                 "parentSetId": sid,
                 "childCount": 0,

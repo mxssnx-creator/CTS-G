@@ -156,7 +156,8 @@ class DcaBook:
         self.tp_mode = str(ov.get("dcaTakeProfitMode") or coord.get("dcaTakeProfitMode") or cts.get("dcaTakeProfitMode") or "average")
         be_raw = ov.get("dcaBreakevenProfitPct", coord.get("dcaBreakevenProfitPct", cts.get("dcaBreakevenProfitPct", 0.2)))
         be = float(be_raw if be_raw is not None else 0.2)
-        self.be_pct = be / 100.0 if be > 0.05 else be
+        # Percent, as on the desk (0.05 = 0.05%); never guessed as a fraction.
+        self.be_pct = be / 100.0
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))

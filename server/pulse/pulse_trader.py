@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 import overall_controls
 from forced_configs import FORCED_SYMBOLS, MIN_PF as FORCED_MIN_PF, valid_candidate, training_window, select_best as select_forced
 from validation_policy import control_min_trades
-from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
+from block_engine import BlockBook, BLOCK_COUNT_PREVIEW, BLOCK_PF_RATIO_MIN, BLOCK_PF_RATIO_MAX, clamp_pause_count_ratio, clamp_stack, calculate_block_volume_increment_ratio, calculate_block_minimum_profit_factor, calculate_block_max_additional_ratio, finite_number, normalize_block_counts, cost_pf_from_net_fracs
 from block_active import ContinuationBook, adjusted_quantity, executable_parent_qty, observe_continuation
 from entry_dispatch import EntryMatrix
 from coord_engine import Coordinator, recent_closed_rows
@@ -42,6 +42,7 @@ from position_cost import (
     accumulate_close,
     resolve_sl_tp,
     bind_ratio_sl_tp,
+    cap_sl_to_tp,
     POSITION_COST_PCT_DEFAULT,
     POSITIVE_PF,
     INTERN_PF,
@@ -68,6 +69,7 @@ from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETA
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
+from hist_calc import read_stop_at as read_hist_stop_at
 from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
 import hist_test as hist_test_mod
 from contracts import INDICATION_KINDS, stable_key
@@ -207,6 +209,12 @@ def _bool_setting(value: Any, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def drawdown_halt_fraction(value: Any) -> float:
+    """drawdownHaltPct is a percent (1 = 1%), as entered on the desk; 0 or negative disables."""
+    raw = float(value)
+    return 0.0 if raw <= 0 else max(0.01, min(0.80, raw / 100.0))
 
 
 def normalize_control_pct(value: Any, default: float = 0.0) -> int:
@@ -4216,6 +4224,7 @@ class Pulse:
         bound_sl, bound_tp = bind_ratio_sl_tp(tp, ratio, sl_lo, sl_hi, tp_lo, 0.0 if tp_hi == float("inf") else tp_hi)
         if bound_tp > tp:
             tp = bound_tp
+        sl, tp = cap_sl_to_tp(sl, tp, sl_lo)
         return sl, tp, sl_lo, sl_hi
 
     def _refresh_open_risk_floors(self) -> int:
@@ -4331,6 +4340,7 @@ class Pulse:
             sl_w = max(sl_lo, min(sl_hi, member_sl or sl_f))
             tp_cap = float(self.tp_max) if float(self.tp_max) > 0 else float("inf")
             tp_w = max(float(self.tp_min), min(tp_cap, member_tp or tp_f))
+        sl_w, tp_w = cap_sl_to_tp(sl_w, tp_w, sl_lo)
         e = pos.entry if pos.entry > 0 else (self.px.get(pos.symbol) or 0)
         if e <= 0:
             return pos.sl, pos.tp
@@ -4451,6 +4461,10 @@ class Pulse:
                 or now < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
                 or now < self.ctrl_skip.get(self._control_minimum_key(pos), 0))
 
+    @staticmethod
+    def _ctrl_retry_key(scope: str, is_sl: bool) -> str:
+        return f"retry:{scope}:{'sl' if is_sl else 'tp'}"
+
     def _control_minimum_key(self, pos: Position) -> str:
         # Equal-size sibling sets share the venue floor. A changed quantity
         # may be legal immediately and must not inherit the old rejection.
@@ -4514,6 +4528,13 @@ class Pulse:
         quantity_matched = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
         scope = self.position_key(pos) if quantity_matched else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
+            return have_this
+        # A rejected leg is retried with a growing pause. Without it every
+        # control pass re-sent all payload forms for a persistently rejected
+        # leg (8-16 order requests per second per group) into the venue's
+        # order-rate ban, while the gap stays reported by priority_controls.
+        retry_key = self._ctrl_retry_key(scope, is_sl)
+        if time.time() < self.ctrl_skip.get(retry_key, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
             self.refresh_px_one(pos.symbol)
@@ -4706,10 +4727,11 @@ class Pulse:
                         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
                     px_failed = True
                     break
-            if oid:
+            if oid or not px_failed:
+                # Only a trigger-price rejection earns a re-priced retry. Any
+                # other rejection would repeat identically for every price
+                # step (8 x forms requests) and move the stop off its range.
                 break
-            if px_failed:
-                continue
         if not oid:
             short = short_api_msg(msg)
             kind_err = ctrl_err_kind(msg)
@@ -4724,7 +4746,12 @@ class Pulse:
                 self.ctrl_skip[scope] = time.time() + 45
             elif kind_err == "qty":
                 self.ctrl_skip[scope] = time.time() + 60
+            failures = self.__dict__.setdefault("_ctrl_retry_n", {})
+            failures[retry_key] = min(8, int(failures.get(retry_key, 0)) + 1)
+            self.ctrl_skip[retry_key] = time.time() + min(120.0, 5.0 * 2 ** (failures[retry_key] - 1))
             return ""
+        self.__dict__.setdefault("_ctrl_retry_n", {}).pop(retry_key, None)
+        self.ctrl_skip.pop(retry_key, None)
         pos.overall = True
         pos.ctrl_qty = max(float(pos.qty or 0), float(qty_s or 0) or float(pos.qty or 0))
         if is_sl:
@@ -4740,6 +4767,29 @@ class Pulse:
         self._oo_cache.pop(pos.symbol, None)
         log(f"CTRL {kind} {pos.symbol} {pos.side} oid={oid} closePos={pos.close_position} qty={pos.qty} @{price}")
         return oid
+
+    def _verify_control_legs(self, pos: Position) -> None:
+        """Forget a leg the venue confirms can no longer execute (no fill)."""
+        rows = self.list_orders(pos.symbol)
+        if bool(getattr(self, "exchange_order_snapshot_pending", True)):
+            return  # Only a confirmed snapshot may prompt the per-order check.
+        live = {real_oid(o.get("orderId") or o.get("orderID")) for o in rows}
+        for fields in (("sl_oid", "sec_sl_oid"), ("tp_oid", "sec_tp_oid")):
+            oid = real_oid(getattr(pos, fields[0], ""))
+            if not oid or oid in live:
+                continue
+            found = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "orderId": oid})
+            data = found.get("data") or {}
+            order = data.get("order", data) if isinstance(data, dict) else {}
+            if not (self.ok(found) and real_oid(order.get("orderId")) == oid):
+                continue
+            if (str(order.get("status") or "").upper() in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED")
+                    and _sf(order.get("executedQty")) <= 0):
+                for name in fields:
+                    if real_oid(getattr(pos, name, "")) == oid:
+                        setattr(pos, name, "")
+                pos.controls_ok = pos.ctrl_verified = False
+                self.save_open_book()
 
     def missing_controls(self, pos: Position) -> bool:
         if not getattr(self, "control_orders", True):
@@ -4861,7 +4911,15 @@ class Pulse:
                 continue
             px = self.px.get(pos.symbol) or pos.entry
             scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
+            if not self.missing_controls(pos) and now >= self.ctrl_skip.get(f"verify:{scope}", 0):
+                # Overall pairs are verified by overall_controls.verify_pair();
+                # a per-config leg cancelled or expired at the venue must also
+                # stop counting as protection and be re-placed.
+                self.ctrl_skip[f"verify:{scope}"] = now + 15.0
+                self._verify_control_legs(pos)
             need = self.missing_controls(pos)
+            if not need and not bool(getattr(pos, "controls_ok", False)):
+                need = True  # e.g. an old-size leg kept after a rejected resize.
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{scope}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
                 continue
@@ -4927,6 +4985,18 @@ class Pulse:
                 self.clear_position_controls(pos)
         scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
+            return
+        now = time.time()
+        if not getattr(pos, "_overall_proxy", False) and (
+                now < self.ctrl_skip.get(self._ctrl_retry_key(scope, True), 0)
+                or now < self.ctrl_skip.get(self._ctrl_retry_key(scope, False), 0)):
+            # A leg is in its rejection back-off: do not bypass it through the
+            # batch endpoint. place_ctrl() below honours each leg's own pause.
+            if not real_oid(pos.sl_oid):
+                pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", self.desired_sl_tp(pos)[0])
+            if not real_oid(pos.tp_oid):
+                pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", self.desired_sl_tp(pos)[1])
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
         # BingX applies a separate hard quota to /trade/batchOrders.  Overall
@@ -5129,9 +5199,9 @@ class Pulse:
                 return pos.qty * 0.95 <= q <= pos.qty * 1.05
             return q + 1e-12 >= pos.qty * 0.95
 
+        # A wrong-size leg is replaced before it is cancelled (below), so a
+        # rejected replacement never leaves the group without that leg.
         stale = [o for o in sls + tps if not qty_ok(o)]
-        for extra in stale:
-            self.cancel_order(pos.symbol, str(extra.get("orderId")), self.order_cid(extra))
         sls = [o for o in sls if o not in stale]
         tps = [o for o in tps if o not in stale]
         sec_sls = [o for o in sls if self._cid_kind(o) == "u" or str(o.get("closePosition")).lower() in ("true", "1")]
@@ -5213,7 +5283,14 @@ class Pulse:
         pos.tp_oid = pos.sec_tp_oid = _place_side(False, pos.tp_oid or pos.sec_tp_oid, pos.tp, want_tp, bool(tps), tps)
         if pos.tp_oid and (pos.tp_oid != old_tp_oid or not pos.tp or not self.tp_legal(pos, pos.tp)):
             pos.tp = want_tp
-        pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+        kept_stale = False
+        for extra in stale:
+            stale_oid = real_oid(extra.get("orderId") or extra.get("orderID"))
+            if stale_oid and stale_oid in (real_oid(pos.sl_oid), real_oid(pos.tp_oid)):
+                kept_stale = True  # Its replacement was not accepted yet.
+                continue
+            self.cancel_order(pos.symbol, stale_oid, self.order_cid(extra))
+        pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) and not kept_stale
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
         pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
@@ -6158,7 +6235,14 @@ class Pulse:
         except TypeError:
             max_book = self.max_book_notional()
         if notional > max_book * 1.02:
-            return
+            # size_qty rounds up to the venue step. Less than one step over
+            # the book room is rounding, not oversizing (with no Block/DCA
+            # room it dropped every entry at some volume factors). A min-lot
+            # lift above the room is still skipped.
+            step = float(getattr(c, "step", 0) or 0) if c is not None else 0.0
+            below = qty - step
+            if step <= 0 or below + 1e-12 < floor or below * px > max_book * 1.02:
+                return
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
@@ -6955,16 +7039,17 @@ class Pulse:
             # A partially executed close must leave a fresh, quantity-matched
             # protection pair for the remainder. This is deliberately scoped
             # to this logical group and cannot cancel another group's orders.
+            # The remainder stays covered throughout: the old (larger) pair is
+            # only retired after its replacement is confirmed. Overall pairs
+            # are resized in place by cancelReplace inside ensure().
             if getattr(self, "control_orders", True) and not getattr(self, "_overall_applying_fill", False):
-                try:
-                    self.cancel_controls(pos.symbol, pos=pos)
-                except Exception:
-                    pass
-                self.clear_position_controls(pos)
-                try:
-                    self.ensure_controls(pos)
-                except Exception:
-                    pass
+                if overall_controls.enabled(self, pos):
+                    try:
+                        overall_controls.ensure(self, pos)
+                    except Exception:
+                        pass
+                else:
+                    self._replace_partial_controls(pos)
             self.save_open_book()
             self._stats_force = True
             return True
@@ -6980,8 +7065,11 @@ class Pulse:
                 pass
         if close_cid:
             self.seen_fill_cids.add(close_cid)
-        if getattr(pos,"overall_controls",False):
-            overall_controls.closed_member(self,pos)
+        # Every final close retires this lot's control IDs durably (shared IDs
+        # pass to a sibling). Previously only overall-bound lots did, so a
+        # per-config pair, or retired IDs inherited by a not-yet-bound member,
+        # stayed live on the venue after an asynchronous close.
+        overall_controls.closed_member(self, pos, filled_oid=close_oid)
         if skip:
             self.remove_position(pos)
             self.ban_sym(pos.symbol, clear_open=False)
@@ -6995,9 +7083,48 @@ class Pulse:
             siblings = overall_controls.members(self,pos)
             if siblings:
                 overall_controls.ensure(self,siblings[0])
+        if not getattr(self,"_overall_applying_fill",False):
             overall_controls.drain_cleanup(self)
         self._stats_force = True
         return True
+
+    def _replace_partial_controls(self, pos: Position) -> None:
+        """Place the remainder's pair first, then retire the old larger pair.
+
+        A leg that could not be re-placed keeps its old order (still
+        protective, oversized); ``ctrl_qty`` keeps the old size so the next
+        control pass resizes it.
+        """
+        old = {
+            "sl": real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", "")),
+            "tp": real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")),
+        }
+        old_qty = float(getattr(pos, "ctrl_qty", 0.0) or 0.0)
+        # IDs still shared with overall siblings are only retired (drained once
+        # no member references them), never cancelled from here.
+        shared = bool(getattr(pos, "overall_controls", False))
+        self.clear_position_controls(pos)
+        try:
+            # place_ctrl_pair() never cancels; ensure_controls() would cancel
+            # the old pair as "stale" even when its replacement was rejected.
+            self.place_ctrl_pair(pos)
+        except Exception:
+            pass
+        kept = False
+        for leg, fields in (("sl", ("sl_oid", "sec_sl_oid")), ("tp", ("tp_oid", "sec_tp_oid"))):
+            oid = old[leg]
+            if not oid:
+                continue
+            if not real_oid(getattr(pos, fields[0], "")):
+                for name in fields:
+                    setattr(pos, name, oid)
+                kept = True
+                continue
+            if oid != real_oid(getattr(pos, fields[0], "")) and (shared or not self.cancel_order(pos.symbol, oid)):
+                pos.retired_control_ids = sorted(set(getattr(pos, "retired_control_ids", []) or []) | {oid})
+        if kept:
+            pos.controls_ok = pos.ctrl_verified = False
+            pos.ctrl_qty = old_qty
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
@@ -7911,14 +8038,14 @@ class Pulse:
                     apply(None)
         except Exception:
             pass
-        if ov.get("targetNotional"):
-            # Clamp desk-supplied target notional: a corrupt or absurd overlay
-            # value must never translate into impossible order volume.
-            TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
-        try:
-            self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
-        except Exception:
-            self.volume_factor = 1.0
+        # Clamp desk-supplied target notional and volume factor: a corrupt or
+        # absurd overlay value must never translate into impossible order
+        # volume. NaN passes min(), so non-finite values keep the defaults
+        # instead of saturating at 500 USDT / 10x.
+        target_notional = finite_number(ov.get("targetNotional"), 0.0)
+        if target_notional:
+            TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
+        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
         if ov.get("leverage"):
@@ -7955,9 +8082,8 @@ class Pulse:
         if ov.get("staggerS") is not None:
             STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
         if ov.get("drawdownHaltPct") is not None:
-            raw_dd = float(ov["drawdownHaltPct"])
             # 0 (or negative) disables the drawdown halt entirely.
-            DD_HALT = 0.0 if raw_dd <= 0 else max(0.01, min(0.80, raw_dd / 100.0 if raw_dd > 1.0 else raw_dd))
+            DD_HALT = drawdown_halt_fraction(ov["drawdownHaltPct"])
         else:
             DD_HALT = 0.0
         if ov.get("minimumEquity") is not None:
@@ -8109,7 +8235,7 @@ class Pulse:
             b_stack = 0
         b_ratio = finite_number(ov.get("blockVolumeRatio", cts.get("blockVolumeRatio")), 0.25)
         b_pfr = finite_number(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 1.1, 1.1)
-        b_pause = int(finite_number(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1, 1.0))
+        b_pause = clamp_pause_count_ratio(ov.get("blockPauseCountRatio", cts.get("blockPauseCountRatio")))
         real_pf = POSITIVE_PF
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
@@ -8145,7 +8271,8 @@ class Pulse:
         self.block.active_live = bool(ov.get("blockActiveLive", cts.get("blockActiveLiveEnabled", True)))
         self.block.active_real = bool(ov.get("blockActiveReal", cts.get("blockActiveRealEnabled", True)))
         self.block.default_min_pf = float(real_pf)
-        self.control_orders = _bool_setting(ov.get("controlOrders", cts.get("control_orders", True)), True)
+        # Operator rule: exchange SL/TP protection is always on for our positions.
+        self.control_orders = True
         # Overall symbol+direction protection is the safe high-throughput
         # default.  A missing key must not silently fall back to per-config
         # TP/SL pairs: hundreds of qualified Sets would then consume the
@@ -8227,7 +8354,7 @@ class Pulse:
             self.block.enabled = False
         elif self.strat_block and ov.get("blockEnabled", True):
             self.block.enabled = True
-        self.control_orders = _bool_setting(self.mods.get("exec.controls", self.control_orders), self.control_orders)
+        self.control_orders = True
         self._set_control_mode(control_orders_per_config or self.control_orders_overall)
         for position in list(self.open.values()):
             try:
@@ -8243,7 +8370,6 @@ class Pulse:
             self.indications.settings["enabled"] = False
         else:
             self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
-            self.strat_ind = True
         self.dca.enabled = bool(self.mods.get("strategy.dca", True)) and bool(ov.get("dcaEnabled", False)) and bool(getattr(self, "strat_dca", True))
         if not self.mods.get("strategy.coord", True):
             for ax in self.coord.axes.values():
@@ -8578,7 +8704,6 @@ class Pulse:
             "rearrange": self.coord.rearrange,
             "rearrangeGap": self.coord.rearrange_gap,
             "modules": getattr(self, "mods", {}),
-            "indEnabled": self.indications.settings.get("enabled"),
             "indMinSources": self.indications.settings.get("minimumSourceSignals"),
             "indMinAgreement": self.indications.settings.get("minimumAgreement"),
             "indMinConfidence": self.indications.settings.get("minimumConfidence"),
@@ -8588,12 +8713,10 @@ class Pulse:
             "indAtrMult": self.indications.settings.get("stopLossAtrMultiplier"),
             "indRewardRisk": self.indications.settings.get("takeProfitRewardRisk"),
             "indExtraSources": self.indications.settings.get("extraSources"),
-            "dcaEnabled": self.dca.enabled,
             "dcaMaxSteps": self.dca.max_steps,
             "dcaCooldownSeconds": self.dca.cooldown_s,
             "dcaBreakevenProfitPct": self.dca.be_pct * 100,
             "dcaTakeProfitMode": self.dca.tp_mode,
-            "blockActiveReal": self.block.active_real,
             "symbols": list(SYMBOLS),
             "symbolsAll": bool(getattr(self, "overlay_wild", False)),
             "symbolsDynamic": bool(getattr(self, "symbols_dynamic", True)),
@@ -9035,7 +9158,11 @@ class Pulse:
                     continue
                 inc = specified
                 count_n = 1
-                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw}
+                # Same row shape as evaluate_counts: record_fill attributes the
+                # leg by setKey, so a missing key lost the filled add.
+                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw,
+                       "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:1",
+                       "blockMinPF": float(self.block.formula(parent, 1, lane).get("blockMinPF") or 0.0)}
             else:
                 rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
                 row = self.block.pick_emit(rows)
@@ -11945,22 +12072,6 @@ class Pulse:
             by_ind = getattr(self, "_by_ind_cache", {}) or {}
             by_strat = getattr(self, "_by_strat_cache", {}) or {}
         pulse_view = self.pulse_snapshot()
-        control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        if overall_controls.enabled(self):
-            control_mode = "overall"
-        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
-        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
-        overall_group_rows: Dict[Tuple[str, str], List[Any]] = {}
-        if control_mode == "overall":
-            for row in self.open.values():
-                overall_group_rows.setdefault((row.symbol, row.side), []).append(row)
-        overall_pair_ok = 0
-        if control_mode == "overall":
-            for rows in overall_group_rows.values():
-                pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
-                if len(pairs) == 1 and next(iter(pairs)) != ("", ""):
-                    overall_pair_ok += 1
-        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
         return {
             "running": not self.halted,
             "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
@@ -11999,6 +12110,7 @@ class Pulse:
             "systemSource": act.get("source", "system-orders"),
             "executionEvidence": execution_evidence,
             "pnlPct": round(float(act["pnlPct"]), 3),
+            "tradedNotional": round(float(act.get("tradedNotional") or 0.0), 4),
             "drawdownPct": round(max(0, dd), 3),
             "drawdownAmount": act["drawdownAmount"],
             "drawdownAvailable": act["drawdownAvailable"],
@@ -12165,7 +12277,6 @@ class Pulse:
             ],
             "closed": closed_out,
             "signals": list(self.signals)[::-1][:16],
-            "symbolCount": len(SYMBOLS),
             "symbolMax": MAX_SYMBOLS,
             "scanMs": round(self.last_scan_ms, 1),
             "rssMb": round(rss_mb(), 1),
@@ -12212,22 +12323,39 @@ class Pulse:
             "byStrategy": by_strat,
         }
 
-    def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _control_pair_counts(self) -> Tuple[str, int, int, int, int]:
+        """(mode, groups, expected pairs, protected overall pairs, pair gaps)."""
         control_mode = "per-config" if bool(getattr(self, "control_orders_per_config", True)) else "aggregate"
-        if overall_controls.enabled(self):
+        overall = overall_controls.enabled(self)
+        if overall:
             control_mode = "overall"
-        pair_count = len({(p.symbol,p.side) for p in self.open.values()}) if overall_controls.enabled(self) else len(self.open)
-        expected_control_pairs = pair_count if bool(getattr(self, "control_orders", True)) else 0
-        overall_pair_ok = 0
-        if control_mode == "overall":
-            groups: Dict[Tuple[str, str], List[Any]] = {}
-            for row in self.open.values():
-                groups.setdefault((row.symbol, row.side), []).append(row)
+        groups: Dict[Tuple[str, str], List[Any]] = {}
+        own = [row for row in self.open.values() if self.position_is_ours(row)]
+        for row in own:
+            groups.setdefault((row.symbol, row.side), []).append(row)
+        pair_count = len(groups) if overall else len(own)
+        expected = pair_count if bool(getattr(self, "control_orders", True)) else 0
+        protected = 0
+        if not expected:
+            # Controls disabled: nothing is expected, so nothing is a gap.
+            return control_mode, pair_count, expected, 0, 0
+        if overall:
             for rows in groups.values():
                 pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
-                if len(pairs) == 1 and next(iter(pairs), ("", "")) != ("", ""):
-                    overall_pair_ok += 1
-        overall_pair_gaps = max(0, expected_control_pairs - overall_pair_ok)
+                # A lone SL or TP is not a protected pair.
+                if len(pairs) == 1 and all(next(iter(pairs))) and all(
+                        bool(getattr(row, "controls_ok", False)) for row in rows):
+                    protected += 1
+        else:
+            protected = sum(
+                1 for row in own
+                if bool(getattr(row, "controls_ok", False))
+                and real_oid(getattr(row, "sl_oid", "")) and real_oid(getattr(row, "tp_oid", ""))
+            )
+        return control_mode, pair_count, expected, protected, max(0, expected - protected)
+
+    def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        control_mode, pair_count, expected_control_pairs, overall_pair_ok, overall_pair_gaps = self._control_pair_counts()
         catalog = []
         sim_n, _sim_upnl = self.sim_stats()
         show_n = int(getattr(self.block, "eval_n", BLOCK_COUNT_PREVIEW) or BLOCK_COUNT_PREVIEW)
@@ -12384,7 +12512,7 @@ class Pulse:
                 "stages": stages,
                 "mainEval": int(getattr(self.coord, "main_eval", 5)),
                 "realEval": int(getattr(self.coord, "real_eval", 3)),
-                "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05) or 0.05),
+                "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05)),
                 "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),
                 "openN": len(self.open),
                 "axes": {k: {"enabled": bool(getattr(v, "enabled", False)), "maxWindow": int(getattr(v, "max_window", 0) or 0)} for k, v in coord_axes.items()},
@@ -12496,12 +12624,12 @@ class Pulse:
                 "mode": control_mode,
                 "pairCount": expected_control_pairs,
                 "expectedPairs": expected_control_pairs,
-                "protectedPairs": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
-                "pairGaps": overall_pair_gaps if control_mode == "overall" else sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
+                "protectedPairs": overall_pair_ok,
+                "pairGaps": overall_pair_gaps,
                 "aggregatePairCount": expected_control_pairs if control_mode in ("aggregate", "overall") else 0,
                 "logicalPositionCap": MAX_OPEN,
                 "groupCount": pair_count,
-                "protectedGroups": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "protectedGroups": overall_pair_ok,
                 "memberProtected": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "memberMissing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
@@ -12912,21 +13040,43 @@ class Pulse:
         active_run_id = str(getattr(self, "_hist_active_run_id", "") or "")
         latest_run_id = str(getattr(self, "_hist_latest_request_id", "") or "")
         if now - check_ts < 0.35:
-            return bool(active_run_id and latest_run_id and latest_run_id != active_run_id
-                        and latest_run_id != getattr(self, "_hist_request_seen", ""))
+            return bool(self._hist_desk_stopped() or (
+                active_run_id and latest_run_id and latest_run_id != active_run_id
+                and latest_run_id != getattr(self, "_hist_request_seen", "")))
         self._hist_request_check_ts = now
         request = read_hist_request(CONN_SHORT)
         latest = str(request.get("runId") or "")
         self._hist_latest_request_id = latest
+        started = float(getattr(self, "_hist_active_started_at", 0.0) or 0.0)
+        if active_run_id and started and read_hist_stop_at(CONN_SHORT) >= started:
+            self._hist_desk_stop_run = active_run_id
         # The request file is a durable status boundary and intentionally
         # remains after publication. Only a generation newer than the last
         # consumed request may invalidate an in-flight automatic run.
-        return bool(
+        return bool(self._hist_desk_stopped() or (
             active_run_id
             and latest
             and latest != active_run_id
             and latest != self._hist_request_seen
-        )
+        ))
+
+    def _hist_desk_stopped(self) -> bool:
+        """The desk pressed Stop after the active generation started."""
+        active = str(getattr(self, "_hist_active_run_id", "") or "")
+        return bool(active and getattr(self, "_hist_desk_stop_run", "") == active)
+
+    def _hist_mark_desk_stopped(self, book: SetBook) -> None:
+        """Publish a desk-stopped generation and wait for the next refresh slot."""
+        with self.state_guard():
+            refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+            self._hist_next_hourly_at = time.time() + refresh_s
+            book.progress.phase = "stopped"
+            book.progress.detail = "historic calculation stopped"
+            book.progress.stale = bool(book.progress.ready)
+            book.progress.deferred_reason = ""
+            book.progress.next_run_at = self._hist_next_hourly_at
+        self._hist_write_status(book, nextRunAt=self._hist_next_hourly_at)
+        self._hist_checkpoint(book, "stopped")
 
     def _hist_new_request(self, *, consume: bool = True) -> Dict[str, Any]:
         request = read_hist_request(CONN_SHORT)
@@ -12951,6 +13101,7 @@ class Pulse:
     def _hist_begin_request(self, request: Dict[str, Any], run_id: str) -> None:
         """Automatic runs never un-consume the durable manual request."""
         self._hist_active_run_id = run_id
+        self._hist_active_started_at = time.time()
         if request:
             self._hist_latest_request_id = run_id
             self._hist_request_seen = run_id
@@ -13069,12 +13220,15 @@ class Pulse:
             "updatedAt": time.time(),
         })
 
-    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> List[str]:
+    def _capped_scan_names(self, names: Optional[Sequence[str]] = None, cap: Optional[int] = None,
+                           explicit: bool = False) -> List[str]:
         """Bound any symbol list to the configured scan book / symbolCap.
 
         0 = unlimited. Missing cap defaults to 50. Wildcards and stale
         all-universe snapshots collapse to the live scan book, not the
         full exchange catalog. A historic request may pass an explicit cap.
+        An explicit operator selection keeps its own picks (cap only); the
+        intern pool only fills wildcard or empty selections.
         """
         if cap is None:
             cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
@@ -13107,7 +13261,8 @@ class Pulse:
             hist_owns = bool(self._hist_test_owns_catalog())
         except Exception:
             hist_owns = False
-        intern_replace = bool(hist_owns or wild)
+        picked = bool(explicit and not wild and out)
+        intern_replace = bool((hist_owns or wild) and not picked)
         if cap > 0 and (len(out) > cap or intern_replace):
             must: List[str] = []
             seen_must: set[str] = set()
@@ -13125,7 +13280,7 @@ class Pulse:
                     seen_must.add(s)
             for s in FORCED_SYMBOLS:
                 token = str(s or "")
-                if token and token not in seen_must and (token in out or token in scan):
+                if token and token not in seen_must and (token in out or (token in scan and not picked)):
                     must.append(token)
                     seen_must.add(token)
             intern_pin: List[str] = []
@@ -13148,8 +13303,9 @@ class Pulse:
             out = (must + rest)[: max(cap, len(must))]
         return out
 
-    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None) -> Tuple[List[str], List[Dict[str, str]]]:
-        names = self._capped_scan_names(requested, cap=cap)
+    def _hist_selected_snapshot(self, requested: Optional[Sequence[str]] = None, cap: Optional[int] = None,
+                                explicit: bool = False) -> Tuple[List[str], List[Dict[str, str]]]:
+        names = self._capped_scan_names(requested, cap=cap, explicit=explicit)
         invalid = [
             {"symbol": symbol, "reason": "missing active exchange contract"}
             for symbol in names
@@ -14345,12 +14501,14 @@ class Pulse:
                 except Exception:
                     pass
             for st in states:
+                # Evidence count alone is not Base qualification. Only a Set
+                # whose scored/seeded Base ledger passed is (re)activated; an
+                # allow-listed Set that failed Base stays system-intern.
+                if not bool((getattr(st, "stage_ledger", None) or {}).get("base")):
+                    continue
                 if int(getattr(st, "n", 0) or 0) or int(getattr(st, "last15_n", 0) or 0):
                     st.active = True
                     st.deact_reason = ""
-                    ledger = dict(getattr(st, "stage_ledger", None) or {})
-                    ledger["base"] = True
-                    st.stage_ledger = ledger
             cap = getattr(book, "_cap_active", None)
             if callable(cap):
                 try:
@@ -14516,6 +14674,7 @@ class Pulse:
                 raw_symbols = request.get("symbols")
                 selected_symbols = request.get("selectedSymbols")
                 requested_symbols = selected_symbols or raw_symbols or list(SYMBOLS)
+                explicit_selection = bool(selected_symbols or raw_symbols)
                 wildcard_requested = bool(request.get("allSymbols")) or any(
                     isinstance(values, list)
                     and any(str(value).strip().upper() in ("*", "ALL", "UNLIMITED") for value in values)
@@ -14525,6 +14684,7 @@ class Pulse:
                     # A wildcard is an explicit request for the frozen dynamic
                     # universe; do not let a stale selectedSymbols mirror win.
                     requested_symbols = list(SYMBOLS)
+                    explicit_selection = False
                 request_overlay = request.get("overlay") if isinstance(request.get("overlay"), dict) else {}
                 request_options = request.get("options") if isinstance(request.get("options"), dict) else {}
                 req_cap = None
@@ -14535,15 +14695,15 @@ class Pulse:
                             break
                         except (TypeError, ValueError):
                             req_cap = None
-                ov_cap = int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0)
-                if ov_cap <= 0:
-                    ov_cap = DEFAULT_SYMBOL_CAP
+                # 0 keeps its meaning: unlimited.
+                ov_cap = max(0, int(getattr(self, "symbol_cap", DEFAULT_SYMBOL_CAP) or 0))
                 # Overlay owns the ranked book. A hist generation must never
                 # assign symbol_cap — stale 25-cap jobs were shrinking a 50 book.
                 use_cap = ov_cap
                 valid, invalid = self._hist_selected_snapshot(
                     requested_symbols if isinstance(requested_symbols, list) else list(SYMBOLS),
                     cap=use_cap,
+                    explicit=explicit_selection and isinstance(requested_symbols, list),
                 )
                 self._hist_snapshot_symbols = list(valid)
                 self._hist_invalid_symbols = list(invalid)
@@ -14623,6 +14783,9 @@ class Pulse:
                     self._hist_checkpoint(book, "config-generation-changed")
                     continue
                 if self._hist_request_changed():
+                    if self._hist_desk_stopped():
+                        self._hist_mark_desk_stopped(book)
+                        continue
                     self._hist_checkpoint(book, "superseded-before-replay")
                     continue
                 missing = []
@@ -14746,6 +14909,9 @@ class Pulse:
                 self._hist_replay_retry = ((set(getattr(self, "_hist_replay_retry", set())) | set(replay_names))
                                           - replay_done) & set(valid)
                 if not replayed or self._hist_request_changed():
+                    if self._hist_desk_stopped():
+                        self._hist_mark_desk_stopped(book)
+                        continue
                     self._hist_next_hourly_at = time.time() + 1.0
                     with self.state_guard():
                         book.progress.coordination_complete = False
