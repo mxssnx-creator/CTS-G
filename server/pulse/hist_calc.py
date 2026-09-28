@@ -405,6 +405,20 @@ def req_path(connection: Optional[str] = None) -> str:
     return path_for(f"hist-calc-req-{_connection_id(connection)}.json")
 
 
+def stop_path(connection: Optional[str] = None) -> str:
+    return path_for(f"hist-calc-stop-{_connection_id(connection)}.json")
+
+
+def read_stop_at(connection: Optional[str] = None) -> float:
+    """When the desk last pressed Stop for this lane (0 when never)."""
+    try:
+        with open(stop_path(connection), encoding="utf-8") as handle:
+            value = json.load(handle)
+        return float(value.get("stoppedAt") or 0.0) if isinstance(value, dict) else 0.0
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
 def _pid_path(connection: Optional[str] = None) -> str:
     return path_for(f"hist-calc-{_connection_id(connection)}.pid")
 
@@ -2846,6 +2860,12 @@ def stop_job(connection: Optional[str] = None) -> Dict[str, Any]:
     half-dead worker from this connection.
     """
     cid = _connection_id(connection)
+    # The engine replays in-process; it aborts any generation that started
+    # before this marker (deleting the request alone cannot interrupt it).
+    try:
+        _atomic_write(stop_path(cid), {"stoppedAt": time.time(), "connection": cid})
+    except Exception:
+        pass
     try:
         os.remove(req_path(cid))
     except FileNotFoundError:

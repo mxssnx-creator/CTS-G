@@ -68,6 +68,7 @@ from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETA
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
 from hist_calc import read_job as read_hist_job, read_request as read_hist_request, write_job as write_hist_job
+from hist_calc import read_stop_at as read_hist_stop_at
 from hist_calc import run_forced_calc, forced_path, request_lookback, job_is_running
 import hist_test as hist_test_mod
 from contracts import INDICATION_KINDS, stable_key
@@ -12899,21 +12900,43 @@ class Pulse:
         active_run_id = str(getattr(self, "_hist_active_run_id", "") or "")
         latest_run_id = str(getattr(self, "_hist_latest_request_id", "") or "")
         if now - check_ts < 0.35:
-            return bool(active_run_id and latest_run_id and latest_run_id != active_run_id
-                        and latest_run_id != getattr(self, "_hist_request_seen", ""))
+            return bool(self._hist_desk_stopped() or (
+                active_run_id and latest_run_id and latest_run_id != active_run_id
+                and latest_run_id != getattr(self, "_hist_request_seen", "")))
         self._hist_request_check_ts = now
         request = read_hist_request(CONN_SHORT)
         latest = str(request.get("runId") or "")
         self._hist_latest_request_id = latest
+        started = float(getattr(self, "_hist_active_started_at", 0.0) or 0.0)
+        if active_run_id and started and read_hist_stop_at(CONN_SHORT) >= started:
+            self._hist_desk_stop_run = active_run_id
         # The request file is a durable status boundary and intentionally
         # remains after publication. Only a generation newer than the last
         # consumed request may invalidate an in-flight automatic run.
-        return bool(
+        return bool(self._hist_desk_stopped() or (
             active_run_id
             and latest
             and latest != active_run_id
             and latest != self._hist_request_seen
-        )
+        ))
+
+    def _hist_desk_stopped(self) -> bool:
+        """The desk pressed Stop after the active generation started."""
+        active = str(getattr(self, "_hist_active_run_id", "") or "")
+        return bool(active and getattr(self, "_hist_desk_stop_run", "") == active)
+
+    def _hist_mark_desk_stopped(self, book: SetBook) -> None:
+        """Publish a desk-stopped generation and wait for the next refresh slot."""
+        with self.state_guard():
+            refresh_s = max(60.0, min(86400.0, float(getattr(book, "refresh_s", 3600.0) or 3600.0)))
+            self._hist_next_hourly_at = time.time() + refresh_s
+            book.progress.phase = "stopped"
+            book.progress.detail = "historic calculation stopped"
+            book.progress.stale = bool(book.progress.ready)
+            book.progress.deferred_reason = ""
+            book.progress.next_run_at = self._hist_next_hourly_at
+        self._hist_write_status(book, nextRunAt=self._hist_next_hourly_at)
+        self._hist_checkpoint(book, "stopped")
 
     def _hist_new_request(self, *, consume: bool = True) -> Dict[str, Any]:
         request = read_hist_request(CONN_SHORT)
@@ -12938,6 +12961,7 @@ class Pulse:
     def _hist_begin_request(self, request: Dict[str, Any], run_id: str) -> None:
         """Automatic runs never un-consume the durable manual request."""
         self._hist_active_run_id = run_id
+        self._hist_active_started_at = time.time()
         if request:
             self._hist_latest_request_id = run_id
             self._hist_request_seen = run_id
@@ -14610,6 +14634,9 @@ class Pulse:
                     self._hist_checkpoint(book, "config-generation-changed")
                     continue
                 if self._hist_request_changed():
+                    if self._hist_desk_stopped():
+                        self._hist_mark_desk_stopped(book)
+                        continue
                     self._hist_checkpoint(book, "superseded-before-replay")
                     continue
                 missing = []
@@ -14733,6 +14760,9 @@ class Pulse:
                 self._hist_replay_retry = ((set(getattr(self, "_hist_replay_retry", set())) | set(replay_names))
                                           - replay_done) & set(valid)
                 if not replayed or self._hist_request_changed():
+                    if self._hist_desk_stopped():
+                        self._hist_mark_desk_stopped(book)
+                        continue
                     self._hist_next_hourly_at = time.time() + 1.0
                     with self.state_guard():
                         book.progress.coordination_complete = False

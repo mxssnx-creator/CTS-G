@@ -1,7 +1,10 @@
 """Actual replay completion, fair retries and calculated input watermarks."""
+import os
 import pathlib
 import sys
+import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -28,6 +31,41 @@ class HistoryCompletionTests(unittest.TestCase):
             self.assertTrue(p._hist_request_changed())
             self.assertTrue(p._hist_request_changed())
             read.assert_called_once()
+
+    def test_desk_stop_aborts_the_generation_it_interrupts(self):
+        import hist_calc as hc
+        conn = 'bingx-x02'
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(hc, 'path_for', lambda name: os.path.join(tmp, name)), \
+                patch('pulse_trader.CONN_SHORT', conn):
+            hc.start_job({'hours': 24, 'symbols': ['BTC-USDT'], 'allSymbols': False}, connection=conn)
+            p = Pulse.__new__(Pulse)
+            p._hist_request_seen = ''
+            request = p._hist_new_request(consume=False)
+            p._hist_begin_request(request, request['runId'])
+            p._hist_request_check_ts = 0
+            self.assertFalse(p._hist_request_changed())
+            hc.stop_job(connection=conn)
+            p._hist_request_check_ts = 0
+            self.assertTrue(p._hist_request_changed())
+            self.assertTrue(p._hist_request_changed())  # fast cached path agrees
+            # A generation that starts after the Stop is not aborted by it.
+            p._hist_active_run_id = ''
+            time.sleep(0.01)
+            p._hist_begin_request({}, f'{conn}:next')
+            p._hist_request_check_ts = 0
+            self.assertFalse(p._hist_request_changed())
+
+    def test_desk_stop_parks_the_lane_as_stopped(self):
+        p = self.harness()
+        p._hist_request_changed = Mock(return_value=True)
+        p._hist_desk_stopped = Mock(return_value=True)
+        p._replay_sets_isolated = Mock(return_value=True)
+        before = time.time()
+        self.run_pass(p)
+        self.assertEqual(p.sets.progress.phase, 'stopped')
+        self.assertGreaterEqual(p._hist_next_hourly_at, before + 60)
+        p._replay_sets_isolated.assert_not_called()
 
     def harness(self, missing=()):
         p = Pulse.__new__(Pulse)
@@ -62,7 +100,7 @@ class HistoryCompletionTests(unittest.TestCase):
         p._hist_fetch_durable = Mock(side_effect=lambda *a: (p.coverage, {}))
         p.api = SimpleNamespace(err=Mock())
         def checkpoint(book, reason):
-            if reason in ('superseded-or-deferred', 'published', 'skip-unchanged', 'error'):
+            if reason in ('superseded-or-deferred', 'superseded-before-replay', 'stopped', 'published', 'skip-unchanged', 'error'):
                 p._hist_stop.set()
         p._hist_checkpoint = Mock(side_effect=checkpoint)
         return p
