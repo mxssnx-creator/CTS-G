@@ -1308,6 +1308,15 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertEqual(ht.clamp_target(250), len(ht._MAJOR_KEYS))
         self.assertEqual(ht.clamp_target(12), 12)
 
+    def test_hist_calc_hours_floor_matches_documented_range(self):
+        import hist_calc as hc
+        self.assertEqual(hc.HOURS_MIN, 2)
+        self.assertEqual(hc.parse_options({"hours": 1})["hours"], 2)
+        self.assertEqual(hc.hours_to_bars(1), 120)
+        self.assertEqual(hc.parse_options({"hours": 2.6})["hours"], 3)
+        self.assertEqual(hc.parse_options({"lookback": 170})["hours"], 3)
+        self.assertEqual(hc.parse_options({"hours": 400})["hours"], 336)
+
 
 if __name__ == "__main__":
     unittest.main()

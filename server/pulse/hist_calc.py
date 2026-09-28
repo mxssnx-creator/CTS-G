@@ -68,7 +68,7 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 48
-HOURS_MIN = 1
+HOURS_MIN = 2  # documented 2–336h window; request_lookback already floors at 120 bars
 # The bounded fourteen-day/336-hour validation window is the maximum
 # supported public window. Keep the exchange request bounded to avoid
 # unbounded RAM/CPU.
@@ -597,7 +597,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             raw_hours = None
     if raw_hours is not None:
         try:
-            opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(float(raw_hours))))
+            opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(round(float(raw_hours)))))
         except Exception:
             pass
     for k, lo, hi in (("minStep", 1, 30), ("stepMax", 1, 30)):
@@ -2930,8 +2930,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
-    rec("hours-one-hour", hours_to_bars(1) == 60 and parse_options({"hours": 1})["hours"] == 1)
-    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 60)
+    rec("hours-min-two-hours", hours_to_bars(1) == 120 and parse_options({"hours": 1})["hours"] == 2)
+    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 120)
     rec("conn-alias-live", _connection_id("live") == "bingx-x01", _connection_id("live"))
     rec("conn-alias-vst", _connection_id("vst") == "bingx-x02", _connection_id("vst"))
     rec("conn-alias-mainnet", _connection_id("mainnet") == "bingx-x01")
@@ -2954,7 +2954,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     range_series = {hours: hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
-        range_series == {1: 60, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
+        range_series == {1: 120, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
