@@ -17,7 +17,8 @@ class RangeTests(unittest.TestCase):
 
     def test_all_six_ranges_and_exact_enabled_subset(self):
         bars = self.rising(100)
-        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], DEFAULT_SETTINGS)
+        # Monotone fixture: identity check uses classic breaks (reversal breaks never fire on it).
+        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], {**DEFAULT_SETTINGS, "breakContextSigma": 0})
         self.assertEqual(len(rows), 6)
         self.assertEqual(len({row.entry_key for row in rows}), 6)
         book = IndicationBook()
@@ -38,6 +39,7 @@ class RangeTests(unittest.TestCase):
         settings = {"histLookbackBars": 120, "histMinBars": 60, "histWarmup": 30,
                     "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [.6], "stratTrailing": False}
         book.load(settings)
+        book.ind_settings["breakContextSigma"] = 0  # classic breaks on the monotone fixture
         book.ingest_bars("X-USDT", self.rising(120))
         prepared = book.prepare_replay_signals("X-USDT", now=1800000000)
         configs = [key for key in prepared[1] if "|" in key]

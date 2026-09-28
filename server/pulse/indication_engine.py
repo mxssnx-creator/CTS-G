@@ -742,13 +742,34 @@ def evaluate_trend(
     )
 
 
+def _break_prior_sigma(closes: List[float], bars: int = 30) -> float:
+    """Population std of the last ``bars`` 1m log returns before the current bar."""
+    import math
+
+    window = closes[-(bars + 2) : -1]
+    if len(window) < bars + 1 or min(window) <= 0:
+        return 0.0
+    rets = [math.log(window[i] / window[i - 1]) for i in range(1, len(window))]
+    mean = sum(rets) / len(rets)
+    return math.sqrt(sum((r - mean) ** 2 for r in rets) / len(rets))
+
+
 def evaluate_break(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """Independent structure break: close beyond the prior N-bar high/low."""
+    """Reversal break: a fresh close beyond the prior N-bar high/low that runs
+    against the frame's larger move.
+
+    Research (48 BingX symbols, 1 week, engine kind-tape exits, train-only
+    selection): plain N-bar breaks carry ~zero gross edge in either direction,
+    but a break that turns against the 59-bar move by >= ``breakContextSigma``
+    prior-bar sigmas has a clearly positive gross edge (1m mean reversion
+    triggered by structure). ``breakContextSigma`` <= 0 restores the classic
+    break (any context, no freshness gate).
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     rng = max(8, int(settings.get("breakRange") or settings.get("dirRange") or 16))
@@ -764,11 +785,32 @@ def evaluate_break(
     if long_brk == short_brk:
         return None
     want = "long" if long_brk else "short"
+    sign = 1.0 if want == "long" else -1.0
     ref = hi if want == "long" else lo
     brk = abs(_pct(ref, last))
     noise = float(settings.get("activeNoise") or 0.05)
     if brk + 1e-12 < max(0.04, noise * 0.5):
         return None
+    ctx_sigma = float(settings.get("breakContextSigma", 6.0) or 0.0)
+    ctx_z = 0.0
+    if ctx_sigma > 0:
+        # Stay inside the 60-bar frame: context return spans bars[-60..-1].
+        ctx_bars = max(20, min(59, int(settings.get("breakContextBars", 59) or 59)))
+        if len(closes) < max(ctx_bars + 1, 32, rng + 2):
+            return None
+        # Freshness: fire on the first bar of the break only.
+        if settings.get("breakFresh", True):
+            prev = closes[-2]
+            p_prior = closes[-(rng + 2) : -2]
+            if (want == "long" and prev > max(p_prior)) or (want == "short" and prev < min(p_prior)):
+                return None
+        sigma = _break_prior_sigma(closes, 30)
+        base = closes[-(ctx_bars + 1)]
+        if sigma <= 0 or base <= 0:
+            return None
+        ctx_z = (last / base - 1.0) * sign / sigma
+        if ctx_z > -ctx_sigma:
+            return None
     steps = [closes[i] - closes[i - 1] for i in range(-min(8, len(closes) - 1), 0)]
     ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
     if ev["selected"] and ev["selected"] != want:
@@ -778,8 +820,9 @@ def evaluate_break(
     conf = clamp(0.55 + min(0.35, brk * 8.0) + agr * 0.08, 0.5, 0.99)
     if conf < float(settings.get("minimumConfidence", 0.6)) * 0.88:
         return None
+    source = f"break:{rng}:{brk:.3f}" + (f":rev{ctx_z:.1f}" if ctx_sigma > 0 else "")
     return _kind_indication(
-        symbol, "break", want, strength, last, settings, [f"break:{rng}:{brk:.3f}"],
+        symbol, "break", want, strength, last, settings, [source],
         agreement=agr, mode=f"break:{rng}", conf=conf,
     )
 
@@ -2043,7 +2086,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
            f"kinds={sorted({r.kind for r in rows6})}")
     tr = evaluate_trend("TR-USDT", [b[3] for b in up], st)
     t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
-    brk_px = [100.0] * 20 + [102.2]
+    # Reversal break: 40-bar decline, basing, then a fresh close above the base.
+    brk_px = [106.0 - 0.15 * i + (0.03 if i % 2 else -0.03) for i in range(40)]
+    brk_px += [100.0 + 0.02 * i + (0.08 if i % 2 else 0.0) for i in range(19)]
+    brk_px.append(max(brk_px[-16:]) + 0.3)
     br = evaluate_break("BR-USDT", brk_px, st)
     t32 = (br is not None and br.kind == "break" and br.direction == "long", f"br={br.kind if br else None} {br.direction if br else None}")
     book.settings["typeTrend"] = True
