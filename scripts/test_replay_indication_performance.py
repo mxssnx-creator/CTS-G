@@ -248,7 +248,8 @@ class ReplayIndicationTests(unittest.TestCase):
 
         bars = _fixture("rising")
         book = IndicationBook()
-        book.settings.update(minimumConfidence=0.4, minimumStrength=0.05, tfCombined=True, tfMinAgree=2)
+        # Lane plumbing test: pin the trend-following Signals model so a steady rise fires.
+        book.settings.update(minimumConfidence=0.4, minimumStrength=0.05, tfCombined=True, tfMinAgree=2, signalsModel="trend")
         rows = book.process(
             "SHED-USDT",
             bars,
@@ -325,7 +326,8 @@ class ReplayIndicationTests(unittest.TestCase):
     def test_mixed_timeframes_keep_independent_lanes(self):
         bars = _fixture("rising")
         book = IndicationBook()
-        book.settings.update(minimumConfidence=0.4, minimumStrength=0.05)
+        # Lane plumbing test: pin the trend-following Signals model so a steady rise fires.
+        book.settings.update(minimumConfidence=0.4, minimumStrength=0.05, signalsModel="trend")
         rows = book.process(
             "MIX-USDT",
             bars,
