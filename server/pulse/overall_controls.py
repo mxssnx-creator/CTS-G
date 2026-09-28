@@ -46,25 +46,57 @@ def save_cleanup(pulse):
     os.replace(path+'.tmp',path)
 
 
+def _order_terminal(pulse, symbol, oid):
+    """Whether the venue confirms ``oid`` can no longer execute."""
+    found = pulse.api.get('/openApi/swap/v2/trade/order',{'symbol':symbol,'orderId':oid})
+    if str(found.get('code')) in ('109400','109421') and 'not exist' in str(found.get('msg') or '').lower():
+        return True
+    data = found.get('data') or {}
+    order = data.get('order',data) if isinstance(data,dict) else {}
+    return bool(pulse.ok(found) and str(order.get('orderId')) == str(oid)
+                and str(order.get('status') or '').upper() in ('FILLED','CANCELED','CANCELLED','EXPIRED','REJECTED'))
+
+
 def drain_cleanup(pulse):
     pending = cleanup_state(pulse)
     if not pending or time.monotonic() < getattr(pulse,'_overall_final_cleanup_next',0):
         return
     pulse._overall_final_cleanup_next = time.monotonic()+1
     active = {getattr(p,f,'') for p in pulse.open.values() for f in FIELDS}-{''}
-    for oid,symbol in list(pending.items())[:2]:
-        if oid not in active and pulse.cancel_order(symbol,oid):
+    sent = 0
+    for oid,symbol in list(pending.items()):
+        if sent >= 2:
+            break
+        if oid in active:
+            continue  # Still protecting a live lot; never head-of-line block.
+        sent += 1
+        if pulse.cancel_order(symbol,oid) or _order_terminal(pulse,symbol,oid):
             pending.pop(oid,None)
             save_cleanup(pulse)
+        else:
+            # A refused cancel for a still-live order is retried, paced.
+            pulse._overall_final_cleanup_next = time.monotonic()+15
 
 
-def closed_member(pulse,pos):
-    """Retain cancellation intent after the last lot disappears from the book."""
+def closed_member(pulse,pos,filled_oid=''):
+    """Retain cancellation intent after a lot's final close.
+
+    Shared (overall) IDs pass to a remaining same-direction member, or to the
+    persisted cleanup queue after the last one. A per-config lot owns its pair
+    alone, so its IDs are queued directly: the fill poll, reconciliation and
+    control-fill paths close lots without the synchronous close_pos() cancel.
+    """
+    shared = enabled(pulse,pos) or bool(getattr(pos,'overall_controls',False))
     rows = [p for p in pulse.open.values() if p is not pos and p.symbol == pos.symbol
-            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0]
+            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0] if shared else []
     ids = ({getattr(pos,f,'') for f in FIELDS} | set(pos.retired_control_ids))-{''}
+    if not shared:
+        ids.discard(str(filled_oid or ''))
     cache = getattr(pulse,'_overall_pairs',{})
-    cache.pop((pos.symbol,pos.side),None)
+    if shared:
+        cache.pop((pos.symbol,pos.side),None)
+    if not ids:
+        return
     if rows:
         rows[0].retired_control_ids = sorted(set(rows[0].retired_control_ids) | ids)
         rows[0].overall_bindings = {**pos.overall_bindings, **rows[0].overall_bindings}
@@ -72,6 +104,7 @@ def closed_member(pulse,pos):
         pending = cleanup_state(pulse)
         pending.update({oid:pos.symbol for oid in ids})
         save_cleanup(pulse)
+        pulse._overall_final_cleanup_next = 0
 
 
 def enabled(pulse, pos=None):
@@ -122,11 +155,18 @@ def replace_existing(pulse, proxy, rows, signature):
         intent = next((p.overall_replace_intents.get(kind) for p in rows if p.overall_replace_intents.get(kind)),None)
         response = None
         if not intent:
+            # Recover an accepted order whose response was lost. It must carry
+            # the wanted trigger as well as the wanted size: an old order at
+            # the same size (a trailed or restarted range) is what is being
+            # replaced, not proof that the replacement already exists.
+            contract = pulse.contracts.get(proxy.symbol)
+            want_px = pulse.fmt_px(contract, pulse.clamp_ctrl_price(proxy, kind, price))
             matches = [o for o in pulse.list_orders(proxy.symbol)
                 if pulse._order_matches_position(o,proxy)
                 and o.get('status') == 'NEW'
                 and o.get('type') == ('STOP_MARKET' if kind == 'sl' else 'TAKE_PROFIT_MARKET')
                 and abs(float(o.get('origQty') or o.get('quantity') or 0)-proxy.qty) < 1e-9
+                and pulse.fmt_px(contract, float(o.get('stopPrice') or 0)) == want_px
                 and float(o.get('executedQty') or 0) == 0]
             if len(matches) == 1:
                 order = matches[0]
@@ -223,8 +263,12 @@ def replace_existing(pulse, proxy, rows, signature):
         for p in rows:
             p.overall_replace_intents.pop(kind,None)
             old = getattr(p,field,'')
+            # The venue confirmed old_oid cancelled; retiring it again would
+            # only spend a DELETE on "order not exist".
+            retired = set(p.retired_control_ids) - {old_oid}
             if old and old != old_oid:
-                p.retired_control_ids = sorted(set(p.retired_control_ids) | {old})
+                retired.add(old)
+            p.retired_control_ids = sorted(retired)
             if p is rows[0]:
                 p.overall_bindings = {**p.overall_bindings,new_oid:dict(binding)}
             setattr(p,field,new_oid)
@@ -357,6 +401,8 @@ def ensure(pulse, pos):
                 and p.sl_oid == rows[0].sl_oid and p.tp_oid == rows[0].tp_oid
                 and tuple(getattr(p,'overall_signature',[])) == signature for p in rows):
             cache[key] = dict(signature=signature, sl=rows[0].sl_oid, tp=rows[0].tp_oid,verify_after=time.monotonic()+15)
+            for p in rows:
+                p.controls_ok = True
             return True
         proxy = copy(pos)
         proxy._overall_proxy = True
@@ -389,6 +435,10 @@ def ensure(pulse, pos):
         existing_pair = any(p.sl_oid or p.tp_oid for p in rows)
         if existing_pair:
             if not replace_existing(pulse,proxy,rows,signature):
+                # The live pair (if any) no longer matches the group's size or
+                # range: it is not reported as a protected pair until resized.
+                for p in rows:
+                    p.controls_ok = False
                 return False
         else:
             pulse.place_ctrl_pair(proxy)

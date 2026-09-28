@@ -348,6 +348,7 @@ class OverallTests(unittest.TestCase):
         mode,groups,expected,protected,gaps=p._control_pair_counts()
         self.assertEqual((mode,groups,expected,protected,gaps),('overall',1,1,0,1))
         reject_tp[0]=False;posted.clear()
+        p.ctrl_skip.clear()  # the rejected leg's retry pause has elapsed
         self.assertTrue(overall.ensure(p,pos))
         self.assertEqual(pos.sl_oid,sl_oid)
         self.assertTrue(pos.tp_oid)

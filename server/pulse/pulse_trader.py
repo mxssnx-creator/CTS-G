@@ -4458,6 +4458,10 @@ class Pulse:
                 or now < self.ctrl_skip.get(f"flat:{pos.symbol}:{pos.side}", 0)
                 or now < self.ctrl_skip.get(self._control_minimum_key(pos), 0))
 
+    @staticmethod
+    def _ctrl_retry_key(scope: str, is_sl: bool) -> str:
+        return f"retry:{scope}:{'sl' if is_sl else 'tp'}"
+
     def _control_minimum_key(self, pos: Position) -> str:
         # Equal-size sibling sets share the venue floor. A changed quantity
         # may be legal immediately and must not inherit the old rejection.
@@ -4521,6 +4525,13 @@ class Pulse:
         quantity_matched = self.per_config_controls(pos) or bool(getattr(pos, "_overall_proxy", False))
         scope = self.position_key(pos) if quantity_matched else self.legacy_position_key(pos)
         if have_this and time.time() < self.ctrl_skip.get(scope, 0):
+            return have_this
+        # A rejected leg is retried with a growing pause. Without it every
+        # control pass re-sent all payload forms for a persistently rejected
+        # leg (8-16 order requests per second per group) into the venue's
+        # order-rate ban, while the gap stays reported by priority_controls.
+        retry_key = self._ctrl_retry_key(scope, is_sl)
+        if time.time() < self.ctrl_skip.get(retry_key, 0):
             return have_this
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
             self.refresh_px_one(pos.symbol)
@@ -4732,7 +4743,12 @@ class Pulse:
                 self.ctrl_skip[scope] = time.time() + 45
             elif kind_err == "qty":
                 self.ctrl_skip[scope] = time.time() + 60
+            failures = self.__dict__.setdefault("_ctrl_retry_n", {})
+            failures[retry_key] = min(8, int(failures.get(retry_key, 0)) + 1)
+            self.ctrl_skip[retry_key] = time.time() + min(120.0, 5.0 * 2 ** (failures[retry_key] - 1))
             return ""
+        self.__dict__.setdefault("_ctrl_retry_n", {}).pop(retry_key, None)
+        self.ctrl_skip.pop(retry_key, None)
         pos.overall = True
         pos.ctrl_qty = max(float(pos.qty or 0), float(qty_s or 0) or float(pos.qty or 0))
         if is_sl:
@@ -4748,6 +4764,29 @@ class Pulse:
         self._oo_cache.pop(pos.symbol, None)
         log(f"CTRL {kind} {pos.symbol} {pos.side} oid={oid} closePos={pos.close_position} qty={pos.qty} @{price}")
         return oid
+
+    def _verify_control_legs(self, pos: Position) -> None:
+        """Forget a leg the venue confirms can no longer execute (no fill)."""
+        rows = self.list_orders(pos.symbol)
+        if bool(getattr(self, "exchange_order_snapshot_pending", True)):
+            return  # Only a confirmed snapshot may prompt the per-order check.
+        live = {real_oid(o.get("orderId") or o.get("orderID")) for o in rows}
+        for fields in (("sl_oid", "sec_sl_oid"), ("tp_oid", "sec_tp_oid")):
+            oid = real_oid(getattr(pos, fields[0], ""))
+            if not oid or oid in live:
+                continue
+            found = self.api.get("/openApi/swap/v2/trade/order", {"symbol": pos.symbol, "orderId": oid})
+            data = found.get("data") or {}
+            order = data.get("order", data) if isinstance(data, dict) else {}
+            if not (self.ok(found) and real_oid(order.get("orderId")) == oid):
+                continue
+            if (str(order.get("status") or "").upper() in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED")
+                    and _sf(order.get("executedQty")) <= 0):
+                for name in fields:
+                    if real_oid(getattr(pos, name, "")) == oid:
+                        setattr(pos, name, "")
+                pos.controls_ok = pos.ctrl_verified = False
+                self.save_open_book()
 
     def missing_controls(self, pos: Position) -> bool:
         if not getattr(self, "control_orders", True):
@@ -4869,7 +4908,15 @@ class Pulse:
                 continue
             px = self.px.get(pos.symbol) or pos.entry
             scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
+            if not self.missing_controls(pos) and now >= self.ctrl_skip.get(f"verify:{scope}", 0):
+                # Overall pairs are verified by overall_controls.verify_pair();
+                # a per-config leg cancelled or expired at the venue must also
+                # stop counting as protection and be re-placed.
+                self.ctrl_skip[f"verify:{scope}"] = now + 15.0
+                self._verify_control_legs(pos)
             need = self.missing_controls(pos)
+            if not need and not bool(getattr(pos, "controls_ok", False)):
+                need = True  # e.g. an old-size leg kept after a rejected resize.
             illegal = (not need) and now >= self.ctrl_skip.get(f"legal:{scope}", 0) and self.controls_illegal(pos)
             if not need and not illegal:
                 continue
@@ -4935,6 +4982,18 @@ class Pulse:
                 self.clear_position_controls(pos)
         scope = self.position_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
         if time.time() < self.ctrl_skip.get(scope, 0) and pos.sl_oid and pos.tp_oid:
+            return
+        now = time.time()
+        if not getattr(pos, "_overall_proxy", False) and (
+                now < self.ctrl_skip.get(self._ctrl_retry_key(scope, True), 0)
+                or now < self.ctrl_skip.get(self._ctrl_retry_key(scope, False), 0)):
+            # A leg is in its rejection back-off: do not bypass it through the
+            # batch endpoint. place_ctrl() below honours each leg's own pause.
+            if not real_oid(pos.sl_oid):
+                pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", self.desired_sl_tp(pos)[0])
+            if not real_oid(pos.tp_oid):
+                pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", self.desired_sl_tp(pos)[1])
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
             return
         want_sl, want_tp, _, _ = self.desired_sl_tp(pos)
         # BingX applies a separate hard quota to /trade/batchOrders.  Overall
@@ -5137,9 +5196,9 @@ class Pulse:
                 return pos.qty * 0.95 <= q <= pos.qty * 1.05
             return q + 1e-12 >= pos.qty * 0.95
 
+        # A wrong-size leg is replaced before it is cancelled (below), so a
+        # rejected replacement never leaves the group without that leg.
         stale = [o for o in sls + tps if not qty_ok(o)]
-        for extra in stale:
-            self.cancel_order(pos.symbol, str(extra.get("orderId")), self.order_cid(extra))
         sls = [o for o in sls if o not in stale]
         tps = [o for o in tps if o not in stale]
         sec_sls = [o for o in sls if self._cid_kind(o) == "u" or str(o.get("closePosition")).lower() in ("true", "1")]
@@ -5221,7 +5280,14 @@ class Pulse:
         pos.tp_oid = pos.sec_tp_oid = _place_side(False, pos.tp_oid or pos.sec_tp_oid, pos.tp, want_tp, bool(tps), tps)
         if pos.tp_oid and (pos.tp_oid != old_tp_oid or not pos.tp or not self.tp_legal(pos, pos.tp)):
             pos.tp = want_tp
-        pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+        kept_stale = False
+        for extra in stale:
+            stale_oid = real_oid(extra.get("orderId") or extra.get("orderID"))
+            if stale_oid and stale_oid in (real_oid(pos.sl_oid), real_oid(pos.tp_oid)):
+                kept_stale = True  # Its replacement was not accepted yet.
+                continue
+            self.cancel_order(pos.symbol, stale_oid, self.order_cid(extra))
+        pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) and not kept_stale
         pos.ctrl_verified = bool(sls and tps)
         pos.ctrl_qty = pos.qty
         pos.overall = bool((real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) or (real_oid(pos.sec_sl_oid) and real_oid(pos.sec_tp_oid)))
@@ -6970,16 +7036,17 @@ class Pulse:
             # A partially executed close must leave a fresh, quantity-matched
             # protection pair for the remainder. This is deliberately scoped
             # to this logical group and cannot cancel another group's orders.
+            # The remainder stays covered throughout: the old (larger) pair is
+            # only retired after its replacement is confirmed. Overall pairs
+            # are resized in place by cancelReplace inside ensure().
             if getattr(self, "control_orders", True) and not getattr(self, "_overall_applying_fill", False):
-                try:
-                    self.cancel_controls(pos.symbol, pos=pos)
-                except Exception:
-                    pass
-                self.clear_position_controls(pos)
-                try:
-                    self.ensure_controls(pos)
-                except Exception:
-                    pass
+                if overall_controls.enabled(self, pos):
+                    try:
+                        overall_controls.ensure(self, pos)
+                    except Exception:
+                        pass
+                else:
+                    self._replace_partial_controls(pos)
             self.save_open_book()
             self._stats_force = True
             return True
@@ -6995,8 +7062,11 @@ class Pulse:
                 pass
         if close_cid:
             self.seen_fill_cids.add(close_cid)
-        if getattr(pos,"overall_controls",False):
-            overall_controls.closed_member(self,pos)
+        # Every final close retires this lot's control IDs durably (shared IDs
+        # pass to a sibling). Previously only overall-bound lots did, so a
+        # per-config pair, or retired IDs inherited by a not-yet-bound member,
+        # stayed live on the venue after an asynchronous close.
+        overall_controls.closed_member(self, pos, filled_oid=close_oid)
         if skip:
             self.remove_position(pos)
             self.ban_sym(pos.symbol, clear_open=False)
@@ -7010,9 +7080,48 @@ class Pulse:
             siblings = overall_controls.members(self,pos)
             if siblings:
                 overall_controls.ensure(self,siblings[0])
+        if not getattr(self,"_overall_applying_fill",False):
             overall_controls.drain_cleanup(self)
         self._stats_force = True
         return True
+
+    def _replace_partial_controls(self, pos: Position) -> None:
+        """Place the remainder's pair first, then retire the old larger pair.
+
+        A leg that could not be re-placed keeps its old order (still
+        protective, oversized); ``ctrl_qty`` keeps the old size so the next
+        control pass resizes it.
+        """
+        old = {
+            "sl": real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", "")),
+            "tp": real_oid(pos.tp_oid) or real_oid(getattr(pos, "sec_tp_oid", "")),
+        }
+        old_qty = float(getattr(pos, "ctrl_qty", 0.0) or 0.0)
+        # IDs still shared with overall siblings are only retired (drained once
+        # no member references them), never cancelled from here.
+        shared = bool(getattr(pos, "overall_controls", False))
+        self.clear_position_controls(pos)
+        try:
+            # place_ctrl_pair() never cancels; ensure_controls() would cancel
+            # the old pair as "stale" even when its replacement was rejected.
+            self.place_ctrl_pair(pos)
+        except Exception:
+            pass
+        kept = False
+        for leg, fields in (("sl", ("sl_oid", "sec_sl_oid")), ("tp", ("tp_oid", "sec_tp_oid"))):
+            oid = old[leg]
+            if not oid:
+                continue
+            if not real_oid(getattr(pos, fields[0], "")):
+                for name in fields:
+                    setattr(pos, name, oid)
+                kept = True
+                continue
+            if oid != real_oid(getattr(pos, fields[0], "")) and (shared or not self.cancel_order(pos.symbol, oid)):
+                pos.retired_control_ids = sorted(set(getattr(pos, "retired_control_ids", []) or []) | {oid})
+        if kept:
+            pos.controls_ok = pos.ctrl_verified = False
+            pos.ctrl_qty = old_qty
 
     def close_pos(self, pos: Position, px: float, reason: str, exchange: bool = True) -> None:
         skip_eval = any(k in str(reason or "").lower() for k in ("oversized", "ctrl-no-position", "no-ctrl"))
@@ -12217,17 +12326,28 @@ class Pulse:
         if overall:
             control_mode = "overall"
         groups: Dict[Tuple[str, str], List[Any]] = {}
-        for row in self.open.values():
+        own = [row for row in self.open.values() if self.position_is_ours(row)]
+        for row in own:
             groups.setdefault((row.symbol, row.side), []).append(row)
-        pair_count = len(groups) if overall else len(self.open)
+        pair_count = len(groups) if overall else len(own)
         expected = pair_count if bool(getattr(self, "control_orders", True)) else 0
         protected = 0
+        if not expected:
+            # Controls disabled: nothing is expected, so nothing is a gap.
+            return control_mode, pair_count, expected, 0, 0
         if overall:
             for rows in groups.values():
                 pairs = {(real_oid(getattr(row, "sl_oid", "")), real_oid(getattr(row, "tp_oid", ""))) for row in rows}
                 # A lone SL or TP is not a protected pair.
-                if len(pairs) == 1 and all(next(iter(pairs))):
+                if len(pairs) == 1 and all(next(iter(pairs))) and all(
+                        bool(getattr(row, "controls_ok", False)) for row in rows):
                     protected += 1
+        else:
+            protected = sum(
+                1 for row in own
+                if bool(getattr(row, "controls_ok", False))
+                and real_oid(getattr(row, "sl_oid", "")) and real_oid(getattr(row, "tp_oid", ""))
+            )
         return control_mode, pair_count, expected, protected, max(0, expected - protected)
 
     def _coverage_blob(self, set_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -12500,12 +12620,12 @@ class Pulse:
                 "mode": control_mode,
                 "pairCount": expected_control_pairs,
                 "expectedPairs": expected_control_pairs,
-                "protectedPairs": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
-                "pairGaps": overall_pair_gaps if control_mode == "overall" else sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
+                "protectedPairs": overall_pair_ok,
+                "pairGaps": overall_pair_gaps,
                 "aggregatePairCount": expected_control_pairs if control_mode in ("aggregate", "overall") else 0,
                 "logicalPositionCap": MAX_OPEN,
                 "groupCount": pair_count,
-                "protectedGroups": overall_pair_ok if control_mode == "overall" else sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
+                "protectedGroups": overall_pair_ok,
                 "memberProtected": sum(1 for p in self.open.values() if bool(getattr(p, "controls_ok", False))),
                 "memberMissing": sum(1 for p in self.open.values() if not (p.sl_oid and p.tp_oid)),
                 "mergedMembers": sum(max(1, int(getattr(p, "member_count", 1) or 1)) for p in self.open.values()),
