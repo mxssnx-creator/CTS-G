@@ -6452,9 +6452,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
-    # hist replay scores each indication kind independently (not pack-consensus copies)
+    # hist replay scores each indication kind independently (not pack-consensus copies).
+    # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
+    # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]

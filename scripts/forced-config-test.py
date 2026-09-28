@@ -61,7 +61,14 @@ class ForcedTests(unittest.TestCase):
             from set_engine import IND_TAG_KIND
             tag = next(k for k,v in IND_TAG_KIND.items() if v == "signals")
             with patch("pulse_trader.indication_kind_votes", return_value=[(1,.9,tag)]):
-                for _ in range(4): p.maybe_forced_entries()
+                # The per-cycle batch is load-governed (an intern desk caps it
+                # so SL/TP keep running); coverage must still be complete.
+                batch, _ = p._entry_window_limits()
+                for _ in range(2 * (len(rows) // batch + 2)):
+                    p.maybe_forced_entries()
+                    self.assertLessEqual(p._forced_entry_queue["examined"], batch)
+                    if len(accepted) == len(rows):
+                        break
         self.assertEqual(len(accepted),700)
         self.assertEqual(attempts["0"],2)
         self.assertTrue(all(n==1 for sid,n in attempts.items() if sid != "0"))
