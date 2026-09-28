@@ -663,33 +663,69 @@ def evaluate_direction(
     )
 
 
+import math  # noqa: E402  (kept with the Move block)
+
+MOVE_FRAME = 60  # engine frame: current bar + 59 prior closes
+MOVE_MIN_PRIOR_RETURNS = 10
+
+
+def move_fade_stats(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
+    """Move extreme statistics inside the engine frame (last 60 closes).
+
+    d  = R-bar displacement close[-R] -> close[-1]
+    sd = sample std of the 1m log returns strictly before the R-bar window
+    z  = |d| / (sd * sqrt(R - 1))
+    last = last-bar return (reversal confirmation when opposite to d)
+    """
+    c = [float(x) for x in list(closes)[-MOVE_FRAME:]]
+    rng = int(rng)
+    if rng < 2 or len(c) < rng or any(x <= 0 for x in c):
+        return None
+    prior = c[: len(c) - rng + 1]
+    rets = [math.log(prior[i] / prior[i - 1]) for i in range(1, len(prior))]
+    if len(rets) < MOVE_MIN_PRIOR_RETURNS:
+        return None
+    mean = sum(rets) / len(rets)
+    sd = math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+    d = c[-1] / c[-rng] - 1.0
+    z = abs(d) / (sd * math.sqrt(rng - 1)) if sd > 0 else float("inf")
+    return {"d": d, "sd": sd, "z": z, "last": c[-1] / c[-2] - 1.0}
+
+
 def evaluate_move(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    """CTS Move: same-window displacement, independent direction agrees with the net move."""
+    """CTS Move: fade volatility-normalized extreme R-bar moves.
+
+    Fires opposite to the R-bar displacement when moveZMin <= z < moveZMax
+    (z vs the frame's pre-window 1m sigma) and the last bar already ticks
+    against the move. Extreme z (>= moveZMax) keeps running, so it is skipped.
+    Each range is its own config identity: mode "move:<R>".
+    """
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
-    rng = max(4, int(settings.get("moveRange") or 10))
-    if len(closes) < rng:
+    rng = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
+    st = move_fade_stats(closes, rng)
+    if st is None:
         return None
-    window = closes[-rng:]
-    d = _dir_of(window)
+    d, z = st["d"], st["z"]
     min_ch = float(settings.get("moveMinChange") or 0.001)
-    if abs(d) < min_ch:
+    z_min = float(settings.get("moveZMin", 2.0))
+    z_max = float(settings.get("moveZMax", 3.0))
+    if abs(d) < min_ch or not (z_min <= z < z_max):
         return None
-    steps = [window[i] - window[i - 1] for i in range(1, len(window))]
-    ev = evaluate_independent_directions(steps, min_evidence=1, min_agreement=0.45)
-    want = "long" if d > 0 else "short"
-    if ev["selected"] and ev["selected"] != want:
+    if bool(settings.get("moveConfirm", True)) and st["last"] * d >= 0:
         return None
-    strength = clamp(abs(d) * 25.0, 0.0, 1.0)
-    agr = float((ev.get(want) or {}).get("agreement") or 1.0)
+    want = "short" if d > 0 else "long"
+    band = clamp((z - z_min) / max(1e-9, z_max - z_min), 0.0, 1.0)
+    strength = clamp(z / max(1e-9, z_max), 0.0, 1.0)
+    conf = clamp(0.6 + 0.1 * band, 0.5, 0.99)
     return _kind_indication(
-        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}"],
-        agreement=agr, mode="move",
+        symbol, "move", want, strength, closes[-1], settings, [f"move:{rng}:z{z:.2f}"],
+        agreement=1.0, mode=f"move:{rng}", conf=conf,
     )
 
 
@@ -810,6 +846,15 @@ def evaluate_range_configs(symbol, closes, settings, frame=None):
     if settings.get("typeBreak", True):
         for period in indication_ranges(settings.get("breakRanges"), (8, 16, 32)):
             row = evaluate_break(symbol, closes, {**settings, "breakRange": period}, frame)
+            if row:
+                rows.append(row)
+    if settings.get("typeMove", True):
+        # The primary Move range (moveFadeRange) runs through evaluate_move itself.
+        primary = max(8, min(55, int(settings.get("moveFadeRange") or 30)))
+        for period in indication_ranges(settings.get("moveRanges"), (20, 30, 40)):
+            if period == primary:
+                continue
+            row = evaluate_move(symbol, closes, {**settings, "moveFadeRange": period}, frame)
             if row:
                 rows.append(row)
     return rows
@@ -1330,6 +1375,7 @@ class IndicationBook:
         s["moveRange"] = int(overlay.get("indMoveRange") or s.get("moveRange") or 10)
         s["trendRanges"] = indication_ranges(overlay.get("indTrendRanges", s.get("trendRanges")), (13, 21, 34))
         s["breakRanges"] = indication_ranges(overlay.get("indBreakRanges", s.get("breakRanges")), (8, 16, 32))
+        s["moveRanges"] = indication_ranges(overlay.get("indMoveRanges", s.get("moveRanges")), (20, 30, 40))
         outbreaks = overlay.get("activeOutbreakRanges") or overlay.get("indActiveOutbreak")
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
@@ -1920,11 +1966,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st2["minimumConfidence"] = 0.4
     drow = evaluate_direction("REV-USDT", [b[3] for b in rev], st2)
     t7 = (drow is not None and drow.direction == "long" and drow.kind == "direction", f"dir={drow.direction if drow else None} str={drow.strength if drow else 0:.3f}")
-    # Move: persistent up
-    mrow = evaluate_move("MOV-USDT", [b[3] for b in up], st2)
-    t8 = (mrow is not None and mrow.direction == "long" and mrow.kind == "move", f"move={mrow.direction if mrow else None}")
-    # Move must not require reversal (same-dir)
-    t8b = (mrow is not None, "move-same-dir")
+    # Move: fade a 2-3 sigma 30-bar spike once the last bar ticks back
+    fade_px = [100.0 * (1.001 if i % 2 else 1.0) for i in range(31)]
+    fade_px += [fade_px[-1] * (1 + 0.0155 * (i + 1) / 28) for i in range(28)]
+    fade_px.append(fade_px[-1] * 0.9995)
+    mrow = evaluate_move("MOV-USDT", fade_px, st2)
+    t8 = (mrow is not None and mrow.direction == "short" and mrow.kind == "move" and mrow.mode == "move:30",
+          f"move={mrow.direction if mrow else None} mode={mrow.mode if mrow else None}")
+    # Beyond the z cap (runaway move) Move stays out
+    runaway = fade_px[:31] + [fade_px[30] * (1 + 0.04 * (i + 1) / 28) for i in range(28)]
+    runaway.append(runaway[-1] * 0.9995)
+    t8b = (evaluate_move("MOV-USDT", runaway, st2) is None, "move-z-cap")
     # Active outbreak: quiet then sharp breakout
     act_px = [100.0] * 12
     for i in range(8):
@@ -2116,7 +2168,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-tf-majority", t5[0], t5[1]),
         ("ind-tf-independent", t6[0], t6[1]),
         ("ind-direction-reversal", t7[0], t7[1]),
-        ("ind-move-same-dir", t8[0] and t8b[0], t8[1]),
+        ("ind-move-fade-extreme", t8[0] and t8b[0], t8[1]),
         ("ind-active-outbreak", t9[0], t9[1]),
         ("ind-common-ta", t10[0], t10[1]),
         ("ind-type-flags", t11[0], t11[1]),

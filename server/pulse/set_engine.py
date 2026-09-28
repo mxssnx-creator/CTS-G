@@ -1581,6 +1581,7 @@ class SetBook:
             "dirRange": int(ov.get("indDirRange") or 10),
             "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
             "breakRanges": indication_ranges(ov.get("indBreakRanges"), (8, 16, 32)),
+            "moveRanges": indication_ranges(ov.get("indMoveRanges"), (20, 30, 40)),
             "dirMinChange": float(ov.get("indDirMinChange") or 0.001),
             "moveRange": int(ov.get("indMoveRange") or 10),
             "moveMinChange": float(ov.get("indMoveMinChange") or 0.001),
@@ -3064,7 +3065,7 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
-                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True):
+                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True) or self.ind_settings.get("typeMove", True):
                     config_frame = indication_frame.window(lo, i + 1)
                     for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
                         key = row.kind + "|" + row.mode
@@ -6455,7 +6456,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
     # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "setMinPf": 1.0})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
