@@ -11981,6 +11981,7 @@ class Pulse:
             "systemSource": act.get("source", "system-orders"),
             "executionEvidence": execution_evidence,
             "pnlPct": round(float(act["pnlPct"]), 3),
+            "tradedNotional": round(float(act.get("tradedNotional") or 0.0), 4),
             "drawdownPct": round(max(0, dd), 3),
             "drawdownAmount": act["drawdownAmount"],
             "drawdownAvailable": act["drawdownAvailable"],
