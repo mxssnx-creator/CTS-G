@@ -60,7 +60,7 @@ from block_engine import (
     normalize_block_counts,
     shared_block_volume_ratio,
 )
-from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 
@@ -788,8 +788,39 @@ def votes_to_signal(votes: Sequence[Tuple[int, float, str]]) -> Tuple[int, float
     return 0, max(long_w, short_w), "split"
 
 
+def core_pack_votes(
+    votes: Sequence[Tuple[int, float, str]],
+    frame: Optional[IndicationFrame],
+    settings: Dict[str, Any],
+) -> List[Tuple[int, float, str]]:
+    """Votes for the combined core ``indications`` pack.
+
+    The State kind lane (tag ``ta``) fades stretched trends by default. The
+    combined core pack keeps the previous RSI/MACD/EMA follow vote in the same
+    slot so core Sets are unaffected by the State lane change.
+    """
+    votes = list(votes)
+    if frame is None or not frame.candles or not settings.get("typeState", True):
+        return votes
+    if str(settings.get("stateMode", "fade") or "fade").lower() in ("follow", "legacy"):
+        return votes
+    out = [v for v in votes if v[2] != "ta"]
+    try:
+        ta = evaluate_ta_pack_follow(frame, settings)
+    except Exception:
+        ta = None
+    if ta:
+        at = 1 if out and out[0][2] == "sig" else 0
+        out.insert(at, (1 if ta.direction == "long" else -1, float(ta.confidence), "ta"))
+    return out
+
+
 def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
-    return votes_to_signal(indication_kind_votes(bars, settings, now))
+    votes = indication_kind_votes(bars, settings, now)
+    if indication_kind_votes is not _DEFAULT_INDICATION_KIND_VOTES:
+        return votes_to_signal(votes)
+    frame = build_indication_frame(list(bars)[-60:], now=now, period_s=BAR_S)
+    return votes_to_signal(core_pack_votes(votes, frame, settings))
 
 
 def hit_exit(
@@ -3053,12 +3084,14 @@ class SetBook:
             if "general" in self.packs:
                 signals["general"][i] = general_signal(window)
             if "indications" in self.packs and indication_frame is not None:
+                vote_frame = None
                 if indication_kind_votes is _DEFAULT_INDICATION_KIND_VOTES:
-                    votes = indication_kind_votes_frame(indication_frame.window(lo, i + 1), self.ind_settings)
+                    vote_frame = indication_frame.window(lo, i + 1)
+                    votes = indication_kind_votes_frame(vote_frame, self.ind_settings)
                 else:
                     ts = frame_now - (n - 1 - i) * BAR_S
                     votes = indication_kind_votes(window, self.ind_settings, ts)
-                signals["indications"][i] = votes_to_signal(votes)
+                signals["indications"][i] = votes_to_signal(core_pack_votes(votes, vote_frame, self.ind_settings))
                 for d, conf, tag in votes:
                     kind = IND_TAG_KIND.get(tag.strip())
                     if kind:

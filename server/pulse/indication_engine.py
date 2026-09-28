@@ -508,12 +508,92 @@ def evaluate_signal_candles(
     )
 
 
+STATE_FRAME_BARS = 60
+
+
+def _ta_signal(
+    frame: IndicationFrame,
+    settings: Dict[str, Any],
+    raw: float,
+    strength: float,
+    source_name: str,
+) -> Optional[SignalEval]:
+    """Shared State risk/confidence envelope for both TA pack modes."""
+    latest = frame.candles[-1]
+    if strength < float(settings.get("minimumStrength", 0.2)):
+        return None
+    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
+    sl_max = float(settings.get("stopLossMaxPct", 1.5))
+    sl = clamp(sl_min * 1.6, sl_min, sl_max)
+    tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
+    conf = clamp(0.5 + strength * 0.45, 0.5, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)):
+        return None
+    return SignalEval(
+        source_id="ta-rsi-macd-ema",
+        source_name=source_name,
+        direction="long" if raw >= 0 else "short",
+        confidence=conf,
+        strength=strength,
+        stop_loss_pct=sl,
+        take_profit_pct=tp,
+        reward_risk=tp / sl if sl else 1.8,
+        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
+        last_price=latest.close,
+        candle_count=len(frame.candles),
+        weight=1.0,
+    )
+
+
 def evaluate_ta_pack(
     candles: List[Candle],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[SignalEval]:
+    """State TA pack.
+
+    Default ``stateMode="fade"``: fade an over-extended EMA20/EMA50 trend once
+    the short-term move has turned.  Research (1m, 48 symbols, engine kind-tape
+    exits) found that following RSI/MACD/EMA extension loses (PF ~0.57), while
+    fading it is consistently better, more so when the stretch is large in ATR
+    units, the symbol is volatile enough to reach the step TP, and RSI(7) has
+    already crossed back toward the fade side.  Conditions (60-bar frame):
+
+    * stretch = (EMA20 - EMA50) / ATR14, |stretch| >= ``stateStretchAtr`` (1.5)
+    * ATR14 / close >= ``stateMinAtrPct`` % (0.25): own-volatility gate
+    * direction = -sign(stretch) and direction * (RSI7 - 50) > ``stateTurnRsi`` (0)
+
+    ``stateMode="follow"`` keeps the previous RSI/MACD/EMA follow pack.
+    """
     frame = frame or frame_from_candles(candles)
+    mode = str(settings.get("stateMode", "fade") or "fade").lower()
+    if mode in ("follow", "legacy"):
+        return evaluate_ta_pack_follow(frame, settings)
+    frame = frame.tail(STATE_FRAME_BARS)
+    candles = frame.candles
+    if len(candles) < 50:
+        return None
+    latest = candles[-1]
+    atr14 = frame.atr(14)
+    if latest.close <= 0 or atr14 <= 0:
+        return None
+    if atr14 / latest.close * 100.0 < float(settings.get("stateMinAtrPct", 0.25)):
+        return None
+    threshold = max(1e-9, float(settings.get("stateStretchAtr", 1.5)))
+    stretch = (frame.ema(20) - frame.ema(50)) / atr14
+    if abs(stretch) < threshold:
+        return None
+    direction = -1.0 if stretch > 0 else 1.0
+    if direction * (frame.rsi(7) - 50.0) <= float(settings.get("stateTurnRsi", 0.0)):
+        return None
+    # Calibrated so the threshold stretch maps to strength 0.5 (confidence
+    # 0.725) and twice the threshold saturates at 1.0.
+    strength = clamp(abs(stretch) / (2.0 * threshold), 0.0, 1.0)
+    return _ta_signal(frame, settings, direction, strength, "State stretch fade")
+
+
+def evaluate_ta_pack_follow(frame: IndicationFrame, settings: Dict[str, Any]) -> Optional[SignalEval]:
+    """Previous State pack: follow the RSI/MACD/EMA composite."""
     candles = frame.candles
     if len(candles) < 26:
         return None
@@ -528,30 +608,7 @@ def evaluate_ta_pack(
     macd_score = clamp(macd / max(latest.close * 0.0008, 1e-9), -1, 1)
     ema_score = clamp((ema20 - ema50) / max(latest.close * 0.001, 1e-9), -1, 1)
     raw = rsi_score * 0.4 + macd_score * 0.3 + ema_score * 0.3
-    strength = abs(raw)
-    if strength < float(settings.get("minimumStrength", 0.2)):
-        return None
-    sl_min = float(settings.get("stopLossMinPct", SL_MIN_PCT))
-    sl_max = float(settings.get("stopLossMaxPct", 1.5))
-    sl = clamp(sl_min * 1.6, sl_min, sl_max)
-    tp = clamp(sl * float(settings.get("takeProfitRewardRisk", 1.8)), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
-    conf = clamp(0.5 + strength * 0.45, 0.5, 0.99)
-    if conf < float(settings.get("minimumConfidence", 0.6)):
-        return None
-    return SignalEval(
-        source_id="ta-rsi-macd-ema",
-        source_name="RSI/MACD/EMA pack",
-        direction="long" if raw >= 0 else "short",
-        confidence=conf,
-        strength=strength,
-        stop_loss_pct=sl,
-        take_profit_pct=tp,
-        reward_risk=tp / sl if sl else 1.8,
-        atr_pct=frame.atr() / latest.close * 100 if latest.close else 0,
-        last_price=latest.close,
-        candle_count=len(candles),
-        weight=1.0,
-    )
+    return _ta_signal(frame, settings, raw, abs(raw), "RSI/MACD/EMA pack")
 
 
 def evaluate_pulse_local(
@@ -2303,9 +2360,15 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book.settings["minimumConfidence"] = 0.4
     book.settings["minimumStrength"] = 0.05
     rows_ta = book.process("TA-USDT", up, bars_by_tf={"1m": up, "5m": up, "15m": up})
-    ta_rows = [r for r in rows_ta if r.mode == "ta_pack"]
-    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" for r in ta_rows), f"ta={[r.kind+':'+r.mode for r in ta_rows]}")
-    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
+    # State fades a stretched EMA trend once it turns: 55 volatile up bars, 5 down.
+    fade = []
+    for i in range(60):
+        c = base * (1 + min(i, 54) * 0.004 - max(0, i - 54) * 0.004)
+        fade.append([c, c * 1.0015, c * 0.9985, c, 1000])
+    rows_fade = book.process("TAF-USDT", fade, bars_by_tf={"1m": fade})
+    ta_rows = [r for r in rows_fade if r.mode == "ta_pack"]
+    t19 = (len(ta_rows) >= 1 and all(r.kind == "state" and r.direction == "short" for r in ta_rows), f"ta={[r.kind+':'+r.mode+':'+r.direction for r in ta_rows]}")
+    t19b = (not any(r.kind == "signals" and "ta-rsi" in (r.sources or []) for r in rows_ta + rows_fade), f"sig-src={[r.sources for r in rows_ta if r.kind=='signals'][:3]}")
     snap = book.snapshot()
     ks = snap.get("kindStats") or {}
     t20 = (set(ks.keys()) == {"state", "signals", "active", "direction", "move", "common", "trend", "break"}, f"keys={sorted(ks)}")
@@ -2357,8 +2420,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
         f"n5={len(c5)} n6={len(c6)} o6={c6[-1].open if c6 else None} c6={c6[-1].close if c6 else None}",
     )
     rows6 = book.process("SIX-USDT", six, bars_by_tf={"1m": six})
-    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6),
-           f"kinds={sorted({r.kind for r in rows6})}")
+    six_fade = [[ts0 + i * 60] + list(b) for i, b in enumerate(fade)]
+    rows6f = book.process("SIXF-USDT", six_fade, bars_by_tf={"1m": six_fade})
+    t30 = (any(r.kind == "signals" for r in rows6) and any(r.kind == "state" for r in rows6f),
+           f"kinds={sorted({r.kind for r in rows6})} fade={sorted({r.kind for r in rows6f})}")
     tr = evaluate_trend("TR-USDT", [b[3] for b in up], st)
     t31 = (tr is not None and tr.kind == "trend" and tr.direction == "long", f"tr={tr.kind if tr else None} {tr.direction if tr else None}")
     brk_px = [100.0] * 20 + [102.2]
