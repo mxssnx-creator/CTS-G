@@ -1223,6 +1223,38 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertEqual(job["phase"], "error")
         self.assertFalse(job.get("running"))
 
+    def test_replay_uses_allowlisted_desk_keys_and_reports_them(self):
+        loaded = []
+        original = ht.SetBook.load
+
+        def spy(book, ov, *args, **kwargs):
+            loaded.append(dict(ov))
+            return original(book, ov, *args, **kwargs)
+
+        desk = {
+            "setMinStep": 5, "setStepMax": 20, "stratTrailing": False,
+            "baseMinPf": 1.02, "mainMinPf": 1.02, "realMinPf": 1.02, "setMinPf": 1.02,
+            "setMaxDdTimeS": 27000, "setPfWindow": 5, "histLookbackBars": 60, "leverage": 50,
+            "symbols": ["BTC-USDT"],
+        }
+        with patch.object(ht.SetBook, "load", spy):
+            job = ht.run_test({"synth": True, "hours": 4, "minPf": 1.3, "symbolCap": 3, "overlay": desk})
+        ov = loaded[-1]
+        self.assertEqual((ov["setMinStep"], ov["setStepMax"], ov["stratTrailing"]), (5, 20, False))
+        for key in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "minPf"):
+            self.assertEqual(ov[key], 1.3, key)
+        self.assertEqual(ov["setMaxDdTimeS"], 57600)
+        self.assertEqual(ov["setPfWindow"], 30)
+        self.assertEqual(ov["histLookbackBars"], ht.lookback_bars(4))
+        self.assertNotIn("leverage", ov)
+        self.assertNotIn("symbols", ov)
+        self.assertEqual((job["stepLo"], job["stepHi"]), (5, 20))
+        options = job["options"]
+        self.assertEqual((options["minStep"], options["stepMax"], options["trailing"]), (5, 20, False))
+        self.assertEqual(options["setMinPf"], 1.3)
+        self.assertIn("setMinStep", options["deskKeys"])
+        self.assertNotIn("baseMinPf", options["deskKeys"])
+
 
 if __name__ == "__main__":
     unittest.main()

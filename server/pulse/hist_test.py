@@ -1670,6 +1670,27 @@ def job_is_paused(job: Optional[Dict[str, Any]] = None) -> bool:
     return str(blob.get("phase") or "") == "paused"
 
 
+# Desk settings that shape the Set catalog the live book trades (steps, SL:TP,
+# trailing grid, packs, indications, Block stack, costs). Test Historic replays
+# these so validated IDs exist live. Its own gates (PF floors, DDT, sample
+# windows, replay window) always come from test_overlay().
+DESK_OVERLAY_KEYS = (
+    "setMinStep", "setStepMax", "minStep", "minStepRange", "setStepAdapt", "trailingMinStep",
+    "slToTpRatios", "slToTpMin", "slToTpMax", "slToTpStep", "slMinPct", "slMaxPct",
+    "tpPct", "tpMinPct", "tpMaxPct", "exitOptSlPct", "timeStopS", "scratchS", "setScratchMin", "setCooldownBars",
+    "trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax",
+    "stratTrailing", "stratIndications", "stratGeneral", "stratBlock",
+    "blockCounts", "blockMaxStack", "blockVolumeRatio", "blockMaxVolumeMultiplier",
+    "indTypeState", "indTypeSignals", "indTypeDirection", "indTypeMove",
+    "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
+    "indActiveMovePct", "indActiveNoise", "indActiveOutbreak", "indActiveThreshold", "indAtrMult",
+    "indBreakRanges", "indDirMinChange", "indDirRange", "indMinAgreement", "indMinConfidence",
+    "indMinStrength", "indMoveMinChange", "indMoveRange", "indRewardRisk", "indStopMaxPct",
+    "indStopMinPct", "indTrendRanges", "activeMovePct", "activeOutbreakRanges", "activeVolatilityWeight",
+    "volWeight", "noise", "positionCostPct", "positionCostSource", "setCostPct",
+)
+
+
 def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int = STEP_HI) -> Dict[str, Any]:
     lookback = lookback_bars(hours)
     lo = max(1, min(30, int(step_lo)))
@@ -2271,7 +2292,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "workers": job.get("workers") or 1,
         "timings": job.get("timings") or {},
         "options": job.get("options") or {},
-        "costPct": 0.10,
+        "costPct": (job.get("options") or {}).get("costPct", 0.10),
         "symbols": names,
         "positive": names,
         "rejected": (job.get("rejected") or [])[:80],
@@ -2403,14 +2424,14 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     recalc_only = use_recalc_only(body, recalc_ids, keep_symbols, target)
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
-    if user_ov:
-        overlay.update({k: v for k, v in user_ov.items() if k not in ("symbols",)})
-        overlay["histLookbackBars"] = lookback_bars(hours)
-        overlay["histTestHours"] = hours
-        overlay["histTestMinPf"] = min_pf
-        overlay["histTestRefreshHours"] = refresh_h
-        overlay["setMinPf"] = min_pf
-        overlay["minPf"] = min_pf
+    desk_keys = [k for k in DESK_OVERLAY_KEYS if k in user_ov]
+    overlay.update({k: user_ov[k] for k in desk_keys})
+    overlay["histTestRefreshHours"] = refresh_h
+    try:
+        step_lo = max(1, min(30, int(overlay.get("setMinStep") or step_lo)))
+        step_hi = max(step_lo, min(30, int(overlay.get("setStepMax") or step_hi)))
+    except (TypeError, ValueError):
+        pass
     t0 = time.time()
     prior_ready = seed_recalc_prior()
     seed_ids = recalc_ids or list(prior_ready.get("validatedIds") or []) or read_persisted_validated_ids()
@@ -2701,29 +2722,31 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "refreshHours": refresh_h,
         "continuous": not synth,
         "running": False,
-        "stepLo": step_lo,
-        "stepHi": step_hi,
+        "stepLo": getattr(book, "min_step", step_lo),
+        "stepHi": getattr(book, "step_max", step_hi),
         "targetCount": target,
         "filled": len(symbols),
         "evaluated": fill["evaluated"],
         "elapsedMs": round((time.time() - t0) * 1000.0, 1),
         "workers": 1,
         "timings": {"totalMs": round((time.time() - t0) * 1000.0, 1)},
+        # Settings the replay book actually loaded, plus which came from the desk.
         "options": {
             "hours": hours,
-            "minStep": step_lo,
-            "stepMax": step_hi,
-            "trailing": True,
-            "stratBlock": True,
-            "stratDca": False,
-            "stratIndications": True,
-            "stratGeneral": True,
-            "costPct": 0.10,
+            "minStep": getattr(book, "min_step", step_lo),
+            "stepMax": getattr(book, "step_max", step_hi),
+            "trailing": bool(getattr(book, "trail_enabled", True)),
+            "stratBlock": bool(getattr(book, "hist_block", True)),
+            "stratDca": bool(getattr(book, "hist_dca", True)),
+            "stratIndications": "indications" in (getattr(book, "packs", None) or []),
+            "stratGeneral": "general" in (getattr(book, "packs", None) or []),
+            "costPct": float(getattr(book, "cost_pct", 0.10) or 0.10),
             "setMinPf": min_pf,
             "histTestHours": hours,
             "histTestMinPf": min_pf,
             "histTestRefreshHours": refresh_h,
-            "baseEvalPosCount": 30,
+            "baseEvalPosCount": int(getattr(book, "pf_n", 30) or 30),
+            "deskKeys": desk_keys,
         },
         "coverage": {
             **(book_cov if isinstance(book_cov, dict) else {}),
