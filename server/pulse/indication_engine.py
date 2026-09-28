@@ -1568,11 +1568,13 @@ class IndicationBook:
             frame = build_indication_frame(rows, period_s=TF_SECONDS[tf])
             frames_by_tf[tf] = frame
             candles = frame.candles
+            # The volatility-normalized revert model is validated on 1m only;
+            # higher timeframes keep the legacy composite.
             ev = evaluate_signal_candles(
                 f"bingx-{tf}",
                 f"BingX {tf}",
                 candles,
-                self.settings,
+                self.settings if tf == "1m" else {**self.settings, "signalsModel": "trend"},
                 weight=TF_WEIGHT[tf],
                 frame=frame,
             )

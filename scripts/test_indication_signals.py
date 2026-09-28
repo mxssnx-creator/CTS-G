@@ -45,6 +45,24 @@ def settings(**over):
 
 
 class SignalRevertTests(unittest.TestCase):
+    def test_live_revert_model_is_1m_only(self):
+        import indication_engine as ie
+        from unittest.mock import patch
+        book = ie.IndicationBook()
+        bars = quiet_then_move(0.004, -0.004)
+        seen = {}
+        real = ie.evaluate_signal_candles
+
+        def spy(source_id, name, candles, st, *args, **kwargs):
+            seen[source_id] = st.get("signalsModel")
+            return real(source_id, name, candles, st, *args, **kwargs)
+
+        with patch.object(ie, "evaluate_signal_candles", side_effect=spy):
+            book.process("X-USDT", bars, bars_by_tf={"1m": bars, "5m": bars})
+        self.assertIn("bingx-1m", seen)
+        self.assertNotEqual(seen["bingx-1m"], "trend")
+        self.assertEqual(seen.get("bingx-5m"), "trend")
+
     def test_shared_defaults_untouched(self):
         for key in SIGNALS_REVERT_DEFAULTS:
             self.assertNotIn(key, DEFAULT_SETTINGS)
