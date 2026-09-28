@@ -87,6 +87,8 @@ PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 
 RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
+# A worker paused while waiting for its next refresh resumes to its idle phase.
+RESUME_IDLE_PHASES = ("ready", "error")
 SYMBOL_CAP = 50
 GATE_SET_CAP = 512
 JOB_CACHE_TTL_S = 1.5
@@ -191,7 +193,7 @@ def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> b
     blob["detail"] = f"{blob.get('detail') or 'ready'} · next refresh {int(hours)}h"
     publish(blob)
     while time.time() < deadline and not stop_requested():
-        wait_if_paused(None, {**read_job(), "phase": str(blob.get("resumePhase") or "evaluate")})
+        wait_if_paused(None, {**read_job(), "phase": str(blob.get("phase") or "ready")})
         remaining = deadline - time.time()
         time.sleep(0.25 if remaining > 1 else max(0.05, remaining))
     return not stop_requested()
@@ -1238,7 +1240,7 @@ def apply_control_latches(blob: Optional[Dict[str, Any]] = None) -> Dict[str, An
     if pause_requested():
         phase = str(payload.get("phase") or "")
         resume_phase = str(payload.get("resumePhase") or "")
-        if phase in RUNNING_PHASES:
+        if phase in RUNNING_PHASES or (phase in RESUME_IDLE_PHASES and thread_alive()):
             resume_phase = phase
             payload["resumePhase"] = phase
         payload["phase"] = "paused"
@@ -1629,7 +1631,7 @@ def wait_if_paused(on_progress: Optional[Callable[[Dict[str, Any]], None]] = Non
         return
     blob = dict(snapshot or {})
     resume_phase = str(blob.get("phase") or blob.get("resumePhase") or "evaluate")
-    if resume_phase not in RUNNING_PHASES:
+    if resume_phase not in RUNNING_PHASES and resume_phase not in RESUME_IDLE_PHASES:
         resume_phase = "evaluate"
     paused_blob = {
         **blob,
@@ -2800,13 +2802,17 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             clear_stop()
             job = read_job()
             resume_phase = str(job.get("resumePhase") or "evaluate")
-            if resume_phase not in RUNNING_PHASES:
+            if resume_phase not in RUNNING_PHASES and resume_phase not in RESUME_IDLE_PHASES:
                 resume_phase = "evaluate"
+            idle = resume_phase in RESUME_IDLE_PHASES
             job["ok"] = True
             job["paused"] = False
-            job["running"] = True
+            job["running"] = not idle
             job["phase"] = resume_phase
-            job["detail"] = "historic test resumed"
+            job["detail"] = "historic test resumed · waiting for next refresh" if idle else "historic test resumed"
+            if idle:
+                job["ready"] = resume_phase == "ready"
+                job.pop("resumePhase", None)
             return publish(job)
         if thread_alive() and not stop_requested():
             current = read_job()

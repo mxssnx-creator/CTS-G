@@ -1182,6 +1182,47 @@ class HistTestAuditRegressions(unittest.TestCase):
         blob = self._get_hist_test()
         self.assertEqual([row.get("id") for row in blob.get("runningSets") or []], ["cfg-1"])
 
+    def test_resume_during_refresh_wait_restores_ready_not_fake_evaluate(self):
+        import threading
+        import time
+        ready = ht.publish({
+            "phase": "ready", "ready": True, "pct": 100, "detail": "1/50 positive",
+            "positive": ["BTC-USDT"], "validatedIds": ["cfg-1"], "winner": {"id": "cfg-1", "n": 10},
+        })
+        worker = threading.Thread(target=ht.wait_for_refresh, args=(1, dict(ready)), daemon=True)
+        with patch.object(ht, "_THREAD", worker):
+            worker.start()
+            try:
+                self._wait(lambda: ht.read_job().get("nextRunAt"))
+                ht.pause_test()
+                self._wait(lambda: ht.read_job().get("resumePhase"))
+                ht.start_test({})
+                time.sleep(0.4)
+                job = ht.read_job()
+                self.assertEqual(job["phase"], "ready")
+                self.assertTrue(job.get("ready"))
+                self.assertFalse(job.get("running"))
+                self.assertFalse(ht.job_progress_view(job)["running"])
+                self.assertGreater(float(job.get("nextRunAt") or 0), time.time() + 3000)
+            finally:
+                ht.request_stop()
+                worker.join(3)
+
+    def test_resume_before_worker_parks_keeps_idle_phase(self):
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "positive": ["BTC-USDT"], "nextRunAt": 9e9})
+        with patch.object(ht, "thread_alive", return_value=True):
+            ht.pause_test()
+            job = ht.start_test({})
+        self.assertEqual(job["phase"], "ready")
+        self.assertTrue(job.get("ready"))
+        self.assertFalse(job.get("running"))
+        ht.publish({"phase": "error", "ready": False, "pct": 100, "error": "no symbol cleared the historic PF floor"})
+        with patch.object(ht, "thread_alive", return_value=True):
+            ht.pause_test()
+            job = ht.start_test({})
+        self.assertEqual(job["phase"], "error")
+        self.assertFalse(job.get("running"))
+
 
 if __name__ == "__main__":
     unittest.main()
