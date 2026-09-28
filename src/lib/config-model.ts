@@ -130,6 +130,8 @@ export const HIST_TEST_HOURS_STEP = 1;
 export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
 export const HIST_TEST_REFRESH_DEFAULT = 2;
+/** Scratch window ceiling on the desk; must cover the 600 s engine default. */
+export const SCRATCH_S_MAX = 3600;
 
 export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
   const n = Math.round(Number(value));
@@ -1159,6 +1161,12 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.minStep, DEFAULT_MIN_STEP))));
   next.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.trailingMinStep, DEFAULT_MIN_STEP))));
   next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
+  // Save the same full trail grid that overlayFromCts loads. A narrower saved
+  // range would shrink the engine catalog until the next reload widened it.
+  next.trailArmMin = 0.3;
+  next.trailArmMax = 1.5;
+  next.trailGiveMin = 0.1;
+  next.trailGiveMax = 0.5;
   next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
   next.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.maxDdTimeS, 57600) / 600) * 600));
   next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
@@ -1243,6 +1251,38 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   m["feed.universeRank"] = Boolean(next.symbolsDynamic);
   next.modules = m;
   return next;
+}
+
+/** Universe and forced-winner keys belong to one connection. */
+export const LANE_OVERLAY_KEYS = [
+  "symbols",
+  "symbolsAll",
+  "symbolsDynamic",
+  "forcedSymbols",
+  "forcedVariant",
+  "forcedEligible",
+  "forcedBest",
+] as const;
+
+/** A shared preset never carries one connection's universe to another. */
+export function withoutLaneKeys(overlay: Partial<PulseOverlay>): Partial<PulseOverlay> {
+  const out: Partial<PulseOverlay> = { ...overlay };
+  for (const key of LANE_OVERLAY_KEYS) delete out[key];
+  return out;
+}
+
+/**
+ * Keys the form changed relative to the overlay it was loaded from, plus keys
+ * explicitly set since then (a set value can equal the loaded default).
+ */
+export function overlayEdits(baseline: PulseOverlay, current: PulseOverlay, touched: Iterable<string> = []): Partial<PulseOverlay> {
+  const out: Record<string, unknown> = {};
+  const base = baseline as Record<string, unknown>;
+  const set = new Set(touched);
+  for (const [key, value] of Object.entries(current)) {
+    if (set.has(key) || JSON.stringify(value) !== JSON.stringify(base[key])) out[key] = value;
+  }
+  return out as Partial<PulseOverlay>;
 }
 
 export async function saveOverlay(

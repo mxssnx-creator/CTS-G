@@ -1,4 +1,4 @@
-import { syncOverlayFlags, type PulseOverlay } from "@/lib/config-model";
+import { syncOverlayFlags, withoutLaneKeys, type PulseOverlay } from "./config-model.ts";
 import type { HistCalcOptions } from "@/lib/hist-calc";
 
 export type UserPreset = {
@@ -46,8 +46,9 @@ export function suggestPresetName(existing: UserPreset[]): string {
   return `Preset-${n}`;
 }
 
+/** Apply a shared preset on top of one lane, keeping that lane's universe. */
 export function applyUserPreset(base: PulseOverlay, preset: UserPreset): PulseOverlay {
-  return syncOverlayFlags({ ...base, ...(preset.overlay || {}) });
+  return syncOverlayFlags({ ...base, ...withoutLaneKeys(preset.overlay || {}) });
 }
 
 function readLocal(): UserPreset[] {

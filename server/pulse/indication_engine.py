@@ -175,7 +175,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "moveMinChange": 0.001,
     "activeOutbreak": [3, 5, 10],
     "activeThreshold": 1.0,
-    "activeNoise": 0.0005,
+    "activeNoise": 0.05,  # percent, like the desk's Noise setting
     "activeMovePct": 0.5,
     "activeVolatilityWeight": 0.3,
 }
@@ -766,9 +766,7 @@ def evaluate_break(
     want = "long" if long_brk else "short"
     ref = hi if want == "long" else lo
     brk = abs(_pct(ref, last))
-    noise = float(settings.get("activeNoise") or 0.0005)
-    if noise <= 0.02:
-        noise *= 100.0
+    noise = float(settings.get("activeNoise") or 0.05)
     if brk + 1e-12 < max(0.04, noise * 0.5):
         return None
     steps = [closes[i] - closes[i - 1] for i in range(-min(8, len(closes) - 1), 0)]
@@ -897,8 +895,6 @@ def evaluate_active_range(
     ref_hi, ref_lo = max(ref), min(ref)
     breakout = max(0.0, _pct(ref_hi, newest)) if direction == "long" else max(0.0, -_pct(ref_lo, newest))
     noise = max(0.0, float(settings.get("activeNoise") or 0.05))
-    if noise <= 0.02:
-        noise *= 100.0
     if breakout + 1e-12 < noise:
         return None
     agr = _dir_agree(current, direction)
@@ -1338,7 +1334,7 @@ class IndicationBook:
         if isinstance(outbreaks, (list, tuple)) and outbreaks:
             s["activeOutbreak"] = [int(x) for x in outbreaks]
         s["activeThreshold"] = float(overlay.get("indActiveThreshold") or s.get("activeThreshold") or 1.0)
-        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.0005
+        noise = overlay.get("noise") or overlay.get("indActiveNoise") or s.get("activeNoise") or 0.05
         s["activeNoise"] = float(noise)
         s["activeMovePct"] = float(overlay.get("indActiveMovePct") or overlay.get("activeMovePct") or 0.5)
         s["activeVolatilityWeight"] = float(overlay.get("volWeight") or overlay.get("activeVolatilityWeight") or 0.3)
