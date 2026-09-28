@@ -9033,7 +9033,11 @@ class Pulse:
                     continue
                 inc = specified
                 count_n = 1
-                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw}
+                # Same row shape as evaluate_counts: record_fill attributes the
+                # leg by setKey, so a missing key lost the filled add.
+                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw,
+                       "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:1",
+                       "blockMinPF": float(self.block.formula(parent, 1, lane).get("blockMinPF") or 0.0)}
             else:
                 rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
                 row = self.block.pick_emit(rows)
