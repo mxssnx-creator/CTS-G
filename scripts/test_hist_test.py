@@ -54,8 +54,9 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ht.clamp_target(None), 50)
         self.assertEqual(ht.clamp_target(0), 50)
         self.assertEqual(ht.clamp_target(50), 50)
-        self.assertEqual(ht.clamp_target(250), 250)
-        self.assertEqual(ht.clamp_target(999), 250)
+        # Only the majors are evaluated, so the fill target cannot exceed them.
+        self.assertEqual(ht.clamp_target(250), ht.TARGET_MAX)
+        self.assertEqual(ht.clamp_target(999), ht.TARGET_MAX)
 
     def test_rank_universe_fills_volume_beyond_majors_up_to_250(self):
         majors = list(ht.HIST_TEST_MAJORS)
@@ -1077,6 +1078,244 @@ class HistTestContract(unittest.TestCase):
         self.assertIsNotNone(empty)
         self.assertEqual(float(empty.get("pf") or 0), 0.0)
         self.assertFalse(empty.get("validated"))
+
+
+class HistTestAuditRegressions(unittest.TestCase):
+    """Regressions from the Test Historic / selected-symbols audit."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="hist-test-audit-")
+        for name, value in (
+            ("PUBLIC_JSON", os.path.join(self._tmp, "hist-test.json")),
+            ("SUMMARY_PATH", os.path.join(self._tmp, "summary.json")),
+            ("PUBLIC_SWEEP", os.path.join(self._tmp, "step-sweep.json")),
+            ("OUT_DIR", self._tmp),
+            ("LAST_READY_PATH", os.path.join(self._tmp, "last-ready.json")),
+            ("VALIDATED_IDS_PATH", os.path.join(self._tmp, "validated-ids.json")),
+        ):
+            patcher = patch.object(ht, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        ht.clear_stop()
+        ht.clear_pause()
+        ht.invalidate_job_cache()
+
+    def tearDown(self):
+        ht.clear_stop()
+        ht.clear_pause()
+        ht.invalidate_job_cache()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _wait(self, predicate, timeout=3.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.fail("condition not reached")
+
+    def _offline(self):
+        return (
+            patch.object(ht, "rank_universe", return_value=([{"symbol": s} for s in ht.HIST_TEST_MAJORS], [])),
+            patch.object(ht, "fetch_klines", return_value=[]),
+        )
+
+    def test_read_job_returns_a_private_copy_of_the_cache(self):
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "symbols": ["BTC-USDT"], "positive": ["BTC-USDT"]})
+        first = ht.read_job()
+        first["symbols"] = ["MUTATED-USDT"]
+        first["positive"].append("ETH-USDT")
+        again = ht.read_job()
+        self.assertEqual(again["symbols"], ["BTC-USDT"])
+        self.assertEqual(again["positive"], ["BTC-USDT"])
+        paused = ht.pause_test()
+        self.assertEqual(paused["symbols"], ["BTC-USDT"])
+        with open(ht.PUBLIC_JSON, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["symbols"], ["BTC-USDT"])
+
+    def test_zero_positive_run_reports_zero_positive(self):
+        published = []
+        original = ht.publish
+
+        def spy(blob):
+            out = original(blob)
+            published.append(out)
+            return out
+
+        rank, fetch = self._offline()
+        with rank, fetch, patch.object(ht, "publish", side_effect=spy):
+            job = ht.run_test({"hours": 20, "targetCount": 50})
+        self.assertEqual(job["phase"], "error")
+        self.assertEqual(job.get("positive"), [])
+        self.assertEqual(job.get("filled"), 0)
+        self.assertTrue(published)
+        self.assertEqual([b for b in published if b.get("positive")], [])
+
+    def _get_hist_test(self):
+        import io
+        import pulse_http as ph
+        handler = ph.Handler.__new__(ph.Handler)
+        handler.path = "/hist-test.json"
+        handler.headers = {}
+        handler.rfile = io.BytesIO(b"")
+        result = []
+        handler._json = lambda obj, code=200: result.append((code, obj))
+        handler.do_GET()
+        code, blob = result[0]
+        self.assertEqual(code, 200)
+        return blob
+
+    def test_hist_test_get_keeps_empty_positive(self):
+        ht.publish({
+            "phase": "error", "ready": False, "pct": 100, "error": "no symbol cleared the historic PF floor",
+            "positive": [], "symbols": [], "filled": 0,
+        })
+        blob = self._get_hist_test()
+        self.assertEqual(blob.get("positive"), [])
+        self.assertTrue(blob.get("internSymbols"))
+
+    def test_hist_test_get_copies_running_sets(self):
+        ht.publish({
+            "phase": "ready", "ready": True, "pct": 100, "positive": ["BTC-USDT"],
+            "successfulConfigs": [{"setId": "cfg-1", "n": 10, "pf": 1.3, "validated": True}],
+        })
+        blob = self._get_hist_test()
+        self.assertEqual([row.get("id") for row in blob.get("runningSets") or []], ["cfg-1"])
+
+    def test_resume_during_refresh_wait_restores_ready_not_fake_evaluate(self):
+        import threading
+        import time
+        ready = ht.publish({
+            "phase": "ready", "ready": True, "pct": 100, "detail": "1/50 positive",
+            "positive": ["BTC-USDT"], "validatedIds": ["cfg-1"], "winner": {"id": "cfg-1", "n": 10},
+        })
+        worker = threading.Thread(target=ht.wait_for_refresh, args=(1, dict(ready)), daemon=True)
+        with patch.object(ht, "_THREAD", worker):
+            worker.start()
+            try:
+                self._wait(lambda: ht.read_job().get("nextRunAt"))
+                ht.pause_test()
+                self._wait(lambda: ht.read_job().get("resumePhase"))
+                ht.start_test({})
+                time.sleep(0.4)
+                job = ht.read_job()
+                self.assertEqual(job["phase"], "ready")
+                self.assertTrue(job.get("ready"))
+                self.assertFalse(job.get("running"))
+                self.assertFalse(ht.job_progress_view(job)["running"])
+                self.assertGreater(float(job.get("nextRunAt") or 0), time.time() + 3000)
+            finally:
+                ht.request_stop()
+                worker.join(3)
+
+    def test_resume_before_worker_parks_keeps_idle_phase(self):
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "positive": ["BTC-USDT"], "nextRunAt": 9e9})
+        with patch.object(ht, "thread_alive", return_value=True):
+            ht.pause_test()
+            job = ht.start_test({})
+        self.assertEqual(job["phase"], "ready")
+        self.assertTrue(job.get("ready"))
+        self.assertFalse(job.get("running"))
+        ht.publish({"phase": "error", "ready": False, "pct": 100, "error": "no symbol cleared the historic PF floor"})
+        with patch.object(ht, "thread_alive", return_value=True):
+            ht.pause_test()
+            job = ht.start_test({})
+        self.assertEqual(job["phase"], "error")
+        self.assertFalse(job.get("running"))
+
+    def test_replay_uses_allowlisted_desk_keys_and_reports_them(self):
+        loaded = []
+        original = ht.SetBook.load
+
+        def spy(book, ov, *args, **kwargs):
+            loaded.append(dict(ov))
+            return original(book, ov, *args, **kwargs)
+
+        desk = {
+            "setMinStep": 5, "setStepMax": 20, "stratTrailing": False,
+            "baseMinPf": 1.02, "mainMinPf": 1.02, "realMinPf": 1.02, "setMinPf": 1.02,
+            "setMaxDdTimeS": 27000, "setPfWindow": 5, "histLookbackBars": 60, "leverage": 50,
+            "symbols": ["BTC-USDT"],
+        }
+        with patch.object(ht.SetBook, "load", spy):
+            job = ht.run_test({"synth": True, "hours": 4, "minPf": 1.3, "symbolCap": 3, "overlay": desk})
+        ov = loaded[-1]
+        self.assertEqual((ov["setMinStep"], ov["setStepMax"], ov["stratTrailing"]), (5, 20, False))
+        for key in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "minPf"):
+            self.assertEqual(ov[key], 1.3, key)
+        self.assertEqual(ov["setMaxDdTimeS"], 57600)
+        self.assertEqual(ov["setPfWindow"], 30)
+        self.assertEqual(ov["histLookbackBars"], ht.lookback_bars(4))
+        self.assertNotIn("leverage", ov)
+        self.assertNotIn("symbols", ov)
+        self.assertEqual((job["stepLo"], job["stepHi"]), (5, 20))
+        options = job["options"]
+        self.assertEqual((options["minStep"], options["stepMax"], options["trailing"]), (5, 20, False))
+        self.assertEqual(options["setMinPf"], 1.3)
+        self.assertIn("setMinStep", options["deskKeys"])
+        self.assertNotIn("baseMinPf", options["deskKeys"])
+
+    def test_validated_flags_use_the_configured_min_pf(self):
+        low = {"minPf": 1.05, "successfulConfigs": [{"setId": "a", "pf": 1.10, "n": 12, "validated": True}]}
+        ht._stamp_honesty(low)
+        self.assertTrue(low["successfulConfigs"][0]["validated"])
+        self.assertEqual(low["validatedCount"], 1)
+        high = {"minPf": 1.30, "successfulConfigs": [{"setId": "a", "pf": 1.20, "n": 12, "validated": True}]}
+        ht._stamp_honesty(high)
+        self.assertFalse(high["successfulConfigs"][0]["validated"])
+        self.assertEqual(high["validatedCount"], 0)
+        floor = {"minPf": 0.5, "successfulConfigs": [{"setId": "a", "pf": 1.01, "n": 12, "validated": True}]}
+        ht._stamp_honesty(floor)
+        self.assertFalse(floor["successfulConfigs"][0]["validated"])
+        kinds = {"state": {"n": 10, "pf": 1.10}}
+        self.assertTrue(ht.indication_calc_view(kinds, {}, min_pf=1.05)["state"]["validated"])
+        self.assertFalse(ht.indication_calc_view(kinds, {}, min_pf=1.30)["state"]["validated"])
+        strat = {"normal": {"n": 10, "pf": 1.10}}
+        self.assertTrue(ht.strategy_calc_view(strat, {}, min_pf=1.05)["normal"]["validated"])
+        self.assertFalse(ht.strategy_calc_view(strat, {}, min_pf=1.30)["normal"]["validated"])
+
+    def test_cli_resume_without_runner_runs_in_the_foreground(self):
+        rank, fetch = self._offline()
+        spawn = AssertionError("CLI resume must not spawn a daemon worker that dies with the process")
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "hours": 8, "minPf": 1.2, "targetCount": 50})
+        ht.pause_test()
+        with rank, fetch, patch.object(ht, "start_test", side_effect=spawn):
+            code = ht.main(["--resume"])
+        self.assertEqual(code, 1)
+        job = ht.read_job()
+        self.assertEqual(job["phase"], "error")
+        self.assertEqual(job["hours"], 8)
+        self.assertFalse(ht.pause_requested())
+        self.assertFalse(os.path.exists(os.path.join(self._tmp, "hist-test.pid")))
+
+    def test_cli_resume_with_live_runner_only_clears_the_pause(self):
+        with open(os.path.join(self._tmp, "hist-test.pid"), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getppid()))
+        ht.publish({"phase": "replay", "pct": 60, "running": True})
+        ht.pause_test()
+        spawn = AssertionError("a live runner must not be duplicated")
+        with patch.object(ht, "start_test", side_effect=spawn), patch.object(ht, "run_test", side_effect=spawn):
+            code = ht.main(["--resume"])
+        self.assertEqual(code, 0)
+        self.assertFalse(ht.pause_requested())
+        job = ht.read_job()
+        self.assertEqual(job["phase"], "replay")
+        self.assertFalse(job.get("paused"))
+
+    def test_fill_target_is_clamped_to_evaluable_majors(self):
+        self.assertEqual(ht.TARGET_MAX, len(ht._MAJOR_KEYS))
+        self.assertEqual(ht.clamp_target(250), len(ht._MAJOR_KEYS))
+        self.assertEqual(ht.clamp_target(12), 12)
+
+    def test_hist_calc_hours_floor_matches_documented_range(self):
+        import hist_calc as hc
+        self.assertEqual(hc.HOURS_MIN, 2)
+        self.assertEqual(hc.parse_options({"hours": 1})["hours"], 2)
+        self.assertEqual(hc.hours_to_bars(1), 120)
+        self.assertEqual(hc.parse_options({"hours": 2.6})["hours"], 3)
+        self.assertEqual(hc.parse_options({"lookback": 170})["hours"], 3)
+        self.assertEqual(hc.parse_options({"hours": 400})["hours"], 336)
 
 
 if __name__ == "__main__":

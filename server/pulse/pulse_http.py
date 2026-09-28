@@ -2514,7 +2514,7 @@ class Handler(SimpleHTTPRequestHandler):
                             name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
                             if str(name or "").strip().upper() in intern_keys:
                                 kept.append(item if isinstance(item, str) else name)
-                        blob["positive"] = kept or intern_syms
+                        blob["positive"] = kept
                     raw_rej = blob.get("rejected") or []
                     if isinstance(raw_rej, list):
                         cleaned = []
@@ -2527,7 +2527,7 @@ class Handler(SimpleHTTPRequestHandler):
                     blob["internSymbols"] = view.get("internSymbols")
                 if view.get("ready") is not None:
                     blob["ready"] = view.get("ready")
-                for key in ("byIndication", "byStrategy", "selectedCoordinations", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
+                for key in ("byIndication", "byStrategy", "selectedCoordinations", "runningSets", "processingCount", "internSymbols", "pfStats", "processedSetCount"):
                     if view.get(key) is not None and (key in ("internSymbols", "processedSetCount", "processingCount") or not blob.get(key)):
                         blob[key] = view.get(key)
                 if view.get("detail"):

@@ -6,6 +6,7 @@ not start, stop or flatten running engines.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -69,7 +70,8 @@ VOL_CANDIDATES = 250
 MIN_QUOTE_VOLUME = 1_000_000.0
 DEFAULT_TARGET = 50
 VALIDATION_CAP = 250
-TARGET_MAX = 250
+# fill_positive evaluates majors only, so a larger fill target can never be met.
+TARGET_MAX = len(_MAJOR_KEYS)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PUBLIC_JSON = os.path.join(ROOT, "public", "hist-test.json")
@@ -86,6 +88,8 @@ PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
 
 RUNNING_PHASES = ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
 IN_FLIGHT_PHASES = RUNNING_PHASES + ("paused",)
+# A worker paused while waiting for its next refresh resumes to its idle phase.
+RESUME_IDLE_PHASES = ("ready", "error")
 SYMBOL_CAP = 50
 GATE_SET_CAP = 512
 JOB_CACHE_TTL_S = 1.5
@@ -190,7 +194,7 @@ def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> b
     blob["detail"] = f"{blob.get('detail') or 'ready'} · next refresh {int(hours)}h"
     publish(blob)
     while time.time() < deadline and not stop_requested():
-        wait_if_paused(None, {**read_job(), "phase": str(blob.get("resumePhase") or "evaluate")})
+        wait_if_paused(None, {**read_job(), "phase": str(blob.get("phase") or "ready")})
         remaining = deadline - time.time()
         time.sleep(0.25 if remaining > 1 else max(0.05, remaining))
     return not stop_requested()
@@ -345,9 +349,16 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
     return out
 
 
+def _job_pf_floor(job: Optional[Dict[str, Any]] = None) -> float:
+    """The run's configured min PF, never below the PF_MIN contract floor."""
+    blob = job if isinstance(job, dict) else {}
+    return clamp_min_pf(blob.get("minPf") or blob.get("positivePf") or POSITIVE_PF)
+
+
 def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
     """Last-15 proven configs: n≥8 and PF≥floor. Empty/intern-neutral tapes are not validated."""
     blob = job if isinstance(job, dict) else {}
+    floor = _job_pf_floor(blob)
     proven = 0
     for row in blob.get("successfulConfigs") or []:
         if not isinstance(row, dict) or row.get("validated") is False:
@@ -360,12 +371,12 @@ def last15_proven_count(job: Optional[Dict[str, Any]] = None) -> int:
             pf = float(row.get("pf") or row.get("last15Ratio") or 0)
         except (TypeError, ValueError):
             pf = 0.0
-        if n_row >= 8 and is_positive_pf(pf):
+        if n_row >= 8 and is_positive_pf(pf, floor):
             proven += 1
     return proven
 
 
-def _clear_unproven(row: Any) -> None:
+def _clear_unproven(row: Any, floor: float = POSITIVE_PF) -> None:
     """Last-15 identity is not validation. n<8 or PF below floor is unproven."""
     if not isinstance(row, dict):
         return
@@ -377,22 +388,23 @@ def _clear_unproven(row: Any) -> None:
         pf = float(row.get("pf") or row.get("last15Ratio") or 0)
     except (TypeError, ValueError):
         pf = 0.0
-    if n_row < 8 or not is_positive_pf(pf):
+    if n_row < 8 or not is_positive_pf(pf, floor):
         row["validated"] = False
 
 
 def _stamp_result_flags(payload: Dict[str, Any]) -> None:
+    floor = _job_pf_floor(payload)
     for key in ("pfStats", "byIndication", "byStrategy", "kinds"):
         blob = payload.get(key)
         if not isinstance(blob, dict):
             continue
         for row in blob.values():
-            _clear_unproven(row)
+            _clear_unproven(row, floor)
             if isinstance(row, dict) and isinstance(row.get("bySide"), dict):
                 for side in row["bySide"].values():
-                    _clear_unproven(side)
+                    _clear_unproven(side, floor)
     for row in payload.get("successfulConfigs") or []:
-        _clear_unproven(row)
+        _clear_unproven(row, floor)
 
 
 def intern_assigned_count(job: Optional[Dict[str, Any]] = None) -> int:
@@ -1200,7 +1212,7 @@ def _ensure_dir() -> None:
 def normalize_job(blob: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(blob or idle_job())
     phase = str(payload.get("phase") or "idle")
-    positives = payload.get("positive") or payload.get("symbols") or []
+    positives = payload.get("positive") if isinstance(payload.get("positive"), list) else payload.get("symbols") or []
     npos = len([s for s in positives if s]) if isinstance(positives, list) else 0
     ready = bool(payload.get("ready")) or phase == "ready"
     try:
@@ -1237,7 +1249,7 @@ def apply_control_latches(blob: Optional[Dict[str, Any]] = None) -> Dict[str, An
     if pause_requested():
         phase = str(payload.get("phase") or "")
         resume_phase = str(payload.get("resumePhase") or "")
-        if phase in RUNNING_PHASES:
+        if phase in RUNNING_PHASES or (phase in RESUME_IDLE_PHASES and thread_alive()):
             resume_phase = phase
             payload["resumePhase"] = phase
         payload["phase"] = "paused"
@@ -1376,7 +1388,8 @@ def read_job() -> Dict[str, Any]:
     global _JOB_CACHE, _JOB_CACHE_AT
     now = time.monotonic()
     if _JOB_CACHE is not None and now - _JOB_CACHE_AT < JOB_CACHE_TTL_S:
-        return _JOB_CACHE
+        # Callers mutate and republish what they read; never hand out the cache.
+        return copy.deepcopy(_JOB_CACHE)
     blob: Dict[str, Any] = idle_job()
     for path in (PUBLIC_JSON, SUMMARY_PATH):
         try:
@@ -1390,7 +1403,7 @@ def read_job() -> Dict[str, Any]:
     blob = normalize_job(apply_control_latches(blob))
     _JOB_CACHE = blob
     _JOB_CACHE_AT = now
-    return blob
+    return copy.deepcopy(blob)
 
 
 def job_age_s(blob: Optional[Dict[str, Any]] = None) -> float:
@@ -1544,11 +1557,11 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "pfStats": blob.get("pfStats") or {},
         "combo": blob.get("combo") or {},
         "byIndication": _compact_stat_map(
-            indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}),
+            indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}, min_pf=_job_pf_floor(blob)),
             16,
         ),
         "byStrategy": _compact_stat_map(
-            strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}),
+            strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}, min_pf=_job_pf_floor(blob)),
             16,
         ),
         "error": blob.get("error") or "",
@@ -1621,13 +1634,29 @@ def thread_alive() -> bool:
     return _THREAD is not None and _THREAD.is_alive()
 
 
+def _runner_alive() -> bool:
+    """Another CLI process (the desk dev fallback) is running a test."""
+    try:
+        with open(_pid_file(), encoding="utf-8") as handle:
+            pid = int(handle.read().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    if pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def wait_if_paused(on_progress: Optional[Callable[[Dict[str, Any]], None]] = None, snapshot: Optional[Dict[str, Any]] = None) -> None:
     """Hold a live run at the next checkpoint until Resume or Stop. Idle pause is a flag only."""
     if not pause_requested() or stop_requested():
         return
     blob = dict(snapshot or {})
     resume_phase = str(blob.get("phase") or blob.get("resumePhase") or "evaluate")
-    if resume_phase not in RUNNING_PHASES:
+    if resume_phase not in RUNNING_PHASES and resume_phase not in RESUME_IDLE_PHASES:
         resume_phase = "evaluate"
     paused_blob = {
         **blob,
@@ -1664,6 +1693,27 @@ def job_is_paused(job: Optional[Dict[str, Any]] = None) -> bool:
     if bool(blob.get("paused")):
         return True
     return str(blob.get("phase") or "") == "paused"
+
+
+# Desk settings that shape the Set catalog the live book trades (steps, SL:TP,
+# trailing grid, packs, indications, Block stack, costs). Test Historic replays
+# these so validated IDs exist live. Its own gates (PF floors, DDT, sample
+# windows, replay window) always come from test_overlay().
+DESK_OVERLAY_KEYS = (
+    "setMinStep", "setStepMax", "minStep", "minStepRange", "setStepAdapt", "trailingMinStep",
+    "slToTpRatios", "slToTpMin", "slToTpMax", "slToTpStep", "slMinPct", "slMaxPct",
+    "tpPct", "tpMinPct", "tpMaxPct", "exitOptSlPct", "timeStopS", "scratchS", "setScratchMin", "setCooldownBars",
+    "trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax",
+    "stratTrailing", "stratIndications", "stratGeneral", "stratBlock",
+    "blockCounts", "blockMaxStack", "blockVolumeRatio", "blockMaxVolumeMultiplier",
+    "indTypeState", "indTypeSignals", "indTypeDirection", "indTypeMove",
+    "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
+    "indActiveMovePct", "indActiveNoise", "indActiveOutbreak", "indActiveThreshold", "indAtrMult",
+    "indBreakRanges", "indDirMinChange", "indDirRange", "indMinAgreement", "indMinConfidence",
+    "indMinStrength", "indMoveMinChange", "indMoveRange", "indRewardRisk", "indStopMaxPct",
+    "indStopMinPct", "indTrendRanges", "activeMovePct", "activeOutbreakRanges", "activeVolatilityWeight",
+    "volWeight", "noise", "positionCostPct", "positionCostSource", "setCostPct",
+)
 
 
 def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int = STEP_HI) -> Dict[str, Any]:
@@ -2036,8 +2086,9 @@ def _cell_pf(cell: Dict[str, Any]) -> float:
         return 0.0
 
 
-def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     """Last-15 indication types: n≥8 and PF≥floor. Combo strategies attach per kind."""
+    floor = clamp_min_pf(min_pf)
     gate = kinds if isinstance(kinds, dict) else {}
     matrix = (combo or {}).get("matrix") if isinstance(combo, dict) else None
     by_kind_cells: Dict[str, List[Dict[str, Any]]] = {}
@@ -2069,8 +2120,8 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
         row["n"] = n
         row["pf"] = round(pf, 4)
         row["evalN"] = n
-        row["validated"] = n >= 8 and is_positive_pf(pf)
-        row["profitable"] = is_positive_pf(pf)
+        row["validated"] = n >= 8 and is_positive_pf(pf, floor)
+        row["profitable"] = is_positive_pf(pf, floor)
         by_st: Dict[str, Any] = {}
         for cell in cells:
             st = str(cell.get("strategy") or "").strip()
@@ -2083,7 +2134,7 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
                 "n": int(cell.get("n") or 0),
                 "evalN": cn,
                 "pf": round(cpf, 4),
-                "validated": cn >= 8 and is_positive_pf(cpf),
+                "validated": cn >= 8 and is_positive_pf(cpf, floor),
                 "maxDdS": cell.get("maxDdS") or 0,
                 "wr": cell.get("wr") or 0,
             }
@@ -2093,8 +2144,9 @@ def indication_calc_view(kinds: Optional[Dict[str, Any]] = None, combo: Optional
     return out
 
 
-def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optional[Dict[str, Any]] = None, min_pf: float = POSITIVE_PF) -> Dict[str, Any]:
     """Strategy / pack books keep last-15 proven. Combo PF families fill gaps."""
+    floor = clamp_min_pf(min_pf)
     out: Dict[str, Any] = dict(by_strat or {})
     pf_stats = (combo or {}).get("pfStats") if isinstance(combo, dict) else {}
     if isinstance(pf_stats, dict):
@@ -2107,14 +2159,14 @@ def strategy_calc_view(by_strat: Optional[Dict[str, Any]] = None, combo: Optiona
         n = _cell_n(row)
         pf = _cell_pf(row)
         row["evalN"] = n
-        row["validated"] = n >= 8 and is_positive_pf(pf)
+        row["validated"] = n >= 8 and is_positive_pf(pf, floor)
         if isinstance(row.get("bySide"), dict):
             for side in row["bySide"].values():
                 if not isinstance(side, dict):
                     continue
                 sn = _cell_n(side)
                 spf = _cell_pf(side)
-                side["validated"] = sn >= 8 and is_positive_pf(spf)
+                side["validated"] = sn >= 8 and is_positive_pf(spf, floor)
     return out
 
 
@@ -2267,7 +2319,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "workers": job.get("workers") or 1,
         "timings": job.get("timings") or {},
         "options": job.get("options") or {},
-        "costPct": 0.10,
+        "costPct": (job.get("options") or {}).get("costPct", 0.10),
         "symbols": names,
         "positive": names,
         "rejected": (job.get("rejected") or [])[:80],
@@ -2313,9 +2365,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
             k: {kk: vv for kk, vv in (v or {}).items() if kk != "evaluationWindows"}
             for k, v in (job.get("byDirection") or {}).items() if isinstance(v, dict)
         },
-        "byStrategy": _compact_stat_map(strategy_calc_view(job.get("byStrategy") or {}, {"pfStats": job.get("pfStats") or {}, "matrix": job.get("comboMatrix") or []}), 40),
-        "byIndication": _compact_stat_map(indication_calc_view(job.get("byIndication") or job.get("kinds") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
-        "kinds": _compact_stat_map(indication_calc_view(job.get("kinds") or job.get("byIndication") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}), 24),
+        "byStrategy": _compact_stat_map(strategy_calc_view(job.get("byStrategy") or {}, {"pfStats": job.get("pfStats") or {}, "matrix": job.get("comboMatrix") or []}, min_pf=min_pf), 40),
+        "byIndication": _compact_stat_map(indication_calc_view(job.get("byIndication") or job.get("kinds") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}, min_pf=min_pf), 24),
+        "kinds": _compact_stat_map(indication_calc_view(job.get("kinds") or job.get("byIndication") or {}, {"matrix": job.get("comboMatrix") or [], "pfStats": job.get("pfStats") or {}}, min_pf=min_pf), 24),
         "pfStats": job.get("pfStats") or {},
         "withWithout": job.get("withWithout") or {},
         "comboMatrix": job.get("comboMatrix") or [],
@@ -2399,14 +2451,14 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     recalc_only = use_recalc_only(body, recalc_ids, keep_symbols, target)
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
-    if user_ov:
-        overlay.update({k: v for k, v in user_ov.items() if k not in ("symbols",)})
-        overlay["histLookbackBars"] = lookback_bars(hours)
-        overlay["histTestHours"] = hours
-        overlay["histTestMinPf"] = min_pf
-        overlay["histTestRefreshHours"] = refresh_h
-        overlay["setMinPf"] = min_pf
-        overlay["minPf"] = min_pf
+    desk_keys = [k for k in DESK_OVERLAY_KEYS if k in user_ov]
+    overlay.update({k: user_ov[k] for k in desk_keys})
+    overlay["histTestRefreshHours"] = refresh_h
+    try:
+        step_lo = max(1, min(30, int(overlay.get("setMinStep") or step_lo)))
+        step_hi = max(step_lo, min(30, int(overlay.get("setStepMax") or step_hi)))
+    except (TypeError, ValueError):
+        pass
     t0 = time.time()
     prior_ready = seed_recalc_prior()
     seed_ids = recalc_ids or list(prior_ready.get("validatedIds") or []) or read_persisted_validated_ids()
@@ -2430,7 +2482,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "stepLo": step_lo,
         "stepHi": step_hi,
         "symbols": list(seed_syms),
-        "positive": list(seed_syms),
+        # The recalc queue is not evidence: positives come only from this run.
+        "positive": [],
         "validatedIds": list(seed_ids)[:PUBLIC_VALIDATED_IDS_CAP],
         "internSetCount": len(seed_ids),
         "validatedCount": last15_proven_count(prior_ready),
@@ -2465,8 +2518,6 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             blob.pop("validatedCount", None)
         if not blob.get("internSymbols"):
             blob["internSymbols"] = intern_liquid_pool(None, None, cap=SYMBOL_CAP)
-        if not blob.get("positive"):
-            blob["positive"] = list(seed.get("positive") or seed_syms or [])
         if not blob.get("symbols"):
             blob["symbols"] = list(blob.get("positive") or seed.get("symbols") or seed_syms or [])
         publish(blob)
@@ -2569,6 +2620,9 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "paused": False,
             "error": "no symbol cleared the historic PF floor",
             "detail": f"evaluated {fill['evaluated']} · rejected {len(fill['rejected'])} · skipped {len(fill['skipped'])}",
+            "symbols": [],
+            "positive": [],
+            "filled": 0,
             "rejected": [{k: v for k, v in r.items() if k != "_bars"} for r in fill["rejected"]],
             "skipped": fill["skipped"],
             "fill": {k: v for k, v in fill.items() if k != "selected"},
@@ -2661,8 +2715,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         kinds = book.ind_gate_snapshot() if hasattr(book, "ind_gate_snapshot") else {}
     except Exception:
         kinds = {}
-    kinds = indication_calc_view(kinds, combo)
-    by_strat = strategy_calc_view(by_strat, combo)
+    kinds = indication_calc_view(kinds, combo, min_pf=min_pf)
+    by_strat = strategy_calc_view(by_strat, combo, min_pf=min_pf)
     progress({
         "phase": "score",
         "pct": 96,
@@ -2695,29 +2749,31 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "refreshHours": refresh_h,
         "continuous": not synth,
         "running": False,
-        "stepLo": step_lo,
-        "stepHi": step_hi,
+        "stepLo": getattr(book, "min_step", step_lo),
+        "stepHi": getattr(book, "step_max", step_hi),
         "targetCount": target,
         "filled": len(symbols),
         "evaluated": fill["evaluated"],
         "elapsedMs": round((time.time() - t0) * 1000.0, 1),
         "workers": 1,
         "timings": {"totalMs": round((time.time() - t0) * 1000.0, 1)},
+        # Settings the replay book actually loaded, plus which came from the desk.
         "options": {
             "hours": hours,
-            "minStep": step_lo,
-            "stepMax": step_hi,
-            "trailing": True,
-            "stratBlock": True,
-            "stratDca": False,
-            "stratIndications": True,
-            "stratGeneral": True,
-            "costPct": 0.10,
+            "minStep": getattr(book, "min_step", step_lo),
+            "stepMax": getattr(book, "step_max", step_hi),
+            "trailing": bool(getattr(book, "trail_enabled", True)),
+            "stratBlock": bool(getattr(book, "hist_block", True)),
+            "stratDca": bool(getattr(book, "hist_dca", True)),
+            "stratIndications": "indications" in (getattr(book, "packs", None) or []),
+            "stratGeneral": "general" in (getattr(book, "packs", None) or []),
+            "costPct": float(getattr(book, "cost_pct", 0.10) or 0.10),
             "setMinPf": min_pf,
             "histTestHours": hours,
             "histTestMinPf": min_pf,
             "histTestRefreshHours": refresh_h,
-            "baseEvalPosCount": 30,
+            "baseEvalPosCount": int(getattr(book, "pf_n", 30) or 30),
+            "deskKeys": desk_keys,
         },
         "coverage": {
             **(book_cov if isinstance(book_cov, dict) else {}),
@@ -2727,7 +2783,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "evaluations": coverage_counter(set_n, set_n),
             "tasks": coverage_counter(len(symbols), len(symbols)),
         },
-        "validatedCount": last15_proven_count({"successfulConfigs": combo.get("successful") or []}),
+        "validatedCount": last15_proven_count({"successfulConfigs": combo.get("successful") or [], "minPf": min_pf}),
         "internSetCount": intern_assigned_count({"validatedIds": validated_ids, "internSetCount": len(validated_ids)}),
         "rowCount": len(ranked_sets),
         "rows": [set_row(st, side) for _k, st, side, _v, _l in ranked_sets[:80]],
@@ -2759,7 +2815,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "detail": (
             f"{len(symbols)}/{target} positive · evaluated {fill['evaluated']} · "
             f"{intern_assigned_count({'validatedIds': validated_ids, 'internSetCount': len(validated_ids)})} intern · "
-            f"{last15_proven_count({'successfulConfigs': combo.get('successful') or []})} last-15 validated"
+            f"{last15_proven_count({'successfulConfigs': combo.get('successful') or [], 'minPf': min_pf})} last-15 validated"
         ),
         "pct": 100,
     }
@@ -2796,13 +2852,17 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             clear_stop()
             job = read_job()
             resume_phase = str(job.get("resumePhase") or "evaluate")
-            if resume_phase not in RUNNING_PHASES:
+            if resume_phase not in RUNNING_PHASES and resume_phase not in RESUME_IDLE_PHASES:
                 resume_phase = "evaluate"
+            idle = resume_phase in RESUME_IDLE_PHASES
             job["ok"] = True
             job["paused"] = False
-            job["running"] = True
+            job["running"] = not idle
             job["phase"] = resume_phase
-            job["detail"] = "historic test resumed"
+            job["detail"] = "historic test resumed · waiting for next refresh" if idle else "historic test resumed"
+            if idle:
+                job["ready"] = resume_phase == "ready"
+                job.pop("resumePhase", None)
             return publish(job)
         if thread_alive() and not stop_requested():
             current = read_job()
@@ -2956,7 +3016,7 @@ def self_test() -> Dict[str, Any]:
     rec("positive-false-empty", not symbol_clears_floor({"n": 0, "pf": 2.0}, 1.1))
     rec("target-default", clamp_target(0) == DEFAULT_TARGET)
     rec("target-active-50", clamp_target(50) == 50)
-    rec("target-validate-250", clamp_target(250) == VALIDATION_CAP)
+    rec("target-capped-to-majors", clamp_target(250) == len(_MAJOR_KEYS))
     rec("target-max", clamp_target(999) == TARGET_MAX)
     rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
     rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))
@@ -3137,10 +3197,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(pause_test()))
             return 0
         if token == "--resume":
-            print(json.dumps(resume_test(body)))
-            return 0
+            if _runner_alive():
+                # The runner polls the PAUSE latch; clearing it resumes that process.
+                clear_stop()
+                clear_pause()
+                job = read_job()
+                resume_phase = str(job.get("resumePhase") or "evaluate")
+                if resume_phase not in RUNNING_PHASES:
+                    resume_phase = "evaluate"
+                job.update(ok=True, paused=False, running=True, phase=resume_phase, detail="historic test resumed")
+                print(json.dumps(publish(job)))
+                return 0
+            # No runner left: a daemon thread would die with this process, so
+            # rerun the paused job in the foreground instead.
+            prior = read_job()
+            for key in ("hours", "minPf", "targetCount"):
+                if body.get(key) is None and prior.get(key) is not None:
+                    body[key] = prior.get(key)
+            i += 1
+            continue
         i += 1
-    job = run_test(body)
+    _ensure_dir()
+    try:
+        with open(_pid_file(), "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        job = run_test(body)
+    finally:
+        try:
+            os.remove(_pid_file())
+        except OSError:
+            pass
     print(json.dumps({
         "ok": bool(job.get("ready")) and not job.get("error"),
         "phase": job.get("phase"),

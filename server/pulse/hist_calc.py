@@ -68,7 +68,7 @@ DEFAULT_SYMBOLS = [
     "KAS-USDT",
 ]
 HOURS_DEFAULT = 48
-HOURS_MIN = 1
+HOURS_MIN = 2  # documented 2–336h window; request_lookback already floors at 120 bars
 # The bounded fourteen-day/336-hour validation window is the maximum
 # supported public window. Keep the exchange request bounded to avoid
 # unbounded RAM/CPU.
@@ -405,6 +405,20 @@ def req_path(connection: Optional[str] = None) -> str:
     return path_for(f"hist-calc-req-{_connection_id(connection)}.json")
 
 
+def stop_path(connection: Optional[str] = None) -> str:
+    return path_for(f"hist-calc-stop-{_connection_id(connection)}.json")
+
+
+def read_stop_at(connection: Optional[str] = None) -> float:
+    """When the desk last pressed Stop for this lane (0 when never)."""
+    try:
+        with open(stop_path(connection), encoding="utf-8") as handle:
+            value = json.load(handle)
+        return float(value.get("stoppedAt") or 0.0) if isinstance(value, dict) else 0.0
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
 def _pid_path(connection: Optional[str] = None) -> str:
     return path_for(f"hist-calc-{_connection_id(connection)}.pid")
 
@@ -597,7 +611,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             raw_hours = None
     if raw_hours is not None:
         try:
-            opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(float(raw_hours))))
+            opt["hours"] = max(HOURS_MIN, min(HOURS_MAX, int(round(float(raw_hours)))))
         except Exception:
             pass
     for k, lo, hi in (("minStep", 1, 30), ("stepMax", 1, 30)):
@@ -853,13 +867,12 @@ def resolve_symbols(body: Optional[Dict[str, Any]] = None) -> List[str]:
             continue
         seen.add(s)
         out.append(s)
-    out = mandatory_symbols(out or list(DEFAULT_SYMBOLS))
+    out = out or list(DEFAULT_SYMBOLS)
     cap = configured_symbol_cap(body)
     if cap > 0 and len(out) > cap:
-        must = [s for s in FORCED_SYMBOLS if s in out]
-        rest = [s for s in out if s not in must]
-        out = (must + rest)[: max(cap, len(must))]
-    return out
+        out = out[:cap]
+    # Forced research symbols join after the cap; they never displace picks.
+    return mandatory_symbols(out)
 
 
 def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2847,6 +2860,12 @@ def stop_job(connection: Optional[str] = None) -> Dict[str, Any]:
     half-dead worker from this connection.
     """
     cid = _connection_id(connection)
+    # The engine replays in-process; it aborts any generation that started
+    # before this marker (deleting the request alone cannot interrupt it).
+    try:
+        _atomic_write(stop_path(cid), {"stoppedAt": time.time(), "connection": cid})
+    except Exception:
+        pass
     try:
         os.remove(req_path(cid))
     except FileNotFoundError:
@@ -2930,8 +2949,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("hours-20h", hours_to_bars(20) == 1200, str(hours_to_bars(20)))
     rec("hours-72h", hours_to_bars(72) == 4320 and parse_options({"hours": 72})["hours"] == 72, str(hours_to_bars(72)))
     rec("hours-336h", hours_to_bars(336) == LOOKBACK_MAX and parse_options({"hours": 336})["hours"] == 336, str(hours_to_bars(336)))
-    rec("hours-one-hour", hours_to_bars(1) == 60 and parse_options({"hours": 1})["hours"] == 1)
-    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 60)
+    rec("hours-min-two-hours", hours_to_bars(1) == 120 and parse_options({"hours": 1})["hours"] == 2)
+    rec("hours-clamp", hours_to_bars(9999) == LOOKBACK_MAX and hours_to_bars(1) == 120)
     rec("conn-alias-live", _connection_id("live") == "bingx-x01", _connection_id("live"))
     rec("conn-alias-vst", _connection_id("vst") == "bingx-x02", _connection_id("vst"))
     rec("conn-alias-mainnet", _connection_id("mainnet") == "bingx-x01")
@@ -2954,7 +2973,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     range_series = {hours: hours_to_bars(hours) for hours in (1, 2, 4, 20, 24, 48, 72, 120, 336)}
     rec(
         "hours-range-series",
-        range_series == {1: 60, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
+        range_series == {1: 120, 2: 120, 4: 240, 20: 1200, 24: 1440, 48: 2880, 72: 4320, 120: 7200, 336: 20160},
         str(range_series),
     )
     bounded = parse_options({"hours": 999, "minStep": -3, "stepMax": 999})
@@ -2968,7 +2987,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     rec("symbol-cap-explicit-unlimited", configured_symbol_cap({"symbolCap": 0}) == 0)
     rec("symbol-cap-from-overlay", configured_symbol_cap({"overlay": {"symbolCap": 12}}) == 12)
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
-    rec("resolve-respects-cap", 1 <= len(capped) <= max(25, len(FORCED_SYMBOLS)), str(len(capped)))
+    rec("resolve-respects-cap", capped[:25] == [f"S{i}-USDT" for i in range(25)] and capped[25:] == list(FORCED_SYMBOLS), str(capped))
     rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 30, str(parse_options({})))
     rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
         "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",

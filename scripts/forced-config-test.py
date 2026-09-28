@@ -81,6 +81,16 @@ class ForcedTests(unittest.TestCase):
     def test_forced_symbols_are_mandatory_not_duplicate(self):
         self.assertEqual(resolve_symbols({"symbols": ["XRPUSDT"], "allSymbols": False}), list(forced.FORCED_SYMBOLS))
 
+    def test_forced_symbols_never_push_out_capped_picks(self):
+        picks = ["BTC-USDT", "ETH-USDT"]
+        out = resolve_symbols({"symbols": picks, "allSymbols": False, "symbolCap": 2})
+        self.assertEqual(out[:2], picks)
+        self.assertEqual(out[2:], list(forced.FORCED_SYMBOLS))
+        many = [f"S{i}-USDT" for i in range(40)]
+        out = resolve_symbols({"symbols": many, "allSymbols": False, "symbolCap": 25})
+        self.assertEqual(out[:25], many[:25])
+        self.assertEqual(out[25:], list(forced.FORCED_SYMBOLS))
+
     def test_forced_cli(self):
         self.assertTrue(cli_options(["--forced-only", "--hours", "24"])["forcedOnly"])
 

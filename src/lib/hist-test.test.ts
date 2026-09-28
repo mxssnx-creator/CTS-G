@@ -8,7 +8,9 @@ import {
   HIST_TEST_REFRESH_MAX,
   HIST_TEST_REFRESH_MIN,
   HIST_TEST_TARGET_DEFAULT,
+  HIST_TEST_TARGET_MAX,
   clampHistTestHours,
+  clampHistTestTarget,
   clampHistTestRefreshHours,
   histTestIsPaused,
   histTestIsRunning,
@@ -17,6 +19,7 @@ import {
   histTestPollMs,
   histTestStartLabel,
   histTestStatusLine,
+  normalizeHistTestJob,
   pauseHistTest,
   startHistTest,
   stopHistTest,
@@ -144,4 +147,29 @@ test("overview line reports OFF and ON running sets", () => {
   assert.match(line, /2 processing/);
   assert.match(line, /1 coordinations/);
   assert.match(line, /indications:1m:sl0.6:st3/);
+});
+
+test("an empty positive list stays zero filled instead of counting the intern book", () => {
+  const book = ["BTC-USDT", "ETH-USDT", "SOL-USDT"];
+  const none = normalizeHistTestJob({ phase: "error", pct: 100, detail: "", positive: [], symbols: book, filled: 0 });
+  assert.equal(none.filled, 0);
+  const legacy = normalizeHistTestJob({ phase: "ready", pct: 100, detail: "", symbols: book });
+  assert.equal(legacy.filled, book.length);
+});
+
+test("fill target is clamped to the 50 evaluable majors", async (t) => {
+  assert.equal(HIST_TEST_TARGET_MAX, 50);
+  assert.equal(clampHistTestTarget(0), HIST_TEST_TARGET_DEFAULT);
+  assert.equal(clampHistTestTarget(12), 12);
+  assert.equal(clampHistTestTarget(300), HIST_TEST_TARGET_MAX);
+  const calls: RequestInit[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: string | URL, init?: RequestInit) => {
+    calls.push(init || {});
+    return new Response(JSON.stringify({ ok: true, phase: "queued", pct: 1, detail: "queued" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  await startHistTest({ hours: 20, minPf: 1.15, symbolCap: 300 });
+  assert.equal(JSON.parse(String(calls[0].body)).symbolCap, HIST_TEST_TARGET_MAX);
 });
