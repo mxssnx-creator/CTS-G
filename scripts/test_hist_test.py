@@ -1079,5 +1079,60 @@ class HistTestContract(unittest.TestCase):
         self.assertFalse(empty.get("validated"))
 
 
+class HistTestAuditRegressions(unittest.TestCase):
+    """Regressions from the Test Historic / selected-symbols audit."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="hist-test-audit-")
+        for name, value in (
+            ("PUBLIC_JSON", os.path.join(self._tmp, "hist-test.json")),
+            ("SUMMARY_PATH", os.path.join(self._tmp, "summary.json")),
+            ("PUBLIC_SWEEP", os.path.join(self._tmp, "step-sweep.json")),
+            ("OUT_DIR", self._tmp),
+            ("LAST_READY_PATH", os.path.join(self._tmp, "last-ready.json")),
+            ("VALIDATED_IDS_PATH", os.path.join(self._tmp, "validated-ids.json")),
+        ):
+            patcher = patch.object(ht, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        ht.clear_stop()
+        ht.clear_pause()
+        ht.invalidate_job_cache()
+
+    def tearDown(self):
+        ht.clear_stop()
+        ht.clear_pause()
+        ht.invalidate_job_cache()
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _wait(self, predicate, timeout=3.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        self.fail("condition not reached")
+
+    def _offline(self):
+        return (
+            patch.object(ht, "rank_universe", return_value=([{"symbol": s} for s in ht.HIST_TEST_MAJORS], [])),
+            patch.object(ht, "fetch_klines", return_value=[]),
+        )
+
+    def test_read_job_returns_a_private_copy_of_the_cache(self):
+        ht.publish({"phase": "ready", "ready": True, "pct": 100, "symbols": ["BTC-USDT"], "positive": ["BTC-USDT"]})
+        first = ht.read_job()
+        first["symbols"] = ["MUTATED-USDT"]
+        first["positive"].append("ETH-USDT")
+        again = ht.read_job()
+        self.assertEqual(again["symbols"], ["BTC-USDT"])
+        self.assertEqual(again["positive"], ["BTC-USDT"])
+        paused = ht.pause_test()
+        self.assertEqual(paused["symbols"], ["BTC-USDT"])
+        with open(ht.PUBLIC_JSON, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["symbols"], ["BTC-USDT"])
+
+
 if __name__ == "__main__":
     unittest.main()

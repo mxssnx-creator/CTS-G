@@ -6,6 +6,7 @@ not start, stop or flatten running engines.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -1376,7 +1377,8 @@ def read_job() -> Dict[str, Any]:
     global _JOB_CACHE, _JOB_CACHE_AT
     now = time.monotonic()
     if _JOB_CACHE is not None and now - _JOB_CACHE_AT < JOB_CACHE_TTL_S:
-        return _JOB_CACHE
+        # Callers mutate and republish what they read; never hand out the cache.
+        return copy.deepcopy(_JOB_CACHE)
     blob: Dict[str, Any] = idle_job()
     for path in (PUBLIC_JSON, SUMMARY_PATH):
         try:
@@ -1390,7 +1392,7 @@ def read_job() -> Dict[str, Any]:
     blob = normalize_job(apply_control_latches(blob))
     _JOB_CACHE = blob
     _JOB_CACHE_AT = now
-    return blob
+    return copy.deepcopy(blob)
 
 
 def job_age_s(blob: Optional[Dict[str, Any]] = None) -> float:
