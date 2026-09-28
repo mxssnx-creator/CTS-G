@@ -138,7 +138,8 @@ export const HIST_TEST_HOURS_DEFAULT = 20;
 export const HIST_TEST_HOURS_STEP = 1;
 export const HIST_TEST_MIN_PF = 1.1;
 export const HIST_TEST_TARGET_DEFAULT = 50;
-export const HIST_TEST_TARGET_MAX = 250;
+/** Test Historic evaluates the 50 intern majors only; a larger fill target can never be met. */
+export const HIST_TEST_TARGET_MAX = 50;
 export const HIST_TEST_VALIDATE_CAP = 250;
 export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
@@ -156,6 +157,12 @@ export function clampHistTestRefreshHours(value: unknown, fallback = HIST_TEST_R
   const n = Math.round(Number(value));
   const base = Number.isFinite(n) ? n : fallback;
   return Math.max(HIST_TEST_REFRESH_MIN, Math.min(HIST_TEST_REFRESH_MAX, base));
+}
+
+export function clampHistTestTarget(value: unknown, fallback = HIST_TEST_TARGET_DEFAULT): number {
+  const n = Math.round(Number(value));
+  const base = Number.isFinite(n) && n > 0 ? n : fallback;
+  return Math.max(1, Math.min(HIST_TEST_TARGET_MAX, base));
 }
 
 export function histTestLookbackBars(hours: unknown): number {
@@ -264,7 +271,7 @@ export async function startHistTest(body: {
     histTestMinPf: body.minPf,
     histTestRefreshHours: refreshHours,
     refreshHours,
-    symbolCap: Math.max(1, Math.min(HIST_TEST_TARGET_MAX, Math.round(Number(body.symbolCap) || HIST_TEST_TARGET_DEFAULT))),
+    symbolCap: clampHistTestTarget(body.symbolCap),
     overlay: { ...(body.overlay || {}), histTestRefreshHours: refreshHours },
   });
 }

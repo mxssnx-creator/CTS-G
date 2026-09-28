@@ -868,7 +868,8 @@ function pulseControlPlugin(): Plugin {
             }
             const hours = Math.max(4, Math.min(64, Math.round(Number(body.hours) || 20)));
             const minPf = Number(body.minPf || body.histTestMinPf || 1.15);
-            const count = Math.max(1, Math.min(250, Math.round(Number(body.targetCount || body.count || body.symbolCap) || 50)));
+            // Test Historic evaluates the 50 intern majors only (hist_test.TARGET_MAX).
+            const count = Math.max(1, Math.min(50, Math.round(Number(body.targetCount || body.count || body.symbolCap) || 50)));
             writeHistLatch("clear");
             const queued = {
               ok: true, phase: "queued", pct: 1, ready: false, running: true, paused: false, independent: true,

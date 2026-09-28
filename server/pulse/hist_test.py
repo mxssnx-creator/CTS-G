@@ -70,7 +70,8 @@ VOL_CANDIDATES = 250
 MIN_QUOTE_VOLUME = 1_000_000.0
 DEFAULT_TARGET = 50
 VALIDATION_CAP = 250
-TARGET_MAX = 250
+# fill_positive evaluates majors only, so a larger fill target can never be met.
+TARGET_MAX = len(_MAJOR_KEYS)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PUBLIC_JSON = os.path.join(ROOT, "public", "hist-test.json")
@@ -3015,7 +3016,7 @@ def self_test() -> Dict[str, Any]:
     rec("positive-false-empty", not symbol_clears_floor({"n": 0, "pf": 2.0}, 1.1))
     rec("target-default", clamp_target(0) == DEFAULT_TARGET)
     rec("target-active-50", clamp_target(50) == 50)
-    rec("target-validate-250", clamp_target(250) == VALIDATION_CAP)
+    rec("target-capped-to-majors", clamp_target(250) == len(_MAJOR_KEYS))
     rec("target-max", clamp_target(999) == TARGET_MAX)
     rec("refresh-default", clamp_refresh_hours(None) == REFRESH_DEFAULT, clamp_refresh_hours(None))
     rec("refresh-min", clamp_refresh_hours(0) == REFRESH_MIN, clamp_refresh_hours(0))

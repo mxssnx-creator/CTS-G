@@ -61,7 +61,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, HIST_TEST_TARGET_DEFAULT, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -449,7 +449,7 @@ function SettingsPage() {
     calcPollRef.current?.refresh();
   };
 
-  const histTestTarget = overlay.symbolCap > 0 ? overlay.symbolCap : HIST_TEST_TARGET_DEFAULT;
+  const histTestTarget = clampHistTestTarget(overlay.symbolCap);
 
   const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
     if (action === "start" && overlay.histTestEnabled === false) return;

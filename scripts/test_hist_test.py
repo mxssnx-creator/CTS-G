@@ -54,8 +54,9 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(ht.clamp_target(None), 50)
         self.assertEqual(ht.clamp_target(0), 50)
         self.assertEqual(ht.clamp_target(50), 50)
-        self.assertEqual(ht.clamp_target(250), 250)
-        self.assertEqual(ht.clamp_target(999), 250)
+        # Only the majors are evaluated, so the fill target cannot exceed them.
+        self.assertEqual(ht.clamp_target(250), ht.TARGET_MAX)
+        self.assertEqual(ht.clamp_target(999), ht.TARGET_MAX)
 
     def test_rank_universe_fills_volume_beyond_majors_up_to_250(self):
         majors = list(ht.HIST_TEST_MAJORS)
@@ -1301,6 +1302,11 @@ class HistTestAuditRegressions(unittest.TestCase):
         job = ht.read_job()
         self.assertEqual(job["phase"], "replay")
         self.assertFalse(job.get("paused"))
+
+    def test_fill_target_is_clamped_to_evaluable_majors(self):
+        self.assertEqual(ht.TARGET_MAX, len(ht._MAJOR_KEYS))
+        self.assertEqual(ht.clamp_target(250), len(ht._MAJOR_KEYS))
+        self.assertEqual(ht.clamp_target(12), 12)
 
 
 if __name__ == "__main__":
