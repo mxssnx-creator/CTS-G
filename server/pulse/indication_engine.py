@@ -1128,19 +1128,117 @@ def evaluate_active_range(
     )
 
 
+# Active "z" model (default). Research on 48 BingX symbols x 1 week with the
+# engine kind-tape exit model (parameters chosen on the first 4 days only):
+# * a 3-5 sigma move (sigma = the frame's own prior 1m steps) over 10-20 bars
+#   mean-reverts more often than it continues -> "fade:<range>" lanes;
+# * a >= 5 sigma move over 8-12 bars is a real outbreak -> "outbreak:<range>".
+# The legacy follow-every-0.5%-move lanes (evaluate_active_range) did barely
+# better than random entries and stay available with activeModel="legacy".
+# Every lane is an independent configuration (kind "active", mode lane:range).
+ACTIVE_FRAME_BARS = 60
+ACTIVE_MIN_PRIOR_STEPS = 20
+ACTIVE_FADE_RANGES = (10, 15, 20)
+ACTIVE_OUTBREAK_RANGES = (8, 10, 12)
+
+
+def _active_z_ranges(values: Any, defaults: Sequence[int]) -> List[int]:
+    """Parse z-lane ranges; every range must leave enough prior steps in the 60-bar frame."""
+    if not isinstance(values, (list, tuple)):
+        return list(defaults)
+    top = ACTIVE_FRAME_BARS - 1 - ACTIVE_MIN_PRIOR_STEPS
+    parsed: List[int] = []
+    for value in values[:8]:
+        try:
+            n = int(value)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if 2 <= n <= top and n not in parsed:
+            parsed.append(n)
+    return sorted(parsed) or list(defaults)
+
+
+def active_z_features(closes: Sequence[float], rng: int) -> Optional[Dict[str, float]]:
+    """Causal features for one range inside the 60-bar frame.
+
+    signed: % move over the last ``rng`` bars; sigma: population sigma (%) of
+    the 1m close steps *before* that window; z: signed / (sigma * sqrt(rng)).
+    """
+    closes = list(closes)[-ACTIVE_FRAME_BARS:]
+    rng = int(rng)
+    if rng < 2 or len(closes) < rng + 1 + ACTIVE_MIN_PRIOR_STEPS:
+        return None
+    prior = closes[:-rng]
+    steps = [_pct(prior[k - 1], prior[k]) for k in range(1, len(prior))]
+    if len(steps) < ACTIVE_MIN_PRIOR_STEPS or closes[-rng - 1] <= 0:
+        return None
+    mean = sum(steps) / len(steps)
+    sigma = max(0.0, sum(v * v for v in steps) / len(steps) - mean * mean) ** 0.5
+    signed = _pct(closes[-rng - 1], closes[-1])
+    return {"signed": signed, "sigma": sigma, "z": signed / max(sigma * (rng ** 0.5), 1e-9)}
+
+
+def evaluate_active_z(
+    symbol: str,
+    closes: List[float],
+    rng: int,
+    lane: str,
+    settings: Dict[str, Any],
+    frame: Optional[IndicationFrame] = None,
+) -> Optional[Indication]:
+    """Volatility-normalized Active lane: "fade" (3-5 sigma stretch) or "outbreak" (>= 5 sigma)."""
+    frame = frame or IndicationFrame([], list(closes))
+    feat = active_z_features(frame.closes, rng)
+    if feat is None:
+        return None
+    if feat["sigma"] + 1e-12 < max(0.0, float(settings.get("activeMinSigmaPct", 0.08))):
+        # Too quiet: fixed-% exits cannot pay the position cost.
+        return None
+    fade_z = max(0.5, float(settings.get("activeFadeZ", 3.0)))
+    out_z = max(fade_z, float(settings.get("activeOutbreakZ", 5.0)))
+    az = abs(feat["z"])
+    move_dir = "long" if feat["signed"] >= 0 else "short"
+    if lane == "fade":
+        if not fade_z <= az < out_z:
+            return None
+        direction = "short" if move_dir == "long" else "long"
+        conf = 0.58 + 0.16 * clamp((az - fade_z) / max(out_z - fade_z, 1e-9), 0.0, 1.0)
+        strength = clamp(az / out_z, 0.0, 1.0)
+    elif lane == "outbreak":
+        if az < out_z:
+            return None
+        direction = move_dir
+        conf = 0.62 + 0.04 * min(7.0, az - out_z)
+        strength = clamp(az / (out_z * 2.0), 0.0, 1.0)
+    else:
+        return None
+    conf = clamp(conf, 0.0, 0.99)
+    if conf < float(settings.get("minimumConfidence", 0.6)) * 0.85:
+        return None
+    cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
+    sl = clamp(max(cost * 2.0, feat["sigma"] * (rng ** 0.5)), float(settings.get("stopLossMinPct", SL_MIN_PCT)), float(settings.get("stopLossMaxPct", 1.5)))
+    tp = clamp(max(cost * 3.0, sl * float(settings.get("takeProfitRewardRisk", 1.8))), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))
+    return _kind_indication(
+        symbol, "active", direction, strength, frame.closes[-1], settings,
+        [f"active:{lane}:{rng}", f"z:{feat['z']:.2f}", f"sig:{feat['sigma']:.3f}"],
+        sl_pct=sl, tp_pct=tp, agreement=1.0, mode=f"{lane}:{rng}", conf=conf,
+    )
+
+
+def active_model(settings: Dict[str, Any]) -> str:
+    return "legacy" if str(settings.get("activeModel", "z") or "z").strip().lower() == "legacy" else "z"
+
+
 def evaluate_active(
     symbol: str,
     closes: List[float],
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> Optional[Indication]:
-    frame = frame or IndicationFrame([], list(closes))
-    closes = frame.closes
-    outbreaks = settings.get("activeOutbreak") or [3, 5, 10]
+    """Strongest Active lane (vote summary). Live and replay trade every lane independently."""
     best: Optional[Indication] = None
-    for raw in outbreaks:
-        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
-        if cand and (best is None or cand.confidence > best.confidence):
+    for cand in evaluate_active_all(symbol, closes, settings, frame=frame):
+        if best is None or cand.confidence > best.confidence:
             best = cand
     return best
 
@@ -1151,14 +1249,24 @@ def evaluate_active_all(
     settings: Dict[str, Any],
     frame: Optional[IndicationFrame] = None,
 ) -> List[Indication]:
-    """Independent Active indication per outbreak range (3 / 5 / 10)."""
+    """Independent Active indication per configuration (mode lane:range)."""
     frame = frame or IndicationFrame([], list(closes))
     closes = frame.closes
     out: List[Indication] = []
-    for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
-        cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
-        if cand:
-            out.append(cand)
+    if active_model(settings) == "legacy":
+        for raw in (settings.get("activeOutbreak") or [3, 5, 10]):
+            cand = evaluate_active_range(symbol, closes, int(raw), settings, frame=frame)
+            if cand:
+                out.append(cand)
+        return out
+    for lane, key, defaults in (
+        ("fade", "activeFadeRanges", ACTIVE_FADE_RANGES),
+        ("outbreak", "activeOutbreakZRanges", ACTIVE_OUTBREAK_RANGES),
+    ):
+        for rng in _active_z_ranges(settings.get(key), defaults):
+            cand = evaluate_active_z(symbol, closes, rng, lane, settings, frame=frame)
+            if cand:
+                out.append(cand)
     return out
 
 
@@ -2136,8 +2244,19 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st3["activeThreshold"] = 1.0
     st3["activeNoise"] = 0.05
     st3["minimumConfidence"] = 0.3
-    arows = evaluate_active_all("ACT-USDT", act_px, st3)
-    t9 = (len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in arows), f"n={len(arows)} dirs={[r.mode for r in arows]}")
+    legacy_rows = evaluate_active_all("ACT-USDT", act_px, {**st3, "activeModel": "legacy"})
+    # Default z model: noisy tape, then a >= 5 sigma run -> outbreak lanes follow it.
+    z_px = [100.0]
+    for i in range(47):
+        z_px.append(z_px[-1] * (1.0015 if i % 2 == 0 else 0.9985))
+    for _ in range(12):
+        z_px.append(z_px[-1] * 1.004)
+    arows = evaluate_active_all("ACT-USDT", z_px, st3)
+    t9 = (
+        len(arows) >= 1 and all(r.kind == "active" and r.direction == "long" and r.mode.startswith("outbreak:") for r in arows)
+        and len(legacy_rows) >= 1 and all(r.kind == "active" and r.direction == "long" for r in legacy_rows),
+        f"n={len(arows)} modes={[r.mode for r in arows]} legacy={[r.mode for r in legacy_rows]}",
+    )
     # Common: oversold then bounce-shaped rsi via steep drop
     drop = []
     px = 100.0

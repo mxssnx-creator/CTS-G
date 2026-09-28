@@ -60,7 +60,7 @@ from block_engine import (
     normalize_block_counts,
     shared_block_volume_ratio,
 )
-from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
+from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 
@@ -3069,6 +3069,15 @@ class SetBook:
                     config_frame = indication_frame.window(lo, i + 1)
                     for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
                         key = row.kind + "|" + row.mode
+                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
+                if self.ind_settings.get("typeActive", True):
+                    # Live enters every Active configuration independently
+                    # (evaluate_active_all, cfg per mode); replay the same
+                    # lanes instead of one best-of-ranges tape.
+                    kind_sigs["active"][i] = (0, 0.0)
+                    act_frame = indication_frame.window(lo, i + 1)
+                    for row in evaluate_active_all(symbol, act_frame.closes, self.ind_settings, act_frame):
+                        key = "active|" + row.mode
                         kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
             if on_step and i % 50 == 0:
                 on_step()
@@ -6470,7 +6479,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
     # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "setMinPf": 1.0})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]

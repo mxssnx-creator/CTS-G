@@ -40,7 +40,7 @@ class RangeTests(unittest.TestCase):
         book.load(settings)
         book.ingest_bars("X-USDT", self.rising(120))
         prepared = book.prepare_replay_signals("X-USDT", now=1800000000)
-        configs = [key for key in prepared[1] if "|" in key]
+        configs = [key for key in prepared[1] if key.startswith(("trend|", "break|"))]
         self.assertEqual(len(configs), 6)
         hist, kinds = {}, {}
         book.replay_symbol_partial("X-USDT", hist, now=1800000000, ind_hist=kinds, prepared=prepared)
