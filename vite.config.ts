@@ -491,6 +491,8 @@ function mergeOverlayForced(payload: Record<string, unknown>, conn: string): Rec
       return payload;
     }
     const overlay = payload.overlay && typeof payload.overlay === "object" ? (payload.overlay as Record<string, unknown>) : {};
+    // Display-only forced winners. tpPct/slPct/slToTpRatio always come from the
+    // engine's overlay: this checkout copy is not the file the engine reads.
     return {
       ...payload,
       overlay: {
@@ -499,9 +501,6 @@ function mergeOverlayForced(payload: Record<string, unknown>, conn: string): Rec
         forcedVariant: local.forcedVariant ?? overlay.forcedVariant,
         forcedEligible: local.forcedEligible ?? overlay.forcedEligible,
         forcedBest: local.forcedBest,
-        tpPct: local.tpPct ?? overlay.tpPct,
-        slPct: local.slPct ?? overlay.slPct,
-        slToTpRatio: local.slToTpRatio ?? overlay.slToTpRatio,
       },
     };
   } catch {
@@ -944,22 +943,9 @@ function pulseControlPlugin(): Plugin {
               jsonRes(res as ServerResponse, 400, { ok: false, detail: "Pick Live or VST to save" });
               return;
             }
-            let body: Record<string, unknown> = {};
-            try {
-              body = JSON.parse(raw || "{}") as Record<string, unknown>;
-            } catch {
-              jsonRes(res as ServerResponse, 400, { ok: false, detail: "invalid json" });
-              return;
-            }
-            const overlay =
-              body.overlay && typeof body.overlay === "object"
-                ? (body.overlay as Record<string, unknown>)
-                : body;
-            const dest = overlayFile(conn);
-            const cur = existsSync(dest) ? (JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>) : {};
-            const next = { ...cur, ...overlay };
-            writeFileSync(dest, JSON.stringify(next, null, 2));
-            jsonRes(res as ServerResponse, 200, { ok: true, overlay: next, conn, via: "local" });
+            // The engine reads its overlay only from its data directory via the
+            // sidecar. A checkout file would never apply, so fail visibly.
+            jsonRes(res as ServerResponse, 503, { ok: false, detail: "pulse sidecar offline — settings not saved" });
             return;
           }
           next();
