@@ -7912,14 +7912,14 @@ class Pulse:
                     apply(None)
         except Exception:
             pass
-        if ov.get("targetNotional"):
-            # Clamp desk-supplied target notional: a corrupt or absurd overlay
-            # value must never translate into impossible order volume.
-            TARGET_NOTIONAL = max(0.2, min(500.0, float(ov["targetNotional"])))
-        try:
-            self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
-        except Exception:
-            self.volume_factor = 1.0
+        # Clamp desk-supplied target notional and volume factor: a corrupt or
+        # absurd overlay value must never translate into impossible order
+        # volume. NaN passes min(), so non-finite values keep the defaults
+        # instead of saturating at 500 USDT / 10x.
+        target_notional = finite_number(ov.get("targetNotional"), 0.0)
+        if target_notional:
+            TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
+        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
         if ov.get("leverage"):
