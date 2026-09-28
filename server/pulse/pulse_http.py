@@ -358,54 +358,46 @@ _MAJOR_USDT = (
     "SNX-USDT", "COMP-USDT",
 )
 _MAJOR_SET = set(_MAJOR_USDT)
+_SYMBOL_RE = re.compile(r"[A-Z0-9]{1,20}-USDT")
 
 
 def guard_runtime_overlay(cid: str, cur: dict) -> dict:
-    """Keep Block on and strip hist-test junk books. Never flatten lots."""
+    """Keep Block on and normalize saved values. Never flatten lots.
+
+    Operator choices are honored: DCA, Block stack, symbol cap (0 means
+    unlimited), Test Historic and explicit symbol lists. Defaults apply only
+    when a key is absent; only malformed symbol names are dropped.
+    """
     out = dict(cur or {})
     out["blockEnabled"] = True
     out["blockOverall"] = True
     out["blockActive"] = True
-    out["dcaEnabled"] = True
-    out["dcaOverall"] = True
-    out["stratDca"] = True
+    for key in ("dcaEnabled", "dcaOverall", "stratDca"):
+        out.setdefault(key, True)
     try:
-        stack = int(out.get("blockMaxStack") or 0)
+        stack = int(out["blockMaxStack"]) if out.get("blockMaxStack") is not None else 6
     except (TypeError, ValueError):
-        stack = 0
-    out["blockMaxStack"] = max(stack, 6)
+        stack = 6
+    out["blockMaxStack"] = max(0, min(6, stack))
     raw = out.get("symbols")
     names = [str(s).strip().upper() for s in raw] if isinstance(raw, list) else []
     wild = bool(out.get("symbolsAll")) or any(s in ("*", "ALL", "UNLIMITED") for s in names)
-    try:
-        cap = int(out.get("symbolCap") or 0)
-    except (TypeError, ValueError):
-        cap = 0
-    cleaned = [s for s in names if s in _MAJOR_SET]
-    usdt = [s for s in names if s.endswith("-USDT")]
-    junk = (not wild) and bool(usdt) and (not cleaned or len(cleaned) < 20 or len(cleaned) < len(usdt))
-    if cid == "bingx-x01" and (wild or junk):
+    valid = list(dict.fromkeys(s for s in names if _SYMBOL_RE.fullmatch(s)))
+    if wild:
         out["symbols"] = ["*"]
         out["symbolsAll"] = True
-        out["symbolsDynamic"] = True
-        out["symbolCap"] = max(cap, 50) if cap else 50
-        out["histTestValidateCap"] = 250
-        out["histTestTargetCount"] = max(1, min(250, int(out.get("histTestTargetCount") or 50)))
-        return out
-    if cid == "bingx-x02" and junk:
-        out["symbols"] = list(_MAJOR_USDT)
+    elif valid:
+        out["symbols"] = valid
         out["symbolsAll"] = False
-        out["symbolCap"] = 50
-        out["histTestValidateCap"] = 250
-        out["histTestTargetCount"] = max(1, min(250, int(out.get("histTestTargetCount") or 50)))
-        out["histTestEnabled"] = True
-        return out
-    if cleaned:
-        out["symbols"] = cleaned
-    if cap and cap < 50:
-        out["symbolCap"] = 50
-    else:
-        out["symbolCap"] = cap or 50
+    elif isinstance(raw, list):
+        # Nothing usable was selected: fall back to the lane default book.
+        out["symbols"] = ["*"] if cid == "bingx-x01" else list(_MAJOR_USDT)
+        out["symbolsAll"] = cid == "bingx-x01"
+    try:
+        cap = int(out["symbolCap"]) if out.get("symbolCap") is not None else 50
+    except (TypeError, ValueError):
+        cap = 50
+    out["symbolCap"] = max(0, cap)
     try:
         validate_cap = int(out.get("histTestValidateCap") or 0)
     except (TypeError, ValueError):
@@ -419,7 +411,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         out["histTestTargetCount"] = 50
     else:
         out["histTestTargetCount"] = max(1, min(250, hist_target))
-    out["histTestEnabled"] = True
+    out.setdefault("histTestEnabled", True)
     return out
 
 

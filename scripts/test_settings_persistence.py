@@ -52,7 +52,7 @@ class SettingsPersistence(unittest.TestCase):
             self.assertEqual(value['histLookbackBars'],2880)
             self.assertTrue(value.get('histTestEnabled',True))
             ph.write_overlay('vst',{'histTestEnabled':False})
-            self.assertTrue(ph.load_overlay('bingx-x02')['histTestEnabled'])
+            self.assertFalse(ph.load_overlay('bingx-x02')['histTestEnabled'])
             ph.write_overlay('live',{'histTestHours':8,'histTestMinPf':1.1})
             live=ph.load_overlay('bingx-x01')
             self.assertEqual(live['histTestHours'],8)
@@ -67,27 +67,38 @@ class SettingsPersistence(unittest.TestCase):
                 self.assertEqual(value['systemSqliteCheckpointS'],seconds)
                 self.assertTrue(value['stratGeneral'])
 
-    def test_hist_test_junk_symbols_cannot_collapse_live_book(self):
+    def test_operator_symbol_and_toggle_choices_are_honored(self):
         with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
             ph.write_overlay('live', {'symbols': ['*'], 'symbolCap': 50, 'blockEnabled': True, 'histTestEnabled': True})
-            ph.write_overlay('live', {'symbols': ['BONER-USDT', 'CTO-USDT', 'ZZZRH-USDT'], 'symbolCap': 3, 'blockEnabled': False})
+            ph.write_overlay('live', {'symbols': ['HYPE-USDT', 'kas-usdt', 'bad name', 'HYPE-USDT'], 'symbolsAll': False, 'symbolCap': 3,
+                                      'blockEnabled': False, 'blockMaxStack': 2, 'dcaEnabled': False, 'stratDca': False})
             live = ph.load_overlay('bingx-x01')
-            self.assertEqual(live['symbols'], ['*'])
-            self.assertEqual(live['symbolCap'], 50)
+            self.assertEqual(live['symbols'], ['HYPE-USDT', 'KAS-USDT'])
+            self.assertFalse(live['symbolsAll'])
+            self.assertEqual(live['symbolCap'], 3)
+            self.assertEqual(live['blockMaxStack'], 2)
+            self.assertFalse(live['dcaEnabled'])
+            self.assertFalse(live['stratDca'])
             self.assertTrue(live['blockEnabled'])
             self.assertTrue(live['blockOverall'])
-            self.assertGreaterEqual(int(live['blockMaxStack']), 6)
-            ph.write_overlay('live', {'symbols': ['BCH-USDT', 'SOL-USDT', 'XRP-USDT', 'AIN-USDT', 'FLYBRAIN-USDT', 'BONER-USDT'], 'symbolCap': 40})
+            ph.write_overlay('live', {'symbolCap': 0, 'blockMaxStack': 99})
             live = ph.load_overlay('bingx-x01')
-            self.assertEqual(live['symbols'], ['*'])
-            self.assertGreaterEqual(int(live['symbolCap']), 50)
-            ph.write_overlay('vst', {'symbols': ['FLYBRAIN-USDT'], 'symbolCap': 5, 'histTestEnabled': True})
+            self.assertEqual(live['symbolCap'], 0)
+            self.assertEqual(live['blockMaxStack'], 6)
+            ph.write_overlay('vst', {'symbols': ['FLYBRAIN-USDT'], 'symbolCap': 5, 'histTestEnabled': False})
             vst = ph.load_overlay('bingx-x02')
-            self.assertEqual(vst['symbols'][:4], ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'])
-            self.assertGreaterEqual(len(vst['symbols']), 20)
-            self.assertGreaterEqual(int(vst['symbolCap']), 50)
-            self.assertTrue(vst['blockEnabled'])
-            self.assertTrue(vst['histTestEnabled'])
+            self.assertEqual(vst['symbols'], ['FLYBRAIN-USDT'])
+            self.assertEqual(vst['symbolCap'], 5)
+            self.assertFalse(vst['histTestEnabled'])
+            ph.write_overlay('vst', {'symbols': ['not a symbol']})
+            self.assertEqual(ph.load_overlay('bingx-x02')['symbols'][:4], ['BTC-USDT', 'ETH-USDT', 'SOL-USDT', 'XRP-USDT'])
+
+    def test_absent_keys_keep_lane_defaults(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            out = ph.guard_runtime_overlay('bingx-x02', {})
+            self.assertTrue(out['dcaEnabled'] and out['stratDca'] and out['histTestEnabled'])
+            self.assertEqual(out['symbolCap'], 50)
+            self.assertEqual(out['blockMaxStack'], 6)
 
     def test_min_sl_floor_is_systemwide_point_four(self):
         with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
