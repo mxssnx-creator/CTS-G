@@ -2757,14 +2757,14 @@ function TestHistoricCard({
           onControl={onControl}
           testId="hist-test-start-settings"
         >
-          {(histTestJob?.positive?.length || histTestJob?.symbols?.length) ? (
+          {histTestJob?.positive?.length ? (
             <button
               type="button"
               data-testid="hist-test-apply"
               onClick={onApply}
               className="min-h-11 rounded-lg border border-border px-3 text-sm"
             >
-              Apply {histTestJob?.positive?.length || histTestJob?.symbols?.length} positive
+              Apply {histTestJob.positive.length} positive
             </button>
           ) : null}
           <a href="/step-sweep" className="min-h-11 inline-flex items-center rounded-lg border border-border px-3 text-sm text-muted">

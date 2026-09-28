@@ -2485,7 +2485,7 @@ class Handler(SimpleHTTPRequestHandler):
                             name = item if isinstance(item, str) else (item.get("symbol") if isinstance(item, dict) else "")
                             if str(name or "").strip().upper() in intern_keys:
                                 kept.append(item if isinstance(item, str) else name)
-                        blob["positive"] = kept or intern_syms
+                        blob["positive"] = kept
                     raw_rej = blob.get("rejected") or []
                     if isinstance(raw_rej, list):
                         cleaned = []

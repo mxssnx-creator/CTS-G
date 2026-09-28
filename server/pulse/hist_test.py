@@ -1201,7 +1201,7 @@ def _ensure_dir() -> None:
 def normalize_job(blob: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(blob or idle_job())
     phase = str(payload.get("phase") or "idle")
-    positives = payload.get("positive") or payload.get("symbols") or []
+    positives = payload.get("positive") if isinstance(payload.get("positive"), list) else payload.get("symbols") or []
     npos = len([s for s in positives if s]) if isinstance(positives, list) else 0
     ready = bool(payload.get("ready")) or phase == "ready"
     try:
@@ -2432,7 +2432,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "stepLo": step_lo,
         "stepHi": step_hi,
         "symbols": list(seed_syms),
-        "positive": list(seed_syms),
+        # The recalc queue is not evidence: positives come only from this run.
+        "positive": [],
         "validatedIds": list(seed_ids)[:PUBLIC_VALIDATED_IDS_CAP],
         "internSetCount": len(seed_ids),
         "validatedCount": last15_proven_count(prior_ready),
@@ -2467,8 +2468,6 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             blob.pop("validatedCount", None)
         if not blob.get("internSymbols"):
             blob["internSymbols"] = intern_liquid_pool(None, None, cap=SYMBOL_CAP)
-        if not blob.get("positive"):
-            blob["positive"] = list(seed.get("positive") or seed_syms or [])
         if not blob.get("symbols"):
             blob["symbols"] = list(blob.get("positive") or seed.get("symbols") or seed_syms or [])
         publish(blob)
@@ -2571,6 +2570,9 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "paused": False,
             "error": "no symbol cleared the historic PF floor",
             "detail": f"evaluated {fill['evaluated']} · rejected {len(fill['rejected'])} · skipped {len(fill['skipped'])}",
+            "symbols": [],
+            "positive": [],
+            "filled": 0,
             "rejected": [{k: v for k, v in r.items() if k != "_bars"} for r in fill["rejected"]],
             "skipped": fill["skipped"],
             "fill": {k: v for k, v in fill.items() if k != "selected"},

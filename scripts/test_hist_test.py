@@ -1133,6 +1133,47 @@ class HistTestAuditRegressions(unittest.TestCase):
         with open(ht.PUBLIC_JSON, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["symbols"], ["BTC-USDT"])
 
+    def test_zero_positive_run_reports_zero_positive(self):
+        published = []
+        original = ht.publish
+
+        def spy(blob):
+            out = original(blob)
+            published.append(out)
+            return out
+
+        rank, fetch = self._offline()
+        with rank, fetch, patch.object(ht, "publish", side_effect=spy):
+            job = ht.run_test({"hours": 20, "targetCount": 50})
+        self.assertEqual(job["phase"], "error")
+        self.assertEqual(job.get("positive"), [])
+        self.assertEqual(job.get("filled"), 0)
+        self.assertTrue(published)
+        self.assertEqual([b for b in published if b.get("positive")], [])
+
+    def _get_hist_test(self):
+        import io
+        import pulse_http as ph
+        handler = ph.Handler.__new__(ph.Handler)
+        handler.path = "/hist-test.json"
+        handler.headers = {}
+        handler.rfile = io.BytesIO(b"")
+        result = []
+        handler._json = lambda obj, code=200: result.append((code, obj))
+        handler.do_GET()
+        code, blob = result[0]
+        self.assertEqual(code, 200)
+        return blob
+
+    def test_hist_test_get_keeps_empty_positive(self):
+        ht.publish({
+            "phase": "error", "ready": False, "pct": 100, "error": "no symbol cleared the historic PF floor",
+            "positive": [], "symbols": [], "filled": 0,
+        })
+        blob = self._get_hist_test()
+        self.assertEqual(blob.get("positive"), [])
+        self.assertTrue(blob.get("internSymbols"))
+
 
 if __name__ == "__main__":
     unittest.main()

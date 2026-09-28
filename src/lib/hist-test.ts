@@ -173,7 +173,8 @@ export function histTestIsPaused(job?: HistTestJob | null): boolean {
 
 export function normalizeHistTestJob(job: HistTestJob): HistTestJob {
   const phase = String(job.phase || "idle");
-  const positives = (job.positive?.length ? job.positive : job.symbols) || [];
+  // An explicit empty positive list means nothing cleared the floor; symbols is the intern book.
+  const positives = (Array.isArray(job.positive) ? job.positive : job.symbols) || [];
   const ready = Boolean(job.ready) || phase === "ready";
   let pct = Number(job.pct);
   if (!Number.isFinite(pct)) pct = 0;

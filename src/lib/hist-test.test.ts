@@ -17,6 +17,7 @@ import {
   histTestPollMs,
   histTestStartLabel,
   histTestStatusLine,
+  normalizeHistTestJob,
   pauseHistTest,
   startHistTest,
   stopHistTest,
@@ -144,4 +145,12 @@ test("overview line reports OFF and ON running sets", () => {
   assert.match(line, /2 processing/);
   assert.match(line, /1 coordinations/);
   assert.match(line, /indications:1m:sl0.6:st3/);
+});
+
+test("an empty positive list stays zero filled instead of counting the intern book", () => {
+  const book = ["BTC-USDT", "ETH-USDT", "SOL-USDT"];
+  const none = normalizeHistTestJob({ phase: "error", pct: 100, detail: "", positive: [], symbols: book, filled: 0 });
+  assert.equal(none.filled, 0);
+  const legacy = normalizeHistTestJob({ phase: "ready", pct: 100, detail: "", symbols: book });
+  assert.equal(legacy.filled, book.length);
 });
