@@ -818,7 +818,7 @@ def kind_ok_mask(cands, catalog, kind_table, bars_by_sym, sim_start) -> np.ndarr
 
 def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_table, catalog, symbols, bars_by_sym,
              sim_start: int, sim_end: int, start_s: int, book, sizer: Sizer, start_equity: float, gated: bool,
-             live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20) -> Dict[str, Any]:
+             live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar") -> Dict[str, Any]:
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
@@ -889,8 +889,9 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         changed = set()
         # 0) exchange liquidation (cross margin): intrabar worst equity at or
         # below the maintenance margin closes the whole book
-        if acct.lots and worst <= acct.maintenance(mmr_of):
-            liq = acct.liquidate(hi_px, lo_px, mmr_of)
+        liq_eq = worst if liq_mode == "intrabar" else acct.equity(px)
+        if acct.lots and liq_eq <= acct.maintenance(mmr_of):
+            liq = acct.liquidate(hi_px, lo_px, mmr_of) if liq_mode == "intrabar" else acct.liquidate(px, px, mmr_of)
             liquidations.append(dict(t=t, utc=time.strftime("%H:%M", time.gmtime(start_s + t * BAR)), lots=len(liq),
                                      notional=round(sum(l["notional"] for l in liq), 4), equityAfter=round(acct.cash, 6)))
             hr["liquidations"] = hr.get("liquidations", 0) + 1
@@ -1544,16 +1545,18 @@ def main(argv=None) -> int:
         raise SystemExit(f"missing contract specs: {missing}")
     ov = deployed_settings(args.overlay)
     runs = []
-    specs = [("post-base", "Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= 1.02, DDT, kind gate, live-negative deact)", True, args.leverage),
-             ("unfiltered", "Unfiltered (all Sets, no stage gates)", False, args.leverage)]
+    specs = [("post-base", "Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= 1.02, DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
+             ("unfiltered", "Unfiltered (all Sets, no stage gates)", False, args.leverage, "intrabar")]
+    specs.append(("post-base-closeliq", "Post-Base, liquidation tested on 1m close equity (less pessimistic than simultaneous intrabar extremes)",
+                  True, args.leverage, "close"))
     if args.sensitivity_leverage:
-        specs.append(("post-base-lev%d" % args.sensitivity_leverage, f"Post-Base, leverage sensitivity {args.sensitivity_leverage}x", True, args.sensitivity_leverage))
-    for name, title, gated, lev in specs:
+        specs.append(("post-base-lev%d" % args.sensitivity_leverage, f"Post-Base, leverage sensitivity {args.sensitivity_leverage}x", True, args.sensitivity_leverage, "intrabar"))
+    for name, title, gated, lev, liq_mode in specs:
         t2 = time.time()
         sizer = Sizer(contracts, ov, lev or None)
         res = simulate(name, cands, strat_g if gated else strat_u, ktable if gated else None, catalog, symbols, bars_by_sym,
                        sim_start, sim_end, start_s, book, sizer, args.start_equity, gated, bool(book.live_negative_deact),
-                       mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN))
+                       mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode)
         res["title"] = title
         res["leverage"] = lev or "exchange max (engine fallback 150)"
         runs.append(res)
