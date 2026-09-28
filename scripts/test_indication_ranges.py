@@ -17,9 +17,9 @@ class RangeTests(unittest.TestCase):
 
     def test_all_six_ranges_and_exact_enabled_subset(self):
         bars = self.rising(100)
-        # Identity plumbing uses the legacy follower (fires on a clean rise); the
-        # default fade lane is covered by test_indication_trend_common.py.
-        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], {**DEFAULT_SETTINGS, "trendMode": "follow"})
+        # Identity plumbing uses the legacy follower and classic breaks (both fire on a
+        # clean monotone rise); the default fade/reversal lanes have their own tests.
+        rows = evaluate_range_configs("X-USDT", [b[3] for b in bars], {**DEFAULT_SETTINGS, "trendMode": "follow", "breakContextSigma": 0})
         self.assertEqual(len(rows), 6)
         self.assertEqual(len({row.entry_key for row in rows}), 6)
         book = IndicationBook()
@@ -42,6 +42,7 @@ class RangeTests(unittest.TestCase):
                     "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [.6], "stratTrailing": False}
         book.load(settings)
         book.ind_settings["trendMode"] = "follow"
+        book.ind_settings["breakContextSigma"] = 0  # classic breaks on the monotone fixture
         book.ingest_bars("X-USDT", self.rising(120))
         prepared = book.prepare_replay_signals("X-USDT", now=1800000000)
         configs = [key for key in prepared[1] if key.startswith(("trend|", "break|"))]

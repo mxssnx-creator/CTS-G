@@ -189,7 +189,8 @@ class SettingsContract(unittest.TestCase):
         self.assertFalse(coord.outbreak_ok([bar(0.008)]*12))   # 0.008% does not
         closes=[100.0]*19+[100.5]
         for noise in (0.02,0.03,0.05):  # 0.5% break clears every desk noise value
-            settings={**DEFAULT_SETTINGS,'breakRange':16,'activeNoise':noise}
+            # Classic break fixture (reversal-mode noise is covered in test_indication_break).
+            settings={**DEFAULT_SETTINGS,'breakRange':16,'activeNoise':noise,'breakContextSigma':0}
             self.assertIsNotNone(evaluate_break('X-USDT',closes,settings),noise)
         book=IndicationBook();book.load({'noise':0.02})
         self.assertEqual(book.settings['activeNoise'],0.02)
