@@ -1249,10 +1249,13 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
 }
 
 export async function fetchLiveStats(conn = "overall", signal?: AbortSignal): Promise<LiveStats | null> {
-  return requestPreferredJson(`/stats.json?conn=${encodeURIComponent(conn)}`, "/live-stats.json", (value) => {
+  return requestPreferredJson(`/stats.json?conn=${encodeURIComponent(conn)}`, "/live-stats.json", (value, url) => {
     const stats = value as LiveStats;
     // A stopped desk is valid. Error objects and another desk's snapshot are not.
     if (typeof stats.running !== "boolean") return null;
+    // The desk proxy answers /live-stats.json with a "sidecar-down" placeholder when it has no synced
+    // snapshot. That must never beat a healthy-but-slow /stats.json (it painted HALT over a running lane).
+    if (url.startsWith("/live-stats.json") && stats.haltReason === "sidecar-down") return null;
     return viewFromSnapshot(stats, conn);
   }, signal);
 }

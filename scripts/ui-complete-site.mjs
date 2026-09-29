@@ -106,7 +106,7 @@ try {
   rec(await page.getByTestId("section-overview").count(), "settings overview section");
   rec(await page.getByTestId("section-historic").count(), "settings historic section");
   rec(await page.getByTestId("test-historic").count() || /Test Historic/i.test(settings.body), "settings test historic present");
-  rec(await page.getByTestId("hist-test-start").count(), "settings hist start");
+  rec(await page.getByTestId("hist-test-start-settings").count(), "settings hist start");
   rec(await page.getByTestId("hist-test-pause").count(), "settings hist pause");
   rec(await page.getByTestId("hist-test-stop").count(), "settings hist stop");
   const histStatus = await page.getByTestId("hist-test-status").innerText().catch(() => "");

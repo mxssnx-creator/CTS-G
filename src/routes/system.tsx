@@ -152,7 +152,7 @@ function SystemPage() {
                       <button
                         type="button"
                         className={`min-h-11 shrink-0 rounded-full px-3 text-xs font-medium ${
-                          on ? "bg-primary-dim text-primary" : "bg-surface2 text-muted"
+                          on ? "bg-primary-dim text-white" : "bg-surface2 text-muted"
                         }`}
                         onClick={() => toggle(m.id, !on)}
                       >

@@ -372,6 +372,9 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
     out["blockEnabled"] = True
     out["blockOverall"] = True
     out["blockActive"] = True
+    # Operator rules: exchange SL/TP protection and max leverage are not switchable.
+    out["controlOrders"] = True
+    out["useMaxLeverage"] = True
     for key in ("dcaEnabled", "dcaOverall", "stratDca"):
         out.setdefault(key, True)
     try:
@@ -2850,6 +2853,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._json({"ok": False, "detail": "pick Live or VST to save overlay"}, 400)
             return
         overlay = body.get("overlay") if isinstance(body, dict) else None
+        if isinstance(body, dict) and "overlay" in body and not isinstance(overlay, dict):
+            self._json({"ok": False, "detail": "overlay must be an object"}, 400)
+            return
         if not isinstance(overlay, dict):
             overlay = body if isinstance(body, dict) else {}
         try:

@@ -521,8 +521,8 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
               <dd className={pnlClass((l.systemPnl ?? l.sessionPnl) || 0)}>
                 {fmt(l.systemPnl ?? l.sessionPnl, 3)}
               </dd>
-              <dt>PF</dt>
-              <dd className="text-fg">{l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
+              <dt title="Cost-net PF over the last window, the same figure as this lane's own desk (classic gross PF is on Results)">PF · cost</dt>
+              <dd className="text-fg">{(l.pfCost ?? l.pf) >= 99 ? "∞" : (l.pfCost ?? l.pf).toFixed(2)}</dd>
               <dt>Scan</dt>
               <dd className="text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>

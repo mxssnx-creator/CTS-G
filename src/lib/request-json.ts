@@ -29,7 +29,7 @@ export function requestJson(url: string, signal?: AbortSignal, timeoutMs = 4000)
 export function requestPreferredJson<T>(
   primary: string,
   fallback: string,
-  select: (value: unknown) => T | null,
+  select: (value: unknown, url: string) => T | null,
   signal?: AbortSignal,
 ): Promise<T | null> {
   return new Promise((resolve) => {
@@ -51,7 +51,7 @@ export function requestPreferredJson<T>(
       const value = await requestJson(url, controller.signal, 8000);
       if (settled) return;
       let selected: T | null = null;
-      try { if (value) selected = select(value); } catch { /* malformed response */ }
+      try { if (value) selected = select(value, url); } catch { /* malformed response */ }
       if (selected !== null) { finish(selected); return; }
       completed++;
       if (completed === 2) finish(null);

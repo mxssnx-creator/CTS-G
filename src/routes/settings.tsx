@@ -166,6 +166,7 @@ function SettingsPage() {
   const touchedRef = useRef<Set<string>>(new Set());
   // Test Historic auto-assign: the last validated result already assigned, and
   // whether the assignment may save itself (only when it starts from a clean form).
+  const credsDirtyRef = useRef(false);
   const autoAssignSigRef = useRef("");
   const autoSavePendingRef = useRef(false);
 
@@ -186,6 +187,7 @@ function SettingsPage() {
     setApiKey("");
     setApiSecret("");
     setCredMsg(null);
+    credsDirtyRef.current = false;
     setConnType(conn === "vst" ? "vst" : "mainnet");
     setAsDefaultMainnet(conn !== "vst");
     setResetAsk(false);
@@ -220,9 +222,11 @@ function SettingsPage() {
       if (signal.aborted) return;
       if (k) {
         setCreds(k);
-        setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
-        setConnMethod(k.connectionMethod || "library");
-        if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
+        if (!credsDirtyRef.current) {
+          setConnType(k.connectionType === "vst" ? "vst" : "mainnet");
+          setConnMethod(k.connectionMethod || "library");
+          if (k.apiKeyMasked) setApiKey(k.apiKeyMasked);
+        }
       }
     }, delay);
     const refreshAfterControl = () => {
@@ -666,6 +670,7 @@ function SettingsPage() {
     setCredSaving(false);
     setCredMsg(r.detail);
     if (r.ok && r.creds) {
+      credsDirtyRef.current = false;
       setCreds(r.creds);
       setApiSecret("");
       if (r.creds.apiKeyMasked) setApiKey(r.creds.apiKeyMasked);
@@ -829,7 +834,7 @@ function SettingsPage() {
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Default ON · OFF stops new Normal entries · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <p className="text-sm text-muted">Control orders (SL/TP on exchange) · always on</p>
                 <p className="text-sm text-muted">General basis and internal historic evaluations · always active</p>
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -1378,6 +1383,7 @@ function SettingsPage() {
                       className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
                       value={connType}
                       onChange={(e) => {
+                        credsDirtyRef.current = true;
                         const v = e.target.value === "vst" ? "vst" : "mainnet";
                         setConnType(v);
                         if (v === "mainnet") setAsDefaultMainnet(true);
@@ -1392,7 +1398,10 @@ function SettingsPage() {
                     <select
                       className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
                       value={connMethod}
-                      onChange={(e) => setConnMethod(e.target.value)}
+                      onChange={(e) => {
+                        credsDirtyRef.current = true;
+                        setConnMethod(e.target.value);
+                      }}
                     >
                       <option value="library">library (HMAC)</option>
                       <option value="rest">REST signed</option>
@@ -1407,7 +1416,10 @@ function SettingsPage() {
                       className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
                       value={apiKey}
                       placeholder={creds?.apiKeySet ? "leave to keep current" : "BingX API key"}
-                      onChange={(e) => setApiKey(e.target.value)}
+                      onChange={(e) => {
+                        credsDirtyRef.current = true;
+                        setApiKey(e.target.value);
+                      }}
                     />
                   </label>
                   <label className="block text-sm sm:col-span-2">
@@ -1418,7 +1430,10 @@ function SettingsPage() {
                       className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-sm"
                       value={apiSecret}
                       placeholder={creds?.apiSecretSet ? "leave blank to keep current" : "BingX API secret"}
-                      onChange={(e) => setApiSecret(e.target.value)}
+                      onChange={(e) => {
+                        credsDirtyRef.current = true;
+                        setApiSecret(e.target.value);
+                      }}
                     />
                   </label>
                 </div>
@@ -1717,7 +1732,7 @@ function SettingsPage() {
             <Card title="Strategy types" hint="Each type runs independently · sliders ON=1 OFF=0">
               <Grid>
                 <EnableSlider label="Indications" on={overlay.stratIndications} hint="State/Direction/Move/Active/Common/Signals/Trend/Break" onChange={(v) => patch("stratIndications", v)} />
-                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Always enabled for Live and VST · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
+                <EnableSlider label="Normal (General)" on={overlay.normalExecutionEnabled} hint="Default ON · OFF stops new Normal entries · bounded Set policy and exchange protections still apply" onChange={(v) => patch("normalExecutionEnabled", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="counts 1–6 · shared 2× maximum · 0 uses default 6" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
                 <EnableSlider label="DCA" on={Boolean(overlay.dcaEnabled) && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
@@ -1974,7 +1989,7 @@ function SettingsPage() {
               <Grid>
                 <EnableSlider
                   label="Block enabled"
-                  on={overlay.blockEnabled}
+                  on={overlay.blockEnabled && overlay.stratBlock}
                   hint="default ON · all counts"
                   onChange={(v) => { patch("blockEnabled", v); patch("stratBlock", v); }}
                 />
@@ -1983,8 +1998,10 @@ function SettingsPage() {
                 <Grid>
                 <Toggle
                   label="Active"
-                  on={overlay.blockActive}
-                  onChange={(v) => patch("blockActive", v)}
+                  hint="Always on"
+                  on
+                  locked
+                  onChange={() => patch("blockActive", true)}
                 />
                 <Toggle
                   label="Active Live overlay"
@@ -1998,8 +2015,10 @@ function SettingsPage() {
                 />
                 <Toggle
                   label="Overall Block (Real)"
-                  on={overlay.blockOverall !== false}
-                  onChange={(v) => patch("blockOverall", v)}
+                  hint="Always on"
+                  on
+                  locked
+                  onChange={() => patch("blockOverall", true)}
                 />
                 <Num label="Minimum valid Block level" value={overlay.blockActiveMinLevel} min={0} max={overlay.blockMaxStack || 6} step={1}
                   hint="0 = normal virtual basis (default) · higher = minimum Block count · adjusted quantity only"
@@ -2426,8 +2445,10 @@ function SettingsPage() {
                 />
                 <Toggle
                   label="Always max leverage"
-                  on={overlay.useMaxLeverage !== false}
-                  onChange={(v) => patch("useMaxLeverage", v)}
+                  hint="Always on · the engine trades at each contract's maximum"
+                  on
+                  locked
+                  onChange={() => patch("useMaxLeverage", true)}
                 />
                 <Num
                   label={overlay.useMaxLeverage !== false ? "Fallback leverage" : "Pulse leverage"}
@@ -2657,9 +2678,7 @@ function SettingsPage() {
             data-testid="reset-confirm"
             className="w-full max-w-md space-y-4 rounded-radius border border-border bg-surface p-4 shadow-lg"
             onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setResetAsk(false);
-            }}
+            onKeyDown={dialogKeys(() => setResetAsk(false))}
           >
             <div>
               <h2 id="reset-overlay-title" className="text-sm font-medium tracking-wide text-muted uppercase">
@@ -2675,6 +2694,7 @@ function SettingsPage() {
               <button
                 type="button"
                 data-testid="reset-cancel"
+                autoFocus
                 onClick={() => setResetAsk(false)}
                 className="min-h-11 rounded-lg border border-border px-4 text-sm text-muted"
               >
@@ -2683,7 +2703,6 @@ function SettingsPage() {
               <button
                 type="button"
                 data-testid="reset-confirm-yes"
-                autoFocus
                 onClick={onResetOverlay}
                 className="min-h-11 rounded-lg bg-danger px-4 text-sm font-medium text-bg"
               >
@@ -2695,13 +2714,13 @@ function SettingsPage() {
       ) : null}
       {cleanupAsk ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4">
+          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4" onKeyDown={dialogKeys(() => setCleanupAsk(false))}>
             <h3 className="text-sm font-medium">Delete all system presets except Default?</h3>
             <p className="mt-2 text-sm text-muted">
               Every saved preset except the protected Default will be removed. The currently applied overlay is not changed.
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button type="button" className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setCleanupAsk(false)}>
+              <button type="button" autoFocus className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setCleanupAsk(false)}>
                 Cancel
               </button>
               <button
@@ -2718,13 +2737,13 @@ function SettingsPage() {
       ) : null}
       {deleteId ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-bg/70 p-4 sm:items-center" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4">
+          <div className="w-full max-w-md rounded-radius border border-border bg-surface p-4" onKeyDown={dialogKeys(() => setDeleteId(null))}>
             <h3 className="text-sm font-medium">Delete system preset?</h3>
             <p className="mt-2 text-sm text-muted">
               {userPresets.find((p) => p.id === deleteId)?.name || "This preset"} will be removed for Live and VST. Overlay on the engine is not changed until you load another.
             </p>
             <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button type="button" className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setDeleteId(null)}>
+              <button type="button" autoFocus className="min-h-11 rounded-lg border border-border px-4 text-sm" onClick={() => setDeleteId(null)}>
                 Cancel
               </button>
               <button
@@ -3058,6 +3077,84 @@ function EnableSlider({
   );
 }
 
+/**
+ * Number box that can be typed into. The draft is committed as typed while it is
+ * in range and clamped on blur/Enter. Clamping on every keystroke turned "24"
+ * into 44, "1.2" into 1.02 and "3600" into 21600.
+ */
+function DraftNumber({
+  value,
+  min,
+  max,
+  step,
+  onCommit,
+  className,
+  label,
+  testId,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onCommit: (n: number) => void;
+  className?: string;
+  label?: string;
+  testId?: string;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const n = Number(draft);
+    setDraft(null);
+    if (draft.trim() !== "" && Number.isFinite(n)) onCommit(Math.min(max, Math.max(min, n)));
+  };
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      aria-label={label}
+      data-testid={testId}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== "" && Number.isFinite(n) && n >= min && n <= max) onCommit(n);
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit();
+      }}
+      className={className}
+      suppressHydrationWarning
+    />
+  );
+}
+
+/** Escape closes, Tab wraps inside the dialog panel. */
+function dialogKeys(close: () => void) {
+  return (e: React.KeyboardEvent<HTMLElement>) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const items = [...e.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled]), input, select, textarea, a[href]")];
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+}
+
 function Slider({
   label,
   value,
@@ -3081,25 +3178,19 @@ function Slider({
 }) {
   const pct = max === min ? 0 : ((value - min) / (max - min)) * 100;
   return (
-    <label className="rounded-lg border border-border bg-bg2 px-3 py-3" data-testid={testId}>
+    <label className="block rounded-lg border border-border bg-bg2 px-3 py-3" data-testid={testId}>
       <div className="flex flex-nowrap items-center justify-between gap-2">
         <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
         <span className="ml-auto inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-sm tabular-nums">
-          <input
-            type="number"
+          <DraftNumber
             min={min}
             max={max}
             step={step}
-            aria-label={label}
-            data-testid={testId ? `${testId}-input` : undefined}
+            label={label}
+            testId={testId ? `${testId}-input` : undefined}
             value={Number.isInteger(step) && step >= 1 ? value : Number(Number(value).toFixed(2))}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              if (!Number.isFinite(n)) return;
-              onChange(Math.min(max, Math.max(min, n)));
-            }}
-            className="w-14 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
-            suppressHydrationWarning
+            onCommit={onChange}
+            className="w-20 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
           />
           {unit ? <span>{unit}</span> : null}
         </span>
@@ -3160,23 +3251,17 @@ function Num({
   const pct = max === min ? 0 : ((clamped - min) / (max - min)) * 100;
   const digits = Number.isInteger(step) && step >= 1 ? 0 : step < 0.05 ? 2 : 2;
   return (
-    <label className="rounded-lg border border-border bg-bg2 px-3 py-3">
+    <label className="block rounded-lg border border-border bg-bg2 px-3 py-3">
       <div className="flex items-baseline justify-between gap-2">
         <span className="min-w-0 truncate font-mono text-xs text-muted">{label}</span>
         <span className="flex shrink-0 items-center gap-1 font-mono text-sm tabular-nums">
-          <input
-            type="number"
+          <DraftNumber
             min={min}
             max={max}
             step={step}
             value={Number(clamped.toFixed(digits))}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              if (!Number.isFinite(n)) return;
-              onChange(Math.min(max, Math.max(min, n)));
-            }}
-            className="w-16 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
-            suppressHydrationWarning
+            onCommit={onChange}
+            className="w-28 rounded border border-border bg-surface px-1 py-0.5 text-right font-mono text-sm"
           />
           {unit}
         </span>

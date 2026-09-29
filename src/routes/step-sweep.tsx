@@ -217,6 +217,8 @@ function fmtDetail(value: unknown): string {
 function StepSweepPage() {
   const [job, setJob] = useState<HistTestJob | null>(null);
   const [data, setData] = useState<SweepReport | null>(null);
+  // Set when the tape shown is the committed public/step-sweep-24h.json, not a live run.
+  const [snapshot, setSnapshot] = useState<string | null>(null);
   const seqRef = useRef(0);
   useEffect(() => {
     let stop = false;
@@ -232,13 +234,17 @@ function StepSweepPage() {
           (hist.bySymbol || []).length > 0 ||
           Boolean(hist.phase && hist.phase !== "idle" && hist.phase !== "stopped");
         if (hasTape) {
+          setSnapshot(null);
           setData(hist as SweepReport);
           return;
         }
         const r = await fetch(`/step-sweep-24h.json?t=${Date.now()}`, { cache: "no-store", signal });
         if (!r.ok || stop || signal?.aborted || seq !== seqRef.current) return;
         const body = (await r.json()) as SweepReport;
-        if (body && (body.phase || body.hours || body.symbols)) setData(body);
+        if (body && (body.phase || body.hours || body.symbols)) {
+          setSnapshot(body.generatedAt || "an unknown date");
+          setData(body);
+        }
       } catch {
         /* keep last */
       }
@@ -264,7 +270,10 @@ function StepSweepPage() {
           : await startHistTest({ hours, minPf, symbolCap, action: action === "resume" ? "resume" : "start" });
     if (seq !== seqRef.current) return;
     setJob(next);
-    if (next.phase && next.phase !== "idle") setData((prev) => ({ ...(prev || {}), ...next } as SweepReport));
+    if (next.phase && next.phase !== "idle") {
+      setSnapshot(null);
+      setData((prev) => ({ ...(prev || {}), ...next } as SweepReport));
+    }
   };
 
   const report = data;
@@ -319,6 +328,11 @@ function StepSweepPage() {
 
   return (
     <DeskShell mode={histTestIsRunning(job?.phase) ? String(job?.phase || "TEST").toUpperCase() : ready ? "TEST READY" : "HISTORIC TEST"}>
+      {snapshot ? (
+        <p className="rounded-radius border border-warn/40 bg-warn/10 px-3 py-2 font-mono text-xs text-warn" data-testid="sweep-snapshot-note">
+          Stored snapshot, not a live run · generated {snapshot} · press Start to refresh
+        </p>
+      ) : null}
       <section data-testid="test-historic" className="rounded-radius border-2 border-primary bg-surface p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
