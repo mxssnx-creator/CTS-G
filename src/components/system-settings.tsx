@@ -11,7 +11,7 @@ const groups: { title: string; hint: string; fields: Field[] }[] = [
     ["rssSoftMb", "Memory soft ceiling · MiB", "0 = automatic host / service budget"], ["rssHardMb", "Memory hard ceiling · MiB", "0 = automatic; increases load shedding, preserves controls"],
   ] },
   { title: "Requests and sampling", hint: "Separate request buckets retain the adapter ceilings. Exchange cooldowns still apply.", fields: [
-    ["systemPublicRps", "Public requests / second"], ["systemPrivateRps", "Private requests / second"], ["systemOrderRps", "Order requests / second"],
+    ["systemPublicRps", "Public requests / second"], ["systemPrivateRps", "Private requests / second"], ["systemOrderRps", "Order requests / second"], ["systemBatchRps", "Batch order requests / second"],
     ["systemStatsIntervalS", "Overview refresh · seconds"], ["systemMetricsIntervalS", "Resource sampling · seconds"],
     ["systemReportIntervalS", "Report export interval · seconds"],
   ] },

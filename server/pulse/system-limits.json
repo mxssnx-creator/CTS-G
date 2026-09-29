@@ -21,6 +21,7 @@
   "systemPublicRps": [12, 0.5, 12, false],
   "systemPrivateRps": [5, 0.5, 5, false],
   "systemOrderRps": [4.0, 0.5, 4.0, false],
+  "systemBatchRps": [2.0, 0.5, 2.0, false],
   "systemRedisCacheS": [1, 0.1, 5, false],
   "systemRedisMaxHashKb": [256, 16, 1024, true],
   "systemRedisMaxFieldKb": [16, 1, 64, true],

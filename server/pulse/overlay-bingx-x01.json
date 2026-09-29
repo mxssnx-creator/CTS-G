@@ -99,6 +99,8 @@
   "maxDdTimeS": 57600,
   "maxOpen": 100,
   "maxPerGroup": 0,
+  "entryBatchOrders": false,
+  "entryBatchSize": 5,
   "maxStopLossRatio": 2.5,
   "minPf": 1.2,
   "minStep": 7,

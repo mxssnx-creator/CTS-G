@@ -233,6 +233,9 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   controlOrders: boolean;
   controlOrdersPerConfig: boolean;
   controlOrdersOverall: boolean;
+  // Up to entryBatchSize entries per batchOrders call (own venue quota). Off until enabled per lane.
+  entryBatchOrders: boolean;
+  entryBatchSize: number;
   normalExecutionEnabled: boolean;
   entryPolicy: EntryPolicy;
   entryPolicyMaxCandidates: number;
@@ -442,6 +445,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   controlOrders: true,
   controlOrdersPerConfig: true,
   controlOrdersOverall: true,
+  entryBatchOrders: false,
+  entryBatchSize: 5,
   normalExecutionEnabled: true,
   entryPolicy: "permissive-bounded",
   entryPolicyMaxCandidates: 0,
@@ -634,6 +639,8 @@ export type CtsSettings = {
   control_orders?: boolean | number | string;
   controlOrdersPerConfig?: boolean | number | string;
   controlOrdersOverall?: boolean | number | string;
+  entryBatchOrders?: boolean | number | string;
+  entryBatchSize?: number;
   control_orders_per_config?: boolean | number | string;
   variantBlockEnabled?: boolean;
   variant_block?: boolean;
@@ -840,6 +847,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailGivePct: give,
     controlOrders: true, // SL/TP protection is always on
     controlOrdersOverall: bool(cts.controlOrdersOverall, true),
+    entryBatchOrders: bool(live?.entryBatchOrders ?? cts.entryBatchOrders, false),
+    entryBatchSize: num(live?.entryBatchSize ?? cts.entryBatchSize, 5),
     controlOrdersPerConfig: bool(
       cts.controlOrdersPerConfig ?? cts.control_orders_per_config,
       true,
@@ -1212,6 +1221,8 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.controlOrders = true;
   next.controlOrdersPerConfig = bool(next.controlOrdersPerConfig, true);
   next.controlOrdersOverall = bool(next.controlOrdersOverall, true);
+  next.entryBatchOrders = bool(next.entryBatchOrders, false);
+  next.entryBatchSize = Math.max(2, Math.min(5, Math.round(num(next.entryBatchSize, 5))));
   next.blockOverall = bool(next.blockOverall, true);
   next.normalExecutionEnabled = bool(next.normalExecutionEnabled, true);
   next.entryPolicy = coerceEntryPolicy(next.entryPolicy);

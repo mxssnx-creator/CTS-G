@@ -2544,6 +2544,13 @@ function SettingsPage() {
                 <Num label="Cycle s" value={overlay.scanS} min={0.2} max={8} step={0.05} onChange={(v) => patch("scanS", v)} />
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
                 <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
+                <Toggle
+                  label="Batch entry orders"
+                  hint="Up to 5 entries per batchOrders call (its own venue quota) · each keeps its own client id and retries alone · off by default, try it on VST first"
+                  on={overlay.entryBatchOrders}
+                  onChange={(v) => patch("entryBatchOrders", v)}
+                />
+                <Num label="Entries per batch" value={overlay.entryBatchSize} min={2} max={5} step={1} onChange={(v) => patch("entryBatchSize", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
                 <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />

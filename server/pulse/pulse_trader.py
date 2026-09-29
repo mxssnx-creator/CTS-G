@@ -1167,6 +1167,8 @@ class Pulse:
         self.exchange_order_snapshot_detail = "not-read"
         self.control_orders_per_config = True
         self.control_orders_overall = False
+        self.entry_batch_orders = False  # overlay entryBatchOrders: up to entry_batch_size entries per batchOrders call
+        self.entry_batch_size = 5
         self.closed: Deque[Closed] = deque(maxlen=80)
         self.cooldown: Dict[str, float] = {}
         self.last_entry_ts = 0.0
@@ -6150,31 +6152,60 @@ class Pulse:
             return decision
         return reject("counts below minimum level, blocked or adjusted target already satisfied")
 
-    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None, execution_strategy=None) -> None:
+    def _entry_mode_flags(self, forced_row, selected_set) -> Tuple[bool, bool, bool]:
         normal_enabled = getattr(self, "normal_execution_enabled", False) is True
         trail_enabled = (forced_row is None and getattr(selected_set, "kind", "") == "trail"
                          and bool(getattr(self, "strat_trail", False)))
         block_enabled = (forced_row is None and bool(getattr(self, "block_active", True))
                          and bool(getattr(self, "strat_block", False)) and bool(getattr(getattr(self, "block", None), "enabled", False)))
+        return normal_enabled, trail_enabled, block_enabled
+
+    def _entry_modes(self, forced_row, selected_set) -> List[str]:
+        """Independent execution modes for one candidate, in rotating start order."""
+        normal_enabled, trail_enabled, block_enabled = self._entry_mode_flags(forced_row, selected_set)
+        modes = (["trailing"] if trail_enabled else ["normal"] if normal_enabled else [])
+        if block_enabled:
+            modes.append("block-active")
+        cursor = int(getattr(self, "_execution_strategy_cursor", 0))
+        self._execution_strategy_cursor = cursor + 1
+        if not modes:
+            return []
+        start = cursor % len(modes)
+        return modes[start:] + modes[:start]
+
+    def place(self, sym: str, direction: int, reason: str, conf: float, forced_row: Optional[Dict[str, Any]] = None, *, selected_set=None, execution_strategy=None) -> None:
         if execution_strategy is None:
             # Independent candidates: a successful Block decision must never
             # replace Normal, and a failed Block decision cannot enable Normal.
-            modes = (["trailing"] if trail_enabled else ["normal"] if normal_enabled else [])
-            if block_enabled:
-                modes.append("block-active")
-            cursor = int(getattr(self, "_execution_strategy_cursor", 0))
-            self._execution_strategy_cursor = cursor + 1
-            if modes:
-                start = cursor % len(modes)
-                for mode in modes[start:] + modes[:start]:
-                    try:
-                        self.place(sym, direction, reason, conf, forced_row, selected_set=selected_set, execution_strategy=mode)
-                    except Exception:
-                        if len(modes) == 1:
-                            raise
-                        self.errors += 1
-                        self.last_error = f"Independent {mode} entry failed for {sym}"
+            modes = self._entry_modes(forced_row, selected_set)
+            for mode in modes:
+                try:
+                    self.place(sym, direction, reason, conf, forced_row, selected_set=selected_set, execution_strategy=mode)
+                except Exception:
+                    if len(modes) == 1:
+                        raise
+                    self.errors += 1
+                    self.last_error = f"Independent {mode} entry failed for {sym}"
             return
+        self._drive_entry(self._place_steps(sym, direction, reason, conf, forced_row, selected_set, execution_strategy))
+
+    def _drive_entry(self, steps, response=None, have_response=False) -> None:
+        """Run an entry to completion, sending each order it asks for as a single POST.
+
+        ``_place_steps`` yields every entry order body it wants sent and receives the
+        exchange response. ``have_response`` resumes a run whose first order was already
+        sent (as part of a batch); any retry it needs goes out as a single order.
+        """
+        try:
+            body = steps.send(response) if have_response else next(steps)
+            while True:
+                body = steps.send(self.api.post("/openApi/swap/v2/trade/order", body))
+        except StopIteration:
+            return
+
+    def _place_steps(self, sym: str, direction: int, reason: str, conf: float, forced_row, selected_set, execution_strategy):
+        """Entry pipeline as a generator: plan, ``yield`` each entry order body, book the fill."""
+        normal_enabled, trail_enabled, block_enabled = self._entry_mode_flags(forced_row, selected_set)
         normal_allowed = ((execution_strategy == "normal" and normal_enabled)
                           or (execution_strategy == "trailing" and trail_enabled))
         if not normal_allowed and not (execution_strategy == "block-active" and block_enabled):
@@ -6503,7 +6534,7 @@ class Pulse:
             detail="entry market order",
             metadata={"path": "/openApi/swap/v2/trade/order", "orderSide": order_side},
         )
-        r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
+        r = (yield _entry_body(qty, cid))
         self.did_io = True
         if not self.ok(r) and self.order_response_ambiguous(r):
             # Lost / timed-out response: the order may already exist. Resolve it by client id;
@@ -6529,7 +6560,7 @@ class Pulse:
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
                 attach = {}
                 # Retry the same client id so the request remains idempotent.
-                r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
+                r = (yield _entry_body(qty, cid))
                 self.did_io = True
         if not self.ok(r):
             msg = str(r.get("msg") or "")
@@ -6549,10 +6580,7 @@ class Pulse:
                     self.lev_map[sym] = cap
                     self._persist_lev()
                     # Retry the same client id after leverage discovery.
-                    r = self.api.post(
-                        "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, cid),
-                    )
+                    r = (yield _entry_body(qty, cid))
                     self.did_io = True
                     msg = str(r.get("msg") or "")
             if not self.ok(r) and c is not None:
@@ -6578,10 +6606,7 @@ class Pulse:
                         requested_qty=qty, group_key=pending_group_key,
                         metadata=pending_meta,
                     )
-                    r = self.api.post(
-                        "/openApi/swap/v2/trade/order",
-                        _entry_body(qty, cid),
-                    )
+                    r = (yield _entry_body(qty, cid))
                     self.did_io = True
                     msg = str(r.get("msg") or "")
             if not self.ok(r) and c is not None:
@@ -6627,10 +6652,7 @@ class Pulse:
                             requested_qty=qty, group_key=pending_group_key,
                             metadata=pending_meta,
                         )
-                        r = self.api.post(
-                            "/openApi/swap/v2/trade/order",
-                            _entry_body(qty, cid),
-                        )
+                        r = (yield _entry_body(qty, cid))
                         self.did_io = True
                         msg = str(r.get("msg") or "")
             if not self.ok(r):
@@ -6893,6 +6915,107 @@ class Pulse:
                 pass
         log(f"OPEN {sym} {side} qty={filled} px={avg} sl={pos.sl} tp={pos.tp} sl_oid={pos.sl_oid} tp_oid={pos.tp_oid}")
         self._stats_force = True
+
+    def _entry_run_failed(self, sym: str, mode: str, exc: Exception) -> None:
+        # One failed lane cannot starve its siblings; the pending intent stays durable.
+        self.errors += 1
+        self.last_error = f"Independent {mode} entry failed for {sym}: {type(exc).__name__}: {str(exc)[:100]}"
+
+    def _submit_entry_chunk(self, bodies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Send up to five entry bodies; return one ``api.post``-shaped response per body.
+
+        A lost or incomplete batch response is reported as the ambiguous transport failure
+        to every body, so each run resolves its own client id before anything is re-sent.
+        """
+        path = "/openApi/swap/v2/trade/order"
+        if len(bodies) == 1 or not hasattr(self.api, "batch_place"):
+            return [self.api.post(path, body) for body in bodies]
+        try:
+            batch = self.api.batch_place(bodies)
+        except ValueError as exc:  # invalid quantity: nothing was sent
+            batch = {"code": 100400, "msg": f"batch entry rejected before sending: {exc}"}
+        except Exception as exc:  # unknown: the venue may have accepted the orders
+            batch = {"code": -1, "error": True, "msg": f"batch entry failed: {type(exc).__name__}"}
+        self.did_io = True
+        if not isinstance(batch, dict):
+            batch = {"code": -1, "error": True, "msg": "bad batch response"}
+        if not self.ok(batch) and not self.order_response_ambiguous(batch) and not batch.get("cooled"):
+            # The venue refused the batch as a whole, so nothing was accepted: send the orders one by
+            # one (each keeps its client id and its own retries) and stop batching if it keeps refusing.
+            self._batch_reject_streak = int(getattr(self, "_batch_reject_streak", 0) or 0) + 1
+            if self._batch_reject_streak >= 3 and getattr(self, "entry_batch_orders", False):
+                self.entry_batch_orders = False
+                log("BATCH ENTRY off after 3 refused batches: " + short_api_msg(str(batch.get("msg") or ""))[:120])
+            return [self.api.post(path, body) for body in bodies]
+        data = batch.get("data") or {}
+        rows = data.get("orders") if isinstance(data, dict) else data
+        if self.ok(batch):
+            if not (batch.get("complete") is True and isinstance(rows, list) and len(rows) == len(bodies)
+                    and all(isinstance(row, dict) for row in rows)):
+                batch = {"code": -1, "error": True, "msg": "incomplete batch response; reconcile by client id"}
+            else:
+                out: List[Dict[str, Any]] = []
+                for body, row in zip(bodies, rows):
+                    echoed = self.order_cid(row)
+                    if echoed and echoed.lower() != str(body.get("clientOrderID") or "").lower():
+                        out = []
+                        break
+                    if row.get("code") not in (0, None, "0", ""):
+                        out.append({"code": row.get("code"), "msg": row.get("msg") or ""})
+                    else:
+                        out.append({"code": 0, "data": {"order": row}})
+                if len(out) == len(bodies):
+                    self._batch_reject_streak = 0
+                    return out
+                batch = {"code": -1, "error": True, "msg": "batch rows do not match the request; reconcile by client id"}
+        return [dict(batch) for _ in bodies]
+
+    def place_batch(self, rows: List[Tuple[str, int, str, float, Any]]) -> int:
+        """Open several entries with one batchOrders call per five; returns the lots opened.
+
+        ``rows`` are (symbol, direction, reason, confidence, selected_set). Every candidate
+        runs the same pipeline as ``place`` up to its order body (checks, sizing, pending
+        intent and reserved margin); the bodies then go out together and each run books its
+        own fill, keeps its own client id and retries alone as a single order. Block-active
+        entries depend on the confirmed Normal lot, so they run afterwards through ``place``.
+        """
+        before = len(self.open)
+        size = max(2, min(5, int(getattr(self, "entry_batch_size", 5) or 5)))
+        runs: List[Tuple[Any, Dict[str, Any], str, str]] = []
+        sequential: List[Tuple[str, int, str, float, Any]] = []
+        for sym, direction, reason, conf, selected in rows:
+            for mode in self._entry_modes(None, selected):
+                if mode == "block-active":
+                    sequential.append((sym, direction, reason, conf, selected))
+                    continue
+                side = "LONG" if direction > 0 else "SHORT"
+                new_group = not self.effective_group_occupied(sym, side)
+                steps = self._place_steps(sym, direction, reason, conf, None, selected, mode)
+                try:
+                    body = next(steps)
+                except StopIteration:
+                    continue
+                except Exception as exc:
+                    self._entry_run_failed(sym, mode, exc)
+                    continue
+                if new_group:
+                    # A new (symbol, side) group needs its own controls: keep the stagger of single entries.
+                    self.last_entry_ts = time.time()
+                runs.append((steps, body, sym, mode))
+        for start in range(0, len(runs), size):
+            chunk = runs[start:start + size]
+            responses = self._submit_entry_chunk([body for _, body, _, _ in chunk])
+            for (steps, _body, sym, mode), response in zip(chunk, responses):
+                try:
+                    self._drive_entry(steps, response, True)
+                except Exception as exc:
+                    self._entry_run_failed(sym, mode, exc)
+        for sym, direction, reason, conf, selected in sequential:
+            try:
+                self.place(sym, direction, reason, conf, None, selected_set=selected, execution_strategy="block-active")
+            except Exception as exc:
+                self._entry_run_failed(sym, "block-active", exc)
+        return len(self.open) - before
 
     def _exchange_flat(self, pos: Position) -> bool:
         """True only when the exchange has zero size on this symbol+side."""
@@ -8455,6 +8578,11 @@ class Pulse:
             ov.get("controlOrdersOverall", cts.get("controlOrdersOverall", True)),
             True,
         )
+        self.entry_batch_orders = _bool_setting(ov.get("entryBatchOrders", False), False)
+        try:
+            self.entry_batch_size = max(2, min(5, int(ov.get("entryBatchSize", 5))))
+        except (TypeError, ValueError, OverflowError):
+            self.entry_batch_size = 5
         control_orders_per_config = _bool_setting(
             ov.get(
                 "controlOrdersPerConfig",
@@ -8733,6 +8861,8 @@ class Pulse:
             "scanS": SCAN_S,
             "cooldownS": COOLDOWN_S,
             "staggerS": STAGGER_S,
+            "entryBatchOrders": bool(getattr(self, "entry_batch_orders", False)),
+            "entryBatchSize": int(getattr(self, "entry_batch_size", 5) or 5),
             "controlOrders": getattr(self, "control_orders", True),
             "controlOrdersPerConfig": bool(getattr(self, "control_orders_per_config", True)),
             "controlOrdersOverall": bool(getattr(self, "control_orders_overall", False)),
@@ -10660,6 +10790,44 @@ class Pulse:
                     by_scope[(pack_name, side_name)] = [None]
         matrix = EntryMatrix(ranked, by_scope, keep_order=True)
         self._entry_candidate_count = len(matrix)
+        def _entry_burst() -> int:
+            room = self.avail_notional()
+            budget = getattr(getattr(self, "load", None), "last_budget", None)
+            level = str(getattr(budget, "level", "normal") or "normal")
+            default_burst = 32  # intern lots are independent of the effective-position cap
+            burst_by_level = {"normal": default_burst, "busy": 16, "overload": 8, "critical": 4}
+            burst = burst_by_level.get(level, default_burst)
+            if budget is not None:
+                try:
+                    burst = min(burst, max(1, int(getattr(budget, "entry_batch", burst)) // 8))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            if room < 8:
+                burst = 1
+            return burst
+
+        batch_mode = bool(getattr(self, "entry_batch_orders", False))
+        batch_size = max(2, min(5, int(getattr(self, "entry_batch_size", 5) or 5)))
+        group: List[Tuple[str, int, str, float, Any]] = []
+
+        def _flush_group() -> bool:
+            """Send the collected candidates together; True once this cycle's entry allowance is used."""
+            nonlocal placed, skipped
+            if group:
+                rows = list(group)
+                del group[:]
+                try:
+                    opened = self.place_batch(rows)
+                except Exception as exc:
+                    self.errors += 1
+                    self.last_error = f"entry batch: {type(exc).__name__}: {str(exc)[:140]}"
+                    opened = 0
+                placed += opened
+                skipped += max(0, len(rows) - opened)
+            if placed >= _entry_burst():
+                return True
+            return bool(slot_cap > 0 and self.entry_slot_count() >= slot_cap and not intern_any)
+
         for conf, s, d, why, selected in self.entry_candidate_window(matrix):
             if self.entries_blocked():
                 break
@@ -10676,6 +10844,13 @@ class Pulse:
                         continue
                 except Exception:
                     pass
+            if batch_mode:
+                # Collect up to five candidates (never more than this cycle may still open)
+                # and send them with one batchOrders call.
+                group.append((s, d, why, conf, selected))
+                if len(group) >= min(batch_size, max(1, _entry_burst() - placed)) and _flush_group():
+                    break
+                continue
             before = len(self.open)
             try:
                 self.place(s, d, why, conf, selected_set=selected)
@@ -10690,23 +10865,13 @@ class Pulse:
                 placed += 1
             else:
                 skipped += 1
-            room = self.avail_notional()
-            budget = getattr(getattr(self, "load", None), "last_budget", None)
-            level = str(getattr(budget, "level", "normal") or "normal")
-            default_burst = 32  # intern lots are independent of the effective-position cap
-            burst_by_level = {"normal": default_burst, "busy": 16, "overload": 8, "critical": 4}
-            burst = burst_by_level.get(level, default_burst)
-            if budget is not None:
-                try:
-                    burst = min(burst, max(1, int(getattr(budget, "entry_batch", burst)) // 8))
-                except (TypeError, ValueError, OverflowError):
-                    pass
-            if room < 8:
-                burst = 1
-            if placed >= burst:
+            if placed >= _entry_burst():
                 break
             if slot_cap > 0 and self.entry_slot_count() >= slot_cap and not intern_any:
                 break
+        else:
+            if batch_mode and group:
+                _flush_group()
         self._entry_queue = self.entry_queue_state(matrix)
         if placed == 0 and ranked and (time.time() - self.skip_log.get("entry0", 0) > 30):
             # Per-scope signal counts: when every ranked signal maps to a

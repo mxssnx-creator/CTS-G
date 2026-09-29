@@ -36,6 +36,7 @@ EVAL_MIN_PF = 1.20
 # 20 % headroom. Same value as bingx_fast.ORDER_RPS and system-limits.json (a test
 # keeps the three together).
 ORDER_RPS = 4.0
+BATCH_RPS = 2.0  # batchOrders has its own 5 / s venue quota; two lanes at 2.0 leave 20 % headroom
 
 
 def processing_profile():
@@ -60,4 +61,5 @@ def processing_profile():
     # IP; two lanes at 4.0/s leave 20 % headroom). Lanes keep any lower value they
     # were saved with unless this profile is applied.
     result["systemOrderRps"] = ORDER_RPS
+    result["systemBatchRps"] = BATCH_RPS
     return result
