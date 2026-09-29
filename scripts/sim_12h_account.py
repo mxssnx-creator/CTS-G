@@ -1545,7 +1545,7 @@ def main(argv=None) -> int:
         raise SystemExit(f"missing contract specs: {missing}")
     ov = deployed_settings(args.overlay)
     runs = []
-    specs = [("post-base", "Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= 1.02, DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
+    specs = [("post-base", f"Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= {float(book.stage_min_pf['base']):.2f}, DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
              ("unfiltered", "Unfiltered (all Sets, no stage gates)", False, args.leverage, "intrabar")]
     specs.append(("post-base-closeliq", "Post-Base, liquidation tested on 1m close equity (less pessimistic than simultaneous intrabar extremes)",
                   True, args.leverage, "close"))
@@ -1564,7 +1564,7 @@ def main(argv=None) -> int:
     cost_pct = float(book.cost_pct)
     trade_level = {
         "unfiltered (all Set trades entering in window)": tape_metrics(cands, catalog, np.ones(len(cands["uid"]), bool), cost_pct),
-        "Base passed (last-30 >= 1.02)": tape_metrics(cands, catalog, cands["base_ok"], cost_pct),
+        f"Base passed (last-30 >= {float(book.stage_min_pf['base']):.2f})": tape_metrics(cands, catalog, cands["base_ok"], cost_pct),
         "Base+Main+Real passed": tape_metrics(cands, catalog, cands["real_ok"], cost_pct),
         "admitted (Base/Main/Real + DDT)": tape_metrics(cands, catalog, cands["admitted"], cost_pct),
     }
@@ -1601,7 +1601,7 @@ def main(argv=None) -> int:
         tradeLevelHourly={"post-base": tl_post, "unfiltered": tl_unf},
         tradeLevelMarkdown={"post-base": trade_level_markdown(tl_post, start_s, sim_start),
                             "unfiltered": trade_level_markdown(tl_unf, start_s, sim_start)},
-        assumptions=ASSUMPTIONS,
+        assumptions=[a.replace("{floor}", f"{float(book.stage_min_pf['base']):.2f}") for a in ASSUMPTIONS_TEMPLATE],
     )
     for r in runs:
         r["markdown"] = markdown_table(r)
@@ -1617,7 +1617,7 @@ def main(argv=None) -> int:
     return 0
 
 
-ASSUMPTIONS = [
+ASSUMPTIONS_TEMPLATE = [
     "ENGINE-COMPUTED: every Set trade (2 packs x 30 SL:TP ratios x TP steps 7-22 x Normal + 25 trailing pairs = 24,960 Sets) comes from "
     "SetBook._replay_core_vectorized with the deployed profile (overlay-bingx-x02.json + connection_profile.processing_profile()); "
     "Sets with identical bound SL/TP/trailing share one tape but stay separate lots (multiplicity).",
@@ -1628,11 +1628,11 @@ ASSUMPTIONS = [
     "Positions still open at the end of data are reconstructed from the engine entry rule (first signal >= cooldown after the last close); "
     "Block/DCA lanes open at the end are not reconstructed.",
     "STAGE CHAIN (walk-forward): a Set trade executes only if, from closes strictly before its entry bar, the Set x direction passes "
-    "Base last-30 cost-PF ratio >= 1.02 (n >= 30), Main last-5 >= 1.02, Real last-3 >= 1.02 (strict gate / _real_metrics_ok) and "
+    "Base last-30 cost-PF ratio >= {floor} (n >= 30), Main last-5 >= {floor}, Real last-3 >= {floor} (strict gate / _real_metrics_ok) and "
     "DD-time <= setMaxDdTimeS (engine drawdown_time_by_symbol on the last 96 closes, refreshed hourly). Evidence is pooled over all symbols "
     "as in the SetState tape; rejected Sets keep producing evidence. Live closes are not added back into Base evidence (they duplicate replay trades).",
     "Indications-pack Sets additionally need SetBook.indication_ok(kind, side) for at least one kind contributing to the pack vote (kind tape "
-    "last-30 >= 1.02). Live-negative deactivation (last 25 own executed closes net < 0) blocks a Set x side.",
+    "last-30 >= {floor}). Live-negative deactivation (last 25 own executed closes net < 0) blocks a Set x side.",
     "Block lanes use score_block_main Real-overall last-50 (n < 50 = valid, engine rule; n >= 50 needs is_positive_pf and floor); "
     "DCA lanes use DcaBook.score (last-15 PF >= floor, last-25 avgR >= 0). Both need an open executed Set lot on the same symbol x direction.",
     "Coordination axes prev/last/cont/pause are DISABLED in the deployed profile and the replay emits no axis-tagged rows; per-axis columns are "

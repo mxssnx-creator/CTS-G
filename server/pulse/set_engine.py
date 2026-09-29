@@ -490,29 +490,37 @@ def row_equity_pnl(row: Any, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> flo
     pct = None
     pnl = None
     cost = cost_pct
+
+    def first_present(*values):
+        # A measured 0.0 cost is a value, not "missing" (``or`` skipped it).
+        return next((v for v in values if v is not None), cost_pct)
+
     if _is_hist_row(row):
         if "pnl" in row and row.get("pnl") is not None:
             pnl = finite(row.get("pnl"))
         pct = row.get("pnl_pct")
-        cost = finite(row.get("position_cost_pct") or row.get("cost_pct") or row.get("costPct") or cost_pct)
+        cost = finite(first_present(row.get("position_cost_pct"), row.get("cost_pct"), row.get("costPct")))
     else:
         raw_pnl = getattr(row, "pnl", None)
         if raw_pnl is not None:
             pnl = finite(raw_pnl)
         pct = getattr(row, "pnl_pct", None)
-        cost = finite(
-            getattr(row, "position_cost_pct", None)
-            or getattr(row, "cost_pct", None)
-            or getattr(row, "costPct", None)
-            or cost_pct
-        )
+        cost = finite(first_present(
+            getattr(row, "position_cost_pct", None),
+            getattr(row, "cost_pct", None),
+            getattr(row, "costPct", None),
+        ))
     if pct is not None:
         return net_pnl_pct(finite(pct), cost)
     return 0.0 if pnl is None else pnl
 
 
-def drawdown_time(rows: Sequence[Any], now: Optional[float] = None, *, ordered: bool = False) -> Dict[str, float]:
-    """CTS drawdown-time: episodes from peak through recovery, in seconds."""
+def drawdown_time(rows: Sequence[Any], now: Optional[float] = None, *, ordered: bool = False,
+                  cost_pct: float = POSITION_COST_PCT_DEFAULT) -> Dict[str, float]:
+    """CTS drawdown-time: episodes from peak through recovery, in seconds.
+
+    ``cost_pct`` is the fallback PositionCost for rows that do not carry their
+    own; pass the same cost the PF gate uses so PF and DDT describe one tape."""
     usable = [r for r in rows if r is not None and row_ts(r) > 0]
     if ordered:
         seq = usable
@@ -539,7 +547,7 @@ def drawdown_time(rows: Sequence[Any], now: Optional[float] = None, *, ordered: 
         t = row_ts(row)
         if t <= 0:
             continue
-        equity += row_equity_pnl(row)
+        equity += row_equity_pnl(row, cost_pct)
         if equity >= peak - 1e-12:
             if started is not None:
                 dur = max(0.0, t - started)
@@ -573,6 +581,7 @@ def drawdown_time_by_symbol(
     now: Optional[float] = None,
     *,
     ordered: bool = False,
+    cost_pct: float = POSITION_COST_PCT_DEFAULT,
 ) -> Dict[str, float]:
     """DDT per symbol, then max/mean. Mixed-market tapes must not span one 20h episode."""
     by: Dict[str, List[Any]] = {}
@@ -581,10 +590,10 @@ def drawdown_time_by_symbol(
             continue
         by.setdefault(row_symbol(r), []).append(r)
     if len(by) <= 1:
-        return drawdown_time(rows, now, ordered=ordered)
-    parts = [drawdown_time(tape, now, ordered=ordered) for tape in by.values() if tape]
+        return drawdown_time(rows, now, ordered=ordered, cost_pct=cost_pct)
+    parts = [drawdown_time(tape, now, ordered=ordered, cost_pct=cost_pct) for tape in by.values() if tape]
     if not parts:
-        return drawdown_time(rows, now, ordered=ordered)
+        return drawdown_time(rows, now, ordered=ordered, cost_pct=cost_pct)
     episodes = sum(p["episodes"] for p in parts)
     total_s = sum(p["totalS"] for p in parts)
     return {
@@ -2022,7 +2031,7 @@ class SetBook:
         n_pos = sum(1 for rec in rows if row_net_pnl(rec, self.cost_pct) > 0)
         avg = sum(row_net_pnl(rec, self.cost_pct) for rec in rows) / len(rows) if rows else 0.0
         opt_pf = last_n_cost_pf(rows, len(rows), self.cost_pct)
-        opt_dd = drawdown_time_by_symbol(rows)
+        opt_dd = drawdown_time_by_symbol(rows, cost_pct=self.cost_pct)
         by_config: Dict[tuple, List[Dict[str, Any]]] = {}
         for rec in rows:
             step = self._record_step(rec)
@@ -3818,7 +3827,7 @@ class SetBook:
         }
         dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if sample >= required:
-            dd = drawdown_time_by_symbol(ordered, ordered=True)
+            dd = drawdown_time_by_symbol(ordered, ordered=True, cost_pct=self.cost_pct)
         base_ok = sample >= required and clears_pf(last15["ratio"], self.min_pf) and float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
         # Named last5..last75 stay off the hist score hot path. Overall last-pos
         # (pf_n) already gated base_ok; publish the overall window for identity.
@@ -3949,7 +3958,7 @@ class SetBook:
         else:
             last25_avg_r = 0.0
             last25_avg_pnl = 0.0
-        dd = drawdown_time_by_symbol(ordered, ordered=True)
+        dd = drawdown_time_by_symbol(ordered, ordered=True, cost_pct=self.cost_pct)
         need = self.eval_need()
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
@@ -4377,7 +4386,7 @@ class SetBook:
             live_ordered = sorted((r for r in live_rows if isinstance(r, dict)), key=lambda r: finite(r.get("t")))
             live_opt_window = live_ordered[-max(50, self.deact_n, self.optimization_n) :]
             live_opt_pf = last_n_cost_pf(live_opt_window, len(live_opt_window) or 1, self.cost_pct)
-            live_opt_dd = drawdown_time_by_symbol(live_opt_window) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+            live_opt_dd = drawdown_time_by_symbol(live_opt_window, cost_pct=self.cost_pct) if live_opt_window else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
             live_opt_avg = (
                 sum(row_net_pnl(r, self.cost_pct) for r in live_opt_window) / len(live_opt_window)
                 if live_opt_window else 0.0
@@ -5429,7 +5438,7 @@ class SetBook:
             tape = filter_side(hist + live, side)
             source = "mixed" if live_side else "hist-sim"
         tape.sort(key=lambda r: finite(r.get("t")))
-        dd = drawdown_time_by_symbol(tape) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+        dd = drawdown_time_by_symbol(tape, cost_pct=self.cost_pct) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if tape:
             last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
             windows = evaluation_windows(tape, self.cost_pct, required_samples=need)

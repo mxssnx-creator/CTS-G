@@ -89,7 +89,7 @@ try {
     rec(eng.every((b) => b.disabled === false), `${p} engine buttons enabled`, eng);
     if (p === "/settings") {
       rec(dump.histPresent, "settings test-historic present");
-      rec(dump.interesting.some((b) => b.testid === "hist-test-start"), "settings hist-test-start");
+      rec(dump.interesting.some((b) => b.testid === "hist-test-start-settings"), "settings hist-test-start");
       rec(dump.interesting.some((b) => b.testid === "hist-test-pause"), "settings hist-test-pause");
       rec(dump.interesting.some((b) => b.testid === "hist-test-stop"), "settings hist-test-stop");
       const ht = dump.interesting.filter((b) => String(b.testid || "").startsWith("hist-test-"));
@@ -131,7 +131,7 @@ try {
   await page.goto(BASE + "/settings", { waitUntil: "domcontentloaded" });
   await waitHydrated();
   await page.waitForTimeout(1000);
-  const start = page.getByTestId("hist-test-start");
+  const start = page.getByTestId("hist-test-start-settings");
   const pause = page.getByTestId("hist-test-pause");
   const stop = page.getByTestId("hist-test-stop");
   rec(await start.count(), "can find hist-test-start");

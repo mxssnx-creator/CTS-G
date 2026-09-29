@@ -7,7 +7,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'server'/'pulse'))
-from connection_profile import connection_endpoint, processing_profile
+from connection_profile import EVAL_MIN_PF, connection_endpoint, processing_profile
 from prepare_connection_profile import prepare
 from runtime_scope import order_tag, tracking_scope, row_scope_matches
 
@@ -20,12 +20,22 @@ class ConnectionProfileTests(unittest.TestCase):
         self.assertEqual(live['profilePatch'], processing_profile())
         self.assertNotIn('api_key', str(live))
         self.assertFalse(live['activationPerformed'])
-        self.assertEqual(live['changes']['minPf'], {'previous':1.26, 'proposed':1.02})
+        self.assertEqual(live['changes']['minPf'], {'previous':1.26, 'proposed':EVAL_MIN_PF})
+
+    def test_eval_min_pf_is_selective_and_inside_the_slider_range(self):
+        self.assertEqual(EVAL_MIN_PF, 1.20)
+        self.assertGreater(EVAL_MIN_PF, 1.15)  # above the code default POSITIVE_PF
+        self.assertLessEqual(EVAL_MIN_PF, 1.35)  # desk slider maximum (PF_MAX)
+
+    def test_desk_default_matches_the_engine_profile(self):
+        # A desk save must not silently put the floor back to the old default.
+        ts = (ROOT / 'src' / 'lib' / 'config-model.ts').read_text()
+        self.assertIn(f'export const EVAL_MIN_PF = {EVAL_MIN_PF:g};', ts)
 
     def test_profile_defaults_and_independent_returns(self):
         p = processing_profile()
         for key in ('minPf','baseMinPf','mainMinPf','realMinPf','setMinPf','dcaMinPf','exitMinPf'):
-            self.assertEqual(p[key],1.02)
+            self.assertEqual(p[key],EVAL_MIN_PF)
         for key in ('maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
             self.assertEqual(p[key],0)
         self.assertEqual(p['maxOpen'],100)
@@ -39,7 +49,7 @@ class ConnectionProfileTests(unittest.TestCase):
             self.assertEqual(p[key],0)
         self.assertTrue(p['controlOrdersPerConfig'])
         p['minPf']=999
-        self.assertEqual(processing_profile()['minPf'],1.02)
+        self.assertEqual(processing_profile()['minPf'],EVAL_MIN_PF)
 
     def test_control_rollout_preserves_remote_edits_except_explicit_50_symbol_profile(self):
         import runpy

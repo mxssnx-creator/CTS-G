@@ -78,7 +78,7 @@ export function SystemSettingsPanel({ conn, overlay, patch, navigate }: Props) {
     <SystemHealth status={status} />
     <section className="rounded-radius border border-border bg-surface p-4">
       <h2 className="text-sm font-medium">General calculation basis · always active</h2>
-      <p className="mt-2 text-sm text-muted">Normal (General) controls effective simulated and live positions and defaults to disabled. Internal General calculations, evaluation counts and coordination continue for Block, DCA and other configured strategies.</p>
+      <p className="mt-2 text-sm text-muted">Normal (General) controls effective simulated and live positions and defaults to enabled. Internal General calculations, evaluation counts and coordination continue for Block, DCA and other configured strategies.</p>
       <button type="button" className="mt-3 min-h-11 rounded-lg border border-border px-3 text-sm" onClick={() => navigate("packs")}>Normal (General) and independent strategy switches</button>
     </section>
     {groups.map((group) => <section key={group.title} className="min-w-0 rounded-radius border border-border bg-surface p-4">

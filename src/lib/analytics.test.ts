@@ -50,13 +50,26 @@ test("drawdown time uses cost-net pnl_pct when pnl is zero", () => {
 });
 
 test("PositionCost between 0.02% and 0.05% stays a percent, matching the engine", () => {
-  // Engine (position_cost.cost_as_frac) treats values above 0.02 as percent.
+  // Engine (position_cost.cost_as_frac) treats values at or above 0.02 as percent.
   assert.equal(costAsFrac(0.04), 0.0004);
   assert.equal(costAsFrac(0.05), 0.0005);
-  assert.equal(costAsFrac(0.02), 0.02);
+  assert.equal(costAsFrac(0.02), 0.0002);
   const rows = Array.from({ length: 10 }, (_, i) => ({ t: 1_790_000_000 - i * 60, pnl: 0.26, pnl_pct: 0.003 }));
   const metric = lastNCostPf(rows, 15, 0.04);
   assert.equal(metric.classicPf, 99);
   assert.equal(metric.netAvg, 0.0026);
   assert.equal(metric.ratio, 1.65);
+});
+
+test("tied close timestamps resolve like the engine's chronological tape (rows arrive newest-first)", () => {
+  // Chronological: a +1 win, then a -2 loss, both stamped the same second. The
+  // desk receives the newest row first; ordering the tie backwards would end
+  // the tape one unit shallower than the engine's.
+  const newestFirst = [
+    { t: 1_700_000_100, symbol: "A", pnl: -2 },
+    { t: 1_700_000_100, symbol: "A", pnl: 1 },
+  ];
+  const metric = calculateDrawdownTime(newestFirst, 1_700_000_200_000, 3);
+  assert.equal(metric.currentDepth, 2);
+  assert.equal(metric.inDrawdown, true);
 });

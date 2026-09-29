@@ -115,6 +115,14 @@ class SettingsPersistence(unittest.TestCase):
             self.assertEqual(out['symbolCap'], 50)
             self.assertEqual(out['blockMaxStack'], 6)
 
+    def test_exchange_protection_and_max_leverage_cannot_be_switched_off(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            ph.write_overlay('live', {'controlOrders': False, 'useMaxLeverage': False, 'leverage': 5})
+            saved = ph.load_overlay('bingx-x01')
+            # What GET /config.json shows must match what the engine enforces.
+            self.assertIs(saved['controlOrders'], True)
+            self.assertIs(saved['useMaxLeverage'], True)
+
     def test_min_sl_floor_is_systemwide_point_four(self):
         with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
             ph.write_overlay('live', {'slMinPct': 0.15, 'indStopMinPct': 0.2, 'slPct': 0.2})

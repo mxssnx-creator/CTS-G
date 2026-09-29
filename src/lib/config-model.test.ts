@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_OVERLAY,
+  EVAL_MIN_PF,
+  PF_MAX,
+  PF_MIN,
+  POSITIVE_PF,
   DEFAULT_SYMBOL_COUNT,
   isUnlimitedSymbolBook,
   overlayFromCts,
@@ -64,10 +68,21 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
   assert.equal(overlayFromCts({}, { systemSqliteCheckpointS: 1000 }).systemSqliteCheckpointS, 60);
 });
 
+test("the shared eval floor is selective and still inside the slider range", () => {
+  assert.equal(EVAL_MIN_PF, 1.2);
+  assert.ok(EVAL_MIN_PF > POSITIVE_PF && EVAL_MIN_PF <= PF_MAX && EVAL_MIN_PF >= PF_MIN);
+  // The Python profile seeds the same value into both lane overlays.
+  for (const id of ["bingx-x01", "bingx-x02"]) {
+    const seed = laneFile(id);
+    for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
+      assert.equal(seed[key], EVAL_MIN_PF, `${id} ${key}`);
+  }
+});
+
 test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
-      assert.equal(value[key], 1.15, key);
+      assert.equal(value[key], EVAL_MIN_PF, key);
     assert.equal(value.maxDdTimeS, 57600);
     assert.equal(value.setMaxDdTimeS, 57600);
     assert.equal(value.positionCostFallbackPct, 0.1);
@@ -135,8 +150,8 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(value.symbolCap, DEFAULT_SYMBOL_COUNT);
     assert.equal(isUnlimitedSymbolBook(value), false);
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
-    assert.equal(value.minPf, 1.15);
-    assert.equal(value.baseMinPf, 1.15);
+    assert.equal(value.minPf, EVAL_MIN_PF);
+    assert.equal(value.baseMinPf, EVAL_MIN_PF);
     assert.equal(value.histLookbackBars, 2880);
     assert.equal(value.histTestHours, 20);
     assert.equal(value.histTestMinPf, 1.15);
@@ -209,7 +224,7 @@ test("Control holdout defaults off and preserves zero independently of PF and la
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
     assert.equal(value.baseEvalPosCount, 30);
-    assert.equal(value.minPf, 1.15);
+    assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.controlOrdersPerConfig, true);
   }
 });
@@ -264,13 +279,13 @@ test("historic test refresh interval is 1–8 hours default 2", () => {
 test("an Overall save applies only its edits on top of the target lane", () => {
   // The Overall form is built without any lane overlay (defaults).
   const baseline = overlayFromCts({}, {});
-  const form = { ...baseline, minPf: 1.2, baseMinPf: 1.2, mainMinPf: 1.2, realMinPf: 1.2, setMinPf: 1.2, dcaMinPf: 1.2, exitMinPf: 1.2 };
+  const form = { ...baseline, minPf: 1.25, baseMinPf: 1.25, mainMinPf: 1.25, realMinPf: 1.25, setMinPf: 1.25, dcaMinPf: 1.25, exitMinPf: 1.25 };
   const edits = overlayEdits(baseline, form);
   assert.deepEqual(Object.keys(edits).sort(), ["baseMinPf", "dcaMinPf", "exitMinPf", "mainMinPf", "minPf", "realMinPf", "setMinPf"]);
   for (const id of ["bingx-x01", "bingx-x02"]) {
     const lane = overlayFromCts({}, laneFile(id));
     const saved = syncOverlayFlags({ ...lane, ...edits });
-    assert.equal(saved.minPf, 1.2);
+    assert.equal(saved.minPf, 1.25);
     for (const key of ["slPct", "tpPct", "slToTpRatio", "blockVolumeRatio", "setStrictGate", "setUseHistoricGate",
       "histRefreshS", "tpMaxPct", "setStepMax", "symbols", "symbolsAll", "symbolsDynamic"] as const) {
       assert.deepEqual(saved[key], lane[key], `${id} ${key}`);

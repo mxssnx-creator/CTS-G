@@ -24,6 +24,14 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
     return ENDPOINTS[connection]
 
 
+# Shared evaluation minimum PF (Base, Main, Real, DCA, exits). Walk-forward over
+# two consecutive 12h windows (scripts/min_pf_sweep.py, reports/min-pf-sweep.md)
+# admitted 40% of entry candidates at 1.02 and ~15-20% at 1.20. The effect on PF
+# is not stable (one window improved with the floor, the other got worse), so this
+# is a selectivity setting, not a guarantee of profitable Sets. Slider range 1.02-1.35.
+EVAL_MIN_PF = 1.20
+
+
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
     result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
@@ -41,5 +49,5 @@ def processing_profile():
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
                   controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
-        result[key] = 1.02
+        result[key] = EVAL_MIN_PF
     return result

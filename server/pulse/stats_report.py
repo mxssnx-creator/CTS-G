@@ -26,6 +26,17 @@ from position_cost import (
 from set_engine import drawdown_time_by_symbol, IND_KINDS, row_equity_pnl
 
 
+def finite_json(value: Any) -> Any:
+    """Replace NaN/±Infinity with None so json.dump(allow_nan=False) always succeeds."""
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float("inf") else None
+    if isinstance(value, dict):
+        return {k: finite_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite_json(v) for v in value]
+    return value
+
+
 def _f(v: Any, fb: float = 0.0) -> float:
     try:
         n = float(v)
@@ -138,6 +149,10 @@ def enrich(row: Dict[str, Any], cost_pct: float) -> Dict[str, Any]:
     else:
         gross_pct = row_pnl_pct(row, row_cost)
     net_pct = net_pnl_pct(gross_pct, row_cost)
+    if not row.get("_pnl_pct_present", True) and notion > 1e-12:
+        # Publish the reconstructed gross move so last_n_cost_pf / DDT do not
+        # read the 0.0 placeholder from _row() as a cost-only loss.
+        row["pnl_pct"] = gross_pct
     net_usdt = net_pnl_usdt(gross_pct, row["qty"], row["entry"], row_cost) if notion else row["pnl"]
     r = signed_result_r(gross_pct, row_cost)
     row["notional"] = round(notion, 6)
@@ -164,14 +179,15 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         pnl = _f(r.get("grossPnl", r.get("pnl")))
         net = _f(r.get("netPnl"), pnl)
         if pnl > 0:
-            wins += 1
             gp += pnl
         elif pnl < 0:
-            losses += 1
             gl += abs(pnl)
+        # Wins/losses follow the engine headline: net of one PositionCost.
         if net > 0:
+            wins += 1
             gp_net += net
         elif net < 0:
+            losses += 1
             gl_net += abs(net)
         holds.append(_f(r.get("hold_s")))
     cost = last_n_cost_pf(src, len(src) or 1, cost_pct) if src else last_n_cost_pf([], 1, cost_pct)
@@ -186,7 +202,8 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "gl": round(gl, 6),
         "net": round(gp - gl, 6),
         "pf": round(float(cost.get("ratio") or 1.0), 4),
-        "classicPf": round(classic, 4),
+        "classicPf": round(classic_net, 4),
+        "grossClassicPf": round(classic, 4),
         "gpNetCost": round(gp_net, 6),
         "glNetCost": round(gl_net, 6),
         "netAfterCost": round(gp_net - gl_net, 6),
@@ -1172,13 +1189,13 @@ def render_md(blob: Dict[str, Any]) -> str:
         f"- Last15 cost-PF **{pc.get('ratio')}** avgR {pc.get('avgR')} classic {pc.get('classicPf')} pass={(blob.get('costAccounting') or {}).get('pass')} min={(blob.get('costAccounting') or {}).get('minPf')}",
         f"- Rule: {(blob.get('costAccounting') or {}).get('rule')}",
         "",
-        "## Profit factor (USDT, PositionCost deducted)",
+        "## Profit factor (PF = cost ratio, 1.00 neutral; W/L, classic PF and net are after PositionCost; gross = before)",
     ]
     for name, w in pf.items():
         if not isinstance(w, dict):
             continue
         lines.append(
-            f"- {name}: n={w.get('n')} {w.get('wins')}W/{w.get('losses')}L PF={w.get('pf')} net={w.get('net')} · afterCost PF={w.get('pfAfterCost')} net={w.get('netAfterCost')} ratio={w.get('costRatio')} WR={w.get('wr')}%"
+            f"- {name}: n={w.get('n')} {w.get('wins')}W/{w.get('losses')}L cost PF={w.get('pf')} classic PF={w.get('classicPf')} net={w.get('netAfterCost')} · gross classic PF={w.get('grossClassicPf')} gross net={w.get('net')} · WR={w.get('wr')}%"
         )
     lines += [
         "",
@@ -1283,7 +1300,7 @@ def write(
     blob = build(st, cost_pct=cost_pct, conn=conn)
     tmp = dest_json + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(blob, f, separators=(",", ":"))
+        json.dump(finite_json(blob), f, separators=(",", ":"), allow_nan=False)
     os.replace(tmp, dest_json)
     with open(dest_md, "w") as f:
         f.write(render_md(blob))

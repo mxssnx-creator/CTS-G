@@ -1539,7 +1539,7 @@ def expand_rows(book: SetBook, limit: Optional[int] = None) -> List[Dict[str, An
     return [set_row(st, side) for _key, st, side, _validated, _low_sl in picked]
 
 
-def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
+def _rank_set_info(st: Any, side: str = "", need: int = 1, floor: float = POSITIVE_PF) -> Tuple[Tuple, bool, bool, int]:
     want = str(side or "").upper()
     blob = (getattr(st, "by_side", None) or {}).get(want) if want in DIRECTIONS else None
     n15 = int((blob.get("last15_n") if blob is not None else st.last15_n) or 0)
@@ -1548,18 +1548,21 @@ def _rank_set_info(st: Any, side: str = "") -> Tuple[Tuple, bool, bool, int]:
     dd = float((blob.get("max_dd_s") if blob is not None else st.max_dd_s) or 0)
     exp = float((blob.get("expectancy") if blob is not None else st.expectancy) or 0)
     sl = float(st.sl_ratio or 9)
-    validated = n15 > 0 and is_positive_pf(pf)
+    # Same sample window and PF floor as the book's Base stage.
+    validated = n15 >= max(1, int(need)) and is_positive_pf(pf, floor)
     low_sl = sl <= 0.6 + 1e-9 or st.kind == "trail"
     return (0 if validated else 1, -pf, dd, sl, -exp, -n), validated, low_sl, n
 
 
 def _rank_set_rows(book: SetBook) -> List[Tuple[Tuple, Any, str, bool, bool]]:
     ranked: List[Tuple[Tuple, Any, str, bool, bool]] = []
+    need = book.eval_need()
+    floor = float(getattr(book, "min_pf", None) or POSITIVE_PF)
     for st in book.by_idx:
-        key, validated, low_sl, _n = _rank_set_info(st, "")
+        key, validated, low_sl, _n = _rank_set_info(st, "", need, floor)
         ranked.append((key, st, "", validated, low_sl))
         for d in DIRECTIONS:
-            skey, sval, slow, sn = _rank_set_info(st, d)
+            skey, sval, slow, sn = _rank_set_info(st, d, need, floor)
             if sn > 0:
                 ranked.append((skey, st, d, sval, slow))
     ranked.sort(key=lambda item: item[0])
@@ -2874,12 +2877,19 @@ def stop_job(connection: Optional[str] = None) -> Dict[str, Any]:
         pass
     pid = 0
     try:
-        pid = int(open(_pid_path(cid)).read().strip())
+        with open(_pid_path(cid)) as handle:
+            pid = int(handle.read().strip())
     except Exception:
         pid = 0
     me = os.getpid()
     killed = 0
-    if pid > 1 and pid != me:
+    # A stale pid file must never signal an unrelated process that reused the pid.
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            is_calc = b"hist_calc" in handle.read()
+    except OSError:
+        is_calc = False
+    if pid > 1 and pid != me and is_calc:
         for sig in (15, 9):
             try:
                 os.kill(pid, sig)

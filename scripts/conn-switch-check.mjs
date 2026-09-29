@@ -129,9 +129,11 @@ try {
 
   await clickConn("overall");
   await page.waitForTimeout(600);
-  const saveDisabled = await page.locator("[data-testid=save-overlay]").isDisabled();
-  if (saveDisabled) ok("overall save disabled");
-  else fail("overall save enabled");
+  // Overall has no generic Save: each button saves only the touched keys to one lane.
+  const laneSaves = await page.locator("[data-testid=save-overlay-live], [data-testid=save-overlay-vst]").count();
+  const genericSave = await page.locator("[data-testid=save-overlay]").count();
+  if (laneSaves === 2 && genericSave === 0) ok("overall saves target one lane each");
+  else fail(`overall save buttons lane=${laneSaves} generic=${genericSave}`);
 
   await page.getByRole("link", { name: "Results" }).click();
   await page.waitForSelector("[data-testid=results-identity]", { timeout: 15000 });
