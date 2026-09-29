@@ -18,6 +18,7 @@ workspace's configured HTTP/HTTPS proxy; the verified local SSH endpoint is
 - **Block, DCA, trailing, exits, rearrange** — each pack independently enabled.
 - **Universe rank** — max exchange leverage first, then Volatility 1H (or 24h / quote volume / abs change). Dynamic book keeps the top names that still fit margin.
 - **Controls** — SL + TP (and security SL/TP) on every ours position. Foreign / leftover / other-desk positions are never flattened.
+- **Own orders only** — the engine cancels, closes and re-protects only orders and positions it placed (client-ID tag `Gx01` / `Gx02`). Orders and positions from other sources are never cancelled or closed, a stop or close never uses `closePosition` next to another source's lot on the same symbol and side, and leverage / margin mode are left alone on any symbol another source holds a position or order on.
 
 ## Layout
 

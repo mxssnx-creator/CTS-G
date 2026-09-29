@@ -1154,6 +1154,8 @@ class Pulse:
         self._last_close_result: Dict[str, Any] = {}
         self.exchange_qty: Dict[str, float] = {}
         self.exchange_foreign_qty: Dict[str, float] = {}
+        # Symbols on which a non-system open order was seen in the last confirmed snapshot.
+        self.exchange_foreign_order_symbols: set = set()
         self.exchange_own_qty: Dict[str, float] = {}
         self.exchange_own_open_count = -1
         self.exchange_total_open_count = -1
@@ -2150,6 +2152,11 @@ class Pulse:
         mx = int(self.lev_max.get(symbol) or getattr(c, "max_lev", 0) or 0)
         applied = int(self.lev_map.get(symbol) or 0)
         now = time.time()
+        if self.symbol_has_foreign_exposure(symbol):
+            # Operator rule: never touch what other sources hold. Their leverage
+            # and margin mode on this symbol stay as they are.
+            log(f"LEV hold {symbol} · another source has a position or order here", every=300.0, key=f"levhold:{symbol}", quiet=True)
+            return applied or mx
         if self._lev_retry.get(symbol, 0.0) > now:
             return applied or mx
         if not force and mx > 0 and applied >= mx:
@@ -2468,7 +2475,12 @@ class Pulse:
         # Never flatten independent / other-system positions.
         tagged = []
         try:
-            tagged = self.our_orders(symbol)
+            # Only orders on THIS hedge side count as proof of ownership: our
+            # orders on the opposite side say nothing about this position.
+            tagged = [
+                o for o in self.our_orders(symbol)
+                if str(o.get("positionSide") or "").upper() in (str(side or "").upper(), "")
+            ]
         except Exception:
             tagged = []
         has_owned_position = any(
@@ -2925,6 +2937,24 @@ class Pulse:
 
     def order_is_ours(self, o: Dict[str, Any]) -> bool:
         return self.cid_ours(self.order_cid(o))
+
+    def symbol_has_foreign_exposure(self, symbol: str) -> bool:
+        """True when another source holds a position or an open order on ``symbol``.
+
+        Leverage and margin mode are per-symbol exchange settings. Changing them
+        moves the liquidation of, and can be refused because of, a lot this
+        system does not own, so they are left alone while such exposure exists.
+        """
+        sym = str(symbol or "").upper()
+        if not sym:
+            return False
+        for key, qty in (getattr(self, "exchange_foreign_qty", None) or {}).items():
+            try:
+                if str(key).split(":", 1)[0].upper() == sym and float(qty or 0) > 1e-12:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return sym in (getattr(self, "exchange_foreign_order_symbols", None) or ())
 
     def order_cid(self, o: Dict[str, Any]) -> str:
         return str(o.get("clientOrderID") or o.get("clientOrderId") or "")
@@ -4007,6 +4037,11 @@ class Pulse:
             self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
             self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
             self.foreign_open_order_count = self.exchange_order_foreign_count
+            self.exchange_foreign_order_symbols = {
+                str(order.get("symbol") or "").upper()
+                for order in rows
+                if str(order.get("symbol") or "") and not self.order_is_ours(order)
+            }
             self.exchange_order_snapshot_at = now
         else:
             # Cached rows remain usable for idempotent cancellation/repair, but
@@ -4555,7 +4590,8 @@ class Pulse:
         market_type = "STOP_MARKET" if is_sl else "TAKE_PROFIT_MARKET"
         limit_type = "STOP" if is_sl else "TAKE_PROFIT"
         forms = control_order_forms(
-            quantity_matched,
+            # Another source's lot on this symbol and side: never a closePosition stop.
+            quantity_matched or float(getattr(pos, "foreign_qty", 0) or 0) > 1e-12,
             foreign_qty=float(getattr(pos, "foreign_qty", 0) or 0),
             market_type=market_type,
             limit_type=limit_type,
@@ -5020,6 +5056,15 @@ class Pulse:
             pos.ctrl_qty = pos.qty
             pos.ctrl_verified = pos.controls_ok
             return
+        if not self.per_config_controls(pos) and float(getattr(pos, "foreign_qty", 0) or 0) > 1e-12:
+            # A closePosition stop would also close another source's lot on this
+            # symbol and side. Place the quantity-matched legs one by one instead.
+            if not real_oid(pos.sl_oid):
+                pos.sl_oid = pos.sec_sl_oid = self.place_ctrl(pos, "sec-sl", want_sl)
+            if not real_oid(pos.tp_oid):
+                pos.tp_oid = pos.sec_tp_oid = self.place_ctrl(pos, "sec-tp", want_tp)
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+            return
         sl_b = self._ctrl_body(pos, "sl", want_sl)
         tp_b = self._ctrl_body(pos, "tp", want_tp)
         for b, ch in ((sl_b, "u"), (tp_b, "v")):
@@ -5406,7 +5451,14 @@ class Pulse:
         # accepted first request followed by a retry becomes two independent
         # close orders and the fill ledger cannot reconcile them safely.
         forms = [{"quantity": requested_qty, "clientOrderID": close_cid}]
-        if not grouped:
+        # closePosition and positionId close the WHOLE exchange position. With
+        # another source's lot on this symbol and side they would take it too,
+        # so only the quantity-matched form is used then.
+        foreign_here = max(
+            _sf(getattr(pos, "foreign_qty", 0.0)),
+            _sf((getattr(self, "exchange_foreign_qty", None) or {}).get(f"{pos.symbol}:{pos.side}", 0.0)),
+        )
+        if not grouped and foreign_here <= 1e-12:
             forms.append({"closePosition": "true", "clientOrderID": close_cid})
             pid = str(getattr(pos, "position_id", "") or "")
             if pid:
@@ -6380,17 +6432,22 @@ class Pulse:
                 self.lev_max[sym] = cap
                 if c is not None:
                     c.max_lev = cap
-                for lev_side in ("LONG", "SHORT"):
-                    self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
-                self.lev_map[sym] = cap
-                self._persist_lev()
-                # Retry the same client id after leverage discovery.
-                r = self.api.post(
-                    "/openApi/swap/v2/trade/order",
-                    _entry_body(qty, cid),
-                )
-                self.did_io = True
-                msg = str(r.get("msg") or "")
+                if self.symbol_has_foreign_exposure(sym):
+                    # Another source holds this symbol: its leverage is not ours
+                    # to lower. The entry stays rejected instead.
+                    log(f"LEV hold {sym} · entry refused at max leverage, another source has exposure here", every=300.0, key=f"levhold:{sym}", quiet=True)
+                else:
+                    for lev_side in ("LONG", "SHORT"):
+                        self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": sym, "side": lev_side, "leverage": cap})
+                    self.lev_map[sym] = cap
+                    self._persist_lev()
+                    # Retry the same client id after leverage discovery.
+                    r = self.api.post(
+                        "/openApi/swap/v2/trade/order",
+                        _entry_body(qty, cid),
+                    )
+                    self.did_io = True
+                    msg = str(r.get("msg") or "")
             if not self.ok(r) and c is not None:
                 min_tries = 0
                 while min_tries < 3 and not self.ok(r):
@@ -11590,6 +11647,7 @@ class Pulse:
             s for s in SYMBOLS
             if s not in offline
             and s in contracts
+            and not self.symbol_has_foreign_exposure(s)
             and self._lev_retry.get(s, 0.0) <= now
             and (int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max)
         ]
