@@ -47,7 +47,7 @@ test("System settings survive save and use bounded values without disabling auto
     systemStatsIntervalS: 9, systemOrderRps: 50, rssSoftMb: 0, rssHardMb: 0, blockMaxStack: 3, blockActiveMinLevel: 6 }));
   assert.equal(saved.systemWorkers, 8);
   assert.equal(saved.systemDbMaxMb, 8);
-  assert.equal(saved.systemOrderRps, 2.4);
+  assert.equal(saved.systemOrderRps, 4);
   assert.equal(saved.systemStatsIntervalS, 9);
   assert.equal(saved.rssSoftMb, 0);
   assert.equal(saved.rssHardMb, 0);

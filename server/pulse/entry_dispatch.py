@@ -4,12 +4,21 @@ from bisect import bisect_right
 
 class EntryMatrix:
     """Store references per pack/side, never millions of candidate tuples."""
-    def __init__(self, signals, sets_by_scope):
+    def __init__(self, signals, sets_by_scope, keep_order=False):
+        """``keep_order`` keeps the caller's signal order (best first).
+
+        The engine ranks signals by confidence, rebalances the sides and, with
+        little free margin, puts the cheapest symbols first. Re-sorting them by
+        name discarded that coordination: with a rate-limited order lane the
+        scarce orders went to whatever sorted first. The default keeps the
+        deterministic name order for callers that hand in an unranked list.
+        """
         self.signals = []
         self.ends = []
         self.sets_by_scope = sets_by_scope
         self.phases = []
-        for signal in sorted(signals, key=lambda r: (r[1], r[2], r[3])):
+        ordered = signals if keep_order else sorted(signals, key=lambda r: (r[1], r[2], r[3]))
+        for signal in ordered:
             scope = self.scope(signal)
             count = len(sets_by_scope.get(scope, ()))
             if count:

@@ -64,7 +64,7 @@ from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
-from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
+from load_engine import LoadGovernor, BoundedSet, SMALL_BOOK_ENTRY_BATCH, trim_map, cap_map, prune_ttl, cap_list
 from storage_paths import MAX_ERROR_LOG_LINES, MAX_RETAINED_FILE_BYTES, MAX_RETAINED_LINES, DATA_DIR, append_bounded_line, append_bounded_lines, atomic_write, read_jsonl, retain_last_lines
 from event_ledger import EventLedger
 from history_store import BAR_S, HistoryStore, parse_exchange_rows
@@ -9947,7 +9947,11 @@ class Pulse:
         # desks shrink so SL/TP still run. Wider books use the 2s ceiling.
         intern_desk = intern_n > 8 and intern_n <= 64
         if intern_desk:
-            dynamic_batch = min(dynamic_batch, 8)
+            # The time slice (not the count) protects SL/TP. Most candidates are
+            # rejected in microseconds (lane already open, cooldown, no margin),
+            # so a count of 8 starved the order lane: only one REST placement
+            # fits into the slice anyway.
+            dynamic_batch = min(dynamic_batch, max(SMALL_BOOK_ENTRY_BATCH.values()))
             dynamic_ms = min(dynamic_ms, 180.0)
         scan_s = max(0.05, float(globals().get("SCAN_S", 5.0) or 5.0))
         ceiling = 0.25 if intern_desk else 2.0
@@ -10654,7 +10658,7 @@ class Pulse:
                         )
                 else:
                     by_scope[(pack_name, side_name)] = [None]
-        matrix = EntryMatrix(ranked, by_scope)
+        matrix = EntryMatrix(ranked, by_scope, keep_order=True)
         self._entry_candidate_count = len(matrix)
         for conf, s, d, why, selected in self.entry_candidate_window(matrix):
             if self.entries_blocked():

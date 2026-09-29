@@ -31,6 +31,12 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
 # is a selectivity setting, not a guarantee of profitable Sets. Slider range 1.02-1.35.
 EVAL_MIN_PF = 1.20
 
+# Order requests per second per lane. BingX allows 10 placements per second per IP
+# (since 2025-10-16); Mainnet and VST can share one IP, so two lanes at 4.0 leave
+# 20 % headroom. Same value as bingx_fast.ORDER_RPS and system-limits.json (a test
+# keeps the three together).
+ORDER_RPS = 4.0
+
 
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
@@ -50,4 +56,8 @@ def processing_profile():
                   controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
         result[key] = EVAL_MIN_PF
+    # Order lane: the same ceiling on both lanes (BingX allows 10 placements/s per
+    # IP; two lanes at 4.0/s leave 20 % headroom). Lanes keep any lower value they
+    # were saved with unless this profile is applied.
+    result["systemOrderRps"] = ORDER_RPS
     return result

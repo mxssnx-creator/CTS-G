@@ -57,11 +57,16 @@ WS_URL = "wss://open-api-swap.bingx.com/swap-market"
 RECV = 10000
 UA = "grok-x01-pulse/2.0"
 
-# CTS connector numbers (UID / IP)
+# CTS connector numbers (UID / IP). BingX allows 10 order placements per second
+# per IP since 2025-10-16 (5 before); Mainnet and VST engines can share one IP,
+# so each lane keeps 4.0 / s (8 / s together) and never spends the whole quota.
+# Batch placing is a separate 5 / s quota (up to 5 orders each) used for controls.
+ORDER_RPS = 4.0
+REPLACE_RPS = 3.0  # /trade/order and cancelReplace share one tighter pacing bucket
 LIMITS = {
     "public": (12.0, 20.0),
     "private": (5.0, 10.0),
-    "order": (2.4, 5.0),
+    "order": (ORDER_RPS, ORDER_RPS * 2),
 }
 
 RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
@@ -462,7 +467,7 @@ class FastBingX:
         w = self.buckets[lane].take()
         if path.endswith("/cancelReplace") or (lane == "order" and path.endswith("/trade/order")):
             if not hasattr(self,"_replace_bucket"):
-                self._replace_bucket = TokenBucket(1.8,1.0)
+                self._replace_bucket = TokenBucket(REPLACE_RPS, 2.0)
             w += self._replace_bucket.take()
         self.stats["wait"] += w
         # Another worker may receive a venue ban while this worker waits for
