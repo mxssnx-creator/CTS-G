@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from position_cost import POSITIVE_PF, is_positive_pf, last_n_cost_pf
+from position_cost import POSITIVE_PF, cost_as_frac, is_positive_pf, last_n_cost_pf, normalize_position_cost_pct
 from set_engine import IND_KINDS, drawdown_time
 
 STRATEGIES = ("normal", "trailing", "axis", "block", "dca")
@@ -90,11 +90,12 @@ class _Acc:
         self.hold = 0.0
         self.tail: deque = deque(maxlen=TAIL_CAP)
 
-    def add(self, t: float, pnl_pct: float, hold: float) -> None:
+    def add(self, t: float, pnl_pct: float, hold: float, cost_frac: float = 0.0) -> None:
         self.n += 1
-        if pnl_pct > 0:
+        net = pnl_pct - cost_frac          # win/loss after one PositionCost, like the PF beside it
+        if net > 0:
             self.wins += 1
-        if pnl_pct != 0:
+        if net != 0:
             self.decided += 1
         self.hold += hold
         self.tail.append({"t": t, "pnl_pct": pnl_pct})
@@ -270,6 +271,7 @@ def evaluate_fills(
         "dca": {"with": _Acc(), "without": _Acc()},
     }
     combo_meta: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    cost_frac = cost_as_frac(normalize_position_cost_pct(cost_pct))
 
     for item in fills:
         row, meta = _unwrap(item)
@@ -303,25 +305,25 @@ def evaluate_fills(
                 "trail": str(_pick(row, meta, "trail_key", "trailKey", default="")),
                 "lane": lane,
             }
-        acc.add(t, pnl_pct, hold)
+        acc.add(t, pnl_pct, hold, cost_frac)
         mkey = (indication, strategy)
         matt = matrix_acc.get(mkey)
         if matt is None:
             matt = _Acc()
             matrix_acc[mkey] = matt
-        matt.add(t, pnl_pct, hold)
+        matt.add(t, pnl_pct, hold, cost_frac)
         # Independent kind tapes are their own relation books. Mixing them
         # into overall / with-without / families is a false affection.
         if lane not in KIND_LANES:
-            family_acc["overall"].add(t, pnl_pct, hold)
+            family_acc["overall"].add(t, pnl_pct, hold, cost_frac)
             if strategy in family_acc:
-                family_acc[strategy].add(t, pnl_pct, hold)
-            with_acc["block"]["with"].add(t, pnl_pct, hold)
-            with_acc["dca"]["with"].add(t, pnl_pct, hold)
+                family_acc[strategy].add(t, pnl_pct, hold, cost_frac)
+            with_acc["block"]["with"].add(t, pnl_pct, hold, cost_frac)
+            with_acc["dca"]["with"].add(t, pnl_pct, hold, cost_frac)
             if strategy != "block":
-                with_acc["block"]["without"].add(t, pnl_pct, hold)
+                with_acc["block"]["without"].add(t, pnl_pct, hold, cost_frac)
             if strategy != "dca":
-                with_acc["dca"]["without"].add(t, pnl_pct, hold)
+                with_acc["dca"]["without"].add(t, pnl_pct, hold, cost_frac)
 
     db = open_combo_db()
     meta = db_pragmas(db)

@@ -1426,8 +1426,13 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         for symbol in (state.get("symbols") or [])
         if symbol
     })
-    wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
-    losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
+    # Lane counters are the persistent totals (same as merge_overall); the
+    # retained tape is only each lane's newest rows.
+    wins = sum(int(_report_number(state.get("wins"))) for state in states)
+    losses = sum(int(_report_number(state.get("losses"))) for state in states)
+    if not (wins or losses):
+        wins = sum(1 for row in closed if _report_number(row.get("pnl")) > 0)
+        losses = sum(1 for row in closed if _report_number(row.get("pnl")) < 0)
     coverages = [state.get("coverage") or {} for state in states]
     strategies = {
         key: any(bool((coverage.get("strategies") or {}).get(key)) for coverage in coverages)
@@ -1524,6 +1529,7 @@ def overall_report_state(live: dict, vst: dict) -> dict:
         "foreignOpenOrderCount": sum(int(_report_number(state.get("foreignOpenOrderCount"))) for state in states),
         "wins": wins,
         "losses": losses,
+        "winRate": round(wins / (wins + losses) * 100, 1) if wins + losses else 0.0,
         "openCount": logical_position_count,
         "logicalPositionCount": logical_position_count,
         "realPositionCount": real_position_count if real_position_count >= 0 else 0,
@@ -1947,7 +1953,7 @@ def merge_overall() -> dict:
         sets["overview"] = overview
     # Each desk owns an independent catalog: valid/active numerators and the
     # catalog/intern denominators are summed over the same lanes.
-    for key in ("setCount", "activeCount", "validatedCount"):
+    for key in ("setCount", "activeCount", "validatedCount", "histFills", "liveFills", "liveProcessed", "liveActive"):
         sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
     intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
     catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
@@ -2345,7 +2351,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
 
     def _json(self, obj, code=200):
-        blob = json.dumps(obj, separators=(",", ":")).encode()
+        try:
+            blob = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
+        except ValueError:  # NaN/Infinity is not JSON; browsers reject the whole payload
+            from stats_report import finite_json
+            blob = json.dumps(finite_json(obj), separators=(",", ":"), allow_nan=False).encode()
         if len(blob) > MAX_JSON_RESPONSE_BYTES:
             obj = {"ok": False, "detail": "response exceeds bounded payload limit"}
             code = 500

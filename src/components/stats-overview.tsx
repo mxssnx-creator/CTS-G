@@ -57,19 +57,19 @@ export function StatsOverview({
         />
         <Hero
           k="Drawdown time avg"
-          v={formatDuration(dd.averageDurationMs || all.averageDurationMs || engineAvgMs)}
-          s={`${dd.episodes || all.episodes || engineEpisodes} episodes · 3d`}
+          v={formatDuration(engineAvgMs || dd.averageDurationMs || all.averageDurationMs)}
+          s={`${engineEpisodes || dd.episodes || all.episodes} episodes · ${engineEpisodes ? "full tape" : "published tape"}`}
           tone={dd.inDrawdown ? "ok" : "ok"}
         />
         <Hero
           k="Current DD time"
-          v={formatDuration(dd.currentDurationMs || engineCurrentMs)}
+          v={formatDuration(live?.pfCost?.currentS != null ? engineCurrentMs : dd.currentDurationMs)}
           s={dd.inDrawdown ? `depth ${dd.currentDepth.toFixed(4)}` : "at peak"}
           tone={dd.inDrawdown ? "ok" : "good"}
         />
         <Hero
           k="Max DD episode"
-          v={formatDuration(dd.maxDurationMs || all.maxDurationMs || engineMaxMs)}
+          v={formatDuration(engineMaxMs || dd.maxDurationMs || all.maxDurationMs)}
           s={`depth ${Math.max(dd.maxDepth, all.maxDepth).toFixed(4)}`}
         />
       </div>
@@ -131,8 +131,9 @@ export function StatsOverview({
               ["Total underwater", formatDuration(dd.totalDurationMs)],
               ["Max depth", dd.maxDepth.toFixed(4)],
               ["Current depth", dd.currentDepth.toFixed(4)],
-              ["All-tape avg", formatDuration(all.averageDurationMs)],
-              ["All-tape max", formatDuration(all.maxDurationMs)],
+              ["Published-tape avg", formatDuration(all.averageDurationMs)],
+              ["Published-tape max", formatDuration(all.maxDurationMs)],
+              ["Engine full-tape max", live?.pfCost?.maxDdS != null ? formatDuration(engineMaxMs) : "—"],
             ]}
           />
         </Card>

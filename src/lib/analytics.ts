@@ -96,7 +96,10 @@ export function calculateDrawdownTime(
   lookbackDays = 3,
 ): DrawdownTimeMetric {
   const cutoff = now - lookbackDays * 24 * 60 * 60 * 1000;
-  const ordered = rows
+  // stats.closed arrives newest-first. Restore arrival order before the stable
+  // sort so tied timestamps resolve exactly like the engine's chronological tape.
+  const ordered = [...rows]
+    .reverse()
     .filter((row) => {
       const ts = timestampMs(row.t);
       return ts >= cutoff && ts <= now;
@@ -199,11 +202,11 @@ function calculateDrawdownTimeSingle(
 }
 
 /** CTS Main-trade scale: 1.00 = Neutral after cost, 1.10 = +1× PositionCost net.
- * PositionCost is a percent; only legacy fractions at or below 0.02 pass through
+ * PositionCost is a percent; only legacy fractions strictly below 0.02 pass through
  * (same threshold as the engine's `position_cost.cost_as_frac`). */
 export function costAsFrac(costPct = POSITION_COST_PCT_DEFAULT): number {
   const c = Math.max(0, finite(costPct));
-  return c > 0.02 ? c / 100 : c;
+  return c >= 0.02 ? c / 100 : c;
 }
 
 export function netPnlPct(pnlPctFraction: number, costPct = POSITION_COST_PCT_DEFAULT): number {

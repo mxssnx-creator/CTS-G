@@ -332,11 +332,12 @@ def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """PositionCost as a fraction.
 
     CTS stores PositionCost in percent (0.15 means 0.15%). A small legacy
-    caller may still pass a fraction such as 0.0015; values at or below 0.02
-    retain that compatibility convention.
+    caller may still pass a fraction such as 0.0015; values strictly below 0.02
+    retain that compatibility convention. 0.02 is the desk slider minimum and
+    is a percent.
     """
     c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
-    return c / 100.0 if c > 0.02 else c
+    return c / 100.0 if c >= 0.02 else c
 
 
 def net_pnl_pct(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
