@@ -2954,6 +2954,11 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
+    try:  # the Test Historic worker thread died with the previous process
+        from hist_test import resume_after_restart
+        resume_after_restart()
+    except Exception:
+        pass
     ThreadingHTTPServer(
         (str(os.environ.get("PULSE_HOST") or "127.0.0.1").strip() or "127.0.0.1", env_listen_port()),
         Handler,

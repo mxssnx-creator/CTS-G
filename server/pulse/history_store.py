@@ -383,8 +383,33 @@ class HistoryStore:
         end: Optional[int] = None,
         source: Optional[str] = "exchange",
         closed_only: bool = True,
+        max_fill: Optional[int] = 5,
     ) -> List[List[float]]:
-        return [list(record["bar"]) for record in self.window_records(symbol, bars=bars, end=end, source=source, closed_only=closed_only)]
+        """1m bars for the replay, which treats neighbouring bars as adjacent minutes.
+
+        A hole of at most ``max_fill`` minutes is a no-trade stretch: it is filled with flat
+        zero-volume bars at the previous close. A longer hole ends the run, so only the newest
+        contiguous run is returned; a position or indicator frame never spans missing time.
+        ``max_fill=None`` returns the stored bars as they are.
+        """
+        records = self.window_records(symbol, bars=bars, end=end, source=source, closed_only=closed_only)
+        if max_fill is None:
+            return [list(record["bar"]) for record in records]
+        out: List[List[float]] = []
+        prev_minute: Optional[int] = None
+        prev_close = 0.0
+        for record in records:
+            minute = int(record["minute"])
+            bar = list(record["bar"])
+            if prev_minute is not None:
+                hole = minute - prev_minute - 1
+                if hole > max_fill:
+                    out = []
+                elif hole > 0:
+                    out.extend([[prev_close, prev_close, prev_close, prev_close, 0.0] for _ in range(hole)])
+            out.append(bar)
+            prev_minute, prev_close = minute, float(bar[3])
+        return out
 
     def missing_ranges(
         self,

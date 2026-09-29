@@ -45,6 +45,7 @@ REFRESH_MAX = 8
 REFRESH_DEFAULT = 2
 STEP_LO = 3
 STEP_HI = 12
+FULL_CATALOG_EVERY = 6  # every Nth continuous refresh re-checks the whole catalog (recalc-only otherwise)
 TICKER_URL = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
 PREFERRED_SYMBOLS = ["BCH-USDT", "SOL-USDT", "XRP-USDT"]
 INTERN_MAJORS = (
@@ -184,7 +185,9 @@ def clamp_refresh_hours(value: Any, default: int = REFRESH_DEFAULT) -> int:
 
 def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> bool:
     """Hold until the next independent rerun. Returns False when Stop wins."""
-    deadline = time.time() + max(REFRESH_MIN, int(hours)) * 3600.0
+    wait_s = max(REFRESH_MIN, int(hours)) * 3600.0
+    deadline = time.time() + wait_s          # wall clock: display only (nextRunAt)
+    deadline_mono = time.monotonic() + wait_s  # an NTP step must not change the interval
     blob = dict(snapshot or read_job())
     blob["nextRunAt"] = deadline
     blob["refreshHours"] = clamp_refresh_hours(hours)
@@ -193,22 +196,25 @@ def wait_for_refresh(hours: int, snapshot: Optional[Dict[str, Any]] = None) -> b
     blob["phase"] = str(blob.get("phase") or "ready")
     blob["detail"] = f"{blob.get('detail') or 'ready'} · next refresh {int(hours)}h"
     publish(blob)
-    while time.time() < deadline and not stop_requested():
+    while time.monotonic() < deadline_mono and not stop_requested():
         wait_if_paused(None, {**read_job(), "phase": str(blob.get("phase") or "ready")})
-        remaining = deadline - time.time()
+        remaining = deadline_mono - time.monotonic()
         time.sleep(0.25 if remaining > 1 else max(0.05, remaining))
     return not stop_requested()
 
 
-def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Set IDs Test Historic currently treats as validated configs."""
+def validated_set_ids(job: Optional[Dict[str, Any]] = None, use_persisted: bool = True) -> List[str]:
+    """Set IDs Test Historic currently treats as validated configs.
+
+    ``use_persisted=False`` reads only this job (no last-ready / sidecar fallback)."""
     blob = job if isinstance(job, dict) else {}
     out: List[str] = []
     seen: set[str] = set()
 
     def add(raw: Any) -> None:
         sid = str(raw or "").strip()
-        if not sid or sid in seen:
+        # Strategy rows ("block", "dca", ...) are not Set ids.
+        if not sid or sid in seen or sid.lower() in VALID_STRATEGIES:
             return
         if ":" in sid:
             sid = normalize_catalog_set_id(sid)
@@ -242,6 +248,8 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
         if not sid or ":" not in str(sid):
             continue
         add(sid)
+    if not use_persisted:
+        return out
     if not out:
         last = read_last_ready()
         add((last.get("winner") or {}).get("id") if isinstance(last.get("winner"), dict) else None)
@@ -254,11 +262,15 @@ def validated_set_ids(job: Optional[Dict[str, Any]] = None) -> List[str]:
     return out
 
 
-def persist_validated_ids(ids: List[str]) -> None:
+def persist_validated_ids(ids: List[str], *, replace: bool = False, evidence: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
     """Keep the full validated Set ID list off the compact public job.
 
-    Never shrinks an existing sidecar. Compact public jobs and tests may pass a
-    short list; the engine still needs last-ready IDs after a restart.
+    Never shrinks an existing sidecar unless ``replace`` is set. Compact public
+    jobs and tests may pass a short list; the engine still needs last-ready IDs
+    after a restart. A completed run that validated Sets replaces the list, so a
+    Set that failed the latest run does not stay allow-listed forever.
+    ``evidence`` ({id: {n, evalN, pf, maxDdS}}) rides in the same file so every
+    listed Set keeps its seed after a restart, not just the compact job's top rows.
     """
     clean: List[str] = []
     seen: set[str] = set()
@@ -276,15 +288,32 @@ def persist_validated_ids(ids: List[str]) -> None:
 
     for raw in ids or []:
         add(raw)
-    for sid in read_persisted_validated_ids():
-        add(sid)
+    if not replace:
+        for sid in read_persisted_validated_ids():
+            add(sid)
     if not clean:
         return
+    kept = {} if replace else read_persisted_validated_evidence()
+    kept.update({sid: dict(row) for sid, row in (evidence or {}).items() if isinstance(row, dict)})
     try:
         _ensure_dir()
-        atomic_write(VALIDATED_IDS_PATH, {"validatedIds": clean, "count": len(clean)})
+        atomic_write(VALIDATED_IDS_PATH, {
+            "validatedIds": clean,
+            "count": len(clean),
+            "evidence": {sid: kept[sid] for sid in clean if sid in kept},
+        })
     except Exception:
         pass
+
+
+def read_persisted_validated_evidence() -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(VALIDATED_IDS_PATH, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        raw = loaded.get("evidence") if isinstance(loaded, dict) else None
+        return {str(k): dict(v) for k, v in (raw or {}).items() if isinstance(v, dict)}
+    except Exception:
+        return {}
 
 
 def read_persisted_validated_ids() -> List[str]:
@@ -314,8 +343,8 @@ def read_persisted_validated_ids() -> List[str]:
         return []
 
 
-def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any = None) -> List[str]:
-    """Union of job IDs, ranked-set flags, combo rows, and the sidecar."""
+def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any = None, use_persisted: bool = True) -> List[str]:
+    """Union of job IDs, ranked-set flags, combo rows, and (by default) the sidecar."""
     blob = job if isinstance(job, dict) else {}
     out: List[str] = []
     seen: set[str] = set()
@@ -331,7 +360,7 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
         seen.add(sid)
         out.append(sid)
 
-    for sid in validated_set_ids(blob):
+    for sid in validated_set_ids(blob, use_persisted):
         add(sid)
     if ranked_sets:
         for item in ranked_sets:
@@ -342,10 +371,11 @@ def collect_validated_ids(job: Optional[Dict[str, Any]] = None, ranked_sets: Any
             if not valid:
                 continue
             add(getattr(st, "id", "") or "")
-    for sid in read_persisted_validated_ids():
-        add(sid)
-        if len(out) >= VALIDATED_IDS_CAP:
-            break
+    if use_persisted:
+        for sid in read_persisted_validated_ids():
+            add(sid)
+            if len(out) >= VALIDATED_IDS_CAP:
+                break
     return out
 
 
@@ -1097,6 +1127,8 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
                 "evalN": last_win.get("n") or last_win.get("evalN") or 0,
                 "n": last_win.get("n") or 0,
             })
+    for sid, row in read_persisted_validated_evidence().items():
+        by_id.setdefault(sid, {"setId": sid, "validated": True, **row})
     for sid in ids:
         by_id.setdefault(sid, {"setId": sid, "validated": True, "pf": 0, "n": 0, "evalN": 0})
     for st in getattr(book, "by_idx", None) or []:
@@ -1141,15 +1173,24 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         except (TypeError, ValueError):
             dd = float(getattr(st, "max_dd_s", 0) or 0)
         st.max_dd_s = dd
+        # Own evidence beats the seed: a direction whose own Base window is
+        # complete (>= need closes) keeps its own Base/Main/Real result. The
+        # seed only fills directions that are still thin, and the Set-level
+        # ledger is only forced when at least one direction was seeded.
+        sides = dict(getattr(st, "by_side", None) or {})
+        seed_dirs = [
+            d for d in ("LONG", "SHORT")
+            if d not in revoked and int((sides.get(d) or {}).get("last15_n") or 0) < need
+        ]
         ledger = dict(getattr(st, "stage_ledger", None) or {})
-        if proven:
+        if proven and seed_dirs:
             ledger["base"] = True
             ledger["main"] = True
             ledger["real"] = True
         st.stage_ledger = ledger
-        # Proven hist-test evidence seeds sides so intern size is not starved.
-        # n=0 / pf=0 never invents intern-neutral 1.0 or Real stages.
-        if n > 0 and pf > 0:
+        # Proven hist-test evidence seeds thin sides so intern size is not
+        # starved. n=0 / pf=0 never invents intern-neutral 1.0 or Real stages.
+        if n > 0 and pf > 0 and seed_dirs:
             side_view = {
                 "last15_n": int(st.last15_n or 0),
                 "last15_ratio": float(st.last15_ratio or 0),
@@ -1166,10 +1207,7 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
                 "active": bool(proven),
                 "deact_reason": "" if proven else "hist-test intern",
             }
-            sides = dict(getattr(st, "by_side", None) or {})
-            for direction in ("LONG", "SHORT"):
-                if direction in revoked:
-                    continue
+            for direction in seed_dirs:
                 blob = dict(sides.get(direction) or {})
                 blob.update(side_view)
                 sides[direction] = blob
@@ -2000,6 +2038,9 @@ def fill_positive(
             if probe is None:
                 probe = SetBook()
                 probe.load(overlay)
+                # Persisted ids that this catalog no longer contains (desk step /
+                # SL:TP change) must not turn the probe into an empty replay.
+                intern_ids = [sid for sid in intern_ids if sid in probe.sets]
                 if intern_ids:
                     probe.restrict_to_ids(intern_ids)
             def on_step() -> None:
@@ -2502,12 +2543,17 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "rejected": [],
     }
     publish(seed)
+    last_pct = [0.0]
 
     def progress(update: Dict[str, Any]) -> None:
         if stop_requested():
             return
         blob = dict(seed)
         blob.update(update)
+        try:
+            last_pct[0] = max(last_pct[0], float(blob.get("pct") or 0))
+        except (TypeError, ValueError):
+            pass
         blob["hours"] = hours
         blob["minPf"] = min_pf
         blob["positivePf"] = min_pf
@@ -2568,8 +2614,10 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         )
         selected = fill["selected"]
         skipped = fill["skipped"]
-        if not selected and keep:
-            # Floor wobble must not drop the last ready majors book.
+        if not selected and keep and not fill.get("rejected"):
+            # Transient fetch/bar shortfalls (nothing was evaluated) must not
+            # drop the last ready majors book. Symbols that were evaluated and
+            # rejected by the floor are never re-labelled positive.
             for symbol in keep:
                 try:
                     bars = fetch_fn(symbol, fetch_bars)
@@ -2598,7 +2646,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return publish({
             **seed,
             "phase": "stopped",
-            "pct": 100 if names else (seed.get("pct") or 0),
+            # An aborted run is not complete: keep the last real progress.
+            "pct": min(99, int(float(read_job().get("pct") or seed.get("pct") or 0))),
             "ready": False,
             "running": False,
             "paused": False,
@@ -2655,6 +2704,10 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     book.load(overlay)
     if recalc_only:
         kept = book.restrict_to_ids(cap_replay_ids(recalc_ids))
+        if not kept:
+            # None of the recalc ids exist in this catalog any more: run full.
+            recalc_only = False
+    if recalc_only:
         progress({
             "phase": "replay",
             "pct": 64,
@@ -2688,7 +2741,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         last_beat[0] = now
         wait_if_paused(progress, {
             "phase": "replay",
-            "pct": 60,
+            "pct": max(60, int(last_pct[0])),
             "detail": f"replay catalog · {len(symbols)} symbols",
             "symbols": symbols,
             "positive": symbols,
@@ -2742,7 +2795,16 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     set_n = len(book.by_idx)
     requested_sets = set_n * max(len(symbols), 1)
     book_cov = book.coverage() if hasattr(book, "coverage") else {}
-    validated_ids = collect_validated_ids(
+    # A full-catalog run's own result replaces the allow-list (a recalc-only
+    # run sees just the previously listed ids and so never shrinks it). A run
+    # that validated nothing keeps the previous list: a bad refresh must not
+    # close the gate.
+    fresh_ids = collect_validated_ids(
+        {"successfulConfigs": combo.get("successful") or [], "winner": winner or {}},
+        ranked_sets=ranked_sets,
+        use_persisted=False,
+    )
+    validated_ids = fresh_ids or collect_validated_ids(
         {
             "successfulConfigs": combo.get("successful") or [],
             "winner": winner or {},
@@ -2750,7 +2812,13 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         },
         ranked_sets=ranked_sets,
     )
-    persist_validated_ids(validated_ids)
+    evidence = {}
+    for sid in validated_ids:
+        st = book.sets.get(sid)
+        if st is not None and int(st.last15_n or 0) > 0:
+            evidence[sid] = {"n": int(st.n or 0), "evalN": int(st.last15_n or 0),
+                             "pf": round(float(st.last15_ratio or 0), 4), "maxDdS": round(float(st.max_dd_s or 0), 1)}
+    persist_validated_ids(validated_ids, replace=bool(fresh_ids) and not recalc_only, evidence=evidence)
     job = {
         "phase": "ready",
         "ready": True,
@@ -2909,6 +2977,12 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             or (body.get("overlay") or {}).get("symbolCap")
             or DEFAULT_TARGET
         )
+        if not bool(body.get("synth") or body.get("once")):
+            try:  # a restarted sidecar continues the run with the desk's settings
+                _ensure_dir()
+                atomic_write(os.path.join(OUT_DIR, "start-body.json"), body)
+            except Exception:
+                pass
         queued = publish({
             "ok": True,
             "phase": "queued",
@@ -2932,6 +3006,7 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             try:
                 once = bool(body.get("synth") or body.get("once"))
                 prior: Dict[str, Any] = seed_recalc_prior()
+                refreshes = 0
                 while True:
                     payload = dict(body)
                     ids = validated_set_ids(prior) or read_persisted_validated_ids()
@@ -2942,6 +3017,11 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                             clamp_target(payload.get("symbolCap") or payload.get("targetCount") or target),
                             prior,
                         )
+                        refreshes += 1
+                        if refreshes % FULL_CATALOG_EVERY == 0:
+                            # A recalc-only refresh only sees the listed ids; a periodic
+                            # full-catalog run lets rejected / new Sets be Base-checked again.
+                            payload["fullCatalog"] = True
                     run_test(payload)
                     if once or stop_requested():
                         break
@@ -2967,6 +3047,30 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         _THREAD = threading.Thread(target=worker, name="hist-test", daemon=True)
         _THREAD.start()
         return queued
+
+
+def resume_after_restart() -> Optional[Dict[str, Any]]:
+    """Call once when the sidecar starts: its worker thread died with the old process.
+
+    A continuous run the desk left running (or waiting for its next refresh) is
+    started again with the settings it was started with; a stopped or paused
+    job is left alone.
+    """
+    if thread_alive() or _runner_alive() or stop_requested() or pause_requested():
+        return None
+    job = read_job()
+    if not job.get("continuous") or str(job.get("phase") or "") in ("", "idle", "off", "stopped"):
+        return None
+    try:
+        with open(os.path.join(OUT_DIR, "start-body.json"), encoding="utf-8") as handle:
+            body = json.load(handle)
+    except Exception:
+        body = {}
+    body = dict(body) if isinstance(body, dict) else {}
+    for key in ("hours", "minPf", "refreshHours", "targetCount"):
+        if body.get(key) is None and job.get(key) is not None:
+            body[key] = job[key]
+    return start_test(body)
 
 
 def pause_test() -> Dict[str, Any]:
