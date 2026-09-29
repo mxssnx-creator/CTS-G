@@ -36,7 +36,7 @@ class PrepareMainnetTests(unittest.TestCase):
             self.assertEqual(stop.stat().st_mtime_ns,stamp)
             current = json.loads(overlay.read_text())
             self.assertEqual(current['marginMode'],'isolated')
-            self.assertEqual(current['minPf'],1.02)
+            self.assertEqual(current['minPf'],runpy.run_path(str(ROOT/'server/pulse/connection_profile.py'))['EVAL_MIN_PF'])
             self.assertEqual(current['symbolCap'],50)
             self.assertTrue(current['controlOrdersOverall'])
             self.assertEqual(current['baseEvalPosCount'],30)

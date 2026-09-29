@@ -15,6 +15,7 @@ DIR = os.path.abspath(DIR)
 sys.path.insert(0, DIR)
 os.chdir(DIR)
 
+from connection_profile import EVAL_MIN_PF
 from set_engine import SetBook, self_test as sets_self_test, synth_trend, drawdown_time, drawdown_time_by_symbol
 from exit_engine import self_test as exit_self_test
 from indication_engine import self_test as indication_self_test
@@ -128,7 +129,9 @@ def overlay_test() -> None:
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 7 and int(ov.get("trailingMinStep") or 0) == 7)
         rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.4) < 1e-9, str(ov.get("slMinPct")))
         rec(f"{name}-ind-sl-min", abs(float(ov.get("indStopMinPct") or 0) - 0.4) < 1e-9, str(ov.get("indStopMinPct")))
-        rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - 1.15) < 1e-9, str(ov.get("minPf")))
+        # Seed lanes carry the deployed evaluation minimum PF, shared by all seven stage keys.
+        rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - EVAL_MIN_PF) < 1e-9, str(ov.get("minPf")))
+        rec(f"{name}-min-pf-shared", all(abs(float(ov.get(k) or 0) - EVAL_MIN_PF) < 1e-9 for k in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf")))
         rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
         rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
         rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.15) < 1e-9, str(ov.get("histTestMinPf")))

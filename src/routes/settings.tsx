@@ -1471,7 +1471,7 @@ function SettingsPage() {
                   min={PF_MIN}
                   max={PF_MAX}
                   step={PF_STEP}
-                  hint={`Shared by Base, Main, Real, DCA and exits. Default ${POSITIVE_PF.toFixed(2)}. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
+                  hint={`Shared by Base, Main, Real, DCA and exits. Default ${DEFAULT_OVERLAY.minPf.toFixed(2)}. ${pfHint(overlay.minPf, overlay.positionCostPct)}`}
                   onChange={(v) => patch("minPf", normalizePf(v, DEFAULT_OVERLAY.minPf))}
                 />
                 <Slider
