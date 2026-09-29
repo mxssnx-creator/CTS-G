@@ -412,6 +412,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
     else:
         out["histTestTargetCount"] = max(1, min(250, hist_target))
     out.setdefault("histTestEnabled", True)
+    out.setdefault("histTestAutoAssign", True)
     return out
 
 

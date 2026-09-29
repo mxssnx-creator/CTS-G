@@ -292,3 +292,101 @@ export async function resumeHistTest(body: {
 }): Promise<HistTestJob> {
   return startHistTest({ ...body, action: "resume" });
 }
+
+export type HistTestAssignedConfig = {
+  id: string;
+  indication?: string;
+  strategy?: string;
+  pf?: number;
+  n?: number;
+};
+
+export type HistTestAssignment = {
+  /** Validated symbols the operator selection should follow, in job order. */
+  symbols: string[];
+  /** Validated configs (Set ids) the engine allow-list runs, best PF first. */
+  configs: HistTestAssignedConfig[];
+  /** Stable key of symbols + configs; changes only when the validated result does. */
+  signature: string;
+};
+
+const USDT_SYMBOL = /^[A-Z0-9]{1,20}-USDT$/;
+
+/**
+ * What a finished Test Historic run assigns: its validated symbols (filtered by
+ * `isEligible`, capped at `cap`, 0 = uncapped) and validated configs. Null until
+ * the run is ready, or while it holds nothing to assign. A non-fatal `audit:`
+ * note on the job does not block assignment.
+ */
+export function histTestAssignment(
+  job: HistTestJob | null | undefined,
+  isEligible: (symbol: string) => boolean = () => true,
+  cap = 0,
+): HistTestAssignment | null {
+  if (!job) return null;
+  const err = String(job.error || "");
+  if (err && !err.startsWith("audit:")) return null;
+  const ready = Boolean(job.ready) || job.phase === "ready";
+  if (!ready || histTestIsRunning(job.phase)) return null;
+
+  const rawSymbols = job.internSymbols?.length ? job.internSymbols : job.positive?.length ? job.positive : job.symbols || [];
+  const symbols: string[] = [];
+  const seenSymbols = new Set<string>();
+  for (const raw of rawSymbols) {
+    const symbol = String(raw || "").trim().toUpperCase();
+    if (!USDT_SYMBOL.test(symbol) || seenSymbols.has(symbol) || !isEligible(symbol)) continue;
+    seenSymbols.add(symbol);
+    symbols.push(symbol);
+  }
+  const limit = Math.max(0, Math.round(Number(cap) || 0));
+  const picked = limit > 0 ? symbols.slice(0, limit) : symbols;
+
+  const configs: HistTestAssignedConfig[] = [];
+  const seenConfigs = new Set<string>();
+  const addConfig = (row: HistTestAssignedConfig) => {
+    if (!row.id || seenConfigs.has(row.id)) return;
+    seenConfigs.add(row.id);
+    configs.push(row);
+  };
+  for (const row of job.successfulConfigs || []) {
+    if (!row || row.validated === false) continue;
+    addConfig({
+      id: String(row.setId || row.config || "").trim(),
+      indication: row.indication,
+      strategy: row.strategy,
+      pf: row.pf,
+      n: row.n,
+    });
+  }
+  for (const id of job.validatedIds || []) addConfig({ id: String(id || "").trim() });
+  configs.sort((a, b) => (b.pf ?? -1) - (a.pf ?? -1) || (b.n ?? 0) - (a.n ?? 0) || a.id.localeCompare(b.id));
+
+  if (!picked.length && !configs.length) return null;
+  const signature = `${[...picked].sort().join(",")}|${configs.map((c) => c.id).sort().join(",")}`;
+  return { symbols: picked, configs, signature };
+}
+
+type SymbolSelection = { symbols: string[]; symbolsAll?: boolean; symbolCap?: number };
+
+/** True when the selection already holds exactly these symbols, in any order. */
+export function histTestSelectionMatches(selection: readonly string[], symbols: readonly string[]): boolean {
+  if (selection.length !== symbols.length) return false;
+  const have = new Set(selection.map((s) => String(s).toUpperCase()));
+  return symbols.every((s) => have.has(String(s).toUpperCase()));
+}
+
+/**
+ * Put the validated symbols into the selection. Returns the same object when
+ * the selection already matches, so callers can skip a no-op save. The cap
+ * only grows to fit; 0 (unlimited) stays 0.
+ */
+export function applyHistTestSymbols<T extends SymbolSelection>(overlay: T, symbols: readonly string[]): T {
+  if (!symbols.length || histTestSelectionMatches(overlay.symbols, symbols)) return overlay;
+  const cap = Math.max(0, Math.round(Number(overlay.symbolCap) || 0));
+  return {
+    ...overlay,
+    symbols: [...symbols],
+    symbolsAll: false,
+    symbolCap: cap === 0 ? 0 : Math.max(cap, symbols.length),
+  };
+}

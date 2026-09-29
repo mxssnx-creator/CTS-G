@@ -57,6 +57,21 @@ class SettingsPersistence(unittest.TestCase):
             live=ph.load_overlay('bingx-x01')
             self.assertEqual(live['histTestHours'],8)
             self.assertNotEqual(ph.load_overlay('bingx-x02')['histTestHours'],8)
+    def test_historic_test_auto_assign_defaults_on_and_persists_per_lane(self):
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            ph.write_overlay('vst',{'histTestHours':20})
+            self.assertTrue(ph.load_overlay('bingx-x02')['histTestAutoAssign'])
+            ph.write_overlay('vst',{'histTestAutoAssign':False})
+            self.assertFalse(ph.load_overlay('bingx-x02')['histTestAutoAssign'])
+            ph.write_overlay('vst',{'histTestHours':24})
+            self.assertFalse(ph.load_overlay('bingx-x02')['histTestAutoAssign'])
+            ph.write_overlay('live',{'histTestHours':8})
+            self.assertTrue(ph.load_overlay('bingx-x01')['histTestAutoAssign'])
+            ph.write_overlay('vst',{'histTestAutoAssign':True})
+            self.assertTrue(ph.load_overlay('bingx-x02')['histTestAutoAssign'])
+        import system_settings
+        self.assertTrue(system_settings.calculation_overlay({})['histTestAutoAssign'])
+        self.assertFalse(system_settings.calculation_overlay({'histTestAutoAssign':False})['histTestAutoAssign'])
     def test_sqlite_modes_and_checkpoints_persist_independently_per_lane(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             ph.write_overlay('vst',{'systemSqliteMemory':1,'systemSqliteCheckpointS':3})

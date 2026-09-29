@@ -354,6 +354,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   histTestMinPf: number;
   /** Test Historic option on Settings Overview. Default ON. */
   histTestEnabled: boolean;
+  /** A new validated Test Historic result assigns its symbols to the selection. Default ON. */
+  histTestAutoAssign: boolean;
   /** Independent historic-test rerun interval in hours. */
   histTestRefreshHours: number;
   setPfWindow: number;
@@ -564,6 +566,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histTestHours: HIST_TEST_HOURS_DEFAULT,
   histTestMinPf: POSITIVE_PF,
   histTestEnabled: true,
+  histTestAutoAssign: true,
   histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
   setPfWindow: 30,
   baseEvalPosCount: 30,
@@ -727,6 +730,7 @@ export type CtsSettings = {
   histTestHours?: number;
   histTestMinPf?: number;
   histTestEnabled?: boolean;
+  histTestAutoAssign?: boolean;
   histTestRefreshHours?: number;
   setPfWindow?: number;
   setDeactN?: number;
@@ -961,6 +965,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histTestHours: clampHistTestHours(cts.histTestHours ?? live?.histTestHours, HIST_TEST_HOURS_DEFAULT),
     histTestMinPf: normalizePf(num(cts.histTestMinPf ?? live?.histTestMinPf, POSITIVE_PF), POSITIVE_PF),
     histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
+    histTestAutoAssign: bool(cts.histTestAutoAssign ?? live?.histTestAutoAssign, true),
     histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
     baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
     setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
@@ -1041,6 +1046,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.histTestHours = clampHistTestHours(out.histTestHours, HIST_TEST_HOURS_DEFAULT);
   out.histTestMinPf = normalizePf(num(out.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
   out.histTestEnabled = bool(out.histTestEnabled, true);
+  out.histTestAutoAssign = bool(out.histTestAutoAssign, true);
   out.histTestRefreshHours = clampHistTestRefreshHours(out.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
   if (Array.isArray(live?.forcedSymbols) && live.forcedSymbols.length) {
     out.forcedSymbols = live.forcedSymbols.filter((s): s is string => typeof s === "string" && s.length > 0);
@@ -1177,6 +1183,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.histTestHours = clampHistTestHours(next.histTestHours, HIST_TEST_HOURS_DEFAULT);
   next.histTestMinPf = normalizePf(num(next.histTestMinPf, POSITIVE_PF), POSITIVE_PF);
   next.histTestEnabled = bool(next.histTestEnabled, true);
+  next.histTestAutoAssign = bool(next.histTestAutoAssign, true);
   next.histTestRefreshHours = clampHistTestRefreshHours(next.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT);
   if (overlay.symbolsAll || next.symbols.includes("*") || next.symbols.includes("ALL")) {
     next.symbols = ["*"];
