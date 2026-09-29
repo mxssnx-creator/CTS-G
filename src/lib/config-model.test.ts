@@ -187,6 +187,10 @@ test("historic test hours stay 4–64 default 20 and min PF 1.15", () => {
   assert.equal(clamped.histTestMinPf, 1.02);
   const off = syncOverlayFlags(overlayFromCts({}, { histTestEnabled: false }));
   assert.equal(off.histTestEnabled, false);
+  // Auto-assign of validated symbols defaults ON and a stored OFF survives.
+  for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) assert.equal(value.histTestAutoAssign, true);
+  assert.equal(syncOverlayFlags(overlayFromCts({}, { histTestAutoAssign: false })).histTestAutoAssign, false);
+  assert.equal(syncOverlayFlags(overlayFromCts({ histTestAutoAssign: false }, {})).histTestAutoAssign, false);
   const low = syncOverlayFlags(overlayFromCts({}, { histTestHours: 2, histTestMinPf: 1.15 }));
   assert.equal(low.histTestHours, 4);
   const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.15 }));

@@ -44,6 +44,7 @@ def calculation_overlay(overlay, cts=None):
     result["histTestHours"] = max(4, min(64, hours))
     result["histTestMinPf"] = normalize_pf(result.get("histTestMinPf"), POSITIVE_PF)
     result["histTestEnabled"] = True if result.get("histTestEnabled") is None else bool(result.get("histTestEnabled"))
+    result["histTestAutoAssign"] = True if result.get("histTestAutoAssign") is None else bool(result.get("histTestAutoAssign"))
     try:
         refresh = int(round(float(result.get("histTestRefreshHours", 2))))
     except (TypeError, ValueError, OverflowError):

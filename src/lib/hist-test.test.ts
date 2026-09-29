@@ -9,14 +9,17 @@ import {
   HIST_TEST_REFRESH_MIN,
   HIST_TEST_TARGET_DEFAULT,
   HIST_TEST_TARGET_MAX,
+  applyHistTestSymbols,
   clampHistTestHours,
   clampHistTestTarget,
   clampHistTestRefreshHours,
+  histTestAssignment,
   histTestIsPaused,
   histTestIsRunning,
   histTestLookbackBars,
   histTestOverviewLine,
   histTestPollMs,
+  histTestSelectionMatches,
   histTestStartLabel,
   histTestStatusLine,
   normalizeHistTestJob,
@@ -172,4 +175,73 @@ test("fill target is clamped to the 50 evaluable majors", async (t) => {
   });
   await startHistTest({ hours: 20, minPf: 1.15, symbolCap: 300 });
   assert.equal(JSON.parse(String(calls[0].body)).symbolCap, HIST_TEST_TARGET_MAX);
+});
+
+const majors = new Set(["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
+
+test("auto-assign waits for a finished, error-free result", () => {
+  const base = { pct: 100, internSymbols: ["BTC-USDT"] };
+  assert.equal(histTestAssignment(null), null);
+  assert.equal(histTestAssignment({ ...base, phase: "replay", detail: "" }), null);
+  assert.equal(histTestAssignment({ ...base, phase: "ready", ready: false, detail: "", error: "boom" }), null);
+  assert.ok(histTestAssignment({ ...base, phase: "ready", detail: "", error: "audit: note" }));
+  assert.equal(histTestAssignment({ phase: "ready", pct: 100, detail: "", internSymbols: [] }), null);
+});
+
+test("auto-assign keeps validated majors only, deduped, capped, in job order", () => {
+  const job = {
+    phase: "ready",
+    pct: 100,
+    detail: "",
+    internSymbols: ["btc-usdt", "ETH-USDT", "ETH-USDT", "FOO-USDT", "*", "ALL", "SOL", "SOL-USDT"],
+  };
+  const all = histTestAssignment(job, (s) => majors.has(s));
+  assert.deepEqual(all?.symbols, ["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
+  assert.deepEqual(histTestAssignment(job, (s) => majors.has(s), 2)?.symbols, ["BTC-USDT", "ETH-USDT"]);
+  // Fall back from the intern book to positives, then to symbols.
+  assert.deepEqual(histTestAssignment({ phase: "ready", pct: 100, detail: "", positive: ["ETH-USDT"], symbols: ["BTC-USDT"] })?.symbols, ["ETH-USDT"]);
+  assert.deepEqual(histTestAssignment({ phase: "ready", pct: 100, detail: "", symbols: ["BTC-USDT"] })?.symbols, ["BTC-USDT"]);
+});
+
+test("auto-assign lists validated configs best PF first without rejected ones", () => {
+  const job = {
+    phase: "ready",
+    pct: 100,
+    detail: "",
+    successfulConfigs: [
+      { setId: "indications:1m:sl0.6:st8", validated: true, pf: 1.2, n: 30 },
+      { setId: "general:1m:sl0.6:st4", validated: true, pf: 1.4, n: 20 },
+      { setId: "indications:1m:sl1.0:st3", validated: false, pf: 3, n: 99 },
+      { setId: "indications:1m:sl0.6:st8", validated: true, pf: 9, n: 1 },
+    ],
+    validatedIds: ["general:1m:sl0.6:st4", "extra-id"],
+  };
+  const a = histTestAssignment(job);
+  assert.deepEqual(a?.configs.map((c) => c.id), ["general:1m:sl0.6:st4", "indications:1m:sl0.6:st8", "extra-id"]);
+  assert.equal(a?.configs[0].pf, 1.4);
+  assert.deepEqual(a?.symbols, []);
+});
+
+test("auto-assign signature changes only with the validated result", () => {
+  const job = { phase: "ready", pct: 100, detail: "", internSymbols: ["BTC-USDT", "ETH-USDT"], validatedIds: ["a", "b"] };
+  const a = histTestAssignment(job);
+  const shuffled = histTestAssignment({ ...job, internSymbols: ["ETH-USDT", "BTC-USDT"], validatedIds: ["b", "a"] });
+  assert.equal(a?.signature, shuffled?.signature);
+  assert.notEqual(a?.signature, histTestAssignment({ ...job, validatedIds: ["a", "b", "c"] })?.signature);
+  assert.notEqual(a?.signature, histTestAssignment({ ...job, internSymbols: ["BTC-USDT"] })?.signature);
+});
+
+test("applying validated symbols sets the selection, grows the cap, and no-ops on a match", () => {
+  const overlay = { symbols: ["XRP-USDT"], symbolsAll: true, symbolCap: 2 };
+  const next = applyHistTestSymbols(overlay, ["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
+  assert.deepEqual(next.symbols, ["BTC-USDT", "ETH-USDT", "SOL-USDT"]);
+  assert.equal(next.symbolsAll, false);
+  assert.equal(next.symbolCap, 3);
+  assert.deepEqual(overlay.symbols, ["XRP-USDT"]);
+  assert.equal(applyHistTestSymbols({ symbols: ["A-USDT"], symbolCap: 0 }, ["B-USDT"]).symbolCap, 0);
+  const same = { symbols: ["ETH-USDT", "BTC-USDT"], symbolCap: 50 };
+  assert.equal(applyHistTestSymbols(same, ["btc-usdt", "ETH-USDT"]), same);
+  assert.equal(applyHistTestSymbols(same, []), same);
+  assert.ok(histTestSelectionMatches(["B-USDT", "A-USDT"], ["A-USDT", "B-USDT"]));
+  assert.ok(!histTestSelectionMatches(["A-USDT"], ["A-USDT", "B-USDT"]));
 });

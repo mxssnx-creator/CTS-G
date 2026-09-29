@@ -63,7 +63,7 @@ import {
   type UserPreset,
 } from "@/lib/user-presets";
 import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
-import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
+import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, histTestAssignment, applyHistTestSymbols, histTestSelectionMatches, type HistTestAssignment, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { SetGroups } from "@/components/set-groups";
@@ -164,6 +164,10 @@ function SettingsPage() {
   // an Overall save applies only these edits to the target lane.
   const baselineRef = useRef<PulseOverlay>(DEFAULT_OVERLAY);
   const touchedRef = useRef<Set<string>>(new Set());
+  // Test Historic auto-assign: the last validated result already assigned, and
+  // whether the assignment may save itself (only when it starts from a clean form).
+  const autoAssignSigRef = useRef("");
+  const autoSavePendingRef = useRef(false);
 
   useEffect(() => {
     setCts(null);
@@ -174,6 +178,8 @@ function SettingsPage() {
     setHistTestJob(null);
     setDirty(false);
     dirtyRef.current = false;
+    autoAssignSigRef.current = "";
+    autoSavePendingRef.current = false;
     setSaveMsg(null);
     setReady(false);
     setCreds(null);
@@ -471,6 +477,34 @@ function SettingsPage() {
 
   const histTestTarget = clampHistTestTarget(overlay.symbolCap);
 
+  // A new validated Test Historic result moves its validated majors into the
+  // symbol selection. A wildcard book is left alone (the engine already narrows
+  // it to the validated intern book) and hand edits stand until the next new
+  // result. Configs need no write: the engine applies the validated allow-list.
+  const autoAssign = overlay.histTestAutoAssign !== false && overlay.histTestEnabled !== false;
+  const histAssignment = useMemo(
+    () => histTestAssignment(histTestJob, (s) => MAJOR_USDT.has(s), overlay.symbolCap),
+    [histTestJob, overlay.symbolCap],
+  );
+  useEffect(() => {
+    if (!ready || conn === "overall" || !autoAssign || !histAssignment) return;
+    if (histAssignment.signature === autoAssignSigRef.current) return;
+    autoAssignSigRef.current = histAssignment.signature;
+    if (!histAssignment.symbols.length) return;
+    if (isUnlimitedSymbolBook(overlay) || (Array.isArray(overlay.symbols) && overlay.symbols.includes("*"))) return;
+    const next = applyHistTestSymbols(overlay, histAssignment.symbols);
+    if (next === overlay) return;
+    autoSavePendingRef.current = !dirtyRef.current;
+    dirtyRef.current = true;
+    for (const key of ["symbols", "symbolsAll", "symbolCap"]) touchedRef.current.add(key);
+    setOverlay(next);
+    setDirty(true);
+    setSaveMsg(
+      `Auto-assigned ${histAssignment.symbols.length} validated symbols · ${histAssignment.configs.length} validated configs run on the engine allow-list` +
+        (autoSavePendingRef.current ? " · saving" : " · unsaved edits present, save Live or VST to persist"),
+    );
+  }, [ready, conn, autoAssign, histAssignment, overlay]);
+
   const onHistTestControl = async (action: "start" | "stop" | "pause" | "resume") => {
     if (action === "start" && overlay.histTestEnabled === false) return;
     const seq = ++histTestSeqRef.current;
@@ -604,6 +638,14 @@ function SettingsPage() {
     }
   };
 
+  // Persist an auto-assignment that started from a clean form. It never bundles
+  // a person's unsaved edits: those keep waiting for the explicit Save.
+  useEffect(() => {
+    if (!autoSavePendingRef.current || !dirty || saving || !ready) return;
+    autoSavePendingRef.current = false;
+    void onSave(conn);
+  });
+
   const onSaveCreds = async () => {
     setCredSaving(true);
     setCredMsg(null);
@@ -704,6 +746,8 @@ function SettingsPage() {
         <div className="min-w-0 flex-1 space-y-4">
           {(section === "overview" || section === "historic") && (
             <TestHistoricCard
+              assignment={histAssignment}
+              unsaved={dirty}
               overlay={overlay}
               histTestTarget={histTestTarget}
               histTestJob={histTestJob}
@@ -2701,6 +2745,8 @@ function SettingsPage() {
 }
 
 function TestHistoricCard({
+  assignment,
+  unsaved,
   overlay,
   histTestTarget,
   histTestJob,
@@ -2708,6 +2754,9 @@ function TestHistoricCard({
   onApply,
   patch,
 }: {
+  assignment: HistTestAssignment | null;
+  /** The form holds edits that are not saved to the lane yet. */
+  unsaved: boolean;
   overlay: PulseOverlay;
   histTestTarget: number;
   histTestJob: HistTestJob | null;
@@ -2739,6 +2788,13 @@ function TestHistoricCard({
           on={enabled}
           hint="default ON · engine skips full-catalog calcs; only validated Test Historic configs"
           onChange={(v) => patch("histTestEnabled", v)}
+        />
+        <EnableSlider
+          label="Auto-assign validated"
+          on={overlay.histTestAutoAssign !== false}
+          testId="hist-test-auto-assign"
+          hint="each new validated result puts its symbols into the selection · validated configs run on the engine allow-list"
+          onChange={(v) => patch("histTestAutoAssign", v)}
         />
         <HistTestStatus
           histTest={
@@ -2812,6 +2868,41 @@ function TestHistoricCard({
             Open report
           </a>
         </HistTestControls>
+        {assignment ? (
+          <div className="grid gap-2 sm:grid-cols-2" data-testid="hist-test-assigned">
+            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">
+                Assigned symbols · {assignment.symbols.length} ·{" "}
+                {isUnlimitedSymbolBook(overlay) || overlay.symbols.includes("*")
+                  ? "wildcard book · engine narrows to these"
+                  : histTestSelectionMatches(overlay.symbols, assignment.symbols)
+                    ? unsaved
+                      ? "in form · unsaved, save Live or VST to persist"
+                      : "in selection"
+                    : overlay.histTestAutoAssign !== false
+                      ? "assigns on the next save"
+                      : "selection differs · auto-assign off"}
+              </p>
+              <p className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{assignment.symbols.join(" · ") || "—"}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-wide text-muted">
+                Assigned configs · {assignment.configs.length} · engine allow-list
+              </p>
+              <ul className="mt-1 space-y-0.5 font-mono text-xs text-fg" data-testid="hist-test-assigned-configs">
+                {assignment.configs.slice(0, 8).map((c) => (
+                  <li key={c.id} className="[overflow-wrap:anywhere]">
+                    {c.id}
+                    {c.pf != null ? ` · PF ${Number(c.pf).toFixed(2)}` : ""}
+                    {c.n != null ? ` · n ${c.n}` : ""}
+                  </li>
+                ))}
+                {assignment.configs.length > 8 ? <li className="text-muted">+{assignment.configs.length - 8} more</li> : null}
+                {assignment.configs.length === 0 ? <li className="text-muted">—</li> : null}
+              </ul>
+            </div>
+          </div>
+        ) : null}
         {(histTestJob?.positive?.length || (Array.isArray(histTestJob?.rejected) && histTestJob.rejected.length) || histTestIsRunning(histTestJob?.phase) || histTestJob?.ready) ? (
           <div className="grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-border bg-bg2 px-3 py-2">
@@ -2944,16 +3035,19 @@ function EnableSlider({
   label,
   on,
   hint,
+  testId,
   onChange,
 }: {
   label: string;
   on: boolean;
   hint?: string;
+  testId?: string;
   onChange: (v: boolean) => void;
 }) {
   return (
     <Slider
       label={label}
+      testId={testId}
       value={on ? 1 : 0}
       min={0}
       max={1}
