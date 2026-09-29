@@ -347,7 +347,10 @@ def ctrl_both_sides(api: FastBingX, out: List[Tuple[str, bool, str]]) -> None:
         have_tp = any(str(o.get("type")) in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT") and str(o.get("positionSide")) == side for o in orders)
         rec(f"ctrl-{side}-both-live", have_sl and have_tp, f"sl={have_sl} tp={have_tp} n={len(orders)}", out)
         for o in orders:
-            if str(o.get("positionSide")) == side and str(o.get("type")) in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
+            # Only orders carrying this system's tag: a stop another source holds
+            # on the same symbol and side must survive the QA run untouched.
+            own = Pulse.cid_ours(p, str(o.get("clientOrderID") or o.get("clientOrderId") or ""))
+            if own and str(o.get("positionSide")) == side and str(o.get("type")) in ("STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT"):
                 api.delete("/openApi/swap/v2/trade/order", {"symbol": sym, "orderId": o.get("orderId")})
         cid_c = Pulse.cid(p, "c", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         cl = {"code": -1}
