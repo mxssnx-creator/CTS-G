@@ -2778,9 +2778,8 @@ class Pulse:
             if str(row.get("side") or "").upper() != str(pos.side or "").upper():
                 continue
             row_scope = str(row.get("group_key") or "")
-            if not row_scope:
-                row_scope = self.legacy_position_key(pos)
-            if row_scope != scope:
+            # An empty group key marks an overall (symbol + side wide) lane, e.g. DCA with dcaOverall.
+            if row_scope and row_scope != scope and row_scope != self.legacy_position_key(pos):
                 continue
             requested = max(0.0, _sf(row.get("requested_qty") or row.get("requestedQty")))
             filled = max(0.0, _sf(row.get("filled_qty") or row.get("filledQty")))
@@ -3096,6 +3095,53 @@ class Pulse:
 
     def ok(self, r: Dict[str, Any]) -> bool:
         return (not r.get("error")) and r.get("code") in (0, None)
+
+    @staticmethod
+    def order_response_ambiguous(r: Dict[str, Any]) -> bool:
+        """Transport failure (BingX client returns code -1): the venue may have accepted the request."""
+        return isinstance(r, dict) and bool(r.get("error")) and str(r.get("code")) == "-1" and not r.get("cooled")
+
+    def lookup_order_by_cid(self, symbol: str, cid: str) -> Optional[Dict[str, Any]]:
+        """Resolve a lost response by client id.
+
+        Returns the venue order when it exists, ``{}`` when the venue confirms it
+        does not, and ``None`` while that is still unknown (keep the intent).
+        """
+        r = self.api.get("/openApi/swap/v2/trade/order", {"symbol": symbol, "clientOrderId": cid})
+        data = r.get("data") or {}
+        order = data.get("order", data) if isinstance(data, dict) else {}
+        if (self.ok(r) and isinstance(order, dict) and real_oid(order.get("orderId"))
+                and self.order_cid(order).lower() == str(cid).lower()):
+            return order
+        if str(r.get("code")) in ("109400", "109421") and "not exist" in str(r.get("msg") or "").lower():
+            return {}
+        return None
+
+    def _retire_superseded_controls(self, symbol: str, pos: Position, tagged: List[Dict[str, Any]]) -> None:
+        """After recovery installs one complete pair, cancel our older controls it replaces."""
+        if not (real_oid(pos.sl_oid) and real_oid(pos.tp_oid)):
+            return  # never retire an old pair before a complete replacement stands
+        keep = {real_oid(getattr(pos, name, "")) for name in overall_controls.FIELDS} - {""}
+        for order in tagged:
+            oid = real_oid(order.get("orderId") or order.get("orderID"))
+            if oid and oid not in keep and (str(order.get("type") or "") in SL_TYPES | TP_TYPES or order.get("stopPrice")):
+                self.cancel_order(symbol, oid, self.order_cid(order))
+
+    def _sweep_ambiguous_pending(self) -> None:
+        """Retire an ambiguous intent the venue confirms never landed (bounded, paced)."""
+        now = time.time()
+        for cid, row in list((getattr(self, "pending_orders", {}) or {}).items())[:4]:
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            since = _sf(meta.get("ambiguous_since"))
+            if since <= 0 or now - since < 45.0:
+                continue
+            found = self.lookup_order_by_cid(str(row.get("symbol") or ""), cid)
+            if found is None:
+                continue
+            if found:
+                meta.pop("ambiguous_since", None)      # it landed: normal fill sync books it
+            else:
+                self._clear_pending(cid)
 
     def record_test(self, name: str, passed: bool, detail: str = "") -> None:
         if not isinstance(detail, str):
@@ -4571,6 +4617,32 @@ class Pulse:
         retry_key = self._ctrl_retry_key(scope, is_sl)
         if time.time() < self.ctrl_skip.get(retry_key, 0):
             return have_this
+        # A control whose response was lost may already be live: resolve it by client id
+        # before any new payload is sent, otherwise a second order is stacked on top of it.
+        amb_cid = self.__dict__.setdefault("_ctrl_ambiguous", {}).get((scope, is_sl))
+        if amb_cid:
+            found = self.lookup_order_by_cid(pos.symbol, amb_cid)
+            if found is None:
+                self.ctrl_skip[retry_key] = time.time() + 10.0
+                return have_this
+            self._ctrl_ambiguous.pop((scope, is_sl), None)
+            if found:
+                px_f = _sf(found.get("stopPrice"))
+                pos.overall = True
+                pos.ctrl_qty = _sf(found.get("origQty") or found.get("quantity")) or float(pos.qty or 0)
+                if px_f > 0:
+                    if is_sl:
+                        pos.sl = px_f
+                    else:
+                        pos.tp = px_f
+                    if is_sec:
+                        if is_sl:
+                            pos.sec_sl = px_f
+                        else:
+                            pos.sec_tp = px_f
+                self._oo_cache.pop("*", None)
+                self._oo_cache.pop(pos.symbol, None)
+                return real_oid(found.get("orderId"))
         if (self.px.get(pos.symbol) or 0) <= 0 and (self.last_px.get(pos.symbol) or 0) <= 0:
             self.refresh_px_one(pos.symbol)
         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", price)
@@ -4643,6 +4715,15 @@ class Pulse:
                 )
                 r = self.api.post("/openApi/swap/v2/trade/order", body)
                 self.did_io = True
+                if not self.ok(r) and self.order_response_ambiguous(r):
+                    found = self.lookup_order_by_cid(pos.symbol, cid)
+                    if found:
+                        r = {"code": 0, "data": {"order": found}}
+                    elif found is None:
+                        # Never stack another payload form on an order that may already exist.
+                        self._ctrl_ambiguous[(scope, is_sl)] = cid
+                        self.ctrl_skip[retry_key] = time.time() + 10.0
+                        return have_this
                 self.record_event(
                     "control_response",
                     stable_key(control_key, "response"),
@@ -5097,6 +5178,18 @@ class Pulse:
         )
         r = self.api.batch_place([sl_b, tp_b])
         self.did_io = True
+        if not self.ok(r) and self.order_response_ambiguous(r):
+            # Lost batch response: resolve each leg by client id; legs still unknown are
+            # remembered so place_ctrl() looks them up before it sends anything new.
+            landed = []
+            for body, is_sl_leg in ((sl_b, True), (tp_b, False)):
+                found = self.lookup_order_by_cid(pos.symbol, body["clientOrderID"])
+                if found:
+                    landed.append(dict(found, code=0))
+                elif found is None:
+                    self.__dict__.setdefault("_ctrl_ambiguous", {})[(batch_scope, is_sl_leg)] = body["clientOrderID"]
+                    self.ctrl_skip[self._ctrl_retry_key(batch_scope, is_sl_leg)] = time.time() + 10.0
+            r = {"code": 0, "data": {"orders": landed}}
         self.record_event(
             "control_response",
             stable_key(batch_key, "response"),
@@ -5503,13 +5596,8 @@ class Pulse:
                     # Economically dust: below the venue close floor forever.
                     self.dust_retired.add(f"{pos.symbol}:{pos.side}")
                     try:
-                        for o in self.our_orders(pos.symbol):
-                            oid = real_oid(o.get("orderId") or o.get("orderID"))
-                            if oid:
-                                try:
-                                    self.cancel_order(pos.symbol, oid)
-                                except Exception:
-                                    pass
+                        # Only this lot's own controls: other own lots (either hedge side) keep theirs.
+                        self.cancel_controls(pos.symbol, pos=pos)
                     except Exception:
                         pass
                     self._last_close_result.update({
@@ -6417,6 +6505,25 @@ class Pulse:
         )
         r = self.api.post("/openApi/swap/v2/trade/order", _entry_body(qty, cid))
         self.did_io = True
+        if not self.ok(r) and self.order_response_ambiguous(r):
+            # Lost / timed-out response: the order may already exist. Resolve it by client id;
+            # if that is still unknown keep the persisted intent so the lane stays occupied,
+            # adopt owns the lot and the fill poll books it (never re-enter with a fresh id).
+            found = self.lookup_order_by_cid(sym, cid)
+            if found:
+                r = {"code": 0, "data": {"order": found}}
+            elif found is None:
+                self._remember_pending(
+                    kind="entry", cid=cid, symbol=sym, side=side, requested_qty=qty,
+                    group_key=pending_group_key,
+                    metadata={**pending_meta, "ambiguous_since": time.time()},
+                )
+                self.cooldown[sym] = time.time() + 12.0
+                self._next_fill_poll = 0.0
+                self.recon_pending = True
+                self._reconcile_retry_at = 0.0
+                log(f"ORDER AMBIGUOUS {sym} {side} cid={cid} kept pending", every=12.0, key=f"amb:{sym}")
+                return
         if not self.ok(r) and attach:
             msg0 = str(r.get("msg") or "").lower()
             if any(k in msg0 for k in ("stop loss", "take profit", "stoploss", "takeprofit", "trigger price", "workingtype", "signature")):
@@ -7191,6 +7298,9 @@ class Pulse:
             # guaranteed-to-fail quantity against a flat symbol+side.
             self.close_pos(pos, px, reason, exchange=False)
             return
+        skips = self.__dict__.setdefault("ctrl_skip", {})
+        if exchange and time.time() < skips.get(f"close:{self.position_key(pos)}", 0):
+            return  # the venue refused this close; wait out the back-off (controls stay live)
         if exchange and float(getattr(pos, "pending_close_qty", 0.0) or 0.0) > 1e-12:
             # An accepted close is already in flight. Repeating it from the
             # max-hold/DDT/control paths would create an over-close race.
@@ -7246,7 +7356,13 @@ class Pulse:
                 price=exit_px,
                 detail=f"close {reason} {close_status.lower()}" if ok else "close failed",
             )
+            fails = self.__dict__.setdefault("_close_fail_n", {})
+            backoff_key = f"close:{self.position_key(pos)}"
             if not ok:
+                # Any refused close (hard rejection, offline symbol, unlearned minimum, throttle) would
+                # otherwise repeat every 0.2s cycle: back off per lot; exchange controls stay live.
+                fails[backoff_key] = min(8, int(fails.get(backoff_key, 0)) + 1)
+                skips[backoff_key] = time.time() + min(60.0, 2.0 * 2 ** (fails[backoff_key] - 1))
                 if skip_eval:
                     self.ban_sym(pos.symbol, clear_open=False)
                 self.record_event("error", stable_key(close_key, "error"), status="error", symbol=pos.symbol, side=pos.side, client_id=pos.client_id, detail="close failed")
@@ -7258,6 +7374,7 @@ class Pulse:
                     except Exception:
                         pass
                 return
+            fails.pop(backoff_key, None)
             pending_meta = {
                 "reason": reason,
                 "parent_client_id": pos.client_id,
@@ -9406,6 +9523,18 @@ class Pulse:
                 },
             )
             self.did_io = True
+            if not self.ok(r) and self.order_response_ambiguous(r):
+                found = self.lookup_order_by_cid(pos.symbol, cid)
+                if found:
+                    r = {"code": 0, "data": {"order": found}}
+                elif found is None:
+                    self._remember_pending(
+                        kind="block", cid=cid, symbol=pos.symbol, side=pos.side, requested_qty=qty,
+                        group_key=block_group_key, metadata={"ambiguous_since": time.time()},
+                    )
+                    self.block_last_emit = time.time()
+                    self._next_fill_poll = 0.0
+                    continue
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 if adopt_venue_minimum(c, msg) or ctrl_err_kind(msg) == "qty" or "minimum" in msg.lower():
@@ -9681,6 +9810,19 @@ class Pulse:
                 },
             )
             self.did_io = True
+            if not self.ok(r) and self.order_response_ambiguous(r):
+                found = self.lookup_order_by_cid(pos.symbol, cid)
+                if found:
+                    r = {"code": 0, "data": {"order": found}}
+                elif found is None:
+                    self._remember_pending(
+                        kind="dca", cid=cid, symbol=pos.symbol, side=pos.side, requested_qty=qty,
+                        group_key=group_key, metadata={"ambiguous_since": time.time()},
+                    )
+                    self.dca_fail_cd[group_scope] = time.time() + 60.0
+                    self.dca_last_emit = time.time()
+                    self._next_fill_poll = 0.0
+                    continue
             if not self.ok(r):
                 msg = str(r.get("msg") or "")
                 if adopt_venue_minimum(c, msg) or ctrl_err_kind(msg) == "qty" or "minimum" in msg.lower():
@@ -10858,6 +11000,8 @@ class Pulse:
             self._empty_rest_streak = 0
             self.exchange_position_snapshot_pending = False
         self.exchange_total_open_count = live_n
+        # A dust marker only describes a venue position that still exists.
+        self.dust_retired = {k for k in getattr(self, "dust_retired", set()) if k in live_keys}
         # The raw exchange set is diagnostic only. ``live_pos_keys`` is always
         # narrowed to exact system-owned keys before controls or system stats use it.
         self.live_pos_keys = set()
@@ -10887,7 +11031,7 @@ class Pulse:
             # Dust write-off: this key was retired locally because the venue
             # can never close it (below min close size). Treat it as foreign
             # so recovery cannot resurrect it into the book.
-            if f"{sym}:{side}" in getattr(self, "dust_retired", set()):
+            if f"{sym}:{side}" in getattr(self, "dust_retired", set()) and not self.positions_for(sym, side):
                 exchange_key = f"{sym}:{side}"
                 self.exchange_qty[exchange_key] = abs(amt)
                 self.exchange_own_qty[exchange_key] = 0.0
@@ -10951,6 +11095,7 @@ class Pulse:
                 self.exchange_qty[f"{sym}:{side}"] = qty
                 self.exchange_own_qty[f"{sym}:{side}"] = own_qty
                 self.exchange_foreign_qty[f"{sym}:{side}"] = foreign_qty
+                external_applied: List[Position] = []
                 for index, candidate in enumerate(candidates):
                     candidate_book_qty = max(0.0, float(getattr(candidate, "qty", 0) or 0))
                     allocated_qty = (
@@ -10980,16 +11125,26 @@ class Pulse:
                             round(previous_qty, 12),
                             round(allocated_qty, 12),
                         )
-                        self._record_close_fill(
-                            candidate,
-                            external_delta,
-                            external_px,
-                            "external-close",
-                            exchange=True,
-                            close_cid=external_cid,
-                            status="recovered",
-                            cumulative_qty=external_delta,
-                        )
+                        # Book every candidate's share first and resize the shared/range controls
+                        # once afterwards. Resizing per candidate targets an intermediate total
+                        # above the venue size: the venue then cancels the old leg and rejects
+                        # the new one, leaving the lot without that stop.
+                        applying = getattr(self, "_overall_applying_fill", False)
+                        self._overall_applying_fill = True
+                        try:
+                            self._record_close_fill(
+                                candidate,
+                                external_delta,
+                                external_px,
+                                "external-close",
+                                exchange=True,
+                                close_cid=external_cid,
+                                status="recovered",
+                                cumulative_qty=external_delta,
+                            )
+                        finally:
+                            self._overall_applying_fill = applying
+                        external_applied.append(candidate)
                         if not any(candidate is current for current in self.open.values()):
                             continue
                     if liq > 0:
@@ -10998,8 +11153,12 @@ class Pulse:
                         candidate.position_id = pid
                     if px > 0:
                         candidate.qty = allocated_qty
-                        candidate.entry = px
-                        candidate.notional = candidate.qty * px
+                        # The venue price is the average of the whole symbol+side position (other
+                        # sources and sibling lots included): it is only this lot's entry when the
+                        # lot is the whole position.
+                        if foreign_qty <= 1e-12 and len(candidates) == 1:
+                            candidate.entry = px
+                        candidate.notional = candidate.qty * candidate.entry
                         candidate.ours = True
                     candidate.exchange_qty = allocated_qty
                     # Attribute a mixed-side foreign remainder once so group
@@ -11028,6 +11187,14 @@ class Pulse:
                     candidate.controls_ok = bool(candidate.sl_oid and candidate.tp_oid)
                     candidate.ctrl_verified = candidate.controls_ok
                     self.ensure_strategy_lanes(candidate)
+                survivors = [c for c in external_applied if any(c is cur for cur in self.open.values())]
+                if external_applied and getattr(self, "control_orders", True):
+                    if survivors and overall_controls.enabled(self, survivors[0]):
+                        overall_controls.ensure(self, survivors[0])
+                    else:
+                        for kept in survivors:
+                            self._replace_partial_controls(kept)
+                    overall_controls.drain_cleanup(self)
                 continue
             exchange_key = f"{sym}:{side}"
             self.exchange_qty[exchange_key] = qty
@@ -11035,6 +11202,21 @@ class Pulse:
             self.exchange_foreign_qty[exchange_key] = 0.0
             if px <= 0:
                 continue
+            # Recovery has no book to split the venue quantity between our lots and another
+            # source's. Our size is proven only by our own intent (pending entry) or by our
+            # quantity-matched controls; whatever the venue holds above that is not ours.
+            proof = max(0.0, _sf((pending_entry or {}).get("requested_qty"))) + max(
+                sum(_sf(o.get("origQty") or o.get("quantity")) for o in tagged
+                    if self._order_is_sl(o) and str(o.get("closePosition")).lower() != "true"),
+                sum(_sf(o.get("origQty") or o.get("quantity")) for o in tagged
+                    if self._order_is_tp(o) and str(o.get("closePosition")).lower() != "true"),
+            )
+            foreign_part = 0.0
+            if proof > 1e-12 and qty > proof * 1.001:
+                foreign_part = qty - proof
+                qty = proof
+                self.exchange_own_qty[exchange_key] = qty
+                self.exchange_foreign_qty[exchange_key] = foreign_part
             grouped_positions = self._recover_grouped_positions(
                 sym,
                 side,
@@ -11098,7 +11280,7 @@ class Pulse:
                 overall=True, close_position=True,
                 set_id=set_id, pack=pack, set_idx=int(track["idx"]) if track.get("idx") is not None else -1,
                 liq=liq, position_id=pid,
-                exchange_qty=qty, foreign_qty=0.0,
+                exchange_qty=qty, foreign_qty=foreign_part,
                 parent_set_id=str(track.get("parent_set_id") or set_id),
                 axis_key=str(track.get("axis_key") or ""),
                 relative_count=int(track.get("relative_count") or 1),
@@ -11143,6 +11325,7 @@ class Pulse:
                 self.place_ctrl_pair(rec_pos)
                 if self.missing_controls(rec_pos):
                     self.ensure_controls(rec_pos)
+                self._retire_superseded_controls(sym, rec_pos, tagged)
         pending_absent: List[str] = []
         for stored_key, pos in list(self.open.items()):
             exchange_key = f"{pos.symbol}:{pos.side}"
@@ -11174,6 +11357,9 @@ class Pulse:
                 pending_absent.append(stored_key)
                 continue
             log(f"DROP stale local {pos.symbol} {pos.side} group={stored_key[:16]} age={age:.0f}s miss={misses}")
+            # The lot vanished at the venue: its own SL/TP are still live there. Queue them for
+            # (persisted, paced) cancellation exactly as every other final close does.
+            overall_controls.closed_member(self, pos)
             self.remove_position(pos)
             self.cooldown[pos.symbol] = time.time() + 12.0
         self.ignored_foreign = len(foreign)
@@ -11566,6 +11752,7 @@ class Pulse:
     def sync_own_fills(self) -> None:
         """Pull exchange fills for this connection and apply only new deltas."""
         self._next_fill_poll = time.monotonic() + 30.0
+        self._sweep_ambiguous_pending()
         request_key = stable_key(CONN_SHORT, "fills", int(getattr(self, "cycle", 0) or 0), int(time.time() // 5))
         self.record_event("exchange_request", request_key, status="pending", detail="fill polling", metadata={"path": "/openApi/swap/v2/trade/allOrders"})
         self.did_io = True
