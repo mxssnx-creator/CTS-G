@@ -57,12 +57,23 @@ WS_URL = "wss://open-api-swap.bingx.com/swap-market"
 RECV = 10000
 UA = "grok-x01-pulse/2.0"
 
-# CTS connector numbers (UID / IP)
+# CTS connector numbers (UID / IP). BingX allows 10 order placements per second
+# per IP since 2025-10-16 (5 before); Mainnet and VST engines can share one IP,
+# so each lane keeps 4.0 / s (8 / s together) and never spends the whole quota.
+# Batch placing is a separate 5 / s quota (up to 5 orders each) used for controls.
+ORDER_RPS = 4.0
+REPLACE_RPS = 3.0  # /trade/order and cancelReplace share one tighter pacing bucket
+# /trade/batchOrders has its own venue quota (5 batches / s, up to 5 orders each).
+# Two lanes at 2.0 / s leave 20 % headroom; it no longer eats the single-order bucket.
+BATCH_RPS = 2.0
 LIMITS = {
     "public": (12.0, 20.0),
     "private": (5.0, 10.0),
-    "order": (2.4, 5.0),
+    "order": (ORDER_RPS, ORDER_RPS * 2),
+    "batch": (BATCH_RPS, BATCH_RPS * 2),
 }
+# Lanes that share one venue ban timer: a rate ban on either stops both.
+ORDER_LANES = ("order", "batch")
 
 RATE_CODES = {429, 100410, 100421, 109421, 109429, 100429, 101209}
 # These are idempotent reconciliation outcomes: the local control/order book
@@ -397,7 +408,7 @@ class FastBingX:
             if until <= now:
                 continue
             self.path_cd[endpoint] = max(self.path_cd.get(endpoint, 0), until)
-            shared = until if self._lane(endpoint, "POST") == "order" else min(until, at+12.5)
+            shared = until if self._lane(endpoint, "POST") in ORDER_LANES else min(until, at+12.5)
             self.cooldown_until = max(self.cooldown_until, shared)
 
     def _next_ts(self) -> int:
@@ -415,7 +426,7 @@ class FastBingX:
     def configure_limits(self, settings):
         from system_settings import normalize_system_settings
         limits = normalize_system_settings(settings)
-        for lane, key in (("public", "systemPublicRps"), ("private", "systemPrivateRps"), ("order", "systemOrderRps")):
+        for lane, key in (("public", "systemPublicRps"), ("private", "systemPrivateRps"), ("order", "systemOrderRps"), ("batch", "systemBatchRps")):
             bucket = self.buckets[lane]
             with bucket.lock:
                 bucket.rate = limits[key]
@@ -433,7 +444,9 @@ class FastBingX:
                 pass
 
     def _lane(self, path: str, method: str) -> str:
-        if "/trade/order" in path or "/trade/batchOrders" in path or "/trade/closePosition" in path or "/trade/cancelReplace" in path:
+        if "/trade/batchOrders" in path:
+            return "batch"
+        if "/trade/order" in path or "/trade/closePosition" in path or "/trade/cancelReplace" in path:
             return "order"
         if path.startswith("/openApi/swap") and method != "PUBLIC":
             if "/quote/" in path:
@@ -455,20 +468,20 @@ class FastBingX:
         now = time.time()
         until = self.path_cd.get(path, 0.0)
         gate = until
-        if lane == "order":
+        if lane in ORDER_LANES:
             gate = max(self.cooldown_until, until)
         if now < gate:
             return False
         w = self.buckets[lane].take()
         if path.endswith("/cancelReplace") or (lane == "order" and path.endswith("/trade/order")):
             if not hasattr(self,"_replace_bucket"):
-                self._replace_bucket = TokenBucket(1.8,1.0)
+                self._replace_bucket = TokenBucket(REPLACE_RPS, 2.0)
             w += self._replace_bucket.take()
         self.stats["wait"] += w
         # Another worker may receive a venue ban while this worker waits for
         # its token. Recheck without submitting a request inside that ban.
         gate = self.path_cd.get(path, 0.0)
-        if lane == "order":
+        if lane in ORDER_LANES:
             gate = max(self.cooldown_until, gate)
         return time.time() >= gate
 
@@ -509,7 +522,7 @@ class FastBingX:
         self.path_cd[path] = max(self.path_cd.get(path, 0.0), now + wait)
         # Batch and single orders share admission. Switching endpoints must
         # never bypass the full venue deadline; private reads stay available.
-        shared_wait = wait if self._lane(path, "POST") == "order" else min(wait, 12.0)
+        shared_wait = wait if self._lane(path, "POST") in ORDER_LANES else min(wait, 12.0)
         self.cooldown_until = max(self.cooldown_until, now + shared_wait)
         self.err.write("rate-limit", path=path, code=code, msg=msg[:180], wait=round(wait, 2))
 

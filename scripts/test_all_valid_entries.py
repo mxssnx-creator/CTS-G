@@ -525,6 +525,26 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual(set(restored.open), set(p.open))
         self.assertEqual(len({v.execution_lane for v in restored.open.values()}), 250)
 
+    def test_scarce_orders_go_to_the_best_ranked_signal_not_the_first_name(self):
+        """maybe_entries ranks by confidence; the matrix must not sort that away."""
+        p = self.pulse(self.book(1))
+        for name in ('A-USDT', 'X-USDT'):
+            p.px[name] = 100.
+            p.contracts[name] = pt.Contract(name, .001, .001, 3, 2, 1., 100)
+        p.strat_ind = False
+        p.score = lambda s: (1, 'trend', .9 if s == 'X-USDT' else .6)
+        order = []
+        real_place = p.place
+
+        def spy(sym, direction, why, conf, **kwargs):
+            order.append(sym)
+            return real_place(sym, direction, why, conf, **kwargs)
+
+        p.place = spy
+        with patch.object(pt, 'SYMBOLS', ['A-USDT', 'X-USDT']):
+            p.maybe_entries()
+        self.assertEqual(order[:2], ['X-USDT', 'A-USDT'], 'best confidence first, then the rest')
+
     def test_same_lane_pending_blocks_only_itself_and_reserves_a_slot(self):
         p = self.pulse()
         p.api.fill_fraction = .5

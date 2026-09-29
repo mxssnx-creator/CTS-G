@@ -28,6 +28,11 @@ LEVEL_RANK = {n: i for i, n in enumerate(LEVELS)}
 # treat that RSS as "critical" using the tiny 90+0.35*n formula.
 CATALOG_SOFT_FLOOR_MB = 1600.0
 CATALOG_HARD_FLOOR_MB = 2200.0
+# Candidates examined per cycle on a ranked 9-64 symbol desk. The time slice
+# (entry_budget_ms below) is what keeps SL/TP running; the count only bounds the
+# cheap rejections (lane already open, cooldown, margin) that fit into it. A
+# count of 8 needed hundreds of cycles to sweep the entry matrix once.
+SMALL_BOOK_ENTRY_BATCH = {"normal": 64, "busy": 24, "overload": 24, "critical": 4}
 # Host-wide pressure: two pulse lanes plus Redis share one box. Shed hist
 # and extra TFs before the kernel starts reclaiming into D-state stalls.
 HOST_PRESSURE_MB = 1600.0
@@ -755,13 +760,13 @@ class LoadGovernor:
             # 50-symbol intern: 128 sequential entry POSTs blow the scan
             # budget and starve SL/TP. Cap the cooperative window.
             if level == "critical":
-                b.entry_batch = min(int(b.entry_batch or 1), 4)
+                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH["critical"])
                 b.entry_budget_ms = min(float(b.entry_budget_ms or 80.0), 80.0)
             elif level in ("overload", "busy"):
-                b.entry_batch = min(int(b.entry_batch or 1), 6)
+                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH[level])
                 b.entry_budget_ms = min(float(b.entry_budget_ms or 150.0), 150.0)
             else:
-                b.entry_batch = min(int(b.entry_batch or 1), 8)
+                b.entry_batch = min(int(b.entry_batch or 1), SMALL_BOOK_ENTRY_BATCH["normal"])
                 b.entry_budget_ms = min(float(b.entry_budget_ms or 180.0), 180.0)
         if n:
             b.scan_chunk = min(int(b.scan_chunk or 1), n)
@@ -989,7 +994,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     b_swap = g.observe(n_sym=48, n_open=16, hot_ms=22, warm_ms=80, rss_mb=230.0)
     out.append((
         "load-swap-ignored-when-ram-free",
-        b_swap.level not in ("overload", "critical") and b_swap.tf_15m and b_swap.extra_sources and "host" not in b_swap.shed and int(b_swap.entry_batch or 0) <= 8,
+        b_swap.level not in ("overload", "critical") and b_swap.tf_15m and b_swap.extra_sources and "host" not in b_swap.shed and int(b_swap.entry_batch or 0) <= SMALL_BOOK_ENTRY_BATCH["normal"] and float(b_swap.entry_budget_ms or 0) <= 180.0,
         f"level={b_swap.level} tf15m={b_swap.tf_15m} shed={b_swap.shed}",
     ))
     g._swap_used_override = None

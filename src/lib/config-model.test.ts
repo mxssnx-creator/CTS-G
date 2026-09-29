@@ -47,7 +47,7 @@ test("System settings survive save and use bounded values without disabling auto
     systemStatsIntervalS: 9, systemOrderRps: 50, rssSoftMb: 0, rssHardMb: 0, blockMaxStack: 3, blockActiveMinLevel: 6 }));
   assert.equal(saved.systemWorkers, 8);
   assert.equal(saved.systemDbMaxMb, 8);
-  assert.equal(saved.systemOrderRps, 2.4);
+  assert.equal(saved.systemOrderRps, 4);
   assert.equal(saved.systemStatsIntervalS, 9);
   assert.equal(saved.rssSoftMb, 0);
   assert.equal(saved.rssHardMb, 0);
@@ -351,4 +351,15 @@ test("the Scratch s control range covers the engine default and saved overlays",
 test("SL/TP control orders are always on, even when a stored overlay says off", () => {
   const saved = syncOverlayFlags(overlayFromCts({ control_orders: false }, { controlOrders: false }));
   assert.equal(saved.controlOrders, true);
+});
+
+test("batch entry orders are off by default, seeded on for VST only, and keep a bounded size", () => {
+  assert.equal(DEFAULT_OVERLAY.entryBatchOrders, false);
+  assert.equal(DEFAULT_OVERLAY.entryBatchSize, 5);
+  assert.equal(overlayFromCts({}, laneFile("bingx-x01")).entryBatchOrders, false);
+  assert.equal(overlayFromCts({}, laneFile("bingx-x02")).entryBatchOrders, true);
+  const on = syncOverlayFlags(overlayFromCts({}, { entryBatchOrders: true, entryBatchSize: 99 }));
+  assert.equal(on.entryBatchOrders, true);
+  assert.equal(on.entryBatchSize, 5);
+  assert.equal(syncOverlayFlags(overlayFromCts({}, { entryBatchSize: 0 })).entryBatchSize, 2);
 });
