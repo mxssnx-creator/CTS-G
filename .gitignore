@@ -44,3 +44,6 @@ server/pulse/hist-calc.pid
 backups/overlays/*/
 !backups/overlays/latest/
 !backups/overlays/latest/**
+
+# Local Claude Code settings (per-user, never committed)
+.claude/settings.local.json
