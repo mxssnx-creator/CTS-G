@@ -894,6 +894,10 @@ export type LiveStats = {
         detail?: string;
         ready?: boolean;
         cycle?: number;
+        symbolsDone?: number;
+        symbolsTotal?: number;
+        setsDone?: number;
+        setsTotal?: number;
       };
       activeCount?: number;
       validatedCount?: number;
@@ -1305,17 +1309,22 @@ export function posOrdersCounts(stats: {
     knownCount(stats?.realPositionGroupCount) ?? knownCount(stats?.realPositionCount);
   const livePositions =
     knownCount(stats?.livePositionCount) ?? knownCount(stats?.exchangeOpenCount);
-  const liveOrders = knownCount(stats?.liveOrderCount);
+  const liveOrdersRaw = knownCount(stats?.liveOrderCount);
   const realOrd = knownCount(stats?.realOrderCount);
   const lanes = knownCount(stats?.openCount);
   let realOrders = realOrd;
   // Older engines copied lane/openCount onto realOrderCount. That is not orders.
-  if (realOrders != null && lanes != null && lanes > 0 && realOrders === lanes) realOrders = liveOrders;
+  if (realOrders != null && lanes != null && lanes > 0 && realOrders === lanes) realOrders = liveOrdersRaw;
+  // Live is the venue subset of the working book. Leftover or stale venue
+  // rows must not display as more orders than Real.
+  let liveOrders = liveOrdersRaw;
+  if (liveOrders != null && realOrders != null && liveOrders > realOrders) liveOrders = realOrders;
   return { realPositions, livePositions, realOrders, liveOrders };
 }
 
 export type EffectiveSetCounts = {
   on: boolean;
+  running: boolean;
   catalog: number | null;
   intern: number | null;
   validated: number | null;
@@ -1324,16 +1333,29 @@ export type EffectiveSetCounts = {
   setCount: number | null;
   symbols: number | null;
   coordinations: number | null;
+  catalogBusy: boolean;
+  symbolsDone: number | null;
+  symbolsTotal: number | null;
 };
+
+const HIST_RUN_PHASES = new Set(["queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh", "paused"]);
+const CALC_BUSY_PHASES = new Set([
+  "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+  "gap", "incremental", "queued", "partial", "catalog", "rank", "evaluate", "hist-test",
+]);
 
 export function effectiveSetCounts(stats: {
   histTest?: {
     enabled?: boolean;
     ownsCatalog?: boolean;
     phase?: string;
+    running?: boolean;
+    paused?: boolean;
     internSetCount?: number;
     validatedCount?: number;
     processingCount?: number;
+    setsDone?: number;
+    setsTotal?: number;
     internSymbols?: string[];
     symbols?: string[];
     selectedCoordinations?: unknown[];
@@ -1346,8 +1368,10 @@ export function effectiveSetCounts(stats: {
     activeCount?: number;
     processingCount?: number;
     internSymbolCount?: number;
+    progress?: { phase?: string; ready?: boolean; setsDone?: number; setsTotal?: number; symbolsDone?: number; symbolsTotal?: number };
   } | null;
   coverage?: { sets?: { setCount?: number; validatedCount?: number; activeCount?: number; internSetCount?: number; catalogSetCount?: number; internSymbolCount?: number; processingCount?: number } };
+  progress?: { phase?: string; ready?: boolean; setsDone?: number; setsTotal?: number; symbolsDone?: number; symbolsTotal?: number };
 } | null | undefined): EffectiveSetCounts {
   const ht = stats?.histTest;
   const on = Boolean(
@@ -1357,6 +1381,7 @@ export function effectiveSetCounts(stats: {
       ht.phase !== "off" &&
       (ht.enabled === true || ht.ownsCatalog === true),
   );
+  const running = Boolean(ht && (ht.running || ht.paused || HIST_RUN_PHASES.has(String(ht.phase || ""))));
   const sets = stats?.sets;
   const cov = stats?.coverage?.sets;
   const catalog =
@@ -1369,11 +1394,36 @@ export function effectiveSetCounts(stats: {
     intern = knownCount(ht?.internSetCount) ?? intern;
     if (!(intern && intern > 0)) intern = knownCount(ht?.validatedCount) ?? intern;
   }
-  const validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount) ?? (on ? knownCount(ht?.validatedCount) : null);
-  const setCount = on ? intern ?? catalog : catalog;
+  const histIntern = knownCount(ht?.internSetCount);
+  if (on && histIntern != null && histIntern > 1 && (intern == null || intern <= 1)) intern = histIntern;
+  const proven = knownCount(ht?.validatedCount);
+  const internReported = knownCount(ht?.internSetCount);
+  let validated = knownCount(sets?.validatedCount) ?? knownCount(cov?.validatedCount) ?? null;
+  if (proven != null && internReported != null && proven > 0 && proven < internReported && (validated == null || proven > validated)) {
+    validated = proven;
+  } else if (validated == null && on) {
+    validated = proven;
+  }
+  const jobTotal = knownCount(ht?.setsTotal);
   const active = knownCount(sets?.activeCount) ?? knownCount(cov?.activeCount);
   let processing = knownCount(sets?.processingCount) ?? knownCount(ht?.processingCount);
-  if (on && intern != null && processing != null && processing > intern) processing = intern;
+  const progress = stats?.progress ?? stats?.sets?.progress;
+  const phase = String(progress?.phase || "");
+  const busy = CALC_BUSY_PHASES.has(phase) || running;
+  if (busy) {
+    const remainSourceDone = running ? knownCount(ht?.setsDone) ?? knownCount(progress?.setsDone) : knownCount(progress?.setsDone);
+    const remainSourceTotal = running ? jobTotal ?? knownCount(progress?.setsTotal) : knownCount(progress?.setsTotal);
+    const remain = remainSourceTotal != null && remainSourceDone != null && remainSourceTotal > remainSourceDone
+      ? remainSourceTotal - remainSourceDone
+      : null;
+    const candidates = [processing, running ? knownCount(ht?.processingCount) : null, remain].filter((n): n is number => n != null);
+    processing = candidates.length ? Math.max(...candidates) : processing;
+    if ((processing == null || processing === 0) && progress && progress.ready !== true && phase && phase !== "ready") {
+      processing = 1;
+    }
+  } else if (on && intern != null && processing != null && processing > intern) {
+    processing = intern;
+  }
   const internSymbols = Array.isArray(ht?.internSymbols) && ht.internSymbols.length
     ? ht.internSymbols
     : (Array.isArray(ht?.symbols) ? ht.symbols : null);
@@ -1381,11 +1431,44 @@ export function effectiveSetCounts(stats: {
     knownCount(sets?.internSymbolCount) ??
     (internSymbols ? internSymbols.length : null);
   const coordinations = Array.isArray(ht?.selectedCoordinations) ? ht.selectedCoordinations.length : null;
-  return { on, catalog, intern, validated, active, processing, setCount, symbols, coordinations };
+  const progPhase = phase;
+  const progTotal = knownCount(progress?.setsTotal);
+  const symbolsDone = knownCount(progress?.symbolsDone);
+  const symbolsTotal = knownCount(progress?.symbolsTotal);
+  const jobForCatalog = knownCount(ht?.setsTotal);
+  const catalogBusy = Boolean(
+    on &&
+      CALC_BUSY_PHASES.has(progPhase) &&
+      progTotal != null &&
+      (jobForCatalog == null || progTotal > jobForCatalog),
+  );
+  const headline = catalogBusy
+    ? catalog
+    : on
+      ? (running && jobTotal != null && (intern == null || jobTotal > intern) ? jobTotal : intern ?? catalog)
+      : catalog;
+  return {
+    on, running, catalog, intern, validated, active, processing,
+    setCount: headline, symbols, coordinations, catalogBusy, symbolsDone, symbolsTotal,
+  };
 }
 
 export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>[0]): string {
   const c = effectiveSetCounts(stats);
+  if (c.on && c.catalogBusy) {
+    const parts = [`catalog ${c.setCount ?? c.catalog ?? 0}`];
+    if (c.symbolsTotal) parts.push(`symbols ${c.symbolsDone ?? 0}/${c.symbolsTotal}`);
+    parts.push(`validated ${c.validated ?? 0}`);
+    if (c.intern) parts.push(`intern ${c.intern}`);
+    if (c.active != null) parts.push(`active ${c.active}`);
+    return parts.join(" · ");
+  }
+  if (c.on && c.running) {
+    const parts = [`processing ${c.processing ?? 0}`, `validated ${c.validated ?? 0}`];
+    if (c.setCount) parts.push(`sets ${c.setCount}`);
+    if (c.active != null) parts.push(`active ${c.active}`);
+    return parts.join(" · ");
+  }
   if (c.on) {
     const parts = [`intern ${c.intern ?? 0} · validated ${c.validated ?? 0}`];
     if (c.processing != null) parts.push(`processing ${c.processing}`);
@@ -1395,7 +1478,9 @@ export function formatEffectiveSets(stats: Parameters<typeof effectiveSetCounts>
     if (c.catalog != null && c.intern != null && c.catalog > c.intern) parts.push(`catalog ${c.catalog} skipped`);
     return parts.join(" · ");
   }
-  return `valid ${c.validated ?? 0}/${c.setCount ?? 0} · active ${c.active ?? 0}/${c.setCount ?? 0}`;
+  const parts = [`valid ${c.validated ?? 0}/${c.setCount ?? 0}`, `active ${c.active ?? 0}/${c.setCount ?? 0}`];
+  if (c.processing) parts.push(`processing ${c.processing}`);
+  return parts.join(" · ");
 }
 
 export function realPosOrders(stats: {

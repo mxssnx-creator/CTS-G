@@ -599,6 +599,65 @@ class HistTestContract(unittest.TestCase):
         self.assertIn("BCH-USDT", out)
         self.assertNotIn("BONER-USDT", out)
 
+    def test_stopped_empty_historic_releases_the_catalog(self):
+        view = ht.job_progress_view({
+            "phase": "stopped",
+            "pct": 8,
+            "detail": "historic test stopped",
+            "running": False,
+        })
+        self.assertFalse(view["ownsCatalog"])
+        self.assertFalse(view["catalogSkipped"])
+        self.assertFalse(view["enabled"])
+        self.assertNotIn("skip full catalog", view["detail"])
+        self.assertIn("full catalog", view["detail"])
+
+    def test_ready_without_intern_does_not_skip_the_catalog(self):
+        view = ht.job_progress_view({
+            "phase": "ready",
+            "pct": 100,
+            "ready": True,
+            "running": False,
+            "detail": "catalog ready",
+        })
+        self.assertFalse(view["ownsCatalog"])
+        self.assertFalse(view["catalogSkipped"])
+        self.assertNotIn("skip full catalog", view["detail"])
+        self.assertIn("full catalog", view["detail"])
+
+    def test_ready_intern_does_not_freeze_the_catalog(self):
+        view = ht.job_progress_view({
+            "phase": "ready",
+            "ready": True,
+            "pct": 100,
+            "internSetCount": 1,
+            "validatedIds": ["general:1m:sl2.1:st10"],
+            "successfulConfigs": [{"setId": "general:1m:sl2.1:st10", "validated": True, "pf": 0, "n": 0}],
+            "refreshHours": 2,
+        })
+        self.assertFalse(view["ownsCatalog"])
+        self.assertFalse(view["enabled"])
+        self.assertFalse(view["catalogSkipped"])
+        self.assertEqual(view["processingCount"], 0)
+        self.assertNotIn("skip full catalog", view["detail"])
+        self.assertIn("full catalog", view["detail"])
+        self.assertIn("intern configs", view["detail"])
+
+    def test_running_intern_still_owns_and_reports_processing(self):
+        view = ht.job_progress_view({
+            "phase": "evaluate",
+            "pct": 12,
+            "running": True,
+            "targetCount": 50,
+            "validatedIds": ["general:1m:sl2.1:st10"],
+            "detail": "evaluate BTC-USDT · 0/50 positive",
+        })
+        self.assertTrue(view["ownsCatalog"])
+        self.assertTrue(view["running"])
+        self.assertEqual(view["setsTotal"], 50)
+        self.assertGreater(view["processingCount"], 1)
+        self.assertNotIn("skip full catalog", view["detail"])
+
     def test_progress_view_does_not_mark_ready_on_batch_error(self):
         view = ht.job_progress_view({
             "phase": "ready",

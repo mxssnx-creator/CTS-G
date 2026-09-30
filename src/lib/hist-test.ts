@@ -126,6 +126,7 @@ export function histTestOverviewLine(ht?: HistTestLive | null): string {
   parts.push(`${n} validated`);
   if (proc) parts.push(`${proc} processing`);
   if (coords) parts.push(`${coords} coordinations`);
+  if (ht?.stale) parts.push("stale");
   if (ids.length) parts.push(`sets ${ids.join(" ")}`);
   if (syms.length) parts.push(syms.join(" "));
   if (ht?.detail && !ids.length && !syms.length) parts.push(String(ht.detail));

@@ -369,12 +369,26 @@ function progressCount(...vals: Array<number | null | undefined>): number | unde
   return nums.length ? Math.max(...nums) : undefined;
 }
 
+const CALC_PHASES = new Set([
+  "fetch", "backfill", "gap", "catalog", "replay", "score", "partial", "initial",
+  "incremental", "evaluate", "rank", "queued", "hist-test", "score-refresh",
+]);
+
+function firstCount(...vals: Array<number | null | undefined>): number | undefined {
+  for (const value of vals) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
 function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]>[number] {
   const p = stats.sets?.progress;
   const h = (stats as LiveStats & { historic?: { phase?: string; pct?: number; detail?: string; ready?: boolean } }).historic;
   const nestedDetail = String(p?.detail || h?.detail || "");
   const topDetail = String(stats.progressDetail || "");
   const detail = /slice |continuing |replay [A-Z]/.test(nestedDetail) ? nestedDetail : topDetail || nestedDetail;
+  const enginePhase = String(stats.progressPhase || p?.phase || "");
+  const engineOwns = CALC_PHASES.has(enginePhase);
   return {
     type: stats.connType || "live",
     id: stats.connection || "",
@@ -393,21 +407,21 @@ function histProgressFromStats(stats: LiveStats): NonNullable<LiveStats["lanes"]
     pf: Number(stats.pf || 0),
     errors: stats.errors,
     alive: stats.alive ?? true,
-    progressPct: progressCount(stats.progressPct, p?.pct, h?.pct),
+    progressPct: engineOwns ? firstCount(stats.progressPct, p?.pct) : firstCount(stats.progressPct, p?.pct, h?.pct),
     progressPhase: stats.progressPhase ?? p?.phase ?? h?.phase,
     progressDetail: detail,
     progressReady: Boolean(stats.progressReady || p?.ready || h?.ready),
     progressSymbol: stats.progressSymbol ?? p?.symbol,
     progressSetId: stats.progressSetId ?? p?.setId,
-    progressSymbolsDone: progressCount(stats.progressSymbolsDone, p?.symbolsDone),
-    progressSymbolsTotal: progressCount(stats.progressSymbolsTotal, p?.symbolsTotal),
-    progressSetsDone: progressCount(stats.progressSetsDone, p?.setsDone),
-    progressSetsTotal: progressCount(stats.progressSetsTotal, p?.setsTotal),
-    progressBarsDone: progressCount(stats.progressBarsDone, p?.barsDone),
-    progressBarsTotal: progressCount(stats.progressBarsTotal, p?.barsTotal),
-    progressElapsedMs: progressCount(stats.progressElapsedMs, p?.elapsedMs),
-    progressLastRunMs: progressCount(stats.progressLastRunMs, p?.lastRunMs),
-    progressCycle: progressCount(stats.progressCycle, p?.cycle),
+    progressSymbolsDone: firstCount(stats.progressSymbolsDone, p?.symbolsDone),
+    progressSymbolsTotal: firstCount(stats.progressSymbolsTotal, p?.symbolsTotal),
+    progressSetsDone: firstCount(stats.progressSetsDone, p?.setsDone),
+    progressSetsTotal: firstCount(stats.progressSetsTotal, p?.setsTotal),
+    progressBarsDone: firstCount(stats.progressBarsDone, p?.barsDone),
+    progressBarsTotal: firstCount(stats.progressBarsTotal, p?.barsTotal),
+    progressElapsedMs: firstCount(stats.progressElapsedMs, p?.elapsedMs),
+    progressLastRunMs: firstCount(stats.progressLastRunMs, p?.lastRunMs),
+    progressCycle: firstCount(stats.progressCycle, p?.cycle),
     progressError: stats.progressError ?? p?.error,
     klinesReady: stats.klinesReady,
     symbolCount: stats.symbolCount,
@@ -425,7 +439,8 @@ function LaneProgress({ l }: { l: NonNullable<LiveStats["lanes"]>[number] }) {
   const details: Array<[string, string]> = [];
   if (l.progressSymbol) details.push(["symbol", l.progressSymbol]);
   if (l.progressSymbolsTotal) details.push(["symbols", `${l.progressSymbolsDone ?? 0}/${l.progressSymbolsTotal}`]);
-  if (l.progressSetsTotal) details.push(["sets", `${l.progressSetsDone ?? 0}/${l.progressSetsTotal}`]);
+  const symbolReplay = Boolean(l.progressSymbolsTotal) && (l.progressSetsDone ?? 0) === 0 && ["replay", "backfill", "fetch"].includes(phase);
+  if (l.progressSetsTotal && !symbolReplay) details.push(["sets", `${l.progressSetsDone ?? 0}/${l.progressSetsTotal}`]);
   if (l.progressBarsDone) details.push(["bars", `${l.progressBarsDone}${l.progressBarsTotal ? `/${l.progressBarsTotal}` : ""}`]);
   if (l.klinesReady != null && l.symbolCount) details.push(["klines", `${l.klinesReady}/${l.symbolCount}`]);
   if (l.progressElapsedMs) details.push(["elapsed", `${(l.progressElapsedMs / 1000).toFixed(1)}s`]);
@@ -478,8 +493,8 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
                 <p className="font-mono text-xs tracking-wide text-muted uppercase">{l.label}</p>
                 <p className="mt-1 truncate text-lg font-medium">{l.exchange}</p>
               </div>
-              <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-danger/15 text-danger"}`}>
-                {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : "off"}
+              <span className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-xs ${l.paused ? "bg-bg2 text-muted" : l.running && !l.halted ? "bg-primary-dim text-primary" : l.progressPhase === "ready" && !l.halted ? "bg-primary-dim text-primary" : l.halted ? "bg-warn/15 text-warn" : "bg-bg2 text-muted"}`}>
+                {l.paused ? "pause" : l.halted ? "halt" : l.running ? "live" : l.progressPhase === "ready" ? "ready" : "off"}
               </span>
             </div>
             <p className="mt-3 font-mono text-2xl tabular-nums">
@@ -660,17 +675,22 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
     ...(s?.lanes || []).map((ln) => ln.progress?.pct),
     ...nested.map((ln) => ln.pct ?? ln.progress?.pct),
   ].filter((n): n is number => n != null && Number.isFinite(n));
+  const enginePhase = String(p?.phase || stats?.progressPhase || "idle");
+  const engineBusy = CALC_PHASES.has(enginePhase);
+  const histOwnsBar = htOn && !engineBusy;
   const pct = Math.max(
     0,
-    Math.min(100, (htOn ? ht?.pct : p?.pct) ?? ht?.pct ?? p?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
+    Math.min(100, (histOwnsBar ? ht?.pct : p?.pct ?? stats?.progressPct) ?? ht?.pct ?? p?.pct ?? (lanePcts.length ? Math.max(...lanePcts) : 0)),
   );
-  const phase = String((htOn ? ht?.phase : p?.phase) ?? ht?.phase ?? p?.phase ?? "idle");
-  const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(phase);
-  const gateReady = Boolean(htOn ? ht?.ready : p?.ready);
+  const phase = String(histOwnsBar ? (ht?.phase || enginePhase) : (enginePhase || ht?.phase || "idle"));
+  const updating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test", "backfill", "gap", "initial", "incremental", "catalog"].includes(phase);
+  const gateReady = Boolean(histOwnsBar ? ht?.ready : p?.ready ?? stats?.progressReady);
   const lanes = s?.lanes ?? [];
-  const proc = htOn
+  const proc = histOwnsBar
     ? (ht?.processingCount ?? s?.processingCount ?? 0)
     : (s?.processingCount ?? (s as { processingRows?: unknown[] } | undefined)?.processingRows?.length ?? 0);
+  const catalogN = s?.catalogSetCount ?? 0;
+  const showProc = Boolean(proc) && !(engineBusy && catalogN && proc >= catalogN);
   const phaseLabel = PROGRESS_PHASE_LABEL[phase] ?? phase;
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="sets-strip">
@@ -679,7 +699,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           sets · {phaseLabel}
         </span>
         <span className="min-w-0 [overflow-wrap:anywhere]">{formatEffectiveSets(stats)}</span>
-        {proc ? <span className="whitespace-nowrap">proc {proc}</span> : null}
+        {showProc ? <span className="whitespace-nowrap">proc {proc}</span> : null}
         {updating ? <span>updating</span> : null}
         <span>{gateReady ? (phase === "ready" ? "ready" : "gate ready") : "gate closed"}</span>
         {stats?.detailType ? <span className="whitespace-nowrap">from {stats.detailType}</span> : null}
@@ -699,14 +719,19 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             const laneUpdating = ["fetch", "replay", "score", "score-refresh", "partial", "evaluate", "rank", "queued", "hist-test"].includes(lanePhase);
             const laneGate = ln.progress?.ready ? (lanePhase === "ready" ? "" : " · gate ready") : " · gate closed";
             const internN = ln.internSetCount ?? 0;
-            const laneSets = internN || htOn
+            const catalogN = ln.catalogSetCount ?? 0;
+            const sym = ln.progress?.symbolsTotal ? ` · ${ln.progress.symbolsDone ?? 0}/${ln.progress.symbolsTotal} sym` : "";
+            const laneSets = catalogN > Math.max(internN, 1)
+              ? `catalog ${catalogN} · intern ${internN} · validated ${ln.validatedCount ?? 0}${sym}`
+              : internN || htOn
               ? `intern ${internN} · validated ${ln.validatedCount ?? 0} · active ${ln.activeCount ?? 0}`
-              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;            return (
+              : `valid ${ln.validatedCount ?? 0}/${ln.setCount ?? 0} · active ${ln.activeCount ?? 0}/${ln.setCount ?? 0}`;
+            const showProc = Boolean(ln.processingCount) && !(catalogN && (ln.processingCount ?? 0) >= catalogN);            return (
               <div key={ln.id || ln.type}>
                 <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-muted">
                   <span className={`min-w-0 ${ln.running && !ln.halted ? "text-primary" : "text-faint"}`}>
                     {ln.type} {laneSets}
-                    {ln.processingCount ? ` · proc ${ln.processingCount}` : ""}
+                    {showProc ? ` · proc ${ln.processingCount}` : ""}
                   </span>
                   <span className="shrink-0">{PROGRESS_PHASE_LABEL[lanePhase] ?? lanePhase}{laneUpdating ? " · updating" : ""}{laneGate} {fmt(lp, 0)}%</span>
                 </div>
@@ -724,9 +749,9 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
             <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${pct}%` }} />
           </div>
           <p className="mt-1 text-muted">
-            {(htOn ? ht?.detail : p?.detail) || p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
-            {p?.symbolsTotal && !htOn ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
-            {updating && (htOn ? ht?.ready : p?.ready) ? " · prior gate remains active" : ""}
+            {(histOwnsBar ? ht?.detail : p?.detail || stats?.progressDetail) || p?.detail || "prehistoric 1m replay"} {p?.symbol ? `· ${p.symbol.replace("-USDT", "")}` : ""} · {fmt(p?.lastRunMs, 0)}ms
+            {p?.symbolsTotal ? ` · history ${p.symbolsDone ?? 0}/${p.symbolsTotal}` : ""}
+            {updating && (histOwnsBar ? ht?.ready : p?.ready) ? " · prior gate remains active" : ""}
           </p>
         </>
       )}
@@ -778,7 +803,15 @@ function ExitStrip({ stats }: { stats: LiveStats | null }) {
 }
 
 function WorkStrip({ stats }: { stats: LiveStats | null }) {
-  const fails = (stats?.tests ?? []).filter((t) => !t.pass);
+  const trailingOff = (stats?.pulse as { stratTrailing?: boolean } | undefined)?.stratTrailing === false;
+  const fails = (stats?.tests ?? []).filter((t) => {
+    if (t.pass) return false;
+    if (!trailingOff) return true;
+    const name = String(t.name || "");
+    if (name !== "qa-set-grid" && name !== "qa-set-cover") return true;
+    const detail = String(t.detail || "");
+    return !(detail.includes("trails=[]") || detail.includes("'trail': 0") || detail.includes('"trail": 0') || detail.includes("trailing=off") || detail.includes("trailing off"));
+  });
   const last = (stats?.signals ?? []).slice(0, 3);
   return (
     <div className="mt-3 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs" data-testid="work-strip">

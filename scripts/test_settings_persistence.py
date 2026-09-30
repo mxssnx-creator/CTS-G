@@ -173,6 +173,44 @@ class SettingsPersistence(unittest.TestCase):
             self.assertEqual(out['progressPhase'], 'error')
             self.assertIn('service failed', out['progressDetail'])
 
+    def test_missing_systemd_is_unknown_and_shows_the_historic_job(self):
+        ph._STATE_CACHE.clear()
+        with patch.object(ph, '_sysctl', return_value=(99, 'systemctl missing')):
+            self.assertEqual(ph.unit_state('bingx-x02', fresh=True), 'unknown')
+        job = {
+            'phase': 'replay',
+            'pct': 42,
+            'detail': 'replay BTC-USDT · 2/6 symbols',
+            'ready': False,
+            'checkpoint': {'symbol': 'BTC-USDT'},
+            'coverage': {
+                'symbols': {'completed': 2, 'requested': 6},
+                'sets': {'completed': 10, 'requested': 100},
+                'bars': {'completed': 400, 'requested': 2400},
+            },
+            'elapsedMs': 1500,
+        }
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(ph, 'DIR', d),
+            patch.object(ph, 'STOP_ALL_PATH', str(pathlib.Path(d) / 'STOP')),
+            patch.object(ph, 'unit_state', return_value='unknown'),
+            patch('hist_calc.read_job', return_value=job),
+        ):
+            out = ph.stamp_stats({
+                'running': False,
+                'halted': True,
+                'progressPhase': 'idle',
+                'progressDetail': 'service inactive',
+            }, 'bingx-x02')
+        self.assertEqual(out['progressPhase'], 'replay')
+        self.assertEqual(out['progressPct'], 42)
+        self.assertTrue(out['running'])
+        self.assertFalse(out['halted'])
+        self.assertIn('BTC-USDT', out['progressDetail'])
+        self.assertNotIn('service inactive', out['progressDetail'])
+        self.assertFalse((out.get('histTest') or {}).get('ownsCatalog'))
+
 
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 LANE_FILES={'bingx-x01':ROOT/'server/pulse/overlay-bingx-x01.json','bingx-x02':ROOT/'server/pulse/overlay-bingx-x02.json'}

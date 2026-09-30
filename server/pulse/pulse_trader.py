@@ -61,7 +61,7 @@ from position_cost import (
 )
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX
+from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, SMALL_BOOK_ENTRY_BATCH, trim_map, cap_map, prune_ttl, cap_list
@@ -356,6 +356,8 @@ MAX_DD_TIME_S = 57600.0  # default and upper bound 16 hours; configurable 10..96
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
+# A confirmed open-order read older than this is not a current Live count.
+ORDER_SNAPSHOT_MAX_AGE = 45.0
 KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
 KLINE_LIMIT = 60
@@ -387,6 +389,25 @@ def real_oid(v: Any) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", s):
         return ""
     return s
+
+
+def _dedupe_open_orders(rows: Any) -> List[Dict[str, Any]]:
+    """One row per order id (else client id). Repeated pages must not inflate Live."""
+    if not isinstance(rows, list):
+        return []
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for order in rows:
+        if not isinstance(order, dict):
+            continue
+        oid = real_oid(order.get("orderId") or order.get("orderID"))
+        cid = str(order.get("clientOrderID") or order.get("clientOrderId") or "").strip()
+        key = oid or cid.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(order)
+    return out
 
 
 _DOC_URL_RE = re.compile(r"https?://\S+", re.I)
@@ -4034,8 +4055,13 @@ class Pulse:
             detail = "cache-confirmed" if confirmed else "cache-pending"
         elif getattr(self.api, "path_cd", {}).get("/openApi/swap/v2/trade/openOrders", 0) > now:
             rows = hit[1] if hit else []
-            self._empty_order_streak = 0
-            detail = "rate-limit cooldown"
+            if self._reuse_fresh_order_snapshot(hit, now):
+                pending = False
+                confirmed = True
+                detail = "cache-confirmed"
+            else:
+                self._empty_order_streak = 0
+                detail = "rate-limit cooldown"
         else:
             try:
                 r = self.api.get("/openApi/swap/v2/trade/openOrders")
@@ -4043,12 +4069,17 @@ class Pulse:
                 r = {"code": -1, "msg": f"{type(exc).__name__}: {exc}"}
             if not self.ok(r):
                 rows = hit[1] if hit else []
-                self._empty_order_streak = 0
-                detail = str(r.get("msg") or r.get("code") or "open orders failed")[:120]
+                if self._reuse_fresh_order_snapshot(hit, now):
+                    pending = False
+                    confirmed = True
+                    detail = "cache-confirmed"
+                else:
+                    self._empty_order_streak = 0
+                    detail = str(r.get("msg") or r.get("code") or "open orders failed")[:120]
             else:
                 data = r.get("data") or {}
                 orders = data.get("orders") if isinstance(data, dict) else data
-                rows = orders if isinstance(orders, list) else []
+                rows = _dedupe_open_orders(orders)
                 open_book = getattr(self, "open", {}) or {}
                 # Empty REST while we hold positions needs a second confirmed
                 # read. Keep the previous rows available for control repair,
@@ -4081,6 +4112,7 @@ class Pulse:
                         pending = True
                         detail = f"pending empty snapshot {self._empty_order_streak}/2"
         if confirmed:
+            rows = _dedupe_open_orders(rows)
             self.exchange_order_total_count = len(rows)
             self.exchange_order_own_count = sum(1 for order in rows if self.order_is_ours(order))
             self.exchange_order_foreign_count = max(0, self.exchange_order_total_count - self.exchange_order_own_count)
@@ -4111,14 +4143,45 @@ class Pulse:
         rows = self.list_orders(symbol)
         return [o for o in rows if self.cid_ours(self.order_cid(o))]
 
-    def internal_working_order_count(self) -> int:
-        """Internal working orders we own: unique attached SL/TP plus pending intents.
+    def _reuse_fresh_order_snapshot(self, hit, now: float) -> bool:
+        """Keep the last confirmed book across a cooldown. Never revive a stale one."""
+        if not hit or bool(getattr(self, "exchange_order_snapshot_pending", True)):
+            return False
+        try:
+            age = float(now) - float(hit[0])
+        except (TypeError, ValueError):
+            return False
+        return 0 <= age <= ORDER_SNAPSHOT_MAX_AGE
 
-        Live is the confirmed exchange snapshot, published separately. Intern
-        extras, pending without oid, and leftover venue orders are why Real
-        and Live differ — never replace this book with Live.
+    def refresh_open_orders(self) -> None:
+        """Re-read the venue book every cycle, including when we are flat.
+
+        Open orders were only fetched at startup and while repairing controls.
+        After the book went flat the last Live count stayed on the desk.
         """
+        try:
+            rows = self.list_orders()
+        except Exception:
+            return
+        if getattr(self, "exchange_order_snapshot_pending", True):
+            return
+        try:
+            raw = int(getattr(self, "exchange_order_own_count", -1))
+            live = int(self.live_working_order_count(rows))
+        except (TypeError, ValueError):
+            return
+        extra = max(0, raw - live) if raw >= 0 else 0
+        if extra:
+            log(
+                f"UNTRACKED own orders {extra} outside the working book",
+                every=60.0,
+                key="untracked-orders",
+            )
+
+    def _book_order_ids(self):
+        """Owned working-book ids. Pending rows with no id count separately."""
         oids: set = set()
+        cids: set = set()
         pending_without_oid = 0
         for pos in (getattr(self, "open", {}) or {}).values():
             if not self.position_is_ours(pos):
@@ -4131,12 +4194,66 @@ class Pulse:
             if not isinstance(row, dict):
                 pending_without_oid += 1
                 continue
+            token = str(row.get("client_id") or cid or "").strip()
+            if token:
+                cids.add(token.lower())
             oid = real_oid(row.get("order_id") or row.get("orderId"))
             if oid:
                 oids.add(oid)
             else:
                 pending_without_oid += 1
+        return oids, cids, pending_without_oid
+
+    def internal_working_order_count(self) -> int:
+        """Internal working orders we own: unique attached SL/TP plus pending intents.
+
+        Live is the exchange-confirmed subset of this book. Leftover venue
+        orders are not part of it and must not be published as Live.
+        """
+        oids, _cids, pending_without_oid = self._book_order_ids()
         return len(oids) + pending_without_oid
+
+    def live_working_order_count(self, rows) -> int:
+        """Own open orders that this working book currently names.
+
+        Real is the complete book. Live cannot exceed it: an exchange order
+        with our prefix but no position, control, or pending intent is leftover
+        and is not a Live working order.
+        """
+        oids, cids, _pending_without_oid = self._book_order_ids()
+        if not oids and not cids:
+            return 0
+        seen: set = set()
+        count = 0
+        for order in _dedupe_open_orders(rows):
+            if not self.order_is_ours(order):
+                continue
+            oid = real_oid(order.get("orderId") or order.get("orderID"))
+            cid = str(self.order_cid(order) or "").strip().lower()
+            key = oid or cid
+            if not key or key in seen:
+                continue
+            if (oid and oid in oids) or (cid and cid in cids):
+                seen.add(key)
+                count += 1
+        return count
+
+    def _published_order_counts(self):
+        """Current Live/total/foreign order counts. Stale snapshots stay unknown."""
+        pending = bool(getattr(self, "exchange_order_snapshot_pending", True))
+        snap_at = float(getattr(self, "exchange_order_snapshot_at", 0.0) or 0.0)
+        if not pending and (snap_at <= 0 or time.time() - snap_at > ORDER_SNAPSHOT_MAX_AGE):
+            pending = True
+        if pending:
+            return -1, -1, -1, -1
+        cached = (getattr(self, "_oo_cache", {}) or {}).get("*")
+        rows = cached[1] if cached and isinstance(cached[1], list) else []
+        live = int(self.live_working_order_count(rows))
+        total = _known_count(getattr(self, "exchange_order_total_count", -1))
+        foreign = _known_count(getattr(self, "foreign_open_order_count", -1))
+        raw_own = _known_count(getattr(self, "exchange_order_own_count", -1))
+        untracked = max(0, raw_own - live) if raw_own >= 0 else -1
+        return live, total, foreign, untracked
 
     def internal_position_group_count(self) -> int:
         """Unique Real positions: one owned symbol+direction parent with qty > 0.
@@ -12128,8 +12245,8 @@ class Pulse:
             fam = cov.get("families") or {}
             self.record_test(
                 "qa-set-grid",
-                bool(cov.get("trailCover") and cov.get("slCover") and cov.get("independentTrail") and fam.get("trail", 0) >= 5 and fam.get("base", 0) >= 8),
-                f"n={cov.get('product')} fam={fam} trails={cov.get('trails')}",
+                catalog_grid_passes(cov),
+                f"n={cov.get('product')} fam={fam} trails={cov.get('trails')} trailing={'on' if cov.get('independentTrail') else 'off'}",
             )
         else:
             self.record_test("qa-set-grid", True, "deferred catalog bootstrap")
@@ -12318,9 +12435,14 @@ class Pulse:
                 hist_test_snap = dict(hist_test_mod.job_progress_view() or {})
             except Exception:
                 hist_test_snap = {}
-            hist_test_snap["enabled"] = True
-            hist_test_snap["ownsCatalog"] = True
-            hist_test_snap["catalogSkipped"] = True
+            if hist_test_snap.get("ownsCatalog") or hist_test_snap.get("running"):
+                hist_test_snap["enabled"] = True
+                hist_test_snap["ownsCatalog"] = True
+                hist_test_snap["catalogSkipped"] = not bool(hist_test_snap.get("running"))
+            else:
+                hist_test_snap["enabled"] = False
+                hist_test_snap["ownsCatalog"] = False
+                hist_test_snap["catalogSkipped"] = False
             try:
                 intern_syms = self._intern_symbols()
                 hist_test_snap["internSymbols"] = intern_syms[:50]
@@ -12356,7 +12478,10 @@ class Pulse:
         phase = hist_phase if hist_phase and hist_phase not in ("idle",) else (prog_phase or hist_phase or "idle")
         if hist_phase in ("backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial") and prog_phase in ("idle", "ready", ""):
             phase = hist_phase
-        if hist_test_snap.get("enabled") or hist_test_snap.get("ownsCatalog") or hist_test_snap.get("running"):
+        active_calc = hist_phase in (
+            "backfill", "fetch", "gap", "catalog", "replay", "score", "partial", "initial",
+        )
+        if (hist_test_snap.get("ownsCatalog") or hist_test_snap.get("running")) and not active_calc:
             phase = str(hist_test_snap.get("phase") or phase)
             if hist_test_snap.get("pct") is not None:
                 historic_snap = dict(historic_snap)
@@ -12393,11 +12518,9 @@ class Pulse:
         # engine can track many independent config/set lanes in that group.
         # Real Positions are those symbol+direction groups, never lane count.
         order_snapshot_pending = bool(getattr(self, "exchange_order_snapshot_pending", False))
-        live_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_own_count", -1))
-        live_total_order_count = -1 if order_snapshot_pending else _known_count(getattr(self, "exchange_order_total_count", -1))
-        foreign_order_count = _known_count(getattr(self, "foreign_open_order_count", -1))
-        if live_order_count < 0 and live_total_order_count >= 0 and foreign_order_count >= 0:
-            live_order_count = max(0, live_total_order_count - foreign_order_count)
+        live_order_count, live_total_order_count, foreign_order_count, untracked_own_orders = self._published_order_counts()
+        if live_order_count < 0:
+            order_snapshot_pending = True
         internal_orders = int(self.internal_working_order_count())
         if position_snapshot_pending or bool(getattr(self, "recon_pending", False)):
             open_parity = "pending"
@@ -12429,12 +12552,13 @@ class Pulse:
             "liveOrderSnapshotPending": order_snapshot_pending,
             "liveOrderSnapshotAt": float(getattr(self, "exchange_order_snapshot_at", 0.0) or 0.0),
             "liveOrderSnapshotDetail": str(getattr(self, "exchange_order_snapshot_detail", "") or ""),
+            "untrackedOwnOrderCount": untracked_own_orders,
             "internalPositionGroups": internal_position_groups,
             "exchangeOpen": exchange_total_open,
             "exchangeOwnOpen": exchange_own_open,
             "exchangePositionGroups": exchange_own_open,
             "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
-            "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
+            "foreignOpenOrderCount": foreign_order_count,
             "foreignUnrealized": round(float(getattr(self, "foreign_upnl", 0.0) or 0.0), 4),
             "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
             "openParity": open_parity,
@@ -12512,7 +12636,7 @@ class Pulse:
             "foreignRealized": round(float(getattr(self, "foreign_realized", 0.0) or 0.0), 4),
             "foreignExposure": round(float(getattr(self, "foreign_exposure", 0.0) or 0.0), 4),
             "foreignPositionCount": int(getattr(self, "foreign_position_count", 0)),
-            "foreignOpenOrderCount": int(getattr(self, "foreign_open_order_count", 0)),
+            "foreignOpenOrderCount": foreign_order_count,
             "unrealized": round(float(act["unrealized"]), 4),
             "realizedPnl": round(realized, 4),
             "sessionPnl": round(float(act["pnl"]), 4),
@@ -13421,13 +13545,12 @@ class Pulse:
             f"stages={list(stgs)} intern={stgs.get('intern')}",
         )
         cov = self.sets.coverage() if hasattr(self.sets, "coverage") else {}
-        fam = cov.get("families") or {}
         catalog_ready = self._catalog_ready.is_set()
+        cover_ok, cover_detail = catalog_cover_passes(cov, catalog_ready)
         self.record_test(
             "qa-set-cover",
-            (not catalog_ready)
-            or bool(cov.get("slCover") and cov.get("trailCover") and cov.get("independentTrail") and int(cov.get("product") or 0) >= 10),
-            "deferred catalog bootstrap" if not catalog_ready else f"n={cov.get('product')} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')}",
+            cover_ok,
+            cover_detail if catalog_ready else "deferred catalog bootstrap",
         )
         sample_g = self.cid("o", set_id="general:1m:sl0.6:tr0.3:0.1:st8", pack="general", set_idx=0)
         tr_g = self.parse_track(sample_g)
@@ -14819,6 +14942,46 @@ class Pulse:
         self._intern_scan_at = now
         return list(out)
 
+    def _release_idle_hist_test_lane(self, view: Optional[Dict[str, Any]] = None) -> None:
+        """Drop a frozen intern gate so an idle Test Historic cannot pin overviews at 1/0.
+
+        Only the fake ready bar (skip-catalog or a 1-set Test Historic placeholder
+        over a real catalog) is rewound. A catalog that is already scoring, or
+        a finished full-catalog ready bar, is left alone.
+        """
+        with self.state_guard():
+            book = self.sets
+            apply = getattr(book, "apply_hist_test_gate", None)
+            if callable(apply) and getattr(book, "hist_test_set_ids", None) is not None:
+                apply(None)
+            detail = str(getattr(book.progress, "detail", "") or "")
+            phase = str(getattr(book.progress, "phase", "") or "")
+            try:
+                sets_total = int(getattr(book.progress, "sets_total", 0) or 0)
+            except (TypeError, ValueError):
+                sets_total = 0
+            catalog = len(getattr(book, "sets", {}) or {})
+            fake = ("skip full catalog" in detail) or (
+                "Test Historic" in detail
+                and phase in ("ready", "hist-test", "idle", "")
+                and catalog > max(sets_total, 1) + 8
+            )
+            if not fake:
+                return
+            book.progress.ready = False
+            book.progress.phase = "initial"
+            book.progress.coordination_complete = False
+            book.progress.pct = 0.0
+            book.progress.sets_done = 0
+            book.progress.sets_total = catalog
+            book.progress.stale = False
+            book.progress.detail = f"full catalog in play · {catalog} sets"
+        self._hist_next_hourly_at = 0.0
+        try:
+            self._hist_write_status(self.sets)
+        except Exception:
+            pass
+
     def _sync_hist_test_lane(self) -> None:
         """Test Historic owns catalog calcs. Engine skips full-universe eval/progress."""
         job: Dict[str, Any] = {}
@@ -14851,20 +15014,37 @@ class Pulse:
                 apply = getattr(book, "apply_hist_test_gate", None)
                 if callable(apply):
                     apply(ids)
-            book.progress.phase = str(view.get("phase") or "hist-test")
-            book.progress.ready = True if ids else bool(view.get("ready"))
-            book.progress.coordination_complete = not bool(view.get("running"))
+            catalog_phases = {
+                "initial", "hourly", "backfill", "fetch", "replay", "score-refresh",
+                "gap", "incremental", "partial", "catalog",
+            }
+            phase_now = str(getattr(book.progress, "phase", "") or "")
             try:
-                book.progress.pct = float(view.get("pct") or 0)
+                job_done = int(view.get("setsDone") or 0)
+                job_total = int(view.get("setsTotal") or 0)
             except (TypeError, ValueError):
-                book.progress.pct = 0.0
-            book.progress.sets_total = int(view.get("setsTotal") or (len(ids) if ids else 0))
-            book.progress.sets_done = int(view.get("setsDone") or len(ids))
-            book.progress.detail = str(view.get("detail") or "")
-            if view.get("symbol"):
-                book.progress.symbol = str(view.get("symbol") or "")
-            if job.get("nextRunAt"):
-                book.progress.next_run_at = float(job.get("nextRunAt") or 0)
+                job_done, job_total = 0, 0
+            hist_idle = bool(view.get("stale")) or (job_total > 0 and job_done >= job_total and not view.get("paused"))
+            # A finished or stale Test Historic must not paint over a catalog
+            # replay that is actually moving. The intern gate above still applies.
+            if phase_now in catalog_phases and hist_idle:
+                pass
+            else:
+                book.progress.phase = str(view.get("phase") or "hist-test")
+                running_now = bool(view.get("running") or view.get("paused"))
+                book.progress.ready = False if running_now else bool(view.get("ready"))
+                book.progress.coordination_complete = not running_now
+                try:
+                    book.progress.pct = float(view.get("pct") or 0)
+                except (TypeError, ValueError):
+                    book.progress.pct = 0.0
+                book.progress.sets_total = int(view.get("setsTotal") or (len(ids) if ids else 0))
+                book.progress.sets_done = int(view.get("setsDone") or len(ids))
+                book.progress.detail = str(view.get("detail") or "")
+                if view.get("symbol"):
+                    book.progress.symbol = str(view.get("symbol") or "")
+                if job.get("nextRunAt"):
+                    book.progress.next_run_at = float(job.get("nextRunAt") or 0)
         try:
             self._hist_write_status(self.sets)
         except Exception:
@@ -15010,13 +15190,27 @@ class Pulse:
                     self._hist_wake.wait(timeout=5.0)
                     continue
                 if self._hist_test_owns_catalog() and not manual:
-                    self._sync_hist_test_lane()
-                    now_score = time.time()
-                    if now_score - float(getattr(self, "_hist_test_score_at", 0) or 0) >= 20.0:
-                        self._hist_test_score_at = now_score
-                        self._score_hist_test_validated()
-                    self._hist_wake.wait(timeout=5.0)
-                    continue
+                    try:
+                        hist_view = hist_test_mod.job_progress_view()
+                    except Exception:
+                        hist_view = {"ownsCatalog": True}
+                    calc_phase = ""
+                    with self.state_guard():
+                        calc_phase = str(book.progress.phase or "")
+                    calc_busy = calc_phase in (
+                        "initial", "backfill", "fetch", "gap", "replay", "score",
+                        "score-refresh", "partial", "catalog",
+                    )
+                    if hist_view.get("ownsCatalog") and not calc_busy:
+                        self._sync_hist_test_lane()
+                        now_score = time.time()
+                        if now_score - float(getattr(self, "_hist_test_score_at", 0) or 0) >= 20.0:
+                            self._hist_test_score_at = now_score
+                            self._score_hist_test_validated()
+                        self._hist_wake.wait(timeout=5.0)
+                        continue
+                    if not hist_view.get("ownsCatalog") and not hist_view.get("running") and not calc_busy:
+                        self._release_idle_hist_test_lane(hist_view)
                 score_refresh = False
                 score_book = None
                 score_generation = 0
@@ -15615,6 +15809,7 @@ class Pulse:
         # Overlay saves must bind before halt/entry/block so the same cycle
         # trades and coordinates with the settings the desk just wrote.
         self._cycle_step("config", self.maybe_reload_config)
+        self._cycle_step("orders", self.refresh_open_orders)
         paused = os.path.exists(PAUSE_PATH)
         stopped = os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL)
         if stopped:

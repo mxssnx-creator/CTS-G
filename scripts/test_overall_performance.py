@@ -106,6 +106,68 @@ class OverallPerformanceTests(unittest.TestCase):
         self.assertTrue(live["halted"])
         self.assertTrue(vst["running"])
 
+    def test_idle_hist_test_does_not_hide_catalog_replay(self):
+        states = {}
+        for lane in http.LANES:
+            states[lane["id"]] = {
+                "running": True,
+                "halted": False,
+                "open": [],
+                "closed": [],
+                "sets": {"progress": {"phase": "replay", "pct": 33, "detail": "replay BTC-USDT"}},
+                "progressPhase": "replay",
+                "progressPct": 33,
+                "progressDetail": "replay BTC-USDT",
+                "histTest": {
+                    "enabled": True,
+                    "ownsCatalog": True,
+                    "running": False,
+                    "phase": "stopped",
+                    "detail": "Test Historic owns calcs · waiting intern configs · skip full catalog",
+                },
+            }
+        fresh = {
+            "ownsCatalog": False,
+            "enabled": False,
+            "catalogSkipped": False,
+            "running": False,
+            "phase": "stopped",
+            "pct": 0,
+            "detail": "Test Historic stopped · full catalog in play",
+        }
+        with patch.object(http, "load_stats", side_effect=lambda cid: states[cid]), \
+             patch.object(http, "unit_state", return_value="active"), \
+             patch.object(http, "stats_age", return_value=1), \
+             patch.object(http.os.path, "exists", return_value=False), \
+             patch("hist_test.job_progress_view", return_value=fresh):
+            result = http.merge_overall()
+        self.assertEqual(result["progress"]["phase"], "replay")
+        self.assertIn("BTC-USDT", result["progress"]["detail"])
+        self.assertNotIn("skip full catalog", str(result["progress"]["detail"]))
+        self.assertFalse(result["histTest"]["ownsCatalog"])
+        self.assertFalse(result["histTest"]["catalogSkipped"])
+
+    def test_missing_systemd_lane_shows_historic_job_not_inactive(self):
+        job = {
+            "phase": "score",
+            "pct": 94,
+            "detail": "score PF · DDT",
+            "ready": False,
+            "coverage": {"sets": {"completed": 10, "requested": 12}, "symbols": {"completed": 6, "requested": 6}, "bars": {"completed": 1, "requested": 2}},
+        }
+        with patch.object(http, "load_stats", return_value={}), \
+             patch.object(http, "unit_state", return_value="unknown"), \
+             patch.object(http, "stats_age", return_value=1), \
+             patch.object(http.os.path, "exists", return_value=False), \
+             patch("hist_calc.read_job", return_value=job), \
+             patch("hist_test.job_progress_view", return_value={"ownsCatalog": False, "enabled": False, "running": False, "phase": "stopped", "detail": "full catalog in play"}):
+            result = http.merge_overall()
+        self.assertTrue(result["running"])
+        self.assertFalse(result["halted"])
+        self.assertEqual(result["progress"]["phase"], "score")
+        self.assertNotIn("service inactive", str(result["progress"]["detail"]))
+        self.assertTrue(any(l.get("running") and l.get("progressPhase") == "score" for l in result["lanes"]))
+
     def test_old_running_snapshot_cannot_mark_inactive_services_as_running(self):
         with patch.object(http, "load_stats", return_value={"running": True}), \
              patch.object(http, "unit_state", return_value="inactive"), \

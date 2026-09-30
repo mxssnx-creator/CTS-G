@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
-import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, kindGateOpen, costPfWindow, type LiveStats } from "./live-stats.ts";
+import { fetchLiveStats, pickView, viewFromSnapshot, deskPollMs, statsUnchanged, formatPosOrders, knownCount, posOrdersCounts, realPosOrders, livePosOrders, kindGateOpen, costPfWindow, effectiveSetCounts, formatEffectiveSets, type LiveStats } from "./live-stats.ts";
 import { fetchConnections } from "./connections.ts";
 import { fetchCtsBundle } from "./config-model.ts";
 
@@ -171,7 +171,7 @@ test("positions/orders never fall order counts back onto positions", () => {
       liveOrderCount: 26,
       openCount: 40,
     }),
-    { realPositions: 5, livePositions: 4, realOrders: 10, liveOrders: 26 },
+    { realPositions: 5, livePositions: 4, realOrders: 10, liveOrders: 10 },
   );
 });
 
@@ -223,6 +223,79 @@ test("cost PF labels use the configured evaluation window", () => {
   assert.equal(costPfWindow({ pfCost: { n: 30 }, sets: { pfWindow: 20 } }), 30);
   assert.equal(costPfWindow({ sets: { pfWindow: 20 } }), 20);
   assert.equal(costPfWindow(null), 15);
+});
+
+test("an idle intern book does not freeze catalog overviews", () => {
+  const idle = effectiveSetCounts({
+    histTest: { enabled: false, ownsCatalog: false, phase: "ready", internSetCount: 1, validatedCount: 0, processingCount: 0 },
+    sets: { setCount: 39000, catalogSetCount: 39000, internSetCount: 1, validatedCount: 12, activeCount: 4, processingCount: 0 },
+    progress: { phase: "initial", ready: false, setsDone: 10, setsTotal: 39000 },
+  });
+  assert.equal(idle.on, false);
+  assert.equal(idle.setCount, 39000);
+  assert.equal(idle.validated, 12);
+  assert.equal(idle.processing, 38990);
+  assert.match(formatEffectiveSets({
+    histTest: { enabled: false, ownsCatalog: false, phase: "ready" },
+    sets: { setCount: 39000, catalogSetCount: 39000, validatedCount: 12, activeCount: 4 },
+    progress: { phase: "initial", ready: false, setsDone: 10, setsTotal: 39000 },
+  }), /processing 38990/);
+  assert.doesNotMatch(formatEffectiveSets({
+    histTest: { enabled: false, ownsCatalog: false, phase: "ready", internSetCount: 1 },
+    sets: { catalogSetCount: 39000, setCount: 39000, internSetCount: 1, validatedCount: 0, activeCount: 0 },
+  }), /skipped/);
+});
+
+test("a running Test Historic reports its own processing, not intern 1", () => {
+  const running = effectiveSetCounts({
+    histTest: {
+      enabled: true, ownsCatalog: true, running: true, phase: "evaluate",
+      internSetCount: 1, validatedCount: 0, processingCount: 47, setsDone: 3, setsTotal: 50,
+    },
+    sets: { setCount: 1, catalogSetCount: 39000, internSetCount: 1, validatedCount: 0, activeCount: 0, processingCount: 0 },
+  });
+  assert.equal(running.on, true);
+  assert.equal(running.running, true);
+  assert.equal(running.setCount, 50);
+  assert.equal(running.processing, 47);
+  assert.match(formatEffectiveSets({
+    histTest: {
+      enabled: true, ownsCatalog: true, running: true, phase: "evaluate",
+      internSetCount: 1, validatedCount: 0, processingCount: 47, setsTotal: 50, setsDone: 3,
+    },
+    sets: { catalogSetCount: 39000, internSetCount: 1, validatedCount: 0, activeCount: 0, processingCount: 0 },
+  }), /processing 47/);
+  assert.doesNotMatch(formatEffectiveSets({
+    histTest: {
+      enabled: true, ownsCatalog: true, running: true, phase: "evaluate",
+      processingCount: 47, setsTotal: 50, setsDone: 3, validatedCount: 0,
+    },
+    sets: { catalogSetCount: 39000, internSetCount: 1 },
+  }), /skipped/);
+});
+
+test("a live catalog replay is not hidden behind a finished historic test", () => {
+  const stats = {
+    histTest: {
+      enabled: true, ownsCatalog: true, running: true, phase: "score", stale: true,
+      internSetCount: 358, validatedCount: 60, processingCount: 1, setsDone: 358, setsTotal: 358,
+    },
+    sets: {
+      setCount: 780, catalogSetCount: 780, internSetCount: 358, validatedCount: 60,
+      activeCount: 0, processingCount: 780,
+    },
+    progress: { phase: "replay", ready: false, setsDone: 0, setsTotal: 780, symbolsDone: 30, symbolsTotal: 48 },
+  };
+  const counts = effectiveSetCounts(stats);
+  assert.equal(counts.catalogBusy, true);
+  assert.equal(counts.setCount, 780);
+  assert.equal(counts.intern, 358);
+  const line = formatEffectiveSets(stats);
+  assert.match(line, /catalog 780/);
+  assert.match(line, /symbols 30\/48/);
+  assert.match(line, /intern 358/);
+  assert.doesNotMatch(line, /processing 780/);
+  assert.doesNotMatch(line, /sets 358/);
 });
 
 test("lane view keeps realized, foreign and unknown PnL % from the lane summary", () => {

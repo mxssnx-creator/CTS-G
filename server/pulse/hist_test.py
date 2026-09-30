@@ -1535,6 +1535,23 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         sets_total = int(sets_cov.get("requested") or sets_cov.get("total") or blob.get("setsTotal") or max(n_ids, 1 if running or n_ids else 0))
     except (TypeError, ValueError):
         sets_total = max(n_ids, 1 if running or n_ids else 0)
+    # An idle intern book is not a catalog. A live run that has not published
+    # its own set totals still has a symbol target — show that, not 1/1.
+    if running and sets_total <= max(intern_n, 1) and blob.get("setsTotal") in (None, "", 0):
+        try:
+            target_n = int(blob.get("targetCount") or 0)
+        except (TypeError, ValueError):
+            target_n = 0
+        if target_n > sets_total:
+            sets_total = target_n
+            if blob.get("setsDone") in (None, ""):
+                try:
+                    filled_n = int(blob.get("filled") or 0)
+                except (TypeError, ValueError):
+                    filled_n = 0
+                if filled_n <= 0 and isinstance(blob.get("positive"), list):
+                    filled_n = len(blob.get("positive") or [])
+                sets_done = filled_n
     err = str(blob.get("error") or "")
     err_line = ""
     if err and not err.startswith("audit:"):
@@ -1555,9 +1572,19 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         pct = min(float(pct or 0), 99.0)
         detail = f"Test Historic error · {intern_n} intern · {proven} last-15 validated · {len(intern_syms)} intern symbols · {err_line}"
     elif intern_n:
-        detail = f"Test Historic · {intern_n} intern configs · {proven} last-15 validated · {len(intern_syms)} intern symbols · skip full catalog · refresh {refresh_h}h"
+        detail = (
+            f"Test Historic ready · {intern_n} intern configs · {proven} last-15 validated · "
+            f"{len(intern_syms)} intern symbols · full catalog in play · refresh {refresh_h}h"
+        )
+    elif not running and not paused:
+        if phase == "stopped":
+            detail = "Test Historic stopped · full catalog in play"
+        elif phase in ("idle", ""):
+            detail = "Test Historic idle · full catalog in play"
+        else:
+            detail = f"Test Historic {phase} · full catalog in play"
     else:
-        detail = "Test Historic owns calcs · waiting intern configs · skip full catalog"
+        detail = "Test Historic · full catalog in play"
     if stale:
         detail += " · waiting on Test Historic refresh"
     running_set_rows = running_sets(blob)
@@ -1573,6 +1600,9 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     )
     if err_line and not running and not paused:
         ready_flag = False
+    # Ownership is the in-flight run only. A ready intern id must not freeze
+    # the desk on "skip full catalog" after the worker has gone idle.
+    owns_catalog = bool(running or paused)
     return {
         "phase": phase,
         "pct": pct,
@@ -1591,9 +1621,9 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "filled": blob.get("filled"),
         "targetCount": blob.get("targetCount"),
         "symbol": symbols[0] if symbols else blob.get("symbol"),
-        "enabled": True,
-        "ownsCatalog": True,
-        "catalogSkipped": not running,
+        "enabled": owns_catalog,
+        "ownsCatalog": owns_catalog,
+        "catalogSkipped": bool(owns_catalog and not running),
         "symbols": intern_syms,
         "runningSets": running_set_rows,
         "processedSetCount": n_ids,
@@ -3172,8 +3202,11 @@ def self_test() -> Dict[str, Any]:
             "progress-has-running-sets",
             bool(view.get("runningSets"))
             and bool(view.get("symbols"))
-            and view.get("enabled") is True
-            and view.get("catalogSkipped") is True,
+            and view.get("enabled") is False
+            and view.get("ownsCatalog") is False
+            and view.get("catalogSkipped") is False
+            and "full catalog" in str(view.get("detail") or "")
+            and "skip full catalog" not in str(view.get("detail") or ""),
             view,
         )
         flying = job_progress_view({

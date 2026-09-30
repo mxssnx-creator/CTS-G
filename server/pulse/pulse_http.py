@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -472,8 +473,64 @@ def _hist_test_on(ht: Any) -> bool:
     return bool(ht.get("enabled") is True or ht.get("ownsCatalog") is True)
 
 
+def _hist_test_running(ht: Any) -> bool:
+    if not isinstance(ht, dict):
+        return False
+    phase = str(ht.get("phase") or "")
+    if ht.get("running") or ht.get("paused") or phase == "paused":
+        return True
+    return phase in ("queued", "rank", "evaluate", "fetch", "replay", "score", "score-refresh")
+
+
+def _inflight_remaining(out: dict) -> int:
+    """Sets still being scored. Live-order processing stays separate and is not clamped away."""
+    if not isinstance(out, dict):
+        return 0
+    sets = out.get("sets") if isinstance(out.get("sets"), dict) else {}
+    prog = out.get("progress") if isinstance(out.get("progress"), dict) else {}
+    nested = sets.get("progress") if isinstance(sets.get("progress"), dict) else {}
+    ht = out.get("histTest") if isinstance(out.get("histTest"), dict) else {}
+    phase = str(prog.get("phase") or nested.get("phase") or out.get("progressPhase") or "")
+    busy_phases = {
+        "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+        "gap", "incremental", "queued", "partial", "catalog", "rank", "evaluate", "hist-test",
+    }
+    busy = phase in busy_phases or _hist_test_running(ht)
+    if not busy:
+        return 0
+
+    def _n(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    job_proc = 0
+    if _hist_test_running(ht):
+        job_proc = _n(ht.get("processingCount"))
+        job_total = _n(ht.get("setsTotal"))
+        job_done = _n(ht.get("setsDone"))
+        if job_total > job_done:
+            job_proc = max(job_proc, job_total - job_done)
+    total = max(_n(prog.get("setsTotal")), _n(nested.get("setsTotal")))
+    done_src = prog if _n(prog.get("setsTotal")) >= _n(nested.get("setsTotal")) else nested
+    done = _n(done_src.get("setsDone"))
+    catalog_remain = total - done if total > done else 0
+    # A 1-set intern heartbeat must not hide a catalog score that is actually moving.
+    best = max(job_proc, catalog_remain)
+    if best > 0:
+        return best
+    if busy and not prog.get("ready") and phase not in ("ready", ""):
+        return 1
+    return 0
+
+
 def _apply_effective_set_counts(out: dict) -> None:
-    """When Test Historic owns intern, overviews show intern/validated book not the full catalog."""
+    """Intern counts replace the catalog only while Test Historic is actually on.
+
+    A live run shows its own set total and processing. It is not clamped back
+    to the intern book, which is what froze overviews at 1 / 0.
+    """
     if not isinstance(out, dict):
         return
     sets = out.get("sets") if isinstance(out.get("sets"), dict) else None
@@ -490,7 +547,30 @@ def _apply_effective_set_counts(out: dict) -> None:
         if intern <= 0:
             intern = int(ht.get("validatedCount") or 0)
         sets["internSetCount"] = intern
-        sets["setCount"] = intern
+        running = _hist_test_running(ht)
+        try:
+            job_total = int(ht.get("setsTotal") or 0)
+        except (TypeError, ValueError):
+            job_total = 0
+        prog_for_count = out.get("progress") if isinstance(out.get("progress"), dict) else {}
+        if not prog_for_count and isinstance(sets.get("progress"), dict):
+            prog_for_count = sets["progress"]
+        try:
+            prog_total = int((prog_for_count or {}).get("setsTotal") or 0)
+        except (TypeError, ValueError):
+            prog_total = 0
+        prog_phase = str((prog_for_count or {}).get("phase") or out.get("progressPhase") or "")
+        catalog_scoring = prog_total > max(job_total, intern, 1) and prog_phase in (
+            "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+            "gap", "incremental", "partial", "catalog",
+        )
+        if catalog_scoring:
+            if catalog > int(sets.get("setCount") or 0):
+                sets["setCount"] = catalog
+        elif running and job_total > intern:
+            sets["setCount"] = job_total
+        else:
+            sets["setCount"] = intern
         if sets.get("validatedCount") is None:
             sets["validatedCount"] = 0
         proc = sets.get("processingCount")
@@ -500,12 +580,41 @@ def _apply_effective_set_counts(out: dict) -> None:
             proc = int(proc or 0)
         except (TypeError, ValueError):
             proc = 0
-        if intern and proc > intern:
+        if running:
+            try:
+                proc = max(proc, int(ht.get("processingCount") or 0))
+            except (TypeError, ValueError):
+                pass
+        elif intern and proc > intern:
             proc = intern
         sets["processingCount"] = proc
         job_syms = ht.get("symbols") if isinstance(ht.get("symbols"), list) else []
         if job_syms:
             sets["internSymbolCount"] = len(job_syms)
+    try:
+        proven = int(ht.get("validatedCount") or 0)
+    except (TypeError, ValueError):
+        proven = 0
+    try:
+        intern_reported = int(ht.get("internSetCount") or 0)
+    except (TypeError, ValueError):
+        intern_reported = 0
+    try:
+        cur_valid = int(sets.get("validatedCount") or 0)
+    except (TypeError, ValueError):
+        cur_valid = 0
+    # Last-15 proven is a subset of the intern book. A legacy blob that stuffed
+    # the intern size into validatedCount (proven == intern, or no intern) must
+    # not be painted as validated.
+    if proven > cur_valid and intern_reported and proven < intern_reported:
+        sets["validatedCount"] = proven
+    inflight = _inflight_remaining(out)
+    try:
+        current_proc = int(sets.get("processingCount") or 0)
+    except (TypeError, ValueError):
+        current_proc = 0
+    if inflight > current_proc:
+        sets["processingCount"] = inflight
     cov = out.get("coverage") if isinstance(out.get("coverage"), dict) else None
     if isinstance(cov, dict):
         cov_sets = dict(cov.get("sets") or {})
@@ -726,6 +835,153 @@ def slim_for_ui(st: dict) -> dict:
     return out
 
 
+_CALC_BUSY = {
+    "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+    "gap", "incremental", "queued", "partial", "catalog",
+}
+
+
+def _surface_hist_calc(out: dict, progress: dict, conn: str) -> None:
+    """On a host with no trading service, show the historic job as lane progress.
+
+    A ready or in-flight catalog calc must stay visible. This does not start
+    trading and does not change the on-disk Test Historic job.
+    """
+    try:
+        from hist_calc import read_job
+        job = read_job(conn)
+    except Exception:
+        return
+    if not isinstance(job, dict) or not job.get("phase"):
+        return
+    phase = str(job.get("phase") or "")
+    cov = job.get("coverage") if isinstance(job.get("coverage"), dict) else {}
+    sets_cov = cov.get("sets") if isinstance(cov.get("sets"), dict) else {}
+    sym_cov = cov.get("symbols") if isinstance(cov.get("symbols"), dict) else {}
+    bar_cov = cov.get("bars") if isinstance(cov.get("bars"), dict) else {}
+    rows = job.get("rows") if isinstance(job.get("rows"), list) else []
+    ready = phase == "ready" and bool(job.get("winner") or job.get("rowCount") or rows or sets_cov)
+    if phase not in _CALC_BUSY and not ready:
+        return
+    cur = str(progress.get("phase") or "")
+    detail = str(progress.get("detail") or "")
+    engine_busy = cur in _CALC_BUSY and "skip full catalog" not in detail
+    if engine_busy and phase not in _CALC_BUSY:
+        return
+    if engine_busy and cur == phase:
+        return
+    checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+
+    def _n(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        pct = float(job.get("pct") if job.get("pct") is not None else (100 if ready else 0))
+    except (TypeError, ValueError):
+        pct = 100.0 if ready else 0.0
+    progress.update({
+        "phase": phase,
+        "pct": pct,
+        "detail": str(job.get("detail") or ""),
+        "ready": bool(job.get("ready") or ready),
+        "symbol": str(checkpoint.get("symbol") or job.get("symbol") or ""),
+        "symbolsDone": _n(sym_cov.get("completed")),
+        "symbolsTotal": _n(sym_cov.get("requested")),
+        "setsDone": _n(sets_cov.get("completed") or job.get("setsDone")),
+        "setsTotal": _n(sets_cov.get("requested") or job.get("setsTotal")),
+        "barsDone": _n(bar_cov.get("completed")),
+        "barsTotal": _n(bar_cov.get("requested")),
+        "elapsedMs": job.get("elapsedMs") or 0,
+        "error": str(job.get("error") or "")[:180],
+    })
+    out["historic"] = {
+        "phase": phase,
+        "pct": pct,
+        "detail": progress["detail"],
+        "ready": progress["ready"],
+        "hours": job.get("hours"),
+        "rowCount": int(job.get("rowCount") or len(rows) or 0),
+        "winner": job.get("winner") if isinstance(job.get("winner"), dict) else None,
+        "symbols": list(job.get("symbols") or [])[:50],
+    }
+    if phase in _CALC_BUSY:
+        out["running"] = True
+        out["halted"] = False
+        out["alive"] = True
+        out["stale"] = False
+        out["haltReason"] = ""
+        out["mode"] = "HIST"
+        ht = dict(out.get("histTest") or {})
+        if not ht.get("running"):
+            ht["enabled"] = False
+            ht["ownsCatalog"] = False
+            ht["catalogSkipped"] = False
+            out["histTest"] = ht
+    sets_out = dict(out.get("sets") or {})
+    requested = _n(sets_cov.get("requested") or job.get("rowCount"))
+    if requested:
+        sets_out["catalogSetCount"] = requested
+        sets_out["setCount"] = requested
+        sets_out["validatedCount"] = _n(job.get("validatedCount"))
+        sets_out["processingCount"] = 0 if phase not in _CALC_BUSY else max(0, requested - _n(sets_cov.get("completed")))
+        out["sets"] = sets_out
+    symbols = job.get("symbols") if isinstance(job.get("symbols"), list) else []
+    if symbols:
+        out["symbols"] = symbols[:50]
+        out["symbolCount"] = len(symbols)
+    for src, dest in (
+        ("symbol", "progressSymbol"),
+        ("symbolsDone", "progressSymbolsDone"),
+        ("symbolsTotal", "progressSymbolsTotal"),
+        ("setsDone", "progressSetsDone"),
+        ("setsTotal", "progressSetsTotal"),
+        ("barsDone", "progressBarsDone"),
+        ("barsTotal", "progressBarsTotal"),
+        ("elapsedMs", "progressElapsedMs"),
+        ("pct", "progressPct"),
+    ):
+        out[dest] = progress.get(src)
+
+
+def _spawn_offline_calc(body: dict, conn: str) -> None:
+    """Run the catalog when no trading service exists to consume the queue.
+
+    A live host keeps the request for the engine. This path is only the
+    preview / offline host, where systemd is not installed.
+    """
+    cid = resolve_conn(conn)
+    if unit_state(cid) != "unknown":
+        return
+    try:
+        from hist_calc import is_running
+        if is_running():
+            return
+    except Exception:
+        pass
+    code_dir = os.path.dirname(os.path.abspath(__file__))
+    env = os.environ.copy()
+    env["PULSE_CONN"] = cid
+    env["PYTHONPATH"] = code_dir + os.pathsep + env.get("PYTHONPATH", "")
+    log_path = os.path.join(DIR, f"hist-calc-{cid}.log")
+    try:
+        log = open(log_path, "a", encoding="utf-8")
+    except OSError:
+        log = subprocess.DEVNULL
+    subprocess.Popen(
+        [sys.executable, "-c",
+         "import os\nfrom hist_calc import read_request, run_calc\n"
+         "run_calc(read_request(os.environ.get('PULSE_CONN')) or {}, persist=True)\n"],
+        cwd=code_dir,
+        env=env,
+        start_new_session=True,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
 def stamp_stats(st: dict, conn: str) -> dict:
     lane = ID_TO_LANE.get(conn) or {}
     out = slim_for_ui(st or {})
@@ -805,7 +1061,10 @@ def stamp_stats(st: dict, conn: str) -> dict:
         out["running"] = False
         out["haltReason"] = out.get("haltReason") or "paused"
         progress.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
-    if state != "active":
+    if state == "unknown":
+        # Preview / offline host: trust the snapshot, then the historic job.
+        _surface_hist_calc(out, progress, conn)
+    elif state != "active":
         out["running"] = False
         out["alive"] = False
         out["stale"] = True
@@ -975,6 +1234,12 @@ def unit_state(cid: str, fresh: bool = False) -> str:
     if not fresh and hit and now - hit[0] < 3.0:
         return hit[1]
     rc, out = _sysctl("is-active", engine_unit(cid), timeout=6)
+    # No systemd in this process (desktop preview, tests, restricted hosts).
+    # That is not a crashed trading service.
+    if rc >= 90:
+        state = "unknown"
+        _STATE_CACHE[cid] = (now, state)
+        return state
     state = (out.splitlines() or [""])[0].strip() if out else ""
     if state not in ("active", "inactive", "failed", "activating", "deactivating"):
         state = "failed" if rc not in (0,) and state == "" else (state or "unknown")
@@ -1680,18 +1945,35 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
     paused = bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}"))
     state = unit_state(lane["id"])
     prog = dict(_lane_progress(st))
-    running = bool(st.get("running")) and state == "active" and not stopped and not paused
-    halted = bool(st.get("halted")) or stopped or paused or state != "active"
-    halt_reason = st.get("haltReason")
-    if stopped:
-        halt_reason = "stopped"
-        prog.update(phase="stopped", detail="engine stopped; historic snapshot retained")
-    elif paused:
-        halt_reason = "paused"
-        prog.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
-    elif state != "active" and not halt_reason:
-        halt_reason = "service failed" if state == "failed" else "service inactive"
-        prog.update(phase="error" if state == "failed" else "deferred", detail=halt_reason)
+    # No systemd here: a historic calc is the lane, not a dead trading service.
+    if state == "unknown" and not stopped and not paused:
+        stamped = stamp_stats(st, lane["id"])
+        running = bool(stamped.get("running"))
+        halted = False
+        halt_reason = ""
+        prog = dict(stamped.get("progress") or prog)
+        alive = True
+        if isinstance(stamped.get("sets"), dict) and stamped.get("sets"):
+            sets = stamped["sets"]
+        if stamped.get("symbolCount"):
+            st = dict(st)
+            st["symbolCount"] = stamped.get("symbolCount")
+            if stamped.get("symbols"):
+                st["symbols"] = stamped.get("symbols")
+    else:
+        running = bool(st.get("running")) and state == "active" and not stopped and not paused
+        halted = bool(st.get("halted")) or stopped or paused or state != "active"
+        halt_reason = st.get("haltReason")
+        alive = bool(st) and state == "active"
+        if stopped:
+            halt_reason = "stopped"
+            prog.update(phase="stopped", detail="engine stopped; historic snapshot retained")
+        elif paused:
+            halt_reason = "paused"
+            prog.update(phase="paused", detail="engine paused; protection and reconciliation remain enabled")
+        elif state != "active" and not halt_reason:
+            halt_reason = "service failed" if state == "failed" else "service inactive"
+            prog.update(phase="error" if state == "failed" else "deferred", detail=halt_reason)
     groups = _position_group_count(st, default=0)
     orders = _real_order_count(st, default=0)
     live_groups = _live_position_count(st, default=-1)
@@ -1749,7 +2031,7 @@ def lane_summary(lane: dict, st: dict | None = None) -> dict:
         "scanMs": st.get("scanMs"),
         "rssMb": st.get("rssMb"),
         "errors": st.get("errors") or 0,
-        "alive": bool(st) and state == "active",
+        "alive": alive,
         "paused": bool(st.get("paused")) or os.path.exists(os.path.join(DIR, f"PAUSE-{lane['id']}")),
         "progressPct": prog.get("pct"),
         "progressPhase": prog.get("phase"),
@@ -1956,13 +2238,34 @@ def merge_overall() -> dict:
         sets["overview"] = overview
     # Each desk owns an independent catalog: valid/active numerators and the
     # catalog/intern denominators are summed over the same lanes.
-    for key in ("setCount", "activeCount", "validatedCount", "histFills", "liveFills", "liveProcessed", "liveActive"):
+    for key in ("setCount", "activeCount", "histFills", "liveFills", "liveProcessed", "liveActive"):
         sets[key] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get(key) or 0) for lane in LANES)
+    valid_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("validatedCount") or 0) for lane in LANES]
+    shared_hist = any(
+        _hist_test_running((stats_by_id.get(lane["id"], {}) or {}).get("histTest") or {})
+        for lane in LANES
+    )
+    if shared_hist and valid_vals and max(valid_vals) == min(valid_vals):
+        # One Test Historic proof copied onto every desk. Do not add it twice.
+        sets["validatedCount"] = valid_vals[0]
+    else:
+        sets["validatedCount"] = sum(valid_vals)
     intern_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("internSetCount") or 0) for lane in LANES]
     catalog_vals = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("catalogSetCount") or (stats_by_id.get(lane["id"], {}).get("sets") or {}).get("setCount") or 0) for lane in LANES]
-    sets["internSetCount"] = sum(intern_vals)
+    if shared_hist and intern_vals and max(intern_vals) == min(intern_vals):
+        # Same Test Historic intern book mirrored onto every desk.
+        sets["internSetCount"] = intern_vals[0]
+    else:
+        sets["internSetCount"] = sum(intern_vals)
     sets["catalogSetCount"] = sum(catalog_vals)
-    sets["processingCount"] = sum(int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES)
+    lane_proc = [int((stats_by_id.get(lane["id"], {}).get("sets") or {}).get("processingCount") or 0) for lane in LANES]
+    # Both desks mirror one Test Historic run. Summing that copy paints 2x processing on Overall.
+    sets["processingCount"] = (max(lane_proc) if lane_proc else 0) if shared_hist else sum(lane_proc)
+    if not sets.get("setCount"):
+        # Offline historic jobs publish counts on the lane, not in a stats file.
+        sets["setCount"] = sum(int(l.get("setCount") or 0) for l in lanes)
+        sets["catalogSetCount"] = sets["catalogSetCount"] or sets["setCount"]
+        sets["validatedCount"] = sum(int(l.get("validatedSetCount") or 0) for l in lanes)
     system_equity = sum(_report_number(l.get("systemEquity", l.get("equity"))) for l in lanes)
     wallet_equity = sum(_report_number(l.get("walletEquity")) for l in lanes)
     session_pnl = sum(_report_number(l.get("systemPnl", l.get("sessionPnl"))) for l in lanes)
@@ -2111,6 +2414,7 @@ def merge_overall() -> dict:
         "backfill", "gap", "partial", "initial", "incremental", "starting", "hist-test",
     }
     active_lanes = [l for l in lanes if l.get("running") and not l.get("halted")]
+    ready_lanes = [l for l in lanes if str(l.get("progressPhase") or "") == "ready"]
     busy_lanes = [l for l in active_lanes if str(l.get("progressPhase") or "") in _BUSY]
 
     def _lane_pct(row: dict):
@@ -2128,7 +2432,9 @@ def merge_overall() -> dict:
         )
     elif active_lanes:
         focus = active_lanes[0]
-    overall_ready = all(bool(l.get("progressReady")) for l in active_lanes) if active_lanes else False
+    elif ready_lanes:
+        focus = ready_lanes[0]
+    overall_ready = all(bool(l.get("progressReady")) for l in active_lanes) if active_lanes else bool(ready_lanes)
     if focus:
         overall_phase = focus.get("progressPhase") or "ready"
         overall_pct = _lane_pct(focus)
@@ -2145,6 +2451,9 @@ def merge_overall() -> dict:
         overall_sets_total = None
         overall_symbols_done = None
         overall_symbols_total = None
+    if ready_lanes and not running_any:
+        out["halted"] = False
+        out["haltReason"] = ""
     out["progress"] = {
         "connection": "overall",
         "connType": "overall",
@@ -2218,7 +2527,7 @@ def merge_overall() -> dict:
                 try:
                     if not fresh:
                         fresh = job_progress_view()
-                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "positive", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready"):
+                    for key in ("phase", "pct", "detail", "validatedCount", "internSetCount", "runningSets", "symbols", "internSymbols", "positive", "processedSetCount", "processingCount", "setsDone", "setsTotal", "selectedCoordinations", "withWithout", "comboMatrix", "successfulConfigs", "pfStats", "byIndication", "byStrategy", "ready", "ownsCatalog", "enabled", "catalogSkipped", "running"):
                         if fresh.get(key) is None:
                             continue
                         existing = view.get(key)
@@ -2232,30 +2541,178 @@ def merge_overall() -> dict:
                         view[key] = fresh.get(key)
                 except Exception:
                     pass
-            view["enabled"] = True
-            view["ownsCatalog"] = True
-            out["histTest"] = view
-            if isinstance(sets, dict):
-                sets["histTest"] = view
-            # Keep overall progress on Test Historic when a desk owns the catalog.
-            if str(out.get("progressPhase") or "") in ("replay", "catalog", "backfill", "gap", "partial") and not view.get("running"):
-                out["progressPhase"] = view.get("phase") or out.get("progressPhase")
-                out["progressPct"] = view.get("pct") if view.get("pct") is not None else out.get("progressPct")
-                out["progressDetail"] = view.get("detail") or out.get("progressDetail")
-                prog = dict(out.get("progress") or {})
-                prog["phase"] = out["progressPhase"]
-                prog["pct"] = out["progressPct"]
-                prog["detail"] = out["progressDetail"]
-                out["progress"] = prog
+            if fresh:
+                for key in ("ownsCatalog", "enabled", "catalogSkipped", "running"):
+                    if key in fresh and fresh.get(key) is not None:
+                        view[key] = fresh.get(key)
+            calc_busy = str(out.get("progressPhase") or "") in (
+                "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+                "gap", "incremental", "queued", "partial", "catalog",
+            )
+            # A live catalog replay is the progress source. An idle Test Historic
+            # view must not paint "skip full catalog" over it, and a stopped
+            # empty test must not keep a stale ownsCatalog flag.
+            if (calc_busy and not view.get("running")) or (view.get("ownsCatalog") is False and not view.get("running")):
+                view["enabled"] = False
+                view["ownsCatalog"] = False
+                view["catalogSkipped"] = False
+                out["histTest"] = view
                 if isinstance(sets, dict):
-                    sets["progress"] = dict(prog)
+                    sets["histTest"] = view
+                detail_now = str(out.get("progressDetail") or "")
+                if "skip full catalog" in detail_now:
+                    out["progressDetail"] = str(view.get("detail") or "full catalog in play")
+                    out["progressReady"] = False
+                    out["progressPhase"] = "initial"
+                    prog = dict(out.get("progress") or {})
+                    prog["detail"] = out["progressDetail"]
+                    prog["ready"] = False
+                    prog["phase"] = "initial"
+                    out["progress"] = prog
+                    if isinstance(sets, dict):
+                        sets["progress"] = dict(prog)
+            else:
+                view["enabled"] = True
+                view["ownsCatalog"] = True
+                out["histTest"] = view
+                if isinstance(sets, dict):
+                    sets["histTest"] = view
+                # A running Test Historic replaces a frozen skip-catalog bar.
+                # An idle view must not hide a live catalog replay.
+                detail_now = str(out.get("progressDetail") or "")
+                phase_now = str(out.get("progressPhase") or "")
+                engine_scoring = phase_now in (
+                    "initial", "hourly", "backfill", "fetch", "replay", "score", "score-refresh",
+                    "gap", "incremental", "partial", "catalog",
+                )
+                # A live catalog score stays on the bar. Test Historic only
+                # replaces a frozen ready / skip-catalog placeholder.
+                if view.get("running") and not engine_scoring and (
+                    "skip full catalog" in detail_now or phase_now in ("ready", "hist-test", "idle", "")
+                ):
+                    out["progressPhase"] = view.get("phase") or out.get("progressPhase")
+                    out["progressPct"] = view.get("pct") if view.get("pct") is not None else out.get("progressPct")
+                    out["progressDetail"] = view.get("detail") or out.get("progressDetail")
+                    out["progressReady"] = False
+                    prog = dict(out.get("progress") or {})
+                    prog["phase"] = out["progressPhase"]
+                    prog["pct"] = out["progressPct"]
+                    prog["detail"] = out["progressDetail"]
+                    prog["ready"] = False
+                    if view.get("setsDone") is not None:
+                        prog["setsDone"] = view.get("setsDone")
+                        out["progressSetsDone"] = view.get("setsDone")
+                    if view.get("setsTotal") is not None:
+                        prog["setsTotal"] = view.get("setsTotal")
+                        out["progressSetsTotal"] = view.get("setsTotal")
+                    out["progress"] = prog
+                    if isinstance(sets, dict):
+                        sets["progress"] = dict(prog)
         else:
             out["histTest"] = off_blob or off_progress_view()
             if isinstance(sets, dict):
                 sets["histTest"] = out["histTest"]
     except Exception:
         pass
+    _attach_overall_surfaces(out, stats_by_id, LANES)
     return slim_for_ui(out)
+
+
+def _attach_overall_surfaces(out: dict, stats_by_id: dict, lanes: list) -> None:
+    """Overall is a desk, not a blank merge. Strategy flags, coverage and the
+    engine summary come from the lanes so the overview is not empty."""
+    if not isinstance(out, dict):
+        return
+    blobs = []
+    for lane in lanes:
+        st = stats_by_id.get(lane.get("id")) if isinstance(lane, dict) else None
+        if isinstance(st, dict):
+            blobs.append(st)
+    if not blobs:
+        return
+    if not isinstance(out.get("pulse"), dict):
+        pulses = [st.get("pulse") for st in blobs if isinstance(st.get("pulse"), dict)]
+        if pulses:
+            pulse = dict(pulses[0])
+            flags = (
+                "stratIndications", "stratGeneral", "stratBlock", "stratTrailing",
+                "stratDca", "dcaEnabled", "normalExecutionEnabled",
+            )
+            for flag in flags:
+                vals = [p.get(flag) for p in pulses if flag in p]
+                if not vals:
+                    continue
+                pulse[flag] = False if all(v is False for v in vals) else any(v is True for v in vals)
+            out["pulse"] = pulse
+    if not isinstance(out.get("coverage"), dict) or not out.get("coverage"):
+        covs = [st.get("coverage") for st in blobs if isinstance(st.get("coverage"), dict) and st.get("coverage")]
+        if covs:
+            def _px(cov: dict) -> int:
+                scan = cov.get("scan") if isinstance(cov.get("scan"), dict) else {}
+                try:
+                    return int(scan.get("px") or cov.get("px") or 0)
+                except (TypeError, ValueError):
+                    return 0
+            base = dict(max(covs, key=_px))
+            controls = dict(base.get("controls") or {})
+            for key in (
+                "ok", "missing", "open", "security", "pairCount", "groupCount", "mergedMembers",
+                "protectedPairs", "expectedPairs", "pairGaps", "memberProtected", "memberMissing",
+            ):
+                total = 0
+                seen = False
+                for cov in covs:
+                    ctrl = cov.get("controls") if isinstance(cov.get("controls"), dict) else {}
+                    if ctrl.get(key) is None:
+                        continue
+                    try:
+                        total += int(ctrl.get(key) or 0)
+                        seen = True
+                    except (TypeError, ValueError):
+                        continue
+                if seen:
+                    controls[key] = total
+            if controls:
+                base["controls"] = controls
+            strat: dict = {}
+            for cov in covs:
+                raw = cov.get("strategies") if isinstance(cov.get("strategies"), dict) else {}
+                for key, value in raw.items():
+                    strat[key] = bool(strat.get(key)) or bool(value)
+            if strat:
+                base["strategies"] = strat
+            recs = [cov.get("recon") for cov in covs if isinstance(cov.get("recon"), dict)]
+            if recs:
+                base["recon"] = {
+                    "ok": all(rec.get("ok") is not False for rec in recs) and not any(rec.get("pending") for rec in recs),
+                    "pending": any(bool(rec.get("pending")) for rec in recs),
+                    "detail": " · ".join(str(rec.get("detail") or "") for rec in recs if rec.get("detail"))[:180],
+                    "exchangePositionGroups": sum(int(rec.get("exchangePositionGroups") or 0) for rec in recs),
+                }
+            sets = dict(base.get("sets") or {})
+            for fat in ("qualifiedParentIds", "processingSetIds", "internSetIds", "byTrail", "bySl"):
+                sets.pop(fat, None)
+            base["sets"] = sets
+            for fat in ("history", "events", "activity"):
+                base.pop(fat, None)
+            out["coverage"] = base
+    for key in ("engine", "variants", "indications", "api", "exits", "block", "dca"):
+        if out.get(key) is not None:
+            continue
+        for st in blobs:
+            blob = st.get(key)
+            if not isinstance(blob, dict) or not blob:
+                continue
+            copied = dict(blob)
+            if key == "engine":
+                copied.pop("scanKeep", None)
+                load = copied.get("load")
+                if isinstance(load, dict):
+                    load = dict(load)
+                    load.pop("scanKeep", None)
+                    copied["load"] = load
+            out[key] = copied
+            break
 
 
 def connections_blob() -> dict:
@@ -2842,6 +3299,7 @@ class Handler(SimpleHTTPRequestHandler):
                 job = start_job(body if isinstance(body, dict) else {}, connection=conn)
                 job["ok"] = True
                 job["running"] = job_is_running(job)
+                _spawn_offline_calc(body if isinstance(body, dict) else {}, conn)
                 self._json(job)
             except Exception as exc:
                 self._json({"ok": False, "phase": "error", "detail": str(exc)[:200], "connection": conn, "shared": True, "independent": False}, 200)
@@ -2884,17 +3342,31 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
 
-def heal_loop() -> None:
-    """Restart crashed/failed engines unless the user stopped them on purpose.
-    After a crash loop systemd start-limit leaves a unit dead; reset-failed +
-    start revives it, so the desk always comes back on its own.
+def _heal_hist_test() -> None:
+    """One sidecar owns the worker. Engines must not each call start_test."""
+    now = time.time()
+    last = float(getattr(_heal_hist_test, "last", 0) or 0)
+    if now - last < 30.0:
+        return
+    setattr(_heal_hist_test, "last", now)
+    try:
+        from hist_test import resume_after_restart, thread_alive
+        if thread_alive():
+            return
+        resume_after_restart()
+    except Exception:
+        pass
 
-    A live unit whose stats file stops moving is treated as stuck: first ask
-    it to trim caches, then (after a long stall) recycle the unit.
-    """
+
+def heal_loop() -> None:
+    """Restart crashed lanes, and a continuous Test Historic worker whose thread died."""
     last: dict = {}
     last_trim: dict = {}
     while True:
+        try:
+            _heal_hist_test()
+        except Exception:
+            pass
         try:
             for lane in LANES:
                 cid = lane["id"]
