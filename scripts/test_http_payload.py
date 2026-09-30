@@ -157,3 +157,95 @@ class HttpPayloadTests(unittest.TestCase):
         self.assertEqual(sets["setCount"], 8192)
         self.assertEqual(sets["validatedCount"], 61)
         self.assertNotEqual(sets["internSetCount"], sets["validatedCount"])
+
+    def test_running_hist_test_processing_is_not_clamped_to_intern(self):
+        blob = {
+            "sets": {
+                "setCount": 1,
+                "internSetCount": 1,
+                "validatedCount": 0,
+                "catalogSetCount": 39000,
+                "activeCount": 0,
+                "processingCount": 0,
+            },
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "running": True,
+                "phase": "evaluate",
+                "internSetCount": 1,
+                "validatedCount": 0,
+                "processingCount": 47,
+                "setsDone": 3,
+                "setsTotal": 50,
+            },
+            "coverage": {"sets": {}},
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["setCount"], 50)
+        self.assertEqual(sets["processingCount"], 47)
+        self.assertEqual(sets["validatedCount"], 0)
+        self.assertEqual(sets["catalogSetCount"], 39000)
+        self.assertEqual(sets["internSetCount"], 1)
+
+    def test_idle_hist_test_keeps_catalog_counts_and_inflight_processing(self):
+        blob = {
+            "sets": {
+                "setCount": 39000,
+                "catalogSetCount": 39000,
+                "internSetCount": 1,
+                "validatedCount": 12,
+                "activeCount": 4,
+                "processingCount": 800,
+            },
+            "histTest": {
+                "enabled": False,
+                "ownsCatalog": False,
+                "phase": "ready",
+                "internSetCount": 1,
+                "validatedCount": 0,
+                "processingCount": 0,
+            },
+            "coverage": {"sets": {}},
+            "progress": {"phase": "initial", "ready": False, "setsDone": 100, "setsTotal": 39000},
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["setCount"], 39000)
+        self.assertEqual(sets["validatedCount"], 12)
+        self.assertEqual(sets["activeCount"], 4)
+        self.assertGreaterEqual(sets["processingCount"], 800)
+        self.assertFalse(compact["histTest"]["ownsCatalog"])
+
+    def test_catalog_score_is_not_hidden_behind_the_intern_book(self):
+        blob = {
+            "progress": {"phase": "score", "setsDone": 4704, "setsTotal": 37440, "ready": False},
+            "sets": {
+                "setCount": 1,
+                "catalogSetCount": 37440,
+                "internSetCount": 1,
+                "validatedCount": 0,
+                "activeCount": 0,
+                "processingCount": 0,
+                "stageCounts": {"Base": 11104, "Main": 0, "Real": 0, "Unqualified": 26336},
+            },
+            "histTest": {
+                "enabled": True,
+                "ownsCatalog": True,
+                "running": True,
+                "phase": "evaluate",
+                "internSetCount": 358,
+                "validatedCount": 60,
+                "processingCount": 1,
+                "setsDone": 358,
+                "setsTotal": 358,
+            },
+            "coverage": {"sets": {}},
+        }
+        compact = slim_for_ui(blob)
+        sets = compact["sets"]
+        self.assertEqual(sets["setCount"], 37440)
+        self.assertEqual(sets["validatedCount"], 60)
+        self.assertEqual(sets["processingCount"], 37440 - 4704)
+        self.assertEqual(sets["catalogSetCount"], 37440)

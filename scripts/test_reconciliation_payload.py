@@ -90,4 +90,39 @@ class SnapshotValidation(unittest.TestCase):
         self.assertEqual(row["symbol"], "SOL-USDT")
         self.assertFalse(p.pending_entry_owns("SOL-USDT", "SHORT"))
 
+    def test_live_orders_cannot_exceed_the_working_book(self):
+        p = Pulse.__new__(Pulse)
+        p.position_is_ours = lambda pos: getattr(pos, "ours", True) is not False
+        p.order_is_ours = lambda order: str(order.get("clientOrderId") or "").lower().startswith("gx02")
+        p.order_cid = lambda order: str(order.get("clientOrderId") or "")
+        p.open = {
+            "own": SimpleNamespace(ours=True, sl_oid="SL1", tp_oid="TP1", sec_sl_oid="SL1", sec_tp_oid="TP1"),
+        }
+        p.pending_orders = {}
+        rows = [
+            {"orderId": "SL1", "clientOrderId": "Gx02s-sl"},
+            {"orderId": "TP1", "clientOrderId": "Gx02t-tp"},
+            {"orderId": "OLD1", "clientOrderId": "Gx02o-leftover"},
+            {"orderId": "OLD1", "clientOrderId": "Gx02o-leftover"},
+            {"orderId": "FOR", "clientOrderId": "other-bot"},
+        ]
+        self.assertEqual(p.internal_working_order_count(), 2)
+        self.assertEqual(p.live_working_order_count(rows), 2)
+        p.open = {}
+        self.assertEqual(p.internal_working_order_count(), 0)
+        self.assertEqual(p.live_working_order_count(rows), 0)
+        p.exchange_order_snapshot_pending = False
+        p.exchange_order_snapshot_at = 0.0
+        p.exchange_order_total_count = 4
+        p.exchange_order_own_count = 3
+        p.foreign_open_order_count = 1
+        p._oo_cache = {"*": (0.0, rows)}
+        self.assertEqual(p._published_order_counts(), (-1, -1, -1, -1))
+        p.exchange_order_snapshot_at = 10**12
+        live, total, foreign, untracked = p._published_order_counts()
+        self.assertEqual(live, 0)
+        self.assertEqual(total, 4)
+        self.assertEqual(foreign, 1)
+        self.assertEqual(untracked, 3)
+
 if __name__=='__main__':unittest.main()

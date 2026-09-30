@@ -121,6 +121,22 @@ const CALC_RANGE_PRESETS = [
   { label: "14d", hours: 336 },
 ] as const;
 
+function calcOptionsFromOverlay(overlay: PulseOverlay, prev: HistCalcOptions): HistCalcOptions {
+  const minStep = Math.max(1, Math.min(30, Math.round(Number(overlay.setMinStep ?? overlay.minStep ?? prev.minStep) || prev.minStep)));
+  const stepMax = Math.max(minStep, Math.min(30, Math.round(Number(overlay.setStepMax ?? prev.stepMax) || prev.stepMax)));
+  return {
+    ...prev,
+    minStep,
+    stepMax,
+    stratBlock: overlay.blockEnabled !== false,
+    stratDca: Boolean(overlay.dcaEnabled || overlay.stratDca),
+    trailing: overlay.stratTrailing !== false,
+    preferMinimalRange: Boolean(overlay.preferMinimalRange),
+    additionalCoordination: overlay.additionalCoordination !== false,
+    coordOptimizationN: Math.max(50, Math.min(200, Math.round(Number(overlay.coordOptimizationN) || prev.coordOptimizationN))),
+  };
+}
+
 function SettingsPage() {
   const { conn } = useConnection();
   const [cts, setCts] = useState<CtsSettings | null>(null);
@@ -169,6 +185,7 @@ function SettingsPage() {
   const credsDirtyRef = useRef(false);
   const autoAssignSigRef = useRef("");
   const autoSavePendingRef = useRef(false);
+  const calcSyncedRef = useRef(false);
 
   useEffect(() => {
     setCts(null);
@@ -181,6 +198,7 @@ function SettingsPage() {
     dirtyRef.current = false;
     autoAssignSigRef.current = "";
     autoSavePendingRef.current = false;
+    calcSyncedRef.current = false;
     setSaveMsg(null);
     setReady(false);
     setCreds(null);
@@ -214,6 +232,10 @@ function SettingsPage() {
         baselineRef.current = overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) });
         touchedRef.current = new Set();
         setOverlay(baselineRef.current);
+        if (!calcSyncedRef.current && c.overlay) {
+          calcSyncedRef.current = true;
+          setCalcOpt((prev) => calcOptionsFromOverlay(baselineRef.current, prev));
+        }
       }
       setReady(true);
     }, delay);

@@ -4756,7 +4756,7 @@ class SetBook:
                 "direction": 2,
             },
             "families": {"base": len(base_sets), "trail": len(trail_sets)},
-            "product": intern_n if hist_ids is not None else len(self.by_idx),
+            "product": len(self.by_idx),
             "setCount": intern_n if hist_ids is not None else len(self.sets),
             "catalogSetCount": len(self.sets),
             "internSetCount": intern_n,
@@ -5915,6 +5915,35 @@ def synth_trend(n: int = 240, start: float = 100.0, step: float = 0.12, noise: f
     return bars
 
 
+def catalog_grid_passes(cov: dict) -> bool:
+    """A trailing-off catalog is complete. Trail coverage is required only when trails are on."""
+    fam = cov.get("families") if isinstance(cov.get("families"), dict) else {}
+    base = int(fam.get("base") or 0)
+    trail_n = int(fam.get("trail") or 0)
+    if not cov.get("slCover") or base < 8:
+        return False
+    if bool(cov.get("independentTrail")):
+        return bool(cov.get("trailCover")) and trail_n >= 5 and bool(cov.get("trails"))
+    return trail_n == 0
+
+
+def catalog_cover_passes(cov: dict, catalog_ready: bool) -> Tuple[bool, str]:
+    """Grid QA must not fail just because the operator turned trailing off."""
+    fam = cov.get("families") if isinstance(cov.get("families"), dict) else {}
+    trailing_on = bool(cov.get("independentTrail"))
+    size = int(cov.get("catalogSetCount") or cov.get("product") or 0)
+    if not catalog_ready:
+        return True, "deferred catalog bootstrap"
+    ok = bool(cov.get("slCover")) and size >= 10
+    if trailing_on:
+        ok = ok and bool(cov.get("trailCover")) and int(fam.get("trail") or 0) >= 1 and bool(cov.get("trails"))
+    detail = (
+        f"n={size} fam={fam} sl={cov.get('slCover')} tr={cov.get('trailCover')} "
+        f"trailing={'on' if trailing_on else 'off'}"
+    )
+    return ok, detail
+
+
 def self_test() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     # drawdown time: 3 down, recover, 2 down — cost-net of pnl_pct (shared units)
@@ -6199,6 +6228,21 @@ def self_test() -> List[Tuple[str, bool, str]]:
     off = SetBook()
     off.load({"histEnabled": True, "setMinStep": 2, "setStepMax": 2, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "stratTrailing": False})
     out.append(("set-trail-explicit-off", not off.trails and all(s.kind == "base" for s in off.by_idx), f"n={len(off.by_idx)} kinds={ {s.kind for s in off.by_idx} }"))
+    off_cov = off.coverage()
+    off.hist_test_set_ids = {off.by_idx[0].id} if off.by_idx else set()
+    gated = off.coverage()
+    out.append((
+        "set-product-is-catalog",
+        off_cov.get("product") == len(off.by_idx)
+        and gated.get("product") == len(off.by_idx)
+        and gated.get("internSetCount") == (1 if off.by_idx else 0)
+        and not gated.get("independentTrail")
+        and catalog_grid_passes({"slCover": True, "independentTrail": False, "families": {"base": 780, "trail": 0}, "trails": []})
+        and not catalog_grid_passes({"slCover": True, "independentTrail": True, "families": {"base": 780, "trail": 0}, "trails": []})
+        and catalog_cover_passes({"slCover": True, "independentTrail": False, "catalogSetCount": 780, "families": {"base": 780, "trail": 0}, "trails": []}, True)[0]
+        and not catalog_cover_passes({"slCover": True, "independentTrail": True, "catalogSetCount": 780, "families": {"base": 780, "trail": 0}, "trails": []}, True)[0],
+        f"product={gated.get('product')} intern={gated.get('internSetCount')} n={len(off.by_idx)}",
+    ))
     out.append(("set-sl-cover", cov.get("slCover") and len(book4.sl_ratios) >= 5, f"sl={book4.sl_ratios}"))
     out.append(("set-sl-tp-cover", bool(cov.get("slTpCover")), f"slTp={cov.get('slTpCover')} steps={cov.get('steps')} bySl={ {k: v.get('steps') for k, v in (cov.get('bySl') or {}).items()} }"))
     out.append(("set-trail-sl-cover", bool(cov.get("trailSlCover")), f"trailSl={cov.get('trailSlCover')} byTrail={ {k: v.get('sl') for k, v in (cov.get('byTrail') or {}).items()} }"))
