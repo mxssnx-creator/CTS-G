@@ -43,6 +43,9 @@ def main() -> int:
     ap.add_argument("--overlay", default=os.path.join(ROOT, "server", "pulse", "overlay-bingx-x02.json"))
     ap.add_argument("--floors", default="1.02,1.10,1.20,1.30")
     ap.add_argument("--ddt-s", default="", help="comma list of setMaxDdTimeS values (seconds, 600..57600); empty keeps the overlay value")
+    ap.add_argument("--combos", default="",
+                    help="semicolon list of floor,baseN,mainN,realN,ddtS tuples (overrides --floors/--ddt-s); "
+                         "baseN/mainN/realN are the last-N windows of the Base/Main/Real stage")
     ap.add_argument("--window-ends", default="0", help="comma list of bar indexes, 0 = end of data")
     ap.add_argument("--hours", type=int, default=12)
     ap.add_argument("--out", required=True, help="JSON lines, one row per window and floor")
@@ -60,11 +63,20 @@ def main() -> int:
     for end in [int(x) for x in args.window_ends.split(",")]:
         sim_end = end or n_all
         sim_start = sim_end - args.hours * 60
-        ddt_values = [float(x) for x in args.ddt_s.split(",") if x] or [None]
-        for floor, ddt in [(float(f), d) for f in args.floors.split(",") for d in ddt_values]:
-            def profile(floor=floor, ddt=ddt):
+        if args.combos:
+            combos = []
+            for item in args.combos.split(";"):
+                f, bn, mn, rn, dd = item.split(",")
+                combos.append((float(f), dict(baseEvalPosCount=int(bn), setPfWindow=int(bn), mainEvalPosCount=int(mn),
+                                              realEvalPosCount=int(rn)), float(dd)))
+        else:
+            ddt_values = [float(x) for x in args.ddt_s.split(",") if x] or [None]
+            combos = [(float(f), {}, d) for f in args.floors.split(",") for d in ddt_values]
+        for floor, ns, ddt in combos:
+            def profile(floor=floor, ns=ns, ddt=ddt):
                 out = original()
                 out.update({key: floor for key in STAGE_KEYS})
+                out.update(ns)
                 if ddt is not None:
                     out.update(setMaxDdTimeS=ddt, maxDdTimeS=ddt)
                 return out
@@ -78,8 +90,15 @@ def main() -> int:
             cost = float(book.cost_pct)
             n_cand = int(len(cands["uid"]))
             admitted = cands["admitted"]
+            hours = args.hours
+            sel = np.flatnonzero(admitted & (cands["exit"] >= 0) & (cands["exit"] < sim_end))
+            mult = np.array([c["mult"] for c in catalog], dtype=np.float64)
+            w = mult[cands["uid"][sel]]
+            level = sim._level_stats(cands["raw"][sel], w, cands["exit"][sel].astype(np.float64) * sim.BAR,
+                                     cands["sym"][sel].astype(np.int64), cost)
+            level["lotsPerHour"] = round(float(w.sum()) / hours, 1)
             row = dict(
-                windowEnd=sim_end, windowStart=sim_start, floor=floor, maxDdS=float(book.max_dd_s),
+                nWindows=ns, level=level, windowEnd=sim_end, windowStart=sim_start, floor=floor, maxDdS=float(book.max_dd_s),
                 stageFloors={k: float(v) for k, v in book.stage_min_pf.items()},
                 candidates=n_cand, seconds=round(time.time() - t0),
                 base_ok=int(cands["base_ok"].sum()), main_ok=int(cands["main_ok"].sum()),
