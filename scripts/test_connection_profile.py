@@ -40,7 +40,7 @@ class ConnectionProfileTests(unittest.TestCase):
             self.assertEqual(p[key],0)
         self.assertEqual(p['maxOpen'],100)
         self.assertEqual(p['histLookbackBars'],2880)
-        self.assertEqual(p['baseEvalPosCount'],30)
+        self.assertEqual(p['baseEvalPosCount'],40)
         self.assertEqual(p['symbolCap'],50)
         self.assertTrue(p['controlOrdersOverall'])
         self.assertTrue(p['symbolsAll'])
