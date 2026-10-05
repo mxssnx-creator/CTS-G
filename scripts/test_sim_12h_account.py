@@ -217,6 +217,26 @@ class LoadSymbolTest(unittest.TestCase):
             self.assertEqual(len(bars), 5)
 
 
+class DdtFastTest(unittest.TestCase):
+    def test_matches_the_engine_on_random_mixed_symbol_tapes(self):
+        import random
+        from position_cost import POSITION_COST_PCT_DEFAULT, cost_as_frac
+        from set_engine import drawdown_time_by_symbol
+        rng = random.Random(7)
+        cf = cost_as_frac(POSITION_COST_PCT_DEFAULT)
+        for trial in range(300):
+            n = rng.randint(0, 96)
+            nsym = rng.randint(1, 4)
+            t = sorted(rng.choice([0.0] + [60.0 * rng.randint(1, 4000) for _ in range(5)]) if rng.random() < 0.03
+                       else 60.0 * rng.randint(1, 4000) for _ in range(n))
+            sy = [rng.randrange(nsym) for _ in range(n)]
+            mv = [rng.gauss(0.0005, 0.004) for _ in range(n)]
+            rows = [{"t": a, "symbol": "S%d" % b, "pnl_pct": c} for a, b, c in zip(t, sy, mv)]
+            want = float(drawdown_time_by_symbol(rows, ordered=True)["maxS"]) if rows else 0.0
+            got = sim.ddt_max_s_fast(np.array(t), np.array(sy), np.array(mv), cf)
+            self.assertEqual(got, want, (trial, n, nsym))
+
+
 class ChartTest(unittest.TestCase):
     labels = ["05:00", "06:00", "07:00"]
 

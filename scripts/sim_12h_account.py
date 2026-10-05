@@ -300,7 +300,8 @@ def build_catalog(book) -> List[Dict[str, Any]]:
 
 
 def load_symbol(data_dir: str, symbol: str) -> Tuple[List[List[float]], int]:
-    d = json.load(open(os.path.join(data_dir, symbol + ".json")))
+    with open(os.path.join(data_dir, symbol + ".json")) as fh:
+        d = json.load(fh)
     # The first row is the time base. Fetched files carry warmup bars before
     # "start", so "start" would shift every timestamp (and report label) late.
     return [r[1] for r in d["rows"]], int(d["rows"][0][0]) // 1000
@@ -621,6 +622,36 @@ def strategy_key(pack: str, kind: str) -> str:
     return f"{pack}/{'trailing' if kind == 'trail' else 'normal'}"
 
 
+def ddt_max_s_fast(t, sym, moves, cost_frac: float) -> float:
+    """``drawdown_time_by_symbol(rows, ordered=True)["maxS"]`` for rows
+    ``{t, symbol, pnl_pct}`` without building the row dicts (that call was
+    ~75% of the gating stage). Same episode rule: per symbol, an episode opens
+    when cost-net equity falls below its peak and closes at the first row that
+    recovers it; an open one runs to that symbol's last row. Rows with t <= 0
+    are ignored, exactly like the engine."""
+    per: Dict[int, List[Tuple[float, float]]] = {}
+    for ti, si, mv in zip(t, sym, moves):
+        if ti > 0:
+            per.setdefault(int(si), []).append((float(ti), float(mv)))
+    best = 0.0
+    for seq in per.values():
+        eq = peak = 0.0
+        started = None
+        for ti, mv in seq:
+            eq += mv - cost_frac
+            if eq >= peak - 1e-12:
+                if started is not None:
+                    best = max(best, ti - started)
+                    started = None
+                if eq > peak:
+                    peak = eq
+            elif started is None:
+                started = ti
+        if started is not None:
+            best = max(best, seq[-1][0] - started)
+    return round(best, 1)
+
+
 def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: bool, ddt_cache: Dict,
                      chunk: int = 2_000_000, drop_core: bool = True) -> Dict[str, Any]:
     """Core Set lots eligible in [sim_start, sim_end), with walk-forward gate results."""
@@ -679,6 +710,8 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
         for axis, w in AXIS_WINDOWS.items():
             rr, ok = (ev.window_ratio(idx, gstart, w, w) if axis == "prev" else ev.ratio(idx, gstart, w))
             axes[axis][a0:a1] = ok & clears_vec(rr, floors["base"])
+    from position_cost import POSITION_COST_PCT_DEFAULT, cost_as_frac
+    dd_cost_frac = cost_as_frac(POSITION_COST_PCT_DEFAULT)
     # DD-time gate: engine drawdown_time_by_symbol on the Set x side retained
     # tape (last 96 closes), refreshed at each simulated hour.
     hour = (cands["entry"] - sim_start) // 60
@@ -701,9 +734,8 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
                 # too few prior closes for a DDT: valid until the sample exists
                 ddt_cache[key] = 0.0
                 continue
-            rows = [{"t": float(ev.exit[k]) * BAR, "symbol": sym_names[int(ev.tiebreak[k])], "pnl_pct": float(ev.moves[k])}
-                    for k in range(lo_i, ie + 1)]
-            ddt_cache[key] = float(drawdown_time_by_symbol(rows, ordered=True)["maxS"])
+            ddt_cache[key] = ddt_max_s_fast(ev.exit[lo_i:ie + 1].astype(np.float64) * BAR, ev.tiebreak[lo_i:ie + 1],
+                                           ev.moves[lo_i:ie + 1], dd_cost_frac)
         vals = np.array([ddt_cache[k] for k in (g_all[need_dd] * 1000 + hour[need_dd]).tolist()])
         dd_ok[need_dd] = vals <= float(book.max_dd_s) + 1e-9
         ddt_values = vals

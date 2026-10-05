@@ -132,7 +132,7 @@ def overlay_test() -> None:
         # Seed lanes carry the deployed evaluation minimum PF, shared by all seven stage keys.
         rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - EVAL_MIN_PF) < 1e-9, str(ov.get("minPf")))
         rec(f"{name}-min-pf-shared", all(abs(float(ov.get(k) or 0) - EVAL_MIN_PF) < 1e-9 for k in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf")))
-        rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
+        rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 720)
         rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
         rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.15) < 1e-9, str(ov.get("histTestMinPf")))
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
@@ -180,7 +180,7 @@ def overlay_test() -> None:
     )
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
-    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 2880 and int(x01.get("histTestHours") or 0) == 20)
+    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 720 and int(x01.get("histTestHours") or 0) == 20)
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
