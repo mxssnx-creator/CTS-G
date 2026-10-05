@@ -4083,21 +4083,25 @@ class SetBook:
             "ev": round(finite(m.get("net_ev")) - finite(m.get("gross_ev")), 8),
             "costPct": self.cost_pct,
         }
+        # Base is sample + PF + DDT; only when Base qualifies do Main/Real
+        # reasons apply. DDT is a Base-stage gate, so a DDT breach is reported
+        # as a Base failure and never as a spurious "main sample 0/x".
         reasons: List[str] = []
         if base_n < need:
             reasons.append(f"sample {base_n}/{need}")
         if not clears_pf(base_pf, base_floor):
             reasons.append(f"base PF {base_pf:.2f}<{base_floor:.2f}")
-        elif main_n < main_req:
-            reasons.append(f"main sample {main_n}/{main_req}")
-        elif not clears_pf(main_pf, main_floor):
-            reasons.append(f"main PF {main_pf:.2f}<{main_floor:.2f}")
-        elif real_n < real_req:
-            reasons.append(f"real sample {real_n}/{real_req}")
-        elif not clears_pf(real_pf, real_floor):
-            reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         if not dd_ok:
-            reasons.append("DDt cap")
+            reasons.append(f"DDt {dd_s:.0f}s>{float(self.max_dd_s or 57600):.0f}s")
+        if base:
+            if main_n < main_req:
+                reasons.append(f"main sample {main_n}/{main_req}")
+            elif not clears_pf(main_pf, main_floor):
+                reasons.append(f"main PF {main_pf:.2f}<{main_floor:.2f}")
+            elif real_n < real_req:
+                reasons.append(f"real sample {real_n}/{real_req}")
+            elif not clears_pf(real_pf, real_floor):
+                reasons.append(f"real PF {real_pf:.2f}<{real_floor:.2f}")
         reason = "; ".join(reasons)
         st.strategy_adjustments = {
             "base": {"qualified": base, "evaluated": True, "minPf": base_floor, "pf": round(base_pf, 6), "n": base_n, "ddtS": dd_s},
