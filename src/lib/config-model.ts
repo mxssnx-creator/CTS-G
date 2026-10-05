@@ -420,7 +420,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 0.05,
+  volumeFactor: 0.1,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 100,
@@ -884,7 +884,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 0.05),
+    volumeFactor: num(cts.volumeFactor, 0.1),
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),

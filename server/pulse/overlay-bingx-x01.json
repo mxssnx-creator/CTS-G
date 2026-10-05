@@ -236,7 +236,7 @@
   "useLivePositionCosts": true,
   "useMaxLeverage": true,
   "volWeight": 0.3,
-  "volumeFactor": 0.05,
+  "volumeFactor": 0.1,
   "marginCapPct": 0,
   "controlMinTrades": 0,
   "blockEvalPosCount": 50,
