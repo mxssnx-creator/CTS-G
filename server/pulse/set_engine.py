@@ -61,7 +61,7 @@ from block_engine import (
     normalize_block_counts,
     shared_block_volume_ratio,
 )
-from indication_engine import exit_tactic_hit
+from indication_engine import exit_tactic_hit, tactic_should_close
 from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -314,7 +314,8 @@ IND_KINDS = INDICATION_KINDS
 # kinds msi/vwap/retest/squeeze trade as their own lanes, never as votes).
 VOTE_KINDS = INDICATION_KINDS[:8]
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break",
-                "msi": "msi", "vwap": "vwap", "retest": "retest", "squeeze": "squeeze"}
+                "msi": "msi", "vwap": "vwap", "retest": "retest", "squeeze": "squeeze",
+                "sweep": "sweep", "rsi2": "rsi2", "keltner": "keltner", "impulse": "impulse"}
 
 
 class KindSignals(dict):
@@ -1708,8 +1709,27 @@ class SetBook:
             "retestTol": float(ov.get("indRetestTol") or 0.12),
             "retestMinBreak": float(ov.get("indRetestMinBreak") or 0.08),
             "squeezePctl": float(ov.get("indSqueezePctl") or 0.2),
+            "typeSweep": bool(ov.get("indTypeSweep", True)),
+            "typeRsi2": bool(ov.get("indTypeRsi2", True)),
+            "typeKeltner": bool(ov.get("indTypeKeltner", True)),
+            "typeImpulse": bool(ov.get("indTypeImpulse", True)),
+            "sweepRanges": indication_ranges(ov.get("indSweepRanges"), (12, 20, 34)),
+            "rsi2Ranges": indication_ranges(ov.get("indRsi2Ranges"), (21, 34, 55)),
+            "keltnerRanges": indication_ranges(ov.get("indKeltnerRanges"), (14, 20, 30)),
+            "impulseRanges": indication_ranges(ov.get("indImpulseRanges"), (20, 30, 45)),
+            "sweepWickAtr": float(ov.get("indSweepWickAtr") or 0.25),
+            "rsi2Low": float(ov.get("indRsi2Low") or 10.0),
+            "rsi2High": float(ov.get("indRsi2High") or 90.0),
+            "keltnerMult": float(ov.get("indKeltnerMult") or 2.0),
+            "impulseSigma": float(ov.get("indImpulseSigma") or 3.0),
+            "impulseVolMult": float(ov.get("indImpulseVolMult") or 2.0),
+            "actSweepMin": float(ov.get("actSweepMin") if ov.get("actSweepMin") is not None else 0.04),
+            "actRsi2Min": float(ov.get("actRsi2Min") if ov.get("actRsi2Min") is not None else 0.03),
+            "actKeltnerMin": float(ov.get("actKeltnerMin") if ov.get("actKeltnerMin") is not None else 0.04),
+            "actImpulseMin": float(ov.get("actImpulseMin") if ov.get("actImpulseMin") is not None else 0.03),
             "exitTacticOn": bool(ov.get("exitTacticOn", True)),
             "exitTacticBufferPct": float(ov.get("exitTacticBufferPct", 0.1) or 0.0),
+            "exitTacticMinGainPct": float(ov.get("exitTacticMinGainPct", 0.15) or 0.0),
             "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
             "dirRange": int(ov.get("indDirRange") or 10),
             "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
@@ -3236,7 +3256,8 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
-                if any(self.ind_settings.get(flag, True) for flag in ("typeTrend", "typeBreak", "typeMove", "typeMsi", "typeVwap", "typeRetest", "typeSqueeze")):
+                if any(self.ind_settings.get(flag, True) for flag in ("typeTrend", "typeBreak", "typeMove", "typeMsi", "typeVwap", "typeRetest", "typeSqueeze",
+                                                                 "typeSweep", "typeRsi2", "typeKeltner", "typeImpulse")):
                     config_frame = indication_frame.window(lo, i + 1)
                     for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
                         key = row.kind + "|" + row.mode
@@ -3740,6 +3761,7 @@ class SetBook:
         sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
         tactic_on = bool((self.ind_settings or {}).get("exitTacticOn", True))
         tactic_buf = float((self.ind_settings or {}).get("exitTacticBufferPct", 0.1) or 0.0)
+        tactic_gain = float((self.ind_settings or {}).get("exitTacticMinGainPct", 0.15) or 0.0)
         all_exits = getattr(kind_sigs, "exits", None) or {}
         for config_key, sigs in kind_sigs.items():
                 kind, _, config = config_key.partition("|")
@@ -3759,7 +3781,8 @@ class SetBook:
                             held = i - int(open_pos["i"])
                             why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
                             tactic = open_pos.get("tactic")
-                            if why is None and tactic and held >= 1 and exit_tactic_hit(tactic[0], side, float(bar[3]), tactic[1], tactic_buf):
+                            if why is None and tactic and held >= 1 and tactic_should_close(
+                                    tactic[0], side, float(bar[3]), tactic[1], entry, tactic_buf, tactic_gain):
                                 why, px = f"tactic-{tactic[0]}", float(bar[3])
                             if why is None and held >= time_bars:
                                 why, px = "time", float(bar[3])
@@ -6833,7 +6856,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
     # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "setMinPf": 1.0})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "indTypeSweep": False, "indTypeRsi2": False, "indTypeKeltner": False, "indTypeImpulse": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
@@ -6891,7 +6914,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeSignals": True, "indTypeState": False, "indTypeDirection": False,
         "indTypeMove": False, "indTypeActive": False, "indTypeCommon": False,
         "indTypeTrend": False, "indTypeBreak": False,
-        "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False,
+        "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "indTypeSweep": False, "indTypeRsi2": False, "indTypeKeltner": False, "indTypeImpulse": False,
     })
     g8.ingest_bars("ONLY-USDT", synth_trend(180, 40.0, 0.18, 0.04))
     g8.replay_all(now=1_700_001_200)

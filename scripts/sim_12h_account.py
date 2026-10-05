@@ -56,7 +56,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PULSE = os.path.join(ROOT, "server", "pulse")
 BAR = 60
 COST_REASONS = ("sl", "tp", "time", "scratch+")
-IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze")
+IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
 AXIS_WINDOWS = {"prev": 12, "last": 4, "cont": 8, "pause": 8}  # overlay axis*MaxWindow
 VST_CONTRACTS_URL = "https://open-api-vst.bingx.com/openApi/swap/v2/quote/contracts"
 

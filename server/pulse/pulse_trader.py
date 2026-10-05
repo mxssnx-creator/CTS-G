@@ -61,7 +61,7 @@ from position_cost import (
     exchange_order_cost_sample,
     row_fee_usdt,
 )
-from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit
+from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit, tactic_should_close
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
 from exit_engine import ExitBook, self_test as exit_self_test
@@ -7932,8 +7932,10 @@ class Pulse:
             if tactic and bool(self.indications.settings.get("exitTacticOn", True)):
                 hold_s = float(getattr(self.exits, "min_hold_s", 6) or 0)
                 buf = float(self.indications.settings.get("exitTacticBufferPct", 0.1) or 0.0)
-                if (now - pos.opened_at) >= max(hold_s, 60.0) and exit_tactic_hit(
-                        tactic, pos.side, px, float(getattr(pos, "exit_level", 0.0) or 0.0), buf):
+                gain = float(self.indications.settings.get("exitTacticMinGainPct", 0.15) or 0.0)
+                if (now - pos.opened_at) >= max(hold_s, 60.0) and tactic_should_close(
+                        tactic, pos.side, px, float(getattr(pos, "exit_level", 0.0) or 0.0),
+                        float(pos.entry or 0.0), buf, gain):
                     self.close_pos(pos, px, f"exit:rev:{tactic}")
                     continue
             sig = 0
@@ -13940,7 +13942,7 @@ class Pulse:
         Trend and Break. Missing flags or a real settings/report mismatch fail.
         """
         types = snapshot.get("types") or {}
-        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze")
+        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
         expected = {kind: bool(self.indications.settings.get("type" + kind.title(), True)) for kind in kinds}
         mismatches = [kind for kind in kinds if types.get(kind) is not expected[kind]]
         self.record_test("qa-ind-types", not mismatches, f"types={types} mismatch={mismatches}")

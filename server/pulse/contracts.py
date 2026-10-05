@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Mapping
 STAGES = ("Base", "Main", "Real", "Live", "Exchange")
 STAGE_ORDER = {name.lower(): index for index, name in enumerate(STAGES)}
 AXES = ("prev", "last", "cont", "pause")
-INDICATION_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze")
+INDICATION_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
 STRATEGIES = ("indications", "general", "block", "trailing", "dca", "exits")
 DIRECTIONS = ("LONG", "SHORT")
 

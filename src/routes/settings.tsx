@@ -2535,6 +2535,10 @@ function SettingsPage() {
                 <EnableSlider label="VWAP reversion" on={overlay.indTypeVwap !== false} hint="z-stretch from VWAP on a volume surge · exit: VWAP touch" onChange={(v) => patch("indTypeVwap", v)} />
                 <EnableSlider label="Break retest" on={overlay.indTypeRetest !== false} hint="broken level retested and held · exit: level fail" onChange={(v) => patch("indTypeRetest", v)} />
                 <EnableSlider label="Squeeze release" on={overlay.indTypeSqueeze !== false} hint="low band-width percentile, close outside band · exit: back through mid" onChange={(v) => patch("indTypeSqueeze", v)} />
+                <EnableSlider label="Liquidity sweep" on={overlay.indTypeSweep !== false} hint="wick through range high/low, close back inside · exit: beyond the wick" onChange={(v) => patch("indTypeSweep", v)} />
+                <EnableSlider label="RSI(2) pullback" on={overlay.indTypeRsi2 !== false} hint="RSI(2) extreme against the EMA trend · exit: EMA5 snap-back" onChange={(v) => patch("indTypeRsi2", v)} />
+                <EnableSlider label="Keltner fade" on={overlay.indTypeKeltner !== false} hint="wick outside Keltner band + StochRSI turn · exit: middle line" onChange={(v) => patch("indTypeKeltner", v)} />
+                <EnableSlider label="Impulse fade" on={overlay.indTypeImpulse !== false} hint="sigma impulse bar on a volume surge · exit: beyond the extreme" onChange={(v) => patch("indTypeImpulse", v)} />
                 <EnableSlider label="Exit tactics" on={overlay.exitTacticOn !== false} hint="per-indication price-only exit (target or invalidation)" onChange={(v) => patch("exitTacticOn", v)} />
                 <Num label="Exit tactic buffer" value={overlay.exitTacticBufferPct ?? 0.1} min={0} max={1} step={0.05} unit="%"
                   hint="close beyond the invalidation level by this much" onChange={(v) => patch("exitTacticBufferPct", v)} />
@@ -2557,6 +2561,22 @@ function SettingsPage() {
                 {(overlay.indRetestRanges ?? [12, 20, 32]).map((period, index, periods) => (
                   <Num key={`indRetestRanges-${index}`} label={`Retest range ${index + 1}`} value={period} min={8} max={55} step={1}
                     hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRetestRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indSweepRanges ?? [12, 20, 34]).map((period, index, periods) => (
+                  <Num key={`indSweepRanges-${index}`} label={`Sweep range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSweepRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indRsi2Ranges ?? [21, 34, 55]).map((period, index, periods) => (
+                  <Num key={`indRsi2Ranges-${index}`} label={`RSI(2) trend EMA ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRsi2Ranges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indKeltnerRanges ?? [14, 20, 30]).map((period, index, periods) => (
+                  <Num key={`indKeltnerRanges-${index}`} label={`Keltner period ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indKeltnerRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indImpulseRanges ?? [20, 30, 45]).map((period, index, periods) => (
+                  <Num key={`indImpulseRanges-${index}`} label={`Impulse sigma window ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indImpulseRanges", periods.map((n, i) => i === index ? value : n))} />
                 ))}
                 {(overlay.indSqueezeRanges ?? [16, 20, 26]).map((period, index, periods) => (
                   <Num key={`indSqueezeRanges-${index}`} label={`Squeeze period ${index + 1}`} value={period} min={8} max={55} step={1}

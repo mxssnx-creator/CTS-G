@@ -2260,7 +2260,7 @@ def _compact_stat_map(blob: Any, limit: int = 40) -> Dict[str, Any]:
     prefer = [
         "indications", "general", "block", "dca", "core", "trail",
         "state", "signals", "active", "direction", "move", "common", "trend", "break",
-        "msi", "vwap", "retest", "squeeze",
+        "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse",
         "block:active", "block:break", "block:common", "block:direction",
         "block:move", "block:signals", "block:state", "block:trend",
         "indications:trail",

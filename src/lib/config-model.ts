@@ -335,6 +335,14 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   indTypeVwap: boolean;
   indTypeRetest: boolean;
   indTypeSqueeze: boolean;
+  indTypeSweep: boolean;
+  indTypeRsi2: boolean;
+  indTypeKeltner: boolean;
+  indTypeImpulse: boolean;
+  indSweepRanges?: number[];
+  indRsi2Ranges?: number[];
+  indKeltnerRanges?: number[];
+  indImpulseRanges?: number[];
   indTrendRanges?: number[];
   indBreakRanges?: number[];
   indMsiRanges?: number[];
@@ -568,6 +576,14 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTypeVwap: true,
   indTypeRetest: true,
   indTypeSqueeze: true,
+  indTypeSweep: true,
+  indTypeRsi2: true,
+  indTypeKeltner: true,
+  indTypeImpulse: true,
+  indSweepRanges: [12, 20, 34],
+  indRsi2Ranges: [21, 34, 55],
+  indKeltnerRanges: [14, 20, 30],
+  indImpulseRanges: [20, 30, 45],
   indMsiRanges: [14, 21, 34],
   indVwapRanges: [20, 30, 40],
   indRetestRanges: [12, 20, 32],
@@ -759,6 +775,14 @@ export type CtsSettings = {
   indTypeVwap?: boolean;
   indTypeRetest?: boolean;
   indTypeSqueeze?: boolean;
+  indTypeSweep?: boolean;
+  indTypeRsi2?: boolean;
+  indTypeKeltner?: boolean;
+  indTypeImpulse?: boolean;
+  indSweepRanges?: number[];
+  indRsi2Ranges?: number[];
+  indKeltnerRanges?: number[];
+  indImpulseRanges?: number[];
   indTrendRanges?: number[];
   indBreakRanges?: number[];
   indMsiRanges?: number[];
@@ -1009,6 +1033,14 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTypeVwap: bool(cts.indTypeVwap, true),
     indTypeRetest: bool(cts.indTypeRetest, true),
     indTypeSqueeze: bool(cts.indTypeSqueeze, true),
+    indTypeSweep: bool(cts.indTypeSweep, true),
+    indTypeRsi2: bool(cts.indTypeRsi2, true),
+    indTypeKeltner: bool(cts.indTypeKeltner, true),
+    indTypeImpulse: bool(cts.indTypeImpulse, true),
+    indSweepRanges: Array.isArray(cts.indSweepRanges) ? cts.indSweepRanges : [12, 20, 34],
+    indRsi2Ranges: Array.isArray(cts.indRsi2Ranges) ? cts.indRsi2Ranges : [21, 34, 55],
+    indKeltnerRanges: Array.isArray(cts.indKeltnerRanges) ? cts.indKeltnerRanges : [14, 20, 30],
+    indImpulseRanges: Array.isArray(cts.indImpulseRanges) ? cts.indImpulseRanges : [20, 30, 45],
     indMsiRanges: Array.isArray(cts.indMsiRanges) ? cts.indMsiRanges : [14, 21, 34],
     indVwapRanges: Array.isArray(cts.indVwapRanges) ? cts.indVwapRanges : [20, 30, 40],
     indRetestRanges: Array.isArray(cts.indRetestRanges) ? cts.indRetestRanges : [12, 20, 32],

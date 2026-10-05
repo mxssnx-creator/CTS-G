@@ -31,7 +31,7 @@ def frame_from(closes, vols=None, spread=0.0005):
 class KindListTests(unittest.TestCase):
     def test_new_kinds_appended_after_break(self):
         self.assertEqual(INDICATION_KINDS[:8], ("state", "signals", "active", "direction", "move", "common", "trend", "break"))
-        self.assertEqual(INDICATION_KINDS[8:], ("msi", "vwap", "retest", "squeeze"))
+        self.assertEqual(INDICATION_KINDS[8:], ("msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse"))
         self.assertEqual(se.IND_KINDS, INDICATION_KINDS)
         self.assertEqual(set(ie.KIND_FLAGS), set(INDICATION_KINDS))
 
@@ -95,6 +95,55 @@ class EvaluatorTests(unittest.TestCase):
         self.assertEqual(len({r.entry_key for r in rows}), len(rows))
         off = [r for r in ie.evaluate_range_configs("T", closes, {**S, "typeSqueeze": False}) if r.kind == "squeeze"]
         self.assertEqual(off, [])
+
+
+class ResearchedKindTests(unittest.TestCase):
+    def noisy(self, n=50, base=100.0, amp=0.05):
+        return [base + amp * math.sin(i * 1.3) for i in range(n)]
+
+    def test_sweep_short_on_wick_through_high_closing_inside(self):
+        closes = self.noisy()
+        f = frame_from(closes)
+        hi = max(c.high for c in f.candles[-21:])
+        prev = closes[-1]
+        f.candles.append(ie.Candle(ts=60.0 * 51, open=prev, high=hi * 1.004, low=prev * 0.9995, close=prev * 0.9998, volume=300))
+        f.closes.append(prev * 0.9998)
+        ind = ie.evaluate_sweep("T", f.closes, {**S, "sweepRange": 20, "actSweepMin": 0.0}, f)
+        self.assertIsNotNone(ind)
+        self.assertEqual((ind.kind, ind.direction, ind.exit_tactic), ("sweep", "short", "sweep-fail"))
+        self.assertGreater(ind.exit_level, hi)
+
+    def test_rsi2_long_pullback_in_uptrend(self):
+        closes = [100 + i * 0.05 for i in range(50)] + [102.40, 102.33, 102.27]
+        ind = ie.evaluate_rsi2("T", closes, {**S, "rsi2Trend": 34, "actRsi2Min": 0.0}, frame_from(closes))
+        self.assertIsNotNone(ind)
+        self.assertEqual((ind.kind, ind.direction, ind.exit_tactic), ("rsi2", "long", "ema5-cross"))
+        self.assertGreater(ind.exit_level, closes[-1])
+
+    def test_impulse_fade_needs_volume_surge(self):
+        closes = self.noisy(45) + [101.5]
+        vols = [100.0] * 45 + [600.0]
+        ind = ie.evaluate_impulse("T", closes, {**S, "impulseRange": 30, "actImpulseMin": 0.0}, frame_from(closes, vols))
+        self.assertIsNotNone(ind)
+        self.assertEqual((ind.kind, ind.direction, ind.exit_tactic), ("impulse", "short", "impulse-fail"))
+        quiet = ie.evaluate_impulse("T", closes, {**S, "impulseRange": 30, "actImpulseMin": 0.0}, frame_from(closes))
+        self.assertIsNone(quiet)
+
+    def test_activity_specialization_blocks_quiet_markets(self):
+        closes = self.noisy(45) + [101.5]
+        vols = [100.0] * 45 + [600.0]
+        self.assertIsNone(ie.evaluate_impulse("T", closes, {**S, "impulseRange": 30, "actImpulseMin": 50.0}, frame_from(closes, vols)))
+
+    def test_keltner_returns_none_or_keltner_mid(self):
+        closes = self.noisy(60)
+        ind = ie.evaluate_keltner("T", closes, {**S, "keltnerPeriod": 20, "actKeltnerMin": 0.0}, frame_from(closes))
+        self.assertTrue(ind is None or ind.exit_tactic == "keltner-mid")
+
+    def test_target_tactics(self):
+        self.assertTrue(ie.exit_tactic_hit("ema5-cross", "LONG", 101.0, 100.5))
+        self.assertTrue(ie.exit_tactic_hit("keltner-mid", "SHORT", 99.0, 99.5))
+        self.assertTrue(ie.exit_tactic_hit("sweep-fail", "SHORT", 100.3, 100.0, 0.1))
+        self.assertFalse(ie.exit_tactic_hit("impulse-fail", "LONG", 99.95, 100.0, 0.1))
 
 
 class ExitTacticTests(unittest.TestCase):

@@ -309,7 +309,7 @@ class ReplayIndicationTests(unittest.TestCase):
 
     def test_prepared_frame_matches_public_vote_wrapper(self):
         settings = dict(DEFAULT_SETTINGS)
-        tags = {"sig", "ta", "dir", "move", "act", "common", "trend", "brk", "break", "msi", "vwap", "retest", "squeeze"}
+        tags = {"sig", "ta", "dir", "move", "act", "common", "trend", "brk", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse"}
         self.assertEqual(set(IND_TAG_KIND), tags)
 
         for fixture_name in ("rising", "falling", "reversal", "breakout", "flat", "invalid"):
