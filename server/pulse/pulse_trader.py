@@ -8473,7 +8473,7 @@ class Pulse:
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
         self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
-        self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.5)))
+        self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.0)))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
         if ov.get("leverage"):
