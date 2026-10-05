@@ -152,6 +152,8 @@
   "setHistTimeBars": 120,
   "setAutoDeact": true,
   "microEnabled": true,
+  "mainEvalPosCount": 12,
+  "realEvalPosCount": 3,
   "microMaxShare": 0.05,
   "microMinPf": 1.05,
   "setDeactN": 25,

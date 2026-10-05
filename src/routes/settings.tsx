@@ -1998,7 +1998,7 @@ function SettingsPage() {
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
+                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 12))} />
                 <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
                 <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 3))} />
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />

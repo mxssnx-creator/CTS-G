@@ -1193,7 +1193,9 @@ class SetBook:
         self.micro_enabled = True
         self.micro_max_share = 0.05
         self.real_min_pf = POSITIVE_PF
-        self.main_eval = 5
+        # Main stage: last-12 closes; Real: last-3 (6h sims, two windows:
+        # Main 12 / Real 3 beat 5/3, 8/3, 10/3, 12/5, 12/8 and 12/12).
+        self.main_eval = 12
         self.real_eval = 3
         self.max_dd_s = 57600.0
         self.auto_deact = True
@@ -1532,11 +1534,14 @@ class SetBook:
         self.micro_max_share = max(0.0, min(1.0, finite(ov.get("microMaxShare", 0.05), 0.05)))
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
-            self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
+            self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 12)))
         except Exception:
-            self.main_eval = 5
+            self.main_eval = 12
         try:
-            self.real_eval = max(3, min(75, int(ov.get("realEvalPosCount") or 3)))
+            raw_real = ov.get("realEvalPosCount")
+            raw_real = 3 if raw_real is None or raw_real == "" else int(raw_real)
+            # 0 = Real gate off (Real reuses the Main window); else last-N >= 3.
+            self.real_eval = 0 if raw_real <= 0 else max(3, min(75, raw_real))
         except Exception:
             self.real_eval = 3
         self.max_dd_s = max(600.0, min(960.0 * 60.0, float(ov.get("setMaxDdTimeS") or 57600)))
@@ -1765,8 +1770,10 @@ class SetBook:
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
         base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
-        main_n = max(3, int(getattr(self, "main_eval", 5) or 5))
-        real_n = max(3, int(getattr(self, "real_eval", 3) or 3))
+        main_n = max(3, int(getattr(self, "main_eval", 12) or 12))
+        real_eval = int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3)
+        # realEvalPosCount 0: no separate Real window; Real == Main.
+        real_n = main_n if real_eval <= 0 else max(3, real_eval)
         return base_n, main_n, real_n
 
     def _window_cost_pf(
@@ -6050,8 +6057,8 @@ class SetBook:
             "entryPolicyMinLiveSamples": int(self.entry_policy_min_live_samples),
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
-            "mainEval": int(getattr(self, "main_eval", 5) or 5),
-            "realEval": int(getattr(self, "real_eval", 3) or 3),
+            "mainEval": int(getattr(self, "main_eval", 12) or 12),
+            "realEval": int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3),
             "deactN": self.deact_n,
             "minPf": self.real_min_pf,
                 "enablePf": POSITIVE_PF if float(self.min_pf or 0) <= 0 else self.min_pf,
@@ -6337,7 +6344,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book._score_one(st)
     out.append(("set-losing-stage-overrides-hist", (not st.active) and not book._real_metrics_ok(st.by_side.get("LONG") or {}), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
     st.hist = [{"t": 1500 + i, "pnl": -0.02, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(15)]
-    st.live = [{"t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(10)]
+    st.live = [{"t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(12)]
     book._score_one(st)
     out.append(("set-live-wins-keep", st.active, f"{st.active} {st.deact_reason} live={st.live_eval}"))
     snap_ov = book.snapshot().get("liveOverview") or {}
@@ -6994,6 +7001,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "histEnabled": True, "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
         "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
         "setMinPf": 1.15, "setMinSamples": 8, "setMaxDdTimeS": 1800, "setStrictGate": True,
+        "mainEvalPosCount": 5,
     })
     out.append(("set-enable-need-8", e.eval_need() == 8, str(e.eval_need())))
     out.append(("set-enable-pf-115", abs(e.min_pf - 1.15) < 1e-9, str(e.min_pf)))

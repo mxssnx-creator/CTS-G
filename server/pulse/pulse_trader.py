@@ -13251,7 +13251,7 @@ class Pulse:
                 "addsAllow": bool(coord_last.get("addsAllow", True)),
                 "addReasons": list(coord_last.get("addReasons") or [])[:6],
                 "stages": stages,
-                "mainEval": int(getattr(self.coord, "main_eval", 5)),
+                "mainEval": int(getattr(self.coord, "main_eval", 12)),
                 "realEval": int(getattr(self.coord, "real_eval", 3)),
                 "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05)),
                 "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),

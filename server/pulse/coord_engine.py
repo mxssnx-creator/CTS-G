@@ -106,7 +106,7 @@ class Coordinator:
         self.outbreak = [3, 5, 10]
         self.prev_min_count = 5
         self.prev_window = 25
-        self.main_eval = 5
+        self.main_eval = 12
         self.real_eval = 3
         self.min_step = 7
         self.max_sl_ratio = 2.5
@@ -194,7 +194,7 @@ class Coordinator:
                 ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)))
         except Exception:
             self.prev_window = 25
-        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 5)
+        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 12)
         self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
