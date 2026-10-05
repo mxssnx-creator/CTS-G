@@ -1,11 +1,11 @@
 {
- "generatedAt": "2026-10-05T18:22:16Z",
+ "generatedAt": "2026-10-05T19:02:17Z",
  "window": {
   "simStartBar": 3660,
   "simEndBar": 4380,
   "startUtc": "2026-10-05 05:00",
   "endUtc": "2026-10-05 17:00",
-  "replayFromBar": 720
+  "replayFromBar": 2880
  },
  "symbols": [
   "1000PEPE-USDT",
@@ -64,7 +64,7 @@
  "contracts": {
   "vst": {
    "source": "https://open-api-vst.bingx.com/openApi/swap/v2/quote/contracts",
-   "fetchedAt": "2026-10-05T17:36:19Z",
+   "fetchedAt": "2026-10-05T18:58:08Z",
    "n": 48
   }
  },
@@ -85,7 +85,7 @@
   "costPct": 0.1,
   "timeBars": 45,
   "scratchS": 600.0,
-  "lookbackBars": 2880,
+  "lookbackBars": 720,
   "openAtEndReconstructed": 1041774,
   "axes": {
    "axisPrevEnabled": false,
@@ -94,7 +94,7 @@
    "axisPauseEnabled": false
   },
   "targetNotional": 2.15,
-  "volumeFactor": 1.0,
+  "volumeFactor": 0.05,
   "posCountsVolumeRatio": 0.05,
   "maxOpen": 100,
   "symbolCap": 50
@@ -113,7 +113,7 @@
   "ddtBlocked": 0,
   "ddtMaxS": 7020.0,
   "admitted": 1296414,
-  "replayClosesTotal": 136075845
+  "replayClosesTotal": 57901873
  },
  "tradeLevel": {
   "unfiltered (all Set trades entering in window)": {
@@ -194,8 +194,8 @@
      "ddIntrabarMaxPct": 100.0,
      "ddCumMaxPct": 100.0,
      "ddCumIntrabarMaxPct": 100.0,
-     "marginMax": 9.296355,
-     "marginMaxPct": 99.93,
+     "marginMax": 9.295302,
+     "marginMaxPct": 99.92,
      "closed": {
       "n": 679,
       "wins": 0,
@@ -204,8 +204,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5636,
-      "netUsdt": -6.058853,
-      "grossUsdt": -4.6644,
+      "netUsdt": -6.058395,
+      "grossUsdt": -4.6641,
       "engineDdtMaxS": 0.0
      },
      "cumulative": {
@@ -215,7 +215,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 57,
      "positions": {
@@ -255,8 +255,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.71,
-       "netUsdt": -0.030221,
-       "grossUsdt": -0.0198,
+       "netUsdt": -0.029764,
+       "grossUsdt": -0.0195,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
@@ -291,8 +291,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5636,
-       "netUsdt": -6.058853,
-       "grossUsdt": -4.6644,
+       "netUsdt": -6.058395,
+       "grossUsdt": -4.6641,
        "engineDdtMaxS": 0.0
       },
       "indications": {
@@ -318,8 +318,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.71,
-       "netUsdt": -0.030221,
-       "grossUsdt": -0.0198,
+       "netUsdt": -0.029764,
+       "grossUsdt": -0.0195,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -342,8 +342,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5636,
-       "netUsdt": -6.058853,
-       "grossUsdt": -4.6644,
+       "netUsdt": -6.058395,
+       "grossUsdt": -4.6641,
        "engineDdtMaxS": 0.0
       },
       "axis:cont": {
@@ -354,8 +354,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5598,
-       "netUsdt": -5.156898,
-       "grossUsdt": -3.9801,
+       "netUsdt": -5.15644,
+       "grossUsdt": -3.9798,
        "engineDdtMaxS": 0.0
       },
       "axis:pause": {
@@ -366,8 +366,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5598,
-       "netUsdt": -5.156898,
-       "grossUsdt": -3.9801,
+       "netUsdt": -5.15644,
+       "grossUsdt": -3.9798,
        "engineDdtMaxS": 0.0
       },
       "kind:state": {
@@ -417,7 +417,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 117,
      "positions": {
@@ -536,7 +536,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 177,
      "positions": {
@@ -655,7 +655,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 237,
      "positions": {
@@ -774,7 +774,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 297,
      "positions": {
@@ -893,7 +893,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 357,
      "positions": {
@@ -1012,7 +1012,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 417,
      "positions": {
@@ -1131,7 +1131,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 477,
      "positions": {
@@ -1250,7 +1250,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 537,
      "positions": {
@@ -1369,7 +1369,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 597,
      "positions": {
@@ -1488,7 +1488,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 657,
      "positions": {
@@ -1607,7 +1607,7 @@
       "costPf": 0.5636,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.058853
+      "netUsdt": -6.058395
      },
      "underwaterMaxMin": 717,
      "positions": {
@@ -1711,14 +1711,14 @@
     "equityEnd": 0.0,
     "pnl": -10.0,
     "returnPct": -100.0,
-    "realizedGross": -4.6644,
-    "fees": 1.394453,
+    "realizedGross": -4.6641,
+    "fees": 1.394295,
     "unrealizedEnd": 0.0,
     "ddMaxPct": 100.0,
     "ddIntrabarMaxPct": 100.0,
     "underwaterMaxMin": 717,
-    "marginMax": 9.296355,
-    "marginMaxPct": 99.93,
+    "marginMax": 9.295302,
+    "marginMaxPct": 99.92,
     "closed": {
      "n": 679,
      "wins": 0,
@@ -1727,8 +1727,8 @@
      "pfNormal": 0.0,
      "pfGross": 0.0,
      "costPf": 0.5636,
-     "netUsdt": -6.058853,
-     "grossUsdt": -4.6644,
+     "netUsdt": -6.058395,
+     "grossUsdt": -4.6641,
      "engineDdtMaxS": 0.0
     },
     "byStrategy": {
@@ -1740,8 +1740,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.71,
-      "netUsdt": -0.030221,
-      "grossUsdt": -0.0198,
+      "netUsdt": -0.029764,
+      "grossUsdt": -0.0195,
       "engineDdtMaxS": 0.0
      },
      "general/trailing": {
@@ -1776,8 +1776,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5636,
-      "netUsdt": -6.058853,
-      "grossUsdt": -4.6644,
+      "netUsdt": -6.058395,
+      "grossUsdt": -4.6641,
       "engineDdtMaxS": 0.0
      },
      "indications": {
@@ -1803,8 +1803,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.71,
-      "netUsdt": -0.030221,
-      "grossUsdt": -0.0198,
+      "netUsdt": -0.029764,
+      "grossUsdt": -0.0195,
       "engineDdtMaxS": 0.0
      },
      "axis:prev": {
@@ -1827,8 +1827,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5636,
-      "netUsdt": -6.058853,
-      "grossUsdt": -4.6644,
+      "netUsdt": -6.058395,
+      "grossUsdt": -4.6641,
       "engineDdtMaxS": 0.0
      },
      "axis:cont": {
@@ -1839,8 +1839,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5598,
-      "netUsdt": -5.156898,
-      "grossUsdt": -3.9801,
+      "netUsdt": -5.15644,
+      "grossUsdt": -3.9798,
       "engineDdtMaxS": 0.0
      },
      "axis:pause": {
@@ -1851,8 +1851,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5598,
-      "netUsdt": -5.156898,
-      "grossUsdt": -3.9801,
+      "netUsdt": -5.15644,
+      "grossUsdt": -3.9798,
       "engineDdtMaxS": 0.0
      },
      "kind:state": {
@@ -1913,11 +1913,11 @@
       "t": 3664,
       "utc": "05:04",
       "lots": 679,
-      "notional": 1394.4532,
+      "notional": 1394.2953,
       "equityAfter": 0.0
      }
     ],
-    "liquidationLoss": 3.941147,
+    "liquidationLoss": 3.941605,
     "haltedMinutes": 716,
     "candidates": {
      "setTradesInWindow": 29262722,
@@ -1932,9 +1932,9 @@
    "equityCurve": [
     [
      3660,
-     9.302773,
-     9.302773,
-     9.296355,
+     9.302852,
+     9.302852,
+     9.295302,
      679,
      3
     ],
@@ -3099,53 +3099,53 @@
      "ddIntrabarMaxPct": 100.0,
      "ddCumMaxPct": 100.0,
      "ddCumIntrabarMaxPct": 100.0,
-     "marginMax": 10.333144,
-     "marginMaxPct": 99.87,
+     "marginMax": 10.345138,
+     "marginMaxPct": 100.0,
      "closed": {
-      "n": 465,
+      "n": 466,
       "wins": 37,
-      "losses": 428,
-      "winRate": 7.96,
+      "losses": 429,
+      "winRate": 7.94,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "netUsdt": -6.446662,
-      "grossUsdt": -4.715723,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "netUsdt": -6.455742,
+      "grossUsdt": -4.723004,
       "engineDdtMaxS": 0.0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 58,
      "positions": {
-      "lotsOpened": 465,
+      "lotsOpened": 466,
       "groupsOpened": 15,
       "lotsOpenEnd": 0,
       "groupsOpenEnd": 0,
-      "maxLots": 428,
+      "maxLots": 429,
       "maxGroups": 14
      },
      "orders": {
-      "entry": 465,
+      "entry": 466,
       "blockAdd": 0,
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
        "sl": 130,
-       "liquidation": 335
+       "liquidation": 336
       },
       "controlPlace": 30,
       "controlCancelReplace": 6,
       "controlCancel": 30
      },
      "skipped": {
-      "noFreeMargin": 303643,
+      "noFreeMargin": 303642,
       "belowMinOrQty": 12,
       "liveNegativeDeact": 0,
       "addOnNoParent": 59,
@@ -3161,8 +3161,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5073,
-       "netUsdt": -0.031116,
-       "grossUsdt": -0.0248,
+       "netUsdt": -0.030338,
+       "grossUsdt": -0.02418,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
@@ -3178,15 +3178,15 @@
        "engineDdtMaxS": 0.0
       },
       "indications/normal": {
-       "n": 11,
+       "n": 12,
        "wins": 0,
-       "losses": 11,
+       "losses": 12,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.5644,
-       "netUsdt": -0.112872,
-       "grossUsdt": -0.084543,
+       "costPf": 0.5591,
+       "netUsdt": -0.12285,
+       "grossUsdt": -0.092525,
        "engineDdtMaxS": 0.0
       },
       "indications/trailing": {
@@ -3197,8 +3197,8 @@
        "pfNormal": 0.0746,
        "pfGross": 0.1646,
        "costPf": 0.6434,
-       "netUsdt": -3.764837,
-       "grossUsdt": -2.458301,
+       "netUsdt": -3.764717,
+       "grossUsdt": -2.45822,
        "engineDdtMaxS": 0.0
       },
       "block": {
@@ -3215,20 +3215,20 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.4035,
-       "netUsdt": -2.568953,
-       "grossUsdt": -2.17288,
+       "netUsdt": -2.568175,
+       "grossUsdt": -2.17226,
        "engineDdtMaxS": 0.0
       },
       "indications": {
-       "n": 330,
+       "n": 331,
        "wins": 37,
-       "losses": 293,
-       "winRate": 11.21,
-       "pfNormal": 0.0726,
-       "pfGross": 0.16,
-       "costPf": 0.6407,
-       "netUsdt": -3.877709,
-       "grossUsdt": -2.542843,
+       "losses": 294,
+       "winRate": 11.18,
+       "pfNormal": 0.0724,
+       "pfGross": 0.1596,
+       "costPf": 0.6403,
+       "netUsdt": -3.887567,
+       "grossUsdt": -2.550744,
        "engineDdtMaxS": 0.0
       },
       "trailing": {
@@ -3239,20 +3239,20 @@
        "pfNormal": 0.0459,
        "pfGross": 0.0951,
        "costPf": 0.5725,
-       "netUsdt": -6.302674,
-       "grossUsdt": -4.606381,
+       "netUsdt": -6.302554,
+       "grossUsdt": -4.6063,
        "engineDdtMaxS": 0.0
       },
       "normal": {
-       "n": 14,
+       "n": 15,
        "wins": 0,
-       "losses": 14,
+       "losses": 15,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.5522,
-       "netUsdt": -0.143988,
-       "grossUsdt": -0.109343,
+       "costPf": 0.5488,
+       "netUsdt": -0.153188,
+       "grossUsdt": -0.116705,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -3275,8 +3275,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.3995,
-       "netUsdt": -2.51839,
-       "grossUsdt": -2.13258,
+       "netUsdt": -2.517612,
+       "grossUsdt": -2.13196,
        "engineDdtMaxS": 0.0
       },
       "axis:cont": {
@@ -3287,8 +3287,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.3895,
-       "netUsdt": -2.412894,
-       "grossUsdt": -2.0468,
+       "netUsdt": -2.412117,
+       "grossUsdt": -2.04618,
        "engineDdtMaxS": 0.0
       },
       "axis:pause": {
@@ -3299,20 +3299,20 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.3895,
-       "netUsdt": -2.412894,
-       "grossUsdt": -2.0468,
+       "netUsdt": -2.412117,
+       "grossUsdt": -2.04618,
        "engineDdtMaxS": 0.0
       },
       "kind:state": {
-       "n": 330,
+       "n": 331,
        "wins": 37,
-       "losses": 293,
-       "winRate": 11.21,
-       "pfNormal": 0.0726,
-       "pfGross": 0.16,
-       "costPf": 0.6407,
-       "netUsdt": -3.877709,
-       "grossUsdt": -2.542843,
+       "losses": 294,
+       "winRate": 11.18,
+       "pfNormal": 0.0724,
+       "pfGross": 0.1596,
+       "costPf": 0.6403,
+       "netUsdt": -3.887567,
+       "grossUsdt": -2.550744,
        "engineDdtMaxS": 0.0
       },
       "kind:signals": {
@@ -3353,13 +3353,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 118,
      "positions": {
@@ -3472,13 +3472,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 178,
      "positions": {
@@ -3591,13 +3591,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 238,
      "positions": {
@@ -3710,13 +3710,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 298,
      "positions": {
@@ -3829,13 +3829,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 358,
      "positions": {
@@ -3948,13 +3948,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 418,
      "positions": {
@@ -4067,13 +4067,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 478,
      "positions": {
@@ -4186,13 +4186,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 538,
      "positions": {
@@ -4305,13 +4305,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 598,
      "positions": {
@@ -4424,13 +4424,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 658,
      "positions": {
@@ -4543,13 +4543,13 @@
       "n": 0
      },
      "cumulative": {
-      "n": 465,
+      "n": 466,
       "pfNormal": 0.0449,
-      "pfGross": 0.0931,
-      "costPf": 0.5719,
-      "winRate": 7.96,
+      "pfGross": 0.093,
+      "costPf": 0.5717,
+      "winRate": 7.94,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -6.446662
+      "netUsdt": -6.455742
      },
      "underwaterMaxMin": 718,
      "positions": {
@@ -4653,24 +4653,24 @@
     "equityEnd": 0.0,
     "pnl": -10.0,
     "returnPct": -100.0,
-    "realizedGross": -4.715723,
-    "fees": 1.730939,
+    "realizedGross": -4.723004,
+    "fees": 1.732738,
     "unrealizedEnd": 0.0,
     "ddMaxPct": 100.0,
     "ddIntrabarMaxPct": 100.0,
     "underwaterMaxMin": 718,
-    "marginMax": 10.333144,
-    "marginMaxPct": 99.87,
+    "marginMax": 10.345138,
+    "marginMaxPct": 100.0,
     "closed": {
-     "n": 465,
+     "n": 466,
      "wins": 37,
-     "losses": 428,
-     "winRate": 7.96,
+     "losses": 429,
+     "winRate": 7.94,
      "pfNormal": 0.0449,
-     "pfGross": 0.0931,
-     "costPf": 0.5719,
-     "netUsdt": -6.446662,
-     "grossUsdt": -4.715723,
+     "pfGross": 0.093,
+     "costPf": 0.5717,
+     "netUsdt": -6.455742,
+     "grossUsdt": -4.723004,
      "engineDdtMaxS": 0.0
     },
     "byStrategy": {
@@ -4682,8 +4682,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5073,
-      "netUsdt": -0.031116,
-      "grossUsdt": -0.0248,
+      "netUsdt": -0.030338,
+      "grossUsdt": -0.02418,
       "engineDdtMaxS": 0.0
      },
      "general/trailing": {
@@ -4699,15 +4699,15 @@
       "engineDdtMaxS": 0.0
      },
      "indications/normal": {
-      "n": 11,
+      "n": 12,
       "wins": 0,
-      "losses": 11,
+      "losses": 12,
       "winRate": 0.0,
       "pfNormal": 0.0,
       "pfGross": 0.0,
-      "costPf": 0.5644,
-      "netUsdt": -0.112872,
-      "grossUsdt": -0.084543,
+      "costPf": 0.5591,
+      "netUsdt": -0.12285,
+      "grossUsdt": -0.092525,
       "engineDdtMaxS": 0.0
      },
      "indications/trailing": {
@@ -4718,8 +4718,8 @@
       "pfNormal": 0.0746,
       "pfGross": 0.1646,
       "costPf": 0.6434,
-      "netUsdt": -3.764837,
-      "grossUsdt": -2.458301,
+      "netUsdt": -3.764717,
+      "grossUsdt": -2.45822,
       "engineDdtMaxS": 0.0
      },
      "block": {
@@ -4736,20 +4736,20 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4035,
-      "netUsdt": -2.568953,
-      "grossUsdt": -2.17288,
+      "netUsdt": -2.568175,
+      "grossUsdt": -2.17226,
       "engineDdtMaxS": 0.0
      },
      "indications": {
-      "n": 330,
+      "n": 331,
       "wins": 37,
-      "losses": 293,
-      "winRate": 11.21,
-      "pfNormal": 0.0726,
-      "pfGross": 0.16,
-      "costPf": 0.6407,
-      "netUsdt": -3.877709,
-      "grossUsdt": -2.542843,
+      "losses": 294,
+      "winRate": 11.18,
+      "pfNormal": 0.0724,
+      "pfGross": 0.1596,
+      "costPf": 0.6403,
+      "netUsdt": -3.887567,
+      "grossUsdt": -2.550744,
       "engineDdtMaxS": 0.0
      },
      "trailing": {
@@ -4760,20 +4760,20 @@
       "pfNormal": 0.0459,
       "pfGross": 0.0951,
       "costPf": 0.5725,
-      "netUsdt": -6.302674,
-      "grossUsdt": -4.606381,
+      "netUsdt": -6.302554,
+      "grossUsdt": -4.6063,
       "engineDdtMaxS": 0.0
      },
      "normal": {
-      "n": 14,
+      "n": 15,
       "wins": 0,
-      "losses": 14,
+      "losses": 15,
       "winRate": 0.0,
       "pfNormal": 0.0,
       "pfGross": 0.0,
-      "costPf": 0.5522,
-      "netUsdt": -0.143988,
-      "grossUsdt": -0.109343,
+      "costPf": 0.5488,
+      "netUsdt": -0.153188,
+      "grossUsdt": -0.116705,
       "engineDdtMaxS": 0.0
      },
      "axis:prev": {
@@ -4796,8 +4796,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.3995,
-      "netUsdt": -2.51839,
-      "grossUsdt": -2.13258,
+      "netUsdt": -2.517612,
+      "grossUsdt": -2.13196,
       "engineDdtMaxS": 0.0
      },
      "axis:cont": {
@@ -4808,8 +4808,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.3895,
-      "netUsdt": -2.412894,
-      "grossUsdt": -2.0468,
+      "netUsdt": -2.412117,
+      "grossUsdt": -2.04618,
       "engineDdtMaxS": 0.0
      },
      "axis:pause": {
@@ -4820,20 +4820,20 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.3895,
-      "netUsdt": -2.412894,
-      "grossUsdt": -2.0468,
+      "netUsdt": -2.412117,
+      "grossUsdt": -2.04618,
       "engineDdtMaxS": 0.0
      },
      "kind:state": {
-      "n": 330,
+      "n": 331,
       "wins": 37,
-      "losses": 293,
-      "winRate": 11.21,
-      "pfNormal": 0.0726,
-      "pfGross": 0.16,
-      "costPf": 0.6407,
-      "netUsdt": -3.877709,
-      "grossUsdt": -2.542843,
+      "losses": 294,
+      "winRate": 11.18,
+      "pfNormal": 0.0724,
+      "pfGross": 0.1596,
+      "costPf": 0.6403,
+      "netUsdt": -3.887567,
+      "grossUsdt": -2.550744,
       "engineDdtMaxS": 0.0
      },
      "kind:signals": {
@@ -4859,29 +4859,29 @@
      }
     },
     "positions": {
-     "lotsOpened": 465,
+     "lotsOpened": 466,
      "groupsOpened": 15,
      "lotsOpenEnd": 0,
      "groupsOpenEnd": 0,
-     "maxLots": 428,
+     "maxLots": 429,
      "maxGroups": 14
     },
     "orders": {
-     "entry": 465,
+     "entry": 466,
      "blockAdd": 0,
      "dcaEntry": 0,
      "dcaAdd": 0,
      "closeFills": {
       "sl": 130,
-      "liquidation": 335
+      "liquidation": 336
      },
      "controlPlace": 30,
      "controlCancelReplace": 6,
      "controlCancel": 30,
-     "total": 996
+     "total": 998
     },
     "skipped": {
-     "noFreeMargin": 303643,
+     "noFreeMargin": 303642,
      "belowMinOrQty": 12,
      "liveNegativeDeact": 0,
      "addOnNoParent": 59,
@@ -4891,12 +4891,12 @@
      {
       "t": 3665,
       "utc": "05:05",
-      "lots": 335,
-      "notional": 1342.8046,
+      "lots": 336,
+      "notional": 1344.6038,
       "equityAfter": 0.0
      }
     ],
-    "liquidationLoss": 3.553338,
+    "liquidationLoss": 3.544258,
     "haltedMinutes": 715,
     "candidates": {
      "setTradesInWindow": 29262722,
@@ -4911,9 +4911,9 @@
    "equityCurve": [
     [
      3660,
-     9.302502,
-     9.302502,
-     9.299976,
+     9.302581,
+     9.302581,
+     9.298923,
      384,
      10
     ],
@@ -6064,7 +6064,7 @@
    ],
    "title": "Unfiltered (all Sets, no stage gates)",
    "leverage": "exchange max (engine fallback 150)",
-   "markdown": "| h (UTC) | Equity | PnL | DD% max (intrabar) | cum DD% | Margin max $ (% eq) | PF normal h / cum | Cost PF h | DDT eng s / uw min | Gen N | Gen Tr | Ind N | Ind Tr | Block | DCA | Closed W/L (win%) | Lots opened / open / max | Groups max | Orders E/B/D/close/ctrl |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| 05:00 | 0.000 | -10.000 | 100.00 (100.00) | 100.00 | 10.33 (100%) | 0.04 / 0.04 | 0.572 | 0 / 58 | 0.00(3) | 0.00(132) | 0.00(11) | 0.07(319) | - | - | 37/428 (8.0) | 465 / 0 / 428 | 14 | 465/0/0/465/66 |\n| 06:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 118 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 07:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 178 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 08:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 238 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 09:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 298 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 10:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 358 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 11:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 418 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 12:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 478 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 13:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 538 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 14:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 598 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 15:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 658 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 16:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 718 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| **Total** | 0.000 | -10.000 | 100.00 (100.00) | 100.00 | 10.33 (100%) | 0.04 | 0.572 | 0 / 718 | 0.00(3) | 0.00(132) | 0.00(11) | 0.07(319) | - | - | 37/428 (8.0) | 465 / 0 / 428 | 14 | 465/0/0/465/66 |"
+   "markdown": "| h (UTC) | Equity | PnL | DD% max (intrabar) | cum DD% | Margin max $ (% eq) | PF normal h / cum | Cost PF h | DDT eng s / uw min | Gen N | Gen Tr | Ind N | Ind Tr | Block | DCA | Closed W/L (win%) | Lots opened / open / max | Groups max | Orders E/B/D/close/ctrl |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| 05:00 | 0.000 | -10.000 | 100.00 (100.00) | 100.00 | 10.35 (100%) | 0.04 / 0.04 | 0.572 | 0 / 58 | 0.00(3) | 0.00(132) | 0.00(12) | 0.07(319) | - | - | 37/429 (7.9) | 466 / 0 / 429 | 14 | 466/0/0/466/66 |\n| 06:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 118 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 07:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 178 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 08:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 238 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 09:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 298 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 10:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 358 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 11:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 418 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 12:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 478 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 13:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 538 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 14:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 598 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 15:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 658 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 16:00 | 0.000 | +0.000 | 100.00 (100.00) | 100.00 | 0.00 (0%) | - / 0.04 | - | - / 718 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| **Total** | 0.000 | -10.000 | 100.00 (100.00) | 100.00 | 10.35 (100%) | 0.04 | 0.572 | 0 / 718 | 0.00(3) | 0.00(132) | 0.00(12) | 0.07(319) | - | - | 37/429 (7.9) | 466 / 0 / 429 | 14 | 466/0/0/466/66 |"
   },
   {
    "run": "post-base-closeliq",
@@ -6078,8 +6078,8 @@
      "ddIntrabarMaxPct": 100.0,
      "ddCumMaxPct": 100.0,
      "ddCumIntrabarMaxPct": 100.0,
-     "marginMax": 9.296355,
-     "marginMaxPct": 99.93,
+     "marginMax": 9.295302,
+     "marginMaxPct": 99.92,
      "closed": {
       "n": 679,
       "wins": 0,
@@ -6088,8 +6088,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4166,
-      "netUsdt": -8.113013,
-      "grossUsdt": -6.71856,
+      "netUsdt": -8.112335,
+      "grossUsdt": -6.71804,
       "engineDdtMaxS": 0.0
      },
      "cumulative": {
@@ -6099,7 +6099,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 57,
      "positions": {
@@ -6139,8 +6139,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5707,
-       "netUsdt": -0.044741,
-       "grossUsdt": -0.03432,
+       "netUsdt": -0.044064,
+       "grossUsdt": -0.0338,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
@@ -6175,8 +6175,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.4166,
-       "netUsdt": -8.113013,
-       "grossUsdt": -6.71856,
+       "netUsdt": -8.112335,
+       "grossUsdt": -6.71804,
        "engineDdtMaxS": 0.0
       },
       "indications": {
@@ -6202,8 +6202,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.5707,
-       "netUsdt": -0.044741,
-       "grossUsdt": -0.03432,
+       "netUsdt": -0.044064,
+       "grossUsdt": -0.0338,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -6226,8 +6226,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.4166,
-       "netUsdt": -8.113013,
-       "grossUsdt": -6.71856,
+       "netUsdt": -8.112335,
+       "grossUsdt": -6.71804,
        "engineDdtMaxS": 0.0
       },
       "axis:cont": {
@@ -6238,8 +6238,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.4126,
-       "netUsdt": -6.892848,
-       "grossUsdt": -5.71605,
+       "netUsdt": -6.89217,
+       "grossUsdt": -5.71553,
        "engineDdtMaxS": 0.0
       },
       "axis:pause": {
@@ -6250,8 +6250,8 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.4126,
-       "netUsdt": -6.892848,
-       "grossUsdt": -5.71605,
+       "netUsdt": -6.89217,
+       "grossUsdt": -5.71553,
        "engineDdtMaxS": 0.0
       },
       "kind:state": {
@@ -6301,7 +6301,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 117,
      "positions": {
@@ -6420,7 +6420,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 177,
      "positions": {
@@ -6539,7 +6539,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 237,
      "positions": {
@@ -6658,7 +6658,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 297,
      "positions": {
@@ -6777,7 +6777,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 357,
      "positions": {
@@ -6896,7 +6896,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 417,
      "positions": {
@@ -7015,7 +7015,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 477,
      "positions": {
@@ -7134,7 +7134,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 537,
      "positions": {
@@ -7253,7 +7253,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 597,
      "positions": {
@@ -7372,7 +7372,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 657,
      "positions": {
@@ -7491,7 +7491,7 @@
       "costPf": 0.4166,
       "winRate": 0.0,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -8.113013
+      "netUsdt": -8.112335
      },
      "underwaterMaxMin": 717,
      "positions": {
@@ -7595,14 +7595,14 @@
     "equityEnd": 0.0,
     "pnl": -10.0,
     "returnPct": -100.0,
-    "realizedGross": -6.71856,
-    "fees": 1.394453,
+    "realizedGross": -6.71804,
+    "fees": 1.394295,
     "unrealizedEnd": 0.0,
     "ddMaxPct": 100.0,
     "ddIntrabarMaxPct": 100.0,
     "underwaterMaxMin": 717,
-    "marginMax": 9.296355,
-    "marginMaxPct": 99.93,
+    "marginMax": 9.295302,
+    "marginMaxPct": 99.92,
     "closed": {
      "n": 679,
      "wins": 0,
@@ -7611,8 +7611,8 @@
      "pfNormal": 0.0,
      "pfGross": 0.0,
      "costPf": 0.4166,
-     "netUsdt": -8.113013,
-     "grossUsdt": -6.71856,
+     "netUsdt": -8.112335,
+     "grossUsdt": -6.71804,
      "engineDdtMaxS": 0.0
     },
     "byStrategy": {
@@ -7624,8 +7624,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5707,
-      "netUsdt": -0.044741,
-      "grossUsdt": -0.03432,
+      "netUsdt": -0.044064,
+      "grossUsdt": -0.0338,
       "engineDdtMaxS": 0.0
      },
      "general/trailing": {
@@ -7660,8 +7660,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4166,
-      "netUsdt": -8.113013,
-      "grossUsdt": -6.71856,
+      "netUsdt": -8.112335,
+      "grossUsdt": -6.71804,
       "engineDdtMaxS": 0.0
      },
      "indications": {
@@ -7687,8 +7687,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.5707,
-      "netUsdt": -0.044741,
-      "grossUsdt": -0.03432,
+      "netUsdt": -0.044064,
+      "grossUsdt": -0.0338,
       "engineDdtMaxS": 0.0
      },
      "axis:prev": {
@@ -7711,8 +7711,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4166,
-      "netUsdt": -8.113013,
-      "grossUsdt": -6.71856,
+      "netUsdt": -8.112335,
+      "grossUsdt": -6.71804,
       "engineDdtMaxS": 0.0
      },
      "axis:cont": {
@@ -7723,8 +7723,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4126,
-      "netUsdt": -6.892848,
-      "grossUsdt": -5.71605,
+      "netUsdt": -6.89217,
+      "grossUsdt": -5.71553,
       "engineDdtMaxS": 0.0
      },
      "axis:pause": {
@@ -7735,8 +7735,8 @@
       "pfNormal": 0.0,
       "pfGross": 0.0,
       "costPf": 0.4126,
-      "netUsdt": -6.892848,
-      "grossUsdt": -5.71605,
+      "netUsdt": -6.89217,
+      "grossUsdt": -5.71553,
       "engineDdtMaxS": 0.0
      },
      "kind:state": {
@@ -7797,11 +7797,11 @@
       "t": 3665,
       "utc": "05:05",
       "lots": 679,
-      "notional": 1394.4532,
+      "notional": 1394.2953,
       "equityAfter": 0.0
      }
     ],
-    "liquidationLoss": 1.886987,
+    "liquidationLoss": 1.887665,
     "haltedMinutes": 715,
     "candidates": {
      "setTradesInWindow": 29262722,
@@ -7816,9 +7816,9 @@
    "equityCurve": [
     [
      3660,
-     9.302773,
-     9.302773,
-     9.296355,
+     9.302852,
+     9.302852,
+     9.295302,
      679,
      3
     ],
@@ -8977,34 +8977,34 @@
     {
      "hour": 0,
      "startUtc": "05:00",
-     "equityEnd": 8.351981,
-     "pnl": -1.648019,
-     "ddMaxPct": 25.701,
-     "ddIntrabarMaxPct": 28.362,
-     "ddCumMaxPct": 25.701,
-     "ddCumIntrabarMaxPct": 28.362,
-     "marginMax": 9.741176,
-     "marginMaxPct": 99.84,
+     "equityEnd": 8.351859,
+     "pnl": -1.648141,
+     "ddMaxPct": 25.694,
+     "ddIntrabarMaxPct": 28.353,
+     "ddCumMaxPct": 25.694,
+     "ddCumIntrabarMaxPct": 28.353,
+     "marginMax": 9.738018,
+     "marginMaxPct": 99.81,
      "closed": {
       "n": 237,
       "wins": 39,
       "losses": 198,
       "winRate": 16.46,
-      "pfNormal": 0.0363,
-      "pfGross": 0.1091,
+      "pfNormal": 0.0362,
+      "pfGross": 0.1089,
       "costPf": 0.6596,
-      "netUsdt": -1.648019,
-      "grossUsdt": -1.16096,
+      "netUsdt": -1.648141,
+      "grossUsdt": -1.16124,
       "engineDdtMaxS": 0.0
      },
      "cumulative": {
       "n": 237,
-      "pfNormal": 0.0363,
-      "pfGross": 0.1091,
+      "pfNormal": 0.0362,
+      "pfGross": 0.1089,
       "costPf": 0.6596,
       "winRate": 16.46,
       "engineDdtMaxS": 0.0,
-      "netUsdt": -1.648019
+      "netUsdt": -1.648141
      },
      "underwaterMaxMin": 57,
      "positions": {
@@ -9045,8 +9045,8 @@
        "pfNormal": 99.0,
        "pfGross": 99.0,
        "costPf": 1.0773,
-       "netUsdt": 0.008059,
-       "grossUsdt": 0.01848,
+       "netUsdt": 0.007936,
+       "grossUsdt": 0.0182,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
@@ -9078,11 +9078,11 @@
        "wins": 39,
        "losses": 198,
        "winRate": 16.46,
-       "pfNormal": 0.0363,
-       "pfGross": 0.1091,
+       "pfNormal": 0.0362,
+       "pfGross": 0.1089,
        "costPf": 0.6596,
-       "netUsdt": -1.648019,
-       "grossUsdt": -1.16096,
+       "netUsdt": -1.648141,
+       "grossUsdt": -1.16124,
        "engineDdtMaxS": 0.0
       },
       "indications": {
@@ -9108,8 +9108,8 @@
        "pfNormal": 99.0,
        "pfGross": 99.0,
        "costPf": 1.0773,
-       "netUsdt": 0.008059,
-       "grossUsdt": 0.01848,
+       "netUsdt": 0.007936,
+       "grossUsdt": 0.0182,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -9129,11 +9129,11 @@
        "wins": 39,
        "losses": 198,
        "winRate": 16.46,
-       "pfNormal": 0.0363,
-       "pfGross": 0.1091,
+       "pfNormal": 0.0362,
+       "pfGross": 0.1089,
        "costPf": 0.6596,
-       "netUsdt": -1.648019,
-       "grossUsdt": -1.16096,
+       "netUsdt": -1.648141,
+       "grossUsdt": -1.16124,
        "engineDdtMaxS": 0.0
       },
       "axis:cont": {
@@ -9141,11 +9141,11 @@
        "wins": 19,
        "losses": 126,
        "winRate": 13.1,
-       "pfNormal": 0.0279,
-       "pfGross": 0.0842,
+       "pfNormal": 0.0278,
+       "pfGross": 0.0839,
        "costPf": 0.6446,
-       "netUsdt": -1.053113,
-       "grossUsdt": -0.75496,
+       "netUsdt": -1.053235,
+       "grossUsdt": -0.75524,
        "engineDdtMaxS": 0.0
       },
       "axis:pause": {
@@ -9153,11 +9153,11 @@
        "wins": 19,
        "losses": 126,
        "winRate": 13.1,
-       "pfNormal": 0.0279,
-       "pfGross": 0.0842,
+       "pfNormal": 0.0278,
+       "pfGross": 0.0839,
        "costPf": 0.6446,
-       "netUsdt": -1.053113,
-       "grossUsdt": -0.75496,
+       "netUsdt": -1.053235,
+       "grossUsdt": -0.75524,
        "engineDdtMaxS": 0.0
       },
       "kind:state": {
@@ -9189,53 +9189,53 @@
     {
      "hour": 1,
      "startUtc": "06:00",
-     "equityEnd": 8.189681,
-     "pnl": -0.1623,
-     "ddMaxPct": 37.562,
-     "ddIntrabarMaxPct": 38.649,
-     "ddCumMaxPct": 37.562,
-     "ddCumIntrabarMaxPct": 38.649,
-     "marginMax": 11.33566,
-     "marginMaxPct": 99.73,
+     "equityEnd": 8.207224,
+     "pnl": -0.144635,
+     "ddMaxPct": 37.583,
+     "ddIntrabarMaxPct": 38.681,
+     "ddCumMaxPct": 37.583,
+     "ddCumIntrabarMaxPct": 38.681,
+     "marginMax": 11.371532,
+     "marginMaxPct": 99.91,
      "closed": {
-      "n": 440,
-      "wins": 292,
+      "n": 442,
+      "wins": 294,
       "losses": 148,
-      "winRate": 66.36,
-      "pfNormal": 0.959,
-      "pfGross": 1.3257,
-      "costPf": 1.1183,
-      "netUsdt": -0.148992,
-      "grossUsdt": 1.008411,
+      "winRate": 66.52,
+      "pfNormal": 0.9639,
+      "pfGross": 1.3327,
+      "costPf": 1.1198,
+      "netUsdt": -0.131327,
+      "grossUsdt": 1.029898,
       "engineDdtMaxS": 2340.0
      },
      "cumulative": {
-      "n": 677,
-      "pfNormal": 0.6639,
-      "pfGross": 0.9653,
-      "costPf": 0.9577,
-      "winRate": 48.89,
+      "n": 679,
+      "pfNormal": 0.6671,
+      "pfGross": 0.9701,
+      "costPf": 0.9592,
+      "winRate": 49.04,
       "engineDdtMaxS": 3720.0,
-      "netUsdt": -1.797011
+      "netUsdt": -1.779468
      },
      "underwaterMaxMin": 67,
      "positions": {
-      "lotsOpened": 446,
+      "lotsOpened": 448,
       "groupsOpened": 21,
       "lotsOpenEnd": 6,
       "groupsOpenEnd": 1,
-      "maxLots": 266,
-      "maxGroups": 16
+      "maxLots": 267,
+      "maxGroups": 17
      },
      "orders": {
-      "entry": 446,
+      "entry": 448,
       "blockAdd": 0,
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
        "sl": 227,
-       "tp": 81,
-       "scratch+": 107,
+       "tp": 82,
+       "scratch+": 108,
        "time": 25
       },
       "controlPlace": 42,
@@ -9243,8 +9243,8 @@
       "controlCancel": 40
      },
      "skipped": {
-      "noFreeMargin": 215490,
-      "belowMinOrQty": 4290,
+      "noFreeMargin": 219754,
+      "belowMinOrQty": 24,
       "liveNegativeDeact": 0,
       "addOnNoParent": 29,
       "equityHalt": 0
@@ -9252,27 +9252,27 @@
      "liquidations": 0,
      "byStrategy": {
       "general/normal": {
-       "n": 36,
-       "wins": 30,
+       "n": 37,
+       "wins": 31,
        "losses": 6,
-       "winRate": 83.33,
-       "pfNormal": 1.4579,
-       "pfGross": 2.09,
-       "costPf": 1.1332,
-       "netUsdt": 0.07729,
-       "grossUsdt": 0.166407,
+       "winRate": 83.78,
+       "pfNormal": 1.4706,
+       "pfGross": 2.1169,
+       "costPf": 1.1326,
+       "netUsdt": 0.079435,
+       "grossUsdt": 0.170516,
        "engineDdtMaxS": 2340.0
       },
       "general/trailing": {
-       "n": 404,
-       "wins": 262,
+       "n": 405,
+       "wins": 263,
        "losses": 142,
-       "winRate": 64.85,
-       "pfNormal": 0.9347,
-       "pfGross": 1.2861,
-       "costPf": 1.117,
-       "netUsdt": -0.226282,
-       "grossUsdt": 0.842004,
+       "winRate": 64.94,
+       "pfNormal": 0.9392,
+       "pfGross": 1.292,
+       "costPf": 1.1187,
+       "netUsdt": -0.210762,
+       "grossUsdt": 0.859382,
        "engineDdtMaxS": 2340.0
       },
       "indications/normal": {
@@ -9288,90 +9288,90 @@
        "n": 0
       },
       "general": {
-       "n": 440,
-       "wins": 292,
+       "n": 442,
+       "wins": 294,
        "losses": 148,
-       "winRate": 66.36,
-       "pfNormal": 0.959,
-       "pfGross": 1.3257,
-       "costPf": 1.1183,
-       "netUsdt": -0.148992,
-       "grossUsdt": 1.008411,
+       "winRate": 66.52,
+       "pfNormal": 0.9639,
+       "pfGross": 1.3327,
+       "costPf": 1.1198,
+       "netUsdt": -0.131327,
+       "grossUsdt": 1.029898,
        "engineDdtMaxS": 2340.0
       },
       "indications": {
        "n": 0
       },
       "trailing": {
-       "n": 404,
-       "wins": 262,
+       "n": 405,
+       "wins": 263,
        "losses": 142,
-       "winRate": 64.85,
-       "pfNormal": 0.9347,
-       "pfGross": 1.2861,
-       "costPf": 1.117,
-       "netUsdt": -0.226282,
-       "grossUsdt": 0.842004,
+       "winRate": 64.94,
+       "pfNormal": 0.9392,
+       "pfGross": 1.292,
+       "costPf": 1.1187,
+       "netUsdt": -0.210762,
+       "grossUsdt": 0.859382,
        "engineDdtMaxS": 2340.0
       },
       "normal": {
-       "n": 36,
-       "wins": 30,
+       "n": 37,
+       "wins": 31,
        "losses": 6,
-       "winRate": 83.33,
-       "pfNormal": 1.4579,
-       "pfGross": 2.09,
-       "costPf": 1.1332,
-       "netUsdt": 0.07729,
-       "grossUsdt": 0.166407,
+       "winRate": 83.78,
+       "pfNormal": 1.4706,
+       "pfGross": 2.1169,
+       "costPf": 1.1326,
+       "netUsdt": 0.079435,
+       "grossUsdt": 0.170516,
        "engineDdtMaxS": 2340.0
       },
       "axis:prev": {
-       "n": 75,
-       "wins": 5,
+       "n": 76,
+       "wins": 6,
        "losses": 70,
-       "winRate": 6.67,
-       "pfNormal": 0.011,
-       "pfGross": 0.0205,
-       "costPf": 0.516,
-       "netUsdt": -1.831203,
-       "grossUsdt": -1.473075,
+       "winRate": 7.89,
+       "pfNormal": 0.0132,
+       "pfGross": 0.0246,
+       "costPf": 0.5249,
+       "netUsdt": -1.827128,
+       "grossUsdt": -1.466915,
        "engineDdtMaxS": 420.0
       },
       "axis:last": {
-       "n": 440,
-       "wins": 292,
+       "n": 442,
+       "wins": 294,
        "losses": 148,
-       "winRate": 66.36,
-       "pfNormal": 0.959,
-       "pfGross": 1.3257,
-       "costPf": 1.1183,
-       "netUsdt": -0.148992,
-       "grossUsdt": 1.008411,
+       "winRate": 66.52,
+       "pfNormal": 0.9639,
+       "pfGross": 1.3327,
+       "costPf": 1.1198,
+       "netUsdt": -0.131327,
+       "grossUsdt": 1.029898,
        "engineDdtMaxS": 2340.0
       },
       "axis:cont": {
-       "n": 439,
-       "wins": 292,
+       "n": 441,
+       "wins": 294,
        "losses": 147,
-       "winRate": 66.51,
-       "pfNormal": 0.9624,
-       "pfGross": 1.3302,
-       "costPf": 1.1198,
-       "netUsdt": -0.136249,
-       "grossUsdt": 1.018794,
+       "winRate": 66.67,
+       "pfNormal": 0.9673,
+       "pfGross": 1.3372,
+       "costPf": 1.1213,
+       "netUsdt": -0.118585,
+       "grossUsdt": 1.040281,
        "engineDdtMaxS": 2340.0
       },
       "axis:pause": {
-       "n": 439,
-       "wins": 292,
+       "n": 441,
+       "wins": 294,
        "losses": 147,
-       "winRate": 66.51,
-       "pfNormal": 0.9624,
-       "pfGross": 1.3302,
-       "costPf": 1.1198,
-       "netUsdt": -0.136249,
-       "grossUsdt": 1.018794,
+       "winRate": 66.67,
+       "pfNormal": 0.9673,
+       "pfGross": 1.3372,
+       "costPf": 1.1213,
+       "netUsdt": -0.118585,
+       "grossUsdt": 1.040281,
        "engineDdtMaxS": 2340.0
       },
       "kind:state": {
@@ -9403,61 +9403,61 @@
     {
      "hour": 2,
      "startUtc": "07:00",
-     "equityEnd": 7.555413,
-     "pnl": -0.634268,
-     "ddMaxPct": 36.455,
-     "ddIntrabarMaxPct": 36.853,
-     "ddCumMaxPct": 37.562,
-     "ddCumIntrabarMaxPct": 38.649,
-     "marginMax": 8.246322,
-     "marginMaxPct": 99.55,
+     "equityEnd": 7.563302,
+     "pnl": -0.643921,
+     "ddMaxPct": 36.445,
+     "ddIntrabarMaxPct": 36.845,
+     "ddCumMaxPct": 37.583,
+     "ddCumIntrabarMaxPct": 38.681,
+     "marginMax": 8.298569,
+     "marginMaxPct": 99.91,
      "closed": {
-      "n": 152,
+      "n": 153,
       "wins": 6,
-      "losses": 146,
-      "winRate": 3.95,
-      "pfNormal": 0.0114,
-      "pfGross": 0.1111,
-      "costPf": 0.8534,
-      "netUsdt": -0.606931,
-      "grossUsdt": -0.19208,
+      "losses": 147,
+      "winRate": 3.92,
+      "pfNormal": 0.0113,
+      "pfGross": 0.1103,
+      "costPf": 0.8533,
+      "netUsdt": -0.611136,
+      "grossUsdt": -0.19356,
       "engineDdtMaxS": 0.0
      },
      "cumulative": {
-      "n": 829,
-      "pfNormal": 0.5966,
-      "pfGross": 0.9253,
-      "costPf": 0.9386,
-      "winRate": 40.65,
+      "n": 832,
+      "pfNormal": 0.5992,
+      "pfGross": 0.9296,
+      "costPf": 0.9397,
+      "winRate": 40.75,
       "engineDdtMaxS": 3720.0,
-      "netUsdt": -2.403942
+      "netUsdt": -2.390605
      },
      "underwaterMaxMin": 107,
      "positions": {
-      "lotsOpened": 153,
-      "groupsOpened": 5,
+      "lotsOpened": 154,
+      "groupsOpened": 4,
       "lotsOpenEnd": 7,
-      "groupsOpenEnd": 4,
-      "maxLots": 153,
-      "maxGroups": 5
+      "groupsOpenEnd": 3,
+      "maxLots": 154,
+      "maxGroups": 4
      },
      "orders": {
-      "entry": 153,
+      "entry": 154,
       "blockAdd": 0,
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
-       "time": 152
+       "time": 153
       },
-      "controlPlace": 10,
+      "controlPlace": 8,
       "controlCancelReplace": 0,
       "controlCancel": 4
      },
      "skipped": {
-      "noFreeMargin": 134114,
-      "belowMinOrQty": 4,
+      "noFreeMargin": 134113,
+      "belowMinOrQty": 3,
       "liveNegativeDeact": 0,
-      "addOnNoParent": 82,
+      "addOnNoParent": 83,
       "equityHalt": 0
      },
      "liquidations": 0,
@@ -9475,15 +9475,15 @@
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
-       "n": 147,
+       "n": 148,
        "wins": 6,
-       "losses": 141,
-       "winRate": 4.08,
-       "pfNormal": 0.0118,
-       "pfGross": 0.115,
-       "costPf": 0.8537,
-       "netUsdt": -0.585907,
-       "grossUsdt": -0.18468,
+       "losses": 142,
+       "winRate": 4.05,
+       "pfNormal": 0.0117,
+       "pfGross": 0.1142,
+       "costPf": 0.8536,
+       "netUsdt": -0.590112,
+       "grossUsdt": -0.18616,
        "engineDdtMaxS": 0.0
       },
       "indications/normal": {
@@ -9499,30 +9499,30 @@
        "n": 0
       },
       "general": {
-       "n": 152,
+       "n": 153,
        "wins": 6,
-       "losses": 146,
-       "winRate": 3.95,
-       "pfNormal": 0.0114,
-       "pfGross": 0.1111,
-       "costPf": 0.8534,
-       "netUsdt": -0.606931,
-       "grossUsdt": -0.19208,
+       "losses": 147,
+       "winRate": 3.92,
+       "pfNormal": 0.0113,
+       "pfGross": 0.1103,
+       "costPf": 0.8533,
+       "netUsdt": -0.611136,
+       "grossUsdt": -0.19356,
        "engineDdtMaxS": 0.0
       },
       "indications": {
        "n": 0
       },
       "trailing": {
-       "n": 147,
+       "n": 148,
        "wins": 6,
-       "losses": 141,
-       "winRate": 4.08,
-       "pfNormal": 0.0118,
-       "pfGross": 0.115,
-       "costPf": 0.8537,
-       "netUsdt": -0.585907,
-       "grossUsdt": -0.18468,
+       "losses": 142,
+       "winRate": 4.05,
+       "pfNormal": 0.0117,
+       "pfGross": 0.1142,
+       "costPf": 0.8536,
+       "netUsdt": -0.590112,
+       "grossUsdt": -0.18616,
        "engineDdtMaxS": 0.0
       },
       "normal": {
@@ -9550,39 +9550,39 @@
        "engineDdtMaxS": 0.0
       },
       "axis:last": {
-       "n": 152,
+       "n": 153,
        "wins": 6,
-       "losses": 146,
-       "winRate": 3.95,
-       "pfNormal": 0.0114,
-       "pfGross": 0.1111,
-       "costPf": 0.8534,
-       "netUsdt": -0.606931,
-       "grossUsdt": -0.19208,
+       "losses": 147,
+       "winRate": 3.92,
+       "pfNormal": 0.0113,
+       "pfGross": 0.1103,
+       "costPf": 0.8533,
+       "netUsdt": -0.611136,
+       "grossUsdt": -0.19356,
        "engineDdtMaxS": 0.0
       },
       "axis:cont": {
-       "n": 152,
+       "n": 153,
        "wins": 6,
-       "losses": 146,
-       "winRate": 3.95,
-       "pfNormal": 0.0114,
-       "pfGross": 0.1111,
-       "costPf": 0.8534,
-       "netUsdt": -0.606931,
-       "grossUsdt": -0.19208,
+       "losses": 147,
+       "winRate": 3.92,
+       "pfNormal": 0.0113,
+       "pfGross": 0.1103,
+       "costPf": 0.8533,
+       "netUsdt": -0.611136,
+       "grossUsdt": -0.19356,
        "engineDdtMaxS": 0.0
       },
       "axis:pause": {
-       "n": 152,
+       "n": 153,
        "wins": 6,
-       "losses": 146,
-       "winRate": 3.95,
-       "pfNormal": 0.0114,
-       "pfGross": 0.1111,
-       "costPf": 0.8534,
-       "netUsdt": -0.606931,
-       "grossUsdt": -0.19208,
+       "losses": 147,
+       "winRate": 3.92,
+       "pfNormal": 0.0113,
+       "pfGross": 0.1103,
+       "costPf": 0.8533,
+       "netUsdt": -0.611136,
+       "grossUsdt": -0.19356,
        "engineDdtMaxS": 0.0
       },
       "kind:state": {
@@ -9614,60 +9614,60 @@
     {
      "hour": 3,
      "startUtc": "08:00",
-     "equityEnd": 5.364366,
-     "pnl": -2.191047,
-     "ddMaxPct": 52.931,
-     "ddIntrabarMaxPct": 57.324,
-     "ddCumMaxPct": 52.931,
-     "ddCumIntrabarMaxPct": 57.324,
-     "marginMax": 8.069117,
-     "marginMaxPct": 99.68,
+     "equityEnd": 5.365978,
+     "pnl": -2.197324,
+     "ddMaxPct": 52.979,
+     "ddIntrabarMaxPct": 57.341,
+     "ddCumMaxPct": 52.979,
+     "ddCumIntrabarMaxPct": 57.341,
+     "marginMax": 8.025072,
+     "marginMaxPct": 99.32,
      "closed": {
       "n": 23,
-      "wins": 2,
-      "losses": 21,
-      "winRate": 8.7,
-      "pfNormal": 0.0356,
-      "pfGross": 0.0594,
-      "costPf": 0.4259,
-      "netUsdt": -0.269153,
-      "grossUsdt": -0.222373,
+      "wins": 1,
+      "losses": 22,
+      "winRate": 4.35,
+      "pfNormal": 0.0108,
+      "pfGross": 0.0208,
+      "costPf": 0.3732,
+      "netUsdt": -0.2935,
+      "grossUsdt": -0.246833,
       "engineDdtMaxS": 420.0
      },
      "cumulative": {
-      "n": 852,
-      "pfNormal": 0.5715,
-      "pfGross": 0.8831,
-      "costPf": 0.9248,
-      "winRate": 39.79,
+      "n": 855,
+      "pfNormal": 0.5713,
+      "pfGross": 0.8826,
+      "costPf": 0.9245,
+      "winRate": 39.77,
       "engineDdtMaxS": 11580.0,
-      "netUsdt": -2.673095
+      "netUsdt": -2.684105
      },
      "underwaterMaxMin": 167,
      "positions": {
-      "lotsOpened": 193,
+      "lotsOpened": 192,
       "groupsOpened": 2,
-      "lotsOpenEnd": 177,
+      "lotsOpenEnd": 176,
       "groupsOpenEnd": 2,
-      "maxLots": 193,
-      "maxGroups": 4
+      "maxLots": 192,
+      "maxGroups": 3
      },
      "orders": {
-      "entry": 193,
+      "entry": 192,
       "blockAdd": 0,
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
-       "scratch+": 2,
-       "time": 5,
+       "scratch+": 1,
+       "time": 6,
        "sl": 16
       },
       "controlPlace": 4,
       "controlCancelReplace": 4,
-      "controlCancel": 8
+      "controlCancel": 6
      },
      "skipped": {
-      "noFreeMargin": 70286,
+      "noFreeMargin": 70287,
       "belowMinOrQty": 2,
       "liveNegativeDeact": 0,
       "addOnNoParent": 67,
@@ -9676,27 +9676,27 @@
      "liquidations": 0,
      "byStrategy": {
       "general/normal": {
-       "n": 5,
-       "wins": 2,
+       "n": 4,
+       "wins": 1,
        "losses": 3,
-       "winRate": 40.0,
-       "pfNormal": 0.1898,
-       "pfGross": 0.3047,
-       "costPf": 0.5874,
-       "netUsdt": -0.042338,
-       "grossUsdt": -0.032066,
+       "winRate": 25.0,
+       "pfNormal": 0.0616,
+       "pfGross": 0.1141,
+       "costPf": 0.4041,
+       "netUsdt": -0.048925,
+       "grossUsdt": -0.040758,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
-       "n": 18,
+       "n": 19,
        "wins": 0,
-       "losses": 18,
+       "losses": 19,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.381,
-       "netUsdt": -0.226815,
-       "grossUsdt": -0.190306,
+       "costPf": 0.3667,
+       "netUsdt": -0.244576,
+       "grossUsdt": -0.206074,
        "engineDdtMaxS": 420.0
       },
       "indications/normal": {
@@ -9713,41 +9713,41 @@
       },
       "general": {
        "n": 23,
-       "wins": 2,
-       "losses": 21,
-       "winRate": 8.7,
-       "pfNormal": 0.0356,
-       "pfGross": 0.0594,
-       "costPf": 0.4259,
-       "netUsdt": -0.269153,
-       "grossUsdt": -0.222373,
+       "wins": 1,
+       "losses": 22,
+       "winRate": 4.35,
+       "pfNormal": 0.0108,
+       "pfGross": 0.0208,
+       "costPf": 0.3732,
+       "netUsdt": -0.2935,
+       "grossUsdt": -0.246833,
        "engineDdtMaxS": 420.0
       },
       "indications": {
        "n": 0
       },
       "trailing": {
-       "n": 18,
+       "n": 19,
        "wins": 0,
-       "losses": 18,
+       "losses": 19,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.381,
-       "netUsdt": -0.226815,
-       "grossUsdt": -0.190306,
+       "costPf": 0.3667,
+       "netUsdt": -0.244576,
+       "grossUsdt": -0.206074,
        "engineDdtMaxS": 420.0
       },
       "normal": {
-       "n": 5,
-       "wins": 2,
+       "n": 4,
+       "wins": 1,
        "losses": 3,
-       "winRate": 40.0,
-       "pfNormal": 0.1898,
-       "pfGross": 0.3047,
-       "costPf": 0.5874,
-       "netUsdt": -0.042338,
-       "grossUsdt": -0.032066,
+       "winRate": 25.0,
+       "pfNormal": 0.0616,
+       "pfGross": 0.1141,
+       "costPf": 0.4041,
+       "netUsdt": -0.048925,
+       "grossUsdt": -0.040758,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -9764,38 +9764,38 @@
       },
       "axis:last": {
        "n": 23,
-       "wins": 2,
-       "losses": 21,
-       "winRate": 8.7,
-       "pfNormal": 0.0356,
-       "pfGross": 0.0594,
-       "costPf": 0.4259,
-       "netUsdt": -0.269153,
-       "grossUsdt": -0.222373,
+       "wins": 1,
+       "losses": 22,
+       "winRate": 4.35,
+       "pfNormal": 0.0108,
+       "pfGross": 0.0208,
+       "costPf": 0.3732,
+       "netUsdt": -0.2935,
+       "grossUsdt": -0.246833,
        "engineDdtMaxS": 420.0
       },
       "axis:cont": {
        "n": 23,
-       "wins": 2,
-       "losses": 21,
-       "winRate": 8.7,
-       "pfNormal": 0.0356,
-       "pfGross": 0.0594,
-       "costPf": 0.4259,
-       "netUsdt": -0.269153,
-       "grossUsdt": -0.222373,
+       "wins": 1,
+       "losses": 22,
+       "winRate": 4.35,
+       "pfNormal": 0.0108,
+       "pfGross": 0.0208,
+       "costPf": 0.3732,
+       "netUsdt": -0.2935,
+       "grossUsdt": -0.246833,
        "engineDdtMaxS": 420.0
       },
       "axis:pause": {
        "n": 23,
-       "wins": 2,
-       "losses": 21,
-       "winRate": 8.7,
-       "pfNormal": 0.0356,
-       "pfGross": 0.0594,
-       "costPf": 0.4259,
-       "netUsdt": -0.269153,
-       "grossUsdt": -0.222373,
+       "wins": 1,
+       "losses": 22,
+       "winRate": 4.35,
+       "pfNormal": 0.0108,
+       "pfGross": 0.0208,
+       "costPf": 0.3732,
+       "netUsdt": -0.2935,
+       "grossUsdt": -0.246833,
        "engineDdtMaxS": 420.0
       },
       "kind:state": {
@@ -9827,34 +9827,34 @@
     {
      "hour": 4,
      "startUtc": "09:00",
-     "equityEnd": 4.481038,
-     "pnl": -0.883329,
-     "ddMaxPct": 61.016,
-     "ddIntrabarMaxPct": 63.23,
-     "ddCumMaxPct": 61.016,
-     "ddCumIntrabarMaxPct": 63.23,
-     "marginMax": 7.423126,
-     "marginMaxPct": 142.0,
+     "equityEnd": 4.487682,
+     "pnl": -0.878295,
+     "ddMaxPct": 61.009,
+     "ddIntrabarMaxPct": 63.197,
+     "ddCumMaxPct": 61.009,
+     "ddCumIntrabarMaxPct": 63.197,
+     "marginMax": 7.379082,
+     "marginMaxPct": 141.09,
      "closed": {
-      "n": 177,
+      "n": 176,
       "wins": 0,
-      "losses": 177,
+      "losses": 176,
       "winRate": 0.0,
       "pfNormal": 0.0,
       "pfGross": 0.0,
-      "costPf": 0.213,
-      "netUsdt": -2.845867,
-      "grossUsdt": -2.474711,
+      "costPf": 0.2131,
+      "netUsdt": -2.828212,
+      "grossUsdt": -2.459258,
       "engineDdtMaxS": 1260.0
      },
      "cumulative": {
-      "n": 1029,
-      "pfNormal": 0.3925,
-      "pfGross": 0.5848,
-      "costPf": 0.8023,
-      "winRate": 32.94,
+      "n": 1031,
+      "pfNormal": 0.3935,
+      "pfGross": 0.5864,
+      "costPf": 0.803,
+      "winRate": 32.98,
       "engineDdtMaxS": 13500.0,
-      "netUsdt": -5.518962
+      "netUsdt": -5.512318
      },
      "underwaterMaxMin": 227,
      "positions": {
@@ -9862,7 +9862,7 @@
       "groupsOpened": 0,
       "lotsOpenEnd": 0,
       "groupsOpenEnd": 0,
-      "maxLots": 177,
+      "maxLots": 176,
       "maxGroups": 2
      },
      "orders": {
@@ -9871,7 +9871,7 @@
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
-       "sl": 154,
+       "sl": 153,
        "time": 23
       },
       "controlPlace": 0,
@@ -9895,20 +9895,20 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.2462,
-       "netUsdt": -0.171196,
-       "grossUsdt": -0.147715,
+       "netUsdt": -0.170068,
+       "grossUsdt": -0.146724,
        "engineDdtMaxS": 1260.0
       },
       "general/trailing": {
-       "n": 166,
+       "n": 165,
        "wins": 0,
-       "losses": 166,
+       "losses": 165,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.2108,
-       "netUsdt": -2.674671,
-       "grossUsdt": -2.326996,
+       "costPf": 0.2109,
+       "netUsdt": -2.658145,
+       "grossUsdt": -2.312535,
        "engineDdtMaxS": 1260.0
       },
       "indications/normal": {
@@ -9924,30 +9924,30 @@
        "n": 0
       },
       "general": {
-       "n": 177,
+       "n": 176,
        "wins": 0,
-       "losses": 177,
+       "losses": 176,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.213,
-       "netUsdt": -2.845867,
-       "grossUsdt": -2.474711,
+       "costPf": 0.2131,
+       "netUsdt": -2.828212,
+       "grossUsdt": -2.459258,
        "engineDdtMaxS": 1260.0
       },
       "indications": {
        "n": 0
       },
       "trailing": {
-       "n": 166,
+       "n": 165,
        "wins": 0,
-       "losses": 166,
+       "losses": 165,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.2108,
-       "netUsdt": -2.674671,
-       "grossUsdt": -2.326996,
+       "costPf": 0.2109,
+       "netUsdt": -2.658145,
+       "grossUsdt": -2.312535,
        "engineDdtMaxS": 1260.0
       },
       "normal": {
@@ -9958,56 +9958,56 @@
        "pfNormal": 0.0,
        "pfGross": 0.0,
        "costPf": 0.2462,
-       "netUsdt": -0.171196,
-       "grossUsdt": -0.147715,
+       "netUsdt": -0.170068,
+       "grossUsdt": -0.146724,
        "engineDdtMaxS": 1260.0
       },
       "axis:prev": {
-       "n": 177,
+       "n": 176,
        "wins": 0,
-       "losses": 177,
+       "losses": 176,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.213,
-       "netUsdt": -2.845867,
-       "grossUsdt": -2.474711,
+       "costPf": 0.2131,
+       "netUsdt": -2.828212,
+       "grossUsdt": -2.459258,
        "engineDdtMaxS": 1260.0
       },
       "axis:last": {
-       "n": 177,
+       "n": 176,
        "wins": 0,
-       "losses": 177,
+       "losses": 176,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.213,
-       "netUsdt": -2.845867,
-       "grossUsdt": -2.474711,
+       "costPf": 0.2131,
+       "netUsdt": -2.828212,
+       "grossUsdt": -2.459258,
        "engineDdtMaxS": 1260.0
       },
       "axis:cont": {
-       "n": 177,
+       "n": 176,
        "wins": 0,
-       "losses": 177,
+       "losses": 176,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.213,
-       "netUsdt": -2.845867,
-       "grossUsdt": -2.474711,
+       "costPf": 0.2131,
+       "netUsdt": -2.828212,
+       "grossUsdt": -2.459258,
        "engineDdtMaxS": 1260.0
       },
       "axis:pause": {
-       "n": 177,
+       "n": 176,
        "wins": 0,
-       "losses": 177,
+       "losses": 176,
        "winRate": 0.0,
        "pfNormal": 0.0,
        "pfGross": 0.0,
-       "costPf": 0.213,
-       "netUsdt": -2.845867,
-       "grossUsdt": -2.474711,
+       "costPf": 0.2131,
+       "netUsdt": -2.828212,
+       "grossUsdt": -2.459258,
        "engineDdtMaxS": 1260.0
       },
       "kind:state": {
@@ -10039,25 +10039,25 @@
     {
      "hour": 5,
      "startUtc": "10:00",
-     "equityEnd": 4.481038,
+     "equityEnd": 4.487682,
      "pnl": 0.0,
-     "ddMaxPct": 60.576,
-     "ddIntrabarMaxPct": 60.576,
-     "ddCumMaxPct": 61.016,
-     "ddCumIntrabarMaxPct": 63.23,
+     "ddMaxPct": 60.57,
+     "ddIntrabarMaxPct": 60.57,
+     "ddCumMaxPct": 61.009,
+     "ddCumIntrabarMaxPct": 63.197,
      "marginMax": 0.0,
      "marginMaxPct": 0.0,
      "closed": {
       "n": 0
      },
      "cumulative": {
-      "n": 1029,
-      "pfNormal": 0.3925,
-      "pfGross": 0.5848,
-      "costPf": 0.8023,
-      "winRate": 32.94,
+      "n": 1031,
+      "pfNormal": 0.3935,
+      "pfGross": 0.5864,
+      "costPf": 0.803,
+      "winRate": 32.98,
       "engineDdtMaxS": 13500.0,
-      "netUsdt": -5.518962
+      "netUsdt": -5.512318
      },
      "underwaterMaxMin": 287,
      "positions": {
@@ -10158,25 +10158,25 @@
     {
      "hour": 6,
      "startUtc": "11:00",
-     "equityEnd": 4.481038,
+     "equityEnd": 4.487682,
      "pnl": 0.0,
-     "ddMaxPct": 60.576,
-     "ddIntrabarMaxPct": 60.576,
-     "ddCumMaxPct": 61.016,
-     "ddCumIntrabarMaxPct": 63.23,
+     "ddMaxPct": 60.57,
+     "ddIntrabarMaxPct": 60.57,
+     "ddCumMaxPct": 61.009,
+     "ddCumIntrabarMaxPct": 63.197,
      "marginMax": 0.0,
      "marginMaxPct": 0.0,
      "closed": {
       "n": 0
      },
      "cumulative": {
-      "n": 1029,
-      "pfNormal": 0.3925,
-      "pfGross": 0.5848,
-      "costPf": 0.8023,
-      "winRate": 32.94,
+      "n": 1031,
+      "pfNormal": 0.3935,
+      "pfGross": 0.5864,
+      "costPf": 0.803,
+      "winRate": 32.98,
       "engineDdtMaxS": 13500.0,
-      "netUsdt": -5.518962
+      "netUsdt": -5.512318
      },
      "underwaterMaxMin": 347,
      "positions": {
@@ -10277,25 +10277,25 @@
     {
      "hour": 7,
      "startUtc": "12:00",
-     "equityEnd": 4.481038,
+     "equityEnd": 4.487682,
      "pnl": 0.0,
-     "ddMaxPct": 60.576,
-     "ddIntrabarMaxPct": 60.576,
-     "ddCumMaxPct": 61.016,
-     "ddCumIntrabarMaxPct": 63.23,
+     "ddMaxPct": 60.57,
+     "ddIntrabarMaxPct": 60.57,
+     "ddCumMaxPct": 61.009,
+     "ddCumIntrabarMaxPct": 63.197,
      "marginMax": 0.0,
      "marginMaxPct": 0.0,
      "closed": {
       "n": 0
      },
      "cumulative": {
-      "n": 1029,
-      "pfNormal": 0.3925,
-      "pfGross": 0.5848,
-      "costPf": 0.8023,
-      "winRate": 32.94,
+      "n": 1031,
+      "pfNormal": 0.3935,
+      "pfGross": 0.5864,
+      "costPf": 0.803,
+      "winRate": 32.98,
       "engineDdtMaxS": 13500.0,
-      "netUsdt": -5.518962
+      "netUsdt": -5.512318
      },
      "underwaterMaxMin": 407,
      "positions": {
@@ -10396,25 +10396,25 @@
     {
      "hour": 8,
      "startUtc": "13:00",
-     "equityEnd": 4.481038,
+     "equityEnd": 4.487682,
      "pnl": 0.0,
-     "ddMaxPct": 60.576,
-     "ddIntrabarMaxPct": 60.576,
-     "ddCumMaxPct": 61.016,
-     "ddCumIntrabarMaxPct": 63.23,
+     "ddMaxPct": 60.57,
+     "ddIntrabarMaxPct": 60.57,
+     "ddCumMaxPct": 61.009,
+     "ddCumIntrabarMaxPct": 63.197,
      "marginMax": 0.0,
      "marginMaxPct": 0.0,
      "closed": {
       "n": 0
      },
      "cumulative": {
-      "n": 1029,
-      "pfNormal": 0.3925,
-      "pfGross": 0.5848,
-      "costPf": 0.8023,
-      "winRate": 32.94,
+      "n": 1031,
+      "pfNormal": 0.3935,
+      "pfGross": 0.5864,
+      "costPf": 0.803,
+      "winRate": 32.98,
       "engineDdtMaxS": 13500.0,
-      "netUsdt": -5.518962
+      "netUsdt": -5.512318
      },
      "underwaterMaxMin": 467,
      "positions": {
@@ -10515,39 +10515,39 @@
     {
      "hour": 9,
      "startUtc": "14:00",
-     "equityEnd": 2.515785,
-     "pnl": -1.965253,
-     "ddMaxPct": 78.182,
-     "ddIntrabarMaxPct": 79.638,
-     "ddCumMaxPct": 78.182,
-     "ddCumIntrabarMaxPct": 79.638,
-     "marginMax": 5.056144,
-     "marginMaxPct": 99.57,
+     "equityEnd": 2.532449,
+     "pnl": -1.955233,
+     "ddMaxPct": 78.242,
+     "ddIntrabarMaxPct": 79.69,
+     "ddCumMaxPct": 78.242,
+     "ddCumIntrabarMaxPct": 79.69,
+     "marginMax": 5.05573,
+     "marginMaxPct": 99.43,
      "closed": {
       "n": 118,
       "wins": 52,
       "losses": 66,
       "winRate": 44.07,
-      "pfNormal": 0.5293,
-      "pfGross": 0.6898,
-      "costPf": 0.726,
-      "netUsdt": -1.013886,
-      "grossUsdt": -0.600186,
+      "pfNormal": 0.534,
+      "pfGross": 0.695,
+      "costPf": 0.7301,
+      "netUsdt": -1.003712,
+      "grossUsdt": -0.590074,
       "engineDdtMaxS": 1260.0
      },
      "cumulative": {
-      "n": 1147,
-      "pfNormal": 0.4187,
-      "pfGross": 0.6068,
-      "costPf": 0.7945,
-      "winRate": 34.09,
+      "n": 1149,
+      "pfNormal": 0.4204,
+      "pfGross": 0.6091,
+      "costPf": 0.7955,
+      "winRate": 34.12,
       "engineDdtMaxS": 31320.0,
-      "netUsdt": -6.532848
+      "netUsdt": -6.51603
      },
      "underwaterMaxMin": 527,
      "positions": {
       "lotsOpened": 165,
-      "groupsOpened": 32,
+      "groupsOpened": 31,
       "lotsOpenEnd": 47,
       "groupsOpenEnd": 11,
       "maxLots": 67,
@@ -10559,19 +10559,19 @@
       "dcaEntry": 0,
       "dcaAdd": 0,
       "closeFills": {
-       "sl": 69,
+       "sl": 70,
        "tp": 12,
-       "scratch+": 37
+       "scratch+": 36
       },
-      "controlPlace": 64,
+      "controlPlace": 62,
       "controlCancelReplace": 20,
-      "controlCancel": 42
+      "controlCancel": 40
      },
      "skipped": {
-      "noFreeMargin": 422530,
-      "belowMinOrQty": 18,
+      "noFreeMargin": 422529,
+      "belowMinOrQty": 17,
       "liveNegativeDeact": 0,
-      "addOnNoParent": 138,
+      "addOnNoParent": 140,
       "equityHalt": 0
      },
      "liquidations": 0,
@@ -10581,11 +10581,11 @@
        "wins": 4,
        "losses": 12,
        "winRate": 25.0,
-       "pfNormal": 0.2892,
-       "pfGross": 0.3886,
+       "pfNormal": 0.2893,
+       "pfGross": 0.3888,
        "costPf": 0.5849,
-       "netUsdt": -0.256786,
-       "grossUsdt": -0.191359,
+       "netUsdt": -0.256635,
+       "grossUsdt": -0.191228,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
@@ -10593,11 +10593,11 @@
        "wins": 48,
        "losses": 54,
        "winRate": 47.06,
-       "pfNormal": 0.5777,
-       "pfGross": 0.7479,
-       "costPf": 0.7481,
-       "netUsdt": -0.7571,
-       "grossUsdt": -0.408827,
+       "pfNormal": 0.5832,
+       "pfGross": 0.7541,
+       "costPf": 0.7529,
+       "netUsdt": -0.747078,
+       "grossUsdt": -0.398846,
        "engineDdtMaxS": 1260.0
       },
       "indications/normal": {
@@ -10617,11 +10617,11 @@
        "wins": 52,
        "losses": 66,
        "winRate": 44.07,
-       "pfNormal": 0.5293,
-       "pfGross": 0.6898,
-       "costPf": 0.726,
-       "netUsdt": -1.013886,
-       "grossUsdt": -0.600186,
+       "pfNormal": 0.534,
+       "pfGross": 0.695,
+       "costPf": 0.7301,
+       "netUsdt": -1.003712,
+       "grossUsdt": -0.590074,
        "engineDdtMaxS": 1260.0
       },
       "indications": {
@@ -10632,11 +10632,11 @@
        "wins": 48,
        "losses": 54,
        "winRate": 47.06,
-       "pfNormal": 0.5777,
-       "pfGross": 0.7479,
-       "costPf": 0.7481,
-       "netUsdt": -0.7571,
-       "grossUsdt": -0.408827,
+       "pfNormal": 0.5832,
+       "pfGross": 0.7541,
+       "costPf": 0.7529,
+       "netUsdt": -0.747078,
+       "grossUsdt": -0.398846,
        "engineDdtMaxS": 1260.0
       },
       "normal": {
@@ -10644,11 +10644,11 @@
        "wins": 4,
        "losses": 12,
        "winRate": 25.0,
-       "pfNormal": 0.2892,
-       "pfGross": 0.3886,
+       "pfNormal": 0.2893,
+       "pfGross": 0.3888,
        "costPf": 0.5849,
-       "netUsdt": -0.256786,
-       "grossUsdt": -0.191359,
+       "netUsdt": -0.256635,
+       "grossUsdt": -0.191228,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
@@ -10656,11 +10656,11 @@
        "wins": 52,
        "losses": 66,
        "winRate": 44.07,
-       "pfNormal": 0.5293,
-       "pfGross": 0.6898,
-       "costPf": 0.726,
-       "netUsdt": -1.013886,
-       "grossUsdt": -0.600186,
+       "pfNormal": 0.534,
+       "pfGross": 0.695,
+       "costPf": 0.7301,
+       "netUsdt": -1.003712,
+       "grossUsdt": -0.590074,
        "engineDdtMaxS": 1260.0
       },
       "axis:last": {
@@ -10668,11 +10668,11 @@
        "wins": 52,
        "losses": 66,
        "winRate": 44.07,
-       "pfNormal": 0.5293,
-       "pfGross": 0.6898,
-       "costPf": 0.726,
-       "netUsdt": -1.013886,
-       "grossUsdt": -0.600186,
+       "pfNormal": 0.534,
+       "pfGross": 0.695,
+       "costPf": 0.7301,
+       "netUsdt": -1.003712,
+       "grossUsdt": -0.590074,
        "engineDdtMaxS": 1260.0
       },
       "axis:cont": {
@@ -10680,11 +10680,11 @@
        "wins": 51,
        "losses": 66,
        "winRate": 43.59,
-       "pfNormal": 0.5281,
-       "pfGross": 0.6873,
-       "costPf": 0.7226,
-       "netUsdt": -1.016622,
-       "grossUsdt": -0.605158,
+       "pfNormal": 0.5327,
+       "pfGross": 0.6924,
+       "costPf": 0.7268,
+       "netUsdt": -1.006448,
+       "grossUsdt": -0.595046,
        "engineDdtMaxS": 1260.0
       },
       "axis:pause": {
@@ -10692,11 +10692,11 @@
        "wins": 51,
        "losses": 66,
        "winRate": 43.59,
-       "pfNormal": 0.5281,
-       "pfGross": 0.6873,
-       "costPf": 0.7226,
-       "netUsdt": -1.016622,
-       "grossUsdt": -0.605158,
+       "pfNormal": 0.5327,
+       "pfGross": 0.6924,
+       "costPf": 0.7268,
+       "netUsdt": -1.006448,
+       "grossUsdt": -0.595046,
        "engineDdtMaxS": 1260.0
       },
       "kind:state": {
@@ -10728,61 +10728,61 @@
     {
      "hour": 10,
      "startUtc": "15:00",
-     "equityEnd": 2.285735,
-     "pnl": -0.230049,
-     "ddMaxPct": 81.02,
-     "ddIntrabarMaxPct": 81.372,
-     "ddCumMaxPct": 81.02,
-     "ddCumIntrabarMaxPct": 81.372,
-     "marginMax": 2.413871,
-     "marginMaxPct": 98.12,
+     "equityEnd": 2.300146,
+     "pnl": -0.232303,
+     "ddMaxPct": 80.888,
+     "ddIntrabarMaxPct": 81.27,
+     "ddCumMaxPct": 80.888,
+     "ddCumIntrabarMaxPct": 81.27,
+     "marginMax": 2.474281,
+     "marginMaxPct": 99.76,
      "closed": {
-      "n": 70,
-      "wins": 23,
-      "losses": 47,
-      "winRate": 32.86,
-      "pfNormal": 0.053,
-      "pfGross": 0.1043,
-      "costPf": 0.5807,
-      "netUsdt": -1.181416,
-      "grossUsdt": -1.005239,
+      "n": 68,
+      "wins": 22,
+      "losses": 46,
+      "winRate": 32.35,
+      "pfNormal": 0.0503,
+      "pfGross": 0.1,
+      "costPf": 0.5679,
+      "netUsdt": -1.183824,
+      "grossUsdt": -1.010681,
       "engineDdtMaxS": 780.0
      },
      "cumulative": {
       "n": 1217,
-      "pfNormal": 0.3822,
-      "pfGross": 0.5524,
-      "costPf": 0.7822,
+      "pfNormal": 0.3835,
+      "pfGross": 0.554,
+      "costPf": 0.7828,
       "winRate": 34.02,
       "engineDdtMaxS": 32340.0,
-      "netUsdt": -7.714265
+      "netUsdt": -7.699854
      },
      "underwaterMaxMin": 587,
      "positions": {
-      "lotsOpened": 23,
+      "lotsOpened": 21,
       "groupsOpened": 8,
       "lotsOpenEnd": 0,
       "groupsOpenEnd": 0,
-      "maxLots": 51,
-      "maxGroups": 16
+      "maxLots": 50,
+      "maxGroups": 15
      },
      "orders": {
-      "entry": 22,
+      "entry": 20,
       "blockAdd": 0,
       "dcaEntry": 1,
       "dcaAdd": 0,
       "closeFills": {
-       "sl": 11,
-       "scratch+": 23,
-       "time": 36
+       "sl": 12,
+       "scratch+": 22,
+       "time": 34
       },
       "controlPlace": 16,
       "controlCancelReplace": 12,
       "controlCancel": 38
      },
      "skipped": {
-      "noFreeMargin": 13557,
-      "belowMinOrQty": 0,
+      "noFreeMargin": 13376,
+      "belowMinOrQty": 183,
       "liveNegativeDeact": 0,
       "addOnNoParent": 63,
       "equityHalt": 0
@@ -10790,27 +10790,27 @@
      "liquidations": 0,
      "byStrategy": {
       "general/normal": {
-       "n": 7,
+       "n": 8,
        "wins": 6,
-       "losses": 1,
-       "winRate": 85.71,
-       "pfNormal": 0.1427,
-       "pfGross": 0.3381,
-       "costPf": 0.9087,
-       "netUsdt": -0.074116,
-       "grossUsdt": -0.05229,
+       "losses": 2,
+       "winRate": 75.0,
+       "pfNormal": 0.1255,
+       "pfGross": 0.2993,
+       "costPf": 0.8268,
+       "netUsdt": -0.090674,
+       "grossUsdt": -0.065824,
        "engineDdtMaxS": 0.0
       },
       "general/trailing": {
-       "n": 62,
-       "wins": 16,
-       "losses": 46,
-       "winRate": 25.81,
-       "pfNormal": 0.0433,
-       "pfGross": 0.0814,
-       "costPf": 0.5341,
-       "netUsdt": -1.110813,
-       "grossUsdt": -0.958462,
+       "n": 59,
+       "wins": 15,
+       "losses": 44,
+       "winRate": 25.42,
+       "pfNormal": 0.0404,
+       "pfGross": 0.0765,
+       "costPf": 0.5224,
+       "netUsdt": -1.096663,
+       "grossUsdt": -0.95037,
        "engineDdtMaxS": 780.0
       },
       "indications/normal": {
@@ -10835,90 +10835,90 @@
        "engineDdtMaxS": 0.0
       },
       "general": {
-       "n": 69,
-       "wins": 22,
-       "losses": 47,
-       "winRate": 31.88,
-       "pfNormal": 0.0502,
-       "pfGross": 0.0994,
-       "costPf": 0.5721,
-       "netUsdt": -1.184929,
-       "grossUsdt": -1.010752,
+       "n": 67,
+       "wins": 21,
+       "losses": 46,
+       "winRate": 31.34,
+       "pfNormal": 0.0474,
+       "pfGross": 0.0951,
+       "costPf": 0.5588,
+       "netUsdt": -1.187336,
+       "grossUsdt": -1.016194,
        "engineDdtMaxS": 780.0
       },
       "indications": {
        "n": 0
       },
       "trailing": {
-       "n": 62,
-       "wins": 16,
-       "losses": 46,
-       "winRate": 25.81,
-       "pfNormal": 0.0433,
-       "pfGross": 0.0814,
-       "costPf": 0.5341,
-       "netUsdt": -1.110813,
-       "grossUsdt": -0.958462,
+       "n": 59,
+       "wins": 15,
+       "losses": 44,
+       "winRate": 25.42,
+       "pfNormal": 0.0404,
+       "pfGross": 0.0765,
+       "costPf": 0.5224,
+       "netUsdt": -1.096663,
+       "grossUsdt": -0.95037,
        "engineDdtMaxS": 780.0
       },
       "normal": {
-       "n": 7,
+       "n": 8,
        "wins": 6,
-       "losses": 1,
-       "winRate": 85.71,
-       "pfNormal": 0.1427,
-       "pfGross": 0.3381,
-       "costPf": 0.9087,
-       "netUsdt": -0.074116,
-       "grossUsdt": -0.05229,
+       "losses": 2,
+       "winRate": 75.0,
+       "pfNormal": 0.1255,
+       "pfGross": 0.2993,
+       "costPf": 0.8268,
+       "netUsdt": -0.090674,
+       "grossUsdt": -0.065824,
        "engineDdtMaxS": 0.0
       },
       "axis:prev": {
        "n": 63,
-       "wins": 22,
-       "losses": 41,
-       "winRate": 34.92,
-       "pfNormal": 0.0525,
-       "pfGross": 0.1034,
-       "costPf": 0.5748,
-       "netUsdt": -1.130157,
-       "grossUsdt": -0.967984,
+       "wins": 21,
+       "losses": 42,
+       "winRate": 33.33,
+       "pfNormal": 0.0489,
+       "pfGross": 0.0976,
+       "costPf": 0.5597,
+       "netUsdt": -1.150822,
+       "grossUsdt": -0.987682,
        "engineDdtMaxS": 780.0
       },
       "axis:last": {
-       "n": 69,
-       "wins": 22,
-       "losses": 47,
-       "winRate": 31.88,
-       "pfNormal": 0.0502,
-       "pfGross": 0.0994,
-       "costPf": 0.5721,
-       "netUsdt": -1.184929,
-       "grossUsdt": -1.010752,
+       "n": 67,
+       "wins": 21,
+       "losses": 46,
+       "winRate": 31.34,
+       "pfNormal": 0.0474,
+       "pfGross": 0.0951,
+       "costPf": 0.5588,
+       "netUsdt": -1.187336,
+       "grossUsdt": -1.016194,
        "engineDdtMaxS": 780.0
       },
       "axis:cont": {
-       "n": 61,
-       "wins": 16,
-       "losses": 45,
-       "winRate": 26.23,
-       "pfNormal": 0.0437,
-       "pfGross": 0.0821,
-       "costPf": 0.5359,
-       "netUsdt": -1.099281,
-       "grossUsdt": -0.948933,
+       "n": 58,
+       "wins": 15,
+       "losses": 43,
+       "winRate": 25.86,
+       "pfNormal": 0.0408,
+       "pfGross": 0.0772,
+       "costPf": 0.5241,
+       "netUsdt": -1.085149,
+       "grossUsdt": -0.940856,
        "engineDdtMaxS": 780.0
       },
       "axis:pause": {
-       "n": 61,
-       "wins": 16,
-       "losses": 45,
-       "winRate": 26.23,
-       "pfNormal": 0.0437,
-       "pfGross": 0.0821,
-       "costPf": 0.5359,
-       "netUsdt": -1.099281,
-       "grossUsdt": -0.948933,
+       "n": 58,
+       "wins": 15,
+       "losses": 43,
+       "winRate": 25.86,
+       "pfNormal": 0.0408,
+       "pfGross": 0.0772,
+       "costPf": 0.5241,
+       "netUsdt": -1.085149,
+       "grossUsdt": -0.940856,
        "engineDdtMaxS": 780.0
       },
       "kind:state": {
@@ -10950,14 +10950,14 @@
     {
      "hour": 11,
      "startUtc": "16:00",
-     "equityEnd": 1.86864,
-     "pnl": -0.417096,
-     "ddMaxPct": 86.988,
-     "ddIntrabarMaxPct": 87.363,
-     "ddCumMaxPct": 86.988,
-     "ddCumIntrabarMaxPct": 87.363,
-     "marginMax": 2.22444,
-     "marginMaxPct": 99.75,
+     "equityEnd": 1.88322,
+     "pnl": -0.416926,
+     "ddMaxPct": 86.873,
+     "ddIntrabarMaxPct": 87.247,
+     "ddCumMaxPct": 86.873,
+     "ddCumIntrabarMaxPct": 87.247,
+     "marginMax": 2.222056,
+     "marginMaxPct": 99.0,
      "closed": {
       "n": 17,
       "wins": 17,
@@ -10972,12 +10972,12 @@
      },
      "cumulative": {
       "n": 1234,
-      "pfNormal": 0.3858,
-      "pfGross": 0.5603,
-      "costPf": 0.7868,
+      "pfNormal": 0.3871,
+      "pfGross": 0.5619,
+      "costPf": 0.7875,
       "winRate": 34.93,
       "engineDdtMaxS": 32340.0,
-      "netUsdt": -7.669254
+      "netUsdt": -7.654843
      },
      "underwaterMaxMin": 647,
      "positions": {
@@ -11161,52 +11161,52 @@
    ],
    "totals": {
     "equityStart": 10.0,
-    "equityEnd": 1.86864,
-    "pnl": -8.13136,
-    "returnPct": -81.314,
-    "realizedGross": -4.565238,
-    "fees": 3.141183,
-    "unrealizedEnd": -0.42494,
-    "ddMaxPct": 86.988,
-    "ddIntrabarMaxPct": 87.363,
+    "equityEnd": 1.88322,
+    "pnl": -8.11678,
+    "returnPct": -81.168,
+    "realizedGross": -4.549849,
+    "fees": 3.142101,
+    "unrealizedEnd": -0.42483,
+    "ddMaxPct": 86.873,
+    "ddIntrabarMaxPct": 87.247,
     "underwaterMaxMin": 647,
-    "marginMax": 11.33566,
-    "marginMaxPct": 142.0,
+    "marginMax": 11.371532,
+    "marginMaxPct": 141.09,
     "closed": {
      "n": 1234,
      "wins": 431,
      "losses": 803,
      "winRate": 34.93,
-     "pfNormal": 0.3858,
-     "pfGross": 0.5603,
-     "costPf": 0.7868,
-     "netUsdt": -7.669254,
-     "grossUsdt": -4.565238,
+     "pfNormal": 0.3871,
+     "pfGross": 0.5619,
+     "costPf": 0.7875,
+     "netUsdt": -7.654843,
+     "grossUsdt": -4.549849,
      "engineDdtMaxS": 32340.0
     },
     "byStrategy": {
      "general/normal": {
-      "n": 89,
+      "n": 90,
       "wins": 51,
-      "losses": 38,
-      "winRate": 57.3,
-      "pfNormal": 0.4545,
-      "pfGross": 0.6959,
-      "costPf": 0.8568,
-      "netUsdt": -0.469658,
-      "grossUsdt": -0.226843,
+      "losses": 39,
+      "winRate": 56.67,
+      "pfNormal": 0.4417,
+      "pfGross": 0.6786,
+      "costPf": 0.8478,
+      "netUsdt": -0.4895,
+      "grossUsdt": -0.244118,
       "engineDdtMaxS": 29400.0
      },
      "general/trailing": {
-      "n": 1144,
+      "n": 1143,
       "wins": 379,
-      "losses": 765,
-      "winRate": 33.13,
-      "pfNormal": 0.3804,
-      "pfGross": 0.5493,
-      "costPf": 0.7811,
-      "netUsdt": -7.203108,
-      "grossUsdt": -4.343908,
+      "losses": 764,
+      "winRate": 33.16,
+      "pfNormal": 0.3826,
+      "pfGross": 0.5521,
+      "costPf": 0.7824,
+      "netUsdt": -7.168855,
+      "grossUsdt": -4.311244,
       "engineDdtMaxS": 32340.0
      },
      "indications/normal": {
@@ -11235,38 +11235,38 @@
       "wins": 430,
       "losses": 803,
       "winRate": 34.87,
-      "pfNormal": 0.3855,
-      "pfGross": 0.5598,
-      "costPf": 0.7865,
-      "netUsdt": -7.672767,
-      "grossUsdt": -4.570751,
+      "pfNormal": 0.3868,
+      "pfGross": 0.5614,
+      "costPf": 0.7872,
+      "netUsdt": -7.658356,
+      "grossUsdt": -4.555362,
       "engineDdtMaxS": 32340.0
      },
      "indications": {
       "n": 0
      },
      "trailing": {
-      "n": 1144,
+      "n": 1143,
       "wins": 379,
-      "losses": 765,
-      "winRate": 33.13,
-      "pfNormal": 0.3804,
-      "pfGross": 0.5493,
-      "costPf": 0.7811,
-      "netUsdt": -7.203108,
-      "grossUsdt": -4.343908,
+      "losses": 764,
+      "winRate": 33.16,
+      "pfNormal": 0.3826,
+      "pfGross": 0.5521,
+      "costPf": 0.7824,
+      "netUsdt": -7.168855,
+      "grossUsdt": -4.311244,
       "engineDdtMaxS": 32340.0
      },
      "normal": {
-      "n": 89,
+      "n": 90,
       "wins": 51,
-      "losses": 38,
-      "winRate": 57.3,
-      "pfNormal": 0.4545,
-      "pfGross": 0.6959,
-      "costPf": 0.8568,
-      "netUsdt": -0.469658,
-      "grossUsdt": -0.226843,
+      "losses": 39,
+      "winRate": 56.67,
+      "pfNormal": 0.4417,
+      "pfGross": 0.6786,
+      "costPf": 0.8478,
+      "netUsdt": -0.4895,
+      "grossUsdt": -0.244118,
       "engineDdtMaxS": 29400.0
      },
      "axis:prev": {
@@ -11274,11 +11274,11 @@
       "wins": 102,
       "losses": 577,
       "winRate": 15.02,
-      "pfNormal": 0.128,
-      "pfGross": 0.1873,
-      "costPf": 0.5198,
-      "netUsdt": -8.690013,
-      "grossUsdt": -6.867281,
+      "pfNormal": 0.129,
+      "pfGross": 0.1887,
+      "costPf": 0.5206,
+      "netUsdt": -8.678774,
+      "grossUsdt": -6.855254,
       "engineDdtMaxS": 32340.0
      },
      "axis:last": {
@@ -11286,35 +11286,35 @@
       "wins": 430,
       "losses": 803,
       "winRate": 34.87,
-      "pfNormal": 0.3855,
-      "pfGross": 0.5598,
-      "costPf": 0.7865,
-      "netUsdt": -7.672767,
-      "grossUsdt": -4.570751,
+      "pfNormal": 0.3868,
+      "pfGross": 0.5614,
+      "costPf": 0.7872,
+      "netUsdt": -7.658356,
+      "grossUsdt": -4.555362,
       "engineDdtMaxS": 32340.0
      },
      "axis:cont": {
-      "n": 1131,
+      "n": 1130,
       "wins": 403,
-      "losses": 728,
-      "winRate": 35.63,
-      "pfNormal": 0.4057,
-      "pfGross": 0.5821,
-      "costPf": 0.7945,
-      "netUsdt": -6.982206,
-      "grossUsdt": -4.097521,
+      "losses": 727,
+      "winRate": 35.66,
+      "pfNormal": 0.4076,
+      "pfGross": 0.5845,
+      "costPf": 0.7957,
+      "netUsdt": -6.951255,
+      "grossUsdt": -4.068613,
       "engineDdtMaxS": 32340.0
      },
      "axis:pause": {
-      "n": 1131,
+      "n": 1130,
       "wins": 403,
-      "losses": 728,
-      "winRate": 35.63,
-      "pfNormal": 0.4057,
-      "pfGross": 0.5821,
-      "costPf": 0.7945,
-      "netUsdt": -6.982206,
-      "grossUsdt": -4.097521,
+      "losses": 727,
+      "winRate": 35.66,
+      "pfNormal": 0.4076,
+      "pfGross": 0.5845,
+      "costPf": 0.7957,
+      "netUsdt": -6.951255,
+      "grossUsdt": -4.068613,
       "engineDdtMaxS": 32340.0
      },
      "kind:state": {
@@ -11344,11 +11344,11 @@
     },
     "positions": {
      "lotsOpened": 1251,
-     "groupsOpened": 75,
+     "groupsOpened": 73,
      "lotsOpenEnd": 17,
      "groupsOpenEnd": 2,
-     "maxLots": 266,
-     "maxGroups": 16
+     "maxLots": 267,
+     "maxGroups": 17
     },
     "orders": {
      "entry": 1250,
@@ -11356,21 +11356,21 @@
      "dcaEntry": 1,
      "dcaAdd": 0,
      "closeFills": {
-      "scratch+": 225,
+      "scratch+": 223,
       "time": 439,
-      "sl": 477,
-      "tp": 93
+      "sl": 478,
+      "tp": 94
      },
-     "controlPlace": 150,
+     "controlPlace": 146,
      "controlCancelReplace": 60,
-     "controlCancel": 146,
-     "total": 2841
+     "controlCancel": 142,
+     "total": 2833
     },
     "skipped": {
-     "noFreeMargin": 976238,
-     "belowMinOrQty": 4318,
+     "noFreeMargin": 980320,
+     "belowMinOrQty": 233,
      "liveNegativeDeact": 0,
-     "addOnNoParent": 548,
+     "addOnNoParent": 551,
      "equityHalt": 0
     },
     "liquidations": [],
@@ -11389,1160 +11389,1160 @@
    "equityCurve": [
     [
      3660,
-     9.756471,
-     9.756471,
-     9.741176,
+     9.75655,
+     9.75655,
+     9.738018,
      237,
      3
     ],
     [
      3665,
-     7.504391,
-     7.368151,
-     9.741176,
+     7.50499,
+     7.36885,
+     9.738018,
      237,
      3
     ],
     [
      3670,
-     7.807591,
-     7.306951,
-     9.741176,
+     7.80805,
+     7.30765,
+     9.738018,
      237,
      3
     ],
     [
      3675,
-     8.231351,
-     8.088791,
-     9.741176,
+     8.23141,
+     8.08897,
+     9.738018,
      237,
      3
     ],
     [
      3680,
-     8.600044,
-     8.477644,
+     8.599922,
+     8.477522,
      8.136912,
      198,
      2
     ],
     [
      3685,
-     8.856364,
-     8.624284,
+     8.856242,
+     8.624162,
      8.136912,
      198,
      2
     ],
     [
      3690,
-     9.509164,
-     8.889484,
+     9.509042,
+     8.889362,
      8.136912,
      198,
      2
     ],
     [
      3695,
-     8.909884,
-     8.889484,
+     8.909762,
+     8.889362,
      8.136912,
      198,
      2
     ],
     [
      3700,
-     8.518444,
-     7.935724,
+     8.518322,
+     7.935602,
      8.136912,
      198,
      2
     ],
     [
      3705,
-     8.351981,
-     8.351981,
+     8.351859,
+     8.351859,
      0.0,
      0,
      0
     ],
     [
      3710,
-     8.351981,
-     8.351981,
+     8.351859,
+     8.351859,
      0.0,
      0,
      0
     ],
     [
      3715,
-     8.351981,
-     8.351981,
+     8.351859,
+     8.351859,
      0.0,
      0,
      0
     ],
     [
      3720,
-     8.351981,
-     8.351981,
+     8.351859,
+     8.351859,
      0.0,
      0,
      0
     ],
     [
      3725,
-     8.149347,
-     8.149347,
-     8.105378,
-     196,
+     8.148236,
+     8.148236,
+     8.144926,
+     197,
      1
     ],
     [
      3730,
-     10.237354,
-     9.635861,
-     10.197198,
-     240,
+     10.245113,
+     9.64377,
+     10.23307,
+     241,
      13
     ],
     [
      3735,
-     9.713746,
-     9.244169,
-     9.699162,
+     9.732837,
+     9.26171,
+     9.695486,
      183,
      16
     ],
     [
      3740,
-     7.91317,
-     7.737176,
-     7.87417,
-     160,
+     7.926031,
+     7.75218,
+     7.910887,
+     161,
      12
     ],
     [
      3745,
-     8.242815,
-     7.798994,
-     5.63864,
-     122,
+     8.250332,
+     7.804525,
+     5.675357,
+     123,
      10
     ],
     [
      3750,
-     8.550445,
-     8.086807,
-     5.591444,
-     121,
+     8.55508,
+     8.086206,
+     5.628161,
+     122,
      9
     ],
     [
      3755,
-     7.78184,
-     7.651634,
-     5.591444,
-     121,
+     7.787349,
+     7.657187,
+     5.628161,
+     122,
      9
     ],
     [
      3760,
-     7.657279,
-     7.381202,
-     5.098067,
-     109,
+     7.663964,
+     7.386727,
+     5.138638,
+     110,
      8
     ],
     [
      3765,
-     7.3025,
-     7.038734,
-     3.590507,
-     75,
+     7.310389,
+     7.044131,
+     3.631078,
+     76,
      8
     ],
     [
      3770,
-     8.076525,
-     7.843826,
-     1.939661,
-     43,
+     8.090181,
+     7.855803,
+     1.980233,
+     44,
      4
     ],
     [
      3775,
-     8.022394,
-     7.998694,
+     8.039936,
+     8.016236,
      1.44882,
      31,
      2
     ],
     [
      3780,
-     8.180081,
-     8.178881,
+     8.197624,
+     8.196424,
      0.34032,
      6,
      1
     ],
     [
      3785,
-     8.209973,
-     8.202881,
+     8.227516,
+     8.220424,
      0.0,
      0,
      0
     ],
     [
      3790,
-     8.011055,
-     8.011055,
-     7.956708,
-     146,
+     8.027235,
+     8.027235,
+     8.011206,
+     147,
      1
     ],
     [
      3795,
-     7.961415,
-     7.961415,
-     7.956708,
-     146,
+     7.977255,
+     7.977255,
+     8.011206,
+     147,
      1
     ],
     [
      3800,
-     7.481075,
-     7.421215,
-     7.956708,
-     146,
+     7.493625,
+     7.433355,
+     8.011206,
+     147,
      1
     ],
     [
      3805,
-     7.465015,
-     7.232875,
-     7.956708,
-     146,
+     7.477455,
+     7.243725,
+     8.011206,
+     147,
      1
     ],
     [
      3810,
-     7.613935,
-     7.613935,
-     7.956708,
-     146,
+     7.627395,
+     7.627395,
+     8.011206,
+     147,
      1
     ],
     [
      3815,
-     7.575975,
-     7.365735,
-     7.956708,
-     146,
+     7.589175,
+     7.377495,
+     8.011206,
+     147,
      1
     ],
     [
      3820,
-     7.872355,
-     7.764315,
-     7.956708,
-     146,
+     7.887585,
+     7.778805,
+     8.011206,
+     147,
      1
     ],
     [
      3825,
-     8.241735,
-     8.183335,
-     7.956708,
-     146,
+     8.259495,
+     8.200695,
+     8.011206,
+     147,
      1
     ],
     [
      3830,
-     7.600795,
-     7.425595,
-     7.956708,
-     146,
+     7.614165,
+     7.437765,
+     8.011206,
+     147,
      1
     ],
     [
      3835,
-     7.556441,
-     7.556441,
-     0.289614,
+     7.57189,
+     7.57189,
+     0.287363,
      7,
-     4
+     3
     ],
     [
      3840,
-     7.523257,
-     7.520309,
-     0.289614,
+     7.534576,
+     7.531993,
+     0.287363,
      7,
-     4
+     3
     ],
     [
      3845,
-     7.557794,
-     7.537394,
-     0.24779,
-     6,
+     7.555023,
+     7.531723,
+     0.287363,
+     7,
      3
     ],
     [
      3850,
-     7.561587,
-     7.557129,
-     0.20704,
-     5,
+     7.562007,
+     7.557114,
+     0.246613,
+     6,
      2
     ],
     [
      3855,
-     7.548259,
-     7.540659,
-     0.20704,
-     5,
+     7.551144,
+     7.542819,
+     0.246613,
+     6,
      2
     ],
     [
      3860,
-     7.537007,
-     7.533437,
-     0.20704,
-     5,
+     7.538877,
+     7.535307,
+     0.246613,
+     6,
      2
     ],
     [
      3865,
-     7.521233,
-     7.510445,
-     0.20704,
-     5,
+     7.519623,
+     7.50405,
+     0.246613,
+     6,
      2
     ],
     [
      3870,
-     7.540295,
-     7.528255,
-     0.20704,
-     5,
+     7.544775,
+     7.529835,
+     0.246613,
+     6,
      2
     ],
     [
      3875,
-     7.533933,
-     7.527813,
-     0.20704,
-     5,
+     7.533048,
+     7.526928,
+     0.246613,
+     6,
      2
     ],
     [
      3880,
-     7.499909,
-     7.499909,
+     7.488899,
+     7.488899,
      0.0,
      0,
      0
     ],
     [
      3885,
-     7.317123,
-     7.317123,
-     7.311437,
-     181,
+     7.307214,
+     7.307214,
+     7.267392,
+     180,
      1
     ],
     [
      3890,
-     7.413141,
-     6.615141,
-     8.069117,
-     193,
+     7.402272,
+     6.609072,
+     8.025072,
+     192,
      2
     ],
     [
      3895,
-     5.628629,
-     5.628629,
-     7.907619,
-     189,
+     5.62832,
+     5.62832,
+     7.863574,
+     188,
      2
     ],
     [
      3900,
-     5.227486,
-     5.195086,
-     7.423126,
-     177,
+     5.230058,
+     5.197658,
+     7.379082,
+     176,
      2
     ],
     [
      3905,
-     5.211886,
-     4.750846,
-     7.423126,
-     177,
+     5.214458,
+     4.756298,
+     7.379082,
+     176,
      2
     ],
     [
      3910,
-     4.431003,
-     4.408203,
+     4.437647,
+     4.414847,
      1.201798,
      23,
      2
     ],
     [
      3915,
-     4.563883,
-     4.542203,
+     4.570527,
+     4.548847,
      1.201798,
      23,
      2
     ],
     [
      3920,
-     4.475643,
-     4.455243,
+     4.482287,
+     4.461887,
      1.201798,
      23,
      2
     ],
     [
      3925,
-     4.510843,
-     4.462443,
+     4.517487,
+     4.469087,
      1.201798,
      23,
      2
     ],
     [
      3930,
-     4.51558,
-     4.475883,
+     4.522224,
+     4.482527,
      0.75768,
      12,
      1
     ],
     [
      3935,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3940,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3945,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3950,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3955,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3960,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3965,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3970,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3975,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3980,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3985,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3990,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      3995,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4000,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4005,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4010,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4015,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4020,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4025,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4030,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4035,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4040,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4045,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4050,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4055,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4060,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4065,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4070,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4075,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4080,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4085,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4090,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4095,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4100,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4105,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4110,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4115,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4120,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4125,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4130,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4135,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4140,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4145,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4150,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4155,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4160,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4165,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4170,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4175,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4180,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4185,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4190,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4195,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4200,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4205,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4210,
-     4.481038,
-     4.481038,
+     4.487682,
+     4.487682,
      0.0,
      0,
      0
     ],
     [
      4215,
-     4.169572,
-     3.983972,
+     4.176217,
+     3.990617,
      4.338632,
      58,
      2
     ],
     [
      4220,
-     4.761616,
-     4.58485,
-     5.056144,
+     4.768283,
+     4.591519,
+     5.05573,
      67,
      10
     ],
     [
      4225,
-     4.839439,
-     4.699742,
-     1.910803,
+     4.846177,
+     4.706556,
+     1.909791,
      26,
      10
     ],
     [
      4230,
-     3.887636,
-     3.79084,
-     3.856616,
+     3.894612,
+     3.797843,
+     3.856018,
      55,
      7
     ],
     [
      4235,
-     3.178009,
-     2.765878,
+     3.185102,
+     2.77297,
      3.148131,
      52,
      4
     ],
     [
      4240,
-     2.509013,
-     2.314402,
-     2.661115,
+     2.5091,
+     2.311489,
+     2.661339,
      49,
-     6
+     5
     ],
     [
      4245,
-     2.77918,
-     2.68502,
-     2.978457,
+     2.779581,
+     2.685027,
+     2.978686,
      56,
-     12
+     11
     ],
     [
      4250,
-     2.842026,
-     2.777962,
-     2.862258,
+     2.858809,
+     2.794768,
+     2.862263,
      53,
      10
     ],
     [
      4255,
-     2.612089,
-     2.552231,
-     2.587741,
+     2.62884,
+     2.568947,
+     2.588131,
      47,
      7
     ],
     [
      4260,
-     2.460081,
-     2.39406,
-     2.413871,
-     45,
+     2.480313,
+     2.412523,
+     2.474281,
+     46,
      11
     ],
     [
      4265,
-     2.314131,
-     2.2481,
-     2.310444,
-     49,
-     16
+     2.323894,
+     2.259305,
+     2.289179,
+     48,
+     15
     ],
     [
      4270,
-     2.311874,
-     2.261331,
-     2.270418,
+     2.307207,
+     2.259387,
+     2.289294,
      48,
      15
     ],
     [
      4275,
-     2.291731,
-     2.2536,
-     1.20288,
+     2.287653,
+     2.251935,
+     1.223214,
      25,
-     11
+     13
     ],
     [
      4280,
-     2.259183,
-     2.239617,
-     1.078943,
+     2.258578,
+     2.238724,
+     1.099277,
      22,
-     9
+     11
     ],
     [
      4285,
-     2.157306,
-     2.130379,
-     1.078943,
+     2.175217,
+     2.1521,
+     1.099277,
      22,
-     9
+     11
     ],
     [
      4290,
-     2.202139,
-     2.142517,
-     0.957423,
-     19,
-     8
+     2.220608,
+     2.163417,
+     0.932073,
+     18,
+     9
     ],
     [
      4295,
-     2.338404,
-     2.324021,
-     0.509489,
-     10,
+     2.350806,
+     2.3388,
+     0.429406,
+     8,
      4
     ],
     [
      4300,
-     2.356091,
-     2.297368,
-     0.429309,
-     8,
+     2.358998,
+     2.309779,
+     0.349285,
+     6,
      3
     ],
     [
      4305,
-     2.288833,
-     2.269177,
-     0.320195,
-     8,
+     2.302432,
+     2.287528,
+     0.240172,
+     6,
      2
     ],
     [
      4310,
-     2.298983,
-     2.28397,
-     0.280078,
-     7,
+     2.310206,
+     2.298757,
+     0.200054,
+     5,
      2
     ],
     [
      4315,
-     2.263225,
-     2.256097,
-     0.240071,
-     6,
+     2.28514,
+     2.280388,
+     0.160047,
+     4,
      1
     ],
     [
      4320,
-     2.285735,
-     2.285735,
+     2.300146,
+     2.300146,
      0.0,
      0,
      0
     ],
     [
      4325,
-     2.285735,
-     2.285735,
+     2.300146,
+     2.300146,
      0.0,
      0,
      0
     ],
     [
      4330,
-     2.285735,
-     2.285735,
+     2.300146,
+     2.300146,
      0.0,
      0,
      0
     ],
     [
      4335,
-     2.285735,
-     2.285735,
+     2.300146,
+     2.300146,
      0.0,
      0,
      0
     ],
     [
      4340,
-     2.285735,
-     2.285735,
+     2.300146,
+     2.300146,
      0.0,
      0,
      0
     ],
     [
      4345,
-     2.230124,
-     2.230124,
-     2.22444,
+     2.244595,
+     2.244595,
+     2.222056,
      34,
      4
     ],
     [
      4350,
-     2.191384,
-     2.092084,
-     2.22444,
+     2.205635,
+     2.106425,
+     2.222056,
      34,
      4
     ],
     [
      4355,
-     1.697524,
-     1.678084,
-     2.22444,
+     1.712415,
+     1.692975,
+     2.222056,
      34,
      4
     ],
     [
      4360,
-     1.643997,
-     1.522864,
-     1.901736,
+     1.658957,
+     1.537905,
+     1.899352,
      26,
      3
     ],
     [
      4365,
-     1.768157,
-     1.746537,
-     1.901736,
+     1.782827,
+     1.761237,
+     1.899352,
      26,
      3
     ],
     [
      4370,
-     1.768357,
-     1.737857,
-     1.901736,
+     1.782977,
+     1.752477,
+     1.899352,
      26,
      3
     ],
     [
      4375,
-     1.774397,
-     1.716457,
-     1.901736,
+     1.789007,
+     1.731177,
+     1.899352,
      26,
      3
     ]
    ],
    "title": "Post-Base, leverage sensitivity 50x",
    "leverage": 50,
-   "markdown": "| h (UTC) | Equity | PnL | DD% max (intrabar) | cum DD% | Margin max $ (% eq) | PF normal h / cum | Cost PF h | DDT eng s / uw min | Gen N | Gen Tr | Ind N | Ind Tr | Block | DCA | Closed W/L (win%) | Lots opened / open / max | Groups max | Orders E/B/D/close/ctrl |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| 05:00 | 8.352 | -1.648 | 25.70 (28.36) | 25.70 | 9.74 (100%) | 0.04 / 0.04 | 0.660 | 0 / 57 | 99.00(5) | 0.03(232) | - | - | - | - | 39/198 (16.5) | 237 / 0 / 237 | 3 | 237/0/0/237/12 |\n| 06:00 | 8.190 | -0.162 | 37.56 (38.65) | 37.56 | 11.34 (100%) | 0.96 / 0.66 | 1.118 | 2340 / 67 | 1.46(36) | 0.93(404) | - | - | - | - | 292/148 (66.4) | 446 / 6 / 266 | 16 | 446/0/0/440/104 |\n| 07:00 | 7.555 | -0.634 | 36.45 (36.85) | 37.56 | 8.25 (100%) | 0.01 / 0.60 | 0.853 | 0 / 107 | 0.00(5) | 0.01(147) | - | - | - | - | 6/146 (4.0) | 153 / 7 / 153 | 5 | 153/0/0/152/14 |\n| 08:00 | 5.364 | -2.191 | 52.93 (57.32) | 52.93 | 8.07 (100%) | 0.04 / 0.57 | 0.426 | 420 / 167 | 0.19(5) | 0.00(18) | - | - | - | - | 2/21 (8.7) | 193 / 177 / 193 | 4 | 193/0/0/23/16 |\n| 09:00 | 4.481 | -0.883 | 61.02 (63.23) | 61.02 | 7.42 (142%) | 0.00 / 0.39 | 0.213 | 1260 / 227 | 0.00(11) | 0.00(166) | - | - | - | - | 0/177 (0.0) | 0 / 0 / 177 | 2 | 0/0/0/177/6 |\n| 10:00 | 4.481 | +0.000 | 60.58 (60.58) | 61.02 | 0.00 (0%) | - / 0.39 | - | - / 287 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 11:00 | 4.481 | +0.000 | 60.58 (60.58) | 61.02 | 0.00 (0%) | - / 0.39 | - | - / 347 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 12:00 | 4.481 | +0.000 | 60.58 (60.58) | 61.02 | 0.00 (0%) | - / 0.39 | - | - / 407 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 13:00 | 4.481 | +0.000 | 60.58 (60.58) | 61.02 | 0.00 (0%) | - / 0.39 | - | - / 467 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 14:00 | 2.516 | -1.965 | 78.18 (79.64) | 78.18 | 5.06 (100%) | 0.53 / 0.42 | 0.726 | 1260 / 527 | 0.29(16) | 0.58(102) | - | - | - | - | 52/66 (44.1) | 165 / 47 / 67 | 12 | 165/0/0/118/126 |\n| 15:00 | 2.286 | -0.230 | 81.02 (81.37) | 81.02 | 2.41 (98%) | 0.05 / 0.38 | 0.581 | 780 / 587 | 0.14(7) | 0.04(62) | - | - | - | 99.00(1) | 23/47 (32.9) | 23 / 0 / 51 | 16 | 22/0/1/70/66 |\n| 16:00 | 1.869 | -0.417 | 86.99 (87.36) | 86.99 | 2.22 (100%) | 99.00 / 0.39 | 1.121 | 0 / 647 | 99.00(4) | 99.00(13) | - | - | - | - | 17/0 (100.0) | 34 / 17 / 34 | 4 | 34/0/0/17/12 |\n| **Total** | 1.869 | -8.131 | 86.99 (87.36) | 86.99 | 11.34 (142%) | 0.39 | 0.787 | 32340 / 647 | 0.45(89) | 0.38(1144) | - | - | - | 99.00(1) | 431/803 (34.9) | 1251 / 17 / 266 | 16 | 1250/0/1/1234/356 |"
+   "markdown": "| h (UTC) | Equity | PnL | DD% max (intrabar) | cum DD% | Margin max $ (% eq) | PF normal h / cum | Cost PF h | DDT eng s / uw min | Gen N | Gen Tr | Ind N | Ind Tr | Block | DCA | Closed W/L (win%) | Lots opened / open / max | Groups max | Orders E/B/D/close/ctrl |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| 05:00 | 8.352 | -1.648 | 25.69 (28.35) | 25.69 | 9.74 (100%) | 0.04 / 0.04 | 0.660 | 0 / 57 | 99.00(5) | 0.03(232) | - | - | - | - | 39/198 (16.5) | 237 / 0 / 237 | 3 | 237/0/0/237/12 |\n| 06:00 | 8.207 | -0.145 | 37.58 (38.68) | 37.58 | 11.37 (100%) | 0.96 / 0.67 | 1.120 | 2340 / 67 | 1.47(37) | 0.94(405) | - | - | - | - | 294/148 (66.5) | 448 / 6 / 267 | 17 | 448/0/0/442/104 |\n| 07:00 | 7.563 | -0.644 | 36.45 (36.84) | 37.58 | 8.30 (100%) | 0.01 / 0.60 | 0.853 | 0 / 107 | 0.00(5) | 0.01(148) | - | - | - | - | 6/147 (3.9) | 154 / 7 / 154 | 4 | 154/0/0/153/12 |\n| 08:00 | 5.366 | -2.197 | 52.98 (57.34) | 52.98 | 8.03 (99%) | 0.01 / 0.57 | 0.373 | 420 / 167 | 0.06(4) | 0.00(19) | - | - | - | - | 1/22 (4.3) | 192 / 176 / 192 | 3 | 192/0/0/23/14 |\n| 09:00 | 4.488 | -0.878 | 61.01 (63.20) | 61.01 | 7.38 (141%) | 0.00 / 0.39 | 0.213 | 1260 / 227 | 0.00(11) | 0.00(165) | - | - | - | - | 0/176 (0.0) | 0 / 0 / 176 | 2 | 0/0/0/176/6 |\n| 10:00 | 4.488 | +0.000 | 60.57 (60.57) | 61.01 | 0.00 (0%) | - / 0.39 | - | - / 287 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 11:00 | 4.488 | +0.000 | 60.57 (60.57) | 61.01 | 0.00 (0%) | - / 0.39 | - | - / 347 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 12:00 | 4.488 | +0.000 | 60.57 (60.57) | 61.01 | 0.00 (0%) | - / 0.39 | - | - / 407 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 13:00 | 4.488 | +0.000 | 60.57 (60.57) | 61.01 | 0.00 (0%) | - / 0.39 | - | - / 467 | - | - | - | - | - | - | 0/0 (-) | 0 / 0 / 0 | 0 | 0/0/0/0/0 |\n| 14:00 | 2.532 | -1.955 | 78.24 (79.69) | 78.24 | 5.06 (99%) | 0.53 / 0.42 | 0.730 | 1260 / 527 | 0.29(16) | 0.58(102) | - | - | - | - | 52/66 (44.1) | 165 / 47 / 67 | 12 | 165/0/0/118/122 |\n| 15:00 | 2.300 | -0.232 | 80.89 (81.27) | 80.89 | 2.47 (100%) | 0.05 / 0.38 | 0.568 | 780 / 587 | 0.13(8) | 0.04(59) | - | - | - | 99.00(1) | 22/46 (32.4) | 21 / 0 / 50 | 15 | 20/0/1/68/66 |\n| 16:00 | 1.883 | -0.417 | 86.87 (87.25) | 86.87 | 2.22 (99%) | 99.00 / 0.39 | 1.121 | 0 / 647 | 99.00(4) | 99.00(13) | - | - | - | - | 17/0 (100.0) | 34 / 17 / 34 | 4 | 34/0/0/17/12 |\n| **Total** | 1.883 | -8.117 | 86.87 (87.25) | 86.87 | 11.37 (141%) | 0.39 | 0.787 | 32340 / 647 | 0.44(90) | 0.38(1143) | - | - | - | 99.00(1) | 431/803 (34.9) | 1251 / 17 / 267 | 17 | 1250/0/1/1234/348 |"
   }
  ],
  "tradeLevelHourly": {
