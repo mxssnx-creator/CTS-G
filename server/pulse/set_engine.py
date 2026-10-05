@@ -1652,6 +1652,17 @@ class SetBook:
             self.replay_required = not bool(self._hist_set_signature)
             self.score_refresh_required = False
 
+    def ddt_when_enough(self, rows: Sequence[Any], need: int, *, ordered: bool = False) -> Dict[str, float]:
+        """Drawdown time, valid (zero) until a tape holds ``need`` positions.
+
+        With too few prior positions there is no drawdown evidence yet: the
+        Set counts as DDT-valid and keeps being processed, then the normal
+        cap applies once the sample exists (same rule as the sample-gated
+        score path)."""
+        if not rows or len(rows) < int(need):
+            return {"maxS": 0.0, "avgS": 0.0, "episodes": 0, "pending": 1.0}
+        return drawdown_time_by_symbol(rows, ordered=ordered, cost_pct=self.cost_pct)
+
     def eval_need(self) -> int:
         """Required completed Base samples; default is the full last-30 window."""
         try:
@@ -3958,8 +3969,8 @@ class SetBook:
         else:
             last25_avg_r = 0.0
             last25_avg_pnl = 0.0
-        dd = drawdown_time_by_symbol(ordered, ordered=True, cost_pct=self.cost_pct)
         need = self.eval_need()
+        dd = self.ddt_when_enough(ordered, need, ordered=True)
         n15 = int(last15["count"])
         ratio = float(last15["ratio"])
         from position_cost import clears_pf
@@ -5438,7 +5449,7 @@ class SetBook:
             tape = filter_side(hist + live, side)
             source = "mixed" if live_side else "hist-sim"
         tape.sort(key=lambda r: finite(r.get("t")))
-        dd = drawdown_time_by_symbol(tape, cost_pct=self.cost_pct) if tape else {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
+        dd = self.ddt_when_enough(tape, need, ordered=True)
         if tape:
             last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
             windows = evaluation_windows(tape, self.cost_pct, required_samples=need)

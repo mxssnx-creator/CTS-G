@@ -697,6 +697,10 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
                 ddt_cache[key] = 0.0
                 continue
             lo_i = max(g0, ie - 95)
+            if ie - g0 + 1 < book.eval_need():
+                # too few prior closes for a DDT: valid until the sample exists
+                ddt_cache[key] = 0.0
+                continue
             rows = [{"t": float(ev.exit[k]) * BAR, "symbol": sym_names[int(ev.tiebreak[k])], "pnl_pct": float(ev.moves[k])}
                     for k in range(lo_i, ie + 1)]
             ddt_cache[key] = float(drawdown_time_by_symbol(rows, ordered=True)["maxS"])

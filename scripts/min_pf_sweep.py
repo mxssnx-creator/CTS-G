@@ -67,15 +67,21 @@ def main() -> int:
             combos = []
             for item in args.combos.split(";"):
                 f, bn, mn, rn, dd = item.split(",")
-                combos.append((float(f), dict(baseEvalPosCount=int(bn), setPfWindow=int(bn), mainEvalPosCount=int(mn),
+                combos.append((f, dict(baseEvalPosCount=int(bn), setPfWindow=int(bn), mainEvalPosCount=int(mn),
                                               realEvalPosCount=int(rn)), float(dd)))
         else:
             ddt_values = [float(x) for x in args.ddt_s.split(",") if x] or [None]
             combos = [(float(f), {}, d) for f in args.floors.split(",") for d in ddt_values]
         for floor, ns, ddt in combos:
-            def profile(floor=floor, ns=ns, ddt=ddt):
+            # a plain number sets every stage; "base/main/real" sets the three stage floors separately
+            parts = [float(x) for x in str(floor).split("/")]
+            floors = parts * 3 if len(parts) == 1 else parts
+            floor = floors[0] if len(parts) == 1 else str(floor)
+
+            def profile(floors=floors, ns=ns, ddt=ddt):
                 out = original()
-                out.update({key: floor for key in STAGE_KEYS})
+                out.update({key: floors[0] for key in STAGE_KEYS})
+                out.update(baseMinPf=floors[0], mainMinPf=floors[1], realMinPf=floors[2])
                 out.update(ns)
                 if ddt is not None:
                     out.update(setMaxDdTimeS=ddt, maxDdTimeS=ddt)
