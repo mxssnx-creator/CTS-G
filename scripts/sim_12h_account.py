@@ -1357,6 +1357,161 @@ def markdown_table(res: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# Inline SVG diagrams (no external assets; colours follow the page theme)
+# --------------------------------------------------------------------------
+
+_SVG_W, _SVG_H, _PAD_L, _PAD_R, _PAD_T, _PAD_B = 640, 220, 52, 12, 14, 30
+_PALETTE = ["var(--acc)", "var(--pos)", "var(--neg)", "#c98a1b", "#8a5cd1", "#1b9aa6", "#a64d79", "#6b6b66"]
+
+
+def _nice_ticks(lo: float, hi: float, n: int = 4) -> List[float]:
+    if not math.isfinite(lo) or not math.isfinite(hi):
+        return [0.0, 1.0]
+    if hi - lo < 1e-12:
+        hi = lo + 1.0
+    step = (hi - lo) / n
+    mag = 10 ** math.floor(math.log10(step))
+    step = min((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= step), default=step)
+    start = math.floor(lo / step) * step
+    out, v = [], start
+    while v <= hi + step * 0.5 and len(out) < 12:
+        out.append(round(v, 10))
+        v += step
+    return out
+
+
+def _svg_frame(title: str, labels: List[str], ymin: float, ymax: float, body, legend: Optional[List[Tuple[str, str]]] = None):
+    ticks = _nice_ticks(ymin, ymax)
+    ymin, ymax = min(ymin, ticks[0]), max(ymax, ticks[-1])
+    span = (ymax - ymin) or 1.0
+    iw, ih = _SVG_W - _PAD_L - _PAD_R, _SVG_H - _PAD_T - _PAD_B
+
+    def yp(v):
+        return _PAD_T + ih - (v - ymin) / span * ih
+
+    parts = [f"<svg viewBox='0 0 {_SVG_W} {_SVG_H}' role='img' aria-label='{html.escape(title)}' class='chart'>"]
+    for tk in ticks:
+        y = yp(tk)
+        parts.append(f"<line x1='{_PAD_L}' x2='{_SVG_W - _PAD_R}' y1='{y:.1f}' y2='{y:.1f}' class='grid'/>"
+                     f"<text x='{_PAD_L - 6}' y='{y + 4:.1f}' class='ax' text-anchor='end'>{fmt(tk, 2 if abs(tk) < 100 else 0)}</text>")
+    n = max(1, len(labels))
+    every = max(1, n // 12)
+    for i, lab in enumerate(labels):
+        if i % every == 0:
+            x = _PAD_L + (i + 0.5) / n * iw
+            parts.append(f"<text x='{x:.1f}' y='{_SVG_H - 10}' class='ax' text-anchor='middle'>{html.escape(str(lab))}</text>")
+    parts.append(body(yp, iw, ih, n))
+    parts.append("</svg>")
+    leg = ""
+    if legend:
+        leg = "<div class='legend'>" + "".join(f"<span><i style='background:{c}'></i>{html.escape(t)}</span>" for t, c in legend) + "</div>"
+    return f"<figure><figcaption>{html.escape(title)}</figcaption>{''.join(parts)}{leg}</figure>"
+
+
+def svg_bars(title: str, labels: List[str], series: List[Tuple[str, List[float]]], stacked: bool = False, colors=None) -> str:
+    colors = colors or _PALETTE
+    if stacked:
+        pos = [sum(max(0.0, s[1][i]) for s in series) for i in range(len(labels))]
+        neg = [sum(min(0.0, s[1][i]) for s in series) for i in range(len(labels))]
+        ymax, ymin = max(pos + [0.0]), min(neg + [0.0])
+    else:
+        vals = [v for s in series for v in s[1]]
+        ymax, ymin = max(vals + [0.0]), min(vals + [0.0])
+
+    def body(yp, iw, ih, n):
+        out = [f"<line x1='{_PAD_L}' x2='{_SVG_W - _PAD_R}' y1='{yp(0):.1f}' y2='{yp(0):.1f}' class='zero'/>"]
+        slot = iw / n
+        bw = slot * 0.7 / (1 if stacked else max(1, len(series)))
+        for i in range(len(labels)):
+            up = dn = 0.0
+            for k, (name, vals) in enumerate(series):
+                v = vals[i]
+                col = colors[k % len(colors)]
+                if stacked:
+                    base = up if v >= 0 else dn
+                    top = base + v
+                    y0, y1 = yp(base), yp(top)
+                    if v >= 0:
+                        up = top
+                    else:
+                        dn = top
+                    x = _PAD_L + i * slot + slot * 0.15
+                else:
+                    y0, y1 = yp(0), yp(v)
+                    x = _PAD_L + i * slot + slot * 0.15 + k * bw
+                h = abs(y1 - y0)
+                if h > 0.01:
+                    out.append(f"<rect x='{x:.1f}' y='{min(y0, y1):.1f}' width='{bw:.1f}' height='{h:.1f}' fill='{col}'>"
+                               f"<title>{html.escape(labels[i])} {html.escape(name)}: {fmt(v, 4)}</title></rect>")
+        return "".join(out)
+
+    legend = [(n_, colors[k % len(colors)]) for k, (n_, _v) in enumerate(series)] if len(series) > 1 else None
+    return _svg_frame(title, labels, ymin, ymax, body, legend)
+
+
+def svg_lines(title: str, labels: List[str], series: List[Tuple[str, List[Optional[float]]]], ref: Optional[float] = None) -> str:
+    vals = [v for s in series for v in s[1] if v is not None and math.isfinite(v)]
+    if ref is not None:
+        vals.append(ref)
+    ymax, ymin = max(vals + [0.0]), min(vals + [0.0])
+
+    def body(yp, iw, ih, n):
+        out = []
+        if ref is not None:
+            out.append(f"<line x1='{_PAD_L}' x2='{_SVG_W - _PAD_R}' y1='{yp(ref):.1f}' y2='{yp(ref):.1f}' class='ref'/>")
+        for k, (name, ys) in enumerate(series):
+            col = _PALETTE[k % len(_PALETTE)]
+            pts = [(_PAD_L + (i + 0.5) / n * iw, yp(v)) for i, v in enumerate(ys) if v is not None and math.isfinite(v)]
+            if len(pts) > 1:
+                out.append(f"<polyline fill='none' stroke='{col}' stroke-width='1.8' points='{' '.join(f'{x:.1f},{y:.1f}' for x, y in pts)}'/>")
+            for (x, y), (i, v) in zip(pts, [(i, v) for i, v in enumerate(ys) if v is not None and math.isfinite(v)]):
+                out.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='2.6' fill='{col}'><title>{html.escape(labels[i])} {html.escape(name)}: {fmt(v, 3)}</title></circle>")
+        return "".join(out)
+
+    legend = [(n_, _PALETTE[k % len(_PALETTE)]) for k, (n_, _v) in enumerate(series)]
+    return _svg_frame(title, labels, ymin, ymax, body, legend)
+
+
+def run_charts(res: Dict[str, Any], start_s: int, sim_start_bar: int) -> str:
+    hrs = res["hourly"]
+    labels = [h["startUtc"] for h in hrs]
+    pf = lambda st: (st.get("pfNormal") if st and st.get("n") else None)  # noqa: E731
+    charts = [
+        svg_lines("Equity at end of hour (USDT)", labels, [("equity", [h["equityEnd"] for h in hrs])]),
+        svg_bars("PnL per hour (USDT)", labels, [("pnl", [h["pnl"] for h in hrs])], colors=["var(--acc)"]),
+        svg_lines("Max drawdown per hour (%)", labels, [("DD close", [h["ddMaxPct"] for h in hrs]),
+                                                      ("DD intrabar", [h["ddIntrabarMaxPct"] for h in hrs])]),
+        svg_bars("Peak margin used per hour (% of equity)", labels, [("margin %", [h["marginMaxPct"] for h in hrs])], colors=["#c98a1b"]),
+        svg_bars("Closed trades per hour (wins / losses)", labels,
+                 [("wins", [float(h["closed"].get("wins", 0)) for h in hrs]), ("losses", [float(h["closed"].get("losses", 0)) for h in hrs])],
+                 stacked=True, colors=["var(--pos)", "var(--neg)"]),
+        svg_bars("Orders per hour", labels,
+                 [("entry", [float(h["orders"]["entry"]) for h in hrs]), ("block add", [float(h["orders"]["blockAdd"]) for h in hrs]),
+                  ("DCA", [float(h["orders"]["dcaEntry"] + h["orders"]["dcaAdd"]) for h in hrs]),
+                  ("close fills", [float(sum(h["orders"]["closeFills"].values())) for h in hrs]),
+                  ("control", [float(h["orders"]["controlPlace"] + h["orders"]["controlCancelReplace"] + h["orders"]["controlCancel"]) for h in hrs])],
+                 stacked=True),
+        svg_bars("Lots / positions opened per hour", labels,
+                 [("lots", [float(h["positions"]["lotsOpened"]) for h in hrs]), ("position groups", [float(h["positions"]["groupsOpened"]) for h in hrs])]),
+        svg_lines("PF normal per hour by strategy (1.0 = break-even)", labels,
+                  [(k, [pf(h["byStrategy"].get(k)) for h in hrs]) for k in
+                   ("general/normal", "general/trailing", "indications/normal", "indications/trailing", "block", "dca")], ref=1.0),
+        svg_bars("Skipped entries per hour", labels,
+                 [("no free margin", [float(h["skipped"]["noFreeMargin"]) for h in hrs]), ("below min", [float(h["skipped"]["belowMinOrQty"]) for h in hrs]),
+                  ("live-negative", [float(h["skipped"]["liveNegativeDeact"]) for h in hrs]), ("no parent", [float(h["skipped"]["addOnNoParent"]) for h in hrs])],
+                 stacked=True),
+    ]
+    curve = res.get("equityCurve") or []
+    if curve:
+        cl = [time.strftime("%H:%M", time.gmtime(start_s + b * BAR)) for b, *_ in curve]
+        charts.insert(1, svg_lines("Equity, 5-minute resolution (close / worst intrabar)", cl,
+                                   [("equity", [c[1] for c in curve]), ("worst intrabar", [c[2] for c in curve])]))
+        charts.append(svg_lines("Open lots and position groups (5-minute)", cl,
+                                [("lots", [float(c[4]) for c in curve]), ("groups", [float(c[5]) for c in curve])]))
+    return "<div class='charts'>" + "".join(charts) + "</div>"
+
+
 def html_report(report: Dict[str, Any]) -> str:
     def esc(x):
         return html.escape(str(x))
@@ -1408,7 +1563,7 @@ def html_report(report: Dict[str, Any]) -> str:
             for k in IND_KINDS)
         liq = t.get("liquidations") or []
         liq_txt = ("Liquidations: " + "; ".join(f"{x['utc']} UTC {x['lots']} lots / {x['notional']:.0f} USDT notional, equity after {x['equityAfter']:.3f}" for x in liq)) if liq else "No liquidation."
-        return (f"<h2>{esc(res['title'])}</h2><p class='note'>{esc(liq_txt)} Leverage: {esc(res.get('leverage'))}. "
+        return (f"<h2>{esc(res['title'])}</h2>{run_charts(res, report['startS'], report['window']['simStartBar'])}<p class='note'>{esc(liq_txt)} Leverage: {esc(res.get('leverage'))}. "
                 f"Skipped entries: {t['skipped']['noFreeMargin']} no free margin, {t['skipped'].get('equityHalt', 0)} equity halt, "
                 f"{t['skipped']['liveNegativeDeact']} live-negative deactivation.</p>"
                 f"<div class='scroll'><table><thead><tr>{''.join(f'<th>{esc(x)}</th>' for x in heads)}</tr></thead>"
@@ -1453,6 +1608,11 @@ main{max-width:1500px;margin:0 auto;padding:24px 16px}h1{font-size:22px;margin:0
 table{border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12.5px}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
 th{position:sticky;top:0;background:var(--bg);font-weight:600;text-align:right}td:first-child,th:first-child{text-align:left}
 tr.total td{background:var(--tot);font-weight:600}small{color:var(--mut)}.pos{color:var(--pos)}.neg{color:var(--neg)}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:12px;margin:10px 0 14px}
+figure{margin:0;border:1px solid var(--line);border-radius:6px;padding:8px 10px}figcaption{font-weight:600;font-size:12.5px;margin-bottom:4px}
+.chart{width:100%;height:auto}.chart .grid{stroke:var(--line);stroke-width:1}.chart .zero{stroke:var(--mut);stroke-width:1}
+.chart .ref{stroke:var(--mut);stroke-dasharray:4 3}.chart .ax{fill:var(--mut);font-size:10px}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--mut)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
 details{margin:10px 0}summary{cursor:pointer;color:var(--acc)}pre{white-space:pre-wrap;font-size:12px}ul{padding-left:18px}li{margin:3px 0}
 """
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"

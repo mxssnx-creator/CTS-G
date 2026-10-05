@@ -205,5 +205,38 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
         self.assertLessEqual(tot["marginMax"], 1.0)
 
 
+class ChartTest(unittest.TestCase):
+    labels = ["05:00", "06:00", "07:00"]
+
+    def test_bars_signed_and_stacked(self):
+        svg = sim.svg_bars("pnl", self.labels, [("pnl", [-2.0, 0.0, 3.0])])
+        self.assertEqual(svg.count("<rect"), 2)  # the zero hour draws no bar
+        st = sim.svg_bars("w/l", self.labels, [("w", [1.0, 2.0, 0.0]), ("l", [3.0, 0.0, 1.0])], stacked=True)
+        self.assertEqual(st.count("<rect"), 4)
+        self.assertIn("legend", st)
+
+    def test_lines_skip_missing_and_nan(self):
+        svg = sim.svg_lines("pf", self.labels, [("a", [1.5, None, float("nan")])], ref=1.0)
+        self.assertEqual(svg.count("<circle"), 1)
+        self.assertNotIn("nan", svg.lower().replace("<title>", ""))
+        self.assertNotIn("<polyline", svg)  # one point cannot draw a line
+
+    def test_degenerate_flat_series(self):
+        svg = sim.svg_lines("flat", self.labels, [("e", [0.0, 0.0, 0.0])])
+        self.assertIn("<polyline", svg)
+        self.assertEqual(sim.svg_bars("empty", [], [("x", [])]).count("<rect"), 0)
+
+    def test_run_charts_from_hourly_rows(self):
+        h = dict(startUtc="05:00", equityEnd=9.0, pnl=-1.0, ddMaxPct=10.0, ddIntrabarMaxPct=12.0, marginMaxPct=40.0,
+                 closed=dict(wins=1, losses=2), byStrategy={"general/normal": dict(n=3, pfNormal=0.8), "block": dict(n=0)},
+                 orders=dict(entry=3, blockAdd=0, dcaEntry=0, dcaAdd=0, closeFills={"sl": 2, "tp": 1},
+                             controlPlace=2, controlCancelReplace=0, controlCancel=2),
+                 positions=dict(lotsOpened=3, groupsOpened=1),
+                 skipped=dict(noFreeMargin=0, belowMinOrQty=0, liveNegativeDeact=0, addOnNoParent=0))
+        res = dict(hourly=[h, dict(h, startUtc="06:00")], equityCurve=[[0, 10.0, 9.9, 0.1, 1, 1], [5, 9.0, 8.5, 0.2, 2, 1]])
+        out = sim.run_charts(res, 0, 0)
+        self.assertEqual(out.count("<svg"), 11)
+
+
 if __name__ == "__main__":
     unittest.main()
