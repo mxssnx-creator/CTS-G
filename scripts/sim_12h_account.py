@@ -969,7 +969,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     # Micro cap (pulse_trader.place): Micro lots <= microMaxShare x maxOpen.
     micro_cap = 0
     if gated and bool(getattr(book, "micro_enabled", False)):
-        share = float(getattr(book, "micro_max_share", 0.25) or 0.0)
+        share = float(getattr(book, "micro_max_share", 0.05) or 0.0)
         micro_cap = max(1, int(max_open * share)) if share > 0 else 0
     micro_ids: set = set()
     is_micro_c = (cands["micro_ok"] & ~cands["real_ok"]) if "micro_ok" in cands else np.zeros(len(cands["uid"]), bool)
@@ -1684,6 +1684,8 @@ def run_charts(res: Dict[str, Any], start_s: int, sim_start_bar: int) -> str:
 
 
 def html_report(report: Dict[str, Any]) -> str:
+    w = report.get("window") or {}
+    hours_n = max(1, int(round((int(w.get("simEndBar", 0)) - int(w.get("simStartBar", 0))) / 60))) if w else 12
     def esc(x):
         return html.escape(str(x))
 
@@ -1795,8 +1797,8 @@ figure{margin:0;border:1px solid var(--line);border-radius:6px;padding:8px 10px}
 details{margin:10px 0}summary{cursor:pointer;color:var(--acc)}pre{white-space:pre-wrap;font-size:12px}ul{padding-left:18px}li{margin:3px 0}
 """
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>CTS-G 12h account simulation</title><style>{css}</style></head><body><main>"
-            f"<h1>CTS-G 12-hour account simulation</h1>"
+            f"<title>CTS-G {hours_n}h account simulation</title><style>{css}</style></head><body><main>"
+            f"<h1>CTS-G {hours_n}-hour account simulation</h1>"
             f"<p class='meta'>{esc(report['window']['startUtc'])} &rarr; {esc(report['window']['endUtc'])} UTC &middot; "
             f"{len(report['symbols'])} symbols &middot; start equity {report['startEquity']} USDT &middot; "
             f"leverage {esc(report['leverage'])} &middot; cost {report['costPct']}% round trip &middot; generated {esc(report['generatedAt'])}</p>"

@@ -1191,7 +1191,7 @@ class SetBook:
         # On by default: Micro sets (PF microMinPf..floor) trade one venue
         # minimum lot. Overlays can switch it off with microEnabled=false.
         self.micro_enabled = True
-        self.micro_max_share = 0.25
+        self.micro_max_share = 0.05
         self.real_min_pf = POSITIVE_PF
         self.main_eval = 5
         self.real_eval = 3
@@ -1529,7 +1529,7 @@ class SetBook:
         self.real_min_pf = self.stage_min_pf["real"]
         # Micro tier floor: independent of the shared floor and never above Base.
         self.micro_enabled = bool(ov.get("microEnabled", True))
-        self.micro_max_share = max(0.0, min(1.0, finite(ov.get("microMaxShare", 0.25), 0.25)))
+        self.micro_max_share = max(0.0, min(1.0, finite(ov.get("microMaxShare", 0.05), 0.05)))
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
             self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
@@ -4939,7 +4939,7 @@ class SetBook:
             "microCount": sum(1 for st in self.sets.values() if getattr(st, "micro", False)),
             "microMinPf": round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 4),
             "microEnabled": bool(getattr(self, "micro_enabled", True)),
-            "microMaxShare": float(getattr(self, "micro_max_share", 0.25)),
+            "microMaxShare": float(getattr(self, "micro_max_share", 0.05)),
             "validationNeed": need,
             "entryGate": getattr(self, "entry_gate_stats", None),
             "histFills": intern_fills,

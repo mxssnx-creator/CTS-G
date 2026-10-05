@@ -6585,7 +6585,7 @@ class Pulse:
         if micro:
             # Micro is capped to a share of the position book so the
             # below-floor band can never crowd out Base-validated Sets.
-            share = float(getattr(self.sets, "micro_max_share", 0.25) or 0.0)
+            share = float(getattr(self.sets, "micro_max_share", 0.05) or 0.0)
             book_cap = MAX_OPEN if MAX_OPEN > 0 else 100
             micro_cap = max(1, int(book_cap * share)) if share > 0 else 0
             micro_open = sum(1 for p in list(self.open.values()) if getattr(p, "micro", False))

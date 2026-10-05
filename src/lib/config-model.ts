@@ -135,7 +135,7 @@ export const HIST_TEST_REFRESH_MIN = 1;
 export const HIST_TEST_REFRESH_MAX = 8;
 export const HIST_TEST_REFRESH_DEFAULT = 2;
 /** Scratch window ceiling on the desk; must cover the 600 s engine default. */
-export const SCRATCH_S_MAX = 3600;
+export const SCRATCH_S_MAX = 7200;
 
 export function clampHistTestHours(value: unknown, fallback = HIST_TEST_HOURS_DEFAULT): number {
   const n = Math.round(Number(value));
@@ -449,7 +449,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailGivePct: 0.1,
   timeStopS: 21600,
   maxDdTimeS: 57600,
-  scratchS: 600,
+  scratchS: 7200,
   scratchMinPct: 0.16,
   scanS: 0.2,
   cooldownS: 9,
@@ -611,7 +611,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setAutoDeact: true,
   microEnabled: true,
   microMinPf: 1.05,
-  microMaxShare: 0.25,
+  microMaxShare: 0.05,
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
   setLiveNegativeDeact: false,
@@ -1042,7 +1042,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setAutoDeact: bool(cts.setAutoDeact, true),
     microEnabled: bool(cts.microEnabled, true),
     microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
-    microMaxShare: Math.max(0, Math.min(1, num(cts.microMaxShare, 0.25))),
+    microMaxShare: Math.max(0, Math.min(1, num(cts.microMaxShare, 0.05))),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),

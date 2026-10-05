@@ -341,7 +341,7 @@ test("saved trail ranges equal the reloaded full grid, so the catalog cannot fli
 });
 
 test("the Scratch s control range covers the engine default and saved overlays", () => {
-  assert.equal(DEFAULT_OVERLAY.scratchS, 600);
+  assert.equal(DEFAULT_OVERLAY.scratchS, 7200);
   assert.ok(SCRATCH_S_MAX >= DEFAULT_OVERLAY.scratchS);
   for (const id of ["bingx-x01", "bingx-x02"]) {
     assert.ok(Number(laneFile(id).scratchS) <= SCRATCH_S_MAX, id);
