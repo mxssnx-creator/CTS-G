@@ -371,6 +371,10 @@ SYMBOL_SORTS = ("vol1h", "vol24h", "quoteVolume", "changeAbs", "changePct", "lev
 BALANCE_EVERY = 6.0
 QA_EVERY = 5
 COOLDOWN_S = 9.0
+# After a position is closed outside the engine (manual exchange close), its
+# exact execution lane is held this long so the same order/position is not
+# re-opened; other lanes and new configurations keep trading. 0 disables.
+MANUAL_LANE_HOLD_S = 21600.0
 STAGGER_S = 0.6
 DD_HALT = 0.0
 EQ_MIN = 0.20
@@ -6477,6 +6481,9 @@ class Pulse:
             execution_lane = self.execution_lane_key(pack, reason, chosen, execution_strategy)
         if execution_lane and self.occupying(sym, side, pack, set_id, execution_lane=execution_lane):
             return
+        if self.manual_lane_held(sym, side, execution_lane, set_id, pack):
+            # This exact order/position was closed manually: do not re-open it.
+            return
         for pending in (getattr(self, "pending_orders", {}) or {}).values():
             if (
                 str(pending.get("kind") or "entry") == "entry"
@@ -7219,6 +7226,39 @@ class Pulse:
                 upnl += d * p.qty * p.entry
         return n, upnl
 
+    def _hold_manual_lane(self, pos: Position) -> None:
+        """Remember the exact lane of a position closed outside the engine."""
+        hold = float(getattr(self, "manual_lane_hold_s", MANUAL_LANE_HOLD_S) or 0.0)
+        if hold <= 0:
+            return
+        lane = str(getattr(pos, "execution_lane", "") or "")
+        ident = lane or f"set:{getattr(pos, 'pack', '')}:{getattr(pos, 'set_id', '')}"
+        if ident in ("", "set::"):
+            return
+        holds = self.__dict__.setdefault("manual_lane_holds", {})
+        holds[(pos.symbol, pos.side, ident)] = time.time() + hold
+
+    def manual_lane_held(self, sym: str, side: str, lane: str = "", set_id: str = "", pack: str = "") -> bool:
+        """True while this exact lane was closed manually and is on hold."""
+        holds = getattr(self, "manual_lane_holds", None)
+        if not holds:
+            return False
+        now = time.time()
+        set_ident = f"set:{pack}:{set_id}" if set_id else ""
+        for key, until in list(holds.items()):
+            if until <= now:
+                holds.pop(key, None)
+                continue
+            hsym, hside, ident = key
+            if hsym != sym or hside != side:
+                continue
+            if ident.startswith("set:"):
+                if set_ident and ident == set_ident:
+                    return True
+            elif lane and self.execution_lane_matches(ident, lane):
+                return True
+        return False
+
     def exchange_position_active(self, pos: Position) -> bool:
         """Whether exchange truth permits a live order for this position.
 
@@ -7425,8 +7465,12 @@ class Pulse:
             else:
                 self.losses += 1
                 self.consec_loss += 1
+            # A manual (outside-the-engine) close is account truth, not an
+            # outcome of the engine's own SL/exit/variant decisions.
+            manual_close = str(reason or "").lower().startswith("manual")
             try:
-                self.variants.on_close(rec)
+                if not manual_close:
+                    self.variants.on_close(rec)
             except Exception:
                 pass
             try:
@@ -7442,11 +7486,13 @@ class Pulse:
             except Exception:
                 pass
             try:
-                self.sets.adapt_from_live(completed_roundtrips(self.strategy_closes()))
+                if not manual_close:
+                    self.sets.adapt_from_live(completed_roundtrips(self.strategy_closes()))
             except Exception:
                 pass
             try:
-                self.exits.on_close(rec)
+                if not manual_close:
+                    self.exits.on_close(rec)
             except Exception:
                 pass
             try:
@@ -7504,7 +7550,7 @@ class Pulse:
             self.ban_sym(pos.symbol, clear_open=False)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
         else:
-            self.cooldown[pos.symbol] = time.time() + COOLDOWN_S
+            self.cooldown[pos.symbol] = max(float(self.cooldown.get(pos.symbol, 0.0) or 0.0), time.time() + COOLDOWN_S)
             self.remove_position(pos)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self.save_open_book()
@@ -7604,6 +7650,13 @@ class Pulse:
             filled_qty = min(requested_qty, max(0.0, float(close_result.get("filled_qty") or 0.0)))
             close_oid = real_oid(close_result.get("order_id"))
             close_status = str(close_result.get("status") or "").upper()
+            if ok and close_status == "FLAT":
+                # The venue had no position: it was closed outside the engine.
+                # Book it locally and hold the lane instead of recording an
+                # exchange-confirmed fill at an invented price.
+                self._hold_manual_lane(pos)
+                self.close_pos(pos, exit_px, "manual-close", exchange=False)
+                return
             response_status = "rejected" if not ok else ("confirmed" if filled_qty + 1e-12 >= requested_qty else ("partial" if filled_qty > 0 else "pending"))
             self.record_event(
                 "exchange_response",
@@ -8519,6 +8572,8 @@ class Pulse:
             SCAN_S = max(0.20, min(8.0, float(ov["scanS"])))
         if ov.get("cooldownS") is not None:
             COOLDOWN_S = max(0.0, min(120.0, float(ov["cooldownS"])))
+        self.manual_lane_hold_s = max(0.0, min(7 * 86400.0, finite_number(
+            ov.get("manualCloseLaneHoldS"), MANUAL_LANE_HOLD_S)))
         if ov.get("staggerS") is not None:
             STAGGER_S = max(0.0, min(30.0, float(ov["staggerS"])))
         if ov.get("drawdownHaltPct") is not None:
@@ -11659,6 +11714,13 @@ class Pulse:
             if not hasattr(self, "_absent_n"):
                 self._absent_n = {}
             self._absent_n[stored_key] = misses
+            # Confirmed absent past the propagation window: the venue holds no
+            # quantity for this lot. A stale exchange_qty kept overall controls
+            # "verified" and re-placed them on a flat side (each rejection then
+            # paused protection on every symbol for 30 s).
+            pos.exchange_qty = 0.0
+            if getattr(pos, "_overall_exchange_verified", False):
+                pos._overall_exchange_verified = False
             flat_ex = int(getattr(self, "_empty_rest_streak", 0) or 0) >= 8 and live_n == 0
             # Partial list: need 8 misses. Fully-flat exchange already confirmed by streak.
             if not flat_ex and misses < 8:
@@ -11668,12 +11730,21 @@ class Pulse:
             if has_ctrl and not flat_ex and not self._exchange_flat(pos):
                 pending_absent.append(stored_key)
                 continue
-            log(f"DROP stale local {pos.symbol} {pos.side} group={stored_key[:16]} age={age:.0f}s miss={misses}")
-            # The lot vanished at the venue: its own SL/TP are still live there. Queue them for
-            # (persisted, paced) cancellation exactly as every other final close does.
-            overall_controls.closed_member(self, pos)
-            self.remove_position(pos)
-            self.cooldown[pos.symbol] = time.time() + 12.0
+            log(f"MANUAL CLOSE {pos.symbol} {pos.side} group={stored_key[:16]} age={age:.0f}s miss={misses}")
+            self._absent_n.pop(stored_key, None)
+            # The lot was closed outside the engine. Book it as a realized
+            # local close (account stats, strategy-lane feedback; never Set
+            # evidence, since it is not the configuration's own exit), queue
+            # its SL/TP for paced cancellation through the normal final-close
+            # path, and hold this exact lane so the same position is not
+            # re-opened. Every other lane keeps processing.
+            self._hold_manual_lane(pos)
+            mark = float(self.px.get(pos.symbol) or pos.entry or 0.0)
+            self.close_pos(pos, mark, "manual-close", exchange=False)
+            if any(candidate is pos for candidate in self.open.values()):
+                overall_controls.closed_member(self, pos)
+                self.remove_position(pos)
+            self.cooldown[pos.symbol] = max(float(self.cooldown.get(pos.symbol, 0.0) or 0.0), time.time() + 12.0)
         self.ignored_foreign = len(foreign)
         self.foreign_position_count = len(foreign)
         if foreign:

@@ -6876,6 +6876,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
         "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
         "trailArmMin": 0.3, "trailArmMax": 0.3,
+        "microEnabled": False,  # Base-tier contract; Micro has its own checks
     })
     out.append(("set-stage-eval-from-overlay", sbook.main_eval == 5 and sbook.real_eval == 3, f"{sbook.main_eval}/{sbook.real_eval}"))
     sst = next(x for x in sbook.by_idx if x.kind == "base")

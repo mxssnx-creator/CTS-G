@@ -593,6 +593,7 @@ def stage_engine_calc_test() -> None:
         "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
         "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
         "trailArmMin": 0.3, "trailArmMax": 0.3,
+        "microEnabled": False,  # Base-tier contract; Micro is checked below
     })
     rec("set-eval-overlay", book.main_eval == 7 and book.real_eval == 4, f"{book.main_eval}/{book.real_eval}")
     st = next(x for x in book.by_idx if x.kind == "base")
@@ -614,6 +615,25 @@ def stage_engine_calc_test() -> None:
         st.main_pf == 0.0 and st.real_pf == 0.0 and not st.stage_qualified
         and not bool((st.strategy_adjustments or {}).get("main", {}).get("evaluated")),
         f"stage={st.stage} windows={len(st.evaluation_windows or {})}")
+    # Same tape with the Micro tier on: PF 1.11 is below the 1.20 floor but
+    # above 1.05, so it is Micro with its own Main/Real evaluated at 1.05 and
+    # never reported as Base/Main/Real.
+    mbook = SetBook()
+    mbook.load({
+        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
+        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
+        "mainEvalPosCount": 7, "realEvalPosCount": 4,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "trailArmMin": 0.3, "trailArmMax": 0.3, "microEnabled": True, "microMinPf": 1.05,
+    })
+    mst = next(x for x in mbook.by_idx if x.kind == "base")
+    mst.hist = list(st.hist)
+    mbook._score_one(mst)
+    rec("set-micro-tier-below-base",
+        mst.stage == "Micro" and mst.micro and not (mst.stage_ledger or {}).get("base")
+        and mst.main_pf > 0.0 and mbook.qualified_stage_ids("base") == [],
+        f"stage={mst.stage} b={mst.base_pf} m={mst.main_pf} r={mst.real_pf}")
     rec_m = book.stage_record(st, "main")
     rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
         f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")
