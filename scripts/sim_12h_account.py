@@ -933,7 +933,7 @@ def kind_ok_mask(cands, catalog, kind_table, bars_by_sym, sim_start) -> np.ndarr
 def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_table, catalog, symbols, bars_by_sym,
              sim_start: int, sim_end: int, start_s: int, book, sizer: Sizer, start_equity: float, gated: bool,
              live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar",
-             kind_lanes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+             kind_lanes: Optional[List[Dict[str, Any]]] = None, max_open: int = 100) -> Dict[str, Any]:
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
@@ -966,6 +966,13 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     for r in strat:
         if (not gated) or r["_ok"]:
             strat_by_bar[int(r["_entry"])].append(r)
+    # Micro cap (pulse_trader.place): Micro lots <= microMaxShare x maxOpen.
+    micro_cap = 0
+    if gated and bool(getattr(book, "micro_enabled", False)):
+        share = float(getattr(book, "micro_max_share", 0.25) or 0.0)
+        micro_cap = max(1, int(max_open * share)) if share > 0 else 0
+    micro_ids: set = set()
+    is_micro_c = (cands["micro_ok"] & ~cands["real_ok"]) if "micro_ok" in cands else np.zeros(len(cands["uid"]), bool)
     lanes_by_bar: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for r in kind_lanes or []:
         if (not gated) or r["_ok"]:
@@ -1017,6 +1024,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             liquidations.append(dict(t=t, utc=time.strftime("%H:%M", time.gmtime(start_s + t * BAR)), lots=len(liq),
                                      notional=round(sum(l["notional"] for l in liq), 4), equityAfter=round(acct.cash, 6)))
             hr["liquidations"] = hr.get("liquidations", 0) + 1
+            micro_ids.clear()
             for lot in liq:
                 sizer.open.pop(lot["id"], None)
                 changed.add((lot["symbol"], lot["side"]))
@@ -1047,6 +1055,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                 continue
             lot = acct.close_lot(lot_id, xpx)
             sizer.open.pop(lot_id, None)
+            micro_ids.discard(lot_id)
             changed.add((lot["symbol"], lot["side"]))
             hr["close_fills"][why] = hr["close_fills"].get(why, 0) + 1
             move = (xpx - lot["entry"]) / lot["entry"] * lot["side"]
@@ -1111,7 +1120,11 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             if is_ind_uid[u]:
                 mk = int(bars_by_sym["ind_mask"][s_i][t])
                 meta_kinds = [IND_KINDS[k] for k in range(len(IND_KINDS)) if (mk >> k) & 1]
+            micro_c = bool(gated and is_micro_c[i])
             for _dup in range(m_i):
+                if micro_c and len(micro_ids) >= micro_cap:
+                    hr["skipped_micro_cap"] = hr.get("skipped_micro_cap", 0) + 1
+                    continue
                 if min_margin_of[s] > avail * 0.95:
                     hr["skipped_margin"] += 1
                     continue
@@ -1124,6 +1137,8 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                 g_before = acct.agg.get((s, side))
                 acct.open_lot(lot_seq, s, side, q, p, lev, uid=u, ci=int(i), strategy=strategy_key(packs[u], kinds[u]),
                               unit_qty=q, axes=meta_axes, kinds=meta_kinds)
+                if micro_c:
+                    micro_ids.add(lot_seq)
                 sizer.open[lot_seq] = 1
                 avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
                 hr["opened_lots"] += 1
@@ -1310,7 +1325,8 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         skipped=dict(noFreeMargin=sum(h["skipped_margin"] for h in hours), belowMinOrQty=sum(h["skipped_min"] for h in hours),
                      liveNegativeDeact=sum(h["skipped_live_neg"] for h in hours),
                      addOnNoParent=sum(h["skipped_no_parent"] for h in hours),
-                     equityHalt=sum(h.get("skipped_halt", 0) for h in hours)),
+                     equityHalt=sum(h.get("skipped_halt", 0) for h in hours),
+                     microCap=sum(h.get("skipped_micro_cap", 0) for h in hours)),
         liquidations=liquidations, liquidationLoss=round(getattr(acct, "liquidation_loss", 0.0), 6),
         haltedMinutes=halted_minutes,
         candidates=dict(setTradesInWindow=int(len(cands["uid"])), setLotsInWindow=int(mult[cands["uid"]].sum()),
@@ -1750,6 +1766,14 @@ def html_report(report: Dict[str, Any]) -> str:
     tlh = (tl_section("Post-Base (admitted by the stage chain)", report["tradeLevelHourly"]["post-base"])
            + tl_section("Unfiltered (all Sets)", report["tradeLevelHourly"]["unfiltered"]))
     assumptions = "".join(f"<li>{esc(a)}</li>" for a in report["assumptions"])
+    floors = report.get("slFloorPct") or {}
+    if floors:
+        fv = sorted(floors.values())
+        above = [f"{k} {v:.3f}%" for k, v in sorted(floors.items(), key=lambda kv: -kv[1]) if v > fv[0] + 1e-9][:12]
+        sl_floor_txt = (f"min {fv[0]:.3f}% · median {fv[len(fv) // 2]:.3f}% · max {fv[-1]:.3f}% over {len(fv)} symbols"
+                        + (f" · above desk floor: {', '.join(above)}" if above else " · every symbol at the desk floor"))
+    else:
+        sl_floor_txt = "not recorded"
     tm = report["tradeLevel"]
     tl = "".join(f"<tr><td>{esc(k)}</td><td>{v.get('trades', 0)}</td><td>{v.get('lots', 0)}</td><td>{fmt(v.get('classicPf'))}</td>"
                  f"<td>{fmt(v.get('costPf'), 3)}</td><td>{fmt(v.get('winRate'), 1)}</td><td>{fmt(v.get('netAvgPct'), 4)}</td></tr>"
@@ -1782,6 +1806,7 @@ details{margin:10px 0}summary{cursor:pointer;color:var(--acc)}pre{white-space:pr
             f"Block/DCA lane PF uses the engine's lane pnl_pct (relative to the parent unit).</p>{tlh}"
             f"<h2>Trade level (engine tape, no account limits)</h2><div class='scroll'><table><thead><tr><th>Selection</th><th>Trades</th>"
             f"<th>Set lots</th><th>Classic PF</th><th>Cost PF</th><th>Win %</th><th>Net avg %</th></tr></thead><tbody>{tl}</tbody></table></div>"
+            f"<h2>Exchange-minimum SL floor per symbol</h2><p class='note'>{esc(sl_floor_txt)}</p>"
             f"<h2>Assumptions</h2><ul>{assumptions}</ul>"
             f"<p class='note'>* Axis columns are diagnostics: coordination axes are disabled in the deployed profile, so they do not trade; the column "
             f"shows the executed Set lots whose coord_engine axis child would have qualified.</p>"
@@ -1881,7 +1906,7 @@ def main(argv=None) -> int:
         res = simulate(name, cands, strat_g if gated else strat_u, ktable if gated else None, catalog, symbols, bars_by_sym,
                        sim_start, sim_end, start_s, book, sizer, args.start_equity, gated, bool(book.live_negative_deact),
                        mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode,
-                       kind_lanes=lanes_g if gated else lanes_u)
+                       kind_lanes=lanes_g if gated else lanes_u, max_open=int(ov.get("maxOpen") or 100))
         res["title"] = title
         res["leverage"] = lev or "exchange max (engine fallback 150)"
         runs.append(res)
@@ -1908,6 +1933,9 @@ def main(argv=None) -> int:
     trade_level["kind lanes unfiltered"] = lane_metrics(lanes_u)
     trade_level["kind lanes admitted (config/kind PF validated)"] = lane_metrics([r for r in lanes_g if r["_ok"]])
     for k in IND_KINDS:
+        unf = [r for r in lanes_u if r["kind"] == k]
+        if unf:
+            trade_level[f"kind lane {k} unfiltered"] = lane_metrics(unf)
         sel = [r for r in lanes_g if r["_ok"] and r["kind"] == k]
         if sel:
             trade_level[f"kind lane {k} admitted"] = lane_metrics(sel)

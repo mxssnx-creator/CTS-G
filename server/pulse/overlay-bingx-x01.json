@@ -151,6 +151,7 @@
   "scratchS": 600,
   "setAutoDeact": true,
   "microEnabled": true,
+  "microMaxShare": 0.25,
   "microMinPf": 1.05,
   "setDeactN": 25,
   "setLiveNegativeDeact": true,

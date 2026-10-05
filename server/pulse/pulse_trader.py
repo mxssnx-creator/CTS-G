@@ -1083,6 +1083,7 @@ class Position:
     # Indication exit tactic (price-only) and its reference level.
     exit_tactic: str = ""
     exit_level: float = 0.0
+    micro: bool = False
     liq: float = 0.0
     position_id: str = ""
     ctrl_verified: bool = False
@@ -6581,6 +6582,19 @@ class Pulse:
                 micro = False
         if micro and c is not None and floor > 0:
             qty = self.round_qty_up(c, floor)
+        if micro:
+            # Micro is capped to a share of the position book so the
+            # below-floor band can never crowd out Base-validated Sets.
+            share = float(getattr(self.sets, "micro_max_share", 0.25) or 0.0)
+            book_cap = MAX_OPEN if MAX_OPEN > 0 else 100
+            micro_cap = max(1, int(book_cap * share)) if share > 0 else 0
+            micro_open = sum(1 for p in list(self.open.values()) if getattr(p, "micro", False))
+            if share <= 0 or micro_open >= micro_cap:
+                decision = getattr(self, "_execution_decision", None)
+                if not isinstance(decision, dict):
+                    decision = self._execution_decision = {}
+                decision.update(allowed=False, reason=f"micro cap {micro_open}/{micro_cap}")
+                return
         execution_plan = None
         if execution_strategy == "block-active" and not micro:
             extra_cap = 1.0
@@ -7025,6 +7039,7 @@ class Pulse:
             overall=True, close_position=True, ind_kind=ind_kind,
             exit_tactic=str(getattr(ind, "exit_tactic", "") or "") if ind is not None else "",
             exit_level=float(getattr(ind, "exit_level", 0.0) or 0.0) if ind is not None else 0.0,
+            micro=bool(micro),
             parent_set_id=parent_set_id,
             axis_key=str(pending_meta["axis_key"]),
             relative_count=int(pending_meta["relative_count"]),

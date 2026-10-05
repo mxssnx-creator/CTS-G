@@ -234,3 +234,43 @@ class VolumeFactorAdds(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MicroCapEntries(unittest.TestCase):
+    """A Micro entry trades one venue-minimum lot, capped to microMaxShare x maxOpen."""
+
+    def place_micro(self, open_micro, share=0.25, max_open=8):
+        t = fixtures.AllValidEntries()
+        p = t.pulse(t.book(1))
+        for name in ('size_qty', 'max_book_notional', 'avail_notional'):
+            p.__dict__.pop(name, None)
+        p.volume_factor = 1.0
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,
+                     register_parent=Mock(), on_parent_close=Mock())
+        p.dca = NS(enabled=False, max_steps=0, _mult_at=lambda i: 1.0, attach=Mock(), on_close=Mock(), drop=Mock())
+        p.contracts = {'X-USDT': pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)}
+        p.px = {'X-USDT': 100.}
+        p.sets.micro_tier = lambda st, side: True
+        p.sets.micro_max_share = share
+        for k in range(open_micro):
+            p.open[f'm{k}'] = NS(micro=True, symbol=f'M{k}-USDT', side='LONG')
+        with patch.object(pt, 'MAX_OPEN', max_open):
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+        return [float(b['quantity']) for b in p.api.posts if b.get('type') == 'MARKET'], p
+
+    def test_micro_below_cap_trades_one_minimum_lot(self):
+        entries, p = self.place_micro(open_micro=1)
+        self.assertEqual(entries, [.001])
+        pos = next(v for k, v in p.open.items() if not str(k).startswith('m'))
+        self.assertTrue(pos.micro)
+
+    def test_micro_at_cap_is_skipped(self):
+        entries, p = self.place_micro(open_micro=2)
+        self.assertEqual(entries, [])
+        self.assertIn('micro cap 2/2', str(p._execution_decision.get('reason')))
+
+    def test_micro_share_zero_blocks_micro(self):
+        entries, _ = self.place_micro(open_micro=0, share=0.0)
+        self.assertEqual(entries, [])
