@@ -11740,7 +11740,12 @@ class Pulse:
             # re-opened. Every other lane keeps processing.
             self._hold_manual_lane(pos)
             mark = float(self.px.get(pos.symbol) or pos.entry or 0.0)
-            self.close_pos(pos, mark, "manual-close", exchange=False)
+            try:
+                self.close_pos(pos, mark, "manual-close", exchange=False)
+            except Exception as exc:
+                # Booking is best-effort; reconciliation itself must never
+                # stall. Fall through to the plain drop below.
+                log(f"MANUAL CLOSE book failed {pos.symbol} {pos.side}: {exc}", every=30.0, key=f"manual-book:{pos.symbol}")
             if any(candidate is pos for candidate in self.open.values()):
                 overall_controls.closed_member(self, pos)
                 self.remove_position(pos)
