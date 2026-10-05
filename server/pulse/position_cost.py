@@ -784,6 +784,35 @@ def cap_sl_to_tp(sl: float, tp: float, sl_min: float = 0.0) -> tuple[float, floa
     return sl, tp
 
 
+VENUE_SL_TICKS = 3
+LIQ_SL_SHARE = 0.9
+
+
+def venue_sl_floor(
+    px: float,
+    tick: float,
+    sl_min: float,
+    *,
+    ticks: float = VENUE_SL_TICKS,
+    learned: float = 0.0,
+    leverage: float = 0.0,
+) -> float:
+    """Smallest SL distance (fraction) the venue accepts for this lot.
+
+    The larger of the desk floor, ``ticks`` price ticks and a per-symbol
+    floor learned from trigger-price rejections. The tick/learned part is
+    capped inside the liquidation distance at ``leverage`` so the stop
+    still fires first; the desk floor itself is never lowered."""
+    lo = max(0.0, finite(sl_min, 0.0))
+    p, t = finite(px, 0.0), finite(tick, 0.0)
+    tick_floor = (max(0.0, finite(ticks, VENUE_SL_TICKS)) * t / p) if p > 0 and t > 0 else 0.0
+    want = max(lo, tick_floor, max(0.0, finite(learned, 0.0)))
+    lev = finite(leverage, 0.0)
+    if lev > 0:
+        want = min(want, max(lo, LIQ_SL_SHARE / lev))
+    return want
+
+
 def bind_ratio_sl_tp(
     tp: float,
     ratio: float,

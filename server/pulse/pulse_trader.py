@@ -35,6 +35,8 @@ from coord_engine import Coordinator, recent_closed_rows
 from bingx_fast import FastBingX, ErrorLog, dumps as fast_json_dumps
 from modules import resolve as resolve_modules
 from position_cost import (
+    VENUE_SL_TICKS,
+    venue_sl_floor,
     last_n_cost_pf,
     overall_last_pos_eval,
     evaluation_windows,
@@ -59,7 +61,7 @@ from position_cost import (
     exchange_order_cost_sample,
     row_fee_usdt,
 )
-from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
+from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
 from exit_engine import ExitBook, self_test as exit_self_test
@@ -1078,6 +1080,9 @@ class Position:
     sec_sl: float = 0.0
     sec_tp: float = 0.0
     ind_kind: str = ""
+    # Indication exit tactic (price-only) and its reference level.
+    exit_tactic: str = ""
+    exit_level: float = 0.0
     liq: float = 0.0
     position_id: str = ""
     ctrl_verified: bool = False
@@ -1429,6 +1434,8 @@ class Pulse:
         self._load_config_evidence()
         self.pf_window = 15
         self.sl_min = SL_MIN_PCT / 100.0
+        self.venue_sl_ticks = float(VENUE_SL_TICKS)
+        self.sl_learned: Dict[str, float] = {}
         self.sl_max = 0.0300
         self.tp_min = 0.0030
         self.tp_max = 0.0
@@ -2114,6 +2121,43 @@ class Pulse:
                 step = max(float(getattr(c, "step", 0) or 0), 0.0)
                 bumped = self.round_qty_up(c, max(q + step, q * 1.05, floor))
         return bumped
+
+    def venue_sl_min(self, c: Optional[Contract], px: float, lev: Optional[float] = None) -> float:
+        """Exchange-accepted SL floor (fraction) for one lot on ``c``."""
+        base = float(getattr(self, "sl_min", SL_MIN_PCT / 100.0) or SL_MIN_PCT / 100.0)
+        if c is None:
+            return base
+        try:
+            tick = 10 ** -(int(c.pprec) if int(c.pprec) >= 0 else 6)
+            learned = float((getattr(self, "sl_learned", {}) or {}).get(c.symbol) or 0.0)
+            ticks = float(getattr(self, "venue_sl_ticks", VENUE_SL_TICKS) or VENUE_SL_TICKS)
+            lev_f = float(lev) if lev else float(self.leverage_for(c))
+            return venue_sl_floor(px, tick, base, ticks=ticks, learned=learned, leverage=lev_f)
+        except Exception:
+            return base
+
+    def symbol_sl_floors(self, symbols: Optional[Sequence[str]] = None) -> Dict[str, float]:
+        """Venue SL floor per symbol for the intern Set replay."""
+        out: Dict[str, float] = {}
+        for sym in (symbols if symbols is not None else list(self.contracts)):
+            c = self.contracts.get(sym)
+            px = float(self.px.get(sym) or 0.0)
+            if c is None or px <= 0:
+                continue
+            out[sym] = self.venue_sl_min(c, px)
+        return out
+
+    def learn_sl_floor(self, c: Optional[Contract], sl_pct: float) -> float:
+        """Widen the per-symbol SL floor after a trigger-price rejection."""
+        if c is None:
+            return 0.0
+        book = getattr(self, "sl_learned", None)
+        if not isinstance(book, dict):
+            book = self.sl_learned = {}
+        cap = float(getattr(self, "sl_max", 0.03) or 0.03)
+        nxt = min(cap, max(float(book.get(c.symbol) or 0.0), float(sl_pct or 0.0)) * 1.5)
+        book[c.symbol] = nxt
+        return nxt
 
     def min_order_qty(self, c: Contract, px: float) -> float:
         """Exchange min lot and min USDT, rounded up to step."""
@@ -4961,6 +5005,17 @@ class Pulse:
                     self.ctrl_skip[scope] = time.time() + 30
                     return have_this
                 if kind_err in ("px", "liq"):
+                    if kind_err == "px" and is_sl and c is not None:
+                        # A stop placed at the floor and refused on price is
+                        # tighter than the venue accepts: widen that symbol's
+                        # floor so later entries and intern evals use it.
+                        try:
+                            ent = float(pos.entry or 0)
+                            dist = abs(float(price) - ent) / ent if ent > 0 else 0.0
+                            if 0 < dist <= self.venue_sl_min(c, ent) * 1.5:
+                                self.learn_sl_floor(c, dist)
+                        except Exception:
+                            pass
                     if kind_err == "px" and not refreshed_quote:
                         refreshed_quote = True
                         refresh = getattr(self, "refresh_px_one", None)
@@ -6029,7 +6084,7 @@ class Pulse:
             sl_pct, tp_pct, _ = resolve_sl_tp(
                 base_sl=SL_PCT,
                 base_tp=TP_PCT,
-                sl_min=self.sl_min,
+                sl_min=self.venue_sl_min(self.contracts.get(symbol), fill_px),
                 sl_max=self.sl_max,
                 tp_min=self.tp_min,
                 tp_max=self.tp_max,
@@ -6558,10 +6613,17 @@ class Pulse:
             # the book room is rounding, not oversizing (with no Block/DCA
             # room it dropped every entry at some volume factors). A min-lot
             # lift above the room is still skipped.
+            # The exchange minimum lot is always allowed: volume is raised to
+            # the venue floor, never skipped for being above a small room.
+            # Anything larger is clamped back to the room (floor kept).
             step = float(getattr(c, "step", 0) or 0) if c is not None else 0.0
+            at_floor = floor > 0 and qty <= self.round_qty_up(c, floor) + 1e-12
             below = qty - step
-            if step <= 0 or below + 1e-12 < floor or below * px > max_book * 1.02:
-                return
+            if not at_floor and (step <= 0 or below + 1e-12 < floor or below * px > max_book * 1.02):
+                if c is None or floor <= 0 or step <= 0:
+                    return
+                qty = self.round_qty_up(c, max(floor, self.round_qty(c, max_book / px)))
+                notional = qty * px
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
@@ -6595,8 +6657,11 @@ class Pulse:
             price=px,
             metadata={"reason": reason, "confidence": conf, "setIdx": set_idx, "execution": execution_plan or {"mode": "normal"}},
         )
+        # Exchange-accepted SL floor for this lot: desk floor, venue ticks and
+        # any floor learned from trigger-price rejections, inside liquidation.
+        sl_min_eff = self.venue_sl_min(c, px, lev)
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
-            base_sl=SL_PCT, base_tp=TP_PCT, sl_min=self.sl_min, sl_max=self.sl_max,
+            base_sl=SL_PCT, base_tp=TP_PCT, sl_min=sl_min_eff, sl_max=self.sl_max,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
             tp_cost_ratio=self.tp_cost_ratio, sl_to_tp=sl_ratio, bind_sl_to_tp=True,
         )
@@ -6604,10 +6669,13 @@ class Pulse:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
         elif chosen and getattr(chosen, "step", 0):
             sl_pct_a, tp_pct_a = bind_ratio_sl_tp(
-                chosen.tp_pct, sl_ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max,
+                chosen.tp_pct, sl_ratio, sl_min_eff, self.sl_max, self.tp_min, self.tp_max,
             )
             if self.exits.enabled and self.exits.ignore_tp:
                 tp_pct_a = min(self.tp_max or float("inf"), max(tp_pct_a, sl_pct_a * 3.0))
+        if sl_pct_a + 1e-12 < sl_min_eff:
+            sl_pct_a = sl_min_eff
+            tp_pct_a = max(tp_pct_a, sl_min_eff)
         sl_a = px * (1 - sl_pct_a) if direction > 0 else px * (1 + sl_pct_a)
         tp_a = px * (1 + tp_pct_a) if direction > 0 else px * (1 - tp_pct_a)
         pending_meta = {
@@ -6918,7 +6986,7 @@ class Pulse:
         sl_pct, tp_pct, src = resolve_sl_tp(
             base_sl=SL_PCT,
             base_tp=TP_PCT,
-            sl_min=self.sl_min,
+            sl_min=self.venue_sl_min(c, avg, lev),
             sl_max=self.sl_max,
             tp_min=self.tp_min,
             tp_max=self.tp_max,
@@ -6932,7 +7000,7 @@ class Pulse:
         )
         if chosen and getattr(chosen, "step", 0):
             sl_pct, tp_pct = bind_ratio_sl_tp(
-                chosen.tp_pct, sl_ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max,
+                chosen.tp_pct, sl_ratio, self.venue_sl_min(c, avg, lev), self.sl_max, self.tp_min, self.tp_max,
             )
             src = f"step{chosen.step}xcost"
         if forced_row is not None:
@@ -6955,6 +7023,8 @@ class Pulse:
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
             execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
+            exit_tactic=str(getattr(ind, "exit_tactic", "") or "") if ind is not None else "",
+            exit_level=float(getattr(ind, "exit_level", 0.0) or 0.0) if ind is not None else 0.0,
             parent_set_id=parent_set_id,
             axis_key=str(pending_meta["axis_key"]),
             relative_count=int(pending_meta["relative_count"]),
@@ -7843,6 +7913,14 @@ class Pulse:
                 # Baseline attribution stays free of extra exit strategies.
                 # Global emergency/age/DD protection above remains binding.
                 continue
+            tactic = str(getattr(pos, "exit_tactic", "") or "")
+            if tactic and bool(self.indications.settings.get("exitTacticOn", True)):
+                hold_s = float(getattr(self.exits, "min_hold_s", 6) or 0)
+                buf = float(self.indications.settings.get("exitTacticBufferPct", 0.1) or 0.0)
+                if (now - pos.opened_at) >= max(hold_s, 60.0) and exit_tactic_hit(
+                        tactic, pos.side, px, float(getattr(pos, "exit_level", 0.0) or 0.0), buf):
+                    self.close_pos(pos, px, f"exit:rev:{tactic}")
+                    continue
             sig = 0
             if self.exits.enabled and self.exits.rev_on:
                 ind = self.indications.primary(pos.symbol)
@@ -8609,6 +8687,7 @@ class Pulse:
 
         self.sl_min = max(SL_MIN_PCT / 100.0, _risk_pct("slMinPct", SL_MIN_PCT))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
+        self.venue_sl_ticks = max(1.0, min(50.0, finite_number(ov.get("venueSlTicks"), float(VENUE_SL_TICKS)) or float(VENUE_SL_TICKS)))
         self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
         tp_cap = finite_number(ov.get("tpMaxPct"), 0.0)
         self.tp_max = max(self.tp_min, tp_cap / 100) if tp_cap > 0 else 0.0
@@ -9092,6 +9171,8 @@ class Pulse:
             "livePositionCostComplete": bool(self.live_position_cost_complete),
             "pfWindow": self.pf_window,
             "slMinPct": self.sl_min * 100,
+            "venueSlTicks": self.venue_sl_ticks,
+            "slLearnedPct": {k: round(v * 100, 4) for k, v in sorted((getattr(self, "sl_learned", {}) or {}).items())},
             "slMaxPct": self.sl_max * 100,
             "tpMinPct": self.tp_min * 100,
             "tpMaxPct": self.tp_max * 100,
@@ -10806,12 +10887,17 @@ class Pulse:
             contracts = getattr(self, "contracts", None) or {}
             return contracts.get(token) is not None
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
-            def _ind_allow(kind: str, direction: str = "") -> bool:
+            def _ind_allow(kind: str, direction: str = "", config: str = "") -> bool:
                 gate = getattr(self.sets, "indication_ok", None)
                 if not (self.sets.enabled and callable(gate)):
                     return True
                 side = "LONG" if str(direction).lower().startswith("l") else "SHORT"
                 try:
+                    if config:
+                        try:
+                            return bool(gate(kind, side, config))
+                        except TypeError:
+                            pass
                     return bool(gate(kind, side))
                 except TypeError:
                     return bool(gate(kind))
@@ -11626,7 +11712,7 @@ class Pulse:
                 trail_key = str(track.get("trail"))
             sl_pct, tp_pct, src = resolve_sl_tp(
                 base_sl=SL_PCT, base_tp=TP_PCT,
-                sl_min=self.sl_min, sl_max=self.sl_max,
+                sl_min=self.venue_sl_min(self.contracts.get(sym), px), sl_max=self.sl_max,
                 tp_min=self.tp_min, tp_max=self.tp_max,
                 sl_to_tp=sl_ratio, bind_sl_to_tp=True,
                 cost_pct=self.position_cost_pct, tp_cost_ratio=self.tp_cost_ratio,
@@ -11842,7 +11928,7 @@ class Pulse:
                 sl_pct, tp_pct, _ = resolve_sl_tp(
                     base_sl=SL_PCT,
                     base_tp=TP_PCT,
-                    sl_min=self.sl_min,
+                    sl_min=self.venue_sl_min(self.contracts.get(symbol), px),
                     sl_max=self.sl_max,
                     tp_min=self.tp_min,
                     tp_max=self.tp_max,
@@ -13839,7 +13925,7 @@ class Pulse:
         Trend and Break. Missing flags or a real settings/report mismatch fail.
         """
         types = snapshot.get("types") or {}
-        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break")
+        kinds = ("state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze")
         expected = {kind: bool(self.indications.settings.get("type" + kind.title(), True)) for kind in kinds}
         mismatches = [kind for kind in kinds if types.get(kind) is not expected[kind]]
         self.record_test("qa-ind-types", not mismatches, f"types={types} mismatch={mismatches}")
@@ -14433,6 +14519,11 @@ class Pulse:
             # large per-state object graph, before this slice has produced any
             # history.  Keep the source book live and build only a lean,
             # metadata-equivalent replay catalog with the selected bars.
+            # Intern replay uses each symbol's exchange-accepted SL floor.
+            try:
+                source.set_symbol_sl_floors(self.symbol_sl_floors(names))
+            except Exception:
+                pass
             replay_book = source.replay_clone(names)
             run_progress = copy.deepcopy(source.progress)
             run_completed = set(completed_symbols) if completed_symbols is not None else set(source._hist_seen)

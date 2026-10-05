@@ -634,6 +634,18 @@ def stage_engine_calc_test() -> None:
         mst.stage == "Micro" and mst.micro and not (mst.stage_ledger or {}).get("base")
         and mst.main_pf > 0.0 and mbook.qualified_stage_ids("base") == [],
         f"stage={mst.stage} b={mst.base_pf} m={mst.main_pf} r={mst.real_pf}")
+    # Exchange-accepted SL floor: intern replay of a symbol binds the Set's
+    # SL to that symbol's venue floor; outside a replay the desk floor holds.
+    from position_cost import venue_sl_floor
+    fbook = SetBook()
+    fbook.sl_min, fbook.sl_max = 0.004, 0.03
+    fbook.set_symbol_sl_floors({"COARSE-USDT": venue_sl_floor(0.5, 0.001, 0.004, leverage=50)})
+    with fbook.sl_scope("COARSE-USDT"):
+        c_sl, c_tp = fbook.pair_sl_tp(0.005, 0.6)
+    d_sl, _ = fbook.pair_sl_tp(0.005, 0.6)
+    rec("set-venue-sl-floor-replay", abs(c_sl - 0.006) < 1e-12 and abs(d_sl - 0.004) < 1e-12 and c_tp * 0.6 >= c_sl - 1e-12,
+        f"coarse={c_sl} desk={d_sl} tp={c_tp}")
+    rec("venue-sl-floor-inside-liq", abs(venue_sl_floor(0.1, 0.001, 0.004, leverage=100) - 0.009) < 1e-12)
     rec_m = book.stage_record(st, "main")
     rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
         f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")

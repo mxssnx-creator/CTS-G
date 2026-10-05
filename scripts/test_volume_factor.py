@@ -106,11 +106,12 @@ class VolumeFactorEntries(unittest.TestCase):
             self.assertEqual(entries, [want], vf)
             self.assertEqual(controls, {want}, vf)
 
-    def test_min_lot_parent_above_the_book_room_stays_skipped(self):
-        # Policy unchanged: an 8 USDT venue minimum is not rounding noise.
+    def test_min_lot_parent_above_the_book_room_is_raised_to_venue_min(self):
+        # Volume is always raised to the exchange minimum lot: an 8 USDT
+        # venue minimum above a small book room still trades one min lot.
         btc = pt.Contract('X-USDT', .0001, .0001, 4, 1, 2., 100)
-        self.assertEqual(self.place(1., btc, 80000.)[0], [])
-        self.assertEqual(self.place(1., btc, 80000., block=True)[0], [])
+        self.assertEqual(self.place(1., btc, 80000.)[0], [.0001])
+        self.assertEqual(self.place(1., btc, 80000., block=True)[0], [.0001])
         self.assertEqual(self.place(1., btc, 80000., block=True, dca=True)[0], [.0001])
 
 

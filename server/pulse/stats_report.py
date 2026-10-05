@@ -1236,7 +1236,7 @@ def render_md(blob: Dict[str, Any]) -> str:
     types = cov.get("indicationTypes") or {}
     hits = cov.get("indicationHits") or {}
     lines.append("- strategies: " + ", ".join(f"{k}={'ON' if v else 'off'}" for k, v in strat.items()))
-    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in ("state", "direction", "move", "active", "common", "signals", "trend", "break")))
+    lines.append("- indication types: " + ", ".join(f"{k}={'ON' if types.get(k, True) else 'off'} hits={hits.get(k, 0)}" for k in ("state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze")))
     bcov = cov.get("block") or {}
     lines.append(f"- block enabled={bcov.get('enabled')} counts={bcov.get('countN')} stack={bcov.get('maxStack')} liveLanes={bcov.get('liveLanes')}")
     for c in bcov.get("allCounts") or []:

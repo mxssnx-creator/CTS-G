@@ -292,6 +292,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   coordOptimizationN: number;
   pfWindow: number;
   slMinPct: number;
+  venueSlTicks: number;
   slMaxPct: number;
   tpMinPct: number;
   tpMaxPct: number;
@@ -330,8 +331,18 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   indTypeSignals: boolean;
   indTypeTrend: boolean;
   indTypeBreak: boolean;
+  indTypeMsi: boolean;
+  indTypeVwap: boolean;
+  indTypeRetest: boolean;
+  indTypeSqueeze: boolean;
   indTrendRanges?: number[];
   indBreakRanges?: number[];
+  indMsiRanges?: number[];
+  indVwapRanges?: number[];
+  indRetestRanges?: number[];
+  indSqueezeRanges?: number[];
+  exitTacticOn: boolean;
+  exitTacticBufferPct: number;
   noise: number;
   volWeight: number;
   minStep: number;
@@ -511,6 +522,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   coordOptimizationN: 150,
   pfWindow: 15,
   slMinPct: 0.4,
+  venueSlTicks: 3,
   slMaxPct: 3.0,
   tpMinPct: 0.3,
   tpMaxPct: 0,
@@ -551,6 +563,16 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indTrendRanges: [13, 21, 34],
   indBreakRanges: [8, 16, 32],
   indTypeBreak: true,
+  indTypeMsi: true,
+  indTypeVwap: true,
+  indTypeRetest: true,
+  indTypeSqueeze: true,
+  indMsiRanges: [14, 21, 34],
+  indVwapRanges: [20, 30, 40],
+  indRetestRanges: [12, 20, 32],
+  indSqueezeRanges: [16, 20, 26],
+  exitTacticOn: true,
+  exitTacticBufferPct: 0.1,
   noise: 0.05,
   volWeight: 0.3,
   minStep: 7,
@@ -586,7 +608,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinPf: EVAL_MIN_PF,
   setMaxDdTimeS: 14400,
   setAutoDeact: true,
-  microEnabled: false,
+  microEnabled: true,
   microMinPf: 1.05,
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
@@ -692,6 +714,7 @@ export type CtsSettings = {
   positionCost?: number;
   pfWindow?: number;
   slMinPct?: number;
+  venueSlTicks?: number;
   slMaxPct?: number;
   tpMinPct?: number;
   tpMaxPct?: number;
@@ -730,8 +753,18 @@ export type CtsSettings = {
   indTypeSignals?: boolean;
   indTypeTrend?: boolean;
   indTypeBreak?: boolean;
+  indTypeMsi?: boolean;
+  indTypeVwap?: boolean;
+  indTypeRetest?: boolean;
+  indTypeSqueeze?: boolean;
   indTrendRanges?: number[];
   indBreakRanges?: number[];
+  indMsiRanges?: number[];
+  indVwapRanges?: number[];
+  indRetestRanges?: number[];
+  indSqueezeRanges?: number[];
+  exitTacticOn?: boolean;
+  exitTacticBufferPct?: number;
   activeNoiseFilter?: number;
   activeVolatilityWeight?: number;
   posCountsVolumeRatio?: number;
@@ -928,6 +961,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, SL_MIN_PCT),
+    venueSlTicks: Math.max(1, Math.min(50, num(cts.venueSlTicks, 3))),
     slMaxPct: num(cts.slMaxPct, 3.0),
     tpMinPct: num(cts.tpMinPct, 0.3),
     tpMaxPct: num(cts.tpMaxPct, 0),
@@ -968,6 +1002,16 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indTrendRanges: Array.isArray(cts.indTrendRanges) ? cts.indTrendRanges : [13, 21, 34],
     indBreakRanges: Array.isArray(cts.indBreakRanges) ? cts.indBreakRanges : [8, 16, 32],
     indTypeBreak: bool(cts.indTypeBreak, true),
+    indTypeMsi: bool(cts.indTypeMsi, true),
+    indTypeVwap: bool(cts.indTypeVwap, true),
+    indTypeRetest: bool(cts.indTypeRetest, true),
+    indTypeSqueeze: bool(cts.indTypeSqueeze, true),
+    indMsiRanges: Array.isArray(cts.indMsiRanges) ? cts.indMsiRanges : [14, 21, 34],
+    indVwapRanges: Array.isArray(cts.indVwapRanges) ? cts.indVwapRanges : [20, 30, 40],
+    indRetestRanges: Array.isArray(cts.indRetestRanges) ? cts.indRetestRanges : [12, 20, 32],
+    indSqueezeRanges: Array.isArray(cts.indSqueezeRanges) ? cts.indSqueezeRanges : [16, 20, 26],
+    exitTacticOn: bool(cts.exitTacticOn, true),
+    exitTacticBufferPct: Math.max(0, Math.min(1, num(cts.exitTacticBufferPct, 0.1))),
     noise: num(cts.activeNoiseFilter, 0.05),
     volWeight: num(cts.activeVolatilityWeight, 0.3),
     minStep: num((coord as { minStep?: number }).minStep, DEFAULT_MIN_STEP),
@@ -993,7 +1037,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 14400),
     setAutoDeact: bool(cts.setAutoDeact, true),
-    microEnabled: bool(cts.microEnabled, false),
+    microEnabled: bool(cts.microEnabled, true),
     microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),

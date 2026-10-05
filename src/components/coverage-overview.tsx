@@ -6,7 +6,7 @@ import { histTestIsEnabled } from "@/lib/hist-test";
 import { PosOrdersLine } from "@/components/pos-orders";
 
 const PACKS = ["indications", "general", "block", "trailing", "dca", "exits", "coord", "sets", "rearrange", "trailRecalc"] as const;
-const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break"] as const;
+const TYPES = ["state", "direction", "move", "active", "common", "signals", "trend", "break", "msi", "vwap", "retest", "squeeze"] as const;
 
 export function CoverageBar({ live }: { live: LiveStats | null }) {
   if (!live) return null;

@@ -25,9 +25,11 @@ def gross(pf):
 
 
 class MicroTierTests(unittest.TestCase):
-    def test_micro_is_opt_in(self):
+    def test_micro_is_on_by_default(self):
         b = SetBook()
         b.load({}, rebuild=False)
+        self.assertTrue(b.micro_enabled)
+        b.load({"microEnabled": False}, rebuild=False)
         self.assertFalse(b.micro_enabled)
 
     def book(self, strict=False, **extra):

@@ -61,6 +61,7 @@ from block_engine import (
     normalize_block_counts,
     shared_block_volume_ratio,
 )
+from indication_engine import exit_tactic_hit
 from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
 from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
@@ -308,8 +309,27 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
             compact[key] = value
     return compact
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
-IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
-IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break"}
+IND_KINDS = INDICATION_KINDS
+IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break",
+                "msi": "msi", "vwap": "vwap", "retest": "retest", "squeeze": "squeeze"}
+
+
+class KindSignals(dict):
+    """Per-kind/config signal lanes; ``exits`` carries each entry bar's exit
+    tactic and level per lane (``{key: {bar: (tactic, level)}}``)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.exits: Dict[str, Dict[int, Tuple[str, float]]] = {}
+
+    def __reduce__(self):
+        return (_kind_signals_restore, (dict(self), self.exits))
+
+
+def _kind_signals_restore(items: Dict[str, Any], exits: Dict[str, Dict[int, Tuple[str, float]]]) -> "KindSignals":
+    out = KindSignals(items)
+    out.exits = exits
+    return out
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -1113,6 +1133,43 @@ class Progress:
     coordination_complete: bool = False
 
 
+
+
+def _tape_fingerprint(rows: Sequence[Any], tail: int = 96) -> Tuple[Any, ...]:
+    """Cheap content fingerprint of an evidence tape for cache invalidation.
+
+    Length, first row and the last ``tail`` rows' identity/result fields: a
+    rolling window, an appended close or a corrected recent close all change
+    it, without serializing thousands of rows per lookup."""
+    n = len(rows)
+    if not n:
+        return (0,)
+
+    def one(r: Any) -> Tuple[Any, ...]:
+        g = r.get if isinstance(r, dict) else (lambda k, d=None: getattr(r, k, d))
+        return (g("t"), g("pnl_pct"), g("pnl"), g("side"), g("symbol"), g("reason"), g("ind_config"))
+
+    return (n, one(rows[0])) + tuple(one(r) for r in rows[max(0, n - tail):])
+
+_SL_SCOPE = threading.local()
+
+
+class _SlScope:
+    """Per-thread SL floor for one symbol replay (replays run in a pool)."""
+
+    def __init__(self, floor: float) -> None:
+        self.floor = float(floor or 0.0)
+        self.prev = 0.0
+
+    def __enter__(self) -> "_SlScope":
+        self.prev = float(getattr(_SL_SCOPE, "floor", 0.0) or 0.0)
+        _SL_SCOPE.floor = self.floor
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        _SL_SCOPE.floor = self.prev
+
+
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
@@ -1128,10 +1185,9 @@ class SetBook:
         self.min_pf = POSITIVE_PF
         self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
         self.micro_min_pf = MICRO_PF
-        # Off by default: on the 6h validation window the 1.05..floor band
-        # admitted ~3x the Base+Main+Real lots at trade PF 0.24 (vs 0.79),
-        # turning the account result from 4.53 to 0.47. Opt in per overlay.
-        self.micro_enabled = False
+        # On by default: Micro sets (PF microMinPf..floor) trade one venue
+        # minimum lot. Overlays can switch it off with microEnabled=false.
+        self.micro_enabled = True
         self.real_min_pf = POSITIVE_PF
         self.main_eval = 5
         self.real_eval = 3
@@ -1185,6 +1241,7 @@ class SetBook:
         self.bars: Dict[str, List[List[float]]] = {}
         self.progress = Progress()
         self.sl_min, self.sl_max = SL_MIN_PCT / 100.0, 0.03
+        self.sym_sl_floor: Dict[str, float] = {}
         self.tp_min, self.tp_max = 0.003, 0.0
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
@@ -1467,7 +1524,7 @@ class SetBook:
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
         # Micro tier floor: independent of the shared floor and never above Base.
-        self.micro_enabled = bool(ov.get("microEnabled", False))
+        self.micro_enabled = bool(ov.get("microEnabled", True))
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
             self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
@@ -1627,6 +1684,22 @@ class SetBook:
             "typeMove": bool(ov.get("indTypeMove", True)),
             "typeActive": bool(ov.get("indTypeActive", True)),
             "typeCommon": bool(ov.get("indTypeCommon", True)),
+            "typeMsi": bool(ov.get("indTypeMsi", True)),
+            "typeVwap": bool(ov.get("indTypeVwap", True)),
+            "typeRetest": bool(ov.get("indTypeRetest", True)),
+            "typeSqueeze": bool(ov.get("indTypeSqueeze", True)),
+            "msiRanges": indication_ranges(ov.get("indMsiRanges"), (14, 21, 34)),
+            "vwapRanges": indication_ranges(ov.get("indVwapRanges"), (20, 30, 40)),
+            "retestRanges": indication_ranges(ov.get("indRetestRanges"), (12, 20, 32)),
+            "squeezeRanges": indication_ranges(ov.get("indSqueezeRanges"), (16, 20, 26)),
+            "msiMinGap": float(ov.get("indMsiMinGap") or 5.0),
+            "vwapDevZ": float(ov.get("indVwapDevZ") or 2.0),
+            "vwapVolMult": float(ov.get("indVwapVolMult") or 1.8),
+            "retestTol": float(ov.get("indRetestTol") or 0.12),
+            "retestMinBreak": float(ov.get("indRetestMinBreak") or 0.08),
+            "squeezePctl": float(ov.get("indSqueezePctl") or 0.2),
+            "exitTacticOn": bool(ov.get("exitTacticOn", True)),
+            "exitTacticBufferPct": float(ov.get("exitTacticBufferPct", 0.1) or 0.0),
             "activeOutbreak": ov.get("activeOutbreakRanges") or ov.get("indActiveOutbreak") or [3, 5, 10],
             "dirRange": int(ov.get("indDirRange") or 10),
             "trendRanges": indication_ranges(ov.get("indTrendRanges"), (13, 21, 34)),
@@ -1781,7 +1854,30 @@ class SetBook:
         )
 
     def pair_sl_tp(self, tp: float, ratio: float) -> Tuple[float, float]:
-        return bind_ratio_sl_tp(tp, ratio, self.sl_min, self.sl_max, self.tp_min, self.tp_max)
+        # Inside a symbol replay the exchange-accepted SL floor of that
+        # symbol applies, so intern PF/DDT uses the stops really placed.
+        lo = max(float(self.sl_min), float(getattr(_SL_SCOPE, "floor", 0.0) or 0.0))
+        lo = min(lo, float(self.sl_max))
+        return bind_ratio_sl_tp(tp, ratio, lo, self.sl_max, self.tp_min, self.tp_max)
+
+    def symbol_sl_min(self, symbol: str) -> float:
+        """Effective SL floor (fraction) for ``symbol``: desk floor or venue floor."""
+        try:
+            venue = float((getattr(self, "sym_sl_floor", None) or {}).get(str(symbol)) or 0.0)
+        except Exception:
+            venue = 0.0
+        return min(float(self.sl_max), max(float(self.sl_min), venue))
+
+    def set_symbol_sl_floors(self, floors: Mapping[str, Any], *, replace: bool = False) -> None:
+        out: Dict[str, float] = {} if replace else dict(getattr(self, "sym_sl_floor", None) or {})
+        for sym, value in (floors or {}).items():
+            v = finite(value, 0.0)
+            if v > 0:
+                out[str(sym)] = v
+        self.sym_sl_floor = out
+
+    def sl_scope(self, symbol: str) -> "_SlScope":
+        return _SlScope(self.symbol_sl_min(symbol))
 
     def _rebuild_sets(self) -> None:
         keep = {sid: st for sid, st in self.sets.items()}
@@ -3101,7 +3197,7 @@ class SetBook:
         else:
             warmup = min(self.warmup, max(16, n // 5))
         signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
-        kind_sigs: Dict[str, List[Tuple[int, float]]] = {k: [(0, 0.0)] * n for k in IND_KINDS}
+        kind_sigs: Dict[str, List[Tuple[int, float]]] = KindSignals({k: [(0, 0.0)] * n for k in IND_KINDS})
         frame_now = now or time.time()
         indication_frame = (
             build_indication_frame(bars, now=frame_now, period_s=BAR_S)
@@ -3128,11 +3224,14 @@ class SetBook:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
-                if self.ind_settings.get("typeTrend", True) or self.ind_settings.get("typeBreak", True) or self.ind_settings.get("typeMove", True):
+                if any(self.ind_settings.get(flag, True) for flag in ("typeTrend", "typeBreak", "typeMove", "typeMsi", "typeVwap", "typeRetest", "typeSqueeze")):
                     config_frame = indication_frame.window(lo, i + 1)
                     for row in evaluate_range_configs(symbol, config_frame.closes, self.ind_settings, config_frame):
                         key = row.kind + "|" + row.mode
                         kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (1 if row.direction == "long" else -1, row.confidence)
+                        tactic = str(getattr(row, "exit_tactic", "") or "")
+                        if tactic and isinstance(kind_sigs, KindSignals):
+                            kind_sigs.exits.setdefault(key, {})[i] = (tactic, float(getattr(row, "exit_level", 0.0) or 0.0))
                 if self.ind_settings.get("typeActive", True):
                     # Live enters every Active configuration independently
                     # (evaluate_active_all, cfg per mode); replay the same
@@ -3147,7 +3246,11 @@ class SetBook:
                 time.sleep(0)
         return signals, kind_sigs, warmup
 
-    def _replay_core_vectorized(
+    def _replay_core_vectorized(self, symbol: str, *args: Any, **kwargs: Any) -> None:
+        with self.sl_scope(symbol):
+            return self._replay_core_vectorized_scoped(symbol, *args, **kwargs)
+
+    def _replay_core_vectorized_scoped(
         self,
         symbol: str,
         bars: Sequence[Sequence[float]],
@@ -3326,7 +3429,11 @@ class SetBook:
                     ))
                 hist[sid] = recent_direction_rows(rows, REPLAY_HIST_CAP)
 
-    def _replay_symbol(
+    def _replay_symbol(self, symbol: str, *args: Any, **kwargs: Any) -> None:
+        with self.sl_scope(symbol):
+            return self._replay_symbol_scoped(symbol, *args, **kwargs)
+
+    def _replay_symbol_scoped(
         self,
         symbol: str,
         hist: Dict[str, List[Dict[str, Any]]],
@@ -3619,10 +3726,14 @@ class SetBook:
             return
         base_ts = now - (n - 1) * BAR_S
         sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
+        tactic_on = bool((self.ind_settings or {}).get("exitTacticOn", True))
+        tactic_buf = float((self.ind_settings or {}).get("exitTacticBufferPct", 0.1) or 0.0)
+        all_exits = getattr(kind_sigs, "exits", None) or {}
         for config_key, sigs in kind_sigs.items():
                 kind, _, config = config_key.partition("|")
                 if not any(d != 0 for d, _ in sigs):
                     continue
+                lane_exits = (all_exits.get(config_key) or {}) if tactic_on else {}
                 buf = ind_hist.setdefault(kind, [])
                 for want_side in (1, -1):
                     open_pos: Optional[Dict[str, Any]] = None
@@ -3635,6 +3746,9 @@ class SetBook:
                             entry = float(open_pos["entry"])
                             held = i - int(open_pos["i"])
                             why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], None, bar, ignore_tp=not honor_tp)
+                            tactic = open_pos.get("tactic")
+                            if why is None and tactic and held >= 1 and exit_tactic_hit(tactic[0], side, float(bar[3]), tactic[1], tactic_buf):
+                                why, px = f"tactic-{tactic[0]}", float(bar[3])
                             if why is None and held >= time_bars:
                                 why, px = "time", float(bar[3])
                             if why is None and held >= scratch_bars:
@@ -3670,7 +3784,8 @@ class SetBook:
                         else:
                             sl_px = close * (1 + sl_frac)
                             tp_px = close * (1 - tp_frac)
-                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i}
+                        open_pos = {"side": d, "entry": close, "sl": sl_px, "tp": tp_px, "i": i,
+                                    "tactic": lane_exits.get(i)}
 
     def _fast_historic_pf(self, rows: Sequence[Dict[str, Any]], requested: int) -> Dict[str, float]:
         """Score generated historic rows with the exact cost-aware formulas."""
@@ -4818,7 +4933,7 @@ class SetBook:
             "validatedCount": intern_validated,
             "microCount": sum(1 for st in self.sets.values() if getattr(st, "micro", False)),
             "microMinPf": round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 4),
-            "microEnabled": bool(getattr(self, "micro_enabled", False)),
+            "microEnabled": bool(getattr(self, "micro_enabled", True)),
             "validationNeed": need,
             "entryGate": getattr(self, "entry_gate_stats", None),
             "histFills": intern_fills,
@@ -5518,11 +5633,8 @@ class SetBook:
         # Signals for hundreds of symbols share this indication evidence.
         # Cache by contents, not TTL or count: a corrected/rolling close or a
         # changed cost/window/PF setting must invalidate immediately.
-        signature = json.dumps(
-            [self.pf_n, need, self.cost_pct, self.min_pf,
-             [dict(row) for row in hist], [dict(row) for row in live]],
-            sort_keys=True, separators=(",", ":"), default=str,
-        )
+        signature = (self.pf_n, need, self.cost_pct, self.min_pf,
+                     _tape_fingerprint(hist), _tape_fingerprint(live))
         cache = getattr(self, "_ind_stats_cache", None)
         if cache is None:
             cache = self._ind_stats_cache = {}
@@ -5574,12 +5686,54 @@ class SetBook:
         cache[key] = (signature, copy.deepcopy(out))
         return out
 
-    def indication_ok(self, kind: str, side: Optional[str] = None) -> bool:
+    def ind_config_stats(self, kind: str, config: str, side: Optional[str] = None) -> Dict[str, Any]:
+        """Cost-adjusted PF evidence for one kind configuration (range) x side.
+
+        Each range of a kind is its own configuration with its own tape, so a
+        good range validates at Base even when the pooled kind does not, and
+        a losing range is held back even when the pool clears the floor."""
+        k, cfg = str(kind or "").strip(), str(config or "").strip().lower()
+        hist = self.ind_hist.get(k) or []
+        live = self.ind_live.get(k) or []
+        need = self.eval_need()
+        sig = (len(hist), len(live), finite((hist[-1] if hist else {}).get("t")) if hist else 0.0,
+               finite((live[-1] if live else {}).get("t")) if live else 0.0,
+               self.pf_n, need, self.cost_pct, self.min_pf)
+        cache = getattr(self, "_ind_cfg_cache", None)
+        if cache is None:
+            cache = self._ind_cfg_cache = {}
+        key = (k, cfg, str(side or "").upper())
+        hit = cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return dict(hit[1])
+        rows = [r for r in list(hist) + list(live)
+                if str((r.get("ind_config") if isinstance(r, dict) else getattr(r, "ind_config", "")) or "").lower() == cfg]
+        tape = filter_side(rows, side)
+        tape.sort(key=lambda r: finite(r.get("t")))
+        if tape:
+            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
+            n, pf = int(last["count"]), float(last["ratio"])
+        else:
+            n, pf = 0, 0.0
+        out = {"kind": k, "config": cfg, "side": str(side or "BOTH").upper(), "n": n, "tapeN": len(tape),
+               "pf": round(pf, 4), "validated": n >= need and clears_pf(pf, self.min_pf),
+               "enough": n >= need, "profitable": clears_pf(pf, self.min_pf)}
+        if len(cache) > 4096:
+            cache.clear()
+        cache[key] = (sig, dict(out))
+        return out
+
+    def indication_ok(self, kind: str, side: Optional[str] = None, config: Optional[str] = None) -> bool:
         if not (self.enabled and self.use_historic_gate and self.strict_gate):
             return True
         if not getattr(self.progress, "ready", False):
             return True
         k = str(kind or "").strip()
+        if k and config:
+            # A configuration with its own evidence decides for itself.
+            cst = self.ind_config_stats(k, str(config), side=side)
+            if cst["enough"]:
+                return bool(cst["validated"])
         if k:
             st = self.ind_stats(k, side=side)
             if st["validated"]:

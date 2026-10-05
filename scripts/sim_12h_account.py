@@ -56,7 +56,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PULSE = os.path.join(ROOT, "server", "pulse")
 BAR = 60
 COST_REASONS = ("sl", "tp", "time", "scratch+")
-IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break")
+IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze")
 AXIS_WINDOWS = {"prev": 12, "last": 4, "cont": 8, "pause": 8}  # overlay axis*MaxWindow
 VST_CONTRACTS_URL = "https://open-api-vst.bingx.com/openApi/swap/v2/quote/contracts"
 
@@ -321,9 +321,18 @@ def replay_symbol(job: Dict[str, Any]) -> Dict[str, Any]:
     sym, cache = job["symbol"], job["cache"]
     out_path = os.path.join(cache, f"{sym}.pkl")
     if os.path.exists(out_path) and not job.get("force"):
-        return {"symbol": sym, "cached": True}
+        try:
+            with open(out_path, "rb") as fh:
+                cached_floor = float(pickle.load(fh).get("sl_floor") or 0.0)
+        except Exception:
+            cached_floor = -1.0
+        if abs(cached_floor - float(job.get("sl_floor") or 0.0)) < 1e-12:
+            return {"symbol": sym, "cached": True}
     t0 = time.time()
     book = make_book(job["overlay"])
+    sl_floor = float(job.get("sl_floor") or 0.0)
+    if sl_floor > 0:
+        book.set_symbol_sl_floors({sym: sl_floor})
     catalog = build_catalog(book)
     bars_all, start_s = load_symbol(job["data_dir"], sym)
     n_all = len(bars_all)
@@ -454,7 +463,8 @@ def replay_symbol(job: Dict[str, Any]) -> Dict[str, Any]:
         for r in rows:
             ex = int(round((float(r["t"]) - base_ts) / BAR))
             en = ex - int(round(float(r["hold_s"]) / BAR))
-            kinds.append((kind, 1 if str(r["side"])[:1] == "L" else -1, en + lo, ex + lo, float(r["pnl_pct"])))
+            kinds.append((kind, 1 if str(r["side"])[:1] == "L" else -1, en + lo, ex + lo, float(r["pnl_pct"]),
+                          str(r.get("ind_config") or ""), str(r.get("reason") or "")))
     # indications-pack signal: contributing kinds per bar (bitmask, IND_KINDS order)
     mask = np.zeros(n_all, dtype=np.uint16)
     tagmap = se.IND_TAG_KIND
@@ -471,7 +481,7 @@ def replay_symbol(job: Dict[str, Any]) -> Dict[str, Any]:
         mask[i + lo] = m
     payload = dict(symbol=sym, lo=lo, n_all=n_all, start_s=start_s, warmup=warmup + lo, time_bars=time_bars,
                    core=core, strat=strat, kinds=kinds, ind_mask=mask, open_end=open_end, closes_total=n_closes_total,
-                   seconds=round(time.time() - t0, 1))
+                   seconds=round(time.time() - t0, 1), sl_floor=sl_floor)
     tmp = out_path + ".tmp"
     with open(tmp, "wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -581,8 +591,13 @@ class Sizer:
         self.coord = Coordinator()
         self.coord.load({}, overlay)
         P = pt.Pulse
+        # Exchange-accepted SL floor, same helper as the live entry path.
+        self.sl_min = max(pt.SL_MIN_PCT / 100.0, float(overlay.get("slMinPct") or pt.SL_MIN_PCT) / 100.0)
+        self.sl_max = max(self.sl_min, float(overlay.get("slMaxPct") or 3.0) / 100.0)
+        self.venue_sl_ticks = float(overlay.get("venueSlTicks") or pt.VENUE_SL_TICKS)
+        self.sl_learned: Dict[str, float] = {}
         for name in ("round_qty_up", "min_order_qty", "raise_to_min_qty", "leverage_for", "sized_notional",
-                     "avail_notional", "margin_headroom", "size_qty"):
+                     "avail_notional", "margin_headroom", "size_qty", "venue_sl_min"):
             setattr(self, name, getattr(P, name).__get__(self))
 
 
@@ -793,6 +808,54 @@ def kind_gate(caches, symbols, book, sim_start, sim_end):
     return table
 
 
+def kind_lane_lots(caches, symbols, book, sim_start, sim_end, kind_table, gated: bool):
+    """Indication kind lanes traded on their own (pulse_trader pick_entries:
+    one lane per kind x range config x side), admitted walk-forward by
+    SetBook.indication_ok: the config's own last-N cost-PF once it has enough
+    samples, else the pooled kind x side gate."""
+    cost = float(book.cost_pct)
+    need = int(book.eval_need())
+    pf_n = int(book.pf_n)
+    floor = float(book.min_pf)
+    rows = []
+    for si, s in enumerate(symbols):
+        for r in caches[s]["kinds"]:
+            cfg = r[5] if len(r) > 5 else ""
+            why = r[6] if len(r) > 6 else ""
+            rows.append(dict(symbol=s, si=si, kind=r[0], side=int(r[1]), _entry=int(r[2]), _exit=int(r[3]),
+                             pnl_pct=float(r[4]), config=cfg, reason=why))
+    rows.sort(key=lambda r: (r["_exit"], r["symbol"]))
+    tapes: Dict[Tuple[str, str, int], List[Tuple[int, float]]] = defaultdict(list)
+    for r in rows:
+        if r["config"]:
+            tapes[(r["kind"], r["config"], r["side"])].append((r["_exit"], r["pnl_pct"]))
+    times = {k: [t for t, _ in v] for k, v in tapes.items()}
+    out = []
+    for r in rows:
+        if not (sim_start <= r["_entry"] < sim_end) or r["_exit"] < 0:
+            continue
+        ok, why = True, ""
+        if gated:
+            key = (r["kind"], r["config"], r["side"])
+            decided = False
+            if r["config"] and key in tapes:
+                k = bisect.bisect_left(times[key], r["_entry"])
+                past = [m for _, m in tapes[key][max(0, k - pf_n):k]]
+                if k >= need and past:
+                    pf = cost_pf_ratio(past, cost)
+                    ok = bool(clears_vec(np.array([pf]), floor)[0])
+                    why, decided = f"config last{pf_n} {pf:.3f}", True
+            if not decided:
+                if kind_table is None or r["kind"] not in IND_KINDS:
+                    ok, why = False, "no kind evidence"
+                else:
+                    ok = bool(kind_table[IND_KINDS.index(r["kind"]), 1 if r["side"] > 0 else 0, r["_entry"] - sim_start])
+                    why = "kind pooled gate"
+        r["_ok"], r["_why"] = ok, why
+        out.append(r)
+    return out
+
+
 def strat_lots(caches, symbols, book, sim_start, sim_end, gated: bool):
     """Block / DCA lane trades in the window with the engine's own add-on gates."""
     _engine_path()
@@ -869,7 +932,8 @@ def kind_ok_mask(cands, catalog, kind_table, bars_by_sym, sim_start) -> np.ndarr
 
 def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_table, catalog, symbols, bars_by_sym,
              sim_start: int, sim_end: int, start_s: int, book, sizer: Sizer, start_equity: float, gated: bool,
-             live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar") -> Dict[str, Any]:
+             live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar",
+             kind_lanes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
@@ -902,6 +966,10 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     for r in strat:
         if (not gated) or r["_ok"]:
             strat_by_bar[int(r["_entry"])].append(r)
+    lanes_by_bar: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in kind_lanes or []:
+        if (not gated) or r["_ok"]:
+            lanes_by_bar[int(r["_entry"])].append(r)
     close = bars_by_sym["close"]
     high = bars_by_sym["high"]
     low = bars_by_sym["low"]
@@ -1107,6 +1175,34 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                 if not is_block:
                     adds[int(ab)].append((lot_seq, float(apx), float(aq)))
             exits[int(r["_exit"])].append((lot_seq, xpx, str(r.get("reason") or "x").split(":")[-1]))
+        # Indication kind lanes (own entries, venue-minimum sized like any lot)
+        for r in (lanes_by_bar.get(t, []) if not halted else []):
+            s, side = r["symbol"], int(r["side"])
+            c = sizer.contracts[s]
+            p = px[s]
+            lev = lev_of[s]
+            if min_margin_of[s] > avail * 0.95:
+                hr["skipped_margin"] += 1
+                continue
+            sizer.available = avail
+            q = sizer.size_qty(c, p)
+            if q <= 0:
+                hr["skipped_min"] += 1
+                continue
+            lot_seq += 1
+            g_before = acct.agg.get((s, side))
+            acct.open_lot(lot_seq, s, side, q, p, lev, uid=-1, strategy="kind:" + r["kind"], unit_qty=q, kinds=[r["kind"]])
+            sizer.open[lot_seq] = 1
+            avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
+            hr["opened_lots"] += 1
+            hr["entry_orders"] += 1
+            hr["kind_lane_orders"] = hr.get("kind_lane_orders", 0) + 1
+            if not g_before or g_before[2] <= 0:
+                hr["opened_groups"] += 1
+            changed.add((s, side))
+            xpx = p * (1.0 + float(r["pnl_pct"]) * side)
+            why = str(r.get("reason") or "x").split(":")[-1]
+            exits[int(r["_exit"])].append((lot_seq, xpx, why))
         after = acct.groups()
         ctrl.step(before, after, changed)
         eq = acct.equity(px)
@@ -1158,6 +1254,8 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             out[f"axis:{a}"] = stats([r for r in rows if r["axes"].get(a)])
         for k in IND_KINDS:
             out[f"kind:{k}"] = stats([r for r in rows if k in r["kinds"]])
+            out[f"lane:{k}"] = stats([r for r in rows if r["strategy"] == "kind:" + k])
+        out["kindLanes"] = stats([r for r in rows if r["strategy"].startswith("kind:")])
         return out
 
     hourly = []
@@ -1218,7 +1316,10 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         candidates=dict(setTradesInWindow=int(len(cands["uid"])), setLotsInWindow=int(mult[cands["uid"]].sum()),
                         admittedTrades=int(use.sum()), admittedLots=int(mult[cands["uid"][use]].sum()),
                         blockedByKindGate=ind_block,
-                        blockDcaLaneTrades=len(strat), blockDcaAdmitted=sum(1 for r in strat if (not gated) or r["_ok"])),
+                        blockDcaLaneTrades=len(strat), blockDcaAdmitted=sum(1 for r in strat if (not gated) or r["_ok"]),
+                        kindLaneTrades=len(kind_lanes or []),
+                        kindLaneAdmitted=sum(1 for r in (kind_lanes or []) if (not gated) or r["_ok"]),
+                        kindLaneOrders=sum(h.get("kind_lane_orders", 0) for h in hours)),
     )
     totals["orders"]["total"] = (totals["orders"]["entry"] + totals["orders"]["blockAdd"] + totals["orders"]["dcaEntry"]
                                  + totals["orders"]["dcaAdd"] + sum(fills.values()) + ctrl.place + ctrl.cancel_replace + ctrl.cancel)
@@ -1718,8 +1819,21 @@ def main(argv=None) -> int:
     sim_start = n_all - args.hours * 60
     book = make_book(args.overlay)
     catalog = build_catalog(book)
-    # ---- Stage A ----
-    jobs = [dict(symbol=s, cache=cache, overlay=args.overlay, data_dir=args.data_dir, sim_start=sim_start, force=args.force)
+    contracts_path = args.contracts or os.path.join(cache, "contracts.json")
+    contracts, cmeta = load_contracts(contracts_path, symbols)
+    missing = [s for s in symbols if s not in contracts]
+    if missing:
+        raise SystemExit(f"missing contract specs: {missing}")
+    ov = deployed_settings(args.overlay)
+    # Exchange-accepted SL floor per symbol at the window start: the intern
+    # replay is computed with the stops the live desk would really place.
+    floor_sizer = Sizer(contracts, ov, args.leverage or None)
+    sl_floor = {}
+    for s in symbols:
+        px0 = float(load_symbol(args.data_dir, s)[0][max(0, sim_start - 1)][3])
+        sl_floor[s] = round(floor_sizer.venue_sl_min(contracts[s], px0), 8)
+    jobs = [dict(symbol=s, cache=cache, overlay=args.overlay, data_dir=args.data_dir, sim_start=sim_start, force=args.force,
+                 sl_floor=sl_floor[s])
             for s in symbols]
     t0 = time.time()
     workers = max(1, min(2, int(args.workers)))
@@ -1751,13 +1865,9 @@ def main(argv=None) -> int:
     ktable = kind_gate(caches, symbols, book, sim_start, sim_end)
     strat_g = strat_lots(caches, symbols, book, sim_start, sim_end, True)
     strat_u = strat_lots(caches, symbols, book, sim_start, sim_end, False)
+    lanes_g = kind_lane_lots(caches, symbols, book, sim_start, sim_end, ktable, True)
+    lanes_u = kind_lane_lots(caches, symbols, book, sim_start, sim_end, ktable, False)
     print(f"gating stage {time.time() - t1:.0f}s candidates={len(cands['uid'])} admitted={int(cands['admitted'].sum())}", flush=True)
-    contracts_path = args.contracts or os.path.join(cache, "contracts.json")
-    contracts, cmeta = load_contracts(contracts_path, symbols)
-    missing = [s for s in symbols if s not in contracts]
-    if missing:
-        raise SystemExit(f"missing contract specs: {missing}")
-    ov = deployed_settings(args.overlay)
     runs = []
     specs = [("post-base", f"Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= {float(book.stage_min_pf['base']):.2f}, DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
              ("unfiltered", "Unfiltered (all Sets, no stage gates)", False, args.leverage, "intrabar")]
@@ -1770,7 +1880,8 @@ def main(argv=None) -> int:
         sizer = Sizer(contracts, ov, lev or None)
         res = simulate(name, cands, strat_g if gated else strat_u, ktable if gated else None, catalog, symbols, bars_by_sym,
                        sim_start, sim_end, start_s, book, sizer, args.start_equity, gated, bool(book.live_negative_deact),
-                       mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode)
+                       mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode,
+                       kind_lanes=lanes_g if gated else lanes_u)
         res["title"] = title
         res["leverage"] = lev or "exchange max (engine fallback 150)"
         runs.append(res)
@@ -1785,6 +1896,21 @@ def main(argv=None) -> int:
     }
     for a in AXIS_WINDOWS:
         trade_level[f"admitted & axis {a} child qualifies"] = tape_metrics(cands, catalog, cands["admitted"] & cands["axes"][a], cost_pct)
+    def lane_metrics(rows):
+        mv = np.array([r["pnl_pct"] for r in rows], dtype=float)
+        if not len(mv):
+            return dict(n=0)
+        net = mv - cost_pct / 100.0
+        gl = float(-net[net < 0].sum())
+        return dict(trades=int(len(mv)), lots=int(len(mv)), classicPf=round(float(net[net > 0].sum()) / gl if gl > 0 else 99.0, 4),
+                    costPf=round(cost_pf_ratio(mv.tolist(), cost_pct), 4), winRate=round(float((net > 0).mean()) * 100, 2),
+                    netAvgPct=round(float(net.mean()) * 100, 4))
+    trade_level["kind lanes unfiltered"] = lane_metrics(lanes_u)
+    trade_level["kind lanes admitted (config/kind PF validated)"] = lane_metrics([r for r in lanes_g if r["_ok"]])
+    for k in IND_KINDS:
+        sel = [r for r in lanes_g if r["_ok"] and r["kind"] == k]
+        if sel:
+            trade_level[f"kind lane {k} admitted"] = lane_metrics(sel)
     H = args.hours
     tl_post = trade_level_hourly(cands, catalog, cands["admitted"] & kind_ok_mask(cands, catalog, ktable, bars_by_sym, sim_start),
                                  strat_g, True, sim_start, H, cost_pct)
@@ -1798,6 +1924,7 @@ def main(argv=None) -> int:
         symbols=symbols, startEquity=args.start_equity, costPct=cost_pct, startS=start_s,
         leverage=args.leverage or "exchange max; not public -> engine fallback 150 (Contract.max_lev / LEVERAGE)",
         contracts=cmeta,
+        slFloorPct={s: round(v * 100, 4) for s, v in sl_floor.items()},
         engine=dict(overlay=os.path.relpath(args.overlay, ROOT), catalogSets=len(book.sets), uniqueBehaviours=len(catalog),
                     baseN=book.pf_n, mainN=book.main_eval, realN=book.real_eval, floors=book.stage_min_pf,
                     maxDdS=book.max_dd_s, strictGate=book.strict_gate, costPct=cost_pct, timeBars=book.hist_time_bars,

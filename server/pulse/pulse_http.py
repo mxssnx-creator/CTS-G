@@ -720,7 +720,7 @@ def slim_for_ui(st: dict) -> dict:
                 c for c in coords
                 if isinstance(c, dict) and c.get("validated") is True
                 and str(c.get("strategy") or "") in ("normal", "trailing", "axis", "block", "dca")
-                and str(c.get("indication") or "") in ("general", "combined", "state", "signals", "active", "direction", "move", "common", "trend", "break")
+                and str(c.get("indication") or "") in ("general", "combined", "state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze")
                 and ":" in str(c.get("id") or c.get("setId") or "")
             ][:24]
         if isinstance(ht.get("comboMatrix"), list):

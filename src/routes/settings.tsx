@@ -2531,6 +2531,13 @@ function SettingsPage() {
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
                 <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
                 <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
+                <EnableSlider label="MSI divergence" on={overlay.indTypeMsi !== false} hint="price extreme not confirmed by RSI · exit: swing fail" onChange={(v) => patch("indTypeMsi", v)} />
+                <EnableSlider label="VWAP reversion" on={overlay.indTypeVwap !== false} hint="z-stretch from VWAP on a volume surge · exit: VWAP touch" onChange={(v) => patch("indTypeVwap", v)} />
+                <EnableSlider label="Break retest" on={overlay.indTypeRetest !== false} hint="broken level retested and held · exit: level fail" onChange={(v) => patch("indTypeRetest", v)} />
+                <EnableSlider label="Squeeze release" on={overlay.indTypeSqueeze !== false} hint="low band-width percentile, close outside band · exit: back through mid" onChange={(v) => patch("indTypeSqueeze", v)} />
+                <EnableSlider label="Exit tactics" on={overlay.exitTacticOn !== false} hint="per-indication price-only exit (target or invalidation)" onChange={(v) => patch("exitTacticOn", v)} />
+                <Num label="Exit tactic buffer" value={overlay.exitTacticBufferPct ?? 0.1} min={0} max={1} step={0.05} unit="%"
+                  hint="close beyond the invalidation level by this much" onChange={(v) => patch("exitTacticBufferPct", v)} />
                 {(overlay.indTrendRanges ?? [13, 21, 34]).map((period, index, periods) => (
                   <Num key={`trend-${index}`} label={`Trend EMA range ${index + 1}`} value={period} min={8} max={55} step={1}
                     hint="Independent EMA calculation · fast period = 0.38 × range" onChange={(value) => patch("indTrendRanges", periods.map((n, i) => i === index ? value : n))} />
@@ -2538,6 +2545,22 @@ function SettingsPage() {
                 {(overlay.indBreakRanges ?? [8, 16, 32]).map((period, index, periods) => (
                   <Num key={`break-${index}`} label={`Break range ${index + 1}`} value={period} min={8} max={55} step={1}
                     hint="Independent breakout calculation in candles" onChange={(value) => patch("indBreakRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indMsiRanges ?? [14, 21, 34]).map((period, index, periods) => (
+                  <Num key={`indMsiRanges-${index}`} label={`MSI range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMsiRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indVwapRanges ?? [20, 30, 40]).map((period, index, periods) => (
+                  <Num key={`indVwapRanges-${index}`} label={`VWAP range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indVwapRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indRetestRanges ?? [12, 20, 32]).map((period, index, periods) => (
+                  <Num key={`indRetestRanges-${index}`} label={`Retest range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRetestRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indSqueezeRanges ?? [16, 20, 26]).map((period, index, periods) => (
+                  <Num key={`indSqueezeRanges-${index}`} label={`Squeeze period ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSqueezeRanges", periods.map((n, i) => i === index ? value : n))} />
                 ))}
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />

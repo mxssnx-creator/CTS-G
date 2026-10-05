@@ -948,7 +948,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px]">
-        {(["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const).map((k) => {
+        {(["state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze"] as const).map((k) => {
           const row = kinds[k];
           const on = ind?.types?.[k] !== false;
           return (

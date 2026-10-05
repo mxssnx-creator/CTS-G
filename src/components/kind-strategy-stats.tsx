@@ -3,7 +3,7 @@ import { lastNCostPf, formatDuration } from "@/lib/analytics";
 import { kindGateOpen, type KindStat, type LiveClosed, type LiveStats, type SideStat, type StrategyStat } from "@/lib/live-stats";
 import { pfClass } from "@/lib/status-tone";
 
-const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const;
+const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze"] as const;
 const STRATEGY_KEYS = ["indications", "general", "block", "block:signals", "trailing", "dca", "exits"] as const;
 
 const KIND_SET = new Set<string>(INDICATION_KINDS);
