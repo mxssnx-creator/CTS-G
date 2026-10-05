@@ -663,6 +663,9 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
     floors = {k: float(v) for k, v in book.stage_min_pf.items()}
     need = int(book.eval_need())
     base_n, main_n, real_n = book._stage_window_ns()
+    micro_on = bool(getattr(book, "micro_enabled", False))
+    micro_floor = float(getattr(book, "micro_min_pf", 0.0) or 0.0)
+    strict = bool(getattr(book, "strict_gate", True))
     # candidates (entries inside the window) and closed evidence, per symbol
     cand_parts = defaultdict(list)
     ev_parts = defaultdict(list)
@@ -687,7 +690,7 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
     ev = Evidence(cat.pop("group"), cat.pop("exit"), cat.pop("raw"), cost, tiebreak=cat.pop("sym"))
     n_evidence = len(ev.exit)
     m = len(cands["uid"])
-    out = {k: np.zeros(m, dtype=bool) for k in ("base_ok", "main_ok", "real_ok", "dd_ok", "admitted")}
+    out = {k: np.zeros(m, dtype=bool) for k in ("base_ok", "main_ok", "real_ok", "micro_ok", "dd_ok", "admitted")}
     out["r30"] = np.full(m, np.nan)
     out["cnt"] = np.zeros(m, dtype=np.int32)
     axes = {a: np.zeros(m, dtype=bool) for a in AXIS_WINDOWS}
@@ -705,6 +708,14 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
         out["base_ok"][a0:a1] = base_ok
         out["main_ok"][a0:a1] = main_ok
         out["real_ok"][a0:a1] = main_ok & ok3 & clears_vec(r3, floors["real"])
+        if micro_on:
+            # Micro tier (set_engine._stage_qualification): positive at the
+            # Micro floor but below the shared floor; strict lanes also need
+            # Main/Real at that floor. Executes at venue-minimum size.
+            micro_ok = (cnt >= need) & ok30 & clears_vec(r30, micro_floor) & ~base_ok
+            if strict:
+                micro_ok &= ok5 & clears_vec(r5, micro_floor) & ok3 & clears_vec(r3, micro_floor)
+            out["micro_ok"][a0:a1] = micro_ok
         out["r30"][a0:a1] = np.where(ok30, r30, np.nan)
         out["cnt"][a0:a1] = cnt
         # coordination axes (coord_engine.axis_variants on the parent's closed tape);
@@ -718,7 +729,7 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
     # tape (last 96 closes), refreshed at each simulated hour.
     hour = (cands["entry"] - sim_start) // 60
     dd_ok = np.ones(m, dtype=bool)
-    need_dd = np.flatnonzero(out["real_ok"])
+    need_dd = np.flatnonzero(out["real_ok"] | out["micro_ok"])
     ddt_values = []
     if len(need_dd):
         pairs = np.unique(g_all[need_dd] * 1000 + hour[need_dd])
@@ -742,7 +753,7 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
         dd_ok[need_dd] = vals <= float(book.max_dd_s) + 1e-9
         ddt_values = vals
     out["dd_ok"] = dd_ok
-    out["admitted"] = out["real_ok"] & dd_ok
+    out["admitted"] = (out["real_ok"] | out["micro_ok"]) & dd_ok
     cands.update(out)
     cands["axes"] = axes
     cands["n_evidence"] = n_evidence
@@ -1769,7 +1780,8 @@ def main(argv=None) -> int:
         "unfiltered (all Set trades entering in window)": tape_metrics(cands, catalog, np.ones(len(cands["uid"]), bool), cost_pct),
         f"Base passed (last-30 >= {float(book.stage_min_pf['base']):.2f})": tape_metrics(cands, catalog, cands["base_ok"], cost_pct),
         "Base+Main+Real passed": tape_metrics(cands, catalog, cands["real_ok"], cost_pct),
-        "admitted (Base/Main/Real + DDT)": tape_metrics(cands, catalog, cands["admitted"], cost_pct),
+        f"Micro passed ({float(getattr(book, 'micro_min_pf', 0.0) or 0.0):.2f} <= PF < floor)": tape_metrics(cands, catalog, cands["micro_ok"], cost_pct),
+        "admitted (Base/Main/Real + Micro + DDT)": tape_metrics(cands, catalog, cands["admitted"], cost_pct),
     }
     for a in AXIS_WINDOWS:
         trade_level[f"admitted & axis {a} child qualifies"] = tape_metrics(cands, catalog, cands["admitted"] & cands["axes"][a], cost_pct)

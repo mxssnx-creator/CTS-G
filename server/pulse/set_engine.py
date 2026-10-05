@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from position_cost import (
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
+    MICRO_PF,
     POSITIVE_PF,
     SL_MIN_PCT,
     cost_aware_metrics,
@@ -967,6 +968,7 @@ class SetState:
     parent_set_id: str = ""
     stage: str = "Base"
     stage_qualified: str = ""
+    micro: bool = False
     base_pf: float = 0.0
     main_pf: float = 0.0
     real_pf: float = 0.0
@@ -1125,6 +1127,8 @@ class SetBook:
         self.deact_n = DEACT_N_DEFAULT
         self.min_pf = POSITIVE_PF
         self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
+        self.micro_min_pf = MICRO_PF
+        self.micro_enabled = True
         self.real_min_pf = POSITIVE_PF
         self.main_eval = 5
         self.real_eval = 3
@@ -1459,6 +1463,9 @@ class SetBook:
         }
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
+        # Micro tier floor: independent of the shared floor and never above Base.
+        self.micro_enabled = bool(ov.get("microEnabled", True))
+        self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
             self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
         except Exception:
@@ -3875,7 +3882,10 @@ class SetBook:
         dd_s = float(dd["maxS"])
         enable_pf = float(self.real_min_pf or POSITIVE_PF)
         max_dd = float(self.max_dd_s or 57600)
-        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(ordered, base_ok, gross=gross)
+        dd_fast_ok = float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
+        micro_base = self._micro_base(sample, required, float(last15["ratio"]), dd_fast_ok, base_ok)
+        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(
+            ordered, base_ok or micro_base, gross=gross, floor=None if base_ok else self.micro_min_pf)
         return {
             "n": int(hist_n if hist_n is not None else n_rows),
             "wins": wins,
@@ -3919,19 +3929,28 @@ class SetBook:
             "proven_neg": n15 >= required and ratio + 1e-9 < enable_pf,
         }
 
-    def _downstream_metrics(self, ordered, base_ok, *, gross=None):
-        """Evaluate only this tape, after its own upstream qualification."""
+    def _downstream_metrics(self, ordered, base_ok, *, gross=None, floor=None):
+        """Evaluate only this tape, after its own upstream qualification.
+
+        ``floor`` is the stage floor the chain stops at: the shared floor for
+        regular Sets, the Micro floor for a Micro-eligible Set."""
         result = [{"ratio": 0.0, "count": 0}, {"ratio": 0.0, "count": 0}]
         evidence = {}
+        floor = self.min_pf if floor is None else floor
         if base_ok:
             for index, (stage, required) in enumerate(zip(("Main", "Real"), self._stage_window_ns()[1:])):
                 metric = (self._fast_historic_pf_from_gross(gross, required, self.cost_pct, cost_as_frac(self.cost_pct))
                           if gross is not None else self._window_cost_pf(ordered, required))
                 result[index] = metric
                 evidence[stage] = cost_aware_metrics(ordered[-required:], self.cost_pct, required_samples=required)
-                if int(metric["count"]) < required or not clears_pf(metric["ratio"], self.min_pf):
+                if int(metric["count"]) < required or not clears_pf(metric["ratio"], floor):
                     break
         return result[0], result[1], evidence
+
+    def _micro_base(self, n: int, need: int, ratio: float, dd_ok: bool, base_ok: bool) -> bool:
+        """Base evidence at the Micro floor for a Set that misses the shared floor."""
+        return bool(getattr(self, "micro_enabled", False) and not base_ok and n >= need
+                    and clears_pf(ratio, float(self.micro_min_pf)) and dd_ok)
 
     def _score_metrics(
         self,
@@ -3985,7 +4004,9 @@ class SetBook:
         # Named diagnostic windows use the same global threshold, too.
         for metric in windows.values():
             metric["validated"] = int(metric["n"]) >= int(metric["requiredSamples"]) and clears_pf(metric["pf"], self.min_pf)
-        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(ordered, base_ok)
+        micro_base = self._micro_base(n15, need, ratio, dd_ok, base_ok)
+        main_pf_m, real_pf_m, stage_evaluations = self._downstream_metrics(
+            ordered, base_ok or micro_base, floor=None if base_ok else self.micro_min_pf)
         return {
             "n": int(hist_n if hist_n is not None else len(ordered)),
             "wins": wins,
@@ -4055,7 +4076,16 @@ class SetBook:
         base = base_n >= need and clears_pf(base_pf, base_floor) and dd_ok
         main = base and main_n >= main_req and clears_pf(main_pf, main_floor)
         real = main and real_n >= real_req and clears_pf(real_pf, real_floor)
-        qualified = "Real" if real else ("Main" if main else ("Base" if base else ""))
+        # Micro: below the shared floor but positive at the Micro floor (same
+        # sample and DDT rules). Strict lanes also need Main/Real at that floor.
+        micro_floor = float(getattr(self, "micro_min_pf", MICRO_PF))
+        micro = bool(getattr(self, "micro_enabled", False) and not base and base_n >= need
+                     and clears_pf(base_pf, micro_floor) and dd_ok)
+        if micro and self.strict_gate:
+            micro = (main_n >= main_req and clears_pf(main_pf, micro_floor)
+                     and real_n >= real_req and clears_pf(real_pf, micro_floor))
+        st.micro = bool(micro)
+        qualified = "Real" if real else ("Main" if main else ("Base" if base else ("Micro" if micro else "")))
         st.parent_set_id = st.id if st.kind == "base" else (st.parent_set_id or st.id)
         st.stage = qualified or "Unqualified"
         st.stage_qualified = qualified
@@ -4093,6 +4123,8 @@ class SetBook:
             reasons.append(f"base PF {base_pf:.2f}<{base_floor:.2f}")
         if not dd_ok:
             reasons.append(f"DDt {dd_s:.0f}s>{float(self.max_dd_s or 57600):.0f}s")
+        if micro:
+            reasons.append(f"micro PF {base_pf:.2f}>={micro_floor:.2f} (min size)")
         if base:
             if main_n < main_req:
                 reasons.append(f"main sample {main_n}/{main_req}")
@@ -4781,6 +4813,9 @@ class SetBook:
             "processingCount": len(getattr(self, "_processing_set_ids", set()) or set()),
             "processingSetIds": self.processing_set_ids()[:350],
             "validatedCount": intern_validated,
+            "microCount": sum(1 for st in self.sets.values() if getattr(st, "micro", False)),
+            "microMinPf": round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 4),
+            "microEnabled": bool(getattr(self, "micro_enabled", False)),
             "validationNeed": need,
             "entryGate": getattr(self, "entry_gate_stats", None),
             "histFills": intern_fills,
@@ -5116,10 +5151,14 @@ class SetBook:
                     # dispatcher (matrix=0 while hundreds of signals fired).
                     reason = str(blob.get("deact_reason") or "")
                     if reason in ("unproven", "stage qualification", ""):
-                        return not self.strict_gate and self._base_metrics_ok(blob)
+                        return ((not self.strict_gate and self._base_metrics_ok(blob))
+                                or (not state.locked and self._micro_metrics_ok(blob)))
                     return False
             if self.strict_gate:
-                return bool(state.active)
+                if state.active:
+                    return True
+                return (not state.locked and self._soft_deact(state.deact_reason)
+                        and self._micro_metrics_ok(self._side_view(state, want_side if use_side else None)))
             reason = str(state.deact_reason or "")
             if state.locked or reason == "locked":
                 return False
@@ -5153,7 +5192,7 @@ class SetBook:
         floor = max(1.0, float(self.stage_min_pf.get("base", self.min_pf) or 1.0))
         intern_floor = floor
         result: List[SetState] = []
-        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0}
+        rejected = {"side_inactive": 0, "low_n": 0, "low_pf": 0, "dd_cap": 0, "live": 0, "stage": 0, "micro": 0}
         for state in rows:
             if not side_active(state):
                 rejected["side_inactive"] += 1
@@ -5167,7 +5206,8 @@ class SetBook:
             if n < need and not hist_test_row:
                 rejected["low_n"] += 1
                 continue
-            if (not math.isfinite(pf) or pf + 1e-9 < intern_floor) and not hist_test_row:
+            micro = self._micro_metrics_ok(view)
+            if (not math.isfinite(pf) or pf + 1e-9 < intern_floor) and not hist_test_row and not micro:
                 rejected["low_pf"] += 1
                 continue
             if (not math.isfinite(dd) or dd < 0 or dd > float(self.max_dd_s or 57600.0) + 1e-9) and not hist_test_row:
@@ -5176,9 +5216,11 @@ class SetBook:
             if not self._live_entry_allowed(state, want_side if use_side else None):
                 rejected["live"] += 1
                 continue
-            if self.strict_gate and not hist_test_row and not self._real_metrics_ok(view):
+            if self.strict_gate and not hist_test_row and not micro and not self._real_metrics_ok(view):
                 rejected["stage"] += 1
                 continue
+            if micro:
+                rejected["micro"] += 1  # admitted at minimum size, counted for observability
             result.append(state)
         # Observability for the live entry boundary: which gate starves the
         # book. Published with the sets snapshot, keyed per scope so all four
@@ -5223,6 +5265,8 @@ class SetBook:
             bool(self.strict_gate),
             int(self.eval_need()),
             round(float(self.real_min_pf or 0.0), 12),
+            bool(getattr(self, "micro_enabled", False)),
+            round(float(getattr(self, "micro_min_pf", 0.0) or 0.0), 12),
             round(float(self.max_dd_s or 0.0), 6),
             round(float(self.cost_pct or 0.0), 12),
             str(getattr(self, "entry_policy", ENTRY_POLICY_STRICT)),
@@ -5357,6 +5401,44 @@ class SetBook:
             and 0 <= float(view.get("max_dd_s", 0) or 0) <= self.max_dd_s
         )
 
+    def _micro_metrics_ok(self, view: Dict[str, Any]) -> bool:
+        """Micro tier gate: the stage chain at the Micro floor, only for a
+        view that does not qualify at the shared floor. Micro entries execute
+        at venue-minimum size and never receive Block/DCA adds (those gates
+        re-check the parent at the shared floor)."""
+        if not getattr(self, "micro_enabled", False) or not isinstance(view, dict) or not view:
+            return False
+        if self._real_metrics_ok(view) if self.strict_gate else self._base_metrics_ok(view):
+            return False
+        floor = float(self.micro_min_pf)
+        n = int(view.get("base_n", view.get("last15_n", 0)) or 0)
+        if not (n >= self.eval_need()
+                and clears_pf(view.get("base_pf", view.get("last15_ratio")), floor)
+                and view.get("ddOk", True)
+                and 0 <= finite(view.get("max_dd_s", 0), -1) <= self.max_dd_s):
+            return False
+        if not self.strict_gate:
+            return True
+        if "real_n" not in view and "real_pf" not in view:
+            return False
+        _, main_need, real_need = self._stage_window_ns()
+        return bool(int(view.get("main_n") or 0) >= main_need and clears_pf(view.get("main_pf"), floor)
+                    and int(view.get("real_n") or 0) >= real_need and clears_pf(view.get("real_pf"), floor))
+
+    def micro_tier(self, st: Any, side: Optional[str]) -> bool:
+        """True when this exact Set/direction trades as Micro (minimum size)."""
+        if not isinstance(st, SetState) or self.sets.get(st.id) is not st:
+            return False
+        try:
+            return self._micro_metrics_ok(self._side_view(st, self._entry_side(side) or None))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _soft_deact(reason: Any) -> bool:
+        """Cached qualification flags are not deactivations; hard ones are."""
+        return str(reason or "") in ("unproven", "stage qualification", "")
+
     def execution_allowed(self, st: SetState, pack: str, side: str) -> bool:
         """Revalidate the exact selected object at the submission boundary."""
         if not self.enabled or self.sets.get(st.id) is not st or st.pack != pack:
@@ -5384,18 +5466,18 @@ class SetBook:
             return False
         if not self._live_entry_allowed(st, side):
             return False
+        blob = st.by_side.get(side) or {}
+        soft = self._soft_deact(blob.get("deact_reason", st.deact_reason)) and not st.locked
         if self.strict_gate:
-            if not active:
-                return False
-            if not self._real_metrics_ok(view):
-                return False
-            return True
+            if active and self._real_metrics_ok(view):
+                return True
+            return soft and self._micro_metrics_ok(view)
         # Non-strict intern: Base-qualified Sets enter even when the cached
         # side flag still says unproven/stage. Empty tape is not evidence and
-        # a Base-rejected Set (PF below the Base floor) never enters.
+        # a Set below the Base floor only enters as Micro (minimum size).
         if n < self.eval_need():
             return False
-        return self._base_metrics_ok(view)
+        return self._base_metrics_ok(view) or (soft and self._micro_metrics_ok(view))
 
     def pick_any(self, pack: str, side: Optional[str] = None) -> Optional[SetState]:
         base = self.pick(pack, "base", side=side)
@@ -5841,6 +5923,7 @@ class SetBook:
             "processingCount": processing_n,
             "processingSetIds": self.processing_set_ids()[:512],
             "validatedCount": intern_validated,
+            "microCount": int(cover.get("microCount") or 0),
             "validationNeed": int(cover.get("validationNeed") or self.eval_need()),
             "entryGate": getattr(self, "entry_gate_stats", None),
             "coverage": cover,

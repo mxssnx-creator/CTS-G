@@ -28,6 +28,9 @@ LAST_N_DEFAULT = 30
 # must never be treated as this real floor (or vice versa). +1× cost remains 1.10.
 POSITIVE_PF = 1.15
 INTERN_PF = 1.0
+# Micro tier: positive Sets below the real floor trade at venue-minimum size
+# only. Kept out of PF_SETTING_KEYS so the shared floor never collapses onto it.
+MICRO_PF = 1.05
 SL_MIN_PCT = 0.4
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough

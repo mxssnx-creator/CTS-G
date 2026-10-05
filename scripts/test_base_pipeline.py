@@ -30,6 +30,8 @@ PROD_OVERLAY = {
     "setDeactN": 25,
     "setLiveNegativeDeact": True,
     "positionCostPct": COST_PCT,
+    # Base-tier contract; the Micro tier (PF 1.05..floor) is covered by test_micro_tier.py.
+    "microEnabled": False,
 }
 
 

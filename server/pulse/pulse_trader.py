@@ -6508,8 +6508,19 @@ class Pulse:
             floor = self.min_order_qty(c, px)
             qty = max(qty, floor)
             qty = self.round_qty_up(c, qty)
+        # Micro tier: a Set positive only at the Micro floor trades one
+        # venue-minimum lot, with no Block-active scaling.
+        micro = False
+        if forced_row is None and chosen is not None:
+            try:
+                micro_fn = getattr(self.sets, "micro_tier", None)
+                micro = bool(micro_fn(chosen, side)) if callable(micro_fn) else False
+            except Exception:
+                micro = False
+        if micro and c is not None and floor > 0:
+            qty = self.round_qty_up(c, floor)
         execution_plan = None
-        if execution_strategy == "block-active":
+        if execution_strategy == "block-active" and not micro:
             extra_cap = 1.0
             try:
                 extra_cap = float(self.block.extra_cap())
@@ -6615,6 +6626,7 @@ class Pulse:
             "trail_key": trail_key,
             "trail_arm": trail_arm / 100.0,
             "trail_give": trail_give / 100.0,
+            "micro": micro,
         }
         if execution_plan:
             pending_meta.update(axis_key=f"block-active:{execution_plan['blockCount']}",

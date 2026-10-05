@@ -26,6 +26,8 @@ def tape(pf=1.2, n=75, **kw):
 def book(*states):
     b = SetBook(); b.by_idx=list(states); b.sets={s.id:s for s in states}
     b.progress.ready=True
+    # Regular-tier isolation contract; the Micro tier has its own tests.
+    b.micro_enabled = False
     return b
 
 

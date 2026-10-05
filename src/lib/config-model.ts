@@ -372,6 +372,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   setMinPf: number;
   setMaxDdTimeS: number;
   setAutoDeact: boolean;
+  microEnabled: boolean;
+  microMinPf: number;
   setLiveNegativeDeact: boolean;
   setUseHistoricGate: boolean;
   setStrictGate: boolean;
@@ -584,6 +586,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinPf: EVAL_MIN_PF,
   setMaxDdTimeS: 14400,
   setAutoDeact: true,
+  microEnabled: true,
+  microMinPf: 1.05,
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
   setLiveNegativeDeact: false,
@@ -749,6 +753,8 @@ export type CtsSettings = {
   setMinPf?: number;
   setMaxDdTimeS?: number;
   setAutoDeact?: boolean;
+  microEnabled?: boolean;
+  microMinPf?: number;
   setUseHistoricGate?: boolean;
   setStrictGate?: boolean;
   baseEvalPosCount?: number;
@@ -987,6 +993,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 14400),
     setAutoDeact: bool(cts.setAutoDeact, true),
+    microEnabled: bool(cts.microEnabled, true),
+    microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),
