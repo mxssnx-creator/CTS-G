@@ -42,6 +42,7 @@ def main() -> int:
     ap.add_argument("--cache", required=True, help="replay cache built by sim_12h_account.py")
     ap.add_argument("--overlay", default=os.path.join(ROOT, "server", "pulse", "overlay-bingx-x02.json"))
     ap.add_argument("--floors", default="1.02,1.10,1.20,1.30")
+    ap.add_argument("--ddt-s", default="", help="comma list of setMaxDdTimeS values (seconds, 600..57600); empty keeps the overlay value")
     ap.add_argument("--window-ends", default="0", help="comma list of bar indexes, 0 = end of data")
     ap.add_argument("--hours", type=int, default=12)
     ap.add_argument("--out", required=True, help="JSON lines, one row per window and floor")
@@ -59,10 +60,13 @@ def main() -> int:
     for end in [int(x) for x in args.window_ends.split(",")]:
         sim_end = end or n_all
         sim_start = sim_end - args.hours * 60
-        for floor in [float(x) for x in args.floors.split(",")]:
-            def profile(floor=floor):
+        ddt_values = [float(x) for x in args.ddt_s.split(",") if x] or [None]
+        for floor, ddt in [(float(f), d) for f in args.floors.split(",") for d in ddt_values]:
+            def profile(floor=floor, ddt=ddt):
                 out = original()
                 out.update({key: floor for key in STAGE_KEYS})
+                if ddt is not None:
+                    out.update(setMaxDdTimeS=ddt, maxDdTimeS=ddt)
                 return out
 
             cp.processing_profile = profile
@@ -75,7 +79,7 @@ def main() -> int:
             n_cand = int(len(cands["uid"]))
             admitted = cands["admitted"]
             row = dict(
-                windowEnd=sim_end, windowStart=sim_start, floor=floor,
+                windowEnd=sim_end, windowStart=sim_start, floor=floor, maxDdS=float(book.max_dd_s),
                 stageFloors={k: float(v) for k, v in book.stage_min_pf.items()},
                 candidates=n_cand, seconds=round(time.time() - t0),
                 base_ok=int(cands["base_ok"].sum()), main_ok=int(cands["main_ok"].sum()),
@@ -87,7 +91,7 @@ def main() -> int:
             )
             with open(args.out, "a") as handle:
                 handle.write(json.dumps(row) + "\n")
-            print("floor", floor, "window", sim_end, "admitted", row["admittedPct"], "%", row["walkForward"], flush=True)
+            print("floor", floor, "ddt", book.max_dd_s, "window", sim_end, "admitted", row["admittedPct"], "%", row["walkForward"], flush=True)
             del cands, caches
     cp.processing_profile = original
     return 0
