@@ -933,7 +933,8 @@ def kind_ok_mask(cands, catalog, kind_table, bars_by_sym, sim_start) -> np.ndarr
 def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_table, catalog, symbols, bars_by_sym,
              sim_start: int, sim_end: int, start_s: int, book, sizer: Sizer, start_equity: float, gated: bool,
              live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar",
-             kind_lanes: Optional[List[Dict[str, Any]]] = None, max_open: int = 100) -> Dict[str, Any]:
+             kind_lanes: Optional[List[Dict[str, Any]]] = None, max_open: int = 100,
+             dd_pause_pct: float = 0.0) -> Dict[str, Any]:
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
@@ -986,6 +987,8 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     live_seen: set = set()
     liquidations: List[Dict[str, Any]] = []
     halted_minutes = 0
+    dd_pause = max(0.0, float(dd_pause_pct or 0.0)) / 100.0
+    eq_peak, dd_paused, dd_pause_minutes = float(start_equity), False, 0
     lot_seq = 0
     closed_rows: List[Dict[str, Any]] = []
     hours = [dict(hour=h, opened_lots=0, opened_groups=0, entry_orders=0, block_orders=0, dca_entry_orders=0,
@@ -1072,7 +1075,20 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         # (symbol, side, pack); inside a signal entry_sets() order = highest
         # last-30 cost-PF first. A Set with multiplicity m occupies m ranks.
         avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
-        halted = acct.equity(px) < eq_min  # pulse_trader EQ_MIN halt: no new entries
+        eq_now = acct.equity(px)
+        halted = eq_now < eq_min  # pulse_trader EQ_MIN halt: no new entries
+        # ddPausePct (pulse_trader drawdown pause): no new entries while equity
+        # sits ddPausePct below its running peak; resume at 60% of it.
+        if dd_pause > 0:
+            eq_peak = max(eq_peak, eq_now)
+            dd_now = (eq_peak - eq_now) / eq_peak if eq_peak > 0 else 0.0
+            if dd_paused and dd_now < dd_pause * 0.6:
+                dd_paused = False
+            elif not dd_paused and dd_now >= dd_pause:
+                dd_paused = True
+            if dd_paused and not halted:
+                halted = True
+                dd_pause_minutes += 1
         if halted:
             halted_minutes += 1
         a0 = int(np.searchsorted(idx_entry, t, side="left"))
@@ -1328,7 +1344,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                      equityHalt=sum(h.get("skipped_halt", 0) for h in hours),
                      microCap=sum(h.get("skipped_micro_cap", 0) for h in hours)),
         liquidations=liquidations, liquidationLoss=round(getattr(acct, "liquidation_loss", 0.0), 6),
-        haltedMinutes=halted_minutes,
+        haltedMinutes=halted_minutes, ddPauseMinutes=dd_pause_minutes,
         candidates=dict(setTradesInWindow=int(len(cands["uid"])), setLotsInWindow=int(mult[cands["uid"]].sum()),
                         admittedTrades=int(use.sum()), admittedLots=int(mult[cands["uid"][use]].sum()),
                         blockedByKindGate=ind_block,
@@ -1908,7 +1924,8 @@ def main(argv=None) -> int:
         res = simulate(name, cands, strat_g if gated else strat_u, ktable if gated else None, catalog, symbols, bars_by_sym,
                        sim_start, sim_end, start_s, book, sizer, args.start_equity, gated, bool(book.live_negative_deact),
                        mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode,
-                       kind_lanes=lanes_g if gated else lanes_u, max_open=int(ov.get("maxOpen") or 100))
+                       kind_lanes=lanes_g if gated else lanes_u, max_open=int(ov.get("maxOpen") or 100),
+                       dd_pause_pct=float(ov.get("ddPausePct") or 0.0))
         res["title"] = title
         res["leverage"] = lev or "exchange max (engine fallback 150)"
         runs.append(res)
