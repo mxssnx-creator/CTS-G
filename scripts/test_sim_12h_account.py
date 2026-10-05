@@ -205,6 +205,18 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
         self.assertLessEqual(tot["marginMax"], 1.0)
 
 
+class LoadSymbolTest(unittest.TestCase):
+    def test_time_base_is_first_row_not_start_when_warmup_precedes_window(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            rows = [[(1_000_000 + i * 60) * 1000, [1, 2, 0.5, 1.5, 3]] for i in range(5)]
+            json.dump(dict(symbol="AAA-USDT", start=(1_000_000 + 120) * 1000, warmup=2, rows=rows),
+                      open(os.path.join(d, "AAA-USDT.json"), "w"))
+            bars, start_s = sim.load_symbol(d, "AAA-USDT")
+            self.assertEqual(start_s, 1_000_000)
+            self.assertEqual(len(bars), 5)
+
+
 class ChartTest(unittest.TestCase):
     labels = ["05:00", "06:00", "07:00"]
 

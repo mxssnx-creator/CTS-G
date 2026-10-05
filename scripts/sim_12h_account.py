@@ -301,7 +301,9 @@ def build_catalog(book) -> List[Dict[str, Any]]:
 
 def load_symbol(data_dir: str, symbol: str) -> Tuple[List[List[float]], int]:
     d = json.load(open(os.path.join(data_dir, symbol + ".json")))
-    return [r[1] for r in d["rows"]], int(d["start"]) // 1000
+    # The first row is the time base. Fetched files carry warmup bars before
+    # "start", so "start" would shift every timestamp (and report label) late.
+    return [r[1] for r in d["rows"]], int(d["rows"][0][0]) // 1000
 
 
 # --------------------------------------------------------------------------
