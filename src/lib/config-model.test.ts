@@ -84,7 +84,7 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
       assert.equal(value[key], EVAL_MIN_PF, key);
     assert.equal(value.maxDdTimeS, 57600);
-    assert.equal(value.setMaxDdTimeS, 57600);
+    assert.equal(value.setMaxDdTimeS, 14400);
     assert.equal(value.positionCostFallbackPct, 0.1);
     assert.equal(value.useLivePositionCosts, true);
   }
@@ -156,7 +156,7 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(value.histTestHours, 20);
     assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
-    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.baseEvalPosCount, 40);
     assert.equal(value.setMinStep, 7);
   }
 });
@@ -223,7 +223,7 @@ test("Control holdout defaults off and preserves zero independently of PF and la
   for (const controlMinTrades of [0, 5, 25, 100]) {
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
-    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.baseEvalPosCount, 40);
     assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.controlOrdersPerConfig, true);
   }

@@ -578,11 +578,11 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histTestAutoAssign: true,
   histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
   setPfWindow: 30,
-  baseEvalPosCount: 30,
+  baseEvalPosCount: 40,
   setDeactN: 25,
   controlMinTrades: 0,
   setMinPf: EVAL_MIN_PF,
-  setMaxDdTimeS: 57600,
+  setMaxDdTimeS: 14400,
   setAutoDeact: true,
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
@@ -980,12 +980,12 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
     histTestAutoAssign: bool(cts.histTestAutoAssign ?? live?.histTestAutoAssign, true),
     histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
-    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
-    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 30),
+    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 40),
+    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 40),
     setDeactN: num(cts.setDeactN, 25),
     controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 57600),
+    setMaxDdTimeS: num(cts.setMaxDdTimeS, 14400),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
@@ -1167,7 +1167,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     next[key] = normalizePf(next.minPf, EVAL_MIN_PF);
   }
-  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 30))));
+  next.baseEvalPosCount = Math.max(5, Math.min(75, Math.round(num(next.baseEvalPosCount ?? next.setPfWindow, 40))));
   next.setPfWindow = next.baseEvalPosCount;
   next.controlMinTrades = Math.max(0, Math.round(num(next.controlMinTrades, 0)));
   next.slMinPct = Math.max(SL_MIN_PCT, Math.min(3, num(next.slMinPct, SL_MIN_PCT)));
