@@ -25,8 +25,13 @@ def gross(pf):
 
 
 class MicroTierTests(unittest.TestCase):
+    def test_micro_is_opt_in(self):
+        b = SetBook()
+        b.load({}, rebuild=False)
+        self.assertFalse(b.micro_enabled)
+
     def book(self, strict=False, **extra):
-        ov = dict(setStrictGate=strict, setUseHistoricGate=False, entryPolicy="permissive-bounded",
+        ov = dict(microEnabled=True, setStrictGate=strict, setUseHistoricGate=False, entryPolicy="permissive-bounded",
                   minPf=1.15, baseEvalPosCount=30, setPfWindow=30, setDeactN=25,
                   positionCostPct=COST, setMaxDdTimeS=57600, setLiveNegativeDeact=False)
         ov.update(extra)

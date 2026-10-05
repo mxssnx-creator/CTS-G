@@ -1128,7 +1128,10 @@ class SetBook:
         self.min_pf = POSITIVE_PF
         self.stage_min_pf = {"base": POSITIVE_PF, "main": POSITIVE_PF, "real": POSITIVE_PF}
         self.micro_min_pf = MICRO_PF
-        self.micro_enabled = True
+        # Off by default: on the 6h validation window the 1.05..floor band
+        # admitted ~3x the Base+Main+Real lots at trade PF 0.24 (vs 0.79),
+        # turning the account result from 4.53 to 0.47. Opt in per overlay.
+        self.micro_enabled = False
         self.real_min_pf = POSITIVE_PF
         self.main_eval = 5
         self.real_eval = 3
@@ -1464,7 +1467,7 @@ class SetBook:
         self.min_pf = _pf("setMinPf", _pf("minPf", self.stage_min_pf["base"]))
         self.real_min_pf = self.stage_min_pf["real"]
         # Micro tier floor: independent of the shared floor and never above Base.
-        self.micro_enabled = bool(ov.get("microEnabled", True))
+        self.micro_enabled = bool(ov.get("microEnabled", False))
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
             self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 5)))
