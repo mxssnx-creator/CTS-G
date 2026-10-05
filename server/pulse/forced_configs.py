@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Sequence
 
 from position_cost import evaluation_windows, last_n_cost_pf
 from validation_policy import CONTROL_MIN_PF, control_min_trades
-from set_engine import BAR_S, IND_KINDS, IND_TAG_KIND, indication_kind_votes
+from set_engine import BAR_S, IND_TAG_KIND, indication_kind_votes
+from set_engine import VOTE_KINDS as IND_KINDS
 
 FORCED_SYMBOLS = ("XRP-USDT", "BCH-USDT", "SOL-USDT")
 TP_GRID = tuple(v / 100 for v in range(40, 81, 5))

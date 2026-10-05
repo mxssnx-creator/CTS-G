@@ -310,6 +310,9 @@ def slim_hist_row(row: Dict[str, Any]) -> Dict[str, Any] | CompactHistRow:
     return compact
 # Indication kinds (live) <-> historic replay vote tags (indication_signal why).
 IND_KINDS = INDICATION_KINDS
+# Kinds that vote in the core indications pack (the extended range-only
+# kinds msi/vwap/retest/squeeze trade as their own lanes, never as votes).
+VOTE_KINDS = INDICATION_KINDS[:8]
 IND_TAG_KIND = {"sig": "signals", "ta": "state", "dir": "direction", "move": "move", "act": "active", "common": "common", "trend": "trend", "brk": "break", "break": "break",
                 "msi": "msi", "vwap": "vwap", "retest": "retest", "squeeze": "squeeze"}
 
@@ -6820,7 +6823,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
     # the contract minimum (1.02) instead of tracking the POSITIVE_PF policy.
     g6 = SetBook()
-    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "setMinPf": 1.0})
+    g6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "stratIndications": True, "stratGeneral": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3, "setHonorTp": True, "setHistTimeBars": 12, "indTypeTrend": False, "indTypeBreak": False, "indTypeMove": False, "indTypeActive": False, "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False, "setMinPf": 1.0})
     g6.ingest_bars("KIND-USDT", synth_trend(240, 42.0, 0.2, 0.05))
     _orig_votes = indication_kind_votes
     globals()["indication_kind_votes"] = lambda bars, settings, now: [(1, 0.9, "sig"), (1, 0.85, "dir")]
@@ -6878,6 +6881,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         "indTypeSignals": True, "indTypeState": False, "indTypeDirection": False,
         "indTypeMove": False, "indTypeActive": False, "indTypeCommon": False,
         "indTypeTrend": False, "indTypeBreak": False,
+        "indTypeMsi": False, "indTypeVwap": False, "indTypeRetest": False, "indTypeSqueeze": False,
     })
     g8.ingest_bars("ONLY-USDT", synth_trend(180, 40.0, 0.18, 0.04))
     g8.replay_all(now=1_700_001_200)

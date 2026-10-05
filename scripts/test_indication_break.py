@@ -89,8 +89,9 @@ class BreakTests(unittest.TestCase):
         self.assertTrue(modes)
         self.assertTrue(modes <= {"break:8", "break:16", "break:32"})
         classic = evaluate_range_configs("T-USDT", rising(), {**DEFAULT_SETTINGS, **CLASSIC, "typeTrend": False})
-        self.assertEqual({row.mode for row in classic}, {"break:8", "break:16", "break:32"})
-        self.assertEqual(evaluate_range_configs("T-USDT", rising(), {**DEFAULT_SETTINGS, "typeTrend": False}), [])
+        self.assertEqual({row.mode for row in classic if row.kind == "break"}, {"break:8", "break:16", "break:32"})
+        plain = evaluate_range_configs("T-USDT", rising(), {**DEFAULT_SETTINGS, "typeTrend": False})
+        self.assertEqual([row for row in plain if row.kind == "break"], [])
 
 
 if __name__ == "__main__":
