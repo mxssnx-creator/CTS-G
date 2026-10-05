@@ -67,7 +67,7 @@
   "exitRevOn": false,
   "exitTimeOn": false,
   "histEnabled": true,
-  "histLookbackBars": 2880,
+  "histLookbackBars": 720,
   "histMinBars": 120,
   "histRefreshS": 90,
   "histWarmup": 30,
@@ -223,7 +223,7 @@
   "useLivePositionCosts": true,
   "useMaxLeverage": true,
   "volWeight": 0.3,
-  "volumeFactor": 1,
+  "volumeFactor": 0.05,
   "controlMinTrades": 0,
   "forcedSymbols": [
     "XRP-USDT",

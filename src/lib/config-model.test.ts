@@ -152,7 +152,7 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
     assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.baseMinPf, EVAL_MIN_PF);
-    assert.equal(value.histLookbackBars, 2880);
+    assert.equal(value.histLookbackBars, 720);
     assert.equal(value.histTestHours, 20);
     assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
@@ -210,7 +210,7 @@ test("historic test hours stay 4–64 default 20 and min PF 1.15", () => {
   assert.equal(low.histTestHours, 4);
   const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.15 }));
   assert.equal(mid.histTestHours, 20);
-  assert.equal(mid.histLookbackBars, 2880);
+  assert.equal(mid.histLookbackBars, 720);
   const shifted = syncOverlayFlags(overlayFromCts({}, { histTestHours: 48, histLookbackBars: 2880, histTestMinPf: 1.15 }));
   assert.equal(shifted.histTestHours, 48);
   assert.equal(shifted.histLookbackBars, 2880);

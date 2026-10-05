@@ -39,7 +39,7 @@ class ConnectionProfileTests(unittest.TestCase):
         for key in ('maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
             self.assertEqual(p[key],0)
         self.assertEqual(p['maxOpen'],100)
-        self.assertEqual(p['histLookbackBars'],2880)
+        self.assertEqual(p['histLookbackBars'],720)
         self.assertEqual(p['baseEvalPosCount'],40)
         self.assertEqual(p['symbolCap'],50)
         self.assertTrue(p['controlOrdersOverall'])

@@ -124,7 +124,7 @@ export const POSITIVE_PF = 1.15;
 // separate "positive Set" predicate and the Test Historic floor.
 export const EVAL_MIN_PF = 1.2;
 export const INTERN_PF = 1.0;
-export const DEFAULT_HIST_LOOKBACK_BARS = 2880; // 48 hours of 1m bars
+export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
 export const SL_MIN_PCT = 0.4;
 export const HIST_TEST_HOURS_MIN = 4;
@@ -420,7 +420,7 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
 export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
-  volumeFactor: 1,
+  volumeFactor: 0.05,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 100,
@@ -568,7 +568,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 2880,
+  histLookbackBars: 720,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 3600,
@@ -884,7 +884,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaMinPf: num(cts.dcaMinPf, EVAL_MIN_PF),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
-    volumeFactor: num(cts.volumeFactor, 1),
+    volumeFactor: num(cts.volumeFactor, 0.05),
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), false),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), false),
