@@ -572,15 +572,17 @@ class Sizer:
             for s in contracts:
                 self.lev_max[s] = int(leverage)
         self.volume_factor = max(0.05, min(10.0, float(overlay.get("volumeFactor") or 1.0)))
+        self.margin_cap_pct = max(0.0, min(1.0, float(overlay.get("marginCapPct", 0.5))))
         pt.TARGET_NOTIONAL = max(0.2, min(500.0, float(overlay.get("targetNotional") or pt.TARGET_NOTIONAL)))
         self.vol1h: Dict[str, float] = {}
         self.open: Dict[int, Any] = {}
         self.available = 0.0
+        self.equity = 0.0  # the simulator passes the already-capped free margin as ``available``
         self.coord = Coordinator()
         self.coord.load({}, overlay)
         P = pt.Pulse
         for name in ("round_qty_up", "min_order_qty", "raise_to_min_qty", "leverage_for", "sized_notional",
-                     "avail_notional", "size_qty"):
+                     "avail_notional", "margin_headroom", "size_qty"):
             setattr(self, name, getattr(P, name).__get__(self))
 
 
@@ -860,6 +862,9 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
+    # marginCapPct: used margin may not exceed this share of equity (0 = uncapped)
+    margin_cap = float(getattr(sizer, "margin_cap_pct", 0.0) or 0.0)
+    margin_cap = margin_cap if 0.0 < margin_cap < 1.0 else 1.0
     acct = Account(start_equity, cost_pct)
     ctrl = ControlOrders()
     dd = DrawdownTracker(start_equity)
@@ -950,7 +955,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             c = sizer.contracts[lot["symbol"]]
             q = sizer.raise_to_min_qty(c, apx, aqty * lot["unit_qty"])
             lev = lev_of[lot["symbol"]]
-            avail = acct.equity(px) - acct.used_margin
+            avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
             if q * apx / lev > avail * 0.95:
                 hr["skipped_margin"] += 1
                 lot["skipped_adds"] = lot.get("skipped_adds", 0) + 1
@@ -978,7 +983,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         # 2) entries at bar close, EntryMatrix order: round-robin over signals
         # (symbol, side, pack); inside a signal entry_sets() order = highest
         # last-30 cost-PF first. A Set with multiplicity m occupies m ranks.
-        avail = acct.equity(px) - acct.used_margin
+        avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
         halted = acct.equity(px) < eq_min  # pulse_trader EQ_MIN halt: no new entries
         if halted:
             halted_minutes += 1
@@ -1041,7 +1046,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                 acct.open_lot(lot_seq, s, side, q, p, lev, uid=u, ci=int(i), strategy=strategy_key(packs[u], kinds[u]),
                               unit_qty=q, axes=meta_axes, kinds=meta_kinds)
                 sizer.open[lot_seq] = 1
-                avail = acct.equity(px) - acct.used_margin
+                avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
                 hr["opened_lots"] += 1
                 hr["entry_orders"] += 1
                 if not g_before or g_before[2] <= 0:
@@ -1077,7 +1082,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             acct.open_lot(lot_seq, s, side, qty0, p, lev, uid=-1, strategy=strat_name, unit_qty=unit,
                           kinds=[r.get("ind_kind")] if r.get("ind_kind") else [])
             sizer.open[lot_seq] = 1
-            avail = acct.equity(px) - acct.used_margin
+            avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
             hr["opened_lots"] += 1
             hr["block_orders" if is_block else "dca_entry_orders"] += 1
             changed.add((s, side))

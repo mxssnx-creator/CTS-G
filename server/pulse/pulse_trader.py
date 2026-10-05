@@ -2348,7 +2348,20 @@ class Pulse:
     def avail_notional(self, c: Optional["Contract"] = None) -> float:
         """USDT notional the remaining available balance can still carry at this pair's max lev."""
         lev = max(1, self.leverage_for(c) if c is not None else int(LEVERAGE or 1))
-        return max(0.0, float(self.available or 0)) * lev * 0.90
+        return self.margin_headroom() * lev * 0.90
+
+    def margin_headroom(self) -> float:
+        """Free margin new orders may still use.
+
+        ``marginCapPct`` bounds total used margin to that share of equity, so
+        many minimum-size lots cannot spend the whole account (a cross-margin
+        wick would then liquidate every lot at once). 0 disables the cap."""
+        free = max(0.0, float(self.available or 0))
+        cap = float(getattr(self, "margin_cap_pct", 0.0) or 0.0)
+        equity = float(getattr(self, "equity", 0.0) or 0.0)
+        if 0.0 < cap < 1.0 and equity > 0:
+            free = max(0.0, free - (1.0 - cap) * equity)
+        return free
 
     def max_book_notional(self, ratio: float = 1.0) -> float:
         """Per-position book room = ratio-adjusted parent × Block/DCA rungs.
@@ -6534,7 +6547,7 @@ class Pulse:
         self.ensure_max_leverage(sym)
         lev = self.leverage_for(c)
         margin = notional / max(1, lev)
-        if margin > max(0.0, float(self.available or 0) - self.pending_entry_margin()) * 0.95:
+        if margin > max(0.0, self.margin_headroom() - self.pending_entry_margin()) * 0.95:
             return
         cid = self.cid("o", set_id=set_id, pack=pack, set_idx=set_idx)
         ind_kind_hint = ""
@@ -8460,6 +8473,7 @@ class Pulse:
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
         self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
+        self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.5)))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
         if ov.get("leverage"):

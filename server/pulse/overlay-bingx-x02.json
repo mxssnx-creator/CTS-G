@@ -224,6 +224,7 @@
   "useMaxLeverage": true,
   "volWeight": 0.3,
   "volumeFactor": 0.05,
+  "marginCapPct": 0.5,
   "controlMinTrades": 0,
   "forcedSymbols": [
     "XRP-USDT",
