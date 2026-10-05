@@ -63,6 +63,8 @@ def main() -> int:
     for end in [int(x) for x in args.window_ends.split(",")]:
         sim_end = end or n_all
         sim_start = sim_end - args.hours * 60
+        # The replay cache is read-only input: load it once per window, not once per setting.
+        caches = sim.load_cache(args.cache, symbols)
         if args.combos:
             combos = []
             for item in args.combos.split(";"):
@@ -91,7 +93,6 @@ def main() -> int:
             t0 = time.time()
             book = sim.make_book(args.overlay)
             catalog = sim.build_catalog(book)
-            caches = sim.load_cache(args.cache, symbols)
             cands = sim.build_candidates(caches, catalog, symbols, sim_start, sim_end, book, True, ddt_cache)
             cost = float(book.cost_pct)
             n_cand = int(len(cands["uid"]))
@@ -117,7 +118,7 @@ def main() -> int:
             with open(args.out, "a") as handle:
                 handle.write(json.dumps(row) + "\n")
             print("floor", floor, "ddt", book.max_dd_s, "window", sim_end, "admitted", row["admittedPct"], "%", row["walkForward"], flush=True)
-            del cands, caches
+            del cands
     cp.processing_profile = original
     return 0
 
