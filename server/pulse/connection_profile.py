@@ -51,8 +51,8 @@ def processing_profile():
                   symbolsAll=True, symbolsDynamic=True, symbolCap=50,
                   maxRealSets=0, strategyLiveSetsCeiling=0,
                   strategyRealSetsSafetyCeiling=0,
-                  axisPrevEnabled=False, axisLastEnabled=False,
-                  axisContEnabled=False, axisPauseEnabled=False, normalExecutionEnabled=True,
+                  axisPrevEnabled=True, axisLastEnabled=True,
+                  axisContEnabled=True, axisPauseEnabled=True, normalExecutionEnabled=True,
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
                   controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
