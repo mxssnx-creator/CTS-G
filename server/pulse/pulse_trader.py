@@ -366,7 +366,8 @@ SCAN_S = 0.20
 ORDER_SNAPSHOT_MAX_AGE = 45.0
 KLINE_EVERY = 2.4
 KLINE_WORKERS = 4
-KLINE_LIMIT = 60
+# 60 closed bars (break needs 60) plus the forming bar and one spare.
+KLINE_LIMIT = 62
 KLINE_BATCH = 12
 TF_EVERY = {"1m": 2.0, "5m": 6.0, "15m": 12.0}
 TF_BATCH = {"1m": 8, "5m": 12, "15m": 8}
@@ -2615,11 +2616,12 @@ class Pulse:
             sl=px or 1.0, tp=px or 1.0, peak=px or 1.0, notional=qty * (px or 0), ours=True,
         )
         try:
-            self.cancel_controls(symbol)
+            # Only this side's controls; the other hedge side stays protected.
+            self.cancel_controls(symbol, pos=dummy)
         except Exception:
             pass
         ok, _ = self.market_close(dummy)
-        self.ban_sym(symbol)
+        self.ban_sym(symbol, clear_open=False)
         log(f"FLATTEN untracked {symbol} {side} q={qty} n={(qty*(px or 0)):.1f} ok={ok}")
         return ok
 
@@ -2953,6 +2955,16 @@ class Pulse:
                     existing.qty = total
                     existing.notional = total * existing.entry
                     existing.member_count = min(256, existing.member_count + pos.member_count)
+                    # The merged record's own controls would be orphans: retire
+                    # them. The surviving pair is now undersized, so it is not
+                    # "ok" and the next pass resizes it (place, then retire).
+                    dropped = {real_oid(getattr(pos, name, "")) for name in ("sl_oid", "tp_oid", "sec_sl_oid", "sec_tp_oid")}
+                    dropped -= {"", real_oid(existing.sl_oid), real_oid(existing.tp_oid),
+                                real_oid(getattr(existing, "sec_sl_oid", "")), real_oid(getattr(existing, "sec_tp_oid", ""))}
+                    if dropped:
+                        existing.retired_control_ids = sorted(set(getattr(existing, "retired_control_ids", []) or []) | dropped)
+                    existing.controls_ok = False
+                    existing.ctrl_verified = False
                 continue
             self.open[key] = pos
             self.owned_syms.add(pos.symbol)
@@ -4737,6 +4749,14 @@ class Pulse:
                 price = max(price or (hi + pad), hi + pad)
             else:
                 price = min(price or (lo - pad), lo - pad)
+        liq = float(getattr(pos, "liq", 0.0) or 0.0)
+        if is_sl and liq > 0:
+            # The stop must fire before liquidation: keep it inside the
+            # liquidation price whenever that still leaves a legal stop.
+            if pos.side == "LONG" and price <= liq * 1.001 and liq * 1.002 < lo - tick:
+                price = liq * 1.002
+            elif pos.side == "SHORT" and price >= liq * 0.999 and liq * 0.998 > hi + tick:
+                price = liq * 0.998
         if c:
             tick = max(tick, 10 ** -(c.pprec if c.pprec >= 0 else 6))
             price = self.round_px(c, price)
@@ -4893,10 +4913,14 @@ class Pulse:
         msg = ""
         oid = ""
         refreshed_quote = False
+        next_px = 0.0  # venue-stated bound (or liquidation-safe price) for the next attempt
         extras = (0.0, 0.002, 0.004, 0.008, 0.012, 0.018, 0.028, 0.040)
         for extra in extras:
             px_try = price
-            if extra:
+            if extra and next_px > 0:
+                px_try = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", next_px)
+                next_px = 0.0
+            elif extra:
                 refresh = getattr(self, "refresh_px_one", None)
                 if callable(refresh):
                     try:
@@ -5074,6 +5098,16 @@ class Pulse:
                         else:
                             px_try = max(px_try, bound_px + max(tick, bound_px * 0.001))
                         price = self.clamp_ctrl_price(pos, "sl" if is_sl else "tp", px_try)
+                        next_px = price
+                    elif kind_err == "liq" and is_sl:
+                        # Too close to / beyond liquidation: step toward mark,
+                        # never further away like the price ladder would.
+                        liq = float(getattr(pos, "liq", 0.0) or 0.0)
+                        mark_now = float(self.px.get(pos.symbol) or pos.entry or 0)
+                        if liq > 0 and mark_now > 0:
+                            next_px = (liq + (mark_now - liq) * 0.5)
+                        elif mark_now > 0:
+                            next_px = mark_now * (0.997 if pos.side == "LONG" else 1.003)
                     px_failed = True
                     break
             if oid or not px_failed:
@@ -5327,6 +5361,11 @@ class Pulse:
         if self.per_config_controls(pos):
             previous_qty = max(0.0, float(getattr(pos, "ctrl_qty", 0.0) or 0.0))
             if previous_qty > 0 and abs(previous_qty - float(pos.qty or 0.0)) > max(1e-9, abs(float(pos.qty or 0.0)) * 0.005):
+                if self._keep_pair_until_replaced(pos):
+                    # New pair for the current size first; the old pair is
+                    # retired only once its replacement exists.
+                    self._replace_partial_controls(pos)
+                    return
                 try:
                     self.cancel_controls(pos.symbol, pos=pos)
                 except Exception:
@@ -5531,6 +5570,7 @@ class Pulse:
             if self.order_is_ours(o) and self._order_matches_position(o, pos)
         ]
         if banned:
+            had_old = bool(real_oid(pos.sl_oid) or real_oid(pos.tp_oid))
             if not real_oid(pos.sl_oid):
                 oid = self.place_ctrl(pos, "sec-sl", want_sl)
                 if retired():
@@ -5543,10 +5583,17 @@ class Pulse:
                 if oid:
                     pos.tp_oid = pos.sec_tp_oid = oid
                     pos.tp = want_tp
-            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
+            # Without the order list the pair's size cannot be verified: a
+            # leg kept oversized after a partial close stays "not ok" until a
+            # verified pass resizes it.
+            prev_qty = float(getattr(pos, "ctrl_qty", 0.0) or 0.0)
+            if prev_qty <= 0 or not had_old:
+                # Both legs were just placed for the current quantity.
+                pos.ctrl_qty = pos.qty
+            size_ok = abs(float(pos.ctrl_qty or 0.0) - float(pos.qty or 0.0)) <= max(1e-12, float(pos.qty or 0.0) * 1e-6)
+            pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid)) and size_ok
             pos.overall = True
             pos.close_position = not self.per_config_controls(pos)
-            pos.ctrl_qty = pos.qty
             self.ctrl_skip[f"sync:{scope}"] = time.time() + 12.0
             return
         # Empty REST is not "no orders" — never drop live oids.
@@ -6242,13 +6289,16 @@ class Pulse:
         existing = self.position_for_group(pos.control_group_key) if self.per_config_controls(pos) else next(
             iter(self.positions_for(pos.symbol, pos.side)), None
         )
+        keep_old_pair = False
         if existing is not None:
             if getattr(self, "control_orders", True):
-                try:
-                    self.cancel_controls(pos.symbol, pos=existing)
-                except Exception:
-                    pass
-                self.clear_position_controls(existing)
+                keep_old_pair = self._keep_pair_until_replaced(existing)
+                if not keep_old_pair:
+                    try:
+                        self.cancel_controls(pos.symbol, pos=existing)
+                    except Exception:
+                        pass
+                    self.clear_position_controls(existing)
             # Seed the parent lane before adding this new entry member, then
             # update its weighted anchor by exactly the confirmed delta.
             self.ensure_strategy_lanes(existing)
@@ -6261,7 +6311,10 @@ class Pulse:
         self.ensure_strategy_lanes(pos)
         self.save_open_book()
         if getattr(self, "control_orders", True):
-            self.place_ctrl_pair(pos)
+            if keep_old_pair:
+                self._replace_partial_controls(pos)
+            else:
+                self.place_ctrl_pair(pos)
             if self.missing_controls(pos):
                 self.ensure_controls(pos)
         self.record_event(
@@ -7161,20 +7214,25 @@ class Pulse:
             metadata=pending_meta,
         )
         merged = False
-        if self.per_config_controls(pos):
-            existing = self.position_for_group(pos.control_group_key)
-            if existing is not None:
-                if getattr(self, "control_orders", True):
+        keep_old_pair = False
+        existing = (
+            self.position_for_group(pos.control_group_key)
+            if self.per_config_controls(pos)
+            # One aggregate book entry per symbol and side: merge, never
+            # overwrite the earlier quantity.
+            else next(iter(self.positions_for(sym, side)), None)
+        )
+        if existing is not None:
+            if getattr(self, "control_orders", True):
+                keep_old_pair = self._keep_pair_until_replaced(existing)
+                if not keep_old_pair:
                     self.cancel_controls(sym, pos=existing)
                     self.clear_position_controls(existing)
-                self.ensure_strategy_lanes(existing)
-                self.merge_position(existing, pos)
-                self.merge_parent_lanes(existing, filled, avg)
-                pos = existing
-                merged = True
-            else:
-                self.open[self.position_key(pos)] = pos
-                self.ensure_strategy_lanes(pos)
+            self.ensure_strategy_lanes(existing)
+            self.merge_position(existing, pos)
+            self.merge_parent_lanes(existing, filled, avg)
+            pos = existing
+            merged = True
         else:
             self.open[self.position_key(pos)] = pos
             self.ensure_strategy_lanes(pos)
@@ -7212,7 +7270,11 @@ class Pulse:
         self.available = max(0.0, self.available - actual_margin)
         if getattr(self, "control_orders", True):
             pos.ctrl_verified = False
-            self.place_ctrl_pair(pos)
+            if keep_old_pair:
+                # Resized pair first, then retire the smaller old pair.
+                self._replace_partial_controls(pos)
+            else:
+                self.place_ctrl_pair(pos)
             if real_oid(pos.sl_oid) and real_oid(pos.tp_oid):
                 self._order_est = int(getattr(self, "_order_est", 0) or 0) + 2
             if self.missing_controls(pos):
@@ -7757,6 +7819,16 @@ class Pulse:
             overall_controls.drain_cleanup(self)
         self._stats_force = True
         return True
+
+    def _keep_pair_until_replaced(self, pos: Position) -> bool:
+        """True when a resize should place the new pair before retiring the
+        old one (any non-overall group that already holds a leg)."""
+        try:
+            if overall_controls.enabled(self, pos):
+                return False
+        except Exception:
+            return False
+        return bool(real_oid(getattr(pos, "sl_oid", "")) or real_oid(getattr(pos, "tp_oid", "")))
 
     def _replace_partial_controls(self, pos: Position) -> None:
         """Place the remainder's pair first, then retire the old larger pair.
@@ -9815,26 +9887,37 @@ class Pulse:
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:
                 try:
-                    def _blk_allow(kind: str, direction: str = "") -> bool:
+                    want_dir = "long" if pos.side == "LONG" else "short"
+
+                    def _blk_allow(kind: str, direction: str = "", config: str = "") -> bool:
+                        # Only the position's own direction can confirm a
+                        # continuation; each lane is judged on its own side
+                        # (and range) evidence.
+                        if direction and str(direction).lower() != want_dir:
+                            return False
                         gate = getattr(self.sets, "indication_ok", None)
                         if not (self.sets.enabled and callable(gate)):
                             return True
                         try:
+                            if config:
+                                try:
+                                    return bool(gate(kind, pos.side, config))
+                                except TypeError:
+                                    pass
                             return bool(gate(kind, pos.side))
                         except TypeError:
                             return bool(gate(kind))
                         except Exception:
-                            return True
+                            return False
                     picked = None
                     try:
-                        picked = self.indications.pick_entry(pos.symbol, min_conf=0.50, allow=_blk_allow)
-                    except TypeError:
-                        picked = self.indications.pick_entry(pos.symbol, min_conf=0.50)
+                        lanes = self.indications.pick_entries(pos.symbol, min_conf=0.50, allow=_blk_allow)
+                        picked = next((row for row in lanes if row and row[0].direction == want_dir), None)
                     except Exception:
                         picked = None
-                    ind = picked[0] if picked else (self.indications.best(pos.symbol) or self.indications.primary(pos.symbol))
+                    ind = picked[0] if picked else None
                     if ind:
-                        same = (pos.side == "LONG" and ind.direction == "long") or (pos.side == "SHORT" and ind.direction == "short")
+                        same = ind.direction == want_dir
                 except Exception:
                     same = True
             if not same:
@@ -10693,9 +10776,14 @@ class Pulse:
             if s in offline or (contracts and s not in contracts):
                 continue
             bars = self.klines_tf.get("1m", {}).get(s) or self.klines.get(s) or []
+            # Evaluate closed bars only, like the replay (signal on bar i's
+            # close): the last row is the forming minute (mark-seeded, volume
+            # 0) and would make volume kinds dead and flip signals per tick.
+            bars = bars[:-1]
             if len(bars) < 20:
                 continue
             last_c = float(bars[-1][3]) if bars else 0.0
+            last_v = float(bars[-1][4]) if bars and len(bars[-1]) > 4 else 0.0
             px = self.px.get(s) or 0
             # Include every effective TF and the current load mode.  A cached
             # higher-TF bar may still exist after the governor sheds 15m; it
@@ -10707,7 +10795,7 @@ class Pulse:
                     len(self.klines_tf.get(tf, {}).get(s) or []),
                     tuple(
                         round(float(value or 0.0), 6)
-                        for value in ((self.klines_tf.get(tf, {}).get(s) or [])[-1][:5] if (self.klines_tf.get(tf, {}).get(s) or []) else ())
+                        for value in ((self.klines_tf.get(tf, {}).get(s) or [])[-2][:5] if len(self.klines_tf.get(tf, {}).get(s) or []) >= 2 else ())
                     ),
                 )
                 for tf in effective_tfs
@@ -10715,7 +10803,7 @@ class Pulse:
             fp = (
                 len(bars),
                 last_c,
-                round(float(px or 0), 6),
+                last_v,
                 effective_tfs,
                 str(getattr(b, "level", "normal") or "normal"),
                 bool(s in extra_syms),
@@ -10724,7 +10812,7 @@ class Pulse:
             if s not in extra_syms and fp_map.get(s) == fp and s in self.indications.last:
                 continue
             bars_by_tf = {
-                tf: (self.klines_tf.get(tf, {}).get(s) or [])
+                tf: (self.klines_tf.get(tf, {}).get(s) or [])[:-1]
                 for tf in effective_tfs
             }
             # One failing symbol must not stop the rest of the scan window,
@@ -14911,7 +14999,10 @@ class Pulse:
             return False
         finally:
             with self.state_guard():
-                if self.sets is source and int(getattr(self, "_sets_generation", 0) or 0) == generation:
+                # This replay is over whatever the generation: a reload that
+                # kept the same book must not leave it marked running (that
+                # stalled incremental replay until the next full run).
+                if self.sets is source:
                     source._running = False
 
     def _score_committed(self, book: Any, generation: int, ids: List[str]) -> None:
@@ -15110,7 +15201,8 @@ class Pulse:
                     retry.append(symbol)
                     continue
                 book.ingest_bars(symbol, bars)
-            self._hist_incremental_symbols.update(retry)
+            # Short symbols are not re-queued here (that spun every 0.25 s):
+            # the next closed bar queues them again with more history.
             names = [symbol for symbol in names if symbol not in retry]
             if not names:
                 return False
@@ -15412,7 +15504,13 @@ class Pulse:
             else:
                 book.progress.phase = str(view.get("phase") or "hist-test")
                 running_now = bool(view.get("running") or view.get("paused"))
-                book.progress.ready = False if running_now else bool(view.get("ready"))
+                # A refresh run keeps the previous validated selection trading
+                # (marked stale) instead of halting every strict entry until
+                # the run finishes; a first run still starts not-ready.
+                was_ready = bool(getattr(book.progress, "ready", False))
+                book.progress.ready = was_ready if running_now else bool(view.get("ready"))
+                if running_now and was_ready:
+                    book.progress.stale = True
                 book.progress.coordination_complete = not running_now
                 try:
                     book.progress.pct = float(view.get("pct") or 0)
@@ -15703,6 +15801,13 @@ class Pulse:
                 }
                 lookback = int(book.lookback)
                 if manual:
+                    # A manual request's replay options apply to this run only;
+                    # the live SetBook gets its own settings back afterwards.
+                    self._hist_manual_restore = (book, {
+                        name: getattr(book, name)
+                        for name in ("lookback", "refresh_s", "hist_block", "hist_dca", "trail_enabled")
+                        if hasattr(book, name)
+                    })
                     lookback = request_lookback(request, fallback=lookback)
                     if lookback != book.lookback:
                         book.lookback = lookback
@@ -15983,6 +16088,13 @@ class Pulse:
                 if hasattr(self.api, "err"):
                     self.api.err.write("hist", msg=error[:200])
             finally:
+                restore = getattr(self, "_hist_manual_restore", None)
+                self._hist_manual_restore = None
+                if restore:
+                    target, saved = restore
+                    with self.state_guard():
+                        for name, value in saved.items():
+                            setattr(target, name, value)
                 self._hist_active_request = {}
                 self._hist_active_run_id = ""
                 self.hist_busy = False
@@ -16197,7 +16309,12 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "stopped"
+            # No new entries, but open positions stay managed until they close
+            # (exits, trailing, time exits), as in pause.
+            self.refresh_tickers()
+            self.seed_px_bars()
             self.priority_controls()
+            self.manage()
             self.write_stats(force=True)
             return
         if paused:

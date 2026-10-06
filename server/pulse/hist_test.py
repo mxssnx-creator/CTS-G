@@ -2236,7 +2236,10 @@ def fill_positive(
                 on_step=on_step,
                 set_ids=intern_ids or None,
             )
-            roll = {r.get("symbol"): r for r in symbol_rollup(probe) if isinstance(r, dict)}
+            fresh = getattr(probe, "last_replay_hist", None)
+            roll = {r.get("symbol"): r for r in symbol_rollup(probe, hist=fresh if isinstance(fresh, dict) and fresh else None)
+                    if isinstance(r, dict)}
+            probe.last_replay_hist = None
             stats = dict(roll.get(symbol) or {})
         record = {
             **{k: v for k, v in row.items() if k != "_bars"},

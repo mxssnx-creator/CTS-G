@@ -95,6 +95,8 @@ except Exception:  # pragma: no cover - scalar replay remains the fallback
 
 PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
+# Default vote lanes that live never trades on their own (see prepare_replay_signals).
+PHANTOM_VOTE_LANES = frozenset({"trend", "break"})
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 30
 # Main / Real stage windows (last-N closes) when an overlay sets none;
@@ -2926,6 +2928,10 @@ class SetBook:
     ) -> None:
         names = [str(s) for s in (replayed_symbols or ())]
         score_set = {str(s) for s in score_ids} if score_ids is not None else None
+        # The rows this replay produced, before they are merged into the
+        # bounded per-Set pool: per-symbol verdicts (Test Historic) read
+        # these so a symbol's result never depends on which ran before it.
+        self.last_replay_hist = hist
         if not merge:
             if ind_hist is not None:
                 self.ind_hist = {k: trim_ind_tape([slim_hist_row(r) for r in v if _is_hist_row(r)]) for k, v in ind_hist.items()}
@@ -3347,7 +3353,12 @@ class SetBook:
                 signals["indications"][i] = votes_to_signal(core_pack_votes(votes, vote_frame, self.ind_settings))
                 for d, conf, tag in votes:
                     kind = IND_TAG_KIND.get(tag.strip())
-                    if kind:
+                    # Trend and Break trade live only through their range
+                    # configurations (kind|config lanes below). Their single
+                    # default vote lane has no live counterpart (it duplicated
+                    # ema 8/21 and added a never-traded break:10 tape), so it
+                    # stays a pack vote, not an evidence lane.
+                    if kind and kind not in PHANTOM_VOTE_LANES:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
@@ -4829,7 +4840,17 @@ class SetBook:
         # Keep scoring all configs, including previously unselected candidates.
         eligible = [s for s in self.by_idx if not s.locked and
                     (s.active or s.deact_reason == "selection limit")]
-        eligible.sort(key=lambda s: (-float(s.last15_ratio or 0),
+        def best_side(st: SetState) -> float:
+            # Rank on the Set's strongest active direction: a strong LONG side
+            # must not be pushed out of the limit by a weak SHORT side.
+            vals = []
+            for side in DIRECTIONS:
+                view = (st.by_side or {}).get(side)
+                if view and view.get("active", True):
+                    vals.append(float(view.get("last15_ratio") or 0.0))
+            return max(vals) if vals else float(st.last15_ratio or 0)
+
+        eligible.sort(key=lambda s: (-best_side(s),
                       -float(s.expectancy or 0), float(s.max_dd_s or 0), s.id))
         for index, st in enumerate(eligible):
             st.active = self.max_active <= 0 or index < self.max_active

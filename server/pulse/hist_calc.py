@@ -1466,7 +1466,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             dir_n = int((group_dir_n.get(key) or {}).get(d) or 0)
             if not sub and not dir_n:
                 continue
-            stail = last_n_chrono(sub, win_n, ordered=True)
+            stail = last_n_chrono(sub, win_n)
             spf = last_n_cost_pf(stail, book.pf_n, book.cost_pct, ordered=True, simple=True)
             by_dir[d] = {
                 "n": dir_n or len(sub),
@@ -1601,6 +1601,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
     by_decided: Dict[str, int] = {}
     by_dd: Dict[str, List[Dict[str, float]]] = {}
     by_dir_n: Dict[str, Dict[str, int]] = {}
+    by_side_tape: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     parts = hist.values() if hist else (st.hist for st in book.by_idx)
     cost = book.cost_pct
     for tape in parts:
@@ -1624,6 +1625,11 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             buf.append(r)
             if len(buf) > trim_at:
                 by_tape[s] = last_n_chrono(buf, cap)
+            if dkey:
+                sbuf = by_side_tape.setdefault(s, {}).setdefault(dkey, [])
+                sbuf.append(r)
+                if len(sbuf) > trim_at:
+                    by_side_tape[s][dkey] = last_n_chrono(sbuf, cap)
             per_set.setdefault(s, []).append(r)
         for s, rows in per_set.items():
             by_dd.setdefault(s, []).append(drawdown_time(rows, ordered=True))
@@ -1643,16 +1649,18 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
         wins = int(by_wins.get(s) or 0)
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
-            sub = filter_side(tail, d)
+            # Each direction from its own rows: a busy side must not push the
+            # other out of a pooled last-N window.
+            sub = (by_side_tape.get(s) or {}).get(d) or []
             if not sub:
                 continue
-            stail = last_n_chrono(sub, win_n, ordered=True)
+            stail = last_n_chrono(sub, win_n)
             spf = last_n_cost_pf(stail, book.pf_n, cost, ordered=True, simple=True)
             by_dir[d] = {
                 "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) >= need and is_positive_pf(spf["ratio"]),
                 "evaluationWindows": evaluation_windows(
                     stail, cost, required_samples=need, ordered=True, simple=True
                 ),
@@ -1667,7 +1675,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) >= need and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 tail, cost, required_samples=need, ordered=True, simple=True

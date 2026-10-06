@@ -162,5 +162,71 @@ class TrailingOwnershipTests(unittest.TestCase):
         self.assertIsNotNone(pos.trail)
 
 
+class SymbolRollupTests(unittest.TestCase):
+    def rows(self, sym, side, n, t0, pnl=0.004):
+        return [{"t": t0 + i * 60, "symbol": sym, "side": side, "pnl_pct": pnl, "hold_s": 60, "reason": "tp"}
+                for i in range(n)]
+
+    def test_quiet_side_is_judged_on_its_own_rows(self):
+        from hist_calc import symbol_rollup
+        b, _ = book()
+        tape = self.rows("A", "SHORT", 40, 0) + self.rows("A", "LONG", 200, 10000)
+        out = {r["symbol"]: r for r in symbol_rollup(b, hist={"s": tape})}
+        self.assertIn("SHORT", out["A"]["bySide"])
+        self.assertTrue(out["A"]["bySide"]["SHORT"]["validated"])
+
+    def test_a_single_row_is_not_validated(self):
+        from hist_calc import symbol_rollup
+        b, _ = book()
+        out = {r["symbol"]: r for r in symbol_rollup(b, hist={"s": self.rows("B", "LONG", 1, 0)})}
+        self.assertFalse(out["B"]["validated"])
+
+    def test_commit_exposes_the_fresh_replay_rows(self):
+        b, st = book()
+        fresh = {st.id: self.rows("C", "LONG", 5, 0)}
+        b._commit_hist(fresh, merge=True, replayed_symbols=["C"], score=False)
+        self.assertIs(b.last_replay_hist, fresh)
+
+
+class ClosedBarIndicationTests(unittest.TestCase):
+    def pulse(self, bars):
+        from unittest.mock import patch  # noqa: F401
+        from indication_engine import IndicationBook
+        p = pt.Pulse.__new__(pt.Pulse)
+        p.indications = IndicationBook()
+        p.tf_on = {"1m": True}
+        p.open = {}
+        p.universe = []
+        p.px = {"V-USDT": 100.0}
+        p.contracts = {"V-USDT": object()}
+        p.klines_tf = {"1m": {"V-USDT": bars}}
+        p.klines = p.klines_tf["1m"]
+        p._ind_fp = {}
+        p.load = NS(cursor_ind=0, scan_chunk=1,
+                    scan_window=lambda names, open_symbols, chunk, cursor, ranked: (["V-USDT"], 0))
+        p._budget = lambda: NS(tf_5m=False, tf_15m=False, level="normal", extra_sources=False, extra_n=0, scan_chunk=1)
+        p.score = lambda symbol: (1, "", 0.8)
+        return p
+
+    def test_forming_bar_is_not_evaluated(self):
+        from unittest.mock import patch
+        closed = [[100.0, 100.2, 99.8, 100.0 + i * 0.01, 50.0] for i in range(40)]
+        forming = [100.4, 100.6, 100.3, 100.5, 0.0]
+        p = self.pulse(closed + [forming])
+        seen = []
+        def process(symbol, bars, **kw):
+            seen.append(bars)
+            p.indications.last[symbol] = []
+        p.indications.process = process
+        with patch.object(pt, "SYMBOLS", ["V-USDT"]):
+            pt.Pulse.process_indications(p)
+            # A tick on the forming bar alone does not re-evaluate.
+            p.klines_tf["1m"]["V-USDT"][-1] = [100.4, 100.9, 100.3, 100.8, 0.0]
+            pt.Pulse.process_indications(p)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0], closed)
+        self.assertGreater(seen[0][-1][4], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
