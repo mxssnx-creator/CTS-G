@@ -69,8 +69,10 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 });
 
 test("the shared eval floor is selective and still inside the slider range", () => {
-  assert.equal(EVAL_MIN_PF, 1.2);
-  assert.ok(EVAL_MIN_PF > POSITIVE_PF && EVAL_MIN_PF <= PF_MAX && EVAL_MIN_PF >= PF_MIN);
+  // Operator default 1.10 (Base 50 / Main 30 / Real 30): above the Micro floor
+  // (1.05), inside the slider range.
+  assert.equal(EVAL_MIN_PF, 1.1);
+  assert.ok(EVAL_MIN_PF > 1.05 && EVAL_MIN_PF <= PF_MAX && EVAL_MIN_PF >= PF_MIN);
   // The Python profile seeds the same value into both lane overlays.
   for (const id of ["bingx-x01", "bingx-x02"]) {
     const seed = laneFile(id);
@@ -156,7 +158,7 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(value.histTestHours, 20);
     assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
-    assert.equal(value.baseEvalPosCount, 40);
+    assert.equal(value.baseEvalPosCount, 50);
     assert.equal(value.setMinStep, 7);
   }
 });
@@ -223,7 +225,7 @@ test("Control holdout defaults off and preserves zero independently of PF and la
   for (const controlMinTrades of [0, 5, 25, 100]) {
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
-    assert.equal(value.baseEvalPosCount, 40);
+    assert.equal(value.baseEvalPosCount, 50);
     assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.controlOrdersPerConfig, true);
   }
@@ -368,7 +370,7 @@ test("batch entry orders are off by default, seeded on for VST only, and keep a 
 
 test("every engine setting added to the desk round-trips a saved value and ships the engine default", () => {
   const engineDefaults: Record<string, unknown> = {
-    mainEvalPosCount: 12, realEvalPosCount: 3, setDdtWindow: 0, setHistTimeBars: 120, setHonorTp: true,
+    mainEvalPosCount: 30, realEvalPosCount: 30, setDdtWindow: 0, setHistTimeBars: 120, setHonorTp: true,
     setCooldownBars: 2, setScratchMin: 0.0016, histSimulateBlock: true, histSimulateDca: true, histExactWindow: false,
     marginCapPct: 0.1, manualCloseLaneHoldS: 21600, exitMinSamples: 0, exitTacticMinGainPct: 0.15,
     blockActiveLiveEnabled: true, blockActiveRealEnabled: true, variantBlockEnabled: true,

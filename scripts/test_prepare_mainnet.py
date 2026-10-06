@@ -39,7 +39,7 @@ class PrepareMainnetTests(unittest.TestCase):
             self.assertEqual(current['minPf'],runpy.run_path(str(ROOT/'server/pulse/connection_profile.py'))['EVAL_MIN_PF'])
             self.assertEqual(current['symbolCap'],50)
             self.assertTrue(current['controlOrdersOverall'])
-            self.assertEqual(current['baseEvalPosCount'],40)
+            self.assertEqual(current['baseEvalPosCount'],50)
             self.assertTrue(all(not any(x in c for x in ('start','restart','enable')) for c in calls))
 
     def test_running_or_unstopped_mainnet_is_not_modified(self):

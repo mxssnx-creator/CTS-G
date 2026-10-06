@@ -2016,6 +2016,7 @@ def block_calc_test() -> None:
     pI = mk_trader(1.2, 1.5, 12)
     pI.sets.strict_gate = True
     pI.sets.min_samples = 8
+    pI.sets.main_eval, pI.sets.real_eval = 12, 3  # 12-close fixture windows
     st_split = SimpleNamespace(
         last15_ratio=1.0, last15_n=12,
         by_side={
@@ -2680,7 +2681,9 @@ def strict_gate_test() -> None:
 
     def mk_book(winner: bool = True, strong: bool = False):
         b = se.SetBook()
+        # 12-15 close fixtures: pin the short Main/Real windows they were built for.
         b.load({"histEnabled": True, "setMinPf": 1.10, "setMinSamples": 8,
+                "mainEvalPosCount": 12, "realEvalPosCount": 3,
                 "stratIndications": True, "stratGeneral": True,
                 "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3,
                 "trailArmMin": 0.3, "trailArmMax": 0.3})

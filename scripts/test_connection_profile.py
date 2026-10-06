@@ -46,8 +46,9 @@ class ConnectionProfileTests(unittest.TestCase):
             self.assertEqual(drift, {}, name)
 
     def test_eval_min_pf_is_selective_and_inside_the_slider_range(self):
-        self.assertEqual(EVAL_MIN_PF, 1.20)
-        self.assertGreater(EVAL_MIN_PF, 1.15)  # above the code default POSITIVE_PF
+        # Operator default 1.10 (Base 50 / Main 30 / Real 30).
+        self.assertEqual(EVAL_MIN_PF, 1.10)
+        self.assertGreater(EVAL_MIN_PF, 1.05)  # above the Micro floor
         self.assertLessEqual(EVAL_MIN_PF, 1.35)  # desk slider maximum (PF_MAX)
 
     def test_desk_default_matches_the_engine_profile(self):
@@ -63,7 +64,9 @@ class ConnectionProfileTests(unittest.TestCase):
             self.assertEqual(p[key],0)
         self.assertEqual(p['maxOpen'],100)
         self.assertEqual(p['histLookbackBars'],720)
-        self.assertEqual(p['baseEvalPosCount'],40)
+        self.assertEqual(p['baseEvalPosCount'],50)
+        self.assertEqual(p['setPfWindow'],50)
+        self.assertEqual((p['mainEvalPosCount'],p['realEvalPosCount']),(30,30))
         self.assertEqual(p['symbolCap'],50)
         self.assertTrue(p['controlOrdersOverall'])
         self.assertTrue(p['symbolsAll'])

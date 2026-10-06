@@ -96,6 +96,10 @@ PACKS = ("indications", "general")
 DIRECTIONS = ("LONG", "SHORT")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 30
+# Main / Real stage windows (last-N closes) when an overlay sets none;
+# mirrors connection_profile.processing_profile (Base 50 / Main 30 / Real 30).
+MAIN_EVAL_DEFAULT = 30
+REAL_EVAL_DEFAULT = 30
 LOOKBACK_DEFAULT = 2880  # two days of 1m bars
 LOOKBACK_MAX = 20160  # fourteen days of 1m bars for historic validation
 WARMUP_DEFAULT = 30
@@ -1194,10 +1198,10 @@ class SetBook:
         self.micro_enabled = True
         self.micro_max_share = 0.05
         self.real_min_pf = POSITIVE_PF
-        # Main stage: last-12 closes; Real: last-3 (6h sims, two windows:
-        # Main 12 / Real 3 beat 5/3, 8/3, 10/3, 12/5, 12/8 and 12/12).
-        self.main_eval = 12
-        self.real_eval = 3
+        # Main / Real stage windows: last-30 closes each (operator default
+        # with Base last-50 at PF 1.10; 0 = stage off, see _stage_window_ns).
+        self.main_eval = MAIN_EVAL_DEFAULT
+        self.real_eval = REAL_EVAL_DEFAULT
         self.max_dd_s = 64800.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -1536,18 +1540,18 @@ class SetBook:
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
             raw_main = ov.get("mainEvalPosCount")
-            raw_main = 12 if raw_main is None or raw_main == "" else int(raw_main)
+            raw_main = MAIN_EVAL_DEFAULT if raw_main is None or raw_main == "" else int(raw_main)
             # 0 = Main gate off (Main reuses the Base window); else last-N >= 3.
             self.main_eval = 0 if raw_main <= 0 else max(3, min(75, raw_main))
         except Exception:
-            self.main_eval = 12
+            self.main_eval = MAIN_EVAL_DEFAULT
         try:
             raw_real = ov.get("realEvalPosCount")
-            raw_real = 3 if raw_real is None or raw_real == "" else int(raw_real)
+            raw_real = REAL_EVAL_DEFAULT if raw_real is None or raw_real == "" else int(raw_real)
             # 0 = Real gate off (Real reuses the Main window); else last-N >= 3.
             self.real_eval = 0 if raw_real <= 0 else max(3, min(75, raw_real))
         except Exception:
-            self.real_eval = 3
+            self.real_eval = REAL_EVAL_DEFAULT
         # Set DDT gate cap: default 18h, configurable up to 24h.
         self.max_dd_s = max(600.0, min(1440.0 * 60.0, float(ov.get("setMaxDdTimeS") or 64800)))
         try:
@@ -1816,11 +1820,12 @@ class SetBook:
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
         base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
-        main_eval = getattr(self, "main_eval", 12)
-        main_eval = 12 if main_eval is None else int(main_eval)
+        main_eval = getattr(self, "main_eval", MAIN_EVAL_DEFAULT)
+        main_eval = MAIN_EVAL_DEFAULT if main_eval is None else int(main_eval)
         # mainEvalPosCount 0: no separate Main window; Main == Base.
         main_n = base_n if main_eval <= 0 else max(3, main_eval)
-        real_eval = int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3)
+        real_eval = getattr(self, "real_eval", REAL_EVAL_DEFAULT)
+        real_eval = REAL_EVAL_DEFAULT if real_eval is None else int(real_eval)
         # realEvalPosCount 0: no separate Real window; Real == Main.
         real_n = main_n if real_eval <= 0 else max(3, real_eval)
         return base_n, main_n, real_n
@@ -6269,6 +6274,22 @@ def catalog_cover_passes(cov: dict, catalog_ready: bool) -> Tuple[bool, str]:
 
 
 def self_test() -> List[Tuple[str, bool, str]]:
+    """Engine self-test with the short Main/Real windows its 8-15 close tapes need.
+
+    The fixtures below predate the Main 30 / Real 30 default; they test pick,
+    activation, direction and gate logic, not stage windows. The production
+    windows are pinned by scripts/test_stage_windows.py.
+    """
+    global MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT
+    saved = (MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT)
+    MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT = 12, 3
+    try:
+        return _self_test_body()
+    finally:
+        MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT = saved
+
+
+def _self_test_body() -> List[Tuple[str, bool, str]]:
     out: List[Tuple[str, bool, str]] = []
     # drawdown time: 3 down, recover, 2 down — cost-net of pnl_pct (shared units)
     rows = [

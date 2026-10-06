@@ -1,4 +1,4 @@
-"""Main / Real stage windows: Main last-12 default, Real 0 = gate off, Real N."""
+"""Main / Real stage windows: Main last-30 / Real last-30 default, 0 = gate off, N."""
 import os
 import pathlib
 import sys
@@ -20,17 +20,25 @@ def book(**ov):
 
 
 class StageWindowTests(unittest.TestCase):
-    def test_main_defaults_to_last_12_real_to_last_3(self):
+    def test_main_and_real_default_to_last_30(self):
         b = book()
-        self.assertEqual((b.main_eval, b.real_eval), (12, 3))
-        self.assertEqual(b._stage_window_ns()[1:], (12, 3))
+        self.assertEqual((b.main_eval, b.real_eval), (30, 30))
+        self.assertEqual(b._stage_window_ns()[1:], (30, 30))
         c = Coordinator()
         c.load({}, {})
-        self.assertEqual((c.main_eval, c.real_eval), (12, 3))
+        self.assertEqual((c.main_eval, c.real_eval), (30, 30))
 
-    def test_profile_pins_main_12_real_3(self):
+    def test_profile_pins_base_50_main_30_real_30_at_pf_110(self):
         prof = cp.processing_profile()
-        self.assertEqual((prof["mainEvalPosCount"], prof["realEvalPosCount"]), (12, 3))
+        self.assertEqual((prof["baseEvalPosCount"], prof["setPfWindow"]), (50, 50))
+        self.assertEqual((prof["mainEvalPosCount"], prof["realEvalPosCount"]), (30, 30))
+        for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf"):
+            self.assertEqual(prof[key], 1.10, key)
+        b = book(**prof)
+        self.assertEqual(b._stage_window_ns(), (50, 30, 30))
+        self.assertEqual(b.eval_need(), 30)
+        self.assertEqual(b.stage_min_pf, {"base": 1.10, "main": 1.10, "real": 1.10})
+        self.assertLess(b.micro_min_pf, b.stage_min_pf["base"])
 
     def test_real_zero_turns_the_real_gate_off(self):
         b = book(mainEvalPosCount=8, realEvalPosCount=0)
@@ -41,7 +49,7 @@ class StageWindowTests(unittest.TestCase):
     def test_real_window_values(self):
         self.assertEqual(book(realEvalPosCount=25)._stage_window_ns()[2], 25)
         self.assertEqual(book(realEvalPosCount=1)._stage_window_ns()[2], 3)
-        self.assertEqual(book(realEvalPosCount=None).real_eval, 3)
+        self.assertEqual(book(realEvalPosCount=None).real_eval, 30)
         self.assertEqual(book(mainEvalPosCount=30)._stage_window_ns()[1], 30)
 
     def test_real_zero_qualifies_on_main_evidence(self):

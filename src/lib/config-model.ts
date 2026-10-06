@@ -122,7 +122,7 @@ export const POSITIVE_PF = 1.15;
 // Shared "Overall minimum PF" default (minPf and its six sibling stage floors).
 // Mirrors EVAL_MIN_PF in server/pulse/connection_profile.py; POSITIVE_PF stays the
 // separate "positive Set" predicate and the Test Historic floor.
-export const EVAL_MIN_PF = 1.2;
+export const EVAL_MIN_PF = 1.1;
 export const INTERN_PF = 1.0;
 export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
@@ -573,8 +573,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   pfWindow: 15,
   slMinPct: 0.4,
   venueSlTicks: 3,
-  mainEvalPosCount: 12,
-  realEvalPosCount: 3,
+  mainEvalPosCount: 30,
+  realEvalPosCount: 30,
   setDdtWindow: 0,
   setHistTimeBars: 120,
   setHonorTp: true,
@@ -700,8 +700,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histTestEnabled: true,
   histTestAutoAssign: true,
   histTestRefreshHours: HIST_TEST_REFRESH_DEFAULT,
-  setPfWindow: 30,
-  baseEvalPosCount: 40,
+  setPfWindow: 50,
+  baseEvalPosCount: 50,
   setDeactN: 25,
   controlMinTrades: 0,
   setMinPf: EVAL_MIN_PF,
@@ -1071,8 +1071,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, SL_MIN_PCT),
     venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
-    mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 12)))),
-    realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 3)))),
+    mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
+    realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),
     setDdtWindow: Math.max(0, Math.min(200, Math.round(num(live?.setDdtWindow, 0)))),
     setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 120)))),
     setHonorTp: bool(live?.setHonorTp, true),
@@ -1188,8 +1188,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histTestEnabled: bool(cts.histTestEnabled ?? live?.histTestEnabled, true),
     histTestAutoAssign: bool(cts.histTestAutoAssign ?? live?.histTestAutoAssign, true),
     histTestRefreshHours: clampHistTestRefreshHours(cts.histTestRefreshHours ?? live?.histTestRefreshHours, HIST_TEST_REFRESH_DEFAULT),
-    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 40),
-    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 40),
+    baseEvalPosCount: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
+    setPfWindow: num(live?.baseEvalPosCount ?? live?.setPfWindow ?? cts.baseEvalPosCount ?? cts.setPfWindow, 50),
     setDeactN: num(cts.setDeactN, 25),
     controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),

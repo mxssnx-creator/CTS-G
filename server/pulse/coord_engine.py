@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
-from set_engine import row_equity_pnl
+from set_engine import MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -106,8 +106,8 @@ class Coordinator:
         self.outbreak = [3, 5, 10]
         self.prev_min_count = 5
         self.prev_window = 25
-        self.main_eval = 12
-        self.real_eval = 3
+        self.main_eval = MAIN_EVAL_DEFAULT
+        self.real_eval = REAL_EVAL_DEFAULT
         self.min_step = 7
         self.max_sl_ratio = 2.5
         self.trailing_min_step = 7
@@ -206,16 +206,16 @@ class Coordinator:
             self.prev_window = 25
         raw_main = ov.get("mainEvalPosCount", coord.get("mainEvalPosCount"))
         try:
-            raw_main = 12 if raw_main is None or raw_main == "" else int(raw_main)
+            raw_main = MAIN_EVAL_DEFAULT if raw_main is None or raw_main == "" else int(raw_main)
         except (TypeError, ValueError):
-            raw_main = 12
+            raw_main = MAIN_EVAL_DEFAULT
         # 0 = Main gate off: Main reuses the Base window (SetBook parity).
         self.main_eval = 0 if raw_main <= 0 else raw_main
         raw_real = ov.get("realEvalPosCount", coord.get("realEvalPosCount"))
         try:
-            raw_real = 3 if raw_real is None or raw_real == "" else int(raw_real)
+            raw_real = REAL_EVAL_DEFAULT if raw_real is None or raw_real == "" else int(raw_real)
         except (TypeError, ValueError):
-            raw_real = 3
+            raw_real = REAL_EVAL_DEFAULT
         # 0 = Real gate off: Real reuses the Main window (SetBook parity).
         self.real_eval = 0 if raw_real <= 0 else raw_real
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)

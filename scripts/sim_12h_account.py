@@ -16,8 +16,8 @@ Layers (see ``--help`` and the JSON ``assumptions`` block):
 
 2. STAGE CHAIN (walk-forward) -- a Set trade may only be executed when, at its
    entry bar, the Set x direction evidence that CLOSED BEFORE the entry passes
-   the engine's strict entry gate: Base last-30 cost-PF ratio >= floor,
-   Main last-5 and Real last-3 >= floor, DD-time <= setMaxDdTimeS, indication
+   the engine's strict entry gate: Base last-N cost-PF ratio >= floor,
+   Main and Real last-N >= floor (the book's stage windows), DD-time <= setMaxDdTimeS, indication
    kind gate (SetBook.indication_ok) for the indications pack and the live
    negative deactivation (last-25 own closes).  Rejected Sets keep producing
    evidence.
@@ -786,7 +786,7 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
 
 
 def kind_gate(caches, symbols, book, sim_start, sim_end):
-    """SetBook.indication_ok(kind, side) walk-forward: kind tape last-30 >= floor."""
+    """SetBook.indication_ok(kind, side) walk-forward: kind tape Base window >= floor."""
     cost = float(book.cost_pct)
     need = int(book.eval_need())
     rows = [r for s in symbols for r in caches[s]["kinds"]]
@@ -1732,6 +1732,22 @@ def run_charts(res: Dict[str, Any], start_s: int, sim_start_bar: int) -> str:
     return "<div class='charts'>" + "".join(charts) + "</div>"
 
 
+def assumption_text(text: str, book) -> str:
+    """Fill the assumption template with the book's own stage windows and floors."""
+    base_w, main_w, real_w = book._stage_window_ns()
+    ddt = int(book.ddt_window()) if callable(getattr(book, "ddt_window", None)) else 96
+    vals = {
+        "{floor}": f"{float(book.stage_min_pf['base']):.2f}",
+        "{mainFloor}": f"{float(book.stage_min_pf['main']):.2f}",
+        "{realFloor}": f"{float(book.stage_min_pf['real']):.2f}",
+        "{base}": str(base_w), "{main}": str(main_w), "{real}": str(real_w),
+        "{need}": str(int(book.eval_need())), "{ddt}": str(ddt), "{lookback}": str(int(book.lookback)),
+    }
+    for key, value in vals.items():
+        text = text.replace(key, value)
+    return text
+
+
 def html_report(report: Dict[str, Any]) -> str:
     w = report.get("window") or {}
     hours_n = max(1, int(round((int(w.get("simEndBar", 0)) - int(w.get("simStartBar", 0))) / 60))) if w else 12
@@ -1945,7 +1961,10 @@ def main(argv=None) -> int:
     lanes_u = kind_lane_lots(caches, symbols, book, sim_start, sim_end, ktable, False)
     print(f"gating stage {time.time() - t1:.0f}s candidates={len(cands['uid'])} admitted={int(cands['admitted'].sum())}", flush=True)
     runs = []
-    specs = [("post-base", f"Post-Base (deployed strict gate: Base last-30 / Main last-5 / Real last-3 >= {float(book.stage_min_pf['base']):.2f}, DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
+    base_w, main_w, real_w = book._stage_window_ns()
+    specs = [("post-base", f"Post-Base (deployed strict gate: Base last-{base_w} / Main last-{main_w} / Real last-{real_w} >= "
+                           f"{float(book.stage_min_pf['base']):.2f}/{float(book.stage_min_pf['main']):.2f}/{float(book.stage_min_pf['real']):.2f}, "
+                           f"DDT, kind gate, live-negative deact)", True, args.leverage, "intrabar"),
              ("unfiltered", "Unfiltered (all Sets, no stage gates)", False, args.leverage, "intrabar")]
     specs.append(("post-base-closeliq", "Post-Base, liquidation tested on 1m close equity (less pessimistic than simultaneous intrabar extremes)",
                   True, args.leverage, "close"))
@@ -1967,7 +1986,7 @@ def main(argv=None) -> int:
     cost_pct = float(book.cost_pct)
     trade_level = {
         "unfiltered (all Set trades entering in window)": tape_metrics(cands, catalog, np.ones(len(cands["uid"]), bool), cost_pct),
-        f"Base passed (last-30 >= {float(book.stage_min_pf['base']):.2f})": tape_metrics(cands, catalog, cands["base_ok"], cost_pct),
+        f"Base passed (last-{book._stage_window_ns()[0]} >= {float(book.stage_min_pf['base']):.2f})": tape_metrics(cands, catalog, cands["base_ok"], cost_pct),
         "Base+Main+Real passed": tape_metrics(cands, catalog, cands["real_ok"], cost_pct),
         f"Micro passed ({float(getattr(book, 'micro_min_pf', 0.0) or 0.0):.2f} <= PF < floor)": tape_metrics(cands, catalog, cands["micro_ok"], cost_pct),
         "admitted (Base/Main/Real + Micro + DDT)": tape_metrics(cands, catalog, cands["admitted"], cost_pct),
@@ -2027,7 +2046,7 @@ def main(argv=None) -> int:
         tradeLevelHourly={"post-base": tl_post, "unfiltered": tl_unf},
         tradeLevelMarkdown={"post-base": trade_level_markdown(tl_post, start_s, sim_start),
                             "unfiltered": trade_level_markdown(tl_unf, start_s, sim_start)},
-        assumptions=[a.replace("{floor}", f"{float(book.stage_min_pf['base']):.2f}") for a in ASSUMPTIONS_TEMPLATE],
+        assumptions=[assumption_text(a, book) for a in ASSUMPTIONS_TEMPLATE],
     )
     for r in runs:
         r["markdown"] = markdown_table(r)
@@ -2049,16 +2068,16 @@ ASSUMPTIONS_TEMPLATE = [
     "Sets with identical bound SL/TP/trailing share one tape but stay separate lots (multiplicity).",
     "ENGINE-COMPUTED: Block and DCA trades are the histSimulateBlock/histSimulateDca lanes of SetBook._replay_symbol (pack lanes seeded from "
     "the first Normal Set of each pack plus per-kind block:<kind> lanes); indication-kind evidence from SetBook._replay_kind_tapes.",
-    "Replay window = engine lookback (histLookbackBars 2880) + 60-bar frame before the simulation start, replayed continuously through the "
+    "Replay window = engine lookback (histLookbackBars {lookback}) + 60-bar frame before the simulation start, replayed continuously through the "
     "window (the live engine re-replays a rolling 2-day window; continuous replay is used instead).",
     "Positions still open at the end of data are reconstructed from the engine entry rule (first signal >= cooldown after the last close); "
     "Block/DCA lanes open at the end are not reconstructed.",
     "STAGE CHAIN (walk-forward): a Set trade executes only if, from closes strictly before its entry bar, the Set x direction passes "
-    "Base last-30 cost-PF ratio >= {floor} (n >= 30), Main last-5 >= {floor}, Real last-3 >= {floor} (strict gate / _real_metrics_ok) and "
-    "DD-time <= setMaxDdTimeS (engine drawdown_time_by_symbol on the last 96 closes, refreshed hourly). Evidence is pooled over all symbols "
+    "Base last-{base} cost-PF ratio >= {floor} (n >= {need}), Main last-{main} >= {mainFloor}, Real last-{real} >= {realFloor} (strict gate / _real_metrics_ok) and "
+    "DD-time <= setMaxDdTimeS (engine drawdown_time_by_symbol on the last {ddt} closes, refreshed hourly). Evidence is pooled over all symbols "
     "as in the SetState tape; rejected Sets keep producing evidence. Live closes are not added back into Base evidence (they duplicate replay trades).",
     "Indications-pack Sets additionally need SetBook.indication_ok(kind, side) for at least one kind contributing to the pack vote (kind tape "
-    "last-30 >= {floor}). Live-negative deactivation (last 25 own executed closes net < 0) blocks a Set x side.",
+    "last-{base} >= {floor}). Live-negative deactivation (last 25 own executed closes net < 0) blocks a Set x side.",
     "Block lanes use score_block_main Real-overall last-50 (n < 50 = valid, engine rule; n >= 50 needs is_positive_pf and floor); "
     "DCA lanes use DcaBook.score (last-15 PF >= floor, last-25 avgR >= 0). Both need an open executed Set lot on the same symbol x direction.",
     "Coordination axes prev/last/cont/pause are DISABLED in the deployed profile and the replay emits no axis-tagged rows; per-axis columns are "
@@ -2072,7 +2091,7 @@ ASSUMPTIONS_TEMPLATE = [
     "MARGIN: cross margin; used margin = sum(notional / leverage); available = MTM equity - used margin; an entry is skipped when the venue-minimum "
     "margin exceeds 95% of available (pulse_trader entry check) or size_qty returns 0 (room = available x leverage x 0.9). Skips are counted.",
     "ORDER SEQUENCE: per minute, exits first, then entries at the bar close in EntryMatrix order (round-robin over symbol/side/pack signals, "
-    "Sets by highest last-30 PF). Entry burst limits, rate limits, latency, slippage and funding are not modelled; fills at the replay prices.",
+    "Sets by highest Base-window PF). Entry burst limits, rate limits, latency, slippage and funding are not modelled; fills at the replay prices.",
     "COSTS: engine PositionCost 0.1% of entry notional per round trip (overlay positionCostPct), half charged on entry and half on close. "
     "PF normal = classic PF of lot USDT results net of cost; PF gross excludes cost; Cost PF = engine ratio 1 + 0.1 x avgR.",
     "CONTROL ORDERS (controlOrdersOverall): one SL+TP pair per symbol x direction; per minute a newly occupied group places 2, a changed "

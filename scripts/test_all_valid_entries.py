@@ -47,7 +47,7 @@ class Exchange:
 
 
 class AllValidEntries(unittest.TestCase):
-    def _real_qualify(self, state, side='LONG', pf=1.8, n=12):
+    def _real_qualify(self, state, side='LONG', pf=1.8, n=30):
         blob = dict(active=True, last15_n=n, last15_ratio=pf, last25_avg_r=0.002,
                     base_n=n, base_pf=pf, main_n=n, main_pf=pf, real_n=n, real_pf=pf,
                     ddOk=True, max_dd_s=0, net_avg=0.002, expectancy=0.002)
