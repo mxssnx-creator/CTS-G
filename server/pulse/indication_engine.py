@@ -2884,7 +2884,8 @@ class IndicationBook:
                     if not bool(allow(kind)):
                         continue
                 except Exception:
-                    pass
+                    # Fail closed: an erroring gate never admits the lane.
+                    continue
             confidence = float(indication.confidence or 0.0)
             if confidence < min_conf:
                 continue

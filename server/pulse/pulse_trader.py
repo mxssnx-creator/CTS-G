@@ -1084,6 +1084,10 @@ class Position:
     sec_sl: float = 0.0
     sec_tp: float = 0.0
     ind_kind: str = ""
+    # Set nominal TP (before venue SL floor / ignore-TP widening) and the
+    # indication range, so the close is credited to its own Set and range.
+    set_tp_pct: float = 0.0
+    ind_config: str = ""
     # Indication exit tactic (price-only) and its reference level.
     exit_tactic: str = ""
     exit_level: float = 0.0
@@ -1149,6 +1153,10 @@ class Closed:
     ours: bool = True
     conn: str = ""
     ind_kind: str = ""
+    # Set nominal TP (before venue SL floor / ignore-TP widening) and the
+    # indication range, so the close is credited to its own Set and range.
+    set_tp_pct: float = 0.0
+    ind_config: str = ""
     parent_set_id: str = ""
     axis_key: str = ""
     relative_count: int = 1
@@ -7111,6 +7119,8 @@ class Pulse:
             set_id=set_id, set_idx=set_idx, trail_set_id=trail_set_id, trail_idx=trail_idx, pack=pack, client_id=cid, ours=True,
             execution_lane=execution_lane,
             overall=True, close_position=True, ind_kind=ind_kind,
+            set_tp_pct=float(getattr(chosen, "tp_pct", 0.0) or 0.0) if (chosen is not None and forced_row is None) else 0.0,
+            ind_config=str(getattr(ind, "mode", "") or "") if ind is not None else "",
             exit_tactic=str(getattr(ind, "exit_tactic", "") or "") if ind is not None else "",
             exit_level=float(getattr(ind, "exit_level", 0.0) or 0.0) if ind is not None else 0.0,
             micro=bool(micro),
@@ -7578,6 +7588,8 @@ class Pulse:
             set_id=pos.set_id, pack=pos.pack, trail_set_id=getattr(pos, "trail_set_id", ""), client_id=pos.client_id, ours=True, conn=CONN_SHORT,
             execution_lane=getattr(pos, "execution_lane", ""),
             ind_kind=str(getattr(pos, "ind_kind", "") or ""),
+            set_tp_pct=float(getattr(pos, "set_tp_pct", 0.0) or 0.0),
+            ind_config=str(getattr(pos, "ind_config", "") or ""),
             parent_set_id=str(getattr(pos, "parent_set_id", "") or pos.set_id),
             axis_key=str(getattr(pos, "axis_key", "") or ""),
             relative_count=int(getattr(pos, "relative_count", 1) or 1),
@@ -10705,23 +10717,31 @@ class Pulse:
             )
             if s not in extra_syms and fp_map.get(s) == fp and s in self.indications.last:
                 continue
-            fp_map[s] = fp
-            d, _, conf = self.score(s)
             bars_by_tf = {
                 tf: (self.klines_tf.get(tf, {}).get(s) or [])
                 for tf in effective_tfs
             }
-            self.indications.process(
-                s,
-                bars,
-                pulse_dir=d,
-                pulse_conf=conf,
-                px=px,
-                sl_pct=SL_PCT,
-                tp_pct=TP_PCT,
-                want_extra=s in extra_syms,
-                bars_by_tf=bars_by_tf,
-            )
+            # One failing symbol must not stop the rest of the scan window,
+            # and is retried next pass (fingerprint stored only on success).
+            try:
+                d, _, conf = self.score(s)
+                self.indications.process(
+                    s,
+                    bars,
+                    pulse_dir=d,
+                    pulse_conf=conf,
+                    px=px,
+                    sl_pct=SL_PCT,
+                    tp_pct=TP_PCT,
+                    want_extra=s in extra_syms,
+                    bars_by_tf=bars_by_tf,
+                )
+            except Exception as exc:
+                errs = self.__dict__.setdefault("_ind_errors", {})
+                errs[s] = int(errs.get(s, 0)) + 1
+                log(f"IND process {s} failed: {type(exc).__name__}: {str(exc)[:120]}", every=60.0, key=f"ind-err:{s}")
+                continue
+            fp_map[s] = fp
 
     def strategy_closes(self) -> List[Closed]:
         """Only this system + this connection. Ignore foreign and leftover oversized."""
@@ -11049,7 +11069,8 @@ class Pulse:
                 except TypeError:
                     return bool(gate(kind))
                 except Exception:
-                    return True
+                    # A failing gate must not admit an unproven lane.
+                    return False
             for s in intern_scan:
                 if not _intern_placeable(s):
                     continue
@@ -11066,7 +11087,9 @@ class Pulse:
                 if not picked_lanes:
                     try:
                         one = self.indications.best(s) or self.indications.primary(s)
-                        if one and one.confidence >= 0.52 and _ind_allow(one.kind, one.direction):
+                        # Same per-range gate as pick_entries: the range's own
+                        # evidence, never the pooled kind, decides.
+                        if one and one.confidence >= 0.52 and _ind_allow(one.kind, one.direction, str(getattr(one, "mode", "") or "")):
                             picked_lanes = [(one, float(one.confidence), 1)]
                     except Exception:
                         picked_lanes = []
@@ -15172,6 +15195,17 @@ class Pulse:
                 if token and token.upper() not in have:
                     names.append(token)
                     have.add(token.upper())
+        # Open positions stay priced and managed until closed, even after
+        # their symbol leaves the ranked universe.
+        try:
+            have = {s.upper() for s in names}
+            for pos in list((getattr(self, "open", None) or {}).values()):
+                token = str(getattr(pos, "symbol", "") or "").strip()
+                if token and token.upper() not in have:
+                    names.append(token)
+                    have.add(token.upper())
+        except Exception:
+            pass
         return names
 
     def _intern_leverage_map(self, max_map: bool = False) -> Dict[str, Any]:

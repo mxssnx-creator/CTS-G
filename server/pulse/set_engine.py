@@ -420,15 +420,42 @@ def hist_row_key(row: Dict[str, Any]) -> Tuple[str, float, str, str, float, floa
     )
 
 
+# Indication tapes hold every range (config) of a kind: each config x side
+# keeps its own last-N evidence so one busy range or direction cannot push
+# the others below the evaluation need.
+IND_CONFIG_SIDE_CAP = 75
+
+
+def trim_ind_tape(bucket: Sequence[Dict[str, Any]], per: int = IND_CONFIG_SIDE_CAP) -> List[Dict[str, Any]]:
+    """Chronological last ``per`` rows per (ind_config, side)."""
+    rows = sorted((r for r in bucket if r is not None), key=lambda r: finite(r.get("t")))
+    per = max(8, int(per or IND_CONFIG_SIDE_CAP))
+    counts: Dict[Tuple[str, str], int] = {}
+    keep: List[int] = []
+    for i in range(len(rows) - 1, -1, -1):
+        r = rows[i]
+        get = r.get if hasattr(r, "get") else (lambda k, d=None, _r=r: getattr(_r, k, d))
+        key = (str(get("ind_config") or "").lower(), str(get("side") or get("direction") or "")[:1].upper())
+        c = counts.get(key, 0)
+        if c < per:
+            counts[key] = c + 1
+            keep.append(i)
+    keep.reverse()
+    return [rows[i] for i in keep]
+
+
 def merge_hist_rows(
     previous: Sequence[Dict[str, Any]],
     incoming: Sequence[Dict[str, Any]],
     replace_symbols: Optional[Sequence[str]] = None,
+    trim: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
     """Merge a refreshed symbol slice into the bounded historic tape."""
     replace = {str(s) for s in (replace_symbols or ())}
+    if trim is None:
+        trim = lambda rows: trim_hist(rows, HIST_CAP)  # noqa: E731
     if not previous:
-        return trim_hist([row for row in incoming if _is_hist_row(row)], HIST_CAP)
+        return trim([row for row in incoming if _is_hist_row(row)])
     merged: Dict[Tuple[str, float, str, str, float, float], Dict[str, Any]] = {}
     for row in previous:
         if not _is_hist_row(row) or str(row.get("symbol") or "") in replace:
@@ -437,7 +464,7 @@ def merge_hist_rows(
     for row in incoming:
         if _is_hist_row(row):
             merged[hist_row_key(row)] = row
-    return trim_hist(list(merged.values()), HIST_CAP)
+    return trim(list(merged.values()))
 
 
 def last_n_balanced(rows: Sequence[Dict[str, Any]], n: int, *, ordered: bool = False) -> List[Dict[str, Any]]:
@@ -1112,8 +1139,15 @@ class SetState:
                 continue
             if row.get("set_id") and row["set_id"] != self.id:
                 continue
-            if any(row.get(key) is not None and abs(finite(row[key]) - expected) > 1e-8
-                   for key, expected in (("tp_pct", self.tp_pct), ("sl_pct", self.tp_pct * self.sl_ratio))):
+            nominal = finite(row.get("set_tp_pct"))
+            if nominal > 0:
+                # The live order widens SL to the venue floor and TP under
+                # ignore-TP; the Set's own nominal TP identifies the close.
+                if abs(nominal - self.tp_pct) > 1e-8:
+                    continue
+            elif row.get("set_id") != self.id and any(
+                    row.get(key) is not None and abs(finite(row[key]) - expected) > 1e-8
+                    for key, expected in (("tp_pct", self.tp_pct), ("sl_pct", self.tp_pct * self.sl_ratio))):
                 continue
             if row.get("trail_key") is not None and str(row["trail_key"]) != self.trail_key:
                 continue
@@ -2317,17 +2351,21 @@ class SetBook:
                 st.live = recent_direction_rows(st.live, lc)
                 n += 1
         n += self.clamp_bars(bar_cap)
+        # Indication tapes: last-N per range x side (never a plain tail, which
+        # dropped a quiet direction or range entirely).
         for k, tape in list(self.ind_hist.items()):
-            if len(tape) > hc:
-                self.ind_hist[k] = tape[-hc:]
+            trimmed = trim_ind_tape(tape)
+            if len(trimmed) != len(tape):
+                self.ind_hist[k] = trimmed
                 n += 1
         for k, tape in list(self.ind_live.items()):
-            if len(tape) > lc:
-                self.ind_live[k] = tape[-lc:]
+            trimmed = trim_ind_tape(tape)
+            if len(trimmed) != len(tape):
+                self.ind_live[k] = trimmed
                 n += 1
         for k, tape in list(self.strategy_hist.items()):
             if len(tape) > hc:
-                self.strategy_hist[k] = tape[-hc:]
+                self.strategy_hist[k] = recent_direction_rows(tape, hc)
                 n += 1
         if n:
             # Trimming can change the live-window predicate even when the
@@ -2429,7 +2467,8 @@ class SetBook:
             ind_kind = str(getattr(rec, "ind_kind", "") or "").strip().lower()
         original = rec if isinstance(rec, dict) else vars(rec)
         for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
-                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id"):
+                    "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id",
+                    "set_tp_pct", "ind_config"):
             if key in original:
                 row[key] = original[key]
         if ind_kind not in IND_KINDS:
@@ -2476,7 +2515,7 @@ class SetBook:
             tape = self.ind_live.setdefault(ind_kind, [])
             if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in tape):
                 tape.append(dict(row))
-                self.ind_live[ind_kind] = recent_direction_rows(tape, HIST_CAP)
+                self.ind_live[ind_kind] = trim_ind_tape(tape)
         if target is None:
             return
         if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in target.live):
@@ -2889,11 +2928,12 @@ class SetBook:
         score_set = {str(s) for s in score_ids} if score_ids is not None else None
         if not merge:
             if ind_hist is not None:
-                self.ind_hist = {k: trim_hist(v, HIST_CAP) for k, v in ind_hist.items()}
+                self.ind_hist = {k: trim_ind_tape([slim_hist_row(r) for r in v if _is_hist_row(r)]) for k, v in ind_hist.items()}
         elif ind_hist is not None:
             keys = set(self.ind_hist) | set(ind_hist)
             self.ind_hist = {
-                k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names)
+                k: merge_hist_rows(self.ind_hist.get(k) or [], ind_hist.get(k) or [], names,
+                                   trim=lambda rows: trim_ind_tape([slim_hist_row(r) for r in rows]))
                 for k in keys
             }
         # First-pass unique symbols only touch Sets that filled. Replays of
@@ -4737,12 +4777,11 @@ class SetBook:
         # evidence as admission. A losing SHORT tape cannot hide a valid LONG.
         if by:
             def stage_rank(item):
-                sm = item[1]
-                from position_cost import clears_pf
-                base = int(sm.get("last15_n") or 0) >= need and clears_pf(sm.get("base_pf", sm.get("last15_ratio")), self.min_pf) and sm.get("ddOk", True)
-                main = base and int(sm.get("main_n") or 0) >= self.main_eval and clears_pf(sm.get("main_pf"), self.min_pf)
-                real = main and self._real_metrics_ok(sm)
-                return (int(base) + int(main) + int(real), finite(sm.get("base_pf")), item[0])
+                # Same ledger, stage floors and windows as the published
+                # qualification, so the recorded direction is the best one.
+                q = self._stage_qualification(st, item[1])
+                rank = int(bool(q.get("base"))) + int(bool(q.get("main"))) + int(bool(q.get("real")))
+                return (rank, int(bool(q.get("micro"))), finite(item[1].get("base_pf")), item[0])
             direction, directional = max(by.items(), key=stage_rank)
             st.stage_ledger = self._stage_qualification(st, directional)
             st.stage_ledger["evaluationDirection"] = direction
@@ -5731,7 +5770,7 @@ class SetBook:
         # Signals for hundreds of symbols share this indication evidence.
         # Cache by contents, not TTL or count: a corrected/rolling close or a
         # changed cost/window/PF setting must invalidate immediately.
-        signature = (self.pf_n, need, self.cost_pct, self.min_pf,
+        signature = (self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
                      _tape_fingerprint(hist), _tape_fingerprint(live))
         cache = getattr(self, "_ind_stats_cache", None)
         if cache is None:
@@ -5772,7 +5811,8 @@ class SetBook:
             "evaluationWindows": windows,
             "netAvg": round(net_avg, 6),
             "costSubtracted": True,
-            "validated": n >= need and clears_pf(pf, self.min_pf),
+            # Base = PF and DDT over the window, as for every Set.
+            "validated": n >= need and clears_pf(pf, self.min_pf) and float(dd.get("maxS") or 0) <= float(self.max_dd_s or 0) + 1e-9,
             "profitable": clears_pf(pf, self.min_pf),
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
@@ -5796,7 +5836,9 @@ class SetBook:
         need = self.eval_need()
         sig = (len(hist), len(live), finite((hist[-1] if hist else {}).get("t")) if hist else 0.0,
                finite((live[-1] if live else {}).get("t")) if live else 0.0,
-               self.pf_n, need, self.cost_pct, self.min_pf)
+               self.pf_n, need, self.cost_pct, self.min_pf, self.max_dd_s,
+               finite((hist[-1] if hist else {}).get("pnl_pct")) if hist else 0.0,
+               finite((live[-1] if live else {}).get("pnl_pct")) if live else 0.0)
         cache = getattr(self, "_ind_cfg_cache", None)
         if cache is None:
             cache = self._ind_cfg_cache = {}
@@ -5815,8 +5857,11 @@ class SetBook:
             n, pf = int(last["count"]), float(last["ratio"])
         else:
             n, pf = 0, 0.0
+        dd = self.ddt_when_enough(tape, need, ordered=True)
+        dd_ok = float(dd.get("maxS") or 0) <= float(self.max_dd_s or 0) + 1e-9
         out = {"kind": k, "config": cfg, "side": str(side or "BOTH").upper(), "n": n, "tapeN": len(tape),
-               "pf": round(pf, 4), "validated": n >= need and clears_pf(pf, self.min_pf),
+               "maxDdS": float(dd.get("maxS") or 0),
+               "pf": round(pf, 4), "validated": n >= need and clears_pf(pf, self.min_pf) and dd_ok,
                "enough": n >= need, "profitable": clears_pf(pf, self.min_pf)}
         if len(cache) > 4096:
             cache.clear()
