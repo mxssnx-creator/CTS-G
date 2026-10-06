@@ -131,5 +131,36 @@ class OpenPositionPricingTests(unittest.TestCase):
         self.assertIn("GONE-USDT", p._live_scan_names())
 
 
+class TrailingOwnershipTests(unittest.TestCase):
+    def manage(self, trail_key, strat_trail):
+        for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "OPEN_PATH", "LOG_PATH", "TRADES_PATH"):
+            setattr(pt, name, os.path.join(tempfile.mkdtemp(), os.path.basename(getattr(pt, name))))
+        p = object.__new__(pt.Pulse)
+        p.ingest_ws_px = lambda: 0
+        p.px = {"AAA-USDT": 102.0}
+        pos = pt.Position(symbol="AAA-USDT", side="LONG", qty=1.0, entry=100.0, opened_at=time.time() - 600.0,
+                          sl=0.0, tp=1e9, peak=102.0, set_id="general:1m:sl0.6:st8", step=8,
+                          trail_key=trail_key, trail_arm=0.006 if trail_key else 0.0,
+                          trail_give=0.002 if trail_key else 0.0)
+        p.open = {"AAA-USDT": pos}
+        p.control_orders = False
+        p.ctrl_skip = {}
+        p.exits = NS(enabled=False, ignore_tp=False, rev_on=False, min_hold_s=0)
+        p.strat_trail = strat_trail
+        p.coord = NS(trailing_min_step=6)
+        p.close_pos = lambda *a, **k: None
+        p.replace_sl = lambda pos, px: True
+        p.manage()
+        return pos
+
+    def test_normal_set_position_is_never_given_the_default_trail(self):
+        self.assertFalse(self.manage("", True).trail_armed)
+
+    def test_trailing_set_position_keeps_trailing_after_trailing_is_switched_off(self):
+        pos = self.manage("0.6:0.2", False)
+        self.assertTrue(pos.trail_armed)
+        self.assertIsNotNone(pos.trail)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8085,7 +8085,13 @@ class Pulse:
                         else:
                             pos.trail_pending = dec.sl
                     continue
-            if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM):
+            # Trailing belongs to Trailing Sets: their positions keep trailing
+            # until closed (even if trailing is switched off later). Normal
+            # Sets are validated without a trail, so they never get the
+            # default one; legacy set-less lots follow the trailing switch.
+            own_trail = bool(getattr(pos, "trail_key", "") or getattr(pos, "trail_armed", False))
+            trail_on = own_trail or (self.strat_trail and not getattr(pos, "set_id", ""))
+            if trail_on and pnl_pct >= (pos.trail_arm or TRAIL_ARM):
                 pos_step = int(getattr(pos, "step", 0) or 0)
                 trail_floor = int(getattr(self.coord, "trailing_min_step", 7) or 7)
                 hold_s = float(getattr(self.exits, "min_hold_s", 6) or 0)
