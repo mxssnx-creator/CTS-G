@@ -4483,7 +4483,15 @@ class SetBook:
             st = self.sets.get(parent_id)
             if st is None:
                 continue
-            rows.extend(coordinator.axis_variants(parent_id, st.hist + st.live, []))
+            tape = list(st.hist) + list(st.live)
+            sides = [d for d in DIRECTIONS if self._base_metrics_ok((st.by_side or {}).get(d) or {})]
+            if not st.by_side:
+                # Unscored sides (legacy callers): the merged tape, as before.
+                rows.extend(coordinator.axis_variants(parent_id, tape, []))
+                continue
+            # Children per Base-qualified direction, on that direction's own tape.
+            for side in sides:
+                rows.extend(coordinator.axis_variants(parent_id, tape, [], side=side))
         return coordinator.aggregate_axis_variants(rows)
 
     def qualified_stage_ids(self, stage: str, pack: Optional[str] = None) -> List[str]:

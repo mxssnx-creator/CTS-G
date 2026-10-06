@@ -17,6 +17,8 @@ import {
   HIST_TEST_REFRESH_DEFAULT,
   overlayEdits,
   SCRATCH_S_MAX,
+  AXIS_SPECS,
+  clampAxisWindow,
   type PulseOverlay,
 } from "./config-model.ts";
 import { CONFIG_PRESETS, applyPresetPatch } from "./config-presets.ts";
@@ -392,4 +394,20 @@ test("every engine setting added to the desk round-trips a saved value and ships
   };
   const reloaded = overlayFromCts({}, saved as never) as unknown as Record<string, unknown>;
   for (const [key, value] of Object.entries(saved)) assert.deepEqual(reloaded[key], value, `saved ${key}`);
+});
+
+test("the desk axis specs mirror coord_engine.AXIS_SPECS and clamp like clamp_window", () => {
+  const py = readFileSync(new URL("../../server/pulse/coord_engine.py", import.meta.url), "utf8");
+  for (const [axis, spec] of Object.entries(AXIS_SPECS)) {
+    const m = py.match(new RegExp(`"${axis}": \\{"min": (\\d+), "max": (\\d+), "step": (\\d+), "default": (\\d+)\\}`));
+    assert.ok(m, axis);
+    assert.deepEqual([spec.min, spec.max, spec.step, spec.default], m!.slice(1).map(Number), axis);
+  }
+  assert.equal(clampAxisWindow("prev", 11), 11);
+  assert.equal(clampAxisWindow("prev", 2), 4);
+  assert.equal(clampAxisWindow("prev", 99), 12);
+  assert.equal(clampAxisWindow("last", "x"), AXIS_SPECS.last.default);
+  const saved = overlayFromCts({}, { axisPrevMaxWindow: 3, axisLastMaxWindow: 9, axisContMaxWindow: 5, axisPauseMaxWindow: 0 });
+  assert.deepEqual([saved.axisPrevMaxWindow, saved.axisLastMaxWindow, saved.axisContMaxWindow, saved.axisPauseMaxWindow], [4, 4, 5, 1]);
+  assert.equal(DEFAULT_OVERLAY.axisPrevMaxWindow, 12);
 });

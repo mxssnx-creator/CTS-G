@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
 from set_engine import MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
 
+# Relative-count windows per coordination axis: every count from min to the
+# configured max window (step 1 = the finest grid) is one child per Base
+# parent x direction. 100 relative positions equal one parent volume.
 AXIS_SPECS = {
-    "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
+    "prev": {"min": 4, "max": 12, "step": 1, "default": 12},
     "last": {"min": 1, "max": 4, "step": 1, "default": 4},
     "cont": {"min": 1, "max": 8, "step": 1, "default": 8},
     "pause": {"min": 1, "max": 8, "step": 1, "default": 8},
 }
+AXIS_EVENT_CAP = 8192
 PREV_POSITION_MIN = 5
 PREV_POSITION_MAX = 55
 LIVE_TAPE_HORIZON_S = 3 * 3600.0
@@ -80,12 +85,7 @@ class Axis:
 
 class Coordinator:
     def __init__(self) -> None:
-        self.axes: Dict[str, Axis] = {
-            "prev": Axis(False, 12),
-            "last": Axis(False, 4),
-            "cont": Axis(False, 8),
-            "pause": Axis(False, 8),
-        }
+        self.axes: Dict[str, Axis] = {name: Axis(False, int(spec["default"])) for name, spec in AXIS_SPECS.items()}
         self.min_pf = POSITIVE_PF
         # Stage PF floors use the shared 0.80–2.50 / 0.02 contract.
         # 1.00 is break-even after cost; 1.15 is +1.5× PositionCost (live floor).
@@ -130,7 +130,8 @@ class Coordinator:
             }
             for axis in AXES
         }
-        self._axis_seen: set[str] = set()
+        # Insertion-ordered so eviction drops the oldest events deterministically.
+        self._axis_seen: "OrderedDict[str, None]" = OrderedDict()
 
     def _main_n(self) -> int:
         """Main window: last-N (>= 3), or the Base window when Main is off (0)."""
@@ -450,9 +451,9 @@ class Coordinator:
         key = event_key or stable_key(axis_name, outcome, direction)
         if key in self._axis_seen:
             return False
-        self._axis_seen.add(key)
-        if len(self._axis_seen) > 4096:
-            self._axis_seen = set(list(self._axis_seen)[-2048:])
+        self._axis_seen[key] = None
+        while len(self._axis_seen) > AXIS_EVENT_CAP:
+            self._axis_seen.popitem(last=False)
         bucket = self.coordination[axis_name]
         name = str(outcome or "").strip().lower()
         if name in bucket:
@@ -466,6 +467,7 @@ class Coordinator:
         parent_set_id: str,
         closed_rows: Sequence[Any],
         open_rows: Optional[Sequence[Any]] = None,
+        side: str = "",
     ) -> List[Dict[str, Any]]:
         """Build deterministic count-pos children without counting a parent twice.
 
@@ -473,11 +475,17 @@ class Coordinator:
         accepted separately so callers cannot accidentally leak an active
         position into the Prev tape. Every child keeps the Base parent ID and a
         stable dedupe key; 100 relative positions equals one parent volume.
+
+        ``side`` (LONG / SHORT) evaluates one direction's own tape, like Base
+        qualification; without it the merged tape is used (legacy callers).
         """
         if not self.axes_active():
             return []
+        from position_cost import filter_side
+        want = str(side or "").strip().upper()
+        want = want if want in ("LONG", "SHORT") else ""
         ordered = sorted(
-            [r for r in closed_rows if r is not None],
+            [r for r in filter_side([r for r in closed_rows if r is not None], want or None) if r is not None],
             key=lambda row: float((row.get("t") if isinstance(row, dict) else getattr(row, "t", 0)) or 0),
         )
         closed = ordered[-max(50, int(self.optimization_n or 50), int(self.prev_window or 25) * 2) :] if self.additional_coordination else ordered
@@ -499,14 +507,16 @@ class Coordinator:
                 else:
                     tape = closed[-count:]
                 pf = last_n_cost_pf(tape, count, self.position_cost_pct)
-                losses = [float((r.get("pnl") if isinstance(r, dict) else getattr(r, "pnl", 0)) or 0) for r in tape]
+                # Cost-net equity move per close: works for live USDT rows and
+                # replayed CompactHistRows (which carry no raw ``pnl``).
+                losses = [row_equity_pnl(r, self.position_cost_pct) for r in tape]
                 paused = axis == "pause" and consec_loss(losses) >= count
                 qualifies = (
                     len(tape) >= min(3, count)
                     and not paused
                     and clears_pf(pf.get("ratio"), self.stage_min_pf.get("base", POSITIVE_PF))
                 )
-                child_key = stable_key(parent_set_id, axis, count, len(tape), round(float(pf.get("ratio") or 0.0), 6))
+                child_key = stable_key(parent_set_id, want, axis, count, len(tape), round(float(pf.get("ratio") or 0.0), 6))
                 self.record_coordination(axis, "evaluated", event_key=child_key + ":evaluated")
                 if paused:
                     self.record_coordination(axis, "paused", event_key=child_key + ":paused")
@@ -517,6 +527,7 @@ class Coordinator:
                 out.append({
                     "axisKey": f"{axis}:{count}",
                     "axis": axis,
+                    "side": want,
                     "parentSetId": str(parent_set_id),
                     "relativeCount": count,
                     "volumeRatio": round(count * VOLUME_RATIO_UNIT, 6),
@@ -539,17 +550,19 @@ class Coordinator:
         """Aggregate relative children once per parent while retaining details."""
         rows = [v for v in variants if isinstance(v, dict)]
         parents = sorted({str(v.get("parentSetId") or "") for v in rows if v.get("parentSetId")})
-        by_parent: Dict[str, List[Dict[str, Any]]] = {}
+        # One parent x direction counts once (children are per direction).
+        by_parent: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for row in rows:
             parent = str(row.get("parentSetId") or "")
             if parent:
-                by_parent.setdefault(parent, []).append(row)
+                by_parent.setdefault((parent, str(row.get("side") or "")), []).append(row)
         parent_rows = []
-        for parent in sorted(by_parent):
-            children = by_parent[parent]
+        for parent, side in sorted(by_parent):
+            children = by_parent[(parent, side)]
             qualified = [row for row in children if row.get("qualified")]
             parent_rows.append({
                 "parentSetId": parent,
+                "side": side,
                 "childCount": len(children),
                 "qualifiedChildren": len(qualified),
                 "childVolumeRatio": round(sum(float(row.get("volumeRatio") or 0) for row in qualified), 6),
@@ -557,6 +570,7 @@ class Coordinator:
             })
         return {
             "parentCount": len(parents),
+            "parentSideCount": len(parent_rows),
             "parentSetIds": parents,
             "childCount": len(rows),
             "volumeRatio": round(sum(float(row.get("countedVolumeRatio") or 0) for row in parent_rows), 6),

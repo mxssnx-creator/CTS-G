@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AXIS_SPECS,
   blockTable,
   bool,
   DEFAULT_OVERLAY,
@@ -2482,45 +2483,45 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range="4–12 step 2"
+                  range={`${AXIS_SPECS.prev.min}–${AXIS_SPECS.prev.max}`}
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={4}
-                  max={12}
-                  step={2}
+                  min={AXIS_SPECS.prev.min}
+                  max={AXIS_SPECS.prev.max}
+                  step={AXIS_SPECS.prev.step}
                   onEn={(v) => patch("axisPrevEnabled", v)}
                   onWin={(v) => patch("axisPrevMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Last"
-                  range="1–4"
+                  range={`${AXIS_SPECS.last.min}–${AXIS_SPECS.last.max}`}
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={1}
-                  max={4}
-                  step={1}
+                  min={AXIS_SPECS.last.min}
+                  max={AXIS_SPECS.last.max}
+                  step={AXIS_SPECS.last.step}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Continuous"
-                  range="1–8"
+                  range={`${AXIS_SPECS.cont.min}–${AXIS_SPECS.cont.max}`}
                   enabled={overlay.axisContEnabled}
                   window={overlay.axisContMaxWindow}
-                  min={1}
-                  max={8}
-                  step={1}
+                  min={AXIS_SPECS.cont.min}
+                  max={AXIS_SPECS.cont.max}
+                  step={AXIS_SPECS.cont.step}
                   onEn={(v) => patch("axisContEnabled", v)}
                   onWin={(v) => patch("axisContMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Pause"
-                  range="1–8"
+                  range={`${AXIS_SPECS.pause.min}–${AXIS_SPECS.pause.max}`}
                   enabled={overlay.axisPauseEnabled}
                   window={overlay.axisPauseMaxWindow}
-                  min={1}
-                  max={8}
-                  step={1}
+                  min={AXIS_SPECS.pause.min}
+                  max={AXIS_SPECS.pause.max}
+                  step={AXIS_SPECS.pause.step}
                   onEn={(v) => patch("axisPauseEnabled", v)}
                   onWin={(v) => patch("axisPauseMaxWindow", v)}
                 />

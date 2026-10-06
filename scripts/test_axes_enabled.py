@@ -91,6 +91,56 @@ class AxesEnabled(unittest.TestCase):
         self.assertFalse(paused)
         self.assertTrue(any("pause" in r for r in reasons), reasons)
 
+    def test_every_count_is_a_child_on_the_finest_grid(self):
+        c = coordinator()
+        kids = c.axis_variants("p", rows([move(1.5)] * 40))
+        counts = {axis: sorted(v["relativeCount"] for v in kids if v["axis"] == axis) for axis in AXES}
+        for axis in AXES:
+            spec = AXIS_SPECS[axis]
+            self.assertEqual(spec["step"], 1, axis)
+            self.assertEqual(counts[axis], list(range(spec["min"], c.axes[axis].max_window + 1)), axis)
+        self.assertEqual(len(kids), sum(len(v) for v in counts.values()))
+        self.assertEqual(len(kids), 9 + 4 + 8 + 8)
+        # defaults come from the specs, windows snap onto the (step-1) grid
+        self.assertEqual({a: Coordinator().axes[a].max_window for a in AXES},
+                         {a: AXIS_SPECS[a]["default"] for a in AXES})
+        self.assertEqual(coordinator(axisPrevMaxWindow=11).axes["prev"].max_window, 11)
+        self.assertEqual(coordinator(axisPrevMaxWindow=99).axes["prev"].max_window, 12)
+
+    def test_pause_trips_on_replayed_rows_without_usdt_pnl(self):
+        c = coordinator()
+        replay = [{k: v for k, v in r.items() if k != "pnl"} for r in rows([move(1.6)] * 20 + [-0.004] * 8)]
+        pause = [v for v in c.axis_variants("p", replay) if v["axis"] == "pause"]
+        self.assertTrue(pause)
+        self.assertTrue(all(v["paused"] for v in pause), [(v["relativeCount"], v["paused"]) for v in pause])
+        winning = [{k: v for k, v in r.items() if k != "pnl"} for r in rows([move(1.6)] * 30)]
+        self.assertFalse(any(v["paused"] for v in c.axis_variants("p", winning) if v["axis"] == "pause"))
+
+    def test_children_follow_each_direction_own_tape(self):
+        c = coordinator()
+        longs = rows([move(1.6)] * 30)
+        shorts = [dict(r, side="SHORT", t=r["t"] + 7) for r in rows([move(0.6)] * 30)]
+        mixed = longs + shorts
+        lk = c.axis_variants("p", mixed, side="LONG")
+        sk = c.axis_variants("p", mixed, side="SHORT")
+        self.assertTrue(lk and sk)
+        self.assertTrue(all(v["side"] == "LONG" for v in lk))
+        self.assertTrue(any(v["qualified"] for v in lk))
+        self.assertFalse(any(v["qualified"] for v in sk), "a losing SHORT tape qualified via the LONG closes")
+        self.assertFalse({v["dedupeKey"] for v in lk} & {v["dedupeKey"] for v in sk})
+        agg = Coordinator.aggregate_axis_variants(lk + sk)
+        self.assertEqual(agg["parentCount"], 1)
+        self.assertEqual(agg["parentSideCount"], 2)
+
+    def test_event_dedupe_evicts_oldest_deterministically(self):
+        import coord_engine as ce
+        c = coordinator()
+        for i in range(ce.AXIS_EVENT_CAP + 5):
+            c.record_coordination("last", "evaluated", event_key=f"k{i}")
+        self.assertEqual(len(c._axis_seen), ce.AXIS_EVENT_CAP)
+        self.assertNotIn("k0", c._axis_seen)
+        self.assertIn(f"k{ce.AXIS_EVENT_CAP + 4}", c._axis_seen)
+
     def test_cont_axis_halves_add_stack_only_on_weak_pf(self):
         c = coordinator()
         self.assertEqual(c.add_stack_cap(6, 1.5), 6)

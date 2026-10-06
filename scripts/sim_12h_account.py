@@ -57,7 +57,25 @@ PULSE = os.path.join(ROOT, "server", "pulse")
 BAR = 60
 COST_REASONS = ("sl", "tp", "time", "scratch+")
 IND_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
-AXIS_WINDOWS = {"prev": 12, "last": 4, "cont": 8, "pause": 8}  # overlay axis*MaxWindow
+AXIS_NAMES = ("prev", "last", "cont", "pause")
+AXIS_WINDOWS = AXIS_NAMES  # legacy name: iterated as the axis list
+
+
+def axis_children(ov: Optional[Dict[str, Any]] = None) -> List[Tuple[str, int]]:
+    """(axis, count) children the engine evaluates: coord_engine.AXIS_SPECS
+    counts from min up to the overlay's clamped max window, enabled axes only."""
+    _engine_path()
+    from coord_engine import AXIS_SPECS, clamp_window
+    ov = ov or {}
+    out: List[Tuple[str, int]] = []
+    for axis in AXIS_NAMES:
+        cap = axis.capitalize()
+        if ov and ov.get(f"axis{cap}Enabled") is False:
+            continue
+        spec = AXIS_SPECS[axis]
+        top = clamp_window(axis, ov.get(f"axis{cap}MaxWindow", spec["default"]))
+        out.extend((axis, c) for c in range(int(spec["min"]), int(top) + 1, int(spec["step"])))
+    return out
 VST_CONTRACTS_URL = "https://open-api-vst.bingx.com/openApi/swap/v2/quote/contracts"
 
 
@@ -512,6 +530,24 @@ def clears_vec(v: np.ndarray, floor: float) -> np.ndarray:
     return (v + 1e-9 >= 1.0) & (v + 1e-9 >= floor)
 
 
+def stage_flags(ev, idx, gstart, need: int, windows: Tuple[int, int, int], floors: Dict[str, float]) -> Dict[str, np.ndarray]:
+    """SetBook stage chain on walk-forward evidence (one call per candidate chunk).
+
+    Base = PF over the last min(n, Base window) closes with n >= need
+    (last_n_cost_pf); Main / Real need their full last-N window. Each later
+    stage requires the earlier one (_stage_qualification / _real_metrics_ok).
+    """
+    base_n, main_n, real_n = windows
+    r30, ok30 = ev.partial_ratio(idx, gstart, base_n, need)
+    r5, ok5 = ev.ratio(idx, gstart, main_n)
+    r3, ok3 = ev.ratio(idx, gstart, real_n)
+    base_ok = ok30 & clears_vec(r30, floors["base"])
+    main_ok = base_ok & ok5 & clears_vec(r5, floors["main"])
+    real_ok = main_ok & ok3 & clears_vec(r3, floors["real"])
+    return dict(r30=r30, ok30=ok30, r5=r5, ok5=ok5, r3=r3, ok3=ok3,
+                base_ok=base_ok, main_ok=main_ok, real_ok=real_ok)
+
+
 class Evidence:
     """Sorted closes per group with O(log n) walk-forward lookups."""
 
@@ -526,6 +562,8 @@ class Evidence:
         del order
         r = (self.moves * 100.0 - cost_pct) / cost_pct
         self.cs = np.concatenate([[0.0], np.cumsum(r)])
+        # cumulative count of cost-net losing closes (axis pause streaks)
+        self.cl = np.concatenate([[0], np.cumsum(r < 0)]).astype(np.int64)
         del r
         self.key = self.group.astype(np.int64) * 1_000_000 + self.exit.astype(np.int64)
         self.ug, self.first = np.unique(self.group, return_index=True)
@@ -553,6 +591,24 @@ class Evidence:
     def window_ratio(self, idx, gstart, skip, n):
         """Ratio of closes (idx-skip-n, idx-skip]; axis 'prev' window."""
         return _rolling_ratio(self.cs, idx - skip, gstart, n)
+
+    def partial_ratio(self, idx, gstart, n, min_n):
+        """coord_engine axis tape: the last min(n, available) closes, at least ``min_n``."""
+        cnt = np.where(idx >= gstart, idx - gstart + 1, 0)
+        take = np.minimum(cnt, n)
+        ok = (idx >= 0) & (take >= min_n) & (take > 0)
+        hi = np.where(ok, idx + 1, 0)
+        lo = np.where(ok, idx + 1 - take, 0)
+        mean = (self.cs[hi] - self.cs[lo]) / np.where(ok, take, 1)
+        return np.round(1.0 + 0.1 * mean, 4), ok
+
+    def all_losses(self, idx, gstart, n):
+        """The last ``n`` closes are all cost-net losses (coord_engine pause)."""
+        cnt = np.where(idx >= gstart, idx - gstart + 1, 0)
+        full = (idx >= 0) & (cnt >= n)
+        hi = np.where(full, idx + 1, 0)
+        lo = np.where(full, idx + 1 - n, 0)
+        return full & ((self.cl[hi] - self.cl[lo]) >= n)
 
 
 def load_cache(cache: str, symbols: Sequence[str]) -> Dict[str, Any]:
@@ -670,7 +726,8 @@ def ddt_max_s_fast(t, sym, moves, cost_frac: float) -> float:
 
 
 def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: bool, ddt_cache: Dict,
-                     chunk: int = 2_000_000, drop_core: bool = True) -> Dict[str, Any]:
+                     chunk: int = 2_000_000, drop_core: bool = True,
+                     children: Optional[List[Tuple[str, int]]] = None) -> Dict[str, Any]:
     """Core Set lots eligible in [sim_start, sim_end), with walk-forward gate results."""
     _engine_path()
     from set_engine import drawdown_time_by_symbol
@@ -708,21 +765,22 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
     out = {k: np.zeros(m, dtype=bool) for k in ("base_ok", "main_ok", "real_ok", "micro_ok", "dd_ok", "admitted")}
     out["r30"] = np.full(m, np.nan)
     out["cnt"] = np.zeros(m, dtype=np.int32)
-    axes = {a: np.zeros(m, dtype=bool) for a in AXIS_WINDOWS}
+    children = list(children if children is not None else axis_children())
+    # per-axis summary (any child of that axis qualifies) + one mask per axis:count
+    axes = {a: np.zeros(m, dtype=bool) for a in AXIS_NAMES}
+    axes.update({f"{a}:{c}": np.zeros(m, dtype=bool) for a, c in children})
     g_all = cands["uid"].astype(np.int64) * 2 + (cands["side"] > 0)
     for a0 in range(0, m, chunk):
         a1 = min(m, a0 + chunk)
         g = g_all[a0:a1]
         idx, gstart = ev.lookup(g, cands["entry"][a0:a1])
-        r30, ok30 = ev.ratio(idx, gstart, base_n)
-        r5, ok5 = ev.ratio(idx, gstart, main_n)
-        r3, ok3 = ev.ratio(idx, gstart, real_n)
+        fl = stage_flags(ev, idx, gstart, need, (base_n, main_n, real_n), floors)
+        r30, ok30, r5, ok5, r3, ok3 = fl["r30"], fl["ok30"], fl["r5"], fl["ok5"], fl["r3"], fl["ok3"]
         cnt = np.where(idx >= 0, idx - gstart + 1, 0)
-        base_ok = (cnt >= need) & ok30 & clears_vec(r30, floors["base"])
-        main_ok = base_ok & ok5 & clears_vec(r5, floors["main"])
+        base_ok = fl["base_ok"]
         out["base_ok"][a0:a1] = base_ok
-        out["main_ok"][a0:a1] = main_ok
-        out["real_ok"][a0:a1] = main_ok & ok3 & clears_vec(r3, floors["real"])
+        out["main_ok"][a0:a1] = fl["main_ok"]
+        out["real_ok"][a0:a1] = fl["real_ok"]
         if micro_on:
             # Micro tier (set_engine._stage_qualification): positive at the
             # Micro floor but below the shared floor; strict lanes also need
@@ -733,11 +791,20 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
             out["micro_ok"][a0:a1] = micro_ok
         out["r30"][a0:a1] = np.where(ok30, r30, np.nan)
         out["cnt"][a0:a1] = cnt
-        # coordination axes (coord_engine.axis_variants on the parent's closed tape);
-        # hist rows carry no USDT 'pnl', so coord_engine's pause never trips on them
-        for axis, w in AXIS_WINDOWS.items():
-            rr, ok = (ev.window_ratio(idx, gstart, w, w) if axis == "prev" else ev.ratio(idx, gstart, w))
-            axes[axis][a0:a1] = ok & clears_vec(rr, floors["base"])
+        # coordination axes = coord_engine.axis_variants on the parent's own
+        # direction tape: prev = the window before the last c closes (needs 2c),
+        # last/cont/pause = the last min(c, available) closes (>= min(3, c)),
+        # pause also off while the last c closes are all cost-net losses.
+        for axis, c in children:
+            if axis == "prev":
+                rr, ok = ev.window_ratio(idx, gstart, c, c)
+            else:
+                rr, ok = ev.partial_ratio(idx, gstart, c, min(3, c))
+            q = ok & clears_vec(rr, floors["base"])
+            if axis == "pause":
+                q &= ~ev.all_losses(idx, gstart, c)
+            axes[f"{axis}:{c}"][a0:a1] = q
+            axes[axis][a0:a1] |= q
     from position_cost import POSITION_COST_PCT_DEFAULT, cost_as_frac
     dd_cost_frac = cost_as_frac(POSITION_COST_PCT_DEFAULT)
     # DD-time gate: engine drawdown_time_by_symbol on the Set x side tape over
@@ -804,9 +871,9 @@ def kind_gate(caches, symbols, book, sim_start, sim_end):
         for si, sd in enumerate((-1, 1)):
             gg = np.full(len(bars), k * 2 + (sd > 0))
             idx, gs = ev.lookup(gg, bars)
-            r, ok = ev.ratio(idx, gs, book.pf_n)
-            cnt = np.where(idx >= 0, idx - gs + 1, 0)
-            table[k, si] = (cnt >= need) & ok & clears_vec(r, float(book.min_pf))
+            # SetBook.ind_stats: last-pf_n PF over the available closes, n >= need
+            r, ok = ev.partial_ratio(idx, gs, book.pf_n, need)
+            table[k, si] = ok & clears_vec(r, float(book.min_pf))
     return table
 
 
@@ -1953,7 +2020,8 @@ def main(argv=None) -> int:
     # ---- Stage B ----
     t1 = time.time()
     ddt_cache: Dict = {}
-    cands = build_candidates(caches, catalog, symbols, sim_start, sim_end, book, True, ddt_cache)
+    children = axis_children(ov)
+    cands = build_candidates(caches, catalog, symbols, sim_start, sim_end, book, True, ddt_cache, children=children)
     ktable = kind_gate(caches, symbols, book, sim_start, sim_end)
     strat_g = strat_lots(caches, symbols, book, sim_start, sim_end, True)
     strat_u = strat_lots(caches, symbols, book, sim_start, sim_end, False)
@@ -1994,8 +2062,13 @@ def main(argv=None) -> int:
     trade_level["per distinct signal · admitted (top in-sample PF per signal)"] = per_signal_metrics(cands, cands["admitted"], cost_pct)
     trade_level["per distinct signal · Base+Main+Real"] = per_signal_metrics(cands, cands["real_ok"], cost_pct)
     trade_level["per distinct signal · unfiltered"] = per_signal_metrics(cands, np.ones(len(cands["uid"]), bool), cost_pct)
-    for a in AXIS_WINDOWS:
+    for a in AXIS_NAMES:
         trade_level[f"admitted & axis {a} child qualifies"] = tape_metrics(cands, catalog, cands["admitted"] & cands["axes"][a], cost_pct)
+    # one row per axis child (axis:count), trade level and per distinct signal
+    for a, c in children:
+        mask = cands["admitted"] & cands["axes"][f"{a}:{c}"]
+        trade_level[f"admitted & axis {a}:{c} qualifies"] = tape_metrics(cands, catalog, mask, cost_pct)
+        trade_level[f"per distinct signal · admitted & axis {a}:{c}"] = per_signal_metrics(cands, mask, cost_pct)
     def lane_metrics(rows):
         mv = np.array([r["pnl_pct"] for r in rows], dtype=float)
         if not len(mv):
@@ -2080,9 +2153,11 @@ ASSUMPTIONS_TEMPLATE = [
     "last-{base} >= {floor}). Live-negative deactivation (last 25 own executed closes net < 0) blocks a Set x side.",
     "Block lanes use score_block_main Real-overall last-50 (n < 50 = valid, engine rule; n >= 50 needs is_positive_pf and floor); "
     "DCA lanes use DcaBook.score (last-15 PF >= floor, last-25 avgR >= 0). Both need an open executed Set lot on the same symbol x direction.",
-    "Coordination axes prev/last/cont/pause are DISABLED in the deployed profile and the replay emits no axis-tagged rows; per-axis columns are "
-    "diagnostics computed like coord_engine.axis_variants at the overlay max windows (prev 12 = closes [-24:-12], last 4, cont 8, pause 8; "
-    "pause never trips on replay rows because they carry no USDT pnl, exactly as in coord_engine).",
+    "Coordination axes prev/last/cont/pause are diagnostics (as live: children never place, gate or size orders). Every child "
+    "axis:count from coord_engine.AXIS_SPECS up to the overlay max window is evaluated per Set x direction like "
+    "coord_engine.axis_variants: prev = the c closes before the last c (needs 2c), last/cont/pause = the last min(c, available) "
+    "closes (>= min(3, c)), PF >= the Base floor; pause is off while the last c closes are all cost-net losses. Per-axis columns "
+    "mean 'any child of that axis qualifies'.",
     "SIZING: pulse_trader.Pulse.size_qty/sized_notional/raise_to_min_qty/min_order_qty/leverage_for called on a stub: targetNotional 2.15 x "
     "volumeFactor 1 x vol1h factor x Coordinator.size_mult(open lots) raised to the venue minimum (tradeMinQuantity / tradeMinUSDT, step "
     "rounding) from the cached public BingX VST contracts endpoint. Block extra = parent x block ratio raised to the venue minimum.",

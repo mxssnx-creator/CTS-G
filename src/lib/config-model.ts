@@ -124,6 +124,26 @@ export const POSITIVE_PF = 1.15;
 // separate "positive Set" predicate and the Test Historic floor.
 export const EVAL_MIN_PF = 1.1;
 export const INTERN_PF = 1.0;
+/**
+ * Mirrors coord_engine.AXIS_SPECS: every relative count from min up to the
+ * configured max window (step 1, the finest grid) is one axis child per Base
+ * parent and direction.
+ */
+export const AXIS_SPECS = {
+  prev: { min: 4, max: 12, step: 1, default: 12 },
+  last: { min: 1, max: 4, step: 1, default: 4 },
+  cont: { min: 1, max: 8, step: 1, default: 8 },
+  pause: { min: 1, max: 8, step: 1, default: 8 },
+} as const;
+export type AxisName = keyof typeof AXIS_SPECS;
+/** Engine clamp_window: clamp to the axis range, then snap down onto its step grid. */
+export function clampAxisWindow(axis: AxisName, value: unknown): number {
+  const spec = AXIS_SPECS[axis];
+  const parsed = Math.trunc(Number(value));
+  const n = Number.isFinite(parsed) ? parsed : spec.default;
+  const clamped = Math.max(spec.min, Math.min(spec.max, n));
+  return spec.min + Math.floor((clamped - spec.min) / spec.step) * spec.step;
+}
 export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
 export const SL_MIN_PCT = 0.4;
@@ -540,13 +560,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaDeactN: 25,
   symbols: ["*"],
   axisPrevEnabled: true,
-  axisPrevMaxWindow: 12,
+  axisPrevMaxWindow: AXIS_SPECS.prev.default,
   axisLastEnabled: true,
-  axisLastMaxWindow: 4,
+  axisLastMaxWindow: AXIS_SPECS.last.default,
   axisContEnabled: true,
-  axisContMaxWindow: 8,
+  axisContMaxWindow: AXIS_SPECS.cont.default,
   axisPauseEnabled: true,
-  axisPauseMaxWindow: 8,
+  axisPauseMaxWindow: AXIS_SPECS.pause.default,
   prevPosWindow: 25,
   prevPosMinCount: 5,
   minPf: EVAL_MIN_PF,
@@ -1256,6 +1276,10 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     out[key] = normalizePf(out.minPf, EVAL_MIN_PF);
   }
+  out.axisPrevMaxWindow = clampAxisWindow("prev", out.axisPrevMaxWindow);
+  out.axisLastMaxWindow = clampAxisWindow("last", out.axisLastMaxWindow);
+  out.axisContMaxWindow = clampAxisWindow("cont", out.axisContMaxWindow);
+  out.axisPauseMaxWindow = clampAxisWindow("pause", out.axisPauseMaxWindow);
   out.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.maxDdTimeS, 64800) / 600) * 600));
   out.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.setMaxDdTimeS, 64800) / 600) * 600));
   out.modules = {

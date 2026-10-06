@@ -270,5 +270,84 @@ class ChartTest(unittest.TestCase):
         self.assertEqual(out.count("<svg"), 11)
 
 
+
+class AxisChildrenTest(unittest.TestCase):
+    """Sim axis children follow coord_engine.axis_variants rules per Set x side."""
+
+    def ev(self, moves):
+        n = len(moves)
+        return sim.Evidence(np.zeros(n, dtype=np.int64), np.arange(n), np.array(moves, float), 0.1)
+
+    def test_children_cover_every_count_of_the_specs(self):
+        kids = sim.axis_children({})
+        self.assertEqual(len(kids), 29)
+        self.assertEqual([c for a, c in kids if a == "prev"], list(range(4, 13)))
+        off = sim.axis_children({"axisPauseEnabled": False, "axisLastMaxWindow": 2})
+        self.assertNotIn("pause", {a for a, _ in off})
+        self.assertEqual([c for a, c in off if a == "last"], [1, 2])
+
+    def test_partial_window_needs_min_three_and_pause_streak(self):
+        win, loss = 0.003, -0.003
+        ev = self.ev([win] * 6 + [loss] * 4)
+        idx, gs = ev.lookup(np.array([0]), np.array([10]))
+        r, ok = ev.partial_ratio(idx, gs, 8, 3)
+        self.assertTrue(ok[0])
+        want = last_n_cost_pf([{"t": i, "pnl_pct": m} for i, m in enumerate([win] * 6 + [loss] * 4)], 8, 0.1)["ratio"]
+        self.assertAlmostEqual(float(r[0]), round(want, 4), places=3)
+        self.assertTrue(bool(ev.all_losses(idx, gs, 4)[0]))
+        self.assertFalse(bool(ev.all_losses(idx, gs, 5)[0]))
+        short = self.ev([win, win])
+        i2, g2 = short.lookup(np.array([0]), np.array([2]))
+        self.assertFalse(bool(short.partial_ratio(i2, g2, 8, 3)[1][0]))
+        self.assertTrue(bool(short.partial_ratio(i2, g2, 2, 2)[1][0]))
+
+
+class BaseWindowParityTest(unittest.TestCase):
+    """The sim Base check equals SetBook: PF over the last min(n, window) closes, n >= need."""
+
+    def test_base_passes_with_need_closes_before_the_window_is_full(self):
+        ev = sim.Evidence(np.zeros(35, dtype=np.int64), np.arange(35), np.full(35, 0.003), 0.1)
+        idx, gs = ev.lookup(np.array([0]), np.array([35]))
+        full_r, full_ok = ev.ratio(idx, gs, 50)
+        part_r, part_ok = ev.partial_ratio(idx, gs, 50, 30)
+        self.assertFalse(bool(full_ok[0]))   # the old full-window rule rejected n=35
+        self.assertTrue(bool(part_ok[0]))    # engine: n=35 >= need 30, PF over 35 closes
+        want = last_n_cost_pf([{"t": i, "pnl_pct": 0.003} for i in range(35)], 50, 0.1)
+        self.assertEqual(want["count"], 35)
+        self.assertAlmostEqual(float(part_r[0]), round(want["ratio"], 4), places=3)
+        few_r, few_ok = ev.partial_ratio(*ev.lookup(np.array([0]), np.array([20])), 50, 30)
+        self.assertFalse(bool(few_ok[0]))    # below need
+
+
+class StageParityWithEngineTest(unittest.TestCase):
+    """sim.stage_flags == SetBook side gates on identical tapes (Base 50 / Main 30 / Real 30, PF 1.10)."""
+
+    def test_stage_flags_match_setbook_on_random_tapes(self):
+        sim._engine_path()
+        from connection_profile import processing_profile
+        from set_engine import SetBook
+        book = SetBook()
+        book.load({**processing_profile(), "stratTrailing": False, "slToTpRatios": [0.6], "setMinStep": 8, "setStepMax": 8})
+        st = next(x for x in book.by_idx if x.kind == "base")
+        rng = np.random.default_rng(7)
+        checked = 0
+        for n in (20, 29, 30, 35, 49, 50, 55, 80):
+            for p_win in (0.35, 0.5, 0.62, 0.75):
+                wins = rng.random(n) < p_win
+                moves = np.where(wins, 0.004, -0.003)
+                st.hist = [{"t": 1_000_000 + i * 60, "pnl_pct": float(m), "symbol": "T", "side": "LONG",
+                            "hold_s": 60, "reason": "tp" if m > 0 else "sl"} for i, m in enumerate(moves)]
+                st.live = []
+                book._score_one(st)
+                view = st.by_side["LONG"]
+                ev = sim.Evidence(np.zeros(n, dtype=np.int64), np.arange(n), moves.astype(float), float(book.cost_pct))
+                idx, gs = ev.lookup(np.array([0]), np.array([n]))
+                fl = sim.stage_flags(ev, idx, gs, int(book.eval_need()), book._stage_window_ns(),
+                                     {k: float(v) for k, v in book.stage_min_pf.items()})
+                self.assertEqual(bool(fl["base_ok"][0]), bool(book._base_metrics_ok(view)), (n, p_win, view.get("base_pf")))
+                self.assertEqual(bool(fl["real_ok"][0]), bool(book._real_metrics_ok(view)), (n, p_win, view.get("main_pf"), view.get("real_pf")))
+                checked += 1
+        self.assertEqual(checked, 32)
+
 if __name__ == "__main__":
     unittest.main()
