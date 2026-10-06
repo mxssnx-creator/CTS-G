@@ -953,6 +953,15 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov["setMinStep"] = int(opt.get("minStep") or 1)
     ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 30))
     ov["stratTrailing"] = bool(opt.get("trailing", True))
+    # The Calc panel's own pack / strategy / kind toggles win over the desk
+    # overlay merged above (only keys the panel actually sent).
+    for key in [k for k in opt if k.startswith("indType")] + ["stratIndications", "stratGeneral", "stratBlock", "stratDca"]:
+        if key in opt and opt.get(key) is not None:
+            ov[key] = bool(opt.get(key))
+    if opt.get("stratBlock") is not None:
+        ov["blockEnabled"] = bool(opt.get("stratBlock"))
+    if opt.get("stratDca") is not None:
+        ov["dcaEnabled"] = bool(opt.get("stratDca"))
     return ov
 
 
@@ -2638,7 +2647,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 by_sym = sym_fut.result()
                 by_dir = dir_fut.result()
                 by_strat = strat_fut.result()
-        combo = combo_evaluate(book, min_pf=float(getattr(book, "min_pf", 1.1) or 1.1), cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
+        need = book.eval_need() if callable(getattr(book, "eval_need", None)) else 8
+        combo = combo_evaluate(book, min_pf=float(getattr(book, "min_pf", 1.1) or 1.1), cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1),
+                               pf_n=int(getattr(book, "pf_n", 30) or 30), min_n=int(need))
         by_step = step_rollup(book)
         rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
         listings = catalog_listings(book, ranked, symbols)

@@ -330,7 +330,9 @@ export function histTestAssignment(
   const ready = Boolean(job.ready) || job.phase === "ready";
   if (!ready || histTestIsRunning(job.phase)) return null;
 
-  const rawSymbols = job.internSymbols?.length ? job.internSymbols : job.positive?.length ? job.positive : job.symbols || [];
+  // Only what this run validated. internSymbols is the engine's padded intern
+  // pool (liquid majors, most never evaluated), never an assignment.
+  const rawSymbols = Array.isArray(job.positive) ? job.positive : job.symbols || [];
   const symbols: string[] = [];
   const seenSymbols = new Set<string>();
   for (const raw of rawSymbols) {
@@ -351,8 +353,12 @@ export function histTestAssignment(
   };
   for (const row of job.successfulConfigs || []) {
     if (!row || row.validated === false) continue;
+    const id = String(row.setId || row.config || "").trim();
+    // Set ids carry a pack prefix ("indications:1m:…"); a bare strategy row
+    // such as "block" is a combo cell, not a config the engine can run.
+    if (!id.includes(":")) continue;
     addConfig({
-      id: String(row.setId || row.config || "").trim(),
+      id,
       indication: row.indication,
       strategy: row.strategy,
       pf: row.pf,

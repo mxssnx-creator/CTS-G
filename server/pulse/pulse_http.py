@@ -2976,8 +2976,9 @@ class Handler(SimpleHTTPRequestHandler):
                 intern_syms = [str(s).strip().upper() for s in (view.get("internSymbols") or []) if str(s or "").strip()]
                 intern_keys = {s.upper() for s in intern_syms}
                 if intern_syms:
+                    # internSymbols is the engine's intern pool; "symbols" and
+                    # "positive" stay what this run evaluated and validated.
                     blob["internSymbols"] = intern_syms
-                    blob["symbols"] = intern_syms
                     raw_pos = blob.get("positive") or []
                     if isinstance(raw_pos, list):
                         kept = []
@@ -3274,7 +3275,13 @@ class Handler(SimpleHTTPRequestHandler):
                 elif action == "resume":
                     job = resume_test(body if isinstance(body, dict) else {})
                 else:
-                    job = start_test(body if isinstance(body, dict) else {})
+                    start_body = dict(body) if isinstance(body, dict) else {}
+                    if not start_body.get("connection") and qs(self.path).get("conn"):
+                        start_body["connection"] = conn
+                    job = start_test(start_body)
+                    if job.get("ok") is False:
+                        self._json({**job, "independent": True, "shared": False}, 200)
+                        return
                 job["ok"] = True
                 job["running"] = job_is_running(job)
                 job["paused"] = job_is_paused(job)

@@ -8654,11 +8654,15 @@ class Pulse:
                 apply = getattr(self.sets, "apply_hist_test_gate", None)
                 if callable(apply):
                     ids = []
+                    job = {}
                     try:
-                        ids = hist_test_mod.collect_validated_ids(hist_test_mod.read_job())
+                        job = hist_test_mod.read_job()
+                        ids = hist_test_mod.collect_validated_ids(job)
                     except Exception:
                         ids = []
-                    apply(ids)
+                    # A job for another catalog / connection (no id exists in
+                    # this book) or a synthetic job never closes this book.
+                    apply(hist_test_mod.gate_ids_for_book(self.sets, ids, job))
                 self._sync_hist_test_lane()
             else:
                 apply = getattr(self.sets, "apply_hist_test_gate", None)

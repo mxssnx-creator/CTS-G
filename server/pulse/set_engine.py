@@ -5793,7 +5793,9 @@ class SetBook:
     def indication_ok(self, kind: str, side: Optional[str] = None, config: Optional[str] = None) -> bool:
         if not (self.enabled and self.use_historic_gate and self.strict_gate):
             return True
-        if not getattr(self.progress, "ready", False):
+        # Not ready (cold replay, or a Test Historic run in flight): only a book
+        # with no indication tape at all defers. Evidence that exists decides.
+        if not getattr(self.progress, "ready", False) and not (self.ind_hist or self.ind_live):
             return True
         k = str(kind or "").strip()
         if k and config:

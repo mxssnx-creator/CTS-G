@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import sys
 import threading
@@ -82,7 +83,13 @@ SUMMARY_PATH = os.path.join(OUT_DIR, "summary.json")
 PID_PATH = os.path.join(OUT_DIR, "hist-test.pid")
 LAST_READY_PATH = os.path.join(OUT_DIR, "last-ready.json")
 VALIDATED_IDS_PATH = os.path.join(OUT_DIR, "validated-ids.json")
+# The files the live engines read. A synthetic run must never write them.
+_LIVE_OUTPUTS = (PUBLIC_JSON, SUMMARY_PATH, LAST_READY_PATH, VALIDATED_IDS_PATH)
 VALIDATED_IDS_CAP = 8192
+# Per-direction replay evidence carried with each validated id, so the live
+# book seeds a direction only from that direction's own Base/Main/Real windows.
+SIDE_EVIDENCE_KEYS = ("last15_n", "last15_ratio", "n", "base_n", "base_pf", "main_n", "main_pf",
+                      "real_n", "real_pf", "max_dd_s", "ddOk")
 PUBLIC_VALIDATED_IDS_CAP = 400
 STOP_PATH = os.path.join(OUT_DIR, "STOP")
 PAUSE_PATH = os.path.join(OUT_DIR, "PAUSE")
@@ -136,6 +143,30 @@ def invalidate_job_cache() -> None:
 
 def _pid_file() -> str:
     return os.path.join(OUT_DIR, "hist-test.pid")
+
+
+def shares_live_outputs() -> bool:
+    """True while this process publishes into the files the live engines read."""
+    current = (PUBLIC_JSON, SUMMARY_PATH, LAST_READY_PATH, VALIDATED_IDS_PATH)
+    return any(os.path.abspath(a) == os.path.abspath(b) for a, b in zip(current, _LIVE_OUTPUTS))
+
+
+def isolate_outputs(directory: str) -> str:
+    """Point every job / last-ready / validated-ids / latch path at ``directory``.
+
+    Used by the CLI ``--synth`` run (single process) so synthetic results never
+    reach the live allow-list or the desk's job file.
+    """
+    global OUT_DIR, PUBLIC_JSON, SUMMARY_PATH, PUBLIC_SWEEP, LAST_READY_PATH, VALIDATED_IDS_PATH
+    os.makedirs(directory, exist_ok=True)
+    OUT_DIR = directory
+    PUBLIC_JSON = os.path.join(directory, "hist-test.json")
+    SUMMARY_PATH = os.path.join(directory, "summary.json")
+    PUBLIC_SWEEP = os.path.join(directory, "step-sweep.json")
+    LAST_READY_PATH = os.path.join(directory, "last-ready.json")
+    VALIDATED_IDS_PATH = os.path.join(directory, "validated-ids.json")
+    invalidate_job_cache()
+    return directory
 
 _LOCK = threading.Lock()
 _STOP = False
@@ -304,6 +335,26 @@ def persist_validated_ids(ids: List[str], *, replace: bool = False, evidence: Op
         })
     except Exception:
         pass
+
+
+def side_evidence(st: Any) -> Dict[str, Dict[str, Any]]:
+    """Each direction's own replay windows ({LONG: {...}, SHORT: {...}})."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for direction, view in (getattr(st, "by_side", None) or {}).items():
+        if direction not in ("LONG", "SHORT") or not isinstance(view, dict):
+            continue
+        row: Dict[str, Any] = {}
+        for key in SIDE_EVIDENCE_KEYS:
+            value = view.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                row[key] = value
+            elif isinstance(value, (int, float)) and math.isfinite(float(value)):
+                row[key] = int(value) if key.endswith("_n") or key == "n" else round(float(value), 6)
+        if row:
+            out[direction] = row
+    return out
 
 
 def read_persisted_validated_evidence() -> Dict[str, Dict[str, Any]]:
@@ -1079,6 +1130,76 @@ def off_progress_view() -> Dict[str, Any]:
     }
 
 
+def gate_ids_for_book(book: Any, ids: Sequence[str], job: Optional[Dict[str, Any]] = None) -> Optional[List[str]]:
+    """The allow-list this book may use, or None for no Test Historic gate.
+
+    A synthetic job never gates a live book. A job whose ids name none of this
+    book's Sets (another connection's catalog, or a changed step / SL:TP grid)
+    must not close every entry: the book keeps its own Base/Main/Real gates.
+    """
+    blob = job if isinstance(job, dict) else {}
+    if str(blob.get("source") or "") == "synth":
+        return None
+    out = [str(sid) for sid in (ids or []) if str(sid or "").strip()]
+    catalog = getattr(book, "sets", None) or {}
+    if out and catalog and not any(sid in catalog for sid in out):
+        return None
+    return out
+
+
+def _seed_gate_ok(book: Any, view: Dict[str, Any], strict: bool) -> bool:
+    gate = getattr(book, "_real_metrics_ok" if strict else "_base_metrics_ok", None)
+    try:
+        return bool(gate(view)) if callable(gate) else False
+    except Exception:
+        return False
+
+
+def _seed_sides(book: Any, st: Any, sides: Dict[str, Any], seed_dirs: Sequence[str], revoked: Any,
+                own_sides: Dict[str, Any], ledger: Dict[str, Any]) -> None:
+    """Seed each thin direction only from that direction's own replay windows.
+
+    The replayed Base/Main/Real/DDT evidence is re-checked against this book's
+    floors, stage windows and DDT cap. A direction the replay never traded
+    stays closed: it never inherits the other direction's (or a blended) PF.
+    """
+    strict = bool(getattr(book, "strict_gate", True))
+    seeded_ok = False
+    seeded_base = False
+    for direction in seed_dirs:
+        ev = {k: v for k, v in (own_sides.get(direction) or {}).items() if k in SIDE_EVIDENCE_KEYS and v is not None}
+        if int(ev.get("last15_n") or 0) <= 0:
+            sides[direction] = {**(sides.get(direction) or {}), "validated": False, "active": False,
+                                "deact_reason": "hist-test no side evidence"}
+            continue
+        ok = _seed_gate_ok(book, ev, strict)
+        base_ok = ok or _seed_gate_ok(book, ev, False)
+        micro = getattr(book, "_micro_metrics_ok", None)
+        try:
+            micro_ok = (not ok) and callable(micro) and bool(micro(ev))
+        except Exception:
+            micro_ok = False
+        seeded_ok = seeded_ok or ok
+        seeded_base = seeded_base or base_ok
+        # A Micro-tier direction keeps the soft "unproven" reason so the live
+        # Micro gate (venue-minimum size) decides it, like any intern Set.
+        reason = "" if ok else ("unproven" if micro_ok else "hist-test intern")
+        sides[direction] = {**(sides.get(direction) or {}), **ev, "validated": ok, "active": ok,
+                            "deact_reason": reason, "source": "hist-test"}
+    own_ok = any(bool((sides.get(d) or {}).get("active")) for d in ("LONG", "SHORT")
+                 if d not in seed_dirs and d not in revoked)
+    if seeded_ok and strict:
+        ledger.update(base=True, main=True, real=True)
+    elif seeded_base:
+        ledger["base"] = True
+    st.stage_ledger = ledger
+    st.by_side = sides
+    active = bool(seeded_ok or own_ok)
+    st.active = active
+    st.deact_reason = "" if active else (st.deact_reason or "hist-test intern")
+    st.processing_reason = "hist-test validated" if active else "hist-test intern"
+
+
 def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> List[str]:
     """Push Test Historic validated configs onto a live SetBook without a full catalog replay.
 
@@ -1086,10 +1207,13 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
     engine progress does not reopen the full catalog while Test Historic is on.
     """
     blob = job if isinstance(job, dict) else read_job()
-    ids = collect_validated_ids(blob)
+    gate = gate_ids_for_book(book, collect_validated_ids(blob), blob)
     apply = getattr(book, "apply_hist_test_gate", None)
     if callable(apply):
-        apply(ids)
+        apply(gate)
+    if gate is None:
+        return []
+    ids = gate
     by_id: Dict[str, Dict[str, Any]] = {}
     for row in blob.get("successfulConfigs") or []:
         if not isinstance(row, dict):
@@ -1131,6 +1255,8 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
         by_id.setdefault(sid, {"setId": sid, "validated": True, **row})
     for sid in ids:
         by_id.setdefault(sid, {"setId": sid, "validated": True, "pf": 0, "n": 0, "evalN": 0})
+    side_ev = {sid: dict(r["bySide"]) for sid, r in read_persisted_validated_evidence().items()
+               if isinstance(r.get("bySide"), dict) and r.get("bySide")}
     for st in getattr(book, "by_idx", None) or []:
         row = by_id.get(getattr(st, "id", ""))
         if not row:
@@ -1183,6 +1309,10 @@ def apply_scores_to_book(book: Any, job: Optional[Dict[str, Any]] = None) -> Lis
             if d not in revoked and int((sides.get(d) or {}).get("last15_n") or 0) < need
         ]
         ledger = dict(getattr(st, "stage_ledger", None) or {})
+        own_sides = side_ev.get(st.id) or (row.get("bySide") if isinstance(row.get("bySide"), dict) else {})
+        if own_sides:
+            _seed_sides(book, st, sides, seed_dirs, revoked, own_sides, ledger)
+            continue
         if proven and seed_dirs:
             ledger["base"] = True
             ledger["main"] = True
@@ -1363,9 +1493,8 @@ def _ready_snapshot(blob: Dict[str, Any]) -> Dict[str, Any]:
     persist_validated_ids(ids)
     stamped = _stamp_honesty(dict(blob), assigned_ids=ids)
     intern_syms = list(stamped.get("internSymbols") or [])
-    positive = [s for s in (blob.get("positive") or blob.get("symbols") or []) if str(s).upper() in _MAJOR_KEYS]
-    if not positive:
-        positive = intern_syms
+    raw_positive = [s for s in (blob.get("positive") or blob.get("symbols") or []) if str(s or "").strip()]
+    positive = [s for s in raw_positive if str(s).upper() in _MAJOR_KEYS] or raw_positive
     return {
         "phase": "ready",
         "ready": True,
@@ -1629,7 +1758,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "processedSetCount": n_ids,
         "processingCount": processing_n,
         "internSymbols": intern_syms,
-        "positive": intern_syms,
+        "positive": [s for s in symbols if str(s).upper() in _MAJOR_KEYS] or list(symbols),
         "selectedCoordinations": selected_coordinations(blob),
         "withWithout": blob.get("withWithout") or {},
         "comboMatrix": (blob.get("comboMatrix") or [])[:40] if isinstance(blob.get("comboMatrix"), list) else [],
@@ -1638,7 +1767,7 @@ def job_progress_view(job: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "combo": blob.get("combo") or {},
         "byIndication": _compact_stat_map(
             indication_calc_view(blob.get("byIndication") or blob.get("kinds") or {}, {"matrix": blob.get("comboMatrix") or [], "pfStats": blob.get("pfStats") or {}}, min_pf=_job_pf_floor(blob)),
-            16,
+            24,
         ),
         "byStrategy": _compact_stat_map(
             strategy_calc_view(blob.get("byStrategy") or {}, {"pfStats": blob.get("pfStats") or {}, "matrix": blob.get("comboMatrix") or []}, min_pf=_job_pf_floor(blob)),
@@ -1776,9 +1905,11 @@ def job_is_paused(job: Optional[Dict[str, Any]] = None) -> bool:
 
 
 # Desk settings that shape the Set catalog the live book trades (steps, SL:TP,
-# trailing grid, packs, indications, Block stack, costs). Test Historic replays
-# these so validated IDs exist live. Its own gates (PF floors, DDT, sample
-# windows, replay window) always come from test_overlay().
+# trailing grid, packs, indications, Block stack, costs, replay hold/exits).
+# Test Historic replays these so validated IDs exist live and score the same
+# tape. Its own gates (PF floors, DDT cap, replay window) always come from
+# test_overlay(); the stage windows follow the desk (DESK_STAGE_KEYS).
+_NEW_KINDS = ("Msi", "Vwap", "Retest", "Squeeze", "Sweep", "Rsi2", "Keltner", "Impulse")
 DESK_OVERLAY_KEYS = (
     "setMinStep", "setStepMax", "minStep", "minStepRange", "setStepAdapt", "trailingMinStep",
     "slToTpRatios", "slToTpMin", "slToTpMax", "slToTpStep", "slMinPct", "slMaxPct",
@@ -1793,6 +1924,17 @@ DESK_OVERLAY_KEYS = (
     "indMinStrength", "indMoveMinChange", "indMoveRange", "indRewardRisk", "indStopMaxPct",
     "indStopMinPct", "indTrendRanges", "activeMovePct", "activeOutbreakRanges", "activeVolatilityWeight",
     "volWeight", "noise", "positionCostPct", "positionCostSource", "setCostPct",
+    "setHistTimeBars", "setHonorTp", "exitTacticOn", "exitTacticBufferPct", "exitTacticMinGainPct",
+    "indMoveRanges", "indMsiMinGap", "indVwapDevZ", "indVwapVolMult", "indRetestTol", "indRetestMinBreak",
+    "indSqueezePctl", "indSweepWickAtr", "indRsi2Low", "indRsi2High", "indKeltnerMult",
+    "indImpulseSigma", "indImpulseVolMult", "actSweepMin", "actRsi2Min", "actKeltnerMin", "actImpulseMin",
+    *(f"indType{k}" for k in _NEW_KINDS),
+    *(f"ind{k}Ranges" for k in _NEW_KINDS),
+)
+# Stage windows: the live book re-checks replayed Base/Main/Real evidence on
+# these windows, so the replay must measure the same last-N closes.
+DESK_STAGE_KEYS = (
+    "baseEvalPosCount", "setPfWindow", "setMinSamples", "mainEvalPosCount", "realEvalPosCount", "setDdtWindow",
 )
 
 
@@ -2128,8 +2270,9 @@ def fill_positive(
                         assigned_ids.append(sid)
                 except Exception:
                     pass
-            if assigned_ids:
-                persist_validated_ids(assigned_ids)
+            # Progress only: the probe merges every evaluated tape, rejected
+            # symbols included, so these ids are not persisted as validated.
+            # The final replay over the positive symbols decides.
             if on_progress:
                 on_progress({
                     "phase": "evaluate",
@@ -2358,9 +2501,9 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
     tape_names = [str(s).strip().upper() for s in (job.get("positive") or job.get("symbols") or []) if str(s or "").strip()]
     if not tape_names:
         tape_names = [str(r.get("symbol") or "").upper() for r in (public_ranked or scored) if r.get("symbol")]
-    tape_names = [s for s in tape_names if s in _MAJOR_KEYS]
-    if not tape_names:
-        tape_names = intern_liquid_pool(None, None, cap=SYMBOL_CAP)
+    # Majors first (the intern book), but never pad with symbols the run did
+    # not evaluate: a run whose positives are all non-majors keeps them.
+    tape_names = [s for s in tape_names if s in _MAJOR_KEYS] or tape_names
     name_keys = {s.upper() for s in tape_names}
     by_sym_rows: List[Dict[str, Any]] = []
     for row in (job.get("bySymbol") or []):
@@ -2389,6 +2532,7 @@ def compact_job(job: Dict[str, Any], ranked: List[Dict[str, Any]], universe: Lis
         "paused": bool(job.get("paused")) or pause_requested(),
         "error": str(job.get("error") or ""),
         "source": str(job.get("source") or ""),
+        "connection": str(job.get("connection") or ""),
         "hours": hours,
         "minPf": min_pf,
         "positivePf": min_pf,
@@ -2526,6 +2670,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     step_lo = max(1, min(30, int(body.get("minStep") or body.get("stepLo") or STEP_LO)))
     step_hi = max(step_lo, min(30, int(body.get("stepMax") or body.get("stepHi") or STEP_HI)))
     synth = bool(body.get("synth"))
+    if synth and shares_live_outputs():
+        raise RuntimeError("synthetic Test Historic run would overwrite the live job; isolate_outputs() first")
     recalc_ids = [str(s).strip() for s in (body.get("recalcIds") or []) if str(s or "").strip()]
     if not recalc_ids:
         recalc_ids = [str(s).strip() for s in seed_recalc_prior().get("validatedIds") or [] if str(s or "").strip()] or read_persisted_validated_ids()
@@ -2535,7 +2681,7 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     recalc_only = use_recalc_only(body, recalc_ids, keep_symbols, target)
     overlay = test_overlay(hours, min_pf, step_lo, step_hi)
     user_ov = body.get("overlay") if isinstance(body.get("overlay"), dict) else {}
-    desk_keys = [k for k in DESK_OVERLAY_KEYS if k in user_ov]
+    desk_keys = [k for k in DESK_OVERLAY_KEYS + DESK_STAGE_KEYS if k in user_ov and user_ov[k] is not None]
     overlay.update({k: user_ov[k] for k in desk_keys})
     overlay["histTestRefreshHours"] = refresh_h
     try:
@@ -2805,7 +2951,8 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     by_sym = symbol_rollup(book)
     by_dir = direction_rollup(book)
     by_strat = strategy_rollup(book, strat=getattr(book, "strategy_hist", None))
-    combo = combo_evaluate(book, min_pf=min_pf, cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
+    combo = combo_evaluate(book, min_pf=min_pf, cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1),
+                           pf_n=int(getattr(book, "pf_n", 30) or 30), min_n=int(book.eval_need()))
     kinds = {}
     try:
         kinds = book.ind_gate_snapshot() if hasattr(book, "ind_gate_snapshot") else {}
@@ -2848,13 +2995,16 @@ def run_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         st = book.sets.get(sid)
         if st is not None and int(st.last15_n or 0) > 0:
             evidence[sid] = {"n": int(st.n or 0), "evalN": int(st.last15_n or 0),
-                             "pf": round(float(st.last15_ratio or 0), 4), "maxDdS": round(float(st.max_dd_s or 0), 1)}
+                             "pf": round(float(st.last15_ratio or 0), 4), "maxDdS": round(float(st.max_dd_s or 0), 1),
+                             "bySide": side_evidence(st)}
     persist_validated_ids(validated_ids, replace=bool(fresh_ids) and not recalc_only, evidence=evidence)
     job = {
         "phase": "ready",
         "ready": True,
         "error": getattr(prog, "error", "") or "",
         "source": "synth" if synth else "live",
+        # The desk connection whose overlay shaped this catalog (display / audit).
+        "connection": str(body.get("connection") or user_ov.get("connection") or ""),
         "hours": hours,
         "minPf": min_pf,
         "refreshHours": refresh_h,
@@ -2990,6 +3140,11 @@ def start_test(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             job["paused"] = False
             job["detail"] = "historic test stopping · click Start again"
             return publish(job)
+        if bool(body.get("synth")) and shares_live_outputs():
+            # Synthetic tapes would replace the live job and allow-list.
+            return {"ok": False, "phase": "error", "running": False, "paused": False, "ready": False,
+                    "error": "synthetic runs are CLI/test only (scripts/run_hist_test.py --synth)",
+                    "detail": "synthetic Test Historic runs never write the live job"}
         clear_stop()
         clear_pause()
         hours = clamp_hours(body.get("hours") or (body.get("overlay") or {}).get("histTestHours") or HOURS_DEFAULT)
@@ -3334,7 +3489,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         if token == "--synth":
             body["synth"] = True
+            isolate_outputs(os.path.join(ROOT, "reports", "hist-test-synth"))
             i += 1
+            continue
+        if token == "--body" and i + 1 < len(argv):
+            # Desk start body (overlay, hours, min PF, target) written by the dev server.
+            try:
+                with open(argv[i + 1], encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    body = {**loaded, **body}
+            except (OSError, ValueError):
+                pass
+            i += 2
             continue
         if token == "--self-test":
             result = self_test()

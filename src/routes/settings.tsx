@@ -546,6 +546,7 @@ function SettingsPage() {
       symbolCap: histTestTarget,
       overlay: {
         ...overlay,
+        connection: conn,
         histTestHours: hours,
         histTestMinPf: minPf,
         histTestRefreshHours: refreshHours,
@@ -566,7 +567,8 @@ function SettingsPage() {
   };
 
   const onApplyPositiveSymbols = () => {
-    const names = (histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
+    // The run's validated symbols only; internSymbols is the padded intern pool.
+    const names = (Array.isArray(histTestJob?.positive) ? histTestJob.positive : histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
     const majors = names.filter((s) => MAJOR_USDT.has(String(s).toUpperCase()));
     setOverlay((o) => {
       const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
@@ -3016,14 +3018,14 @@ function TestHistoricCard({
             histTestJob
               ? {
                   ...(histTestJob as HistTestLive),
-                  symbols: histTestJob.internSymbols || histTestJob.symbols || histTestJob.positive,
+                  symbols: histTestJob.positive || histTestJob.symbols || histTestJob.internSymbols,
                 }
               : null
           }
           enabled={enabled}
         />
         <p className="text-sm text-muted">
-          Replay intern majors on a {overlay.histTestHours}h tape. Last-15 proven configs (n≥8 and PF ≥ {overlay.histTestMinPf.toFixed(2)}) are validated. Intern extras never replace the 50 majors.
+          Replay intern majors on a {overlay.histTestHours}h tape with this connection's catalog and stage windows. A config is validated when its Base window (n≥{overlay.setMinSamples}) clears PF ≥ {overlay.histTestMinPf.toFixed(2)}; each direction is assigned only on its own evidence. Intern extras never replace the 50 majors.
         </p>
         <Grid>
           <Slider
@@ -3171,7 +3173,7 @@ function TestHistoricCard({
               </tr>
             </thead>
             <tbody>
-              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 12).map(([name, row]) => (
+              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 18).map(([name, row]) => (
                 <tr key={name} className="border-t border-border/60">
                   <td className="py-1.5">{name}</td>
                   <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
