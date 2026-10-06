@@ -412,6 +412,30 @@ def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str,
     return result
 
 
+def live_evidence(rows: Sequence[Any]) -> list[Dict[str, Any]]:
+    """Live exchange results only: confirmed, complete round trips of our own
+    positions (one sample per position, partial legs aggregated)."""
+    return completed_roundtrips(rows)
+
+
+def live_first_window(live: Sequence[Any], replay: Sequence[Any], n: int) -> tuple[list, str]:
+    """Evaluation window of ``n`` positions decided by live exchange results.
+
+    With >= n live rows the window is live only. Below that, live rows stay
+    the newest entries and the newest replay rows only fill the missing
+    slots, so replay never pushes a live result out of the window.
+    Returns (window rows in chronological order, "live" | "bootstrap")."""
+    n = max(1, int(n))
+    def stamp(r: Any) -> float:
+        return finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0))
+    lv = sorted(list(live), key=stamp)
+    if len(lv) >= n:
+        return lv[-n:], "live"
+    rp = sorted(list(replay), key=stamp)
+    fill = rp[-(n - len(lv)):] if n > len(lv) else []
+    return list(fill) + lv, ("live" if lv and not fill else "bootstrap")
+
+
 def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
     """Aggregate confirmed close legs; partial fills are not extra samples."""
     groups: Dict[tuple, list] = {}

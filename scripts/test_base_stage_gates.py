@@ -40,7 +40,7 @@ class BaseStageGateTests(unittest.TestCase):
     def feed(self, b, st, seq):
         t0 = time.time() - 500000
         for i, (pp, side) in enumerate(seq, 1):
-            b.on_live_close({"t": t0 + i * 300, "symbol": "X-USDT", "side": side, "pnl": 1.0,
+            b.on_live_close({"exchange_confirmed": True, "t": t0 + i * 300, "symbol": "X-USDT", "side": side, "pnl": 1.0,
                              "pnl_pct": pp, "hold_s": 60, "reason": "tp", "set_id": st.id,
                              "strategy": "core", "client_id": f"c{i}", "close_fill_id": f"f{i}"})
 

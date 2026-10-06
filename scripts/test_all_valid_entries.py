@@ -422,7 +422,7 @@ class AllValidEntries(unittest.TestCase):
         self.assertEqual([state.id], [row.id for row in book.entry_sets("general", "LONG")])
         self.assertTrue(book.execution_allowed(state, "general", "LONG"))
         state.live = [
-            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0}
+            {"t": i, "symbol": "X-USDT", "side": "LONG", "qty": 1.0, "entry": 100.0, "exit": 99.0, "pnl_pct": -0.01, "pnl": -1.0, "exchange_confirmed": True}
             for i in range(8)
         ]
         book._invalidate_entry_cache()

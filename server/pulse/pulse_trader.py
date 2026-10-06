@@ -1185,6 +1185,9 @@ class Closed:
     roundtrip_result: Dict[str, Any] = field(default_factory=dict)
     system_id: str = ""
     tracking_scope: str = ""
+    # Highest confirmed Block count carried by this position (0 = no Block
+    # add), so Block Main/Real evidence comes from live exchange closes.
+    block_count: int = 0
 
 
 class Pulse:
@@ -1773,6 +1776,16 @@ class Pulse:
 
     def logical_group_key(self, pos: Position) -> str:
         return self.position_key(pos) if self.per_config_controls(pos) else ""
+
+    def position_block_count(self, pos: Position) -> int:
+        """Highest confirmed Block count on this position's lane (0 = none)."""
+        if "block" not in str(getattr(pos, "strategy", "") or "").split("+"):
+            return 0
+        try:
+            lane = self.block.lanes.get(self.block_lane_key(pos))
+            return max((int(getattr(leg, "block_count", 0) or 0) for leg in (lane.legs if lane else [])), default=0)
+        except Exception:
+            return 0
 
     def block_lane_key(self, pos: Position) -> str:
         if bool(getattr(self, "block_overall", True)):
@@ -6374,6 +6387,10 @@ class Pulse:
             intern_ok = False
         intern_n = int(view.get("last15_n") or view.get("real_n") or 0)
         intern_pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
+        if intern_ok and not real_ok and view.get("evidenceSource") == "live":
+            # Live exchange closes fill the window and Real fails: proven
+            # negative live, the intern/replay fallback no longer adds size.
+            return reject("live Real negative")
         if intern_ok and not real_ok:
             # Intern parents may emit extras without Real tape. Never invent Real PF 1.15.
             if intern_n < 8 or not math.isfinite(intern_pf) or intern_pf <= 0:
@@ -7538,6 +7555,15 @@ class Pulse:
         # Overall lanes are shared by every parent of one symbol and side, so
         # they are keyed without the per-config group. A close that did not
         # carry the add leaves it on the remaining parents.
+        # One confirmed round-trip sample per position: the aggregated result
+        # of every close leg, not the last leg alone.
+        confirmed = bool(getattr(rec, "exchange_confirmed", False))
+        trip = getattr(rec, "roundtrip_result", None) or {}
+        if confirmed and isinstance(trip, dict) and trip.get("exchange_confirmed"):
+            pnl = float(trip.get("pnl") or pnl)
+            pnl_pct = float(trip.get("pnl_pct") if trip.get("pnl_pct") is not None else pnl_pct)
+            if isinstance(close_rec, dict):
+                close_rec = dict(close_rec, pnl=pnl, pnl_pct=pnl_pct)
         block_overall = bool(getattr(self, "block_overall", True))
         dca_overall = bool(getattr(self, "dca_overall", True))
         parts = set(str(getattr(pos, "strategy", "") or "").split("+"))
@@ -7574,6 +7600,7 @@ class Pulse:
                 group_key="" if block_overall else group_key,
                 carried_add=(not block_overall) or ("block" in parts) or not others,
                 keep_lane=block_overall and others,
+                record=confirmed,
             )
         except TypeError:
             try:
@@ -7677,6 +7704,7 @@ class Pulse:
             strategy=str(getattr(pos, "strategy", "core")),
             system_id=SYSTEM_ID, tracking_scope=TRACKING_SCOPE,
             roundtrip_qty=pos.close_started_qty, close_fill_id=close_key,
+            block_count=self.position_block_count(pos),
         )
         self.record_event(
             "close",
@@ -7733,16 +7761,23 @@ class Pulse:
             # A manual (outside-the-engine) close is account truth, not an
             # outcome of the engine's own SL/exit/variant decisions.
             manual_close = str(reason or "").lower().startswith("manual")
-            try:
-                if not manual_close:
-                    self.variants.on_close(rec)
-            except Exception:
-                pass
+            # Strategy books learn only from live exchange results: one
+            # confirmed, complete round trip per position (legs aggregated).
+            roundtrip = None
             try:
                 if exchange and final_fill:
                     completed = completed_roundtrips([row for row in self.closed if row.client_id == rec.client_id])
-                    if completed and rec.member_count == 1:
-                        self.sets.on_live_close(completed[-1])
+                    roundtrip = completed[-1] if completed else None
+            except Exception:
+                roundtrip = None
+            try:
+                if roundtrip is not None and not manual_close:
+                    self.variants.on_close(roundtrip)
+            except Exception:
+                pass
+            try:
+                if roundtrip is not None and rec.member_count == 1:
+                    self.sets.on_live_close(roundtrip)
             except Exception:
                 pass
             try:
@@ -7751,13 +7786,13 @@ class Pulse:
             except Exception:
                 pass
             try:
-                if not manual_close:
+                if roundtrip is not None and not manual_close:
                     self.sets.adapt_from_live(completed_roundtrips(self.strategy_closes()))
             except Exception:
                 pass
             try:
-                if not manual_close:
-                    self.exits.on_close(rec)
+                if roundtrip is not None and not manual_close:
+                    self.exits.on_close(roundtrip)
             except Exception:
                 pass
             try:
@@ -9143,16 +9178,16 @@ class Pulse:
         self._apply_effective_position_cost(effective_cost, effective_source)
         if initial:
             try:
-                self.variants.seed_history(list(self.strategy_closes()))
+                self.variants.seed_history(self.live_evidence_rows())
             except Exception:
                 pass
             try:
-                self.sets.seed_live(list(self.strategy_closes()))
-                self.sets.adapt_from_live(list(self.strategy_closes()))
+                self.sets.seed_live(self.live_evidence_rows())
+                self.sets.adapt_from_live(self.live_evidence_rows())
             except Exception:
                 pass
             try:
-                self.exits.seed(list(self.strategy_closes()))
+                self.exits.seed(self.live_evidence_rows())
             except Exception:
                 pass
         self.mods = resolve_modules(ov)
@@ -9549,6 +9584,10 @@ class Pulse:
         view = self.sets._side_view(st, pos.side)
         if self.sets._real_metrics_ok(view):
             return float(view.get("real_pf") or 0)
+        if view.get("evidenceSource") == "live":
+            # Live exchange closes fill the whole window and Real fails:
+            # proven negative live, so no replay/intern fallback adds size.
+            return 0.0
         if hist_ok:
             n = int(view.get("last15_n") or view.get("real_n") or 0)
             pf = float(view.get("last15_ratio") or view.get("real_pf") or 0)
@@ -9588,12 +9627,9 @@ class Pulse:
             completed = completed_roundtrips(source)
         except Exception:
             completed = []
-        # Confirmed live partials aggregate through completed_roundtrips. Hist
-        # tapes and unit fixtures store already-complete ours closes without
-        # exchange_confirmed/client_id — those must still form the physical
-        # parent tape, otherwise Overall Block Real PF is stuck at 0.
-        use = completed if completed else source
-        for row in use:
+        # Live exchange results only: confirmed round trips, partial legs
+        # aggregated. Unconfirmed/local rows never form the parent tape.
+        for row in completed:
             if isinstance(row, dict):
                 if str(row.get("ours", True)).lower() in ("false", "0"):
                     continue
@@ -9737,7 +9773,7 @@ class Pulse:
         for row in index.get((str(set_id), str(side).upper()), ()):
             if execution_lane and row.get("execution_lane") != execution_lane:
                 continue
-            if strategy and str(row.get("strategy") or "core") != strategy:
+            if strategy and strategy not in str(row.get("strategy") or "core").split("+"):
                 continue
             rows.append(SimpleNamespace(**row))
         return rows
@@ -9757,7 +9793,7 @@ class Pulse:
         elif overall and symbol:
             rows = self.overall_side_closes(symbol, side)
         else:
-            rows = self.strategy_closes()
+            rows = self.live_closes()
         consec = 0
         for c in reversed(rows):
             pnl = float(getattr(c, "pnl", 0) or 0)
@@ -10307,9 +10343,14 @@ class Pulse:
         if side:
             want = str(side).upper()
             rows = [c for c in rows if str(getattr(c, "side", "") or "").upper() == want]
-        rows = recent_closed_rows(rows)
-        rows = rows[-max(5, int(n or 8)) :]
-        if len(rows) < max(5, int(n or 8)):
+        want_n = max(5, int(n or 8))
+        recent = recent_closed_rows(rows)
+        # Older live results keep counting: fewer than N in the last 3h falls
+        # back to the last N live closes regardless of age.
+        if len(recent) < want_n:
+            recent = sorted(rows, key=lambda c: float(getattr(c, "t", 0) or 0))
+        rows = recent[-want_n:]
+        if len(rows) < want_n:
             return None
         try:
             pc = last_n_cost_pf(rows, len(rows), self.position_cost_pct)
@@ -10851,6 +10892,18 @@ class Pulse:
                 continue
             fp_map[s] = fp
 
+    def live_evidence_rows(self) -> List[Dict[str, Any]]:
+        """This connection's live exchange results: confirmed, complete round
+        trips (one per position). Strategy, adjustment and coordination
+        decisions read only these."""
+        try:
+            return completed_roundtrips(self.strategy_closes())
+        except Exception:
+            return []
+
+    def live_closes(self) -> List[Any]:
+        return [SimpleNamespace(**row) for row in self.live_evidence_rows()]
+
     def strategy_closes(self) -> List[Closed]:
         """Only this system + this connection. Ignore foreign and leftover oversized."""
         cap = self.max_book_notional() * 2.0
@@ -11080,7 +11133,7 @@ class Pulse:
             # Controls/management still run in _one_cycle. Do not repeatedly
             # prepare entries for a transport that cannot accept them yet.
             return
-        rows = self.strategy_closes()
+        rows = self.live_closes()
         consec = 0
         for c in reversed(rows):
             if c.pnl < 0:
@@ -13967,7 +14020,7 @@ class Pulse:
         dca_want = bool(self.mods.get("strategy.dca", True)) and bool(self.overlay.get("dcaEnabled", True)) and bool(getattr(self, "strat_dca", True))
         self.record_test("qa-dca-on", bool(self.dca.enabled) == dca_want, f"en={self.dca.enabled} want={dca_want} act={self.dca.active} steps={self.dca.max_steps} lanes={len(self.dca.lanes)}")
         try:
-            rows_g = self.strategy_closes()
+            rows_g = self.live_closes()
             consec_g = 0
             for c in reversed(rows_g):
                 if float(getattr(c, "pnl", 0) or 0) < 0:

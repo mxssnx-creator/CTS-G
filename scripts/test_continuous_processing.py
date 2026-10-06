@@ -40,7 +40,7 @@ def book(**extra):
 class LiveCloseCreditTests(unittest.TestCase):
     def test_live_close_with_venue_widened_sl_and_ignore_tp_counts_for_its_set(self):
         b, st = book()
-        b.on_live_close({"t": time.time(), "symbol": "X-USDT", "side": "LONG", "pnl": -1.0, "pnl_pct": -0.01,
+        b.on_live_close({"exchange_confirmed": True, "t": time.time(), "symbol": "X-USDT", "side": "LONG", "pnl": -1.0, "pnl_pct": -0.01,
                          "hold_s": 60, "reason": "sl", "set_id": st.id, "strategy": "core",
                          "tp_pct": 0.0108, "sl_pct": 0.006, "set_tp_pct": 0.0045,
                          "client_id": "c1", "close_fill_id": "f1"})
@@ -48,7 +48,7 @@ class LiveCloseCreditTests(unittest.TestCase):
 
     def test_close_from_a_different_nominal_target_is_not_credited(self):
         b, st = book()
-        b.on_live_close({"t": time.time(), "symbol": "X-USDT", "side": "LONG", "pnl": 1.0, "pnl_pct": 0.01,
+        b.on_live_close({"exchange_confirmed": True, "t": time.time(), "symbol": "X-USDT", "side": "LONG", "pnl": 1.0, "pnl_pct": 0.01,
                          "hold_s": 60, "reason": "tp", "set_id": st.id, "strategy": "core",
                          "set_tp_pct": 0.0081, "client_id": "c2", "close_fill_id": "f2"})
         self.assertEqual(st.evaluation_live(), [])
@@ -57,7 +57,7 @@ class LiveCloseCreditTests(unittest.TestCase):
         b, st = book()
         t0 = time.time() - 100000
         for i in range(40):
-            b.on_live_close({"t": t0 + i * 300, "symbol": "X-USDT", "side": "LONG", "pnl": -1.0,
+            b.on_live_close({"exchange_confirmed": True, "t": t0 + i * 300, "symbol": "X-USDT", "side": "LONG", "pnl": -1.0,
                              "pnl_pct": -0.006, "hold_s": 60, "reason": "sl", "set_id": st.id,
                              "strategy": "core", "tp_pct": 0.0135, "sl_pct": 0.006, "set_tp_pct": 0.0045,
                              "client_id": f"c{i}", "close_fill_id": f"f{i}"})
@@ -116,7 +116,7 @@ class StageDirectionTests(unittest.TestCase):
         t0 = time.time() - 500000
         for i in range(30):
             for side, pf in (("LONG", 1.15), ("SHORT", 1.25)):
-                b.on_live_close({"t": t0 + i * 300 + (1 if side == "SHORT" else 0), "symbol": "X-USDT", "side": side,
+                b.on_live_close({"exchange_confirmed": True, "t": t0 + i * 300 + (1 if side == "SHORT" else 0), "symbol": "X-USDT", "side": side,
                                  "pnl": 1.0, "pnl_pct": gross(pf), "hold_s": 60, "reason": "tp", "set_id": st.id,
                                  "strategy": "core", "client_id": f"{side}{i}", "close_fill_id": f"{side}f{i}"})
         self.assertEqual(st.stage_ledger.get("evaluationDirection"), "SHORT")

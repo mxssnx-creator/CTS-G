@@ -65,7 +65,7 @@ def gross_for_pf(pf):
 
 
 def live_close(book, st, i, pf, t0):
-    book.on_live_close({
+    book.on_live_close({"exchange_confirmed": True, 
         "t": t0 + i * 300, "symbol": "X-USDT", "side": "LONG", "pnl": 1.0, "pnl_pct": gross_for_pf(pf),
         "hold_s": 60, "reason": "tp", "set_id": st.id, "strategy": "core", "client_id": f"c{i}",
         "close_fill_id": f"f{i}",

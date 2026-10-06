@@ -62,7 +62,7 @@ class BasePipeline(unittest.TestCase):
     def closes(self, book, state, pf, count=30, side="LONG"):
         for _ in range(count):
             self.i += 1
-            book.on_live_close({
+            book.on_live_close({"exchange_confirmed": True, 
                 "t": self.t0 + self.i * 300, "symbol": "X-USDT", "side": side,
                 "pnl": 1.0, "pnl_pct": gross_for_pf(pf), "hold_s": 60,
                 "reason": "tp", "set_id": state.id, "strategy": "core",
@@ -226,7 +226,7 @@ class BasePipeline(unittest.TestCase):
         st = book.by_idx[0]
         for i in range(30):
             for kind, pf in (("trend", 1.3), ("break", 1.02)):
-                book.on_live_close({"t": self.t0 + i * 60, "symbol": "X-USDT", "side": "LONG",
+                book.on_live_close({"exchange_confirmed": True, "t": self.t0 + i * 60, "symbol": "X-USDT", "side": "LONG",
                                     "pnl_pct": gross_for_pf(pf), "hold_s": 60, "reason": f"ind:{kind}",
                                     "set_id": st.id, "strategy": "core", "ind_kind": kind,
                                     "client_id": f"{kind}{i}", "close_fill_id": f"{kind}{i}"})

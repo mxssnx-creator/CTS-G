@@ -99,7 +99,8 @@ def trader(tmp, positions, block_active=True, stack=6):
                  add_gate=lambda *a, **k: (True, [], {"lastPf": 1.2}),
                  add_stack_cap=lambda stack, pf: stack)
     p.closed = [NS(symbol=SYM, side="LONG", pnl=0.004, pnl_pct=0.004, t=time.time() - i,
-                   ours=True, member_count=1) for i in range(12)]
+                   ours=True, member_count=1, exchange_confirmed=True, client_id=f"c{i}",
+                   qty=1.0, entry=100.0) for i in range(12)]
     p.open = {f"{SYM}:{pos.side}:{pos.set_id}": pos for pos in positions}
     for pos in positions:
         if not pos.micro:
@@ -229,7 +230,8 @@ class CloseLifecycleTests(unittest.TestCase):
 
     def closed(self, pos, pnl_pct):
         return pt.Closed(t=time.time(), symbol=pos.symbol, side=pos.side, qty=pos.qty, entry=pos.entry,
-                         exit=pos.entry, pnl=pnl_pct, pnl_pct=pnl_pct, reason="tp", hold_s=60.0)
+                         exit=pos.entry, pnl=pnl_pct, pnl_pct=pnl_pct, reason="tp", hold_s=60.0,
+                         exchange_confirmed=True, client_id=pos.client_id)
 
     def test_close_of_the_carrier_records_on_the_overall_lane_under_per_config_controls(self):
         a, b = position("general:sl0.6:st3", group="g1"), position("general:sl0.8:st5", group="g2")

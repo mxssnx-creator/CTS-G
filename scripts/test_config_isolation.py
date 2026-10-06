@@ -99,7 +99,7 @@ class ConfigIsolationTests(unittest.TestCase):
 
     def test_live_source_change_invalidates_equal_combined_tape(self):
         st=state(hist=tape(n=30));b=book(st)
-        b._score_pair((st,None));st.live=[st.hist.pop()]
+        b._score_pair((st,None));st.live=[dict(st.hist.pop(),exchange_confirmed=True)]
         b._score_pair((st,None))
         self.assertEqual(b.score_completed,2)
         self.assertEqual(st.live_eval['n'],1)
@@ -108,7 +108,7 @@ class ConfigIsolationTests(unittest.TestCase):
         parent=state(0,hist=tape());child=state(1,kind='trail',trail_key='0.3:0.1',parent_set_id=parent.id)
         b=book(parent,child);b._score_pair((parent,None))
         rec=dict(tape(n=1)[0],set_id=parent.id,trail_set_id=child.id,
-                 client_id='own',close_fill_id='fill',strategy='core')
+                 client_id='own',close_fill_id='fill',strategy='core',exchange_confirmed=True)
         b.on_live_close(rec);b.on_live_close(rec)
         self.assertEqual(len(parent.live),0)
         self.assertEqual(len(child.live),1)

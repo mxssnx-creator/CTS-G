@@ -769,23 +769,27 @@ class BlockBook:
         group_key: str = "",
         carried_add: bool = True,
         keep_lane: bool = False,
+        record: bool = True,
     ) -> None:
         """Record one parent close on its lane.
 
         ``carried_add`` says the closed position held this lane's Block add
         (its legs close with it, so counts are credited and the add resets).
         ``keep_lane`` keeps a shared (Overall) lane bound while other parents of
-        the same symbol and side are still open."""
+        the same symbol and side are still open. ``record=False`` (a close
+        that is not a confirmed exchange round trip) runs the lifecycle only:
+        no PF ring sample, no count pause."""
         k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if not lane:
             return
         # Prefer cost-net fraction so PF is size-independent and PositionCost-aware.
         sample = float(pnl_pct) if pnl_pct is not None else float(pnl)
-        lane.parent_pf_ring.append(sample)
-        lane.parent_pf_ring = lane.parent_pf_ring[-self.window :]
-        self.overall_tape.append(sample)
-        self.overall_tape = self.overall_tape[-self.window :]
+        if record:
+            lane.parent_pf_ring.append(sample)
+            lane.parent_pf_ring = lane.parent_pf_ring[-self.window :]
+            self.overall_tape.append(sample)
+            self.overall_tape = self.overall_tape[-self.window :]
         if not carried_add:
             if not keep_lane:
                 lane.active = False
@@ -801,7 +805,7 @@ class BlockBook:
                 lane.pause_remaining[n] = rem - 1
         used_counts = {int(leg.block_count) for leg in lane.legs if int(leg.block_count or 0) >= 1}
         for n in self._eval_range():
-            if n not in used_counts:
+            if n not in used_counts or not record:
                 continue
             lane.pf_ring.setdefault(n, []).append(sample)
             lane.pf_ring[n] = lane.pf_ring[n][-self.window :]

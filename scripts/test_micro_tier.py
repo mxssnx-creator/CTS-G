@@ -51,7 +51,7 @@ class MicroTierTests(unittest.TestCase):
         t0 = time.time() - 500000
         base = getattr(self, "_i", 0)
         for i in range(base + 1, base + count + 1):
-            b.on_live_close({"t": t0 + i * 300, "symbol": "X-USDT", "side": side, "pnl": 1.0,
+            b.on_live_close({"exchange_confirmed": True, "t": t0 + i * 300, "symbol": "X-USDT", "side": side, "pnl": 1.0,
                              "pnl_pct": gross(pf), "hold_s": 60, "reason": "tp", "set_id": st.id,
                              "strategy": "core", "client_id": f"c{i}", "close_fill_id": f"f{i}"})
         self._i = base + count

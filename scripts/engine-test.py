@@ -1855,7 +1855,8 @@ def block_calc_test() -> None:
             pnl_pct = (avg_r + 1.0) * frac
             p.closed = [
                 SimpleNamespace(symbol="TST-USDT", side="LONG", pnl=pnl_pct, pnl_pct=pnl_pct,
-                                t=time.time() - i, ours=True, member_count=1)
+                                t=time.time() - i, ours=True, member_count=1,
+                                exchange_confirmed=True, client_id=f"tst{i}", qty=1.0, entry=100.0)
                 for i in range(int(set_n))
             ]
         p.open = {"TST-USDT": pt.Position(
@@ -1929,7 +1930,8 @@ def block_calc_test() -> None:
     pS.px["TST-USDT"] = 99.70
     pS.closed = [
         SimpleNamespace(symbol="TST-USDT", side="SHORT", pnl=c.pnl, pnl_pct=c.pnl_pct,
-                        t=c.t, ours=True, member_count=1)
+                        t=c.t, ours=True, member_count=1, exchange_confirmed=True,
+                        client_id=c.client_id, qty=1.0, entry=100.0)
         for c in pS.closed
     ]
     pS.block.lanes.clear()

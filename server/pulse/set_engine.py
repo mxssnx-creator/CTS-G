@@ -33,6 +33,8 @@ from position_cost import (
     evaluation_windows,
     is_positive_pf,
     last_n_cost_pf,
+    live_evidence,
+    live_first_window,
     overall_last_pos_eval,
     normalize_pf,
     signed_result_r,
@@ -1136,7 +1138,7 @@ class SetState:
         """Own strategy/range closes; retain all other fills for accounting."""
         rows = []
         for row in self.live:
-            if row.get("exchange_confirmed") is False or row.get("partial") or row.get("ours") is False:
+            if row.get("exchange_confirmed") is not True or row.get("partial") or row.get("ours") is False:
                 continue
             strategy = str(row.get("strategy") or "core").lower()
             if strategy not in ("core", "normal", "trail", "trailing") or row.get("axis_key"):
@@ -1321,6 +1323,8 @@ class SetBook:
         # winning vote tags) + live (fed by on_live_close via rec.ind_kind).
         self.ind_hist: Dict[str, List[Dict[str, Any]]] = {}
         self.ind_live: Dict[str, List[Dict[str, Any]]] = {}
+        # Confirmed live Block round trips (block_count >= 1) for Main/Real.
+        self.block_live: List[Dict[str, Any]] = []
         # Main-stage strategy tapes are kept separately from the canonical
         # Set tape so Block/DCA evidence cannot inflate Base/Real counts.
         self.strategy_hist: Dict[str, List[Dict[str, Any]]] = {}
@@ -1880,6 +1884,10 @@ class SetBook:
         except Exception:
             pf = PF_N_DEFAULT
         return max(5, min(ms, pf))
+
+    def _evidence_window(self) -> int:
+        """Rows an evaluation tape holds: the largest stage window (>= need)."""
+        return max(max(self._stage_window_ns()), int(self.eval_need()), int(self.deact_n or 0))
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
         base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
@@ -2479,9 +2487,11 @@ class SetBook:
         original = rec if isinstance(rec, dict) else vars(rec)
         for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
                     "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id",
-                    "set_tp_pct", "ind_config", "size_ratio"):
+                    "set_tp_pct", "ind_config", "size_ratio", "block_count", "conn"):
             if key in original:
                 row[key] = original[key]
+        # Only live exchange results decide: confirmed, complete round trips.
+        confirmed = row.get("exchange_confirmed") is True and not row.get("partial")
         if ind_kind not in IND_KINDS:
             ind_kind = ""
         if not sid:
@@ -2520,9 +2530,21 @@ class SetBook:
             if st:
                 target = st
         row["set_id"] = target.id if target is not None else (extra or sid)
+        strategy_parts = set(str(row.get("strategy") or "core").lower().split("+"))
+        if confirmed and "block" in strategy_parts and int(finite(row.get("block_count"))) >= 1:
+            btape = self.block_live
+            if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in btape):
+                btape.append(dict(row, ind_kind=ind_kind))
+                del btape[:-HIST_CAP]
+                try:
+                    self.score_block_main()
+                except Exception:
+                    pass
         if ind_kind:
             row["ind_kind"] = ind_kind
             row["indKind"] = ind_kind
+        core = strategy_parts <= {"core", "normal", "trail", "trailing", ""} and not row.get("axis_key")
+        if ind_kind and confirmed and core:
             tape = self.ind_live.setdefault(ind_kind, [])
             if not any(self._live_fill_identity(r) == self._live_fill_identity(row) for r in tape):
                 tape.append(dict(row))
@@ -2546,7 +2568,7 @@ class SetBook:
         return ("partial", row.get("client_id"), row.get("t"), row.get("qty"), row.get("pnl"))
 
     def seed_live(self, closed: Sequence[Any]) -> None:
-        for rec in closed:
+        for rec in live_evidence(closed):
             self.on_live_close(rec)
 
     def due(self) -> bool:
@@ -2838,16 +2860,26 @@ class SetBook:
                 kind = str(row.get("ind_kind") or "")
                 sid = str(row.get("set_id") or "")
                 buckets.setdefault((count, kind, sid), []).append(row)
+        # Live exchange Block round trips decide; replay only bootstraps the
+        # missing slots until live holds the full window.
+        live_buckets: Dict[tuple, List[Any]] = {}
+        for row in getattr(self, "block_live", None) or []:
+            count = int(finite(row.get("block_count")))
+            if count < 1:
+                continue
+            live_buckets.setdefault((count, str(row.get("ind_kind") or ""), str(row.get("set_id") or "")), []).append(row)
         from position_cost import clears_pf, is_positive_pf, overall_last_pos_eval
         floor = float(self.real_min_pf or POSITIVE_PF)
 
-        def eval_rows(samples: List[Any], *, stage: str, scope: str) -> Dict[str, Any]:
+        def eval_rows(replay: List[Any], *, stage: str, scope: str, live: Optional[List[Any]] = None) -> Dict[str, Any]:
+            samples, source = live_first_window(live or [], replay, need)
             n_all = len(samples)
             if n_all < need:
                 return {
                     "n": n_all, "pf": 0.0, "liveOk": True, "internOk": True,
                     "internOnly": False, "reason": "insufficient-sample", "evalN": need,
-                    "stage": stage, "scope": scope,
+                    "stage": stage, "scope": scope, "evidenceSource": source,
+                    "liveN": len(live or []),
                     "realOverall": {
                         "requestedN": need, "n": n_all, "available": False,
                         "validated": False, "pf": 1.0, "liveOk": True,
@@ -2865,6 +2897,7 @@ class SetBook:
                 "internOnly": not live_ok,
                 "reason": "pass" if live_ok else "real-overall-negative",
                 "evalN": need, "stage": stage, "scope": scope,
+                "evidenceSource": source, "liveN": len(live or []),
                 "realOverall": {
                     "requestedN": need, "n": n, "available": n >= need,
                     "validated": n >= need and is_positive_pf(pf),
@@ -2878,17 +2911,20 @@ class SetBook:
             }
 
         out: Dict[tuple, Dict[str, Any]] = {}
-        for key, samples in buckets.items():
-            out[key] = eval_rows(samples, stage="real", scope="set")
-        kind_groups: Dict[tuple, List[Any]] = {}
-        count_groups: Dict[int, List[Any]] = {}
-        for (count, kind, sid), samples in buckets.items():
-            kind_groups.setdefault((count, kind), []).extend(samples)
-            count_groups.setdefault(count, []).extend(samples)
-        for (count, kind), samples in kind_groups.items():
-            out[(count, kind, "")] = eval_rows(samples, stage="real", scope="indication")
-        for count, samples in count_groups.items():
-            out[(count, "", "")] = eval_rows(samples, stage="real", scope="overall")
+        for key in set(buckets) | set(live_buckets):
+            out[key] = eval_rows(buckets.get(key, []), stage="real", scope="set", live=live_buckets.get(key))
+
+        def group(src: Dict[tuple, List[Any]], key_fn) -> Dict[Any, List[Any]]:
+            res: Dict[Any, List[Any]] = {}
+            for key, samples in src.items():
+                res.setdefault(key_fn(key), []).extend(samples)
+            return res
+        kind_h, kind_l = group(buckets, lambda k: (k[0], k[1])), group(live_buckets, lambda k: (k[0], k[1]))
+        for ck in set(kind_h) | set(kind_l):
+            out[(ck[0], ck[1], "")] = eval_rows(kind_h.get(ck, []), stage="real", scope="indication", live=kind_l.get(ck))
+        cnt_h, cnt_l = group(buckets, lambda k: k[0]), group(live_buckets, lambda k: k[0])
+        for count in set(cnt_h) | set(cnt_l):
+            out[(count, "", "")] = eval_rows(cnt_h.get(count, []), stage="real", scope="overall", live=cnt_l.get(count))
         self.block_main_eval = out
         return out
 
@@ -4231,10 +4267,15 @@ class SetBook:
         tape: Sequence[Dict[str, Any]],
         hist_n: Optional[int] = None,
         fast_historic: bool = False,
+        keep_order: bool = False,
     ) -> Dict[str, Any]:
         if fast_historic:
             return self._fast_historic_metrics(tape, hist_n=hist_n)
-        ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
+        if keep_order:
+            # live_first_window order: replay fill first, live results newest.
+            ordered = [r for r in tape if _is_hist_row(r)]
+        else:
+            ordered = sorted((r for r in tape if _is_hist_row(r)), key=lambda r: finite(r.get("t")))
         nets = [row_net_pnl(r, self.cost_pct) for r in ordered]
         wins = sum(1 for x in nets if x > 0)
         gp = round(sum(x for x in nets if x > 0), 6)
@@ -4570,14 +4611,19 @@ class SetBook:
             st = self.sets.get(parent_id)
             if st is None:
                 continue
-            tape = list(st.hist) + list(st.live)
+            # Live exchange closes decide the children; replay only fills
+            # the missing slots of each direction's window.
+            live_rows = st.evaluation_live()
+            span = 2 * self._evidence_window()
             sides = [d for d in DIRECTIONS if self._base_metrics_ok((st.by_side or {}).get(d) or {})]
             if not st.by_side:
                 # Unscored sides (legacy callers): the merged tape, as before.
+                tape, _ = live_first_window(live_rows, list(st.hist), span)
                 rows.extend(coordinator.axis_variants(parent_id, tape, []))
                 continue
             # Children per Base-qualified direction, on that direction's own tape.
             for side in sides:
+                tape, _ = live_first_window(filter_side(live_rows, side), filter_side(list(st.hist), side), span)
                 rows.extend(coordinator.axis_variants(parent_id, tape, [], side=side))
         return coordinator.aggregate_axis_variants(rows)
 
@@ -4642,9 +4688,10 @@ class SetBook:
         elif not live_rows:
             m, side_bundle = self._fast_historic_bundle(st.hist, hist_n=len(st.hist), ordered=True)
         else:
-            tape = list(live_rows) if len(live_rows) >= self.eval_need() else st.tape()
-            tape.sort(key=lambda r: finite(r.get("t")))
-            m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False)
+            # Live exchange results decide; replay only fills the window
+            # until live has the stage's N.
+            tape, _src = live_first_window(live_rows, st.hist, self._evidence_window())
+            m = self._score_metrics(tape, hist_n=len(st.hist), fast_historic=False, keep_order=True)
         # Reporting counts all historic closes; PF/WR continue using the
         # explicit retained evaluation sample in m.
         counts = self._hist_counts.get(st.id)
@@ -4764,15 +4811,20 @@ class SetBook:
             else:
                 sub_hist = filter_side(st.hist, side)
                 sub_live = filter_side(live_rows, side)
-                # Keep Base evidence while live history is still filling.
-                # A first live close must not erase the last-30 qualification.
-                sub_tape = sub_live if len(sub_live) >= self.eval_need() else filter_side(st.tape(), side)
+                # Live exchange results decide each stage once live holds that
+                # stage's N; until then replay fills only the missing slots
+                # (live rows stay the newest), so a first live close neither
+                # erases the Base qualification nor hides behind replay.
+                sub_tape, src = live_first_window(sub_live, sub_hist, self._evidence_window())
                 sm = self._score_metrics(
                     sub_tape,
                     hist_n=len(sub_hist),
                     fast_historic=historic,
+                    keep_order=True,
                 )
+                sm["evidenceSource"] = src
             sm["side"] = side
+            sm["liveN"] = len(sub_live)
             if sub_live:
                 lm = self._score_metrics(sub_live)
                 live_opt_n = len(sorted(sub_live, key=lambda r: finite(r.get("t")))[-max(50, self.deact_n, self.optimization_n):])
@@ -5817,16 +5869,12 @@ class SetBook:
         if cached is not None and cached[0] == signature:
             return copy.deepcopy(cached[1])
         live_side = filter_side(live, side)
-        if len(live_side) >= need:
-            tape = live_side
-            source = "live-exchange"
-        else:
-            tape = filter_side(hist + live, side)
-            source = "mixed" if live_side else "hist-sim"
-        tape.sort(key=lambda r: finite(r.get("t")))
+        # Live exchange results decide; replay only fills missing slots.
+        tape, src = live_first_window(live_side, filter_side(hist, side), max(int(self.pf_n or 0), need))
+        source = "live-exchange" if src == "live" else ("mixed" if live_side else "hist-sim")
         dd = self.ddt_when_enough(tape, need, ordered=True)
         if tape:
-            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
+            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=True)
             windows = evaluation_windows(tape, self.cost_pct, required_samples=need)
             n = int(last["count"])
             pf = float(last["ratio"])
@@ -5885,12 +5933,14 @@ class SetBook:
             return dict(hit[1])
         # Replay rows are CompactHistRow mappings (not dicts): read the tag
         # through the mapping API, never as an attribute.
-        rows = [r for r in list(hist) + list(live)
-                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg]
-        tape = filter_side(rows, side)
-        tape.sort(key=lambda r: finite(r.get("t")))
+        def tagged(src):
+            return filter_side([r for r in src
+                                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg], side)
+        live_rows = tagged(live)
+        # Live exchange results decide; replay only fills missing slots.
+        tape, src = live_first_window(live_rows, tagged(hist), max(int(self.pf_n or 0), need))
         if tape:
-            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=False)
+            last = last_n_cost_pf(tape, self.pf_n, self.cost_pct, ordered=True)
             n, pf = int(last["count"]), float(last["ratio"])
         else:
             n, pf = 0, 0.0
@@ -5899,7 +5949,8 @@ class SetBook:
         out = {"kind": k, "config": cfg, "side": str(side or "BOTH").upper(), "n": n, "tapeN": len(tape),
                "maxDdS": float(dd.get("maxS") or 0),
                "pf": round(pf, 4), "validated": n >= need and clears_pf(pf, self.min_pf) and dd_ok,
-               "enough": n >= need, "profitable": clears_pf(pf, self.min_pf)}
+               "enough": n >= need, "profitable": clears_pf(pf, self.min_pf),
+               "source": src, "liveN": len(live_rows)}
         if len(cache) > 4096:
             cache.clear()
         cache[key] = (sig, dict(out))
@@ -6524,20 +6575,20 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     st.live = []
     book._score_one(st)
     out.append(("set-hist-neg-off-live", not st.active, f"{st.active} {st.deact_reason}"))
-    st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
+    st.live = [{"exchange_confirmed": True, "t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
     out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
     st.hist = [{"t": 1500 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp"} for i in range(15)]
-    st.live = [{"t": 2500 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(10)]
+    st.live = [{"exchange_confirmed": True, "t": 2500 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(10)]
     book._score_one(st)
     out.append(("set-losing-stage-overrides-hist", (not st.active) and not book._real_metrics_ok(st.by_side.get("LONG") or {}), f"{st.active} {st.deact_reason} histPf={st.last15_ratio}"))
     st.hist = [{"t": 1500 + i, "pnl": -0.02, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(15)]
-    st.live = [{"t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(12)]
+    st.live = [{"exchange_confirmed": True, "t": 2600 + i, "pnl": 0.02, "pnl_pct": 0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "tp", "client_id": f"cid{i}"} for i in range(12)]
     book._score_one(st)
     out.append(("set-live-wins-keep", st.active, f"{st.active} {st.deact_reason} live={st.live_eval}"))
     snap_ov = book.snapshot().get("liveOverview") or {}
     out.append(("set-live-overview", int(snap_ov.get("processed") or 0) >= 1 and snap_ov.get("costSubtracted") is True and snap_ov.get("source") == "live-exchange", str(snap_ov)[:220]))
-    st.live = [{"t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
+    st.live = [{"exchange_confirmed": True, "t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
     book._score_one(st)
     out.append(("set-live-win-on", st.active, f"{st.active} {st.deact_reason}"))
     book.on_live_close({"ours": False, "set_id": sid, "pnl": -9, "pnl_pct": -0.5, "t": 9, "symbol": "X"})
@@ -6958,10 +7009,10 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     out.append(("set-neg-recover", neg_set.active and neg_set.last15_ratio >= 1.0, f"{neg_set.active} pf={neg_set.last15_ratio}"))
     # sticky off when reactivate is disabled — LIVE processed only
     g2.reactivate = False
-    neg_set.live = [{"t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl", "client_id": f"ls{i}"} for i in range(15)]
+    neg_set.live = [{"exchange_confirmed": True, "t": 9000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl", "client_id": f"ls{i}"} for i in range(15)]
     g2._score_one(neg_set)
     off1 = not neg_set.active
-    neg_set.live = [{"t": 10000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp", "client_id": f"lw{i}"} for i in range(15)]
+    neg_set.live = [{"exchange_confirmed": True, "t": 10000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp", "client_id": f"lw{i}"} for i in range(15)]
     g2._score_one(neg_set)
     out.append(("set-live-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.live_eval}"))
     # cold start (no replay yet): STRICT pick stays None, but packs stay
@@ -7014,8 +7065,8 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
     # live closes carrying ind_kind feed the kind tape even without a set match
     g5 = SetBook()
     g5.load({"histEnabled": True, "stratGeneral": True, "stratIndications": True, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
-    g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
-    g5.on_live_close({"ours": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
+    g5.on_live_close({"ours": True, "exchange_confirmed": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 10, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
+    g5.on_live_close({"ours": True, "exchange_confirmed": True, "set_id": "no-such-set", "pnl": 0.01, "pnl_pct": 0.002, "t": 11, "symbol": "T", "ind_kind": "active", "client_id": "cid-a1"})
     out.append(("ind-live-tape-dedup", len(g5.ind_live.get("active") or []) == 1, f"n={len(g5.ind_live.get('active') or [])}"))
     # hist replay scores each indication kind independently (not pack-consensus copies).
     # This proves the replay->kind-tape mechanics, so the PF floor is pinned at
