@@ -2873,6 +2873,11 @@ class Pulse:
         if "dca" in wanted:
             wanted.add("d")
         scope = self.logical_group_key(pos) if self.per_config_controls(pos) else self.legacy_position_key(pos)
+        # Overall lanes are shared by every parent of the symbol and side, so
+        # any unresolved add on that side owns the lane, whichever parent sent it.
+        shared = ("block" in wanted and bool(getattr(self, "block_overall", True))) or (
+            "dca" in wanted and bool(getattr(self, "dca_overall", True))
+        )
         for row in (getattr(self, "pending_orders", {}) or {}).values():
             if str(row.get("kind") or "").lower() not in wanted:
                 continue
@@ -2882,7 +2887,7 @@ class Pulse:
                 continue
             row_scope = str(row.get("group_key") or "")
             # An empty group key marks an overall (symbol + side wide) lane, e.g. DCA with dcaOverall.
-            if row_scope and row_scope != scope and row_scope != self.legacy_position_key(pos):
+            if not shared and row_scope and row_scope != scope and row_scope != self.legacy_position_key(pos):
                 continue
             requested = max(0.0, _sf(row.get("requested_qty") or row.get("requestedQty")))
             filled = max(0.0, _sf(row.get("filled_qty") or row.get("filledQty")))
@@ -7425,12 +7430,34 @@ class Pulse:
             "pnl": rec.pnl,
             "pnl_pct": rec.pnl_pct,
         }
+        # Overall lanes are shared by every parent of one symbol and side, so
+        # they are keyed without the per-config group. A close that did not
+        # carry the add leaves it on the remaining parents.
+        block_overall = bool(getattr(self, "block_overall", True))
+        dca_overall = bool(getattr(self, "dca_overall", True))
+        parts = set(str(getattr(pos, "strategy", "") or "").split("+"))
+        lineage = [str(getattr(pos, "axis_key", "") or ""), *[str(k) for k in (getattr(pos, "lineage_axis_keys", None) or [])]]
+        if any(k.startswith("block-active:") for k in lineage):
+            # Block Active lots are their own entries, never an Overall add.
+            parts.discard("block")
+        others = False
         try:
-            self.dca.on_close(close_rec)
-            try:
-                self.dca.drop(pos.symbol, pos.side, group_key=group_key)
-            except TypeError:
-                self.dca.drop(pos.symbol, pos.side)
+            others = any(
+                p is not pos and float(getattr(p, "qty", 0) or 0) > 0
+                for p in self.positions_for(pos.symbol, pos.side)
+            )
+        except Exception:
+            others = False
+        dca_group = "" if dca_overall else group_key
+        try:
+            if dca_overall and isinstance(close_rec, dict):
+                close_rec = dict(close_rec, control_group_key="")
+            if not (dca_overall and others and "dca" not in parts):
+                self.dca.on_close(close_rec)
+                try:
+                    self.dca.drop(pos.symbol, pos.side, group_key=dca_group)
+                except TypeError:
+                    self.dca.drop(pos.symbol, pos.side)
         except Exception:
             pass
         try:
@@ -7439,7 +7466,9 @@ class Pulse:
                 pos.side,
                 pnl,
                 pnl_pct=net_pnl_pct(pnl_pct, self.position_cost_pct),
-                group_key=group_key,
+                group_key="" if block_overall else group_key,
+                carried_add=(not block_overall) or ("block" in parts) or not others,
+                keep_lane=block_overall and others,
             )
         except TypeError:
             try:
@@ -9406,6 +9435,8 @@ class Pulse:
             lineage = [str(x) for x in (getattr(pos, "lineage_axis_keys", None) or [])]
             if axis.startswith("block-active:") or any(str(k).startswith("block-active:") for k in lineage):
                 continue
+            if bool(getattr(pos, "micro", False)):
+                continue
             total += max(0.0, float(getattr(pos, "qty", 0) or 0))
         try:
             lane = self.block.lanes.get(self.block.key(symbol, side))
@@ -9687,6 +9718,9 @@ class Pulse:
         for pos in list(self.open.values()):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
                 continue
+            if bool(getattr(pos, "micro", False)):
+                # Micro lots are a capped probe tier; Block never sizes onto them.
+                continue
             if overall:
                 parent_id = (str(pos.symbol), str(pos.side))
                 if parent_id in seen_parents:
@@ -9805,16 +9839,25 @@ class Pulse:
                 confirmed = float(lane.confirmed_add or 0)
                 extra_cap = float(self.block.extra_cap())
                 extra_room = max(0.0, parent * extra_cap - confirmed)
-                raw = adjusted_quantity(parent, specified, confirmed, 0.0, min_q, extra_cap)
+                # Additive: each further count adds one more specified ratio,
+                # up to blockMaxStack counts and the volume cap. Every count
+                # needs its own continuation (n x 0.2%) and passes its own
+                # count gates below.
+                count_n = len(lane.legs) + 1
+                if count_n > max(1, stack_cap):
+                    continue
+                if u < 0.002 * count_n:
+                    continue
+                target_ratio = min(1.0, extra_cap, specified * count_n)
+                raw = adjusted_quantity(parent, target_ratio, confirmed, 0.0, min_q, extra_cap)
                 if raw <= 0:
                     continue
                 inc = specified
-                count_n = 1
                 # Same row shape as evaluate_counts: record_fill attributes the
                 # leg by setKey, so a missing key lost the filled add.
-                row = {"blockCount": 1, "volumeIncrement": specified, "requestedAddQty": raw, "targetAddQty": parent * specified, "stepQty": raw,
-                       "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:1",
-                       "blockMinPF": float(self.block.formula(parent, 1, lane).get("blockMinPF") or 0.0)}
+                row = {"blockCount": count_n, "volumeIncrement": specified, "targetRatio": target_ratio, "requestedAddQty": raw, "targetAddQty": parent * target_ratio, "stepQty": raw,
+                       "setKey": f"{lane.symbol}:{lane.side.lower()}#block:active:{count_n}",
+                       "blockMinPF": float(self.block.formula(parent, count_n, lane).get("blockMinPF") or 0.0)}
             else:
                 rows = self.block.evaluate_counts(lane, live_n=live_n_by.get(k, 1), intern_pf=intern_pf, stack_cap=stack_cap)
                 row = self.block.pick_emit(rows)
@@ -9869,9 +9912,11 @@ class Pulse:
                 target = parent * inc
             leftover = max(0.0, target - confirmed)
             if bool(getattr(self, "block_active", True)):
-                raw = adjusted_quantity(parent, inc, confirmed, 0.0, min_q, extra_cap)
+                # Cumulative target of this additive count (count x ratio).
+                ratio = float(row.get("targetRatio") or inc)
+                raw = adjusted_quantity(parent, ratio, confirmed, 0.0, min_q, extra_cap)
                 leftover = extra_cap * parent - confirmed
-                target = parent * inc
+                target = parent * ratio
             else:
                 raw = min(raw, leftover) if leftover > 0 else 0.0
             if raw <= 0:
@@ -10148,6 +10193,9 @@ class Pulse:
         seen_parents = set()
         for pos in list(self.open.values()):
             if any(str(k).startswith("block-active:") for k in [getattr(pos, "axis_key", ""), *getattr(pos, "lineage_axis_keys", [])]):
+                continue
+            if bool(getattr(pos, "micro", False)):
+                # Micro lots are a capped probe tier; Block never sizes onto them.
                 continue
             if overall:
                 parent_id = (str(pos.symbol), str(pos.side))

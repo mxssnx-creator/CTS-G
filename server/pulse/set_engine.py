@@ -3254,11 +3254,13 @@ class SetBook:
         raw = (px - entry) / entry * side
         qty = max(0.0, float(pos.get("qty") or 1.0))
         parent = max(1e-9, float(pos.get("parent") or 1.0))
-        if strategy in ("block", "dca"):
-            raw = raw * (qty / parent)
+        # Block/DCA rows keep the lot's own move: PositionCost is charged per
+        # lot, so a quarter-size move minus a full cost understated the PF.
+        # The lot size relative to its parent rides along as volume_ratio.
         rec = hist_fill(ts, symbol, side, raw, held * BAR_S, why)
         rec["strategy"] = _intern(strategy or "core")
         if strategy in ("block", "dca"):
+            rec["volume_ratio"] = round(qty / parent, 6)
             rec.update(set_id=_intern(st_id), pack=_intern(pack), tp_pct=tp_frac,
                        sl_ratio=sl_frac / tp_frac if tp_frac else 0,
                        step=self._record_step({"set_id": st_id}))

@@ -541,7 +541,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   blockVolumeRatio: 0.25,
   blockMaxVolumeMultiplier: 2,
   blockCounts: [1, 2, 3, 4, 5, 6],
-  blockProfitFactorRatio: 1.25,
+  blockProfitFactorRatio: 1.1,
   blockPauseCountRatio: 1,
   blockEvalPosCount: 50,
   blockActiveLive: true,

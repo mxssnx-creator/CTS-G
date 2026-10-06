@@ -760,7 +760,22 @@ class BlockBook:
         lane.pause_remaining[n] = max(int(lane.pause_remaining.get(n, 0)), max(1, self.pause_ratio))
         self.save()
 
-    def on_parent_close(self, symbol: str, side: str, pnl: float, pnl_pct: Optional[float] = None, group_key: str = "") -> None:
+    def on_parent_close(
+        self,
+        symbol: str,
+        side: str,
+        pnl: float,
+        pnl_pct: Optional[float] = None,
+        group_key: str = "",
+        carried_add: bool = True,
+        keep_lane: bool = False,
+    ) -> None:
+        """Record one parent close on its lane.
+
+        ``carried_add`` says the closed position held this lane's Block add
+        (its legs close with it, so counts are credited and the add resets).
+        ``keep_lane`` keeps a shared (Overall) lane bound while other parents of
+        the same symbol and side are still open."""
         k = self.key(symbol, side, group_key)
         lane = self.lanes.get(k)
         if not lane:
@@ -771,6 +786,15 @@ class BlockBook:
         lane.parent_pf_ring = lane.parent_pf_ring[-self.window :]
         self.overall_tape.append(sample)
         self.overall_tape = self.overall_tape[-self.window :]
+        if not carried_add:
+            if not keep_lane:
+                lane.active = False
+                lane.confirmed_add = 0.0
+                lane.legs = []
+                lane.satisfied = {}
+                lane.base_qty = 0.0
+            self.save()
+            return
         # advance every existing pause once — each count independently
         for n, rem in list(lane.pause_remaining.items()):
             if rem > 0:
@@ -789,11 +813,12 @@ class BlockBook:
                 lane.held_factor[n] = 1.0
             else:
                 lane.held_factor[n] = max(float(n), lane.held_factor.get(n, 1.0))
-        lane.active = False
         lane.confirmed_add = 0.0
         lane.legs = []
         lane.satisfied = {}
-        lane.base_qty = 0.0
+        if not keep_lane:
+            lane.active = False
+            lane.base_qty = 0.0
         self.save()
 
     def snapshot(self, intern_pf_lookup=None) -> Dict[str, Any]:

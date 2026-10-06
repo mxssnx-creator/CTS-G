@@ -382,7 +382,7 @@ def guard_runtime_overlay(cid: str, cur: dict) -> dict:
         stack = int(out["blockMaxStack"]) if out.get("blockMaxStack") is not None else 6
     except (TypeError, ValueError):
         stack = 6
-    out["blockMaxStack"] = max(0, min(6, stack))
+    out["blockMaxStack"] = max(1, min(6, stack or 6))  # 0 means the full 6, as in block_engine.clamp_stack
     raw = out.get("symbols")
     names = [str(s).strip().upper() for s in raw] if isinstance(raw, list) else []
     wild = bool(out.get("symbolsAll")) or any(s in ("*", "ALL", "UNLIMITED") for s in names)
