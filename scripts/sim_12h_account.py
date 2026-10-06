@@ -382,7 +382,9 @@ def replay_symbol(job: Dict[str, Any]) -> Dict[str, Any]:
     try:
         se.hist_fill = _tuple_fill
         se.recent_direction_rows = lambda rows, cap: rows
-        se.REPLAY_HIST_CAP = 512
+        # Long lookbacks produce more closes per Set than a fixed ring holds;
+        # size it to the replay (bounded) so evidence is not cut short.
+        se.REPLAY_HIST_CAP = max(512, min(4096, n // 4))
         for pack in book.packs:
             reps = [r for r in catalog if r["pack"] == pack]
             states = [book.sets[r["set_id"]] for r in reps]
@@ -396,7 +398,12 @@ def replay_symbol(job: Dict[str, Any]) -> Dict[str, Any]:
             for rep, st in zip(reps, states):
                 rows = hist.get(st.id) or []
                 if len(rows) != int(counts.get(st.id, 0)):
-                    raise RuntimeError(f"{sym} {st.id}: ring truncated {len(rows)} != {counts.get(st.id)}")
+                    # Only the oldest closes fell out of the ring. That is fine
+                    # as long as everything from the sim window on is kept.
+                    first_exit = min((int(round((r[0] - base_ts) / BAR)) for r in rows), default=n)
+                    if first_exit + lo > sim_start:
+                        raise RuntimeError(f"{sym} {st.id}: ring truncated inside the sim window "
+                                           f"{len(rows)} != {counts.get(st.id)}")
                 last_exit = {1: None, -1: None}
                 for ts, side, move, hold, why in rows:
                     ex = int(round((ts - base_ts) / BAR))
