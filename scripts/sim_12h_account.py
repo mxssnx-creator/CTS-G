@@ -863,6 +863,33 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
     return cands
 
 
+def apply_factors(cands, catalog, strategies: str, axis_filter: str, no_micro: bool) -> Dict[str, Any]:
+    """Restrict the admitted candidates by the factor options (sim-only filters)."""
+    want = {s.strip().lower() for s in str(strategies or "").split(",") if s.strip()} or {"normal", "trailing"}
+    trail = np.array([bool(r["trail"]) for r in catalog], dtype=bool)[cands["uid"]]
+    keep = np.zeros(len(cands["uid"]), dtype=bool)
+    if "normal" in want:
+        keep |= ~trail
+    if "trailing" in want:
+        keep |= trail
+    axis_filter = str(axis_filter or "none").strip().lower()
+    if axis_filter == "any":
+        anym = np.zeros(len(keep), dtype=bool)
+        for a in AXIS_NAMES:
+            anym |= cands["axes"][a]
+        keep &= anym
+    elif axis_filter != "none":
+        if axis_filter not in cands["axes"]:
+            raise SystemExit(f"--axis-filter {axis_filter!r}: unknown axis (have {sorted(cands['axes'])[:8]}...)")
+        keep &= cands["axes"][axis_filter]
+    if no_micro:
+        keep &= cands["real_ok"]
+    before = int(cands["admitted"].sum())
+    cands["admitted"] = cands["admitted"] & keep
+    return dict(strategies=sorted(want), axisFilter=axis_filter, noMicro=bool(no_micro),
+                admittedBefore=before, admittedAfter=int(cands["admitted"].sum()))
+
+
 def kind_gate(caches, symbols, book, sim_start, sim_end):
     """SetBook.indication_ok(kind, side) walk-forward: kind tape Base window >= floor."""
     cost = float(book.cost_pct)
@@ -1985,6 +2012,11 @@ def main(argv=None) -> int:
     ap.add_argument("--mmr-factor", type=float, default=0.5,
                     help="maintenance margin rate = factor / leverage (not public; 0.5 = half the max-leverage initial margin)")
     ap.add_argument("--force", action="store_true", help="recompute the replay cache")
+    ap.add_argument("--strategies", default="normal,trailing",
+                    help="factor: Set strategies admitted, comma list of normal / trailing")
+    ap.add_argument("--axis-filter", default="none",
+                    help="factor: admit only candidates whose axis child qualifies: none, any, prev|last|cont|pause or axis:count")
+    ap.add_argument("--no-micro", action="store_true", help="factor: admit only Base-qualified Sets (no Micro tier)")
     ap.add_argument("--fee-pct", type=float, default=None,
                     help="round-trip fee the account pays in percent (default: the PositionCost). Gates, PF and the "
                          "TP grid keep using the PositionCost hurdle.")
@@ -2044,6 +2076,7 @@ def main(argv=None) -> int:
     ddt_cache: Dict = {}
     children = axis_children(ov)
     cands = build_candidates(caches, catalog, symbols, sim_start, sim_end, book, True, ddt_cache, children=children)
+    factors = apply_factors(cands, catalog, args.strategies, args.axis_filter, args.no_micro)
     ktable = kind_gate(caches, symbols, book, sim_start, sim_end)
     strat_g = strat_lots(caches, symbols, book, sim_start, sim_end, True)
     strat_u = strat_lots(caches, symbols, book, sim_start, sim_end, False)
@@ -2115,6 +2148,7 @@ def main(argv=None) -> int:
     tl_unf = trade_level_hourly(cands, catalog, np.ones(len(cands["uid"]), bool), strat_u, False, sim_start, H, cost_pct)
     open_end = sum(int(caches[s]["open_end"]) for s in symbols)
     report = dict(
+        factors=factors,
         generatedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         window=dict(simStartBar=sim_start, simEndBar=sim_end, startUtc=time.strftime("%Y-%m-%d %H:%M", time.gmtime(start_s + sim_start * BAR)),
                     endUtc=time.strftime("%Y-%m-%d %H:%M", time.gmtime(start_s + sim_end * BAR)),
