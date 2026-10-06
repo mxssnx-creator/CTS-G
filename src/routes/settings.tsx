@@ -844,14 +844,14 @@ function SettingsPage() {
                     />
                     <Slider
                       label="Volume factor"
-                      value={overlay.volumeFactor ?? 1}
+                      value={overlay.volumeFactor || 0.1}
                       min={0.1}
                       max={5}
                       step={0.1}
                       hint="Scales pulse notional. 1 = base. Independent per Live / VST."
                       onChange={(v) => patch("volumeFactor", v)}
                     />
-                    <KV k="Effective notional" v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)} />
+                    <KV k="Effective notional" v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} />
                   </Grid>
                 </div>
               </div>
@@ -1397,7 +1397,7 @@ function SettingsPage() {
                 <KV k="Maximal leverage" v={bool(cts?.useMaximalLeverage) ? "on" : "off"} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
-                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 1))} />
+                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.1))} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
               <div className="space-y-3 rounded-lg border border-border bg-bg2 p-3">
@@ -2053,13 +2053,13 @@ function SettingsPage() {
                     onChange={(v) => patch("slToTpMax", Math.round(v * 10) / 10)} />
                   <Num label="SL:TP ratio step" value={overlay.slToTpStep} min={0.1} max={1} step={0.1}
                     onChange={(v) => patch("slToTpStep", Math.round(v * 10) / 10)} />
-                  <Num label="Trail arm min" value={overlay.trailArmMin} min={0.05} max={3} step={0.05} unit="%"
+                  <Num label="Trail arm min" value={overlay.trailArmMin} min={0.3} max={1.5} step={0.3} unit="%" hint="Default 0.6"
                     onChange={(v) => patch("trailArmMin", v)} />
-                  <Num label="Trail arm max" value={overlay.trailArmMax} min={0.1} max={5} step={0.05} unit="%"
+                  <Num label="Trail arm max" value={overlay.trailArmMax} min={0.3} max={1.5} step={0.3} unit="%"
                     onChange={(v) => patch("trailArmMax", v)} />
-                  <Num label="Trail give min" value={overlay.trailGiveMin} min={0.02} max={2} step={0.01} unit="%"
+                  <Num label="Trail give min" value={overlay.trailGiveMin} min={0.1} max={0.5} step={0.1} unit="%" hint="Default 0.2"
                     onChange={(v) => patch("trailGiveMin", v)} />
-                  <Num label="Trail give max" value={overlay.trailGiveMax} min={0.05} max={3} step={0.01} unit="%"
+                  <Num label="Trail give max" value={overlay.trailGiveMax} min={0.1} max={0.5} step={0.1} unit="%"
                     onChange={(v) => patch("trailGiveMax", v)} />
                   <Num label="Exit lane min samples" value={overlay.exitMinSamples} min={0} max={200} step={1}
                     hint="0 = the PF window" onChange={(v) => patch("exitMinSamples", Math.round(v))} />
@@ -2573,7 +2573,7 @@ function SettingsPage() {
                 <KV k="Exchange position cost" v={String(num(cts?.exchangePositionCost ?? cts?.positionCost, 0.1))} />
                 <Slider
                   label="Volume factor"
-                  value={overlay.volumeFactor ?? 1}
+                  value={overlay.volumeFactor || 0.1}
                   min={0.1}
                   max={5}
                   step={0.1}
@@ -2590,7 +2590,7 @@ function SettingsPage() {
                 />
                 <KV
                   k="Effective notional"
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)}
+                  v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)}
                 />
                 <Toggle
                   label="Always max leverage"

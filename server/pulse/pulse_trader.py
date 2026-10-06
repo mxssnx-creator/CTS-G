@@ -49,6 +49,7 @@ from position_cost import (
     POSITIVE_PF,
     INTERN_PF,
     SL_MIN_PCT,
+    SL_MIN_DEFAULT_PCT,
     clears_pf,
     SL_TP_RATIOS,
     SL_TP_MIN,
@@ -344,6 +345,8 @@ def rank_self_test() -> Tuple[bool, str]:
     return ok, f"got={got}"
 
 TARGET_NOTIONAL = 2.15
+# Shared with connection_profile and the desk; a missing or 0 factor means this.
+VOLUME_FACTOR_DEFAULT = 0.1
 LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
@@ -2430,11 +2433,15 @@ class Pulse:
             free = max(0.0, free - (1.0 - cap) * equity)
         return free
 
-    def max_book_notional(self, ratio: float = 1.0) -> float:
+    def max_book_notional(self, ratio: float = 1.0, parent_notional: float = 0.0, c: Optional["Contract"] = None) -> float:
         """Per-position book room = ratio-adjusted parent × Block/DCA rungs.
         0 rungs maps to the seeded default (Block 3, DCA distance list). Never
-        a wallet-fraction balloon — leftover size is remaining available only."""
-        base = self.notional_cap(ratio=ratio)
+        a wallet-fraction balloon — leftover size is remaining available only.
+
+        ``parent_notional`` is the confirmed parent of an add: a parent opened
+        at the venue minimum lot (above the sized notional) keeps room for its
+        own adds instead of being starved by the smaller sized cap."""
+        base = max(self.notional_cap(ratio=ratio), max(0.0, float(parent_notional or 0.0)))
         dca_on = bool(getattr(self.dca, "enabled", False))
         block_on = bool(getattr(self.block, "enabled", False))
         dca_n = int(getattr(self.dca, "max_steps", 0) or 0) if dca_on else 0
@@ -2455,7 +2462,7 @@ class Pulse:
             block_extra = calculate_block_max_additional_ratio(stack, vr, getattr(self.block, "max_volume_multiplier", 2.0))
         extra = min(12.0, max(dca_extra, block_extra))
         hard = base * (1.0 + extra)
-        room = self.avail_notional()
+        room = self.avail_notional(c)
         if room > 0:
             hard = min(hard, room)
         return max(base, hard)
@@ -5620,13 +5627,18 @@ class Pulse:
                 return have_oid
             if have_oid and live_have and not can_replace:
                 return have_oid
-            if have_oid and live_have:
-                cid = self.order_cid(live_rows[0]) if live_rows else ""
-                self.cancel_order(pos.symbol, have_oid, cid)
-            oid = self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want)
-            if oid:
+            # Place the replacement first and retire the old leg only once a
+            # distinct new order exists (as replace_sl does). Cancelling first
+            # left the position bare whenever place_ctrl backed off (cooling,
+            # order cap, retry pause) and kept the cancelled id as protection.
+            oid = real_oid(self.place_ctrl(pos, "sec-sl" if is_sl else "sec-tp", want))
+            if oid and oid != have_oid:
+                if have_oid and live_have:
+                    cid = self.order_cid(live_rows[0]) if live_rows else ""
+                    self.cancel_order(pos.symbol, have_oid, cid)
                 self.ctrl_skip[f"sync:{scope}"] = now + 30.0
-            return oid or have_oid
+                return oid
+            return have_oid or oid
 
         old_sl_oid = real_oid(pos.sl_oid or pos.sec_sl_oid)
         old_tp_oid = real_oid(pos.tp_oid or pos.sec_tp_oid)
@@ -5828,7 +5840,7 @@ class Pulse:
                 if not learned:
                     # Unlearnable floor (BingX VST "0 USDT"): extra close forms
                     # fail the same way and each one burns the order budget.
-                    self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 20.0)
+                    self.cooldown[f"{pos.symbol}:{pos.side}"] = max(self.cooldown.get(f"{pos.symbol}:{pos.side}", 0.0), time.time() + 20.0)
                     self._last_close_result.update({"status": "REJECTED", "message": short_api_msg(msg)})
                     log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=20.0, key=f"close-minsize:{pos.symbol}")
                     return False, px_now
@@ -5847,7 +5859,7 @@ class Pulse:
                 # position open and let the event loop retry it without
                 # inflating the error counter or marking a partial close as
                 # complete.
-                self.cooldown[pos.symbol] = max(self.cooldown.get(pos.symbol, 0.0), time.time() + 20.0)
+                self.cooldown[f"{pos.symbol}:{pos.side}"] = max(self.cooldown.get(f"{pos.symbol}:{pos.side}", 0.0), time.time() + 20.0)
                 self._last_close_result.update({"status": "RETRY", "message": short_api_msg(msg)})
                 log(f"CLOSE SKIP {pos.symbol} {short_api_msg(msg)}", every=20.0, key=f"close-skip:{pos.symbol}")
                 return False, self.px.get(pos.symbol) or pos.entry
@@ -6020,7 +6032,16 @@ class Pulse:
         # A fill changes this logical group's quantity. Cancel only its
         # controls before rebuilding them so a smaller pair cannot remain
         # active after a partial or same-range entry merge.
-        if getattr(self, "control_orders", True):
+        # Overall groups are rebuilt by overall_controls (resized in place).
+        # Every other group keeps its old pair until the resized pair is
+        # placed (_replace_partial_controls), so a fill during an order-cap or
+        # cooling window never leaves the existing quantity unprotected.
+        overall_mode = False
+        try:
+            overall_mode = bool(overall_controls.enabled(self, pos))
+        except Exception:
+            overall_mode = False
+        if getattr(self, "control_orders", True) and overall_mode:
             try:
                 self.cancel_controls(pos.symbol, pos=pos)
             except Exception:
@@ -6091,10 +6112,13 @@ class Pulse:
         if str(source or "").lower() == "entry":
             self.merge_parent_lanes(pos, add_qty, fill_px)
         if getattr(self, "control_orders", True):
-            self.clear_position_controls(pos)
             self.ctrl_skip.pop(self.position_key(pos), None)
             self.ctrl_skip.pop(f"sync:{self.position_key(pos)}", None)
-            self.ensure_controls(pos)
+            if overall_mode or not (real_oid(pos.sl_oid) or real_oid(pos.tp_oid)):
+                self.clear_position_controls(pos)
+                self.ensure_controls(pos)
+            else:
+                self._replace_partial_controls(pos)
         return add_qty
 
     def _pending_position(self, row: Dict[str, Any], fill_qty: float, fill_px: float) -> Optional[Position]:
@@ -6475,7 +6499,7 @@ class Pulse:
                 and float(pending.get("requested_qty") or 0) > float(pending.get("filled_qty") or 0) + 1e-12
             ):
                 return
-        if time.time() < self.cooldown.get(sym, 0):
+        if time.time() < max(self.cooldown.get(sym, 0), self.cooldown.get(f"{sym}:{side}", 0)):
             return
         if self.ignore_syms.get(sym, 0) > time.time():
             return
@@ -6647,7 +6671,9 @@ class Pulse:
             if c is not None and qty > 0:
                 qty = max(qty, self.min_order_qty(c, px))
                 qty = self.round_qty_up(c, qty)
-            if qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
+            if c is None or qty < float(c.min_qty or 0) or qty * px < float(c.min_usdt or 0):
+                if not isinstance(getattr(self, "_execution_decision", None), dict):
+                    self._execution_decision = {}
                 self._execution_decision.update(allowed=False, reason="adjusted quantity below exchange minimum")
                 return
         elif not normal_allowed:
@@ -6828,7 +6854,7 @@ class Pulse:
                     group_key=pending_group_key,
                     metadata={**pending_meta, "ambiguous_since": time.time()},
                 )
-                self.cooldown[sym] = time.time() + 12.0
+                self.cooldown[f"{sym}:{side}"] = time.time() + 12.0
                 self._next_fill_poll = 0.0
                 self.recon_pending = True
                 self._reconcile_retry_at = 0.0
@@ -6938,17 +6964,17 @@ class Pulse:
                 msg = str(r.get("msg") or "")
                 short = short_api_msg(msg)
                 low = str(msg or "").lower()
-                self.cooldown[sym] = time.time() + (45.0 if "cooling" in low else 12.0)
+                self.cooldown[f"{sym}:{side}"] = time.time() + (45.0 if "cooling" in low else 12.0)
                 if "insufficient" in low and "margin" in low:
                     self.cooldown["__book__"] = time.time() + 20.0
                     log(f"ENTRY wait available={self.available:.4f} after {sym}", every=15.0, key="avail-wait")
                 if "order size" in low or "available amount" in low:
-                    self.cooldown[sym] = time.time() + 60.0
+                    self.cooldown[f"{sym}:{side}"] = time.time() + 60.0
                     self.cooldown["__book__"] = time.time() + 20.0
                 if "minimum size" in low or "minimum order amount" in low:
                     # Floor already retried via raise_to_min_qty. Cool briefly
                     # so a later cycle can use the learned contract.min_qty.
-                    self.cooldown[sym] = time.time() + 20.0
+                    self.cooldown[f"{sym}:{side}"] = time.time() + 20.0
                     self._clear_pending(cid)
                     log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
                     return
@@ -6957,7 +6983,7 @@ class Pulse:
                     # account (101487). It is not a per-symbol fault, so cool
                     # the whole book briefly instead of hammering the venue.
                     self.cooldown["__book__"] = time.time() + 30.0
-                    self.cooldown[sym] = time.time() + 30.0
+                    self.cooldown[f"{sym}:{side}"] = time.time() + 30.0
                     self._clear_pending(cid)
                     log(f"ORDER SKIP {sym} {side} {short}", every=30.0, key=f"oskip:{short}")
                     return
@@ -7023,7 +7049,7 @@ class Pulse:
             metadata=pending_meta,
         )
         if filled <= 0:
-            self.cooldown[sym] = time.time() + 12.0
+            self.cooldown[f"{sym}:{side}"] = time.time() + 12.0
             log(f"ENTRY no fill {sym} {side}", every=20.0, key=f"nofill:{sym}")
             return
         attached_sl = extract_oid(data.get("stopLoss") if isinstance(data.get("stopLoss"), dict) else {"data": {"stopLoss": data.get("stopLoss")}}) if isinstance(data, dict) else ""
@@ -7707,7 +7733,7 @@ class Pulse:
             self.ban_sym(pos.symbol, clear_open=False)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s skip-eval")
         else:
-            self.cooldown[pos.symbol] = max(float(self.cooldown.get(pos.symbol, 0.0) or 0.0), time.time() + COOLDOWN_S)
+            self.cooldown[f"{pos.symbol}:{pos.side}"] = max(float(self.cooldown.get(f"{pos.symbol}:{pos.side}", 0.0) or 0.0), time.time() + COOLDOWN_S)
             self.remove_position(pos)
             log(f"CLOSE {pos.symbol} {pos.side} pnl={pnl:.4f} ({pnl_pct*100:.3f}%) {reason} hold={hold:.0f}s")
         self.save_open_book()
@@ -8708,7 +8734,7 @@ class Pulse:
         target_notional = finite_number(ov.get("targetNotional"), 0.0)
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
-        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), 1.0) or 1.0))
+        self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), VOLUME_FACTOR_DEFAULT) or VOLUME_FACTOR_DEFAULT))
         self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.5)))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
@@ -8782,7 +8808,7 @@ class Pulse:
                 value = fallback
             return max(0.1, min(3.0, value)) / 100.0
 
-        self.sl_min = max(SL_MIN_PCT / 100.0, _risk_pct("slMinPct", SL_MIN_PCT))
+        self.sl_min = max(SL_MIN_PCT / 100.0, _risk_pct("slMinPct", SL_MIN_DEFAULT_PCT))
         self.sl_max = max(self.sl_min, _risk_pct("slMaxPct", 3.0))
         self.venue_sl_ticks = max(1.0, min(50.0, finite_number(ov.get("venueSlTicks"), float(VENUE_SL_TICKS)) or float(VENUE_SL_TICKS)))
         self.tp_min = max(0.003, _risk_pct("tpMinPct", 0.30))
@@ -9936,8 +9962,9 @@ class Pulse:
                     continue
                 raw = bumped
                 placed_limit = extra_room
-            room = max(0.0, self.max_book_notional() - pos.qty * px)
-            qty_cap_usdt = min(self.notional_cap() * max(1.0, inc), room, placed_limit * px)
+            book_cap = self.max_book_notional(parent_notional=parent * px, c=c)
+            room = max(0.0, book_cap - pos.qty * px)
+            qty_cap_usdt = min(max(self.notional_cap(), parent * px) * max(1.0, inc), room, placed_limit * px)
             qty = self.cap_order_qty(c, px, raw, qty_cap_usdt)
             qty = min(qty, self.round_qty(c, placed_limit))
             if qty > placed_limit + 1e-12 or qty < min_q or qty <= 0:
@@ -9956,11 +9983,11 @@ class Pulse:
                 else:
                     self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                     continue
-            if (pos.qty + qty) * px > self.max_book_notional() * 1.05:
+            if (pos.qty + qty) * px > book_cap * 1.05:
                 key = f"{pos.symbol}:{row['blockCount']}:cap"
                 now = time.time()
                 if now - self.skip_log.get(key, 0) > 30:
-                    log(f"BLOCK skip {pos.symbol} n={row['blockCount']} book cap {self.max_book_notional():.2f}")
+                    log(f"BLOCK skip {pos.symbol} n={row['blockCount']} book cap {book_cap:.2f}")
                     self.skip_log[key] = now
                 self.block.pause_count(lane, int(row["blockCount"]), 90)
                 continue
@@ -10063,7 +10090,7 @@ class Pulse:
                 if adopt_venue_minimum(c, msg) or ctrl_err_kind(msg) == "qty" or "minimum" in msg.lower():
                     qty = self.raise_to_min_qty(c, px, qty, msg)
                     if (qty * px / max(1, self.leverage_for(c)) > self.available * 0.95
-                            or (pos.qty + qty) * px > self.max_book_notional() * 1.08):
+                            or (pos.qty + qty) * px > book_cap * 1.08):
                         self.block.mark_nearly_filled(lane, int(row["blockCount"]))
                         self._clear_pending(cid)
                         continue
@@ -10239,7 +10266,9 @@ class Pulse:
             if age < 45.0:
                 self.dca.skips += 1
                 continue
-            if pos.qty * px >= self.max_book_notional():
+            _dca_lane = self.dca.lanes.get(self.dca_lane_key(pos))
+            _dca_parent = float(getattr(_dca_lane, "parent_qty", 0) or 0) or float(pos.qty or 0)
+            if pos.qty * px >= self.max_book_notional(parent_notional=_dca_parent * px, c=self.contracts.get(pos.symbol)):
                 self.dca.skips += 1
                 continue
             # Block and DCA are independent add-on lanes. Their own PF,
@@ -10261,6 +10290,7 @@ class Pulse:
                 continue
             floor = self.min_order_qty(c, px)
             seed = executable_parent_qty(seed, floor)
+            book_cap = self.max_book_notional(parent_notional=seed * px, c=c)
             try:
                 self.dca.attach(pos.symbol, pos.side, seed, pos.entry, group_key=group_key, min_qty=floor)
             except TypeError:
@@ -10278,8 +10308,8 @@ class Pulse:
             if not row:
                 continue
             want = min(float(row["qty"]), seed * 2.5)
-            room = max(0.0, self.max_book_notional() - pos.qty * px)
-            add_cap = min(self.notional_cap() * max(1.0, min(2.5, float(row.get("mult") or 1))), room)
+            room = max(0.0, book_cap - pos.qty * px)
+            add_cap = min(max(self.notional_cap(), seed * px) * max(1.0, min(2.5, float(row.get("mult") or 1))), room)
             qty = self.cap_order_qty(c, px, want, add_cap)
             if qty < floor:
                 if floor * px > add_cap * 1.08 or floor > seed * 2.5:
@@ -10289,7 +10319,7 @@ class Pulse:
             if qty <= 0 or qty > seed * 2.55:
                 self.dca.skips += 1
                 continue
-            if (pos.qty + qty) * px > self.max_book_notional() * 1.02:
+            if (pos.qty + qty) * px > book_cap * 1.02:
                 self.dca.skips += 1
                 continue
             margin = (qty * px) / max(1, self.leverage_for(c))
@@ -10355,7 +10385,7 @@ class Pulse:
                     retry_qty = self.raise_to_min_qty(c, px, qty, msg)
                     retry_margin = retry_qty * px / max(1, self.leverage_for(c))
                     if (retry_qty > 0
-                            and (pos.qty + retry_qty) * px <= self.max_book_notional() * 1.08
+                            and (pos.qty + retry_qty) * px <= book_cap * 1.08
                             and retry_margin <= self.available * 0.95):
                         qty = retry_qty
                         self._remember_pending(
@@ -11952,7 +11982,7 @@ class Pulse:
             if any(candidate is pos for candidate in self.open.values()):
                 overall_controls.closed_member(self, pos)
                 self.remove_position(pos)
-            self.cooldown[pos.symbol] = max(float(self.cooldown.get(pos.symbol, 0.0) or 0.0), time.time() + 12.0)
+            self.cooldown[f"{pos.symbol}:{pos.side}"] = max(float(self.cooldown.get(f"{pos.symbol}:{pos.side}", 0.0) or 0.0), time.time() + 12.0)
         self.ignored_foreign = len(foreign)
         self.foreign_position_count = len(foreign)
         if foreign:

@@ -127,7 +127,7 @@ def overlay_test() -> None:
         rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 7 and int(ov.get("trailingMinStep") or 0) == 7)
-        rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.4) < 1e-9, str(ov.get("slMinPct")))
+        rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.6) < 1e-9, str(ov.get("slMinPct")))
         rec(f"{name}-ind-sl-min", abs(float(ov.get("indStopMinPct") or 0) - 0.4) < 1e-9, str(ov.get("indStopMinPct")))
         # Seed lanes carry the deployed evaluation minimum PF, shared by all seven stage keys.
         rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - EVAL_MIN_PF) < 1e-9, str(ov.get("minPf")))
@@ -1516,8 +1516,8 @@ def phantom_recon_test() -> None:
     p3.open["CTL-USDT"] = pos("CTL-USDT", age=3600, sl_oid="sl-1")
     for _ in range(8):
         p3.adopt_exchange_positions()
-    rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and p3.cooldown.get("CTL-USDT", 0) > time.time(),
-        f"book={list(p3.open)} cool={bool(p3.cooldown.get('CTL-USDT'))}")
+    rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and max((v for k, v in p3.cooldown.items() if str(k).startswith("CTL-USDT")), default=0) > time.time(),
+        f"book={list(p3.open)} cool={p3.cooldown}")
 
     # 6) negative control: position still live on the exchange is kept
     rows = [{"symbol": "REAL-USDT", "positionSide": "LONG", "positionAmt": "1.0",
@@ -1836,7 +1836,7 @@ def block_calc_test() -> None:
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
         p.notional_cap = lambda: 10**9
-        p.max_book_notional = lambda: 10**9
+        p.max_book_notional = lambda *a, **k: 10**9
         p.cap_order_qty = lambda c, px, qty, cap=None: float(qty)
         p.min_order_qty = lambda c, px: float(c.min_qty)
         p.leverage_for = lambda c: 100
@@ -2304,7 +2304,7 @@ def set_orders_test() -> None:
         p.position_cost_pct = 0.15
         p.tp_cost_ratio = 1.5
         p.size_qty = lambda c, px: 0.05
-        p.max_book_notional = lambda: 1e9
+        p.max_book_notional = lambda *a, **k: 1e9
         p.ensure_max_leverage = lambda s, force=False: 100
         p.leverage_for = lambda c: 100
         p.control_orders = True
@@ -2827,7 +2827,7 @@ def strict_gate_test() -> None:
         p.skip_log = {}
         p.contracts = {"AAA-USDT": Contract("AAA-USDT", 0.001, 0.001, 3, 2, 1.0, 150)}
         p.size_qty = lambda c, px: 0.05
-        p.max_book_notional = lambda: 1000.0
+        p.max_book_notional = lambda *a, **k: 1000.0
         p.notional_cap = lambda: 250.0
         p.ensure_max_leverage = lambda s, force=False: None
         p.leverage_for = lambda c: 150

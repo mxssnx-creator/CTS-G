@@ -57,14 +57,16 @@ class VolumeFactorOverlayLoad(unittest.TestCase):
         self.assertEqual(self.load({'volumeFactor': 2.5, 'targetNotional': 3}), (3.0, 2.5))
         self.assertEqual(self.load({'volumeFactor': 99, 'targetNotional': 9999}), (500.0, 10.0))
         self.assertEqual(self.load({'volumeFactor': 0.01, 'targetNotional': 0.01}), (0.2, 0.05))
-        self.assertEqual(self.load({}), (2.15, 1.0))
+        # Missing or zero factor means the shared default 0.1, as on the desk.
+        self.assertEqual(self.load({}), (2.15, 0.1))
+        self.assertEqual(self.load({'volumeFactor': 0}), (2.15, 0.1))
 
     def test_nonfinite_or_corrupt_values_never_saturate_to_the_maximum(self):
         # write_overlay rejects float NaN, but a JSON string still round-trips
         # and float("nan") passes min(): it must not become 10x / 500 USDT.
         for bad in ('nan', 'NaN', 'inf', '-Infinity', 'abc', None):
             target, factor = self.load({'volumeFactor': bad, 'targetNotional': bad})
-            self.assertEqual(factor, 1.0, bad)
+            self.assertEqual(factor, 0.1, bad)
             self.assertEqual(target, 2.15, bad)
 
 

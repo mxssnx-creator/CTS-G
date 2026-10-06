@@ -26,6 +26,7 @@ from position_cost import (
     MICRO_PF,
     POSITIVE_PF,
     SL_MIN_PCT,
+    SL_MIN_DEFAULT_PCT,
     cost_aware_metrics,
     clears_pf,
     EVALUATION_WINDOWS,
@@ -63,7 +64,7 @@ from block_engine import (
 )
 from indication_engine import exit_tactic_hit, tactic_should_close
 from indication_engine import IndicationFrame, build_indication_frame, evaluate_signal_candles, evaluate_ta_pack, evaluate_ta_pack_follow, evaluate_direction, evaluate_move, evaluate_active, evaluate_active_all, evaluate_common, evaluate_trend, evaluate_break, evaluate_range_configs, indication_ranges, ohlcv_row
-from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
+from risk_variants import TRAIL_VARIANTS, TRAIL_ARM_MIN, TRAIL_ARM_MIN_DEFAULT, TRAIL_GIVE_MIN_DEFAULT, TRAIL_ARM_MAX, TRAIL_GIVE_MIN, TRAIL_GIVE_MAX, give_from_arm, parse_trail, trail_candidates, trail_grid, trail_key
 
 
 def pin_compute_threads(n: int = 1) -> None:
@@ -1529,7 +1530,7 @@ class SetBook:
         ov = shared_pf_settings(ov)
         from system_settings import normalize_system_settings
         self.system_workers = normalize_system_settings(ov)["systemWorkers"]
-        self.sl_min = min(.03, max(SL_MIN_PCT / 100.0, finite(ov.get("slMinPct"), SL_MIN_PCT) / 100))
+        self.sl_min = min(.03, max(SL_MIN_PCT / 100.0, finite(ov.get("slMinPct"), SL_MIN_DEFAULT_PCT) / 100))
         self.sl_max = min(.03, max(self.sl_min, finite(ov.get("slMaxPct"), 3.) / 100))
         self.tp_min = max(.003, finite(ov.get("tpMinPct"), .3) / 100)
         cap = finite(ov.get("tpMaxPct"), 0.) / 100
@@ -1699,9 +1700,9 @@ class SetBook:
             self.trails = []
         else:
             self.trails = trail_grid(
-                float(ov.get("trailArmMin") or TRAIL_ARM_MIN),
+                float(ov.get("trailArmMin") or TRAIL_ARM_MIN_DEFAULT),
                 float(ov.get("trailArmMax") or TRAIL_ARM_MAX),
-                float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN),
+                float(ov.get("trailGiveMin") or TRAIL_GIVE_MIN_DEFAULT),
                 float(ov.get("trailGiveMax") or TRAIL_GIVE_MAX),
             )
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
@@ -6405,6 +6406,7 @@ def _self_test_body() -> List[Tuple[str, bool, str]]:
             "trailGiveMin": 0.1,
             "trailGiveMax": 0.1,
             "positionCostPct": 0.10,
+            "slMinPct": 0.4,
         }
     )
     base_steps = sorted({s.step for s in trail_floor.sets.values() if s.kind == "base"})

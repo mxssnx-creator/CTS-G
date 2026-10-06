@@ -637,7 +637,7 @@ class Sizer:
         if leverage:
             for s in contracts:
                 self.lev_max[s] = int(leverage)
-        self.volume_factor = max(0.05, min(10.0, float(overlay.get("volumeFactor") or 1.0)))
+        self.volume_factor = max(0.05, min(10.0, float(overlay.get("volumeFactor") or 0.1)))
         self.margin_cap_pct = max(0.0, min(1.0, float(overlay.get("marginCapPct", 0.5))))
         pt.TARGET_NOTIONAL = max(0.2, min(500.0, float(overlay.get("targetNotional") or pt.TARGET_NOTIONAL)))
         self.vol1h: Dict[str, float] = {}
@@ -2106,7 +2106,7 @@ def main(argv=None) -> int:
                     maxDdS=book.max_dd_s, strictGate=book.strict_gate, costPct=cost_pct, timeBars=book.hist_time_bars,
                     scratchS=book.scratch_s, lookbackBars=int(ov.get("histLookbackBars")), openAtEndReconstructed=open_end,
                     axes={k: bool(ov.get(k)) for k in ("axisPrevEnabled", "axisLastEnabled", "axisContEnabled", "axisPauseEnabled")},
-                    targetNotional=float(ov.get("targetNotional")), volumeFactor=float(ov.get("volumeFactor") or 1.0),
+                    targetNotional=float(ov.get("targetNotional")), volumeFactor=float(ov.get("volumeFactor") or 0.1),
                     posCountsVolumeRatio=float(ov.get("posCountsVolumeRatio") or 0), maxOpen=int(ov.get("maxOpen")),
                     symbolCap=int(ov.get("symbolCap"))),
         gate=dict(candidatesInWindow=int(len(cands["uid"])), evidenceCloses=int(cands["n_evidence"]),

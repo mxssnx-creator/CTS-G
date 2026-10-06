@@ -91,7 +91,7 @@ def trader(tmp, positions, block_active=True, stack=6):
     p.lev_map = {SYM: 100}
     p.lev_max = {SYM: 100}
     p.notional_cap = lambda: 10**9
-    p.max_book_notional = lambda: 10**9
+    p.max_book_notional = lambda *a, **k: 10**9
     p.cap_order_qty = lambda c, px, qty, cap=None: float(qty)
     p.min_order_qty = lambda c, px: float(c.min_qty)
     p.leverage_for = lambda c: 100
@@ -180,6 +180,27 @@ class OverallLaneTests(unittest.TestCase):
         p._coord_add_state = lambda **k: ((k["count"] != 2), 0, 0.0, ["count 2 blocked"])
         run_adds(p, 4)
         self.assertEqual([leg.block_count for leg in p.block.lanes[f"{SYM}:LONG"].legs], [1])
+
+    def test_min_lot_parent_keeps_room_for_its_add_at_the_shipped_volume_factor(self):
+        # Venue minimum lot 8 USDT, sized notional 2.15 x 0.1: the parent opens
+        # at the minimum lot and its 1x add must not be starved by the 2 USDT cap.
+        p = trader(self.tmp.name, [position("general:sl0.6:st3", qty=0.08)])
+        p.contracts[SYM] = Contract(SYM, 0.0001, 0.0001, 4, 2, 8.0, 100)
+        p.min_order_qty = lambda c, px: max(float(c.min_qty), float(c.min_usdt) / px)
+        p.block.lanes.clear()
+        p.ensure_strategy_lanes(next(iter(p.open.values())))
+        p.volume_factor = 0.1
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.margin_cap_pct = 0.0
+        p.equity = 100.0
+        for name in ("max_book_notional", "notional_cap", "cap_order_qty"):
+            if name in vars(p):
+                delattr(p, name)
+        p.px[SYM] = 102.0
+        run_adds(p, 1)
+        self.assertEqual(len(p.api.posts), 1, "min-lot parent gets its add")
+        self.assertGreaterEqual(float(p.api.posts[0][1]["quantity"]) * 102.0, 7.9)
 
     def test_micro_parent_gets_no_add_and_is_not_parent_size(self):
         p = trader(self.tmp.name, [position("general:sl0.6:st3", micro=True)])

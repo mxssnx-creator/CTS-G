@@ -32,6 +32,8 @@ INTERN_PF = 1.0
 # only. Kept out of PF_SETTING_KEYS so the shared floor never collapses onto it.
 MICRO_PF = 1.05
 SL_MIN_PCT = 0.4
+# Default desk SL floor (wider than the hard floor above).
+SL_MIN_DEFAULT_PCT = 0.6
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.

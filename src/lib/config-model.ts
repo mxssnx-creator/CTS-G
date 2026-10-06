@@ -147,6 +147,21 @@ export function clampAxisWindow(axis: AxisName, value: unknown): number {
 export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
 export const SL_MIN_PCT = 0.4;
+/** Default SL floor; SL_MIN_PCT stays the hard minimum. */
+export const SL_MIN_DEFAULT_PCT = 0.6;
+/** Trailing grid: arm 0.3–1.5 % on a 0.3 grid, give 0.1–0.5 % on a 0.1 grid (risk_variants.trail_grid). */
+export const TRAIL_ARM_MIN_DEFAULT = 0.6;
+export const TRAIL_GIVE_MIN_DEFAULT = 0.2;
+export function clampTrailGrid(v: { trailArmMin?: number; trailArmMax?: number; trailGiveMin?: number; trailGiveMax?: number }) {
+  const snap = (x: number, lo: number, hi: number, step: number) =>
+    Math.round(Math.max(lo, Math.min(hi, Math.round(x / step) * step)) * 10) / 10;
+  const n = (x: unknown, d: number) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x : d);
+  const armMin = snap(n(v.trailArmMin, TRAIL_ARM_MIN_DEFAULT), 0.3, 1.5, 0.3);
+  const armMax = Math.max(armMin, snap(n(v.trailArmMax, 1.5), 0.3, 1.5, 0.3));
+  const giveMin = snap(n(v.trailGiveMin, TRAIL_GIVE_MIN_DEFAULT), 0.1, 0.5, 0.1);
+  const giveMax = Math.max(giveMin, snap(n(v.trailGiveMax, 0.5), 0.1, 0.5, 0.1));
+  return { trailArmMin: armMin, trailArmMax: armMax, trailGiveMin: giveMin, trailGiveMax: giveMax };
+}
 export const HIST_TEST_HOURS_MIN = 4;
 export const HIST_TEST_HOURS_MAX = 64;
 export const HIST_TEST_HOURS_DEFAULT = 20;
@@ -573,8 +588,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   baseMinPf: EVAL_MIN_PF,
   mainMinPf: EVAL_MIN_PF,
   realMinPf: EVAL_MIN_PF,
-  positionCostPct: 0.10,
-  positionCostFallbackPct: 0.10,
+  positionCostPct: 0.18,
+  positionCostFallbackPct: 0.18,
   // Prefer measured exchange fees. The manual PositionCost remains the
   // deterministic fallback until a complete live sample is available.
   useLivePositionCosts: true,
@@ -591,7 +606,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   // XRP/BCH/SOL real-data sweep (see reports/14d-run/coord_sweep_result.json).
   coordOptimizationN: 150,
   pfWindow: 15,
-  slMinPct: 0.4,
+  slMinPct: SL_MIN_DEFAULT_PCT,
   venueSlTicks: 3,
   mainEvalPosCount: 30,
   realEvalPosCount: 30,
@@ -648,9 +663,9 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailAuto: true,
   trailRecalcN: 6,
   trailRecalcEvery: 8,
-  trailArmMin: 0.3,
+  trailArmMin: 0.6,
   trailArmMax: 1.5,
-  trailGiveMin: 0.1,
+  trailGiveMin: 0.2,
   trailGiveMax: 0.5,
   trailGiveFactor: 0.333,
   trailRecalcGive: true,
@@ -1068,8 +1083,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   mainMinPf: normalizePf(num((cts.strategies as { main?: { main?: { min_profit_factor?: number } } } | undefined)?.main?.main?.min_profit_factor, EVAL_MIN_PF), EVAL_MIN_PF),
   realMinPf: normalizePf(num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, EVAL_MIN_PF), EVAL_MIN_PF),
 
-    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.10),
-    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.10),
+    positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.18),
+    positionCostFallbackPct: num(live?.positionCostFallbackPct ?? live?.positionCostPct ?? cts.exchangePositionCost ?? cts.positionCost, 0.18),
     useLivePositionCosts: bool(
       live?.useLivePositionCosts ?? cts.useLivePositionCosts ?? cts.useExchangePositionCost ?? cts.livePositionCostEnabled,
       true,
@@ -1089,7 +1104,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
-    slMinPct: num(cts.slMinPct, SL_MIN_PCT),
+    slMinPct: num(cts.slMinPct, SL_MIN_DEFAULT_PCT),
     venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
     mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
     realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),
@@ -1146,9 +1161,9 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     trailAuto: bool(cts.trailAuto, true),
     trailRecalcN: num(cts.trailRecalcN, 6),
     trailRecalcEvery: num(cts.trailRecalcEvery, 8),
-    trailArmMin: num(cts.trailArmMin, 0.3),
+    trailArmMin: num(cts.trailArmMin, 0.6),
     trailArmMax: num(cts.trailArmMax, 1.5),
-    trailGiveMin: num(cts.trailGiveMin, 0.1),
+    trailGiveMin: num(cts.trailGiveMin, 0.2),
     trailGiveMax: num(cts.trailGiveMax, 0.5),
     trailGiveFactor: num(cts.trailGiveFactor, 0.333),
     trailRecalcGive: bool(cts.trailRecalcGive, true),
@@ -1264,10 +1279,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   out.slToTpMax = SL_TP_MAX;
   out.slToTpStep = SL_TP_STEP;
   out.slToTpRatio = snapSlToTp(num(out.slToTpRatio, 0.6), SL_TP_MIN, SL_TP_MAX, SL_TP_STEP);
-  out.trailArmMin = 0.3;
-  out.trailArmMax = 1.5;
-  out.trailGiveMin = 0.1;
-  out.trailGiveMax = 0.5;
+  Object.assign(out, clampTrailGrid(out));
   out.setMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.setMinStep, DEFAULT_MIN_STEP))));
   out.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.minStep, DEFAULT_MIN_STEP))));
   out.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(out.trailingMinStep, DEFAULT_MIN_STEP))));
@@ -1415,12 +1427,9 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.minStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.minStep, DEFAULT_MIN_STEP))));
   next.trailingMinStep = Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(num(next.trailingMinStep, DEFAULT_MIN_STEP))));
   next.setStepMax = Math.max(next.setMinStep, Math.min(30, Math.round(num(next.setStepMax, 30))));
-  // Save the same full trail grid that overlayFromCts loads. A narrower saved
-  // range would shrink the engine catalog until the next reload widened it.
-  next.trailArmMin = 0.3;
-  next.trailArmMax = 1.5;
-  next.trailGiveMin = 0.1;
-  next.trailGiveMax = 0.5;
+  // Save the same trail grid that overlayFromCts loads (same clamps), so the
+  // engine catalog matches what the desk shows.
+  Object.assign(next, clampTrailGrid(next));
   next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
   next.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.maxDdTimeS, 64800) / 600) * 600));
   next.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.setMaxDdTimeS, 64800) / 600) * 600));

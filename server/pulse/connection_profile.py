@@ -55,7 +55,11 @@ def processing_profile():
                   axisPrevEnabled=True, axisLastEnabled=True,
                   axisContEnabled=True, axisPauseEnabled=True, normalExecutionEnabled=True,
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
-                  controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
+                  controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True,
+                  # PositionCost 0.18 % (TP = step x cost); wider SL floor and
+                  # trailing minimums. All remain desk settings.
+                  positionCostPct=0.18, positionCostFallbackPct=0.18,
+                  slMinPct=0.6, trailArmMin=0.6, trailGiveMin=0.2)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
         result[key] = EVAL_MIN_PF
     # Order lane: the same ceiling on both lanes (BingX allows 10 placements/s per

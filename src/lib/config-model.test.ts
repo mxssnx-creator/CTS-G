@@ -89,7 +89,8 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
       assert.equal(value[key], EVAL_MIN_PF, key);
     assert.equal(value.maxDdTimeS, 64800);
     assert.equal(value.setMaxDdTimeS, 64800);
-    assert.equal(value.positionCostFallbackPct, 0.1);
+    assert.equal(value.positionCostFallbackPct, 0.18);
+    assert.equal(value.positionCostPct, 0.18);
     assert.equal(value.useLivePositionCosts, true);
   }
 });
@@ -98,7 +99,10 @@ test("risk and step limits preserve unlimited TP and the 0.4 percent SL floor", 
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.tpMinPct, .3);
     assert.equal(value.tpMaxPct, 0);
-    assert.equal(value.slMinPct, .4);
+    // Default SL min 0.6 %; 0.4 % stays the hard floor (below).
+    assert.equal(value.slMinPct, .6);
+    assert.equal(value.trailArmMin, .6);
+    assert.equal(value.trailGiveMin, .2);
     assert.equal(value.indStopMinPct, .4);
     assert.equal(value.slMaxPct, 3);
     assert.equal(value.setMinStep, 7);
@@ -268,7 +272,7 @@ test("forced symbol winners survive overlay roundtrip", () => {
   assert.equal(saved.forcedBest?.["BCH-USDT"]?.slPct, 0.25);
   assert.equal(saved.forcedBest?.["SOL-USDT"]?.indication, "trend");
   assert.equal(saved.tpPct, 0.6);
-  assert.equal(saved.slPct, 0.4);
+  assert.equal(saved.slPct, 0.6);
 });
 
 test("historic test refresh interval is 1–8 hours default 2", () => {
@@ -341,9 +345,15 @@ test("saved trail ranges equal the reloaded full grid, so the catalog cannot fli
     for (const key of ["trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax"] as const) {
       assert.equal(saved[key], reloaded[key], `${preset.id} ${key}`);
     }
-    assert.equal(saved.trailArmMin, 0.3);
-    assert.equal(saved.trailArmMax, 1.5);
+    assert.ok(saved.trailArmMin >= 0.3 && saved.trailArmMin <= saved.trailArmMax && saved.trailArmMax <= 1.5, preset.id);
+    assert.ok(saved.trailGiveMin >= 0.1 && saved.trailGiveMin <= saved.trailGiveMax && saved.trailGiveMax <= 0.5, preset.id);
   }
+  const plain = overlayFromCts({}, {});
+  assert.deepEqual([plain.trailArmMin, plain.trailArmMax, plain.trailGiveMin, plain.trailGiveMax], [0.6, 1.5, 0.2, 0.5]);
+  // Operator values are kept (snapped to the engine grid), not forced back.
+  const custom = overlayFromCts({}, { trailArmMin: 0.9, trailGiveMin: 0.33 });
+  assert.equal(custom.trailArmMin, 0.9);
+  assert.equal(custom.trailGiveMin, 0.3);
 });
 
 test("the Scratch s control range covers the engine default and saved overlays", () => {

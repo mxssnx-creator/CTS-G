@@ -175,6 +175,7 @@ class ContinuousTests(AllValidEntries):
             "setMinPf": 1.1,
             "minPf": 1.1,
             "slToTpRatios": [0.6],
+            "slMinPct": 0.4,
             "setMinStep": 8,
             "setStepMax": 8,
             "stratTrailing": False,

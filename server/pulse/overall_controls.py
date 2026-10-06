@@ -414,10 +414,10 @@ def ensure(pulse, pos):
         proxy.close_position = False
         proxy.member_count = len(rows)
         proxy.foreign_qty = sum(float(getattr(p, "foreign_qty", 0) or 0) for p in rows)
-        proxy.exchange_qty = max(
-            sum(float(getattr(p, "exchange_qty", 0) or 0) for p in rows),
-            float(qty or 0),
-        )
+        # The venue position bounds the pair: after an external partial close
+        # the ledger qty can exceed it and the venue would reject the pair.
+        venue_qty = sum(float(getattr(p, "exchange_qty", 0) or 0) for p in rows)
+        proxy.exchange_qty = venue_qty if venue_qty > 0 else float(qty or 0)
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry
         proxy.sl, proxy.tp = low, high
