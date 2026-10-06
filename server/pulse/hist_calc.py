@@ -894,7 +894,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setMinSamples": int(opt.get("setMinSamples") or opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
         "setMinPf": POSITIVE_PF,
         "controlMinTrades": control_min_trades(opt.get("controlMinTrades")),
-        "setMaxDdTimeS": 57600,
+        "setMaxDdTimeS": 64800,
         "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 1),
         "setStepMax": int(opt.get("stepMax") or 30),

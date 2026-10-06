@@ -89,12 +89,13 @@ class ConfigIsolationTests(unittest.TestCase):
     def test_stages_count_their_own_samples_and_have_unique_records(self):
         st=state(hist=tape(1.2,n=30));b=book(st);b._score_pair((st,None))
         records=[b.stage_record(st,name) for name in ('base','main','real')]
-        self.assertEqual([r.sample_count for r in records],[30,5,3])
-        self.assertEqual([r.required_samples for r in records],[30,5,3])
+        want=[30,b.main_eval,b.real_eval]  # Base window 30; Main/Real follow the configured windows
+        self.assertEqual([r.sample_count for r in records],want)
+        self.assertEqual([r.required_samples for r in records],want)
         self.assertEqual(len({r.dedupe_key for r in records}),3)
         self.assertTrue(all(r.confidence==1 and not r.insufficient_sample for r in records))
         flow=b.stage_flow()['stages']
-        self.assertEqual([flow[n]['sampleCount'] for n in ('Base','Main','Real')],[30,5,3])
+        self.assertEqual([flow[n]['sampleCount'] for n in ('Base','Main','Real')],want)
 
     def test_live_source_change_invalidates_equal_combined_tape(self):
         st=state(hist=tape(n=30));b=book(st)

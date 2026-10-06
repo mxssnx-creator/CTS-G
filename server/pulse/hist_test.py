@@ -1821,7 +1821,7 @@ def test_overlay(hours: int, min_pf: float, step_lo: int = STEP_LO, step_hi: int
         "baseMinPf": min_pf,
         "mainMinPf": min_pf,
         "realMinPf": min_pf,
-        "setMaxDdTimeS": 57600,
+        "setMaxDdTimeS": 64800,
         "setMinStep": lo,
         "setStepMax": hi,
         "stratTrailing": True,

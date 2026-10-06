@@ -89,7 +89,9 @@ class Isolated(unittest.TestCase):
 
 class SeedVersusOwnEvidence(Isolated):
     def test_a_direction_with_its_own_complete_window_keeps_its_own_stages(self):
-        book = make_book()
+        # Main window pinned to last-5: this contract is about a losing tail
+        # of the direction's own Main window, not about the window length.
+        book = make_book(overlay={**STRICT, "mainEvalPosCount": 5})
         st = book.by_idx[0]
         t0 = time.time() - 200000
         for i in range(25):

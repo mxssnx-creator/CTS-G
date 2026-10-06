@@ -300,3 +300,48 @@ class SettingsContract(unittest.TestCase):
             self.assertEqual(ph.load_overlay('bingx-x01')['symbols'],live['symbols'])
 
 if __name__=='__main__':unittest.main()
+
+class EngineSettingsEndToEnd(unittest.TestCase):
+    """A desk save of the newer engine settings persists through write_overlay
+    and is what the engine modules actually load (Settings -> overlay -> engine)."""
+
+    SAVE = {
+        'mainEvalPosCount': 0, 'realEvalPosCount': 25, 'setDdtWindow': 60, 'setMaxDdTimeS': 21600,
+        'setHistTimeBars': 90, 'setHonorTp': False, 'setCooldownBars': 4, 'setScratchMin': 0.003,
+        'histSimulateBlock': False, 'histSimulateDca': False, 'microEnabled': False, 'microMinPf': 1.08,
+        'microMaxShare': 0.2, 'marginCapPct': 0.25, 'venueSlTicks': 6, 'manualCloseLaneHoldS': 3600,
+        'exitTacticOn': False, 'exitTacticBufferPct': 0.0, 'exitTacticMinGainPct': 0.3,
+        'indTypeSweep': False, 'indRsi2Low': 5.0, 'indImpulseSigma': 4.0, 'actSweepMin': 0.0,
+        'indSweepRanges': [10, 30], 'setStrictGate': True, 'setUseHistoricGate': True,
+    }
+
+    def test_saved_engine_settings_reach_set_book_indications_and_coordinator(self):
+        from set_engine import SetBook
+        from indication_engine import IndicationBook
+        from coord_engine import Coordinator
+        with tempfile.TemporaryDirectory() as d, patch.object(ph, 'DIR', d):
+            ph.write_overlay('vst', dict(self.SAVE))
+            ov = ph.load_overlay('bingx-x02')
+            for key, value in self.SAVE.items():
+                self.assertEqual(ov[key], value, key)
+        book = SetBook(); book.load(ov, rebuild=False)
+        self.assertEqual(book._stage_window_ns()[1:], (book.pf_n, 25))       # Main off -> Base window
+        self.assertEqual((book.main_eval, book.real_eval), (0, 25))
+        self.assertEqual(book.ddt_window(), max(book.eval_need(), 60))
+        self.assertEqual(book.max_dd_s, 21600.0)
+        self.assertEqual((book.hist_time_bars, book.hist_honor_tp, book.cooldown_bars), (90, False, 4))
+        self.assertEqual((book.hist_block, book.hist_dca), (False, False))
+        self.assertEqual((book.micro_enabled, book.micro_max_share), (False, 0.2))
+        self.assertAlmostEqual(book.micro_min_pf, 1.08)
+        self.assertEqual(book.ind_settings['exitTacticOn'], False)
+        self.assertEqual(book.ind_settings['exitTacticBufferPct'], 0.0)
+        self.assertEqual(book.ind_settings['exitTacticMinGainPct'], 0.3)
+        self.assertEqual((book.ind_settings['typeSweep'], book.ind_settings['rsi2Low'], book.ind_settings['impulseSigma']), (False, 5.0, 4.0))
+        self.assertEqual(book.ind_settings['actSweepMin'], 0.0)              # explicit zero honored
+        self.assertEqual(book.ind_settings['sweepRanges'], [10, 30])
+        ind = IndicationBook(); ind.load(ov)
+        self.assertEqual((ind.settings['typeSweep'], ind.settings['rsi2Low'], ind.settings['actSweepMin']), (False, 5.0, 0.0))
+        self.assertEqual((ind.settings['exitTacticOn'], ind.settings['exitTacticBufferPct'], ind.settings['exitTacticMinGainPct']), (False, 0.0, 0.3))
+        self.assertEqual(ind.settings['sweepRanges'], [10, 30])
+        coord = Coordinator(); coord.load({}, ov)
+        self.assertEqual((coord.main_eval, coord.real_eval), (0, 25))

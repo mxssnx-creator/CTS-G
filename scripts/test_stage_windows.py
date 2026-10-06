@@ -56,5 +56,32 @@ class StageWindowTests(unittest.TestCase):
         self.assertEqual(st.stage, "Real", (st.stage, st.main_pf, st.real_pf))
 
 
+class DdtWindowTests(unittest.TestCase):
+    def rows(self, pnls, t0=0.0, step=3600.0, symbol="T"):
+        return [{"t": t0 + i * step, "pnl_pct": p, "symbol": symbol, "side": "LONG"} for i, p in enumerate(pnls)]
+
+    def test_ddt_measures_the_validated_window_only(self):
+        b = book(baseEvalPosCount=10, setPfWindow=10, setMinSamples=10)
+        self.assertEqual(b.ddt_window(), 10)
+        # 20 old losses (an open drawdown from the start), then 10 clean wins.
+        tape = self.rows([-0.004] * 20 + [0.006] * 10)
+        dd = b.ddt_when_enough(tape, b.eval_need(), ordered=True)
+        self.assertEqual(dd["maxS"], 0.0, dd)
+
+    def test_ddt_still_catches_a_drawdown_inside_the_window(self):
+        b = book(baseEvalPosCount=10, setPfWindow=10, setMinSamples=10)
+        tape = self.rows([0.006] * 2 + [-0.004] * 8)
+        dd = b.ddt_when_enough(tape, b.eval_need(), ordered=True)
+        self.assertGreaterEqual(dd["maxS"], 7 * 3600.0)
+
+    def test_ddt_window_override_and_floor(self):
+        self.assertEqual(book(baseEvalPosCount=10, setPfWindow=10, setMinSamples=10, setDdtWindow=96).ddt_window(), 96)
+        self.assertEqual(book(baseEvalPosCount=40, setPfWindow=40, setMinSamples=30, setDdtWindow=5).ddt_window(), 30)
+
+    def test_max_ddt_default_18h_and_24h_ceiling(self):
+        self.assertEqual(book().max_dd_s, 64800.0)
+        self.assertEqual(book(setMaxDdTimeS=10 ** 9).max_dd_s, 86400.0)
+        self.assertEqual(cp.processing_profile()["setMaxDdTimeS"], 64800)
+
 if __name__ == "__main__":
     unittest.main()

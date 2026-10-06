@@ -293,6 +293,47 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   pfWindow: number;
   slMinPct: number;
   venueSlTicks: number;
+  mainEvalPosCount: number;
+  realEvalPosCount: number;
+  setDdtWindow: number;
+  setHistTimeBars: number;
+  setHonorTp: boolean;
+  setCooldownBars: number;
+  setScratchMin: number;
+  histSimulateBlock: boolean;
+  histSimulateDca: boolean;
+  histExactWindow: boolean;
+  marginCapPct: number;
+  maxLotsPerSymbolSide: number;
+  manualCloseLaneHoldS: number;
+  exitMinSamples: number;
+  exitTacticMinGainPct: number;
+  blockActiveLiveEnabled: boolean;
+  blockActiveRealEnabled: boolean;
+  variantBlockEnabled: boolean;
+  indDirRange: number;
+  indMoveRange: number;
+  indMoveRanges: number[];
+  indDirMinChange: number;
+  indMoveMinChange: number;
+  indActiveThreshold: number;
+  indActiveMovePct: number;
+  indMsiMinGap: number;
+  indVwapDevZ: number;
+  indVwapVolMult: number;
+  indRetestTol: number;
+  indRetestMinBreak: number;
+  indSqueezePctl: number;
+  indSweepWickAtr: number;
+  indRsi2Low: number;
+  indRsi2High: number;
+  indKeltnerMult: number;
+  indImpulseSigma: number;
+  indImpulseVolMult: number;
+  actSweepMin: number;
+  actRsi2Min: number;
+  actKeltnerMin: number;
+  actImpulseMin: number;
   slMaxPct: number;
   tpMinPct: number;
   tpMaxPct: number;
@@ -456,7 +497,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   trailArmPct: 0.3,
   trailGivePct: 0.1,
   timeStopS: 21600,
-  maxDdTimeS: 57600,
+  maxDdTimeS: 64800,
   scratchS: 7200,
   scratchMinPct: 0.16,
   scanS: 0.2,
@@ -532,6 +573,47 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   pfWindow: 15,
   slMinPct: 0.4,
   venueSlTicks: 3,
+  mainEvalPosCount: 12,
+  realEvalPosCount: 3,
+  setDdtWindow: 0,
+  setHistTimeBars: 120,
+  setHonorTp: true,
+  setCooldownBars: 2,
+  setScratchMin: 0.0016,
+  histSimulateBlock: true,
+  histSimulateDca: true,
+  histExactWindow: false,
+  marginCapPct: 0.1,
+  maxLotsPerSymbolSide: 0,
+  manualCloseLaneHoldS: 21600,
+  exitMinSamples: 0,
+  exitTacticMinGainPct: 0.15,
+  blockActiveLiveEnabled: true,
+  blockActiveRealEnabled: true,
+  variantBlockEnabled: true,
+  indDirRange: 10,
+  indMoveRange: 10,
+  indMoveRanges: [20, 30, 40],
+  indDirMinChange: 0.001,
+  indMoveMinChange: 0.001,
+  indActiveThreshold: 1,
+  indActiveMovePct: 0.5,
+  indMsiMinGap: 5,
+  indVwapDevZ: 2,
+  indVwapVolMult: 1.8,
+  indRetestTol: 0.12,
+  indRetestMinBreak: 0.08,
+  indSqueezePctl: 0.2,
+  indSweepWickAtr: 0.25,
+  indRsi2Low: 10,
+  indRsi2High: 90,
+  indKeltnerMult: 2,
+  indImpulseSigma: 3,
+  indImpulseVolMult: 2,
+  actSweepMin: 0.04,
+  actRsi2Min: 0.03,
+  actKeltnerMin: 0.04,
+  actImpulseMin: 0.03,
   slMaxPct: 3.0,
   tpMinPct: 0.3,
   tpMaxPct: 0,
@@ -623,7 +705,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setDeactN: 25,
   controlMinTrades: 0,
   setMinPf: EVAL_MIN_PF,
-  setMaxDdTimeS: 14400,
+  setMaxDdTimeS: 64800,
   setAutoDeact: true,
   microEnabled: true,
   microMinPf: 1.05,
@@ -981,14 +1063,55 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
       false,
     ),
     coordOptimizationN: Math.max(50, Math.min(200, Math.round(num(live?.coordOptimizationN ?? cts.coordOptimizationN, 50)))),
-    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 57600),
+    maxDdTimeS: num(live?.maxDdTimeS ?? cts.maxDdTimeS, 64800),
     cooldownS: num(live?.cooldownS ?? cts.cooldownS, 9),
     staggerS: num(live?.staggerS ?? cts.staggerS, 0.6),
     drawdownHaltPct: num(live?.drawdownHaltPct ?? cts.drawdownHaltPct, 0),
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, SL_MIN_PCT),
-    venueSlTicks: Math.max(1, Math.min(50, num(cts.venueSlTicks, 3))),
+    venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
+    mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 12)))),
+    realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 3)))),
+    setDdtWindow: Math.max(0, Math.min(200, Math.round(num(live?.setDdtWindow, 0)))),
+    setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 120)))),
+    setHonorTp: bool(live?.setHonorTp, true),
+    setCooldownBars: Math.max(1, Math.min(12, Math.round(num(live?.setCooldownBars, 2)))),
+    setScratchMin: Math.max(0, Math.min(0.05, num(live?.setScratchMin, 0.0016))),
+    histSimulateBlock: bool(live?.histSimulateBlock, true),
+    histSimulateDca: bool(live?.histSimulateDca, true),
+    histExactWindow: bool(live?.histExactWindow, false),
+    marginCapPct: Math.max(0, Math.min(1, num(live?.marginCapPct, 0.1))),
+    maxLotsPerSymbolSide: Math.max(0, Math.min(100, Math.round(num(live?.maxLotsPerSymbolSide, 0)))),
+    manualCloseLaneHoldS: Math.max(0, Math.min(86400, Math.round(num(live?.manualCloseLaneHoldS, 21600)))),
+    exitMinSamples: Math.max(0, Math.min(200, Math.round(num(live?.exitMinSamples, 0)))),
+    exitTacticMinGainPct: Math.max(0, Math.min(2, num(live?.exitTacticMinGainPct, 0.15))),
+    blockActiveLiveEnabled: bool(live?.blockActiveLiveEnabled, true),
+    blockActiveRealEnabled: bool(live?.blockActiveRealEnabled, true),
+    variantBlockEnabled: bool(live?.variantBlockEnabled, true),
+    indDirRange: Math.max(4, Math.min(55, Math.round(num(live?.indDirRange, 10)))),
+    indMoveRange: Math.max(4, Math.min(55, Math.round(num(live?.indMoveRange, 10)))),
+    indMoveRanges: Array.isArray(live?.indMoveRanges) ? (live?.indMoveRanges as number[]) : [20, 30, 40],
+    indDirMinChange: Math.max(0, Math.min(0.05, num(live?.indDirMinChange, 0.001))),
+    indMoveMinChange: Math.max(0, Math.min(0.05, num(live?.indMoveMinChange, 0.001))),
+    indActiveThreshold: Math.max(0.1, Math.min(10, num(live?.indActiveThreshold, 1))),
+    indActiveMovePct: Math.max(0, Math.min(5, num(live?.indActiveMovePct, 0.5))),
+    indMsiMinGap: Math.max(0.5, Math.min(30, num(live?.indMsiMinGap, 5))),
+    indVwapDevZ: Math.max(0.5, Math.min(6, num(live?.indVwapDevZ, 2))),
+    indVwapVolMult: Math.max(1, Math.min(10, num(live?.indVwapVolMult, 1.8))),
+    indRetestTol: Math.max(0.01, Math.min(2, num(live?.indRetestTol, 0.12))),
+    indRetestMinBreak: Math.max(0.01, Math.min(2, num(live?.indRetestMinBreak, 0.08))),
+    indSqueezePctl: Math.max(0.05, Math.min(0.5, num(live?.indSqueezePctl, 0.2))),
+    indSweepWickAtr: Math.max(0, Math.min(3, num(live?.indSweepWickAtr, 0.25))),
+    indRsi2Low: Math.max(1, Math.min(49, num(live?.indRsi2Low, 10))),
+    indRsi2High: Math.max(51, Math.min(99, num(live?.indRsi2High, 90))),
+    indKeltnerMult: Math.max(0.5, Math.min(5, num(live?.indKeltnerMult, 2))),
+    indImpulseSigma: Math.max(1, Math.min(10, num(live?.indImpulseSigma, 3))),
+    indImpulseVolMult: Math.max(1, Math.min(10, num(live?.indImpulseVolMult, 2))),
+    actSweepMin: Math.max(0, Math.min(2, num(live?.actSweepMin, 0.04))),
+    actRsi2Min: Math.max(0, Math.min(2, num(live?.actRsi2Min, 0.03))),
+    actKeltnerMin: Math.max(0, Math.min(2, num(live?.actKeltnerMin, 0.04))),
+    actImpulseMin: Math.max(0, Math.min(2, num(live?.actImpulseMin, 0.03))),
     slMaxPct: num(cts.slMaxPct, 3.0),
     tpMinPct: num(cts.tpMinPct, 0.3),
     tpMaxPct: num(cts.tpMaxPct, 0),
@@ -1070,7 +1193,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setDeactN: num(cts.setDeactN, 25),
     controlMinTrades: num(live?.controlMinTrades ?? cts.controlMinTrades, 0),
     setMinPf: num(cts.setMinPf ?? cts.baseMinPf, EVAL_MIN_PF),
-    setMaxDdTimeS: num(cts.setMaxDdTimeS, 14400),
+    setMaxDdTimeS: num(cts.setMaxDdTimeS, 64800),
     setAutoDeact: bool(cts.setAutoDeact, true),
     microEnabled: bool(cts.microEnabled, true),
     microMinPf: normalizePf(num(cts.microMinPf, 1.05), 1.05),
@@ -1133,8 +1256,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
   for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const) {
     out[key] = normalizePf(out.minPf, EVAL_MIN_PF);
   }
-  out.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.maxDdTimeS, 57600) / 600) * 600));
-  out.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(out.setMaxDdTimeS, 57600) / 600) * 600));
+  out.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.maxDdTimeS, 64800) / 600) * 600));
+  out.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(out.setMaxDdTimeS, 64800) / 600) * 600));
   out.modules = {
     ...(DEFAULT_OVERLAY.modules ?? {}),
     ...(typeof live?.modules === "object" && live.modules ? live.modules : {}),
@@ -1275,8 +1398,8 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.trailGiveMin = 0.1;
   next.trailGiveMax = 0.5;
   next.slPct = Math.max(next.slMinPct, num(next.slPct, next.slMinPct));
-  next.maxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.maxDdTimeS, 57600) / 600) * 600));
-  next.setMaxDdTimeS = Math.max(600, Math.min(57600, Math.round(num(next.setMaxDdTimeS, 57600) / 600) * 600));
+  next.maxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.maxDdTimeS, 64800) / 600) * 600));
+  next.setMaxDdTimeS = Math.max(600, Math.min(86400, Math.round(num(next.setMaxDdTimeS, 64800) / 600) * 600));
   next.cooldownS = Math.max(0, Math.min(120, num(next.cooldownS, 9)));
   next.staggerS = Math.max(0, Math.min(30, num(next.staggerS, 0.6)));
   next.drawdownHaltPct = Math.max(0, Math.min(80, num(next.drawdownHaltPct, 0)));

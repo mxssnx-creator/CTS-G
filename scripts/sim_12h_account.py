@@ -740,8 +740,10 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
             axes[axis][a0:a1] = ok & clears_vec(rr, floors["base"])
     from position_cost import POSITION_COST_PCT_DEFAULT, cost_as_frac
     dd_cost_frac = cost_as_frac(POSITION_COST_PCT_DEFAULT)
-    # DD-time gate: engine drawdown_time_by_symbol on the Set x side retained
-    # tape (last 96 closes), refreshed at each simulated hour.
+    # DD-time gate: engine drawdown_time_by_symbol on the Set x side tape over
+    # the same window the Base PF validates (SetBook.ddt_window), refreshed at
+    # each simulated hour.
+    ddt_n = int(getattr(book, "ddt_window", lambda: 96)()) if callable(getattr(book, "ddt_window", None)) else 96
     hour = (cands["entry"] - sim_start) // 60
     dd_ok = np.ones(m, dtype=bool)
     need_dd = np.flatnonzero(out["real_ok"] | out["micro_ok"])
@@ -757,7 +759,7 @@ def build_candidates(caches, catalog, symbols, sim_start, sim_end, book, gated: 
             if ie < 0:
                 ddt_cache[key] = 0.0
                 continue
-            lo_i = max(g0, ie - 95)
+            lo_i = max(g0, ie - (ddt_n - 1))
             if ie - g0 + 1 < book.eval_need():
                 # too few prior closes for a DDT: valid until the sample exists
                 ddt_cache[key] = 0.0
@@ -934,7 +936,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
              sim_start: int, sim_end: int, start_s: int, book, sizer: Sizer, start_equity: float, gated: bool,
              live_neg: bool, mmr_factor: float = 0.5, eq_min: float = 0.20, liq_mode: str = "intrabar",
              kind_lanes: Optional[List[Dict[str, Any]]] = None, max_open: int = 100,
-             dd_pause_pct: float = 0.0) -> Dict[str, Any]:
+             dd_pause_pct: float = 0.0, side_cap: int = 0) -> Dict[str, Any]:
     _engine_path()
     from set_engine import drawdown_time_by_symbol
     cost_pct = float(book.cost_pct)
@@ -1138,6 +1140,9 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                 meta_kinds = [IND_KINDS[k] for k in range(len(IND_KINDS)) if (mk >> k) & 1]
             micro_c = bool(gated and is_micro_c[i])
             for _dup in range(m_i):
+                if side_cap and int((acct.agg.get((s, side)) or (0, 0, 0))[2]) >= side_cap:
+                    hr["skipped_side_cap"] = hr.get("skipped_side_cap", 0) + 1
+                    continue
                 if micro_c and len(micro_ids) >= micro_cap:
                     hr["skipped_micro_cap"] = hr.get("skipped_micro_cap", 0) + 1
                     continue
@@ -1209,6 +1214,9 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
         # Indication kind lanes (own entries, venue-minimum sized like any lot)
         for r in (lanes_by_bar.get(t, []) if not halted else []):
             s, side = r["symbol"], int(r["side"])
+            if side_cap and int((acct.agg.get((s, side)) or (0, 0, 0))[2]) >= side_cap:
+                hr["skipped_side_cap"] = hr.get("skipped_side_cap", 0) + 1
+                continue
             c = sizer.contracts[s]
             p = px[s]
             lev = lev_of[s]
@@ -1342,7 +1350,8 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                      liveNegativeDeact=sum(h["skipped_live_neg"] for h in hours),
                      addOnNoParent=sum(h["skipped_no_parent"] for h in hours),
                      equityHalt=sum(h.get("skipped_halt", 0) for h in hours),
-                     microCap=sum(h.get("skipped_micro_cap", 0) for h in hours)),
+                     microCap=sum(h.get("skipped_micro_cap", 0) for h in hours),
+                     sideCap=sum(h.get("skipped_side_cap", 0) for h in hours)),
         liquidations=liquidations, liquidationLoss=round(getattr(acct, "liquidation_loss", 0.0), 6),
         haltedMinutes=halted_minutes, ddPauseMinutes=dd_pause_minutes,
         candidates=dict(setTradesInWindow=int(len(cands["uid"])), setLotsInWindow=int(mult[cands["uid"]].sum()),
@@ -1471,6 +1480,30 @@ def trade_level_markdown(rows, start_s, sim_start):
             f"{pf(r['indications/normal'])} | {pf(r['indications/trailing'])} | {pfn(r['block'])} | {pfn(r['dca'])} | "
             f"{pf(r['axis:prev'])} | {pf(r['axis:last'])} | {pf(r['axis:cont'])} | {pf(r['axis:pause'])} |")
     return "\n".join(lines)
+
+
+def per_signal_metrics(cands, mask, cost_pct):
+    """One trade per distinct signal (symbol x side x entry bar), the admitted
+    Set with the highest in-sample last-N PF first (the account's pick).
+
+    Pooled Set-trade metrics count one signal once per overlapping Set
+    configuration (hundreds of near-duplicate Sets enter the same signal),
+    so a few winning signals can dominate the pooled PF. This is the edge an
+    account can actually trade."""
+    sel = np.flatnonzero(mask & (cands["exit"] >= 0))
+    if not len(sel):
+        return dict(signals=0)
+    key = cands["sym"][sel].astype(np.int64) * 10_000_000 + (cands["side"][sel] > 0) * 5_000_000 + cands["entry"][sel]
+    r30 = np.nan_to_num(cands["r30"][sel], nan=0.0)
+    order = np.lexsort((-r30, key))
+    k = key[order]
+    first = np.r_[True, k[1:] != k[:-1]]
+    mv = cands["raw"][sel][order][first]
+    net = mv - cost_pct / 100.0
+    gl = float(-net[net < 0].sum())
+    return dict(signals=int(first.sum()), setTrades=int(len(sel)), trades=int(first.sum()), lots=int(len(sel)),
+                classicPf=round(float(net[net > 0].sum()) / gl, 4) if gl > 0 else 99.0,
+                winRate=round(float((net > 0).mean()) * 100, 2), netAvgPct=round(float(net.mean()) * 100, 4))
 
 
 def tape_metrics(cands, catalog, mask, cost_pct):
@@ -1925,7 +1958,8 @@ def main(argv=None) -> int:
                        sim_start, sim_end, start_s, book, sizer, args.start_equity, gated, bool(book.live_negative_deact),
                        mmr_factor=args.mmr_factor, eq_min=float(sizer.pt.EQ_MIN), liq_mode=liq_mode,
                        kind_lanes=lanes_g if gated else lanes_u, max_open=int(ov.get("maxOpen") or 100),
-                       dd_pause_pct=float(ov.get("ddPausePct") or 0.0))
+                       dd_pause_pct=float(ov.get("ddPausePct") or 0.0),
+                       side_cap=int(ov.get("maxLotsPerSymbolSide") or 0))
         res["title"] = title
         res["leverage"] = lev or "exchange max (engine fallback 150)"
         runs.append(res)
@@ -1938,6 +1972,9 @@ def main(argv=None) -> int:
         f"Micro passed ({float(getattr(book, 'micro_min_pf', 0.0) or 0.0):.2f} <= PF < floor)": tape_metrics(cands, catalog, cands["micro_ok"], cost_pct),
         "admitted (Base/Main/Real + Micro + DDT)": tape_metrics(cands, catalog, cands["admitted"], cost_pct),
     }
+    trade_level["per distinct signal · admitted (top in-sample PF per signal)"] = per_signal_metrics(cands, cands["admitted"], cost_pct)
+    trade_level["per distinct signal · Base+Main+Real"] = per_signal_metrics(cands, cands["real_ok"], cost_pct)
+    trade_level["per distinct signal · unfiltered"] = per_signal_metrics(cands, np.ones(len(cands["uid"]), bool), cost_pct)
     for a in AXIS_WINDOWS:
         trade_level[f"admitted & axis {a} child qualifies"] = tape_metrics(cands, catalog, cands["admitted"] & cands["axes"][a], cost_pct)
     def lane_metrics(rows):

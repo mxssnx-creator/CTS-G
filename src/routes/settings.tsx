@@ -101,6 +101,7 @@ const SECTIONS = [
   "sets",
   "exits",
   "stages",
+  "engine",
   "block",
   "dca",
   "axes",
@@ -1596,7 +1597,7 @@ function SettingsPage() {
                     label="Position max DD time"
                     value={overlay.maxDdTimeS / 60}
                     min={10}
-                    max={960}
+                    max={1440}
                     step={10}
                     unit="min"
                     hint="Underwater positions close after this continuous drawdown time."
@@ -1606,7 +1607,7 @@ function SettingsPage() {
                     label="Set max DD time"
                     value={overlay.setMaxDdTimeS / 60}
                     min={10}
-                    max={960}
+                    max={1440}
                     step={10}
                     unit="min"
                     hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
@@ -2004,6 +2005,129 @@ function SettingsPage() {
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
               </Grid>
             </Card>
+          )}
+
+          {section === "engine" && (
+            <>
+              <Card title="Validation stages" hint="Base validates the last-N closes for min PF; Main and Real re-check shorter windows. 0 = stage off (reuses the previous window).">
+                <Grid>
+                  <Num label="Main eval last N" value={overlay.mainEvalPosCount} min={0} max={75} step={1}
+                    hint="0 = Main off (Main reuses the Base window)" onChange={(v) => patch("mainEvalPosCount", Math.max(0, Math.round(v)))} />
+                  <Num label="Real eval last N" value={overlay.realEvalPosCount} min={0} max={75} step={1}
+                    hint="0 = Real off (Real reuses the Main window)" onChange={(v) => patch("realEvalPosCount", Math.max(0, Math.round(v)))} />
+                  <Num label="DDT window (closes)" value={overlay.setDdtWindow} min={0} max={200} step={1}
+                    hint="0 = the Base PF window · drawdown time is measured over these last closes" onChange={(v) => patch("setDdtWindow", Math.max(0, Math.round(v)))} />
+                  <Num label="Set max DD time" value={Math.round(overlay.setMaxDdTimeS / 60)} min={10} max={1440} step={10} unit="min"
+                    hint="DDT cap for a validated Set · default 1080 min (18h)" onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
+                  <EnableSlider label="Strict gate (Base → Main → Real)" on={overlay.setStrictGate !== false}
+                    hint="Execution needs the full chain; off = Base only" onChange={(v) => patch("setStrictGate", v)} />
+                  <EnableSlider label="Historic gate" on={overlay.setUseHistoricGate !== false}
+                    hint="Indication kinds/configs need their own validated tape" onChange={(v) => patch("setUseHistoricGate", v)} />
+                </Grid>
+              </Card>
+              <Card title="Micro tier" hint="Sets positive only between the Micro floor and the Base floor trade one venue-minimum lot, capped to a share of maxOpen">
+                <Grid>
+                  <EnableSlider label="Micro on" on={overlay.microEnabled !== false} onChange={(v) => patch("microEnabled", v)} />
+                  <Num label="Micro min PF" value={overlay.microMinPf} min={1} max={1.35} step={0.01}
+                    hint="never above the Base floor" onChange={(v) => patch("microMinPf", Math.round(v * 100) / 100)} />
+                  <Num label="Micro max share" value={Math.round(overlay.microMaxShare * 100)} min={0} max={100} step={1} unit="%"
+                    hint="of maxOpen positions · 0 blocks Micro entries" onChange={(v) => patch("microMaxShare", Math.max(0, Math.min(100, v)) / 100)} />
+                </Grid>
+              </Card>
+              <Card title="Risk, sizing and stops" hint="Volume is always raised to the venue minimum lot; stops never tighter than the venue accepts">
+                <Grid>
+                  <Num label="Margin cap" value={Math.round(overlay.marginCapPct * 100)} min={0} max={100} step={1} unit="% equity"
+                    hint="used margin limit · 0 or 100 = uncapped" onChange={(v) => patch("marginCapPct", Math.max(0, Math.min(100, v)) / 100)} />
+                  <Num label="Lots per symbol · side" value={overlay.maxLotsPerSymbolSide} min={0} max={100} step={1}
+                    hint="Sets agreeing on one signal share this many lots · 0 = unlimited" onChange={(v) => patch("maxLotsPerSymbolSide", Math.max(0, Math.round(v)))} />
+                  <Num label="Venue SL ticks" value={overlay.venueSlTicks} min={1} max={50} step={1}
+                    hint="minimum SL distance in price ticks (plus floors learned from rejections)" onChange={(v) => patch("venueSlTicks", Math.round(v))} />
+                  <Num label="Manual-close lane hold" value={Math.round(overlay.manualCloseLaneHoldS / 60)} min={0} max={1440} step={10} unit="min"
+                    hint="a manually closed lane is not reopened for this long" onChange={(v) => patch("manualCloseLaneHoldS", Math.round(v) * 60)} />
+                  <Num label="SL:TP ratio min" value={overlay.slToTpMin} min={0.1} max={3} step={0.1}
+                    onChange={(v) => patch("slToTpMin", Math.round(v * 10) / 10)} />
+                  <Num label="SL:TP ratio max" value={overlay.slToTpMax} min={0.1} max={3} step={0.1}
+                    onChange={(v) => patch("slToTpMax", Math.round(v * 10) / 10)} />
+                  <Num label="SL:TP ratio step" value={overlay.slToTpStep} min={0.1} max={1} step={0.1}
+                    onChange={(v) => patch("slToTpStep", Math.round(v * 10) / 10)} />
+                  <Num label="Trail arm min" value={overlay.trailArmMin} min={0.05} max={3} step={0.05} unit="%"
+                    onChange={(v) => patch("trailArmMin", v)} />
+                  <Num label="Trail arm max" value={overlay.trailArmMax} min={0.1} max={5} step={0.05} unit="%"
+                    onChange={(v) => patch("trailArmMax", v)} />
+                  <Num label="Trail give min" value={overlay.trailGiveMin} min={0.02} max={2} step={0.01} unit="%"
+                    onChange={(v) => patch("trailGiveMin", v)} />
+                  <Num label="Trail give max" value={overlay.trailGiveMax} min={0.05} max={3} step={0.01} unit="%"
+                    onChange={(v) => patch("trailGiveMax", v)} />
+                  <Num label="Exit lane min samples" value={overlay.exitMinSamples} min={0} max={200} step={1}
+                    hint="0 = the PF window" onChange={(v) => patch("exitMinSamples", Math.round(v))} />
+                </Grid>
+              </Card>
+              <Card title="Historic replay" hint="How the intern Set replay simulates each configuration (the evidence the stages validate)">
+                <Grid>
+                  <Num label="Hold time (bars)" value={overlay.setHistTimeBars} min={8} max={120} step={1} unit="min"
+                    hint="time exit of a replayed position" onChange={(v) => patch("setHistTimeBars", Math.round(v))} />
+                  <Num label="Scratch min" value={Math.round(overlay.setScratchMin * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    hint="replay scratch exit gain (after scratchS)" onChange={(v) => patch("setScratchMin", Math.max(0, v) / 100)} />
+                  <Num label="Cooldown (bars)" value={overlay.setCooldownBars} min={1} max={12} step={1}
+                    onChange={(v) => patch("setCooldownBars", Math.round(v))} />
+                  <EnableSlider label="Honor TP in replay" on={overlay.setHonorTp !== false} onChange={(v) => patch("setHonorTp", v)} />
+                  <EnableSlider label="Simulate Block lanes" on={overlay.histSimulateBlock !== false} onChange={(v) => patch("histSimulateBlock", v)} />
+                  <EnableSlider label="Simulate DCA lanes" on={overlay.histSimulateDca !== false} onChange={(v) => patch("histSimulateDca", v)} />
+                  <EnableSlider label="Exact replay window" on={overlay.histExactWindow === true}
+                    hint="replay exactly the evaluation window instead of warmup + lookback" onChange={(v) => patch("histExactWindow", v)} />
+                  <Num label="Entry policy candidates" value={overlay.entryPolicyMaxCandidates} min={0} max={500} step={1}
+                    hint="0 = unlimited" onChange={(v) => patch("entryPolicyMaxCandidates", Math.max(0, Math.round(v)))} />
+                  <Num label="Entry policy live samples" value={overlay.entryPolicyMinLiveSamples} min={0} max={25} step={1}
+                    onChange={(v) => patch("entryPolicyMinLiveSamples", Math.max(0, Math.round(v)))} />
+                  <Num label="Prev window" value={overlay.prevPosWindow} min={5} max={75} step={1}
+                    onChange={(v) => patch("prevPosWindow", Math.round(v))} />
+                  <Num label="Prev min count" value={overlay.prevPosMinCount} min={1} max={30} step={1}
+                    onChange={(v) => patch("prevPosMinCount", Math.round(v))} />
+                </Grid>
+              </Card>
+              <Card title="Block variants" hint="Block-active variants per stage">
+                <Grid>
+                  <EnableSlider label="Block variants" on={overlay.variantBlockEnabled !== false} onChange={(v) => patch("variantBlockEnabled", v)} />
+                  <EnableSlider label="Block active · Real" on={overlay.blockActiveRealEnabled !== false} onChange={(v) => patch("blockActiveRealEnabled", v)} />
+                  <EnableSlider label="Block active · Live" on={overlay.blockActiveLiveEnabled !== false} onChange={(v) => patch("blockActiveLiveEnabled", v)} />
+                </Grid>
+              </Card>
+              <Card title="Indication tuning" hint="Situation thresholds per kind · activity = minimum ATR(14) % of price before a kind may fire">
+                <Grid>
+                  <Num label="Direction range" value={overlay.indDirRange} min={4} max={55} step={1} onChange={(v) => patch("indDirRange", Math.round(v))} />
+                  <Num label="Direction min change" value={Math.round(overlay.indDirMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    onChange={(v) => patch("indDirMinChange", Math.max(0, v) / 100)} />
+                  <Num label="Move range" value={overlay.indMoveRange} min={4} max={55} step={1} onChange={(v) => patch("indMoveRange", Math.round(v))} />
+                  <Num label="Move min change" value={Math.round(overlay.indMoveMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    onChange={(v) => patch("indMoveMinChange", Math.max(0, v) / 100)} />
+                  {(overlay.indMoveRanges ?? [20, 30, 40]).map((period, index, periods) => (
+                    <Num key={`move-range-${index}`} label={`Move fade range ${index + 1}`} value={period} min={8} max={55} step={1}
+                      hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMoveRanges", periods.map((n, i) => (i === index ? value : n)))} />
+                  ))}
+                  <Num label="Active threshold" value={overlay.indActiveThreshold} min={0.1} max={10} step={0.1} onChange={(v) => patch("indActiveThreshold", v)} />
+                  <Num label="Active move" value={overlay.indActiveMovePct} min={0} max={5} step={0.05} unit="%" onChange={(v) => patch("indActiveMovePct", v)} />
+                  <Num label="MSI min RSI gap" value={overlay.indMsiMinGap} min={0.5} max={30} step={0.5} onChange={(v) => patch("indMsiMinGap", v)} />
+                  <Num label="VWAP deviation z" value={overlay.indVwapDevZ} min={0.5} max={6} step={0.1} onChange={(v) => patch("indVwapDevZ", v)} />
+                  <Num label="VWAP volume surge" value={overlay.indVwapVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indVwapVolMult", v)} />
+                  <Num label="Retest tolerance" value={overlay.indRetestTol} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestTol", v)} />
+                  <Num label="Retest min break" value={overlay.indRetestMinBreak} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestMinBreak", v)} />
+                  <Num label="Squeeze width percentile" value={Math.round(overlay.indSqueezePctl * 100)} min={5} max={50} step={1} unit="%"
+                    onChange={(v) => patch("indSqueezePctl", Math.max(5, Math.min(50, v)) / 100)} />
+                  <Num label="Sweep wick" value={overlay.indSweepWickAtr} min={0} max={3} step={0.05} unit="ATR" onChange={(v) => patch("indSweepWickAtr", v)} />
+                  <Num label="RSI(2) low" value={overlay.indRsi2Low} min={1} max={49} step={1} onChange={(v) => patch("indRsi2Low", v)} />
+                  <Num label="RSI(2) high" value={overlay.indRsi2High} min={51} max={99} step={1} onChange={(v) => patch("indRsi2High", v)} />
+                  <Num label="Keltner band" value={overlay.indKeltnerMult} min={0.5} max={5} step={0.1} unit="ATR" onChange={(v) => patch("indKeltnerMult", v)} />
+                  <Num label="Impulse sigma" value={overlay.indImpulseSigma} min={1} max={10} step={0.1} onChange={(v) => patch("indImpulseSigma", v)} />
+                  <Num label="Impulse volume surge" value={overlay.indImpulseVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indImpulseVolMult", v)} />
+                  <Num label="Activity · sweep" value={overlay.actSweepMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actSweepMin", v)} />
+                  <Num label="Activity · RSI(2)" value={overlay.actRsi2Min} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actRsi2Min", v)} />
+                  <Num label="Activity · Keltner" value={overlay.actKeltnerMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actKeltnerMin", v)} />
+                  <Num label="Activity · impulse" value={overlay.actImpulseMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actImpulseMin", v)} />
+                  <Num label="Exit tactic min gain" value={overlay.exitTacticMinGainPct} min={0} max={2} step={0.01} unit="%"
+                    hint="a target tactic closes only once the gain covers this (round-trip cost)" onChange={(v) => patch("exitTacticMinGainPct", Math.max(0, v))} />
+                </Grid>
+              </Card>
+            </>
           )}
 
           {section === "block" && (
@@ -2617,7 +2741,7 @@ function SettingsPage() {
                 />
                 <Num label="Entries per batch" value={overlay.entryBatchSize} min={2} max={5} step={1} onChange={(v) => patch("entryBatchSize", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
+                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={1440} step={10} hint="10–1440 min · default 1080 (18h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>

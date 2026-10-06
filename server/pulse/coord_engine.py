@@ -132,6 +132,16 @@ class Coordinator:
         }
         self._axis_seen: set[str] = set()
 
+    def _main_n(self) -> int:
+        """Main window: last-N (>= 3), or the Base window when Main is off (0)."""
+        main = int(getattr(self, "main_eval", 12) if getattr(self, "main_eval", 12) is not None else 12)
+        return max(3, int(self.pf_window or 15)) if main <= 0 else max(3, main)
+
+    def _real_n(self) -> int:
+        """Real window: last-N (>= 3), or the Main window when Real is off (0)."""
+        real = int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3)
+        return self._main_n() if real <= 0 else max(3, real)
+
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
         nested = coord.get("axes") if isinstance(coord, dict) else {}
@@ -194,8 +204,20 @@ class Coordinator:
                 ov.get("prevPosWindow") or coord.get("prevPosWindow") or 25)))
         except Exception:
             self.prev_window = 25
-        self.main_eval = int(ov.get("mainEvalPosCount") or coord.get("mainEvalPosCount") or 12)
-        self.real_eval = int(ov.get("realEvalPosCount") or coord.get("realEvalPosCount") or 3)
+        raw_main = ov.get("mainEvalPosCount", coord.get("mainEvalPosCount"))
+        try:
+            raw_main = 12 if raw_main is None or raw_main == "" else int(raw_main)
+        except (TypeError, ValueError):
+            raw_main = 12
+        # 0 = Main gate off: Main reuses the Base window (SetBook parity).
+        self.main_eval = 0 if raw_main <= 0 else raw_main
+        raw_real = ov.get("realEvalPosCount", coord.get("realEvalPosCount"))
+        try:
+            raw_real = 3 if raw_real is None or raw_real == "" else int(raw_real)
+        except (TypeError, ValueError):
+            raw_real = 3
+        # 0 = Real gate off: Real reuses the Main window (SetBook parity).
+        self.real_eval = 0 if raw_real <= 0 else raw_real
         self.min_step = int(ov.get("minStep") or coord.get("minStep") or ov.get("setMinStep") or 7)
         self.max_sl_ratio = float(ov.get("maxStopLossRatio") or coord.get("maxStopLossRatio") or 2.5)
         self.trailing_min_step = int(ov.get("trailingMinStep") or coord.get("trailingMinStep") or self.min_step)
@@ -253,8 +275,8 @@ class Coordinator:
         # Last and ignored the earlier positions that the axis promises.
         prev_tape = coord_rows[-(prev_w * 2) : -prev_w] if len(coord_rows) >= prev_w * 2 else []
         prev_cost = last_n_cost_pf(prev_tape, prev_w, self.position_cost_pct)
-        main_cost = last_n_cost_pf(coord_rows, max(3, self.main_eval), self.position_cost_pct)
-        real_cost = last_n_cost_pf(coord_rows, max(3, self.real_eval), self.position_cost_pct)
+        main_cost = last_n_cost_pf(coord_rows, self._main_n(), self.position_cost_pct)
+        real_cost = last_n_cost_pf(coord_rows, self._real_n(), self.position_cost_pct)
         intern = intern or {}
         intern_pf = float(intern.get("pf") or intern.get("indications") or intern.get("general") or 0)
         intern_n = float(intern.get("n") or 0)
@@ -336,9 +358,9 @@ class Coordinator:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and not clears_pf(main_cost["ratio"], main_floor):
+        if sample_ok and float(main_cost["count"]) >= self._main_n() and not clears_pf(main_cost["ratio"], main_floor):
             reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<{main_floor:.2f}")
-        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and not clears_pf(real_cost["ratio"], real_floor):
+        if sample_ok and float(real_cost["count"]) >= self._real_n() and not clears_pf(real_cost["ratio"], real_floor):
             reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<{real_floor:.2f}")
         stages = {
             "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},

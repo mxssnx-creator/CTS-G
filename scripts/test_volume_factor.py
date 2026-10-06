@@ -274,3 +274,30 @@ class MicroCapEntries(unittest.TestCase):
     def test_micro_share_zero_blocks_micro(self):
         entries, _ = self.place_micro(open_micro=0, share=0.0)
         self.assertEqual(entries, [])
+
+
+class LotsPerSymbolSideCap(unittest.TestCase):
+    def place_with(self, open_same, cap):
+        t = fixtures.AllValidEntries()
+        p = t.pulse(t.book(1))
+        for name in ('size_qty', 'max_book_notional', 'avail_notional'):
+            p.__dict__.pop(name, None)
+        p.volume_factor = 1.0
+        p.vol1h = {}
+        p.coord.size_mult = lambda n: 1.0
+        p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,
+                     register_parent=Mock(), on_parent_close=Mock())
+        p.dca = NS(enabled=False, max_steps=0, _mult_at=lambda i: 1.0, attach=Mock(), on_close=Mock(), drop=Mock())
+        p.contracts = {'X-USDT': pt.Contract('X-USDT', .001, .001, 3, 2, .1, 100)}
+        p.px = {'X-USDT': 100.}
+        for k in range(open_same):
+            p.open[f's{k}'] = NS(symbol='X-USDT', side='LONG', ours=True, micro=False)
+        p.open['other'] = NS(symbol='X-USDT', side='SHORT', ours=True, micro=False)
+        with patch.object(pt, 'MAX_LOTS_PER_SIDE', cap):
+            p.place('X-USDT', 1, 'gen:trend', .9, selected_set=p.sets.by_idx[0])
+        return [b for b in p.api.posts if b.get('type') == 'MARKET']
+
+    def test_cap_blocks_another_lot_on_the_same_signal_only(self):
+        self.assertEqual(self.place_with(open_same=2, cap=2), [])
+        self.assertEqual(len(self.place_with(open_same=1, cap=2)), 1)
+        self.assertEqual(len(self.place_with(open_same=5, cap=0)), 1)  # 0 = unlimited

@@ -21,7 +21,8 @@ def contract(sym="X-USDT", pprec=4, min_qty=1.0, step=1.0, min_usdt=2.0, max_lev
 
 
 def lite(**kw):
-    ns = NS(sl_min=0.004, sl_max=0.03, venue_sl_ticks=3.0, sl_learned={}, lev_max={}, **kw)
+    kw.setdefault("lev_max", {})
+    ns = NS(sl_min=0.004, sl_max=0.03, venue_sl_ticks=3.0, sl_learned={}, **kw)
     for name in ("venue_sl_min", "learn_sl_floor", "leverage_for", "round_qty_up", "min_order_qty", "raise_to_min_qty"):
         setattr(ns, name, getattr(pt.Pulse, name).__get__(ns))
     return ns
@@ -69,6 +70,25 @@ class TraderVenueMinTests(unittest.TestCase):
         # a 0.1 volume-factor target of 0.3 lots is raised to the 5 USDT floor
         self.assertEqual(p.raise_to_min_qty(c, 1.0, 0.3), 5.0)
         self.assertEqual(p.raise_to_min_qty(c, 1.0, 7.0), 7.0)
+
+
+class LearnedFloorPersistenceTests(unittest.TestCase):
+    def test_learned_floor_survives_restart_via_leverage_file(self):
+        from unittest.mock import patch
+        path = os.path.join(tempfile.mkdtemp(prefix="cts-lev-"), "lev.json")
+        with patch.object(pt, "LEV_PATH", path):
+            p = lite(lev_map={"X-USDT": 50})
+            p.contracts = {}
+            for name in ("_persist_lev", "_load_lev_file"):
+                setattr(p, name, getattr(pt.Pulse, name).__get__(p))
+            c = contract(pprec=4, max_lev=50)
+            learned = p.learn_sl_floor(c, 0.004)
+            q = lite(lev_map={})
+            q.contracts = {}
+            q._load_lev_file = pt.Pulse._load_lev_file.__get__(q)
+            q._load_lev_file()
+            self.assertAlmostEqual(q.sl_learned["X-USDT"], learned)
+            self.assertEqual(q.lev_map.get("X-USDT"), 50)
 
 
 class SetReplayFloorTests(unittest.TestCase):

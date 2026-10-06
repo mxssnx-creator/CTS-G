@@ -83,8 +83,8 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
       assert.equal(value[key], EVAL_MIN_PF, key);
-    assert.equal(value.maxDdTimeS, 57600);
-    assert.equal(value.setMaxDdTimeS, 14400);
+    assert.equal(value.maxDdTimeS, 64800);
+    assert.equal(value.setMaxDdTimeS, 64800);
     assert.equal(value.positionCostFallbackPct, 0.1);
     assert.equal(value.useLivePositionCosts, true);
   }
@@ -121,8 +121,8 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   }));
   assert.equal(value.positionCostPct, 0.087);
   assert.equal(value.positionCostFallbackPct, 0.1);
-  assert.equal(value.maxDdTimeS, 57600);
-  assert.equal(value.setMaxDdTimeS, 57600);
+  assert.equal(value.maxDdTimeS, 86400);
+  assert.equal(value.setMaxDdTimeS, 86400);
 });
 
 test("new and legacy settings default to ranked 50, 100 opens, independent lanes", () => {
@@ -293,7 +293,9 @@ test("an Overall save applies only its edits on top of the target lane", () => {
   }
   assert.deepEqual(overlayEdits(baseline, { ...baseline }), {});
   // A preset value equal to the loaded default is still an explicit edit.
-  const vst = overlayFromCts({}, laneFile("bingx-x02"));
+  // A lane with its gates explicitly off (the shipped overlays now carry the
+  // profile's strict + historic gate): the preset still switches them on.
+  const vst = overlayFromCts({}, { ...laneFile("bingx-x02"), setUseHistoricGate: false, setStrictGate: false });
   const preset = applyPresetPatch(baseline, "tight-guard");
   const touched = Object.keys(CONFIG_PRESETS.find((p) => p.id === "tight-guard")?.patch ?? {});
   const saved = syncOverlayFlags({ ...vst, ...overlayEdits(baseline, preset, touched) });
@@ -362,4 +364,30 @@ test("batch entry orders are off by default, seeded on for VST only, and keep a 
   assert.equal(on.entryBatchOrders, true);
   assert.equal(on.entryBatchSize, 5);
   assert.equal(syncOverlayFlags(overlayFromCts({}, { entryBatchSize: 0 })).entryBatchSize, 2);
+});
+
+test("every engine setting added to the desk round-trips a saved value and ships the engine default", () => {
+  const engineDefaults: Record<string, unknown> = {
+    mainEvalPosCount: 12, realEvalPosCount: 3, setDdtWindow: 0, setHistTimeBars: 120, setHonorTp: true,
+    setCooldownBars: 2, setScratchMin: 0.0016, histSimulateBlock: true, histSimulateDca: true, histExactWindow: false,
+    marginCapPct: 0.1, manualCloseLaneHoldS: 21600, exitMinSamples: 0, exitTacticMinGainPct: 0.15,
+    blockActiveLiveEnabled: true, blockActiveRealEnabled: true, variantBlockEnabled: true,
+    indDirRange: 10, indMoveRange: 10, indDirMinChange: 0.001, indMoveMinChange: 0.001, indActiveThreshold: 1,
+    indActiveMovePct: 0.5, indMsiMinGap: 5, indVwapDevZ: 2, indVwapVolMult: 1.8, indRetestTol: 0.12,
+    indRetestMinBreak: 0.08, indSqueezePctl: 0.2, indSweepWickAtr: 0.25, indRsi2Low: 10, indRsi2High: 90,
+    indKeltnerMult: 2, indImpulseSigma: 3, indImpulseVolMult: 2, actSweepMin: 0.04, actRsi2Min: 0.03,
+    actKeltnerMin: 0.04, actImpulseMin: 0.03, microEnabled: true, microMinPf: 1.05, microMaxShare: 0.05,
+    venueSlTicks: 3, setMaxDdTimeS: 64800, setStrictGate: true, setUseHistoricGate: true,
+  };
+  const fresh = overlayFromCts({}) as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(engineDefaults)) assert.deepEqual(fresh[key], value, `default ${key}`);
+  const saved: Record<string, unknown> = {
+    mainEvalPosCount: 0, realEvalPosCount: 25, setDdtWindow: 96, setHistTimeBars: 60, setHonorTp: false,
+    setCooldownBars: 5, setScratchMin: 0.003, histSimulateBlock: false, histSimulateDca: false, histExactWindow: true,
+    marginCapPct: 0.25, manualCloseLaneHoldS: 3600, exitMinSamples: 20, exitTacticMinGainPct: 0.3,
+    blockActiveLiveEnabled: false, indRsi2Low: 5, indImpulseSigma: 4, actSweepMin: 0, microEnabled: false,
+    microMaxShare: 0.2, venueSlTicks: 7, indMoveRanges: [10, 25],
+  };
+  const reloaded = overlayFromCts({}, saved as never) as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(saved)) assert.deepEqual(reloaded[key], value, `saved ${key}`);
 });

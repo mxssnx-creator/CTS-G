@@ -348,13 +348,14 @@ LEVERAGE = 150
 USE_MAX_LEVERAGE = True
 MAX_OPEN = 0  # 0 = unlimited
 MAX_PER_GROUP = 0  # 0 = unlimited
+MAX_LOTS_PER_SIDE = 0  # lots per symbol x direction; 0 = unlimited
 SL_PCT = 0.0042
 TP_PCT = 0.0070
 TRAIL_ARM = 0.0032
 TRAIL_GIVE = 0.0016
 TIME_STOP_S = 21600
 MAX_HOLD_S = 21600
-MAX_DD_TIME_S = 57600.0  # default and upper bound 16 hours; configurable 10..960 minutes
+MAX_DD_TIME_S = 64800.0  # default 18 hours; configurable 10..1440 minutes
 SCRATCH_S = 600
 SCRATCH_MIN = 0.0016
 SCAN_S = 0.20
@@ -2158,6 +2159,10 @@ class Pulse:
         cap = float(getattr(self, "sl_max", 0.03) or 0.03)
         nxt = min(cap, max(float(book.get(c.symbol) or 0.0), float(sl_pct or 0.0)) * 1.5)
         book[c.symbol] = nxt
+        try:
+            self._persist_lev()
+        except Exception:
+            pass
         return nxt
 
     def min_order_qty(self, c: Contract, px: float) -> float:
@@ -2176,7 +2181,11 @@ class Pulse:
 
     def _persist_lev(self) -> None:
         try:
-            blob = {s: {"a": int(self.lev_map.get(s) or 0), "m": int(self.lev_max.get(s) or self.lev_map.get(s) or 0)} for s in sorted(set(list(self.lev_map) + list(self.lev_max)))}
+            learned = getattr(self, "sl_learned", None) or {}
+            blob = {s: {"a": int(self.lev_map.get(s) or 0), "m": int(self.lev_max.get(s) or self.lev_map.get(s) or 0)} for s in sorted(set(list(self.lev_map) + list(self.lev_max) + list(learned)))}
+            for s, v in learned.items():
+                if float(v or 0) > 0:
+                    blob.setdefault(s, {"a": 0, "m": 0})["sl"] = round(float(v), 6)
             tmp = LEV_PATH + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(blob, f)
@@ -2195,6 +2204,15 @@ class Pulse:
             if isinstance(v, dict):
                 a = int(v.get("a") or v.get("applied") or 0)
                 m = int(v.get("m") or v.get("max") or a or 0)
+                try:
+                    sl_floor = float(v.get("sl") or 0.0)
+                except (TypeError, ValueError):
+                    sl_floor = 0.0
+                if sl_floor > 0:
+                    book = getattr(self, "sl_learned", None)
+                    if not isinstance(book, dict):
+                        book = self.sl_learned = {}
+                    book[str(k)] = min(sl_floor, 0.03)
                 if a:
                     self.lev_map[str(k)] = a
                 if m:
@@ -6141,6 +6159,9 @@ class Pulse:
             relative_count=int(meta.get("relative_count") or meta.get("relativeCount") or 1),
             volume_ratio=float(meta.get("volume_ratio") or meta.get("volumeRatio") or 1.0),
             ind_kind=str(meta.get("ind_kind") or meta.get("indKind") or ""),
+            exit_tactic=str(meta.get("exit_tactic") or ""),
+            exit_level=float(meta.get("exit_level") or 0.0),
+            micro=bool(meta.get("micro", False)),
             strategy=str(meta.get("strategy") or "core"),
             exchange_qty=fill_qty,
             pending_qty=max(0.0, float(row.get("requested_qty") or 0.0) - fill_qty),
@@ -6453,6 +6474,15 @@ class Pulse:
             return
         if MAX_PER_GROUP > 0 and self.group_count(self.group_of(sym)) >= MAX_PER_GROUP:
             return
+        # Per-signal lot cap: independent Sets that agree on one symbol and
+        # direction share this many lots, so capacity spreads across signals
+        # instead of stacking one correlated position (0 = unlimited).
+        if MAX_LOTS_PER_SIDE > 0 and forced_row is None:
+            same = sum(1 for p in list(self.open.values())
+                       if getattr(p, "symbol", "") == sym and getattr(p, "side", "") == side
+                       and getattr(p, "ours", True) is not False)
+            if same >= MAX_LOTS_PER_SIDE:
+                return
         pack = "indications" if str(reason).startswith("ind:") else "general"
         if forced_row is not None:
             if not self._forced_entry_allowed(forced_row, sym, side, conf):
@@ -6717,6 +6747,17 @@ class Pulse:
             "trail_give": trail_give / 100.0,
             "micro": micro,
         }
+        # The exit tactic of the selected indication configuration travels
+        # with the pending entry, so a fill confirmed after a restart or an
+        # ambiguous response still carries it (and the Micro flag).
+        if str(reason).startswith("ind:"):
+            try:
+                pre_ind = self.indications.match(sym, reason)
+            except Exception:
+                pre_ind = None
+            if pre_ind is not None and getattr(pre_ind, "exit_tactic", ""):
+                pending_meta["exit_tactic"] = str(pre_ind.exit_tactic)
+                pending_meta["exit_level"] = float(getattr(pre_ind, "exit_level", 0.0) or 0.0)
         if execution_plan:
             pending_meta.update(axis_key=f"block-active:{execution_plan['blockCount']}",
                                 relative_count=execution_plan["blockCount"],
@@ -8570,7 +8611,7 @@ class Pulse:
                     self._apply_effective_position_cost(self.live_position_cost_pct, "live-exchange", rebuild=True)
 
     def apply_live_config(self, initial: bool = False) -> None:
-        global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
+        global TARGET_NOTIONAL, LEVERAGE, MAX_OPEN, MAX_PER_GROUP, MAX_LOTS_PER_SIDE, SL_PCT, TP_PCT, USE_MAX_LEVERAGE
         global TRAIL_ARM, TRAIL_GIVE, TIME_STOP_S, MAX_DD_TIME_S, SCRATCH_S, SCRATCH_MIN, SCAN_S, COOLDOWN_S, STAGGER_S, DD_HALT, EQ_MIN, SYMBOLS
         previous_symbols = tuple(SYMBOLS)
         previous_overlay = dict(getattr(self, "overlay", None) or {})
@@ -8643,6 +8684,10 @@ class Pulse:
             MAX_OPEN = int(ov["maxOpen"])
         if ov.get("maxPerGroup") is not None:
             MAX_PER_GROUP = int(ov["maxPerGroup"])
+        try:
+            MAX_LOTS_PER_SIDE = max(0, int(ov.get("maxLotsPerSymbolSide") or 0))
+        except (TypeError, ValueError):
+            MAX_LOTS_PER_SIDE = 0
         if ov.get("slPct"):
             SL_PCT = float(ov["slPct"]) / 100.0 if float(ov["slPct"]) > 0.05 else float(ov["slPct"])
         if ov.get("tpPct"):
@@ -8656,9 +8701,9 @@ class Pulse:
         else:
             TIME_STOP_S = MAX_HOLD_S
         if ov.get("maxDdTimeS") is not None:
-            MAX_DD_TIME_S = min(960.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
+            MAX_DD_TIME_S = min(1440.0 * 60.0, max(10.0 * 60.0, float(ov["maxDdTimeS"])))
         else:
-            MAX_DD_TIME_S = 57600.0
+            MAX_DD_TIME_S = 64800.0
         if ov.get("scratchS"):
             SCRATCH_S = float(ov["scratchS"])
         if ov.get("scratchMinPct") is not None:
@@ -9144,6 +9189,7 @@ class Pulse:
             "maxOpen": MAX_OPEN,
             "logicalPositionCap": MAX_OPEN,
             "maxPerGroup": MAX_PER_GROUP,
+            "maxLotsPerSymbolSide": MAX_LOTS_PER_SIDE,
             "slPct": SL_PCT * 100,
             "tpPct": TP_PCT * 100,
             "trailArmPct": TRAIL_ARM * 100,

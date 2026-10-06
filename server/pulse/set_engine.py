@@ -1198,7 +1198,7 @@ class SetBook:
         # Main 12 / Real 3 beat 5/3, 8/3, 10/3, 12/5, 12/8 and 12/12).
         self.main_eval = 12
         self.real_eval = 3
-        self.max_dd_s = 57600.0
+        self.max_dd_s = 64800.0
         self.auto_deact = True
         self.use_historic_gate = True
         self.min_samples = 30
@@ -1535,7 +1535,10 @@ class SetBook:
         self.micro_max_share = max(0.0, min(1.0, finite(ov.get("microMaxShare", 0.05), 0.05)))
         self.micro_min_pf = min(normalize_pf(ov.get("microMinPf", MICRO_PF), MICRO_PF), float(self.stage_min_pf["base"]))
         try:
-            self.main_eval = max(3, min(75, int(ov.get("mainEvalPosCount") or 12)))
+            raw_main = ov.get("mainEvalPosCount")
+            raw_main = 12 if raw_main is None or raw_main == "" else int(raw_main)
+            # 0 = Main gate off (Main reuses the Base window); else last-N >= 3.
+            self.main_eval = 0 if raw_main <= 0 else max(3, min(75, raw_main))
         except Exception:
             self.main_eval = 12
         try:
@@ -1545,7 +1548,12 @@ class SetBook:
             self.real_eval = 0 if raw_real <= 0 else max(3, min(75, raw_real))
         except Exception:
             self.real_eval = 3
-        self.max_dd_s = max(600.0, min(960.0 * 60.0, float(ov.get("setMaxDdTimeS") or 57600)))
+        # Set DDT gate cap: default 18h, configurable up to 24h.
+        self.max_dd_s = max(600.0, min(1440.0 * 60.0, float(ov.get("setMaxDdTimeS") or 64800)))
+        try:
+            self.ddt_n = max(0, int(ov.get("setDdtWindow") or 0))
+        except (TypeError, ValueError):
+            self.ddt_n = 0
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.live_negative_deact = bool(ov.get("setLiveNegativeDeact", ov.get("liveNegativeSetDeactivation", False)))
         self.prefer_minimal_range = bool(
@@ -1765,8 +1773,26 @@ class SetBook:
             self.replay_required = not bool(self._hist_set_signature)
             self.score_refresh_required = False
 
+    def ddt_window(self) -> int:
+        """Closes the DDT gate measures: the same window the Base PF validates.
+
+        DDT over a longer retained tape (up to 96 closes) judged a Set on the
+        losses *before* its validated window: a Set that just turned good
+        still carried an open episode from an old peak and was blocked, while
+        its last-N PF qualified it. ``setDdtWindow`` overrides (>= need)."""
+        need = int(self.eval_need())
+        custom = int(getattr(self, "ddt_n", 0) or 0)
+        if custom > 0:
+            return max(need, custom)
+        return max(need, int(self.pf_n or PF_N_DEFAULT))
+
+    def _ddt_rows(self, rows: Sequence[Any], ordered: bool) -> List[Any]:
+        seq = list(rows) if ordered else sorted(rows, key=lambda r: finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0.0)))
+        return seq[-self.ddt_window():]
+
     def ddt_when_enough(self, rows: Sequence[Any], need: int, *, ordered: bool = False) -> Dict[str, float]:
-        """Drawdown time, valid (zero) until a tape holds ``need`` positions.
+        """Drawdown time over the validated window, valid (zero) until a tape
+        holds ``need`` positions.
 
         With too few prior positions there is no drawdown evidence yet: the
         Set counts as DDT-valid and keeps being processed, then the normal
@@ -1774,7 +1800,7 @@ class SetBook:
         score path)."""
         if not rows or len(rows) < int(need):
             return {"maxS": 0.0, "avgS": 0.0, "episodes": 0, "pending": 1.0}
-        return drawdown_time_by_symbol(rows, ordered=ordered, cost_pct=self.cost_pct)
+        return drawdown_time_by_symbol(self._ddt_rows(rows, ordered), ordered=True, cost_pct=self.cost_pct)
 
     def eval_need(self) -> int:
         """Required completed Base samples; default is the full last-30 window."""
@@ -1790,7 +1816,10 @@ class SetBook:
 
     def _stage_window_ns(self) -> Tuple[int, int, int]:
         base_n = max(1, int(self.pf_n or PF_N_DEFAULT))
-        main_n = max(3, int(getattr(self, "main_eval", 12) or 12))
+        main_eval = getattr(self, "main_eval", 12)
+        main_eval = 12 if main_eval is None else int(main_eval)
+        # mainEvalPosCount 0: no separate Main window; Main == Base.
+        main_n = base_n if main_eval <= 0 else max(3, main_eval)
         real_eval = int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3)
         # realEvalPosCount 0: no separate Real window; Real == Main.
         real_n = main_n if real_eval <= 0 else max(3, real_eval)
@@ -3998,7 +4027,7 @@ class SetBook:
         }
         dd = {"maxS": 0.0, "avgS": 0.0, "episodes": 0}
         if sample >= required:
-            dd = drawdown_time_by_symbol(ordered, ordered=True, cost_pct=self.cost_pct)
+            dd = drawdown_time_by_symbol(self._ddt_rows(ordered, True), ordered=True, cost_pct=self.cost_pct)
         base_ok = sample >= required and clears_pf(last15["ratio"], self.min_pf) and float(dd["maxS"]) <= float(self.max_dd_s or 57600) + 1e-9
         # Named last5..last75 stay off the hist score hot path. Overall last-pos
         # (pf_n) already gated base_ok; publish the overall window for identity.
@@ -5742,8 +5771,10 @@ class SetBook:
         hit = cache.get(key)
         if hit is not None and hit[0] == sig:
             return dict(hit[1])
+        # Replay rows are CompactHistRow mappings (not dicts): read the tag
+        # through the mapping API, never as an attribute.
         rows = [r for r in list(hist) + list(live)
-                if str((r.get("ind_config") if isinstance(r, dict) else getattr(r, "ind_config", "")) or "").lower() == cfg]
+                if str((r.get("ind_config") if hasattr(r, "get") else getattr(r, "ind_config", "")) or "").lower() == cfg]
         tape = filter_side(rows, side)
         tape.sort(key=lambda r: finite(r.get("t")))
         if tape:
@@ -6080,7 +6111,7 @@ class SetBook:
             "entryPolicyMinLiveSamples": int(self.entry_policy_min_live_samples),
             "lookback": self.lookback,
             "pfWindow": self.pf_n,
-            "mainEval": int(getattr(self, "main_eval", 12) or 12),
+            "mainEval": int(getattr(self, "main_eval", 12) if getattr(self, "main_eval", 12) is not None else 12),
             "realEval": int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3),
             "deactN": self.deact_n,
             "minPf": self.real_min_pf,

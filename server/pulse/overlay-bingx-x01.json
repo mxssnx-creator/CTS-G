@@ -114,7 +114,8 @@
   "leverage": 150,
   "loadPartial": true,
   "mainMinPf": 1.2,
-  "maxDdTimeS": 57600,
+  "maxDdTimeS": 64800,
+  "setMaxDdTimeS": 64800,
   "maxOpen": 100,
   "maxPerGroup": 0,
   "entryBatchOrders": false,
@@ -167,7 +168,6 @@
   "setDeactN": 25,
   "setLiveNegativeDeact": true,
   "setMaxActive": 0,
-  "setMaxDdTimeS": 14400,
   "setMinPf": 1.2,
   "setMinSamples": 30,
   "setMinStep": 7,
@@ -175,8 +175,8 @@
   "setReactivate": true,
   "setStepAdapt": true,
   "setStepMax": 22,
-  "setStrictGate": false,
-  "setUseHistoricGate": false,
+  "setStrictGate": true,
+  "setUseHistoricGate": true,
   "slMaxPct": 3.0,
   "slMinPct": 0.4,
   "venueSlTicks": 3,
@@ -272,5 +272,10 @@
     4,
     5,
     6
-  ]
+  ],
+  "maxRealSets": 0,
+  "strategyLiveSetsCeiling": 0,
+  "strategyRealSetsSafetyCeiling": 0,
+  "systemBatchRps": 2.0,
+  "systemOrderRps": 4.0
 }

@@ -49,3 +49,6 @@ backups/overlays/*/
 .claude/settings.local.json
 # Claude Code agent worktrees live inside the checkout; never commit or lint them
 .claude/worktrees/
+
+# sim_12h_account default runtime data dir
+.sim-data/

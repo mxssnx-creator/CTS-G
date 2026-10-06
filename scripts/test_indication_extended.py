@@ -178,6 +178,31 @@ class ExitTacticTests(unittest.TestCase):
         book._replay_kind_tapes("T", bars, sigs, out2, 10_000.0, 20, 60, 30, True)
         self.assertNotIn("tactic", (out2.get("retest") or [{"reason": ""}])[0]["reason"])
 
+    def test_config_stats_read_compact_replay_rows(self):
+        # Replay rows are CompactHistRow mappings: the range tag must be read
+        # through the mapping API or config validation never applies.
+        book = se.SetBook()
+        book.load({"histEnabled": True, "setPfWindow": 10, "setMinSamples": 10, "baseEvalPosCount": 10}, rebuild=False)
+        rows = []
+        for i in range(12):
+            rec = se.hist_fill(1000.0 + i * 60, "T", 1, 0.006, 60.0, "ind:retest:tp", ind_kind="retest")
+            rec["ind_config"] = "retest:16"
+            rows.append(rec)
+        for i in range(12):
+            rec = se.hist_fill(2000.0 + i * 60, "T", 1, -0.006, 60.0, "ind:retest:sl", ind_kind="retest")
+            rec["ind_config"] = "retest:32"
+            rows.append(rec)
+        book.ind_hist["retest"] = rows
+        good = book.ind_config_stats("retest", "retest:16", "LONG")
+        bad = book.ind_config_stats("retest", "retest:32", "LONG")
+        self.assertEqual((good["n"], bad["n"]), (10, 10))
+        self.assertTrue(good["validated"])
+        self.assertFalse(bad["validated"])
+        book.enabled = book.use_historic_gate = book.strict_gate = True
+        book.progress.ready = True
+        self.assertTrue(book.indication_ok("retest", "LONG", "retest:16"))
+        self.assertFalse(book.indication_ok("retest", "LONG", "retest:32"))
+
     def test_kind_signals_pickle_keeps_exits(self):
         import pickle
         sigs = se.KindSignals({"a": [(1, 0.5)]})
