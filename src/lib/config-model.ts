@@ -328,6 +328,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   coordOptimizationN: number;
   pfWindow: number;
   slMinPct: number;
+  /** TP grid unit (%): TP = step × tpStepPct, independent of the position cost. */
+  tpStepPct: number;
   venueSlTicks: number;
   mainEvalPosCount: number;
   realEvalPosCount: number;
@@ -608,6 +610,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   coordOptimizationN: 150,
   pfWindow: 15,
   slMinPct: SL_MIN_DEFAULT_PCT,
+  tpStepPct: 0.1,
   venueSlTicks: 3,
   mainEvalPosCount: 30,
   realEvalPosCount: 30,
@@ -850,6 +853,7 @@ export type CtsSettings = {
   positionCost?: number;
   pfWindow?: number;
   slMinPct?: number;
+  tpStepPct?: number;
   venueSlTicks?: number;
   slMaxPct?: number;
   tpMinPct?: number;
@@ -1106,6 +1110,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     minimumEquity: num(live?.minimumEquity ?? cts.minimumEquity, 0.2),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, SL_MIN_DEFAULT_PCT),
+    tpStepPct: Math.max(0.02, Math.min(1, num(cts.tpStepPct, 0.1))),
     venueSlTicks: Math.max(1, Math.min(50, num(live?.venueSlTicks ?? cts.venueSlTicks, 3))),
     mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
     realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),

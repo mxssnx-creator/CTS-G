@@ -421,3 +421,19 @@ test("the desk axis specs mirror coord_engine.AXIS_SPECS and clamp like clamp_wi
   assert.deepEqual([saved.axisPrevMaxWindow, saved.axisLastMaxWindow, saved.axisContMaxWindow, saved.axisPauseMaxWindow], [4, 4, 5, 1]);
   assert.equal(DEFAULT_OVERLAY.axisPrevMaxWindow, 12);
 });
+
+test("desk ranges and TP grid unit match both lane overlays", () => {
+  const keys = ["indMsiRanges", "indVwapRanges", "indRetestRanges", "indSqueezeRanges", "indSweepRanges",
+    "indRsi2Ranges", "indKeltnerRanges", "indImpulseRanges", "tpStepPct", "tpMinPct",
+    "setMinStep", "trailingMinStep"] as const;
+  for (const id of ["bingx-x01", "bingx-x02"]) {
+    const lane = laneFile(id) as Record<string, unknown>;
+    for (const key of keys) {
+      if (lane[key] === undefined) continue;
+      assert.deepEqual((DEFAULT_OVERLAY as unknown as Record<string, unknown>)[key], lane[key], `${id} ${key}`);
+    }
+  }
+  assert.equal(DEFAULT_OVERLAY.tpStepPct, 0.1);
+  // Top step stays below the TP cap, so no steps collapse onto tpMaxPct.
+  assert.ok(DEFAULT_OVERLAY.setStepMax * DEFAULT_OVERLAY.tpStepPct <= (DEFAULT_OVERLAY.tpMaxPct || Infinity));
+});

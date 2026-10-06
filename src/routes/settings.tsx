@@ -1666,6 +1666,7 @@ function SettingsPage() {
                 <Slider label="SL min" value={overlay.slMinPct} min={SL_MIN_PCT} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
                 <Slider label="SL max" value={overlay.slMaxPct} min={SL_MIN_PCT} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
                 <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Slider label="TP step unit" value={overlay.tpStepPct} min={0.02} max={1} step={0.01} unit="%" onChange={(v) => patch("tpStepPct", v)} />
                 <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
@@ -1823,7 +1824,7 @@ function SettingsPage() {
                   min={DEFAULT_MIN_STEP}
                   max={30}
                   step={1}
-                  hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
+                  hint={`TP = step × ${overlay.tpStepPct}% (TP step unit, independent of the ${overlay.positionCostPct}% cost) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.tpStepPct).toFixed(2)}% … step ${overlay.setStepMax} = ${(overlay.setStepMax * overlay.tpStepPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
                   onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
                 />
                 <Slider

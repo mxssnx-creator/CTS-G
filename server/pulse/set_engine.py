@@ -351,8 +351,12 @@ def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
     return max(lo, min(hi, n))
 
 
+# TP grid unit in percent: TP = step x 0.10 %, independent of the PositionCost.
+TP_STEP_PCT_DEFAULT = 0.10
+
+
 def step_tp_pct(step: int, cost_pct: float) -> float:
-    """TP fraction = step × position cost; the VST tape chooses the winner."""
+    """TP fraction = step x grid unit (``tpStepPct``); the VST tape chooses the winner."""
     c = max(1e-9, float(cost_pct))
     if c > 0.05:
         c = c / 100.0
@@ -1267,6 +1271,7 @@ class SetBook:
         # remain an explicit bounded selection policy; zero means unlimited.
         self.max_active = 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.tp_step_pct = TP_STEP_PCT_DEFAULT / 100.0
         self.cost_source = "manual-fallback"
         # Optional live-selection policy: prefer the smallest stable
         # configuration ranges only after PF/DD/sample gates have passed.
@@ -1666,6 +1671,9 @@ class SetBook:
             self.cost_pct = self.cost_pct / 100.0
         if self.cost_pct > 1:
             self.cost_pct = POSITION_COST_PCT_DEFAULT
+        # TP grid unit (TP = step x unit). Independent of the PositionCost
+        # hurdle, so a higher cost does not stretch every target.
+        self.tp_step_pct = max(0.02, min(1.0, finite(ov.get("tpStepPct"), TP_STEP_PCT_DEFAULT) or TP_STEP_PCT_DEFAULT)) / 100.0
         self.cost_source = str(ov.get("positionCostSource") or "manual-fallback")
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
@@ -1931,6 +1939,7 @@ class SetBook:
             round(float(self.tp_min), 12),
             round(float(self.tp_max), 12),
             round(float(self.cost_pct), 12),
+            round(float(getattr(self, "tp_step_pct", 0.001)), 12),
             json.dumps(self.ind_settings, sort_keys=True, default=str),
             int(self.lookback),
             int(self.evaluation_bars),
@@ -2017,7 +2026,7 @@ class SetBook:
             pack = _intern(pack)
             for sl_i, sl in enumerate(self.sl_ratios):
                 for step_i, step in enumerate(self.steps):
-                    _, tp = self.pair_sl_tp(step_tp_pct(step, self.cost_pct), sl)
+                    _, tp = self.pair_sl_tp(step_tp_pct(step, self.tp_step_pct), sl)
                     sid = make_set_id(pack, sl, "", step)
                     prev = keep.get(sid)
                     if prev:
@@ -3337,6 +3346,7 @@ class SetBook:
             if "indications" in self.packs
             else None
         )
+        move_primary = max(8, min(55, int(self.ind_settings.get("moveFadeRange") or 30)))
         for i in range(warmup, n):
             lo = max(0, i + 1 - 60)
             window = bars[lo : i + 1]
@@ -3358,7 +3368,13 @@ class SetBook:
                     # default vote lane has no live counterpart (it duplicated
                     # ema 8/21 and added a never-traded break:10 tape), so it
                     # stays a pack vote, not an evidence lane.
-                    if kind and kind not in PHANTOM_VOTE_LANES:
+                    if kind == "move":
+                        # Live evaluates the primary Move range through
+                        # evaluate_move with mode "move:<range>": record it as
+                        # that range so its own evidence exists.
+                        key = f"move|move:{move_primary}"
+                        kind_sigs.setdefault(key, [(0, 0.0)] * n)[i] = (d, conf)
+                    elif kind and kind not in PHANTOM_VOTE_LANES:
                         kind_sigs[kind][i] = (d, conf)
                 # General pack votes retain their normal baseline. Additional
                 # Trend/Break configurations replay as independent tapes.
@@ -3793,7 +3809,7 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
+        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
         for want_side in (1, -1):
             parent_pos: Optional[Dict[str, Any]] = None
             extra_pos: Optional[Dict[str, Any]] = None
@@ -3863,7 +3879,7 @@ class SetBook:
         if n <= warmup:
             return
         base_ts = now - (n - 1) * BAR_S
-        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.cost_pct), 0.6)
+        sl_frac, tp_frac = self.pair_sl_tp(step_tp_pct(self.min_step_cfg, self.tp_step_pct), 0.6)
         tactic_on = bool((self.ind_settings or {}).get("exitTacticOn", True))
         tactic_buf = float((self.ind_settings or {}).get("exitTacticBufferPct", 0.1) or 0.0)
         tactic_gain = float((self.ind_settings or {}).get("exitTacticMinGainPct", 0.15) or 0.0)

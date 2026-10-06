@@ -1913,7 +1913,7 @@ _NEW_KINDS = ("Msi", "Vwap", "Retest", "Squeeze", "Sweep", "Rsi2", "Keltner", "I
 DESK_OVERLAY_KEYS = (
     "setMinStep", "setStepMax", "minStep", "minStepRange", "setStepAdapt", "trailingMinStep",
     "slToTpRatios", "slToTpMin", "slToTpMax", "slToTpStep", "slMinPct", "slMaxPct",
-    "tpPct", "tpMinPct", "tpMaxPct", "exitOptSlPct", "timeStopS", "scratchS", "setScratchMin", "setCooldownBars",
+    "tpPct", "tpMinPct", "tpMaxPct", "tpStepPct", "exitOptSlPct", "timeStopS", "scratchS", "setScratchMin", "setCooldownBars",
     "trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax",
     "stratTrailing", "stratIndications", "stratGeneral", "stratBlock",
     "blockCounts", "blockMaxStack", "blockVolumeRatio", "blockMaxVolumeMultiplier",

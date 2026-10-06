@@ -232,6 +232,7 @@
   "tpCostRatio": 5,
   "tpMaxPct": 3.0,
   "tpMinPct": 0.3,
+  "tpStepPct": 0.1,
   "tpPct": 0.7,
   "trailArmMax": 1.5,
   "trailArmMin": 0.6,
