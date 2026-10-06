@@ -173,12 +173,34 @@ def build(root: str, run: str, out: str, title: str, compare: List[str], note: s
             acc += (r["end"] - START) if r else 0.0
             ys.append(round(acc, 4) if r else None)
         cum_series.append((name, ys))
-    charts.append(sim.svg_lines("Cumulative result across windows (USDT)", cum_labels, cum_series, ref=0.0))
+    single = len(order) == 1
+    if single:
+        # One long window: compare the runs hour by hour instead of per window.
+        w0 = order[0]
+        run_eq = []
+        for name in [run] + compare:
+            r = (loaded.get(name) or {}).get(w0)
+            if not r:
+                continue
+            acc, ys = 0.0, []
+            for v in r["hours"]:
+                acc += v
+                ys.append(round(acc, 4))
+            run_eq.append((name, ys))
+        charts.append(sim.svg_lines("Cumulative P&L by hour, all runs (USDT)", hl, run_eq, ref=0.0))
+        charts.append(sim.svg_bars("Hourly P&L by run (USDT)", hl, [
+            (name, [round(v, 4) for v in ((loaded.get(name) or {}).get(w0) or {}).get("hours", [])])
+            for name in [run] + compare]))
+    else:
+        charts.append(sim.svg_lines("Cumulative result across windows (USDT)", cum_labels, cum_series, ref=0.0))
     sig_series = [(name, [r["sig"][name][1] if r["sig"][name][0] else None for r in runs]) for name, _ in SIGNAL_ROWS]
-    charts.append(sim.svg_lines("Net % per distinct signal by window", cum_labels, sig_series, ref=0.0))
-    charts.append(sim.svg_bars("Entries per window", cum_labels, [(name, [((loaded.get(name) or {}).get(w) or {}).get("entries", 0) for w in order])
-                                                              for name in [run] + compare]))
-    charts.append(heat_strip([short(w) for w in order], [r["hours"] for r in runs], "Hourly P&L by window (USDT)"))
+    if not single:
+        charts.append(sim.svg_lines("Net % per distinct signal by window", cum_labels, sig_series, ref=0.0))
+    charts.append(sim.svg_bars("Entries per window" if not single else "Entries per run", cum_labels,
+                               [(name, [((loaded.get(name) or {}).get(w) or {}).get("entries", 0) for w in order])
+                                for name in [run] + compare]))
+    if not single:
+        charts.append(heat_strip([short(w) for w in order], [r["hours"] for r in runs], "Hourly P&L by window (USDT)"))
     # tables
     def cell(v: float, nd: int = 2) -> str:
         cls = "pos" if v > 0 else ("neg" if v < 0 else "")
