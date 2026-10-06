@@ -97,6 +97,10 @@ def classic_pf(values: Sequence[float]) -> float:
     return gp / gl
 
 
+# Round-trip fee the simulated account pays (None = the PositionCost).
+FEE_PCT: Optional[float] = None
+
+
 def cost_pf_ratio(moves: Sequence[float], cost_pct: float) -> float:
     """Engine cost-PF ratio (position_cost.last_n_cost_pf over the whole list)."""
     if not moves:
@@ -1010,7 +1014,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
     # marginCapPct: used margin may not exceed this share of equity (0 = uncapped)
     margin_cap = float(getattr(sizer, "margin_cap_pct", 0.0) or 0.0)
     margin_cap = margin_cap if 0.0 < margin_cap < 1.0 else 1.0
-    acct = Account(start_equity, cost_pct)
+    acct = Account(start_equity, cost_pct if FEE_PCT is None else float(FEE_PCT))
     ctrl = ControlOrders()
     dd = DrawdownTracker(start_equity)
     T = sim_end - sim_start
@@ -1968,7 +1972,12 @@ def main(argv=None) -> int:
     ap.add_argument("--mmr-factor", type=float, default=0.5,
                     help="maintenance margin rate = factor / leverage (not public; 0.5 = half the max-leverage initial margin)")
     ap.add_argument("--force", action="store_true", help="recompute the replay cache")
+    ap.add_argument("--fee-pct", type=float, default=None,
+                    help="round-trip fee the account pays in percent (default: the PositionCost). Gates, PF and the "
+                         "TP grid keep using the PositionCost hurdle.")
     args = ap.parse_args(argv)
+    global FEE_PCT
+    FEE_PCT = args.fee_pct
     _engine_path()
     cache = args.cache or os.path.join(os.environ["CTS_DATA_DIR"], "sim12h-cache")
     os.makedirs(cache, exist_ok=True)
@@ -2097,7 +2106,7 @@ def main(argv=None) -> int:
         window=dict(simStartBar=sim_start, simEndBar=sim_end, startUtc=time.strftime("%Y-%m-%d %H:%M", time.gmtime(start_s + sim_start * BAR)),
                     endUtc=time.strftime("%Y-%m-%d %H:%M", time.gmtime(start_s + sim_end * BAR)),
                     replayFromBar=int(caches[symbols[0]]["lo"])),
-        symbols=symbols, startEquity=args.start_equity, costPct=cost_pct, startS=start_s,
+        symbols=symbols, startEquity=args.start_equity, costPct=cost_pct, feePct=(cost_pct if FEE_PCT is None else FEE_PCT), startS=start_s,
         leverage=args.leverage or "exchange max; not public -> engine fallback 150 (Contract.max_lev / LEVERAGE)",
         contracts=cmeta,
         slFloorPct={s: round(v * 100, 4) for s, v in sl_floor.items()},
