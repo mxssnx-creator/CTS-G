@@ -3096,7 +3096,9 @@ class Pulse:
                 "axis_key": getattr(st_obj, "axis_key", ""),
                 "relative_count": getattr(st_obj, "relative_count", 1),
                 "volume_ratio": getattr(st_obj, "volume_ratio", 1.0),
-                "ind_kind": getattr(st_obj, "ind_kind", ""),
+                # SetState carries the kind as ``indication_kind`` (``ind_kind``
+                # does not exist there, so this field was always empty).
+                "ind_kind": str(getattr(st_obj, "indication_kind", "") or "") if st_obj is not None else "",
                 "group_token": token,
                 "control_range_key": f"sl{sl_bp:04d}-tp{tp_bp:04d}" if sl_bp and tp_bp else "",
                 "control_sl_bp": sl_bp, "control_tp_bp": tp_bp,

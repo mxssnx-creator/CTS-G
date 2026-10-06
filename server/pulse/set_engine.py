@@ -893,6 +893,24 @@ def hit_exit(
     return None, close
 
 
+def combined_kind_signals(kind_sigs: Dict[str, Sequence[Tuple[int, float]]]) -> Dict[str, List[Tuple[int, float, str]]]:
+    """Per indication kind, its strongest lane at each bar: the bare kind lane
+    and every ``kind|config`` range lane. Returns {kind: [(dir, conf, config)]};
+    kinds with no signal at all are omitted."""
+    out: Dict[str, List[Tuple[int, float, str]]] = {}
+    for key, sigs in (kind_sigs or {}).items():
+        if not sigs or not any(d != 0 for d, _ in sigs):
+            continue
+        kind, _, config = str(key).partition("|")
+        lane = out.get(kind)
+        if lane is None:
+            lane = out[kind] = [(0, 0.0, "")] * len(sigs)
+        for i, (d, conf) in enumerate(sigs):
+            if d != 0 and conf > lane[i][1]:
+                lane[i] = (int(d), float(conf), config or kind)
+    return out
+
+
 def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
     parts = [pack, "1m", f"sl{float(sl_ratio):.1f}"]
     if trail:
@@ -3684,21 +3702,20 @@ class SetBook:
         # Each indication kind is an independent execution lane. Keep a
         # dedicated Block tape per kind instead of only attributing Block
         # results to the aggregate indications pack or the signals lane.
+        # Only a replay call that includes indication-pack Sets produces the
+        # per-kind Block lanes; tiled callers (hist_calc) replay each pack
+        # separately and must not get them once per pack.
         if (
             strat_hist is not None
-            and "indications" in self.packs
+            and "indications" in by_pack
             and bool(getattr(self, "hist_block", True))
         ):
-            seen_kinds = set()
-            for config_key, sigs in (kind_sigs or {}).items():
-                kind = str(config_key).partition("|")[0]
-                if kind in seen_kinds or not sigs:
-                    continue
-                seen_kinds.add(kind)
-                if not any(d != 0 for d, _ in sigs):
-                    continue
+            # One Block tape per kind on the kind's combined lane (its strongest
+            # range config per bar). Keying on the first lane skipped every
+            # kind whose bare lane is silent (all range-only kinds).
+            for kind, lane in combined_kind_signals(kind_sigs or {}).items():
                 self._replay_kind_strategy_tape(
-                    symbol, bars, sigs, strat_hist.setdefault(f"block:{kind}", []),
+                    symbol, bars, [(d, conf) for d, conf, _ in lane], strat_hist.setdefault(f"block:{kind}", []),
                     now, warmup, time_bars, scratch_bars, honor_tp,
                     kind=kind,
                 )
