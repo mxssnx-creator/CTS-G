@@ -1221,7 +1221,9 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
                     hr["skipped_margin"] += 1
                     continue
                 sizer.available = avail
-                q = sizer.size_qty(c, p)
+                # Live place(): a Micro lot is one venue-minimum lot, not a
+                # factor-sized order.
+                q = sizer.raise_to_min_qty(c, p, sizer.min_order_qty(c, p)) if micro_c else sizer.size_qty(c, p)
                 if q <= 0:
                     hr["skipped_min"] += 1
                     continue
@@ -1252,7 +1254,11 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             p = px[s]
             lev = lev_of[s]
             sizer.available = avail
-            unit = sizer.size_qty(c, p)
+            # Live sizes an add from its parent's stored quantity, not from a
+            # fresh unit at add time.
+            parents = [lot for lot in acct.lots.values()
+                       if lot["symbol"] == s and lot["side"] == side and lot.get("strategy") not in ("block", "dca")]
+            unit = float(parents[0].get("unit_qty") or 0.0) if parents else sizer.size_qty(c, p)
             if unit <= 0:
                 hr["skipped_margin" if avail <= 0 else "skipped_min"] += 1
                 continue
@@ -1267,7 +1273,7 @@ def simulate(run: str, cands: Dict[str, Any], strat: List[Dict[str, Any]], kind_
             strat_name = "block" if is_block else "dca"
             acct.open_lot(lot_seq, s, side, qty0, p, lev, uid=-1, strategy=strat_name, unit_qty=unit,
                           kinds=[r.get("ind_kind")] if r.get("ind_kind") else [])
-            sizer.open[lot_seq] = 1
+            # Add-ons are not positions: live size_mult counts open positions.
             avail = max(0.0, acct.equity(px) * margin_cap - acct.used_margin)
             hr["opened_lots"] += 1
             hr["block_orders" if is_block else "dca_entry_orders"] += 1

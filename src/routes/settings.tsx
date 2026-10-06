@@ -6,6 +6,8 @@ import {
   bool,
   DEFAULT_OVERLAY,
   DEFAULT_SYMBOL_COUNT,
+  MAIN_EVAL_DEFAULT,
+  REAL_EVAL_DEFAULT,
   fetchCtsBundle,
   loadLocalOverlay,
   num,
@@ -63,7 +65,8 @@ import {
   overlayOverview,
   type UserPreset,
 } from "@/lib/user-presets";
-import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions, type IndTypeFlags } from "@/lib/hist-calc";
+import { INDICATION_KINDS, indTypeKey, kindLabel } from "@/lib/indication-kinds";
 import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, histTestAssignment, applyHistTestSymbols, histTestSelectionMatches, type HistTestAssignment, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
@@ -845,13 +848,13 @@ function SettingsPage() {
                     <Slider
                       label="Volume factor"
                       value={overlay.volumeFactor || 0.1}
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                      min={0.05}
+                      max={10}
+                      step={0.05}
+                      hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
                       onChange={(v) => patch("volumeFactor", v)}
                     />
-                    <KV k="Effective notional" v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} />
+                    <KV k="Effective notional" v={`${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`} />
                   </Grid>
                 </div>
               </div>
@@ -1119,46 +1122,17 @@ function SettingsPage() {
                     }
                     onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
                   />
-                  <EnableSlider
-                    label="Signals"
-                    on={calcOpt.indTypeSignals}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeSignals: v }))}
-                  />
-                  <EnableSlider
-                    label="State"
-                    on={calcOpt.indTypeState}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeState: v }))}
-                  />
-                  <EnableSlider
-                    label="Direction"
-                    on={calcOpt.indTypeDirection}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeDirection: v }))}
-                  />
-                  <EnableSlider
-                    label="Move"
-                    on={calcOpt.indTypeMove}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeMove: v }))}
-                  />
-                  <EnableSlider
-                    label="Active"
-                    on={calcOpt.indTypeActive}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeActive: v }))}
-                  />
-                  <EnableSlider
-                    label="Common"
-                    on={calcOpt.indTypeCommon}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeCommon: v }))}
-                  />
-                  <EnableSlider
-                    label="Trend"
-                    on={calcOpt.indTypeTrend}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeTrend: v }))}
-                  />
-                  <EnableSlider
-                    label="Break"
-                    on={calcOpt.indTypeBreak}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeBreak: v }))}
-                  />
+                  {INDICATION_KINDS.map((kind) => {
+                    const key = indTypeKey(kind) as keyof IndTypeFlags;
+                    return (
+                      <EnableSlider
+                        key={kind}
+                        label={kindLabel(kind)}
+                        on={calcOpt[key] !== false}
+                        onChange={(v) => setCalcOpt((o) => ({ ...o, [key]: v }))}
+                      />
+                    );
+                  })}
                 </Grid>
                 <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg2 px-3 py-3" data-testid="calc-range-presets">
                   <span className="font-mono text-xs uppercase text-muted">Quick range</span>
@@ -1493,7 +1467,7 @@ function SettingsPage() {
             <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
-              hint="One overall threshold · independent evaluation windows in every stage · Base defaults to last 30"
+              hint={`One overall threshold · independent evaluation windows in every stage · Base ${DEFAULT_OVERLAY.baseEvalPosCount ?? DEFAULT_OVERLAY.setPfWindow} / Main ${MAIN_EVAL_DEFAULT} / Real ${REAL_EVAL_DEFAULT} · PF ${DEFAULT_OVERLAY.setMinPf.toFixed(2)}`}
             >
               <Grid>
                 <Slider
@@ -2002,8 +1976,8 @@ function SettingsPage() {
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 30))} />
-                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 30))} />
+                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, MAIN_EVAL_DEFAULT))} />
+                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, REAL_EVAL_DEFAULT))} />
                 <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 3))} />
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
               </Grid>
@@ -2574,10 +2548,10 @@ function SettingsPage() {
                 <Slider
                   label="Volume factor"
                   value={overlay.volumeFactor || 0.1}
-                  min={0.1}
-                  max={5}
-                  step={0.1}
-                  hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                  min={0.05}
+                  max={10}
+                  step={0.05}
+                  hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
@@ -3642,8 +3616,8 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
               <th className="pb-2 font-medium">Lane</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
+              <th className="pb-2 text-right font-medium">Last {ex?.pfWindow ?? 15} PF</th>
+              <th className="pb-2 text-right font-medium">Last {ex?.deactN ?? 25} R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>

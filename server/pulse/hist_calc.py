@@ -49,6 +49,7 @@ from set_engine import (
     synth_trend,
 )
 from validation_policy import control_min_trades
+from contracts import INDICATION_KINDS
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
@@ -569,6 +570,14 @@ def public_presets() -> List[Dict[str, Any]]:
     return out
 
 
+def ind_type_key(kind: str) -> str:
+    """Historic calc toggle name for one indication kind (``indTypeState``)."""
+    return "indType" + str(kind)[:1].upper() + str(kind)[1:]
+
+
+IND_TYPE_KEYS = tuple(ind_type_key(kind) for kind in INDICATION_KINDS)
+
+
 def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
@@ -581,14 +590,8 @@ def default_options() -> Dict[str, Any]:
         "stratGeneral": True,
         "allConfigs": True,
         "allSymbols": True,
-        "indTypeSignals": True,
-        "indTypeState": True,
-        "indTypeDirection": True,
-        "indTypeMove": True,
-        "indTypeActive": True,
-        "indTypeCommon": True,
-        "indTypeTrend": True,
-        "indTypeBreak": True,
+        # One toggle per indication kind, generated from the contract list.
+        **{ind_type_key(kind): True for kind in INDICATION_KINDS},
         # These live-selection coordination layers are opt-in. A historic
         # matrix still evaluates every catalog row regardless of these flags.
         "preferMinimalRange": False,
@@ -623,8 +626,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if opt["stepMax"] < opt["minStep"]:
         opt["stepMax"] = opt["minStep"]
     for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs", "allSymbols",
-              "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon",
-              "indTypeTrend", "indTypeBreak", "preferMinimalRange", "additionalCoordination",
+              *IND_TYPE_KEYS, "preferMinimalRange", "additionalCoordination",
               "preferMinimalPositive", "minimalPositiveCoordination"):
         if k in body:
             opt[k] = bool(body[k])
@@ -909,14 +911,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "histSimulateDca": True,
         "blockVolumeRatio": 0.25,
         "blockMaxStack": 6,
-        "indTypeState": bool(opt.get("indTypeState", True)),
-        "indTypeSignals": bool(opt.get("indTypeSignals", True)),
-        "indTypeDirection": bool(opt.get("indTypeDirection", True)),
-        "indTypeMove": bool(opt.get("indTypeMove", True)),
-        "indTypeActive": bool(opt.get("indTypeActive", True)),
-        "indTypeCommon": bool(opt.get("indTypeCommon", True)),
-        "indTypeTrend": bool(opt.get("indTypeTrend", True)),
-        "indTypeBreak": bool(opt.get("indTypeBreak", True)),
+        **{key: bool(opt.get(key, True)) for key in IND_TYPE_KEYS},
         "trailArmMin": 0.3,
         "trailArmMax": 1.5,
         "trailGiveMin": 0.1,
@@ -3018,10 +3013,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
     rec("resolve-respects-cap", capped[:25] == [f"S{i}-USDT" for i in range(25)] and capped[25:] == list(FORCED_SYMBOLS), str(capped))
     rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 30, str(parse_options({})))
-    rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
-        "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
-        "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
-    )))
+    rec("opt-ind-types-on", all(parse_options({})[k] is True for k in IND_TYPE_KEYS)
+        and len(IND_TYPE_KEYS) == len(INDICATION_KINDS))
+    rec("opt-ind-types-whitelist", all(parse_options({k: False})[k] is False for k in IND_TYPE_KEYS))
+    rec("opt-coord-n-default-50", parse_options({})["coordOptimizationN"] == 50)
     rec("opt-hours-default-48", parse_options({})["hours"] == 48)
     rec("opt-hours-nested-options", parse_options({"options": {"hours": 7}})["hours"] == 7, str(parse_options({"options": {"hours": 7}})))
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)

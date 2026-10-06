@@ -46,6 +46,8 @@ export function StatsOverview({
         : {}),
   };
   const shownCount = cost.count || liveCount;
+  // Engine sample floor (pfCost.requiredSamples), falling back to the PF window.
+  const requiredSamples = Number(live?.pfCost?.requiredSamples ?? cost.n ?? 0);
   const shownRatio = shownCount ? cost.ratio : liveRatio;
   const heroes = (
     <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -53,7 +55,7 @@ export function StatsOverview({
           k={`Last ${cost.n} cost PF`}
           v={shownCount || shownRatio ? shownRatio.toFixed(2) : "—"}
           s={`classic ${cost.classicPf.toFixed(2)} · 1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${shownCount} · ${cost.pass ? "pass" : "block"}`}
-          tone={shownCount < 8 ? "ok" : cost.pass ? "good" : "ok"}
+          tone={shownCount < requiredSamples ? "ok" : cost.pass ? "good" : "ok"}
         />
         <Hero
           k="Drawdown time avg"
@@ -112,6 +114,8 @@ export function StatsOverview({
               <PfRow label="Last 4" m={data.last4} />
               <PfRow label="Last 15" m={data.positionWindows["15"]} />
               <PfRow label="Last 25" m={data.positionWindows["25"]} />
+              <PfRow label="Last 30" m={data.positionWindows["30"]} />
+              <PfRow label="Last 50" m={data.positionWindows["50"]} />
               <PfRow label="Last 75" m={data.positionWindows["75"]} />
               <PfRow label="4 hours" m={data.timeWindows["4h"]} />
               <PfRow label="12 hours" m={data.timeWindows["12h"]} />

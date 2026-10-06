@@ -1,6 +1,7 @@
 import type { EvaluationWindow } from "./hist-calc";
 import type { SetOverview } from "./set-overview";
 import { requestPreferredJson } from "./request-json.ts";
+import { BASE_EVAL_DEFAULT } from "./stage-windows.ts";
 
 export type LiveOpen = {
   symbol: string;
@@ -104,7 +105,10 @@ export type KindStat = {
   kind?: string;
   n?: number;
   pf?: number;
-  wr?: number;
+  /** null when the replay gate supplied n/pf (it carries no win rate). */
+  wr?: number | null;
+  /** "replay" when every count/PF field came from the replay gate. */
+  source?: string;
   maxDdS?: number;
   avgDdS?: number;
   ddEpisodes?: number;
@@ -794,6 +798,8 @@ export type LiveStats = {
     netPct?: number;
     grossPct?: number;
     minPf?: number;
+    /** Sample floor before the cost PF can pass (engine eval_need). */
+    requiredSamples?: number;
     pass?: boolean;
     scale?: string;
     neutral?: number;
@@ -1022,6 +1028,9 @@ export type LiveStats = {
   }>;
   exits?: {
     enabled?: boolean;
+    /** Window behind each lane's last15Ratio (exitPfWindow). */
+    pfWindow?: number;
+    deactN?: number;
     ignoreTp?: boolean;
     bestOf?: boolean;
     lockOn?: boolean;
@@ -1277,7 +1286,7 @@ export function kindGateOpen(blob?: KindStat, gate?: KindStat): boolean | undefi
 
 /** Last-N window behind the headline cost PF (configured pfWindow, not a fixed 15). */
 export function costPfWindow(stats: { pfCost?: { n?: number }; sets?: { pfWindow?: number } } | null | undefined): number {
-  return knownCount(stats?.pfCost?.n) || knownCount(stats?.sets?.pfWindow) || 15;
+  return knownCount(stats?.pfCost?.n) || knownCount(stats?.sets?.pfWindow) || BASE_EVAL_DEFAULT;
 }
 
 /** Positions/Orders pair. Never falls order counts back onto position counts. */

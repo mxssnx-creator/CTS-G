@@ -8,6 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
+import { kindShort } from "@/lib/indication-kinds";
 import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
@@ -968,7 +969,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
               <span className="text-fg">{s.symbol.replace("-USDT", "")}</span>
               <span className="ml-2 text-muted">
                 {Object.entries(s.kinds || {})
-                  .map(([k, v]) => `${k[0]}${v.dir === "short" ? "−" : "+"}`)
+                  .map(([k, v]) => `${kindShort(k)}${v.dir === "short" ? "−" : "+"}`)
                   .join(" ")}
               </span>
             </div>

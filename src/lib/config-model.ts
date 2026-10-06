@@ -144,6 +144,7 @@ export function clampAxisWindow(axis: AxisName, value: unknown): number {
   const clamped = Math.max(spec.min, Math.min(spec.max, n));
   return spec.min + Math.floor((clamped - spec.min) / spec.step) * spec.step;
 }
+export { BASE_EVAL_DEFAULT, MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT } from "./stage-windows.ts";
 export const DEFAULT_HIST_LOOKBACK_BARS = 720; // 12 hours of 1m bars
 export const DEFAULT_MIN_STEP = 7;
 export const SL_MIN_PCT = 0.4;

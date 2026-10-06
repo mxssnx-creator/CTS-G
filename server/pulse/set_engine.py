@@ -2470,7 +2470,7 @@ class SetBook:
         original = rec if isinstance(rec, dict) else vars(rec)
         for key in ("qty", "entry", "exit", "fee_total", "position_cost_pct", "cost_source", "tp_pct", "sl_pct", "trail_key", "step",
                     "exchange_confirmed", "partial", "strategy", "member_count", "execution_lane", "close_fill_id",
-                    "set_tp_pct", "ind_config"):
+                    "set_tp_pct", "ind_config", "size_ratio"):
             if key in original:
                 row[key] = original[key]
         if ind_kind not in IND_KINDS:

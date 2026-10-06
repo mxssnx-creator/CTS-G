@@ -8,7 +8,7 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from position_cost import clears_pf, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, POSITIVE_PF, last_n_cost_pf, normalize_pf
 from contracts import AXES, VOLUME_RATIO_UNIT, stable_key
-from set_engine import MAIN_EVAL_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
+from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, row_equity_pnl
 
 # Relative-count windows per coordination axis: every count from min to the
 # configured max window (step 1 = the finest grid) is one child per Base
@@ -135,12 +135,14 @@ class Coordinator:
 
     def _main_n(self) -> int:
         """Main window: last-N (>= 3), or the Base window when Main is off (0)."""
-        main = int(getattr(self, "main_eval", 12) if getattr(self, "main_eval", 12) is not None else 12)
-        return max(3, int(self.pf_window or 15)) if main <= 0 else max(3, main)
+        main = getattr(self, "main_eval", MAIN_EVAL_DEFAULT)
+        main = int(MAIN_EVAL_DEFAULT if main is None else main)
+        return max(3, int(self.pf_window or PF_N_DEFAULT)) if main <= 0 else max(3, main)
 
     def _real_n(self) -> int:
         """Real window: last-N (>= 3), or the Main window when Real is off (0)."""
-        real = int(getattr(self, "real_eval", 3) if getattr(self, "real_eval", 3) is not None else 3)
+        real = getattr(self, "real_eval", REAL_EVAL_DEFAULT)
+        real = int(REAL_EVAL_DEFAULT if real is None else real)
         return self._main_n() if real <= 0 else max(3, real)
 
     def load(self, cts: Dict[str, Any], ov: Dict[str, Any]) -> None:

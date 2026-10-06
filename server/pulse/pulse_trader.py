@@ -62,9 +62,9 @@ from position_cost import (
     exchange_order_cost_sample,
     row_fee_usdt,
 )
-from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit, tactic_should_close
+from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES, exit_tactic_hit, tactic_should_close, KIND_FLAGS
 from risk_variants import VariantBook, self_test as variants_self_test
-from set_engine import SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
+from set_engine import MAIN_EVAL_DEFAULT, PF_N_DEFAULT, REAL_EVAL_DEFAULT, SetBook, self_test as sets_self_test, indication_kind_votes, IND_TAG_KIND, merge_hist_rows, LOOKBACK_MAX, catalog_grid_passes, catalog_cover_passes
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, SMALL_BOOK_ENTRY_BATCH, trim_map, cap_map, prune_ttl, cap_list
@@ -1101,6 +1101,9 @@ class Position:
     axis_key: str = ""
     relative_count: int = 1
     volume_ratio: float = 1.0
+    # Current size relative to the parent after Block/DCA adds (qty/parent).
+    # volume_ratio stays the Set's input multiplier.
+    size_ratio: float = 1.0
     control_group_key: str = ""
     control_range_key: str = ""
     control_sl_bp: int = 0
@@ -1162,6 +1165,9 @@ class Closed:
     axis_key: str = ""
     relative_count: int = 1
     volume_ratio: float = 1.0
+    # Current size relative to the parent after Block/DCA adds (qty/parent).
+    # volume_ratio stays the Set's input multiplier.
+    size_ratio: float = 1.0
     control_group_key: str = ""
     control_range_key: str = ""
     control_mode: str = ""
@@ -2050,9 +2056,12 @@ class Pulse:
         target.conf = max(float(target.conf or 0), float(incoming.conf or 0))
         target.reason = incoming.reason or target.reason
         target.volume_ratio = max(
-            1.0,
             float(getattr(target, "volume_ratio", 1.0) or 1.0),
             float(getattr(incoming, "volume_ratio", 1.0) or 1.0),
+        )
+        target.size_ratio = max(
+            float(getattr(target, "size_ratio", 1.0) or 1.0),
+            float(getattr(incoming, "size_ratio", 1.0) or 1.0),
         )
         target.relative_count = max(
             1,
@@ -6142,11 +6151,9 @@ class Pulse:
             except Exception:
                 anchor = 0.0
             if anchor > 0:
-                pos.volume_ratio = max(
-                    1.0,
-                    float(getattr(pos, "volume_ratio", 1.0) or 1.0),
-                    total / anchor,
-                )
+                # Size after the add, relative to its parent; the Set ratio
+                # (volume_ratio) is left as entered.
+                pos.size_ratio = max(1.0, float(getattr(pos, "size_ratio", 1.0) or 1.0), total / anchor)
         if pending_qty is not None:
             pos.pending_qty = max(0.0, float(pending_qty or 0.0))
         else:
@@ -7656,6 +7663,7 @@ class Pulse:
             axis_key=str(getattr(pos, "axis_key", "") or ""),
             relative_count=int(getattr(pos, "relative_count", 1) or 1),
             volume_ratio=float(getattr(pos, "volume_ratio", 1.0) or 1.0),
+            size_ratio=float(getattr(pos, "size_ratio", 1.0) or 1.0),
             control_group_key=str(getattr(pos, "control_group_key", "") or ""),
             control_range_key=str(getattr(pos, "control_range_key", "") or "aggregate"),
             control_mode="per-config" if self.per_config_controls(pos) else "aggregate",
@@ -8343,7 +8351,8 @@ class Pulse:
                     "trailKey": str(row.get("trail_key") or row.get("trailKey") or ""),
                     "axisKey": str(row.get("axis_key") or row.get("axisKey") or ""),
                     "relativeCount": max(1, int(_sf(row.get("relative_count") or row.get("relativeCount"), 1))),
-                    "volumeRatio": max(1.0, _sf(row.get("volume_ratio") or row.get("volumeRatio"), 1.0)),
+                    "volumeRatio": _sf(row.get("volume_ratio") or row.get("volumeRatio"), 1.0) or 1.0,
+                    "sizeRatio": _sf(row.get("size_ratio") or row.get("sizeRatio"), 1.0) or 1.0,
                     "indicationKind": str(row.get("ind_kind") or row.get("indKind") or ""),
                     "controlRangeKey": str(row.get("control_range_key") or row.get("controlRangeKey") or ""),
                     "strategy": str(row.get("strategy") or "core"),
@@ -8828,9 +8837,14 @@ class Pulse:
         self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.5)))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
-        if ov.get("leverage"):
-            LEVERAGE = int(ov["leverage"])
+        # An explicit overlay leverage is the account-wide room multiplier;
+        # without one, the highest pair leverage (fallback 150) is used.
         LEVERAGE = max(150, max(self.lev_map.values()) if self.lev_map else 150)
+        if ov.get("leverage"):
+            try:
+                LEVERAGE = max(1, int(ov["leverage"]))
+            except (TypeError, ValueError):
+                pass
         if ov.get("maxOpen") is not None:
             MAX_OPEN = int(ov["maxOpen"])
         if ov.get("maxPerGroup") is not None:
@@ -13455,16 +13469,7 @@ class Pulse:
                 "sets": bool(getattr(self.sets, "enabled", False)),
             },
             "modules": mods,
-            "indicationTypes": {
-                "state": bool(self.indications.settings.get("typeState", True)),
-                "direction": bool(self.indications.settings.get("typeDirection", True)),
-                "move": bool(self.indications.settings.get("typeMove", True)),
-                "active": bool(self.indications.settings.get("typeActive", True)),
-                "common": bool(self.indications.settings.get("typeCommon", True)),
-                "signals": bool(self.indications.settings.get("typeSignals", True)),
-                "trend": bool(self.indications.settings.get("typeTrend", True)),
-                "break": bool(self.indications.settings.get("typeBreak", True)),
-            },
+            "indicationTypes": {k: bool(self.indications.settings.get(f, True)) for k, f in KIND_FLAGS.items()},
             "indicationHits": hits,
             "indicationGate": (self.sets.ind_gate_snapshot() if callable(getattr(self.sets, "ind_gate_snapshot", None)) else {}),
             "executionPolicy": {
@@ -13482,7 +13487,7 @@ class Pulse:
                 "lastPositionOptimizationN": int(getattr(self.sets, "optimization_n", 50) or 50),
                 "lastPositionOptimization": dict(getattr(self.sets, "optimization_stats", {}) or {}),
                 "windows": {
-                    "pf": int(getattr(self.sets, "pf_n", 15) or 15),
+                    "pf": int(getattr(self.sets, "pf_n", PF_N_DEFAULT) or PF_N_DEFAULT),
                     "deactivation": int(getattr(self.sets, "deact_n", 25) or 25),
                     "coordination": int(getattr(self.coord, "optimization_n", 50) or 50),
                     "live": int(getattr(self.sets, "optimization_n", 50) or 50),
@@ -13500,8 +13505,8 @@ class Pulse:
                 "addsAllow": bool(coord_last.get("addsAllow", True)),
                 "addReasons": list(coord_last.get("addReasons") or [])[:6],
                 "stages": stages,
-                "mainEval": int(getattr(self.coord, "main_eval", 12)),
-                "realEval": int(getattr(self.coord, "real_eval", 3)),
+                "mainEval": int(getattr(self.coord, "main_eval", MAIN_EVAL_DEFAULT)),
+                "realEval": int(getattr(self.coord, "real_eval", REAL_EVAL_DEFAULT)),
                 "posCountVolRatio": float(getattr(self.coord, "pos_count_vol_ratio", 0.05)),
                 "sizeMult": round(float(coord_size_mult(len(self.open)) if callable(coord_size_mult) else 1.0), 4),
                 "openN": len(self.open),
