@@ -93,7 +93,12 @@ class SignalSemantics(unittest.TestCase):
         paths = [pathlib.Path(f"/tmp/claude-0/htf1h/{s}.json") for s in ("SOL-USDT", "BTC-USDT", "ETH-USDT", "DOGE-USDT")]
         tapes = [he.Bars.from_rows(json.loads(p.read_text())["rows"]) for p in paths if p.exists()]
         if not tapes:
-            tapes = [he.Bars.from_rows([[t, [o, h, l, c, v]] for t, o, h, l, c, v in zip(*[REF["input"][k] for k in "tohlcv"])])]
+            # No 2-year tapes (CI): the fixture plus its additive price mirror
+            # (an uptrend becomes a downtrend), so each kind meets both regimes.
+            fx = ref_bars()
+            k = 2 * float(fx.h.max())
+            mirror = he.Bars(fx.t, k - fx.o, k - fx.l, k - fx.h, k - fx.c, fx.v, 60, "MIRROR")
+            tapes = [fx, mirror]
         longs, shorts = set(), set()
         for b in tapes:
             for k, s in he.entry_signals(b, he.HTF_KINDS, vol_regime=False).items():
@@ -102,10 +107,10 @@ class SignalSemantics(unittest.TestCase):
                 if (s < 0).any():
                     shorts.add(k)
         both = longs & shorts
-        if len(tapes) > 1:
+        if tapes[-1].sym != "MIRROR":
             self.assertEqual(sorted(set(he.HTF_KINDS) - both), [], "each kind fires long and short")
         else:
-            self.assertGreater(len(both), len(he.HTF_KINDS) // 2)
+            self.assertGreaterEqual(len(both), 10, sorted(set(he.HTF_KINDS) - both))
 
     def test_4h_agreement_uses_completed_4h_bars_only(self):
         # Bars i = 0..15 (4 bars per 4h bucket). The bucket containing i is
