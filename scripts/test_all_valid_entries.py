@@ -248,6 +248,8 @@ class AllValidEntries(unittest.TestCase):
         selected = p.sets.by_idx[0]
         selected.tp_pct = .08
         p.tp_max = 0
+        # 3% SL needs liquidation beyond it: at most 30x (auto leverage).
+        p.leverage_for = lambda c: 30
         p.place('X-USDT', 1, 'trend', .9, selected_set=selected)
         self.assertEqual(len(p.open), 1)
         pos = next(iter(p.open.values()))

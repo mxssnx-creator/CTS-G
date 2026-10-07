@@ -245,6 +245,8 @@ export function trailGiveFromArm(arm: number, factor = 1 / 3, gmin = 0.1, gmax =
 export type PulseOverlay = import("./system-settings").SystemSettings & {
   targetNotional: number;
   volumeFactor: number;
+  orderSizing: "minQty" | "factor";
+  slAutoLeverage: boolean;
   leverage: number;
   useMaxLeverage: boolean;
   maxOpen: number;
@@ -525,6 +527,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   ...normalizeSystemSettings(),
   targetNotional: 2.15,
   volumeFactor: 0.1,
+  orderSizing: "minQty",
+  slAutoLeverage: true,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 100,
@@ -845,6 +849,8 @@ export type CtsSettings = {
   dcaPfWindow?: number;
   dcaDeactN?: number;
   volumeFactor?: number;
+  orderSizing?: string;
+  slAutoLeverage?: boolean;
   axisPrevEnabled?: boolean;
   axisPrevMaxWindow?: number;
   axisLastEnabled?: boolean;
@@ -1082,6 +1088,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 0.1),
+    orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
+    slAutoLeverage: bool(cts.slAutoLeverage, true),
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),

@@ -649,6 +649,8 @@ class Sizer:
             for s in contracts:
                 self.lev_max[s] = int(leverage)
         self.volume_factor = max(0.05, min(10.0, float(overlay.get("volumeFactor") or 0.1)))
+        self.order_sizing = "factor" if overlay.get("orderSizing") == "factor" else pt.ORDER_SIZING_DEFAULT
+        self.sl_auto_leverage = overlay.get("slAutoLeverage", True) is not False
         self.margin_cap_pct = max(0.0, min(1.0, float(overlay.get("marginCapPct", 0.5))))
         pt.TARGET_NOTIONAL = max(0.2, min(500.0, float(overlay.get("targetNotional") or pt.TARGET_NOTIONAL)))
         self.vol1h: Dict[str, float] = {}

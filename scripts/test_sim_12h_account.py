@@ -151,7 +151,8 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
         class Book:
             cost_pct = 0.1
 
-        ov = {"volumeFactor": 1.0, "targetNotional": 2.15, "posCountsVolumeRatio": 0.05}
+        ov = {"volumeFactor": 1.0, "targetNotional": 2.15, "posCountsVolumeRatio": 0.05,
+              "orderSizing": "factor", "slAutoLeverage": False}
         res = sim.simulate("t", cands, [], None, catalog, [sym], bars, 60, 120, 0, Book(), sim.Sizer(contracts, ov, None),
                            10.0, True, True)
         tot = res["totals"]
@@ -196,7 +197,7 @@ class SyntheticTapeSimulationTest(unittest.TestCase):
             cost_pct = 0.1
 
         res = sim.simulate("m", cands, [], None, catalog, [sym], bars, 60, 120, 0, Book(),
-                           sim.Sizer(contracts, {"volumeFactor": 1.0}, None), 1.0, True, True)
+                           sim.Sizer(contracts, {"volumeFactor": 1.0, "orderSizing": "factor", "slAutoLeverage": False}, None), 1.0, True, True)
         tot = res["totals"]
         # 1 USDT equity at 100x: each 4 USDT lot needs 0.04 margin (+0.002 fee); the book fills until free margin is gone
         self.assertGreater(tot["positions"]["lotsOpened"], 10)

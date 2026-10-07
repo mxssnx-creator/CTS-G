@@ -77,6 +77,7 @@ class VolumeFactorEntries(unittest.TestCase):
         for name in ('size_qty', 'max_book_notional', 'avail_notional'):
             p.__dict__.pop(name, None)  # the real sizing chain, not fixture stubs
         p.volume_factor = vf
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.coord.size_mult = lambda n: 1.0
         p.block = NS(enabled=block, max_stack=6, volume_ratio=.25, max_volume_multiplier=2.0,
@@ -127,6 +128,7 @@ class VolumeFactorAdds(unittest.TestCase):
         p.api = _Api(self.PX)
         p.halted = False
         p.volume_factor = vf
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.available = 1000.
         p.coord = NS(min_pf=1.1, real_eval=3, last={}, size_mult=lambda n: 1.,
@@ -247,6 +249,7 @@ class MicroCapEntries(unittest.TestCase):
         for name in ('size_qty', 'max_book_notional', 'avail_notional'):
             p.__dict__.pop(name, None)
         p.volume_factor = 1.0
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.coord.size_mult = lambda n: 1.0
         p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,
@@ -285,6 +288,7 @@ class LotsPerSymbolSideCap(unittest.TestCase):
         for name in ('size_qty', 'max_book_notional', 'avail_notional'):
             p.__dict__.pop(name, None)
         p.volume_factor = 1.0
+        p.order_sizing = 'factor'  # these tests pin the volume-factor path
         p.vol1h = {}
         p.coord.size_mult = lambda n: 1.0
         p.block = NS(enabled=False, max_stack=0, volume_ratio=.25, max_volume_multiplier=2.0,

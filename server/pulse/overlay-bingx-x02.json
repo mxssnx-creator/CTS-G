@@ -253,6 +253,8 @@
   "useMaxLeverage": true,
   "volWeight": 0.3,
   "volumeFactor": 0.1,
+  "orderSizing": "minQty",
+  "slAutoLeverage": true,
   "marginCapPct": 0.1,
   "controlMinTrades": 0,
   "forcedSymbols": [

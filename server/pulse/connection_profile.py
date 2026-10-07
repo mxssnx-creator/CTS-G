@@ -42,7 +42,7 @@ BATCH_RPS = 2.0  # batchOrders has its own 5 / s venue quota; two lanes at 2.0 l
 
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
-    result = dict(histLookbackBars=720, volumeFactor=0.1, marginCapPct=0.1, setHistTimeBars=120, scratchS=7200, microEnabled=True, microMinPf=1.05, microMaxShare=0.05, liveEdgeGuard=True, liveEdgeN=50, liveEdgeProbeShare=0.25, venueSlTicks=3, baseEvalPosCount=50, mainEvalPosCount=30, realEvalPosCount=30, setPfWindow=50, setMinSamples=30, setMaxDdTimeS=64800, setDeactN=25, controlMinTrades=0,
+    result = dict(histLookbackBars=720, volumeFactor=0.1, orderSizing="minQty", slAutoLeverage=True, marginCapPct=0.1, setHistTimeBars=120, scratchS=7200, microEnabled=True, microMinPf=1.05, microMaxShare=0.05, liveEdgeGuard=True, liveEdgeN=50, liveEdgeProbeShare=0.25, venueSlTicks=3, baseEvalPosCount=50, mainEvalPosCount=30, realEvalPosCount=30, setPfWindow=50, setMinSamples=30, setMaxDdTimeS=64800, setDeactN=25, controlMinTrades=0,
                   maxOpen=100, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
                   # Ranked 50-symbol book. maxOpen=100 is the effective-position
                   # cap (symbol × LONG/SHORT). Independent intern, Block, DCA

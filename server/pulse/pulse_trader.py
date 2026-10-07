@@ -36,6 +36,7 @@ from bingx_fast import FastBingX, ErrorLog, dumps as fast_json_dumps
 from modules import resolve as resolve_modules
 from position_cost import (
     VENUE_SL_TICKS,
+    LIQ_SL_SHARE,
     venue_sl_floor,
     last_n_cost_pf,
     overall_last_pos_eval,
@@ -145,6 +146,9 @@ def effective_indication_timeframes(
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 LIVE_EDGE_N_DEFAULT = 50
+# Sizing: "minQty" = every order is the venue minimum lot (max of min qty and
+# min USDT / price, rounded up to the step); "factor" = volume-factor target.
+ORDER_SIZING_DEFAULT = "minQty"
 LIVE_EDGE_PROBE_SHARE_DEFAULT = 0.25
 SYSTEM_ID = system_id()
 TRACKING_SCOPE = tracking_scope(CONN_SHORT, SYSTEM_ID)
@@ -1259,6 +1263,11 @@ class Pulse:
         self.halt_reason: Optional[str] = None
         self._pre_pause_halt: Optional[str] = None
         self.volume_factor = 1.0
+        self.order_sizing = ORDER_SIZING_DEFAULT
+        # Leverage follows the allowed SL distance: each symbol runs at the
+        # highest leverage whose liquidation still lies beyond the widest
+        # configured SL, so every SL the desk can emit is executable as set.
+        self.sl_auto_leverage = True
         self.regime = "neutral"
         self.consec_loss = 0
         self.wins = 0
@@ -2220,7 +2229,31 @@ class Pulse:
         mx = int(self.lev_max.get(sym) or getattr(c, "max_lev", 0) or 0)
         if mx <= 0:
             mx = int(LEVERAGE or 150)
-        return max(1, mx)
+        return Pulse.leverage_target(self, mx)
+
+    def sl_cap_pct(self) -> float:
+        """Widest SL (fraction) any lane of this desk may emit."""
+        return max(float(getattr(self, "sl_max", 0.03) or 0.03), float(getattr(self, "htf_sl_max", 0.0) or 0.0))  # noqa: E501
+
+    def leverage_target(self, mx: int) -> int:
+        """Desk leverage for a pair whose venue max is ``mx``.
+
+        With ``slAutoLeverage`` the leverage is lowered until the liquidation
+        distance (LIQ_SL_SHARE / leverage) covers the widest allowed SL, so a
+        stop is never moved or rejected for sitting beyond liquidation."""
+        mx = max(1, int(mx or 1))
+        if not getattr(self, "sl_auto_leverage", True):
+            return mx
+        cap = int(LIQ_SL_SHARE / max(Pulse.sl_cap_pct(self), 1e-6))
+        return max(1, min(mx, cap))
+
+    def sl_allowed_max(self, c: Optional[Contract]) -> float:
+        """Largest SL distance (fraction) that still fires before liquidation
+        at the leverage the venue currently applies (or will apply)."""
+        sym = getattr(c, "symbol", "") if c is not None else ""
+        applied = int((getattr(self, "lev_map", None) or {}).get(sym) or 0)
+        lev = max(applied, int(self.leverage_for(c) or 1), 1)
+        return min(Pulse.sl_cap_pct(self), LIQ_SL_SHARE / lev)
 
     def _persist_lev(self) -> None:
         try:
@@ -2292,13 +2325,13 @@ class Pulse:
             return applied or mx
         if self._lev_retry.get(symbol, 0.0) > now:
             return applied or mx
-        if not force and mx > 0 and applied >= mx:
+        if not force and mx > 0 and applied == self.leverage_target(mx):
             if c is not None:
                 c.max_lev = mx
             return applied
         if self.api.path_cd.get("/openApi/swap/v2/trade/leverage", 0) > now:
             return applied or mx
-        if mx <= 0 or force or applied < mx:
+        if mx <= 0 or force or applied != self.leverage_target(mx):
             got_mx, cur_l, cur_s = self.fetch_symbol_leverage(symbol)
             self._drain_offline_hits()
             if symbol in (getattr(self, "_offline_symbols", set()) or set()):
@@ -2308,14 +2341,15 @@ class Pulse:
                 self.lev_max[symbol] = mx
                 if c is not None:
                     c.max_lev = mx
-                if cur_l == mx and cur_s == mx:
-                    self.lev_map[symbol] = mx
+                tgt = self.leverage_target(mx)
+                if cur_l == tgt and cur_s == tgt:
+                    self.lev_map[symbol] = tgt
                     self._persist_lev()
-                    return mx
+                    return tgt
                 # current can be 500 while pair max is 10 — must POST down
-            elif applied >= mx > 0 and not force:
+            elif applied == self.leverage_target(mx) and mx > 0 and not force:
                 return applied
-        want = int(mx or 150)
+        want = self.leverage_target(int(mx or 150))
         ok_both = True
         for side in ("LONG", "SHORT"):
             r = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
@@ -2336,7 +2370,7 @@ class Pulse:
                     self.lev_max[symbol] = mx
                     if c is not None:
                         c.max_lev = mx
-                    want = mx
+                    want = self.leverage_target(mx)
                     r2 = self.api.post("/openApi/swap/v2/trade/leverage", {"symbol": symbol, "side": side, "leverage": want})
                     if not self.ok(r2):
                         return applied or cur_l or want
@@ -2539,6 +2573,9 @@ class Pulse:
         room = self.avail_notional(c)
         if room <= 0 or floor_n > room * 1.02:
             return 0.0
+        if getattr(self, "order_sizing", ORDER_SIZING_DEFAULT) == "minQty":
+            # Minimum volume: the smallest lot the venue accepts.
+            return self.round_qty_up(c, floor)
         target_n = self.sized_notional(c.symbol, ratio=ratio)
         want_n = min(target_n, room)
         if want_n < floor_n:
@@ -6842,8 +6879,11 @@ class Pulse:
         # Exchange-accepted SL floor for this lot: desk floor, venue ticks and
         # any floor learned from trigger-price rejections, inside liquidation.
         sl_min_eff = self.venue_sl_min(c, px, lev)
+        # Allowed SL distance: inside liquidation at the applied leverage
+        # (auto leverage keeps this at the desk's slMaxPct).
+        sl_max_eff = max(sl_min_eff, self.sl_allowed_max(c))
         sl_pct_a, tp_pct_a, _src_a = resolve_sl_tp(
-            base_sl=SL_PCT, base_tp=TP_PCT, sl_min=sl_min_eff, sl_max=self.sl_max,
+            base_sl=SL_PCT, base_tp=TP_PCT, sl_min=sl_min_eff, sl_max=sl_max_eff,
             tp_min=self.tp_min, tp_max=self.tp_max, cost_pct=self.position_cost_pct,
             tp_cost_ratio=self.tp_cost_ratio, sl_to_tp=sl_ratio, bind_sl_to_tp=True,
         )
@@ -6851,7 +6891,7 @@ class Pulse:
             sl_pct_a, tp_pct_a = forced_row["slPct"] / 100, forced_row["tpPct"] / 100
         elif chosen and getattr(chosen, "step", 0):
             sl_pct_a, tp_pct_a = bind_ratio_sl_tp(
-                chosen.tp_pct, sl_ratio, sl_min_eff, self.sl_max, self.tp_min, self.tp_max,
+                chosen.tp_pct, sl_ratio, sl_min_eff, sl_max_eff, self.tp_min, self.tp_max,
             )
             if self.exits.enabled and self.exits.ignore_tp:
                 tp_pct_a = min(self.tp_max or float("inf"), max(tp_pct_a, sl_pct_a * 3.0))
@@ -7180,7 +7220,7 @@ class Pulse:
             base_sl=SL_PCT,
             base_tp=TP_PCT,
             sl_min=self.venue_sl_min(c, avg, lev),
-            sl_max=self.sl_max,
+            sl_max=max(self.venue_sl_min(c, avg, lev), self.sl_allowed_max(c)),
             tp_min=self.tp_min,
             tp_max=self.tp_max,
             ind_sl=(ind.stop_loss_pct / 100.0) if ind else 0.0,
@@ -7193,7 +7233,8 @@ class Pulse:
         )
         if chosen and getattr(chosen, "step", 0):
             sl_pct, tp_pct = bind_ratio_sl_tp(
-                chosen.tp_pct, sl_ratio, self.venue_sl_min(c, avg, lev), self.sl_max, self.tp_min, self.tp_max,
+                chosen.tp_pct, sl_ratio, self.venue_sl_min(c, avg, lev),
+                max(self.venue_sl_min(c, avg, lev), self.sl_allowed_max(c)), self.tp_min, self.tp_max,
             )
             src = f"step{chosen.step}xcost"
         if forced_row is not None:
@@ -8889,6 +8930,9 @@ class Pulse:
         if target_notional:
             TARGET_NOTIONAL = max(0.2, min(500.0, target_notional))
         self.volume_factor = max(0.05, min(10.0, finite_number(ov.get("volumeFactor"), VOLUME_FACTOR_DEFAULT) or VOLUME_FACTOR_DEFAULT))
+        sizing = str(ov.get("orderSizing", cts.get("orderSizing", ORDER_SIZING_DEFAULT)) or ORDER_SIZING_DEFAULT)
+        self.order_sizing = sizing if sizing in ("minQty", "factor") else ORDER_SIZING_DEFAULT
+        self.sl_auto_leverage = ov.get("slAutoLeverage", cts.get("slAutoLeverage", True)) is not False
         self.margin_cap_pct = max(0.0, min(1.0, finite_number(ov.get("marginCapPct"), 0.5)))
         self.use_max_leverage = True
         USE_MAX_LEVERAGE = True
@@ -12727,7 +12771,7 @@ class Pulse:
             and s in contracts
             and not self.symbol_has_foreign_exposure(s)
             and self._lev_retry.get(s, 0.0) <= now
-            and (int(self.lev_map.get(s) or 0) < int(self.lev_max.get(s) or 1) or s not in self.lev_max)
+            and (int(self.lev_map.get(s) or 0) != self.leverage_target(int(self.lev_max.get(s) or 1)) or s not in self.lev_max)
         ]
         if not need:
             if self.lev_map:

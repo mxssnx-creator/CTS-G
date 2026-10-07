@@ -854,7 +854,13 @@ function SettingsPage() {
                       hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
                       onChange={(v) => patch("volumeFactor", v)}
                     />
-                    <KV k="Effective notional" v={`${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`} />
+                    <KV k="Effective notional" v={overlay.orderSizing === "factor"
+                      ? `${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`
+                      : "each pair's minimum lot (min qty / min USDT)"} />
+                    <EnableSlider label="Minimum lot sizing" on={overlay.orderSizing !== "factor"}
+                      hint="On: every order is the venue minimum lot · off: volume-factor notional" onChange={(v) => patch("orderSizing", v ? "minQty" : "factor")} />
+                    <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage !== false}
+                      hint="Leverage per pair lowered so liquidation lies beyond the widest allowed SL (slMaxPct) · the SL is never moved for liquidation" onChange={(v) => patch("slAutoLeverage", v)} />
                   </Grid>
                 </div>
               </div>
