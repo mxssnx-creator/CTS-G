@@ -1,10 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AXIS_SPECS,
   blockTable,
   bool,
   DEFAULT_OVERLAY,
+  HTF_KINDS,
   DEFAULT_SYMBOL_COUNT,
+  MAIN_EVAL_DEFAULT,
+  REAL_EVAL_DEFAULT,
   fetchCtsBundle,
   loadLocalOverlay,
   num,
@@ -62,7 +66,8 @@ import {
   overlayOverview,
   type UserPreset,
 } from "@/lib/user-presets";
-import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions } from "@/lib/hist-calc";
+import { DEFAULT_CALC_OPTIONS, fetchHistCalc, startHistCalc, stopHistCalc, calcIsRunning, calcPollMs, calcStartLabel, calcStatusLine, hasCalcSnapshot, type HistCalcJob, type HistCalcOptions, type IndTypeFlags } from "@/lib/hist-calc";
+import { INDICATION_KINDS, indTypeKey, kindLabel } from "@/lib/indication-kinds";
 import { fetchHistTest, startHistTest, stopHistTest, pauseHistTest, histTestIsRunning, histTestPollMs, clampHistTestTarget, histTestAssignment, applyHistTestSymbols, histTestSelectionMatches, type HistTestAssignment, type HistTestJob, type HistTestLive } from "@/lib/hist-test";
 import { HistoricCalcResults } from "@/components/historic-calc-results";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
@@ -101,6 +106,7 @@ const SECTIONS = [
   "sets",
   "exits",
   "stages",
+  "engine",
   "block",
   "dca",
   "axes",
@@ -545,6 +551,7 @@ function SettingsPage() {
       symbolCap: histTestTarget,
       overlay: {
         ...overlay,
+        connection: conn,
         histTestHours: hours,
         histTestMinPf: minPf,
         histTestRefreshHours: refreshHours,
@@ -565,7 +572,8 @@ function SettingsPage() {
   };
 
   const onApplyPositiveSymbols = () => {
-    const names = (histTestJob?.internSymbols || histTestJob?.positive || histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
+    // The run's validated symbols only; internSymbols is the padded intern pool.
+    const names = (Array.isArray(histTestJob?.positive) ? histTestJob.positive : histTestJob?.symbols || []).filter((s) => s && s !== "*" && s !== "ALL");
     const majors = names.filter((s) => MAJOR_USDT.has(String(s).toUpperCase()));
     setOverlay((o) => {
       const wild = isUnlimitedSymbolBook(o) || (Array.isArray(o.symbols) && o.symbols.includes("*"));
@@ -840,14 +848,20 @@ function SettingsPage() {
                     />
                     <Slider
                       label="Volume factor"
-                      value={overlay.volumeFactor ?? 1}
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                      value={overlay.volumeFactor || 0.1}
+                      min={0.05}
+                      max={10}
+                      step={0.05}
+                      hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
                       onChange={(v) => patch("volumeFactor", v)}
                     />
-                    <KV k="Effective notional" v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)} />
+                    <KV k="Effective notional" v={overlay.orderSizing === "factor"
+                      ? `${(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)} USDT · raised to each pair's minimum lot`
+                      : "each pair's minimum lot (min qty / min USDT)"} />
+                    <EnableSlider label="Minimum lot sizing" on={overlay.orderSizing !== "factor"}
+                      hint="On: every order is the venue minimum lot · off: volume-factor notional" onChange={(v) => patch("orderSizing", v ? "minQty" : "factor")} />
+                    <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage === true}
+                      hint="Off (default): every pair at its venue max leverage, minimum-lot sizing, stops clamped inside the exchange-reported liquidation (cross margin) · on: leverage lowered so the per-lot liquidation lies beyond the widest lane SL" onChange={(v) => patch("slAutoLeverage", v)} />
                   </Grid>
                 </div>
               </div>
@@ -1115,46 +1129,17 @@ function SettingsPage() {
                     }
                     onChange={(v) => setCalcOpt((o) => ({ ...o, allSymbols: v }))}
                   />
-                  <EnableSlider
-                    label="Signals"
-                    on={calcOpt.indTypeSignals}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeSignals: v }))}
-                  />
-                  <EnableSlider
-                    label="State"
-                    on={calcOpt.indTypeState}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeState: v }))}
-                  />
-                  <EnableSlider
-                    label="Direction"
-                    on={calcOpt.indTypeDirection}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeDirection: v }))}
-                  />
-                  <EnableSlider
-                    label="Move"
-                    on={calcOpt.indTypeMove}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeMove: v }))}
-                  />
-                  <EnableSlider
-                    label="Active"
-                    on={calcOpt.indTypeActive}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeActive: v }))}
-                  />
-                  <EnableSlider
-                    label="Common"
-                    on={calcOpt.indTypeCommon}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeCommon: v }))}
-                  />
-                  <EnableSlider
-                    label="Trend"
-                    on={calcOpt.indTypeTrend}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeTrend: v }))}
-                  />
-                  <EnableSlider
-                    label="Break"
-                    on={calcOpt.indTypeBreak}
-                    onChange={(v) => setCalcOpt((o) => ({ ...o, indTypeBreak: v }))}
-                  />
+                  {INDICATION_KINDS.map((kind) => {
+                    const key = indTypeKey(kind) as keyof IndTypeFlags;
+                    return (
+                      <EnableSlider
+                        key={kind}
+                        label={kindLabel(kind)}
+                        on={calcOpt[key] !== false}
+                        onChange={(v) => setCalcOpt((o) => ({ ...o, [key]: v }))}
+                      />
+                    );
+                  })}
                 </Grid>
                 <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg2 px-3 py-3" data-testid="calc-range-presets">
                   <span className="font-mono text-xs uppercase text-muted">Quick range</span>
@@ -1393,7 +1378,7 @@ function SettingsPage() {
                 <KV k="Maximal leverage" v={bool(cts?.useMaximalLeverage) ? "on" : "off"} />
                 <KV k="Pulse running" v={stats?.paused ? "paused" : stats?.running && !stats?.halted ? "yes" : stats?.haltReason || "halted"} />
                 <KV k="Scan" v={`${fmtNum(stats?.scanMs, 1)} ms · cycle ${stats?.cycle ?? "—"}`} />
-                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 1))} />
+                <KV k="Volume factor" v={String(num(stats?.volumeFactor ?? overlay.volumeFactor, 0.1))} />
                 <KV k="Unit" v={String(stats?.unit ?? (conn === "vst" ? "VST" : conn === "live" ? "USDT" : "MIXED"))} />
               </Grid>
               <div className="space-y-3 rounded-lg border border-border bg-bg2 p-3">
@@ -1489,7 +1474,7 @@ function SettingsPage() {
             <div className="grid min-w-0 gap-4">
             <Card
               title="Profit factor · PositionCost"
-              hint="One overall threshold · independent evaluation windows in every stage · Base defaults to last 30"
+              hint={`One overall threshold · independent evaluation windows in every stage · Base ${DEFAULT_OVERLAY.baseEvalPosCount ?? DEFAULT_OVERLAY.setPfWindow} / Main ${MAIN_EVAL_DEFAULT} / Real ${REAL_EVAL_DEFAULT} · PF ${DEFAULT_OVERLAY.setMinPf.toFixed(2)}`}
             >
               <Grid>
                 <Slider
@@ -1596,7 +1581,7 @@ function SettingsPage() {
                     label="Position max DD time"
                     value={overlay.maxDdTimeS / 60}
                     min={10}
-                    max={960}
+                    max={1440}
                     step={10}
                     unit="min"
                     hint="Underwater positions close after this continuous drawdown time."
@@ -1606,7 +1591,7 @@ function SettingsPage() {
                     label="Set max DD time"
                     value={overlay.setMaxDdTimeS / 60}
                     min={10}
-                    max={960}
+                    max={1440}
                     step={10}
                     unit="min"
                     hint="Historic Set gate: maximum drawdown duration allowed in the scored tape."
@@ -1688,6 +1673,7 @@ function SettingsPage() {
                 <Slider label="SL min" value={overlay.slMinPct} min={SL_MIN_PCT} max={3} step={0.05} unit="%" onChange={(v) => patch("slMinPct", v)} />
                 <Slider label="SL max" value={overlay.slMaxPct} min={SL_MIN_PCT} max={3} step={0.1} unit="%" onChange={(v) => patch("slMaxPct", v)} />
                 <Slider label="TP min" value={overlay.tpMinPct} min={0.3} max={3} step={0.1} unit="%" onChange={(v) => patch("tpMinPct", v)} />
+                <Slider label="TP step unit" value={overlay.tpStepPct} min={0.02} max={1} step={0.01} unit="%" onChange={(v) => patch("tpStepPct", v)} />
                 <Num label="TP max" value={overlay.tpMaxPct} min={0} max={1000000} step={0.1} hint="Percent · 0 = unlimited" onChange={(v) => patch("tpMaxPct", v)} />
                 <Slider
                   label="TP × PositionCost"
@@ -1845,7 +1831,7 @@ function SettingsPage() {
                   min={DEFAULT_MIN_STEP}
                   max={30}
                   step={1}
-                  hint={`TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
+                  hint={`TP = step × ${overlay.tpStepPct}% (TP step unit, independent of the ${overlay.positionCostPct}% cost) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.tpStepPct).toFixed(2)}% … step ${overlay.setStepMax} = ${(overlay.setStepMax * overlay.tpStepPct).toFixed(2)}%. Every integer step through max is processed. Trailing only from step ${overlay.trailingMinStep}.`}
                   onChange={(v) => patch("setMinStep", Math.max(DEFAULT_MIN_STEP, Math.min(30, Math.round(v))))}
                 />
                 <Slider
@@ -1998,12 +1984,186 @@ function SettingsPage() {
               <Grid>
                 <KV k="Prev window" v={String(num(cts?.prevPosWindow ?? cts?.prev_pos_window, 25))} />
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
-                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
-                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
+                <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, MAIN_EVAL_DEFAULT))} />
+                <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, REAL_EVAL_DEFAULT))} />
                 <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 3))} />
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
               </Grid>
             </Card>
+          )}
+
+          {section === "engine" && (
+            <>
+              <Card title="Validation stages" hint="Base validates the last-N closes for min PF; Main and Real re-check shorter windows. 0 = stage off (reuses the previous window).">
+                <Grid>
+                  <Num label="Main eval last N" value={overlay.mainEvalPosCount} min={0} max={75} step={1}
+                    hint="0 = Main off (Main reuses the Base window)" onChange={(v) => patch("mainEvalPosCount", Math.max(0, Math.round(v)))} />
+                  <Num label="Real eval last N" value={overlay.realEvalPosCount} min={0} max={75} step={1}
+                    hint="0 = Real off (Real reuses the Main window)" onChange={(v) => patch("realEvalPosCount", Math.max(0, Math.round(v)))} />
+                  <Num label="DDT window (closes)" value={overlay.setDdtWindow} min={0} max={200} step={1}
+                    hint="0 = the Base PF window · drawdown time is measured over these last closes" onChange={(v) => patch("setDdtWindow", Math.max(0, Math.round(v)))} />
+                  <Num label="Set max DD time" value={Math.round(overlay.setMaxDdTimeS / 60)} min={10} max={1440} step={10} unit="min"
+                    hint="DDT cap for a validated Set · default 1080 min (18h)" onChange={(v) => patch("setMaxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
+                  <EnableSlider label="Strict gate (Base → Main → Real)" on={overlay.setStrictGate !== false}
+                    hint="Execution needs the full chain; off = Base only" onChange={(v) => patch("setStrictGate", v)} />
+                  <EnableSlider label="Historic gate" on={overlay.setUseHistoricGate !== false}
+                    hint="Indication kinds/configs need their own validated tape" onChange={(v) => patch("setUseHistoricGate", v)} />
+                </Grid>
+              </Card>
+              <Card title="Micro tier" hint="Sets positive only between the Micro floor and the Base floor trade one venue-minimum lot, capped to a share of maxOpen">
+                <Grid>
+                  <EnableSlider label="Micro on" on={overlay.microEnabled !== false} onChange={(v) => patch("microEnabled", v)} />
+                  <Num label="Micro min PF" value={overlay.microMinPf} min={1} max={1.35} step={0.01}
+                    hint="never above the Base floor" onChange={(v) => patch("microMinPf", Math.round(v * 100) / 100)} />
+                  <Num label="Micro max share" value={Math.round(overlay.microMaxShare * 100)} min={0} max={100} step={1} unit="%"
+                    hint="of maxOpen positions · 0 blocks Micro entries" onChange={(v) => patch("microMaxShare", Math.max(0, Math.min(100, v)) / 100)} />
+                </Grid>
+              </Card>
+              <Card title="Live edge guard" hint="Per direction: when this desk's own last N confirmed exchange round trips are net negative (cost-PF < 1.00), entries trade one venue-minimum probe lot and Block/DCA adds stop, until the last N clear the Real floor again">
+                <Grid>
+                  <EnableSlider label="Live edge guard" on={overlay.liveEdgeGuard !== false} onChange={(v) => patch("liveEdgeGuard", v)} />
+                  <Num label="Live window" value={overlay.liveEdgeN} min={10} max={500} step={5} unit="closes"
+                    hint="confirmed round trips per direction" onChange={(v) => patch("liveEdgeN", Math.max(10, Math.min(500, Math.round(v))))} />
+                  <Num label="Probe share" value={Math.round(overlay.liveEdgeProbeShare * 100)} min={0} max={100} step={1} unit="%"
+                    hint="of maxOpen positions while guarded · 0 = no entries" onChange={(v) => patch("liveEdgeProbeShare", Math.max(0, Math.min(100, v)) / 100)} />
+                </Grid>
+                <label className="mt-3 block rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <div className="font-mono text-xs text-muted">1m lanes</div>
+                  <select
+                    className="mt-2 min-h-11 w-full rounded-lg border border-border bg-surface px-2 font-mono text-sm"
+                    value={overlay.oneMinuteLanes || "on"}
+                    onChange={(e) => patch("oneMinuteLanes", e.target.value as "on" | "probe" | "off")}
+                  >
+                    <option value="on">on · full size</option>
+                    <option value="probe">probe · minimum lots, no Block/DCA</option>
+                    <option value="off">off · no new 1m entries</option>
+                  </select>
+                  <div className="mt-1 font-mono text-xs text-faint">The 1h lane has its own switch. Live x01 ships on probe until a change passes the 24h checks.</div>
+                </label>
+              </Card>
+              <Card title="1h lane (HTF)" hint="CTS-A-O robust core on 1h bars: RSI-momentum + 1h/4h-agreement kinds, volatility regime, wide exits (TP 3–10%, 24–48h), validated on 2 years of BingX 1h data (reports/htf-validation-20261007). Own SL/TP pair per lot; no Block/DCA adds">
+                <Grid>
+                  <EnableSlider label="1h lane" on={overlay.htfEnabled === true} hint="Live x01 ships off · VST x02 on" onChange={(v) => patch("htfEnabled", v)} />
+                  <Num label="Evidence PF floor" value={overlay.htfMinPf} min={0.8} max={2} step={0.01}
+                    hint="PF over the live-first window (gross win / gross loss after cost)" onChange={(v) => patch("htfMinPf", Math.round(v * 100) / 100)} />
+                  <Num label="Evidence window" value={overlay.htfWindow} min={5} max={500} step={5} unit="closes"
+                    hint="live exchange closes decide once they fill it" onChange={(v) => patch("htfWindow", Math.round(v))} />
+                  <Num label="Min evidence" value={overlay.htfMinN} min={1} max={500} step={1} unit="closes"
+                    hint="fewer closes: the validated preset decides" onChange={(v) => patch("htfMinN", Math.round(v))} />
+                  <Num label="Last-N gate" value={overlay.htfLastN} min={0} max={100} step={1} unit="closes"
+                    hint="CTS-A-O last-N PF ≥ 1 · 0 = off (it lowered PF on our data)" onChange={(v) => patch("htfLastN", Math.round(v))} />
+                  <Num label="Direction acceptance" value={overlay.htfSideHours} min={1} max={168} step={1} unit="h"
+                    hint={`family × side PF ≥ ${overlay.htfSideMinPf} once ≥ ${overlay.htfSideMinTrades} closes`} onChange={(v) => patch("htfSideHours", Math.round(v))} />
+                  <Num label="Max open" value={overlay.htfMaxOpen} min={0} max={200} step={1} unit="lots"
+                    hint="0 = unlimited" onChange={(v) => patch("htfMaxOpen", Math.round(v))} />
+                </Grid>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {HTF_KINDS.map((k) => {
+                    const on = (overlay.htfKinds ?? []).includes(k);
+                    return (
+                      <button key={k} type="button"
+                        className={`rounded border px-2 py-0.5 text-xs ${on ? "border-emerald-500/60 bg-emerald-500/10" : "border-border opacity-60"}`}
+                        onClick={() => patch("htfKinds", on ? (overlay.htfKinds ?? []).filter((x) => x !== k) : [...(overlay.htfKinds ?? []), k])}>
+                        {k}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Card>
+              <Card title="Risk, sizing and stops" hint="Volume is always raised to the venue minimum lot; stops never tighter than the venue accepts">
+                <Grid>
+                  <Num label="Margin cap" value={Math.round(overlay.marginCapPct * 100)} min={0} max={100} step={1} unit="% equity"
+                    hint="used margin limit · 0 or 100 = uncapped" onChange={(v) => patch("marginCapPct", Math.max(0, Math.min(100, v)) / 100)} />
+                  <Num label="Lots per symbol · side" value={overlay.maxLotsPerSymbolSide} min={0} max={100} step={1}
+                    hint="Sets agreeing on one signal share this many lots · 0 = unlimited" onChange={(v) => patch("maxLotsPerSymbolSide", Math.max(0, Math.round(v)))} />
+                  <Num label="Venue SL ticks" value={overlay.venueSlTicks} min={1} max={50} step={1}
+                    hint="minimum SL distance in price ticks (plus floors learned from rejections)" onChange={(v) => patch("venueSlTicks", Math.round(v))} />
+                  <Num label="Manual-close lane hold" value={Math.round(overlay.manualCloseLaneHoldS / 60)} min={0} max={1440} step={10} unit="min"
+                    hint="a manually closed lane is not reopened for this long" onChange={(v) => patch("manualCloseLaneHoldS", Math.round(v) * 60)} />
+                  <Num label="SL:TP ratio min" value={overlay.slToTpMin} min={0.1} max={3} step={0.1}
+                    onChange={(v) => patch("slToTpMin", Math.round(v * 10) / 10)} />
+                  <Num label="SL:TP ratio max" value={overlay.slToTpMax} min={0.1} max={3} step={0.1}
+                    onChange={(v) => patch("slToTpMax", Math.round(v * 10) / 10)} />
+                  <Num label="SL:TP ratio step" value={overlay.slToTpStep} min={0.1} max={1} step={0.1}
+                    onChange={(v) => patch("slToTpStep", Math.round(v * 10) / 10)} />
+                  <Num label="Trail arm min" value={overlay.trailArmMin} min={0.3} max={1.5} step={0.3} unit="%" hint="Default 0.6"
+                    onChange={(v) => patch("trailArmMin", v)} />
+                  <Num label="Trail arm max" value={overlay.trailArmMax} min={0.3} max={1.5} step={0.3} unit="%"
+                    onChange={(v) => patch("trailArmMax", v)} />
+                  <Num label="Trail give min" value={overlay.trailGiveMin} min={0.1} max={0.5} step={0.1} unit="%" hint="Default 0.2"
+                    onChange={(v) => patch("trailGiveMin", v)} />
+                  <Num label="Trail give max" value={overlay.trailGiveMax} min={0.1} max={0.5} step={0.1} unit="%"
+                    onChange={(v) => patch("trailGiveMax", v)} />
+                  <Num label="Exit lane min samples" value={overlay.exitMinSamples} min={0} max={200} step={1}
+                    hint="0 = the PF window" onChange={(v) => patch("exitMinSamples", Math.round(v))} />
+                </Grid>
+              </Card>
+              <Card title="Historic replay" hint="How the intern Set replay simulates each configuration (the evidence the stages validate)">
+                <Grid>
+                  <Num label="Hold time (bars)" value={overlay.setHistTimeBars} min={8} max={120} step={1} unit="min"
+                    hint="time exit of a replayed position" onChange={(v) => patch("setHistTimeBars", Math.round(v))} />
+                  <Num label="Scratch min" value={Math.round(overlay.setScratchMin * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    hint="replay scratch exit gain (after scratchS)" onChange={(v) => patch("setScratchMin", Math.max(0, v) / 100)} />
+                  <Num label="Cooldown (bars)" value={overlay.setCooldownBars} min={1} max={12} step={1}
+                    onChange={(v) => patch("setCooldownBars", Math.round(v))} />
+                  <EnableSlider label="Honor TP in replay" on={overlay.setHonorTp !== false} onChange={(v) => patch("setHonorTp", v)} />
+                  <EnableSlider label="Simulate Block lanes" on={overlay.histSimulateBlock !== false} onChange={(v) => patch("histSimulateBlock", v)} />
+                  <EnableSlider label="Simulate DCA lanes" on={overlay.histSimulateDca !== false} onChange={(v) => patch("histSimulateDca", v)} />
+                  <EnableSlider label="Exact replay window" on={overlay.histExactWindow === true}
+                    hint="replay exactly the evaluation window instead of warmup + lookback" onChange={(v) => patch("histExactWindow", v)} />
+                  <Num label="Entry policy candidates" value={overlay.entryPolicyMaxCandidates} min={0} max={500} step={1}
+                    hint="0 = unlimited" onChange={(v) => patch("entryPolicyMaxCandidates", Math.max(0, Math.round(v)))} />
+                  <Num label="Entry policy live samples" value={overlay.entryPolicyMinLiveSamples} min={0} max={25} step={1}
+                    onChange={(v) => patch("entryPolicyMinLiveSamples", Math.max(0, Math.round(v)))} />
+                  <Num label="Prev window" value={overlay.prevPosWindow} min={5} max={75} step={1}
+                    onChange={(v) => patch("prevPosWindow", Math.round(v))} />
+                  <Num label="Prev min count" value={overlay.prevPosMinCount} min={1} max={30} step={1}
+                    onChange={(v) => patch("prevPosMinCount", Math.round(v))} />
+                </Grid>
+              </Card>
+              <Card title="Block variants" hint="Block-active variants per stage">
+                <Grid>
+                  <EnableSlider label="Block variants" on={overlay.variantBlockEnabled !== false} onChange={(v) => patch("variantBlockEnabled", v)} />
+                  <EnableSlider label="Block active · Real" on={overlay.blockActiveRealEnabled !== false} onChange={(v) => patch("blockActiveRealEnabled", v)} />
+                  <EnableSlider label="Block active · Live" on={overlay.blockActiveLiveEnabled !== false} onChange={(v) => patch("blockActiveLiveEnabled", v)} />
+                </Grid>
+              </Card>
+              <Card title="Indication tuning" hint="Situation thresholds per kind · activity = minimum ATR(14) % of price before a kind may fire">
+                <Grid>
+                  <Num label="Direction range" value={overlay.indDirRange} min={4} max={55} step={1} onChange={(v) => patch("indDirRange", Math.round(v))} />
+                  <Num label="Direction min change" value={Math.round(overlay.indDirMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    onChange={(v) => patch("indDirMinChange", Math.max(0, v) / 100)} />
+                  <Num label="Move range" value={overlay.indMoveRange} min={4} max={55} step={1} onChange={(v) => patch("indMoveRange", Math.round(v))} />
+                  <Num label="Move min change" value={Math.round(overlay.indMoveMinChange * 10000) / 100} min={0} max={2} step={0.01} unit="%"
+                    onChange={(v) => patch("indMoveMinChange", Math.max(0, v) / 100)} />
+                  {(overlay.indMoveRanges ?? [20, 30, 40]).map((period, index, periods) => (
+                    <Num key={`move-range-${index}`} label={`Move fade range ${index + 1}`} value={period} min={8} max={55} step={1}
+                      hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMoveRanges", periods.map((n, i) => (i === index ? value : n)))} />
+                  ))}
+                  <Num label="Active threshold" value={overlay.indActiveThreshold} min={0.1} max={10} step={0.1} onChange={(v) => patch("indActiveThreshold", v)} />
+                  <Num label="Active move" value={overlay.indActiveMovePct} min={0} max={5} step={0.05} unit="%" onChange={(v) => patch("indActiveMovePct", v)} />
+                  <Num label="MSI min RSI gap" value={overlay.indMsiMinGap} min={0.5} max={30} step={0.5} onChange={(v) => patch("indMsiMinGap", v)} />
+                  <Num label="VWAP deviation z" value={overlay.indVwapDevZ} min={0.5} max={6} step={0.1} onChange={(v) => patch("indVwapDevZ", v)} />
+                  <Num label="VWAP volume surge" value={overlay.indVwapVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indVwapVolMult", v)} />
+                  <Num label="Retest tolerance" value={overlay.indRetestTol} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestTol", v)} />
+                  <Num label="Retest min break" value={overlay.indRetestMinBreak} min={0.01} max={2} step={0.01} unit="%" onChange={(v) => patch("indRetestMinBreak", v)} />
+                  <Num label="Squeeze width percentile" value={Math.round(overlay.indSqueezePctl * 100)} min={5} max={50} step={1} unit="%"
+                    onChange={(v) => patch("indSqueezePctl", Math.max(5, Math.min(50, v)) / 100)} />
+                  <Num label="Sweep wick" value={overlay.indSweepWickAtr} min={0} max={3} step={0.05} unit="ATR" onChange={(v) => patch("indSweepWickAtr", v)} />
+                  <Num label="RSI(2) low" value={overlay.indRsi2Low} min={1} max={49} step={1} onChange={(v) => patch("indRsi2Low", v)} />
+                  <Num label="RSI(2) high" value={overlay.indRsi2High} min={51} max={99} step={1} onChange={(v) => patch("indRsi2High", v)} />
+                  <Num label="Keltner band" value={overlay.indKeltnerMult} min={0.5} max={5} step={0.1} unit="ATR" onChange={(v) => patch("indKeltnerMult", v)} />
+                  <Num label="Impulse sigma" value={overlay.indImpulseSigma} min={1} max={10} step={0.1} onChange={(v) => patch("indImpulseSigma", v)} />
+                  <Num label="Impulse volume surge" value={overlay.indImpulseVolMult} min={1} max={10} step={0.1} unit="x" onChange={(v) => patch("indImpulseVolMult", v)} />
+                  <Num label="Activity · sweep" value={overlay.actSweepMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actSweepMin", v)} />
+                  <Num label="Activity · RSI(2)" value={overlay.actRsi2Min} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actRsi2Min", v)} />
+                  <Num label="Activity · Keltner" value={overlay.actKeltnerMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actKeltnerMin", v)} />
+                  <Num label="Activity · impulse" value={overlay.actImpulseMin} min={0} max={2} step={0.01} unit="% ATR" onChange={(v) => patch("actImpulseMin", v)} />
+                  <Num label="Exit tactic min gain" value={overlay.exitTacticMinGainPct} min={0} max={2} step={0.01} unit="%"
+                    hint="a target tactic closes only once the gain covers this (round-trip cost)" onChange={(v) => patch("exitTacticMinGainPct", Math.max(0, v))} />
+                </Grid>
+              </Card>
+            </>
           )}
 
           {section === "block" && (
@@ -2356,45 +2516,45 @@ function SettingsPage() {
               <div className="space-y-2">
                 <LiveAxis
                   name="Previous"
-                  range="4–12 step 2"
+                  range={`${AXIS_SPECS.prev.min}–${AXIS_SPECS.prev.max}`}
                   enabled={overlay.axisPrevEnabled}
                   window={overlay.axisPrevMaxWindow}
-                  min={4}
-                  max={12}
-                  step={2}
+                  min={AXIS_SPECS.prev.min}
+                  max={AXIS_SPECS.prev.max}
+                  step={AXIS_SPECS.prev.step}
                   onEn={(v) => patch("axisPrevEnabled", v)}
                   onWin={(v) => patch("axisPrevMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Last"
-                  range="1–4"
+                  range={`${AXIS_SPECS.last.min}–${AXIS_SPECS.last.max}`}
                   enabled={overlay.axisLastEnabled}
                   window={overlay.axisLastMaxWindow}
-                  min={1}
-                  max={4}
-                  step={1}
+                  min={AXIS_SPECS.last.min}
+                  max={AXIS_SPECS.last.max}
+                  step={AXIS_SPECS.last.step}
                   onEn={(v) => patch("axisLastEnabled", v)}
                   onWin={(v) => patch("axisLastMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Continuous"
-                  range="1–8"
+                  range={`${AXIS_SPECS.cont.min}–${AXIS_SPECS.cont.max}`}
                   enabled={overlay.axisContEnabled}
                   window={overlay.axisContMaxWindow}
-                  min={1}
-                  max={8}
-                  step={1}
+                  min={AXIS_SPECS.cont.min}
+                  max={AXIS_SPECS.cont.max}
+                  step={AXIS_SPECS.cont.step}
                   onEn={(v) => patch("axisContEnabled", v)}
                   onWin={(v) => patch("axisContMaxWindow", v)}
                 />
                 <LiveAxis
                   name="Pause"
-                  range="1–8"
+                  range={`${AXIS_SPECS.pause.min}–${AXIS_SPECS.pause.max}`}
                   enabled={overlay.axisPauseEnabled}
                   window={overlay.axisPauseMaxWindow}
-                  min={1}
-                  max={8}
-                  step={1}
+                  min={AXIS_SPECS.pause.min}
+                  max={AXIS_SPECS.pause.max}
+                  step={AXIS_SPECS.pause.step}
                   onEn={(v) => patch("axisPauseEnabled", v)}
                   onWin={(v) => patch("axisPauseMaxWindow", v)}
                 />
@@ -2446,11 +2606,11 @@ function SettingsPage() {
                 <KV k="Exchange position cost" v={String(num(cts?.exchangePositionCost ?? cts?.positionCost, 0.1))} />
                 <Slider
                   label="Volume factor"
-                  value={overlay.volumeFactor ?? 1}
-                  min={0.1}
-                  max={5}
-                  step={0.1}
-                  hint="Scales pulse notional. 1 = base. Independent per Live / VST."
+                  value={overlay.volumeFactor || 0.1}
+                  min={0.05}
+                  max={10}
+                  step={0.05}
+                  hint="Scales pulse notional (engine range 0.05–10, default 0.1). Independent per Live / VST."
                   onChange={(v) => patch("volumeFactor", v)}
                 />
                 <Num
@@ -2463,7 +2623,7 @@ function SettingsPage() {
                 />
                 <KV
                   k="Effective notional"
-                  v={(overlay.targetNotional * (overlay.volumeFactor || 1)).toFixed(2)}
+                  v={(overlay.targetNotional * (overlay.volumeFactor || 0.1)).toFixed(2)}
                 />
                 <Toggle
                   label="Always max leverage"
@@ -2531,6 +2691,17 @@ function SettingsPage() {
                 <EnableSlider label="Signals" on={overlay.indTypeSignals !== false} hint="per-TF evaluateSignalCandles" onChange={(v) => patch("indTypeSignals", v)} />
                 <EnableSlider label="Trend" on={overlay.indTypeTrend !== false} hint="trend slope / direction vote" onChange={(v) => patch("indTypeTrend", v)} />
                 <EnableSlider label="Break" on={overlay.indTypeBreak !== false} hint="breakout / range vote" onChange={(v) => patch("indTypeBreak", v)} />
+                <EnableSlider label="MSI divergence" on={overlay.indTypeMsi !== false} hint="price extreme not confirmed by RSI · exit: swing fail" onChange={(v) => patch("indTypeMsi", v)} />
+                <EnableSlider label="VWAP reversion" on={overlay.indTypeVwap !== false} hint="z-stretch from VWAP on a volume surge · exit: VWAP touch" onChange={(v) => patch("indTypeVwap", v)} />
+                <EnableSlider label="Break retest" on={overlay.indTypeRetest !== false} hint="broken level retested and held · exit: level fail" onChange={(v) => patch("indTypeRetest", v)} />
+                <EnableSlider label="Squeeze release" on={overlay.indTypeSqueeze !== false} hint="low band-width percentile, close outside band · exit: back through mid" onChange={(v) => patch("indTypeSqueeze", v)} />
+                <EnableSlider label="Liquidity sweep" on={overlay.indTypeSweep !== false} hint="wick through range high/low, close back inside · exit: beyond the wick" onChange={(v) => patch("indTypeSweep", v)} />
+                <EnableSlider label="RSI(2) pullback" on={overlay.indTypeRsi2 !== false} hint="RSI(2) extreme against the EMA trend · exit: EMA5 snap-back" onChange={(v) => patch("indTypeRsi2", v)} />
+                <EnableSlider label="Keltner fade" on={overlay.indTypeKeltner !== false} hint="wick outside Keltner band + StochRSI turn · exit: middle line" onChange={(v) => patch("indTypeKeltner", v)} />
+                <EnableSlider label="Impulse fade" on={overlay.indTypeImpulse !== false} hint="sigma impulse bar on a volume surge · exit: beyond the extreme" onChange={(v) => patch("indTypeImpulse", v)} />
+                <EnableSlider label="Exit tactics" on={overlay.exitTacticOn !== false} hint="per-indication price-only exit (target or invalidation)" onChange={(v) => patch("exitTacticOn", v)} />
+                <Num label="Exit tactic buffer" value={overlay.exitTacticBufferPct ?? 0.1} min={0} max={1} step={0.05} unit="%"
+                  hint="close beyond the invalidation level by this much" onChange={(v) => patch("exitTacticBufferPct", v)} />
                 {(overlay.indTrendRanges ?? [13, 21, 34]).map((period, index, periods) => (
                   <Num key={`trend-${index}`} label={`Trend EMA range ${index + 1}`} value={period} min={8} max={55} step={1}
                     hint="Independent EMA calculation · fast period = 0.38 × range" onChange={(value) => patch("indTrendRanges", periods.map((n, i) => i === index ? value : n))} />
@@ -2538,6 +2709,38 @@ function SettingsPage() {
                 {(overlay.indBreakRanges ?? [8, 16, 32]).map((period, index, periods) => (
                   <Num key={`break-${index}`} label={`Break range ${index + 1}`} value={period} min={8} max={55} step={1}
                     hint="Independent breakout calculation in candles" onChange={(value) => patch("indBreakRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indMsiRanges ?? [14, 21, 34]).map((period, index, periods) => (
+                  <Num key={`indMsiRanges-${index}`} label={`MSI range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indMsiRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indVwapRanges ?? [20, 30, 40]).map((period, index, periods) => (
+                  <Num key={`indVwapRanges-${index}`} label={`VWAP range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indVwapRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indRetestRanges ?? [12, 20, 32]).map((period, index, periods) => (
+                  <Num key={`indRetestRanges-${index}`} label={`Retest range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRetestRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indSweepRanges ?? [12, 20, 34]).map((period, index, periods) => (
+                  <Num key={`indSweepRanges-${index}`} label={`Sweep range ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSweepRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indRsi2Ranges ?? [21, 34, 55]).map((period, index, periods) => (
+                  <Num key={`indRsi2Ranges-${index}`} label={`RSI(2) trend EMA ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indRsi2Ranges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indKeltnerRanges ?? [14, 20, 30]).map((period, index, periods) => (
+                  <Num key={`indKeltnerRanges-${index}`} label={`Keltner period ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indKeltnerRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indImpulseRanges ?? [20, 30, 45]).map((period, index, periods) => (
+                  <Num key={`indImpulseRanges-${index}`} label={`Impulse sigma window ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indImpulseRanges", periods.map((n, i) => i === index ? value : n))} />
+                ))}
+                {(overlay.indSqueezeRanges ?? [16, 20, 26]).map((period, index, periods) => (
+                  <Num key={`indSqueezeRanges-${index}`} label={`Squeeze period ${index + 1}`} value={period} min={8} max={55} step={1}
+                    hint="Independent configuration · own tape and PF validation" onChange={(value) => patch("indSqueezeRanges", periods.map((n, i) => i === index ? value : n))} />
                 ))}
                 <EnableSlider label="Extra venues (Binance/Bybit)" on={overlay.indExtraSources} onChange={(v) => patch("indExtraSources", v)} />
                 <Num label="Min sources" value={overlay.indMinSources} min={2} max={8} step={1} onChange={(v) => patch("indMinSources", v)} />
@@ -2573,8 +2776,11 @@ function SettingsPage() {
                   onChange={(v) => patch("entryBatchOrders", v)}
                 />
                 <Num label="Entries per batch" value={overlay.entryBatchSize} min={2} max={5} step={1} onChange={(v) => patch("entryBatchSize", v)} />
+                <Num label="Short-trade hold min" value={Math.round(overlay.shortMaxHoldS / 60)} min={5} max={360} step={5}
+                  hint="5–360 min · default 30 · 1m lanes close at this age; the Set replay uses the same hold (1h lane keeps its own 24–48h)"
+                  onChange={(v) => patch("shortMaxHoldS", Math.max(5, Math.min(360, Math.round(v / 5) * 5)) * 60)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={960} step={10} hint="10–960 min · default 960 (16h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(960, Math.round(v / 10) * 10)) * 60)} />
+                <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={1440} step={10} hint="10–1440 min · default 1080 (18h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>
@@ -2849,14 +3055,14 @@ function TestHistoricCard({
             histTestJob
               ? {
                   ...(histTestJob as HistTestLive),
-                  symbols: histTestJob.internSymbols || histTestJob.symbols || histTestJob.positive,
+                  symbols: histTestJob.positive || histTestJob.symbols || histTestJob.internSymbols,
                 }
               : null
           }
           enabled={enabled}
         />
         <p className="text-sm text-muted">
-          Replay intern majors on a {overlay.histTestHours}h tape. Last-15 proven configs (n≥8 and PF ≥ {overlay.histTestMinPf.toFixed(2)}) are validated. Intern extras never replace the 50 majors.
+          Replay intern majors on a {overlay.histTestHours}h tape with this connection's catalog and stage windows. A config is validated when its Base window (n≥{overlay.setMinSamples}) clears PF ≥ {overlay.histTestMinPf.toFixed(2)}; each direction is assigned only on its own evidence. Intern extras never replace the 50 majors.
         </p>
         <Grid>
           <Slider
@@ -3004,7 +3210,7 @@ function TestHistoricCard({
               </tr>
             </thead>
             <tbody>
-              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 12).map(([name, row]) => (
+              {Object.entries(histTestJob?.byIndication || histTestJob?.kinds || {}).slice(0, 18).map(([name, row]) => (
                 <tr key={name} className="border-t border-border/60">
                   <td className="py-1.5">{name}</td>
                   <td className={`font-mono ${pfClass(Number(row?.pf || 0), Number(row?.n || 0), overlay.histTestMinPf)}`}>{(row?.pf ?? 0).toFixed(2)}</td>
@@ -3472,8 +3678,8 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
               <th className="pb-2 font-medium">Lane</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
+              <th className="pb-2 text-right font-medium">Last {ex?.pfWindow ?? 15} PF</th>
+              <th className="pb-2 text-right font-medium">Last {ex?.deactN ?? 25} R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
             </tr>

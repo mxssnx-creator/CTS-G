@@ -28,7 +28,12 @@ LAST_N_DEFAULT = 30
 # must never be treated as this real floor (or vice versa). +1× cost remains 1.10.
 POSITIVE_PF = 1.15
 INTERN_PF = 1.0
+# Micro tier: positive Sets below the real floor trade at venue-minimum size
+# only. Kept out of PF_SETTING_KEYS so the shared floor never collapses onto it.
+MICRO_PF = 1.05
 SL_MIN_PCT = 0.4
+# Default desk SL floor (wider than the hard floor above).
+SL_MIN_DEFAULT_PCT = 0.6
 # The live and historic coordinators share these named evaluation windows.  The
 # largest window is intentionally bounded so every set can retain enough
 # recent evidence without keeping its complete trade history in RAM.
@@ -407,6 +412,30 @@ def accumulate_close(previous: Dict[str, Any], leg: Dict[str, Any]) -> Dict[str,
     return result
 
 
+def live_evidence(rows: Sequence[Any]) -> list[Dict[str, Any]]:
+    """Live exchange results only: confirmed, complete round trips of our own
+    positions (one sample per position, partial legs aggregated)."""
+    return completed_roundtrips(rows)
+
+
+def live_first_window(live: Sequence[Any], replay: Sequence[Any], n: int) -> tuple[list, str]:
+    """Evaluation window of ``n`` positions decided by live exchange results.
+
+    With >= n live rows the window is live only. Below that, live rows stay
+    the newest entries and the newest replay rows only fill the missing
+    slots, so replay never pushes a live result out of the window.
+    Returns (window rows in chronological order, "live" | "bootstrap")."""
+    n = max(1, int(n))
+    def stamp(r: Any) -> float:
+        return finite(r.get("t") if hasattr(r, "get") else getattr(r, "t", 0))
+    lv = sorted(list(live), key=stamp)
+    if len(lv) >= n:
+        return lv[-n:], "live"
+    rp = sorted(list(replay), key=stamp)
+    fill = rp[-(n - len(lv)):] if n > len(lv) else []
+    return list(fill) + lv, ("live" if lv and not fill else "bootstrap")
+
+
 def completed_roundtrips(rows: Sequence[Any]) -> list[Dict[str, Any]]:
     """Aggregate confirmed close legs; partial fills are not extra samples."""
     groups: Dict[tuple, list] = {}
@@ -779,6 +808,35 @@ def cap_sl_to_tp(sl: float, tp: float, sl_min: float = 0.0) -> tuple[float, floa
         if sl > SL_TP_MAX_FACTOR * tp + 1e-12:
             tp = sl / SL_TP_MAX_FACTOR
     return sl, tp
+
+
+VENUE_SL_TICKS = 3
+LIQ_SL_SHARE = 0.9
+
+
+def venue_sl_floor(
+    px: float,
+    tick: float,
+    sl_min: float,
+    *,
+    ticks: float = VENUE_SL_TICKS,
+    learned: float = 0.0,
+    leverage: float = 0.0,
+) -> float:
+    """Smallest SL distance (fraction) the venue accepts for this lot.
+
+    The larger of the desk floor, ``ticks`` price ticks and a per-symbol
+    floor learned from trigger-price rejections. The tick/learned part is
+    capped inside the liquidation distance at ``leverage`` so the stop
+    still fires first; the desk floor itself is never lowered."""
+    lo = max(0.0, finite(sl_min, 0.0))
+    p, t = finite(px, 0.0), finite(tick, 0.0)
+    tick_floor = (max(0.0, finite(ticks, VENUE_SL_TICKS)) * t / p) if p > 0 and t > 0 else 0.0
+    want = max(lo, tick_floor, max(0.0, finite(learned, 0.0)))
+    lev = finite(leverage, 0.0)
+    if lev > 0:
+        want = min(want, max(lo, LIQ_SL_SHARE / lev))
+    return want
 
 
 def bind_ratio_sl_tp(

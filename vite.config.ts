@@ -878,9 +878,19 @@ function pulseControlPlugin(): Plugin {
               symbols: [],
             };
             try { writeFileSync(join(process.cwd(), "public/hist-test.json"), JSON.stringify(queued)); } catch { /* ignore */ }
-            spawn("python3", ["scripts/run_hist_test.py", "--hours", String(hours), "--min-pf", String(minPf), "--count", String(count)], {
-              cwd: process.cwd(), detached: true, stdio: "ignore",
-            }).unref();
+            // Hand the desk overlay to the runner so the replayed catalog (steps,
+            // SL:TP, kinds, stage windows) matches the engine's; without it the
+            // validated ids would name Sets the live book does not have.
+            const args = ["scripts/run_hist_test.py", "--hours", String(hours), "--min-pf", String(minPf), "--count", String(count)];
+            if (body.overlay && typeof body.overlay === "object") {
+              const bodyPath = join(histLatchDir(), "dev-start-body.json");
+              try {
+                mkdirSync(histLatchDir(), { recursive: true });
+                writeFileSync(bodyPath, JSON.stringify({ overlay: body.overlay, refreshHours: body.refreshHours }));
+                args.push("--body", bodyPath);
+              } catch { /* run with the default catalog */ }
+            }
+            spawn("python3", args, { cwd: process.cwd(), detached: true, stdio: "ignore" }).unref();
             jsonRes(res as ServerResponse, 200, queued);
             return;
           }

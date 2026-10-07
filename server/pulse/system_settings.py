@@ -50,7 +50,7 @@ def calculation_overlay(overlay, cts=None):
     except (TypeError, ValueError, OverflowError):
         refresh = 2
     result["histTestRefreshHours"] = max(1, min(8, refresh))
-    result.setdefault("baseEvalPosCount", result.get("setPfWindow", 30))
+    result.setdefault("baseEvalPosCount", result.get("setPfWindow", 40))
     result["setPfWindow"] = result["baseEvalPosCount"]
     result.setdefault("setMinSamples", result["baseEvalPosCount"])
     for key in ("maxPerGroup", "setMaxActive", "entryPolicyMaxCandidates"):

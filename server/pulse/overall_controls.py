@@ -88,7 +88,8 @@ def closed_member(pulse,pos,filled_oid=''):
     """
     shared = enabled(pulse,pos) or bool(getattr(pos,'overall_controls',False))
     rows = [p for p in pulse.open.values() if p is not pos and p.symbol == pos.symbol
-            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0] if shared else []
+            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0
+            and getattr(p,'pack','') != 'htf'] if shared else []
     ids = ({getattr(pos,f,'') for f in FIELDS} | set(pos.retired_control_ids))-{''}
     if not shared:
         ids.discard(str(filled_oid or ''))
@@ -108,12 +109,14 @@ def closed_member(pulse,pos,filled_oid=''):
 
 
 def enabled(pulse, pos=None):
-    return bool(getattr(pulse, 'control_orders_overall', False)) and not bool(getattr(pos, '_overall_proxy', False))
+    # 1h-lane lots keep their own quantity-matched pair (own SL/TP/hold).
+    return (bool(getattr(pulse, 'control_orders_overall', False)) and not bool(getattr(pos, '_overall_proxy', False))
+            and getattr(pos, 'pack', '') != 'htf')
 
 
 def members(pulse, pos):
     rows = [p for p in list(pulse.open.values()) if p.symbol == pos.symbol and p.side == pos.side
-            and pulse.position_is_ours(p) and p.qty > 0]
+            and pulse.position_is_ours(p) and p.qty > 0 and getattr(p, 'pack', '') != 'htf']
     if not any(p is pos for p in rows) and pos.qty > 0 and pulse.position_is_ours(pos):
         rows.append(pos)
     return rows
@@ -414,10 +417,10 @@ def ensure(pulse, pos):
         proxy.close_position = False
         proxy.member_count = len(rows)
         proxy.foreign_qty = sum(float(getattr(p, "foreign_qty", 0) or 0) for p in rows)
-        proxy.exchange_qty = max(
-            sum(float(getattr(p, "exchange_qty", 0) or 0) for p in rows),
-            float(qty or 0),
-        )
+        # The venue position bounds the pair: after an external partial close
+        # the ledger qty can exceed it and the venue would reject the pair.
+        venue_qty = sum(float(getattr(p, "exchange_qty", 0) or 0) for p in rows)
+        proxy.exchange_qty = venue_qty if venue_qty > 0 else float(qty or 0)
         proxy.sl_pct = abs(entry-low)/entry
         proxy.tp_pct = abs(high-entry)/entry
         proxy.sl, proxy.tp = low, high

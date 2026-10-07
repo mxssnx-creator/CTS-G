@@ -30,6 +30,7 @@ const files = [
   "src/lib/polling.test.ts",
   "src/lib/hist-test.test.ts",
   "src/lib/hist-calc.test.ts",
+  "src/lib/indication-kinds.test.ts",
   "src/lib/app-data/app-data.test.ts",
   "src/lib/auth/gate-identity.test.ts",
 ];

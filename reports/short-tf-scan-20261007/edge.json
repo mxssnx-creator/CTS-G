@@ -1,0 +1,8085 @@
+{
+ "generatedAt": "2026-10-07 17:17 UTC",
+ "symbols": [
+  "ADA-USDT",
+  "AVAX-USDT",
+  "BNB-USDT",
+  "BTC-USDT",
+  "DOGE-USDT",
+  "ETH-USDT",
+  "LINK-USDT",
+  "LTC-USDT",
+  "SOL-USDT",
+  "SUI-USDT",
+  "TRX-USDT",
+  "XRP-USDT"
+ ],
+ "days": 60,
+ "testDays": 46,
+ "firstDay": "2026-08-07",
+ "costPct": 0.18,
+ "trainWindow": 14,
+ "top": 3,
+ "minTrainTrades": 60,
+ "onePosition": true,
+ "grid": {
+  "tfs": [
+   1,
+   5,
+   15,
+   30
+  ],
+  "tp": [
+   0.3,
+   0.5,
+   0.8,
+   1.2,
+   2.0
+  ],
+  "slRatio": [
+   0.6,
+   1.0,
+   1.5,
+   2.0
+  ],
+  "holdBars": [
+   5,
+   15,
+   30
+  ]
+ },
+ "rule": {
+  "minPf": 1.05,
+  "minDaysPositive": 0.6,
+  "eachThirdPositive": true,
+  "minTradesPerDay": 30,
+  "minHoursPositive": 0.55,
+  "clusterPfAbove": 1.0,
+  "leaveOneSymbolOutPfAbove": 1.0
+ },
+ "families": {
+  "momentum": {
+   "configs": 1800,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [
+      "tf15|L60z3.5|tp2.0|r0.6|h30",
+      "tf15|L60z3.5|tp2.0|r1.5|h30",
+      "tf15|L60z3.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0662,
+      1.0611,
+      1.0611
+     ],
+     "n": 36,
+     "netPct": -46.0731,
+     "pf": 0.289,
+     "winRate": 22.2,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf1|L60z3.5|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0305,
+      1.0114,
+      1.0072
+     ],
+     "n": 18,
+     "netPct": -2.9975,
+     "pf": 0.9075,
+     "winRate": 33.3,
+     "hoursPositive": 2,
+     "hoursTraded": 5
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf1|L60z3.5|tp1.2|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0304,
+      1.0187,
+      1.0049
+     ],
+     "n": 11,
+     "netPct": -5.0298,
+     "pf": 0.746,
+     "winRate": 9.1,
+     "hoursPositive": 0,
+     "hoursTraded": 4
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf5|L15z3.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.035,
+      1.0101,
+      1.0008
+     ],
+     "n": 11,
+     "netPct": -9.3198,
+     "pf": 0.5293,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 5
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0455,
+      1.0167,
+      1.0038
+     ],
+     "n": 10,
+     "netPct": -0.5792,
+     "pf": 0.9678,
+     "winRate": 20.0,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0493,
+      1.0139,
+      1.0033
+     ],
+     "n": 3,
+     "netPct": 1.6032,
+     "pf": 1.2969,
+     "winRate": 66.7,
+     "hoursPositive": 1,
+     "hoursTraded": 1
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0592,
+      1.0258,
+      1.0132
+     ],
+     "n": 9,
+     "netPct": -7.4742,
+     "pf": 0.5386,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0542,
+      1.0082
+     ],
+     "n": 10,
+     "netPct": -6.939,
+     "pf": 0.6145,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30",
+      "tf15|L240z2.5|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0327,
+      1.0002
+     ],
+     "n": 2,
+     "netPct": -0.4965,
+     "pf": 0.8621,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0088
+     ],
+     "n": 23,
+     "netPct": -2.4992,
+     "pf": 0.9396,
+     "winRate": 39.1,
+     "hoursPositive": 4,
+     "hoursTraded": 8
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0053
+     ],
+     "n": 7,
+     "netPct": -4.5239,
+     "pf": 0.641,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r0.6|h15",
+      "tf5|L15z3.5|tp2.0|r1.5|h15",
+      "tf5|L15z3.5|tp2.0|r2.0|h15"
+     ],
+     "trainPf": [
+      1.007,
+      1.0061,
+      1.0061
+     ],
+     "n": 30,
+     "netPct": -7.4634,
+     "pf": 0.8618,
+     "winRate": 20.0,
+     "hoursPositive": 0,
+     "hoursTraded": 4
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r1.5|h15",
+      "tf5|L15z3.5|tp2.0|r2.0|h15",
+      "tf5|L15z3.5|tp2.0|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0138,
+      1.0138,
+      1.0135
+     ],
+     "n": 39,
+     "netPct": -4.2855,
+     "pf": 0.939,
+     "winRate": 38.5,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15",
+      "tf5|L15z3.5|tp1.2|r1.5|h15"
+     ],
+     "trainPf": [
+      1.0186,
+      1.0162,
+      1.0161
+     ],
+     "n": 21,
+     "netPct": -1.8023,
+     "pf": 0.9523,
+     "winRate": 42.9,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15",
+      "tf5|L15z3.5|tp1.2|r1.5|h15"
+     ],
+     "trainPf": [
+      1.0109,
+      1.0084,
+      1.0083
+     ],
+     "n": 45,
+     "netPct": 13.4082,
+     "pf": 1.1655,
+     "winRate": 60.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r0.6|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15"
+     ],
+     "trainPf": [
+      1.0294,
+      1.0271,
+      1.0269
+     ],
+     "n": 15,
+     "netPct": -2.9144,
+     "pf": 0.8921,
+     "winRate": 20.0,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r0.6|h15",
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15"
+     ],
+     "trainPf": [
+      1.0392,
+      1.039,
+      1.0365
+     ],
+     "n": 45,
+     "netPct": 22.1212,
+     "pf": 1.2731,
+     "winRate": 84.4,
+     "hoursPositive": 5,
+     "hoursTraded": 5
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15",
+      "tf5|L15z3.5|tp1.2|r1.5|h15"
+     ],
+     "trainPf": [
+      1.074,
+      1.0714,
+      1.0712
+     ],
+     "n": 33,
+     "netPct": -7.9202,
+     "pf": 0.8667,
+     "winRate": 36.4,
+     "hoursPositive": 3,
+     "hoursTraded": 6
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r0.6|h15",
+      "tf5|L15z3.5|tp1.2|r1.5|h15"
+     ],
+     "trainPf": [
+      1.0658,
+      1.0648,
+      1.0617
+     ],
+     "n": 45,
+     "netPct": -12.9544,
+     "pf": 0.8401,
+     "winRate": 28.9,
+     "hoursPositive": 2,
+     "hoursTraded": 7
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.5|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15",
+      "tf5|L15z3.5|tp1.2|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0599,
+      1.0582,
+      1.0554
+     ],
+     "n": 48,
+     "netPct": 9.8784,
+     "pf": 1.1143,
+     "winRate": 56.2,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [
+      "tf5|L15z3.5|tp1.2|r1.5|h15",
+      "tf5|L15z3.5|tp2.0|r2.0|h15",
+      "tf5|L15z3.5|tp1.2|r2.0|h15"
+     ],
+     "trainPf": [
+      1.0718,
+      1.0702,
+      1.0702
+     ],
+     "n": 45,
+     "netPct": -12.7107,
+     "pf": 0.8431,
+     "winRate": 13.3,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r2.0|h15",
+      "tf5|L15z3.5|tp2.0|r1.0|h15",
+      "tf5|L15z3.5|tp1.2|r1.5|h15"
+     ],
+     "trainPf": [
+      1.0555,
+      1.0552,
+      1.0541
+     ],
+     "n": 33,
+     "netPct": -15.9953,
+     "pf": 0.7307,
+     "winRate": 18.2,
+     "hoursPositive": 1,
+     "hoursTraded": 6
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r0.6|h5",
+      "tf5|L15z3.5|tp2.0|r1.0|h5",
+      "tf5|L15z3.5|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.0158,
+      1.0148,
+      1.0148
+     ],
+     "n": 42,
+     "netPct": -6.0201,
+     "pf": 0.9204,
+     "winRate": 35.7,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r0.6|h5",
+      "tf5|L15z3.5|tp2.0|r2.0|h5",
+      "tf5|L15z3.5|tp2.0|r1.0|h5"
+     ],
+     "trainPf": [
+      1.0128,
+      1.0119,
+      1.0119
+     ],
+     "n": 45,
+     "netPct": -11.1431,
+     "pf": 0.8624,
+     "winRate": 13.3,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r0.6|h5",
+      "tf5|L15z3.5|tp2.0|r2.0|h5",
+      "tf5|L15z3.5|tp2.0|r1.5|h5"
+     ],
+     "trainPf": [
+      1.0095,
+      1.0085,
+      1.0085
+     ],
+     "n": 12,
+     "netPct": 3.5077,
+     "pf": 1.1624,
+     "winRate": 25.0,
+     "hoursPositive": 1,
+     "hoursTraded": 1
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [
+      "tf5|L15z3.5|tp2.0|r0.6|h5",
+      "tf5|L15z3.5|tp2.0|r1.5|h5",
+      "tf5|L15z3.5|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.019,
+      1.018,
+      1.018
+     ],
+     "n": 15,
+     "netPct": -5.5766,
+     "pf": 0.7935,
+     "winRate": 20.0,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 653,
+   "tradesPerDay": 14.2,
+   "oosNetPct": -124.199,
+   "oosPf": 0.8943,
+   "positiveDays": 5,
+   "thirdsNetPct": [
+    -84.329,
+    19.064,
+    -58.934
+   ],
+   "clusters": 136,
+   "clusterPf": 0.9092,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.8939,
+    "AVAX-USDT": 0.8965,
+    "BNB-USDT": 0.8981,
+    "BTC-USDT": 0.8978,
+    "DOGE-USDT": 0.8934,
+    "ETH-USDT": 0.8953,
+    "LINK-USDT": 0.8996,
+    "LTC-USDT": 0.8835,
+    "SOL-USDT": 0.8977,
+    "SUI-USDT": 0.8817,
+    "TRX-USDT": 0.892,
+    "XRP-USDT": 0.9031
+   },
+   "leaveOneOutMin": 0.8817,
+   "hoursPositivePct": 29.4,
+   "hourNet": [
+    1.937,
+    -7.19,
+    17.312,
+    -1.173,
+    -5.117,
+    -5.682,
+    -0.849,
+    -7.404,
+    -58.459,
+    -23.295,
+    0.0,
+    -12.607,
+    0.886,
+    0.29,
+    7.044,
+    -3.492,
+    1.589,
+    -0.734,
+    -9.179,
+    -0.512,
+    -6.724,
+    0.403,
+    -13.065,
+    1.824
+   ],
+   "hourTraded": [
+    7,
+    7,
+    5,
+    3,
+    4,
+    3,
+    1,
+    5,
+    8,
+    5,
+    0,
+    7,
+    7,
+    8,
+    4,
+    3,
+    3,
+    1,
+    2,
+    2,
+    5,
+    5,
+    5,
+    2
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "reversion": {
+   "configs": 1800,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [
+      "tf5|L240z2.5|tp2.0|r2.0|h30",
+      "tf15|L60z3.5|tp2.0|r2.0|h5",
+      "tf15|L60z3.5|tp2.0|r1.5|h5"
+     ],
+     "trainPf": [
+      1.0137,
+      1.0005,
+      1.0005
+     ],
+     "n": 6,
+     "netPct": -1.2445,
+     "pf": 0.8848,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [
+      "tf5|L240z2.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0145
+     ],
+     "n": 2,
+     "netPct": -0.7583,
+     "pf": 0.7893,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [
+      "tf15|L60z3.5|tp2.0|r2.0|h5",
+      "tf15|L60z3.5|tp2.0|r1.5|h5",
+      "tf15|L60z3.5|tp2.0|r1.0|h5"
+     ],
+     "trainPf": [
+      1.011,
+      1.011,
+      1.011
+     ],
+     "n": 24,
+     "netPct": -7.0742,
+     "pf": 0.8362,
+     "winRate": 12.5,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [
+      "tf5|L240z2.5|tp2.0|r2.0|h30",
+      "tf15|L60z3.5|tp2.0|r1.0|h5",
+      "tf15|L60z3.5|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.0148,
+      1.002,
+      1.002
+     ],
+     "n": 1,
+     "netPct": 0.6959,
+     "pf": 1.3866,
+     "winRate": 100.0,
+     "hoursPositive": 1,
+     "hoursTraded": 1
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [
+      "tf5|L240z2.5|tp2.0|r2.0|h30",
+      "tf30|L60z3.5|tp2.0|r0.6|h5",
+      "tf30|L60z3.5|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.021,
+      1.0082,
+      1.0077
+     ],
+     "n": 6,
+     "netPct": 0.8377,
+     "pf": 1.0776,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [
+      "tf5|L240z2.5|tp2.0|r2.0|h30",
+      "tf5|L240z2.5|tp2.0|r1.0|h30",
+      "tf15|L60z3.5|tp2.0|r1.0|h5"
+     ],
+     "trainPf": [
+      1.0332,
+      1.0192,
+      1.0063
+     ],
+     "n": 2,
+     "netPct": -0.5407,
+     "pf": 0.8498,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf5|L240z2.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.1128,
+      1.1128,
+      1.1009
+     ],
+     "n": 33,
+     "netPct": -18.6521,
+     "pf": 0.686,
+     "winRate": 30.3,
+     "hoursPositive": 3,
+     "hoursTraded": 5
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.1163,
+      1.1163,
+      1.0956
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.0|h15",
+      "tf30|L240z2.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r2.0|h15"
+     ],
+     "trainPf": [
+      1.0163,
+      1.0116,
+      1.0103
+     ],
+     "n": 23,
+     "netPct": -3.9137,
+     "pf": 0.9055,
+     "winRate": 21.7,
+     "hoursPositive": 2,
+     "hoursTraded": 8
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [
+      "tf1|L15z3.5|tp2.0|r1.5|h30",
+      "tf1|L15z3.5|tp2.0|r1.0|h30",
+      "tf1|L15z3.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0161,
+      1.016,
+      1.016
+     ],
+     "n": 63,
+     "netPct": -10.9152,
+     "pf": 0.9037,
+     "winRate": 42.9,
+     "hoursPositive": 5,
+     "hoursTraded": 9
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [
+      "tf1|L15z3.5|tp2.0|r1.5|h30",
+      "tf1|L15z3.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0012,
+      1.0011
+     ],
+     "n": 58,
+     "netPct": 5.87,
+     "pf": 1.0562,
+     "winRate": 65.5,
+     "hoursPositive": 4,
+     "hoursTraded": 10
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0029,
+      1.0029
+     ],
+     "n": 8,
+     "netPct": 0.8302,
+     "pf": 1.0577,
+     "winRate": 50.0,
+     "hoursPositive": 2,
+     "hoursTraded": 3
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0123,
+      1.0123,
+      1.0082
+     ],
+     "n": 9,
+     "netPct": 2.0149,
+     "pf": 1.1244,
+     "winRate": 66.7,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0253,
+      1.0253,
+      1.0213
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0227,
+      1.0227,
+      1.0186
+     ],
+     "n": 12,
+     "netPct": 7.4086,
+     "pf": 1.343,
+     "winRate": 100.0,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0292,
+      1.0292,
+      1.0225
+     ],
+     "n": 6,
+     "netPct": 0.4983,
+     "pf": 1.0461,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0296,
+      1.0296,
+      1.023
+     ],
+     "n": 57,
+     "netPct": -13.1003,
+     "pf": 0.8723,
+     "winRate": 21.1,
+     "hoursPositive": 2,
+     "hoursTraded": 7
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp0.8|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0408,
+      1.0408,
+      1.0369
+     ],
+     "n": 21,
+     "netPct": -2.2581,
+     "pf": 0.9403,
+     "winRate": 42.9,
+     "hoursPositive": 2,
+     "hoursTraded": 5
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [
+      "tf30|L240z2.5|tp1.2|r1.5|h30",
+      "tf30|L240z2.5|tp1.2|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0237,
+      1.0237,
+      1.0182
+     ],
+     "n": 48,
+     "netPct": -1.7071,
+     "pf": 0.9802,
+     "winRate": 37.5,
+     "hoursPositive": 2,
+     "hoursTraded": 5
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r1.0|h30",
+      "tf30|L240z2.5|tp2.0|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0199,
+      1.0199,
+      1.0199
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0203,
+      1.0203,
+      1.0203
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r1.5|h30",
+      "tf30|L240z2.5|tp2.0|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0098,
+      1.0098,
+      1.0098
+     ],
+     "n": 45,
+     "netPct": -14.1278,
+     "pf": 0.8256,
+     "winRate": 33.3,
+     "hoursPositive": 2,
+     "hoursTraded": 8
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [
+      "tf5|L60z3.5|tp2.0|r1.0|h30",
+      "tf5|L60z3.5|tp2.0|r1.5|h30",
+      "tf5|L60z3.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0112,
+      1.0099,
+      1.0099
+     ],
+     "n": 12,
+     "netPct": -0.2329,
+     "pf": 0.9892,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0013
+     ],
+     "n": 7,
+     "netPct": -0.4256,
+     "pf": 0.9662,
+     "winRate": 42.9,
+     "hoursPositive": 2,
+     "hoursTraded": 5
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.0|h15",
+      "tf1|L60z3.5|tp2.0|r1.5|h15"
+     ],
+     "trainPf": [
+      1.0028,
+      1.0007
+     ],
+     "n": 6,
+     "netPct": 1.9033,
+     "pf": 1.1762,
+     "winRate": 100.0,
+     "hoursPositive": 1,
+     "hoursTraded": 1
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [
+      "tf15|L60z3.5|tp1.2|r1.5|h30",
+      "tf15|L60z3.5|tp1.2|r2.0|h30",
+      "tf15|L60z3.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0225,
+      1.022,
+      1.0204
+     ],
+     "n": 12,
+     "netPct": -9.4635,
+     "pf": 0.5619,
+     "winRate": 25.0,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [
+      "tf30|L60z3.5|tp2.0|r1.5|h30",
+      "tf30|L60z3.5|tp2.0|r2.0|h30",
+      "tf30|L60z3.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0814,
+      1.0814,
+      1.0739
+     ],
+     "n": 3,
+     "netPct": -0.1454,
+     "pf": 0.9731,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0114,
+      1.0027,
+      1.002
+     ],
+     "n": 6,
+     "netPct": -0.3524,
+     "pf": 0.9674,
+     "winRate": 33.3,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.014,
+      1.0052,
+      1.0039
+     ],
+     "n": 6,
+     "netPct": -2.6126,
+     "pf": 0.7581,
+     "winRate": 33.3,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp2.0|r1.0|h15",
+      "tf1|L60z3.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0633,
+      1.0562,
+      1.0516
+     ],
+     "n": 3,
+     "netPct": -2.54,
+     "pf": 0.5296,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp2.0|r2.0|h30",
+      "tf1|L60z3.5|tp2.0|r1.5|h15"
+     ],
+     "trainPf": [
+      1.063,
+      1.0513,
+      1.0498
+     ],
+     "n": 30,
+     "netPct": 2.9345,
+     "pf": 1.0543,
+     "winRate": 60.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [
+      "tf30|L60z2.5|tp2.0|r2.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0292,
+      1.0101,
+      1.0086
+     ],
+     "n": 51,
+     "netPct": -5.8641,
+     "pf": 0.9361,
+     "winRate": 23.5,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [
+      "tf30|L60z2.5|tp2.0|r2.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0235,
+      1.006,
+      1.0046
+     ],
+     "n": 12,
+     "netPct": -0.8573,
+     "pf": 0.9603,
+     "winRate": 25.0,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [
+      "tf30|L60z2.5|tp2.0|r2.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.0|h30",
+      "tf30|L60z2.5|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0218,
+      1.0044,
+      1.0031
+     ],
+     "n": 57,
+     "netPct": -7.7653,
+     "pf": 0.9243,
+     "winRate": 31.6,
+     "hoursPositive": 4,
+     "hoursTraded": 7
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [
+      "tf30|L60z2.5|tp2.0|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r1.5|h30",
+      "tf30|L60z2.5|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0467,
+      1.033,
+      1.0321
+     ],
+     "n": 8,
+     "netPct": -0.8423,
+     "pf": 0.9415,
+     "winRate": 62.5,
+     "hoursPositive": 3,
+     "hoursTraded": 5
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [
+      "tf30|L240z2.5|tp2.0|r1.5|h30",
+      "tf30|L60z2.5|tp2.0|r2.0|h30",
+      "tf30|L240z2.5|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0534,
+      1.0488,
+      1.0456
+     ],
+     "n": 23,
+     "netPct": -28.2814,
+     "pf": 0.3169,
+     "winRate": 13.0,
+     "hoursPositive": 2,
+     "hoursTraded": 8
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [
+      "tf1|L60z3.5|tp2.0|r1.5|h30",
+      "tf1|L60z3.5|tp1.2|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0041,
+      1.0024
+     ],
+     "n": 4,
+     "netPct": 0.4065,
+     "pf": 1.0565,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    }
+   ],
+   "oosTrades": 664,
+   "tradesPerDay": 14.4,
+   "oosNetPct": -110.275,
+   "oosPf": 0.9077,
+   "positiveDays": 10,
+   "thirdsNetPct": [
+    -30.65,
+    -25.486,
+    -54.139
+   ],
+   "clusters": 157,
+   "clusterPf": 0.8944,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.9279,
+    "AVAX-USDT": 0.9037,
+    "BNB-USDT": 0.9055,
+    "BTC-USDT": 0.9098,
+    "DOGE-USDT": 0.9097,
+    "ETH-USDT": 0.9036,
+    "LINK-USDT": 0.9083,
+    "LTC-USDT": 0.9004,
+    "SOL-USDT": 0.9028,
+    "SUI-USDT": 0.9108,
+    "TRX-USDT": 0.9087,
+    "XRP-USDT": 0.9012
+   },
+   "leaveOneOutMin": 0.9004,
+   "hoursPositivePct": 38.6,
+   "hourNet": [
+    -3.857,
+    -7.384,
+    4.745,
+    4.21,
+    -12.639,
+    -1.223,
+    -2.483,
+    1.356,
+    -13.056,
+    -0.944,
+    -2.726,
+    -0.25,
+    -13.124,
+    13.287,
+    -22.371,
+    -3.562,
+    -4.55,
+    -2.417,
+    -21.277,
+    -0.542,
+    -5.857,
+    -2.832,
+    -7.779,
+    -5.0
+   ],
+   "hourTraded": [
+    6,
+    7,
+    7,
+    4,
+    3,
+    5,
+    2,
+    4,
+    5,
+    7,
+    4,
+    5,
+    7,
+    5,
+    12,
+    8,
+    5,
+    7,
+    5,
+    2,
+    7,
+    3,
+    5,
+    2
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "reversion-confirm": {
+   "configs": 2820,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [
+      "tf30|L240z2.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0003
+     ],
+     "n": 8,
+     "netPct": -2.2673,
+     "pf": 0.8425,
+     "winRate": 12.5,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L60z3.0|tp2.0|r1.5|h30",
+      "tf1|L60z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0267,
+      1.0249,
+      1.0249
+     ],
+     "n": 28,
+     "netPct": -16.5682,
+     "pf": 0.6713,
+     "winRate": 17.9,
+     "hoursPositive": 0,
+     "hoursTraded": 5
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0699,
+      1.0557,
+      1.0508
+     ],
+     "n": 15,
+     "netPct": -1.5509,
+     "pf": 0.9426,
+     "winRate": 60.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0718,
+      1.064,
+      1.0413
+     ],
+     "n": 18,
+     "netPct": 6.8048,
+     "pf": 1.21,
+     "winRate": 50.0,
+     "hoursPositive": 3,
+     "hoursTraded": 4
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0427,
+      1.0427,
+      1.0291
+     ],
+     "n": 27,
+     "netPct": -5.5009,
+     "pf": 0.8868,
+     "winRate": 44.4,
+     "hoursPositive": 4,
+     "hoursTraded": 7
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0294,
+      1.0245,
+      1.0216
+     ],
+     "n": 15,
+     "netPct": 5.8213,
+     "pf": 1.2156,
+     "winRate": 80.0,
+     "hoursPositive": 3,
+     "hoursTraded": 4
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0395,
+      1.0349,
+      1.032
+     ],
+     "n": 18,
+     "netPct": 11.897,
+     "pf": 1.3672,
+     "winRate": 83.3,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0375,
+      1.0325,
+      1.0294
+     ],
+     "n": 3,
+     "netPct": -0.3318,
+     "pf": 0.9386,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0413,
+      1.0363,
+      1.0333
+     ],
+     "n": 12,
+     "netPct": -5.4805,
+     "pf": 0.7463,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30",
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0343,
+      1.0293,
+      1.0263
+     ],
+     "n": 72,
+     "netPct": -11.571,
+     "pf": 0.9107,
+     "winRate": 54.2,
+     "hoursPositive": 2,
+     "hoursTraded": 6
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0272,
+      1.0194,
+      1.0156
+     ],
+     "n": 21,
+     "netPct": 21.1134,
+     "pf": 1.5586,
+     "winRate": 100.0,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.061,
+      1.0534,
+      1.0497
+     ],
+     "n": 12,
+     "netPct": -4.7751,
+     "pf": 0.7789,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0629,
+      1.0552,
+      1.0515
+     ],
+     "n": 42,
+     "netPct": -31.4249,
+     "pf": 0.5843,
+     "winRate": 7.1,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0137,
+      1.0065,
+      1.0021
+     ],
+     "n": 12,
+     "netPct": 2.3654,
+     "pf": 1.1095,
+     "winRate": 50.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0071
+     ],
+     "n": 10,
+     "netPct": -1.6814,
+     "pf": 0.9066,
+     "winRate": 40.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0123,
+      1.0005
+     ],
+     "n": 10,
+     "netPct": 1.8379,
+     "pf": 1.1021,
+     "winRate": 60.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0076
+     ],
+     "n": 8,
+     "netPct": 2.0639,
+     "pf": 1.1433,
+     "winRate": 62.5,
+     "hoursPositive": 3,
+     "hoursTraded": 4
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0083
+     ],
+     "n": 8,
+     "netPct": 0.965,
+     "pf": 1.067,
+     "winRate": 62.5,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0146,
+      1.0005
+     ],
+     "n": 14,
+     "netPct": -5.4649,
+     "pf": 0.7831,
+     "winRate": 42.9,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0426,
+      1.0272,
+      1.0185
+     ],
+     "n": 9,
+     "netPct": 4.7093,
+     "pf": 1.2907,
+     "winRate": 66.7,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30",
+      "tf1|L15z4.0|tp2.0|r1.5|h30",
+      "tf1|L15z4.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.045,
+      1.0292,
+      1.0204
+     ],
+     "n": 6,
+     "netPct": -0.236,
+     "pf": 0.9781,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 368,
+   "tradesPerDay": 8.0,
+   "oosNetPct": -29.275,
+   "oosPf": 0.9558,
+   "positiveDays": 9,
+   "thirdsNetPct": [
+    -13.582,
+    -19.568,
+    3.875
+   ],
+   "clusters": 82,
+   "clusterPf": 0.9683,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.9594,
+    "AVAX-USDT": 0.9533,
+    "BNB-USDT": 0.955,
+    "BTC-USDT": 0.9766,
+    "DOGE-USDT": 0.9501,
+    "ETH-USDT": 0.9704,
+    "LINK-USDT": 0.9466,
+    "LTC-USDT": 0.9399,
+    "SOL-USDT": 0.9519,
+    "SUI-USDT": 0.9498,
+    "TRX-USDT": 0.9618,
+    "XRP-USDT": 0.9548
+   },
+   "leaveOneOutMin": 0.9399,
+   "hoursPositivePct": 41.4,
+   "hourNet": [
+    2.029,
+    4.184,
+    5.18,
+    -11.684,
+    3.359,
+    0.175,
+    -1.649,
+    -5.173,
+    -0.726,
+    2.039,
+    0.0,
+    0.915,
+    -10.681,
+    -23.701,
+    -7.112,
+    1.311,
+    -0.531,
+    4.779,
+    20.256,
+    -3.271,
+    -9.071,
+    0.492,
+    -0.18,
+    -0.217
+   ],
+   "hourTraded": [
+    2,
+    5,
+    5,
+    3,
+    3,
+    2,
+    1,
+    2,
+    3,
+    3,
+    0,
+    6,
+    9,
+    6,
+    2,
+    2,
+    2,
+    2,
+    1,
+    2,
+    2,
+    1,
+    5,
+    1
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "reversion-with-trend": {
+   "configs": 1800,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [
+      "tf1|L15z3.0|tp2.0|r1.5|h30",
+      "tf1|L15z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0035,
+      1.0035
+     ],
+     "n": 28,
+     "netPct": 2.123,
+     "pf": 1.0421,
+     "winRate": 71.4,
+     "hoursPositive": 4,
+     "hoursTraded": 7
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [
+      "tf1|L60z2.0|tp2.0|r2.0|h30",
+      "tf1|L60z2.0|tp2.0|r1.0|h30",
+      "tf1|L60z2.0|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0052,
+      1.0052,
+      1.0052
+     ],
+     "n": 36,
+     "netPct": -23.0925,
+     "pf": 0.6436,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf1|L15z3.0|tp2.0|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0039
+     ],
+     "n": 11,
+     "netPct": -3.0405,
+     "pf": 0.8464,
+     "winRate": 27.3,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 75,
+   "tradesPerDay": 1.6,
+   "oosNetPct": -24.01,
+   "oosPf": 0.8221,
+   "positiveDays": 1,
+   "thirdsNetPct": [
+    0.0,
+    -20.97,
+    -3.041
+   ],
+   "clusters": 21,
+   "clusterPf": 0.8865,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.8221,
+    "AVAX-USDT": 0.8362,
+    "BNB-USDT": 0.8205,
+    "BTC-USDT": 0.8081,
+    "DOGE-USDT": 0.8081,
+    "ETH-USDT": 0.8186,
+    "LINK-USDT": 0.8366,
+    "LTC-USDT": 0.8309,
+    "SOL-USDT": 0.8094,
+    "SUI-USDT": 0.8441,
+    "TRX-USDT": 0.8165,
+    "XRP-USDT": 0.8148
+   },
+   "leaveOneOutMin": 0.8081,
+   "hoursPositivePct": 35.7,
+   "hourNet": [
+    -1.214,
+    0.0,
+    -4.224,
+    0.0,
+    0.0,
+    -0.141,
+    0.0,
+    0.066,
+    0.0,
+    0.0,
+    0.0,
+    -2.665,
+    -1.707,
+    0.452,
+    -16.815,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.802,
+    0.0,
+    3.039,
+    0.0
+   ],
+   "hourTraded": [
+    1,
+    0,
+    3,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "reversion-btc-calm": {
+   "configs": 3060,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [
+      "tf15|L60z2.0|tp2.0|r2.0|h30",
+      "tf15|L60z2.0|tp2.0|r1.5|h30",
+      "tf15|L60z2.0|tp0.8|r2.0|h30"
+     ],
+     "trainPf": [
+      1.026,
+      1.0147,
+      1.009
+     ],
+     "n": 126,
+     "netPct": -39.6984,
+     "pf": 0.825,
+     "winRate": 28.6,
+     "hoursPositive": 5,
+     "hoursTraded": 15
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0004
+     ],
+     "n": 10,
+     "netPct": 2.3661,
+     "pf": 1.1314,
+     "winRate": 80.0,
+     "hoursPositive": 2,
+     "hoursTraded": 3
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0163
+     ],
+     "n": 10,
+     "netPct": -2.0162,
+     "pf": 0.888,
+     "winRate": 60.0,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf1|L15z4.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0056
+     ],
+     "n": 5,
+     "netPct": -4.4829,
+     "pf": 0.5019,
+     "winRate": 20.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 151,
+   "tradesPerDay": 3.3,
+   "oosNetPct": -43.831,
+   "oosPf": 0.8387,
+   "positiveDays": 1,
+   "thirdsNetPct": [
+    -39.698,
+    0.0,
+    -4.133
+   ],
+   "clusters": 35,
+   "clusterPf": 0.8007,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.8231,
+    "AVAX-USDT": 0.8326,
+    "BNB-USDT": 0.8601,
+    "BTC-USDT": 0.8387,
+    "DOGE-USDT": 0.8638,
+    "ETH-USDT": 0.8374,
+    "LINK-USDT": 0.8483,
+    "LTC-USDT": 0.828,
+    "SOL-USDT": 0.8319,
+    "SUI-USDT": 0.8461,
+    "TRX-USDT": 0.8323,
+    "XRP-USDT": 0.8216
+   },
+   "leaveOneOutMin": 0.8216,
+   "hoursPositivePct": 32.0,
+   "hourNet": [
+    0.099,
+    2.757,
+    -3.416,
+    0.0,
+    0.0,
+    0.0,
+    -11.868,
+    -5.001,
+    -2.153,
+    0.32,
+    -1.077,
+    0.0,
+    -14.775,
+    0.806,
+    0.008,
+    -0.558,
+    -2.26,
+    -10.499,
+    0.004,
+    0.0,
+    2.514,
+    -0.045,
+    1.311,
+    0.0
+   ],
+   "hourTraded": [
+    2,
+    2,
+    1,
+    0,
+    0,
+    0,
+    1,
+    2,
+    2,
+    2,
+    1,
+    0,
+    2,
+    1,
+    2,
+    1,
+    1,
+    1,
+    1,
+    0,
+    1,
+    1,
+    1,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "breakout": {
+   "configs": 660,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "tradesPerDay": 0.0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "thirdsNetPct": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "clusters": 0,
+   "clusterPf": 1.0,
+   "leaveOneOutPf": {
+    "ADA-USDT": null,
+    "AVAX-USDT": null,
+    "BNB-USDT": null,
+    "BTC-USDT": null,
+    "DOGE-USDT": null,
+    "ETH-USDT": null,
+    "LINK-USDT": null,
+    "LTC-USDT": null,
+    "SOL-USDT": null,
+    "SUI-USDT": null,
+    "TRX-USDT": null,
+    "XRP-USDT": null
+   },
+   "leaveOneOutMin": null,
+   "hoursPositivePct": null,
+   "hourNet": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "hourTraded": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "fade-breakout": {
+   "configs": 660,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "tradesPerDay": 0.0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "thirdsNetPct": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "clusters": 0,
+   "clusterPf": 1.0,
+   "leaveOneOutPf": {
+    "ADA-USDT": null,
+    "AVAX-USDT": null,
+    "BNB-USDT": null,
+    "BTC-USDT": null,
+    "DOGE-USDT": null,
+    "ETH-USDT": null,
+    "LINK-USDT": null,
+    "LTC-USDT": null,
+    "SOL-USDT": null,
+    "SUI-USDT": null,
+    "TRX-USDT": null,
+    "XRP-USDT": null
+   },
+   "leaveOneOutMin": null,
+   "hoursPositivePct": null,
+   "hourNet": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "hourTraded": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "squeeze-breakout": {
+   "configs": 720,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "tradesPerDay": 0.0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "thirdsNetPct": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "clusters": 0,
+   "clusterPf": 1.0,
+   "leaveOneOutPf": {
+    "ADA-USDT": null,
+    "AVAX-USDT": null,
+    "BNB-USDT": null,
+    "BTC-USDT": null,
+    "DOGE-USDT": null,
+    "ETH-USDT": null,
+    "LINK-USDT": null,
+    "LTC-USDT": null,
+    "SOL-USDT": null,
+    "SUI-USDT": null,
+    "TRX-USDT": null,
+    "XRP-USDT": null
+   },
+   "leaveOneOutMin": null,
+   "hoursPositivePct": null,
+   "hourNet": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "hourTraded": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "trend-pullback": {
+   "configs": 480,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 0,
+   "tradesPerDay": 0.0,
+   "oosNetPct": 0.0,
+   "oosPf": 1.0,
+   "positiveDays": 0,
+   "thirdsNetPct": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "clusters": 0,
+   "clusterPf": 1.0,
+   "leaveOneOutPf": {
+    "ADA-USDT": null,
+    "AVAX-USDT": null,
+    "BNB-USDT": null,
+    "BTC-USDT": null,
+    "DOGE-USDT": null,
+    "ETH-USDT": null,
+    "LINK-USDT": null,
+    "LTC-USDT": null,
+    "SOL-USDT": null,
+    "SUI-USDT": null,
+    "TRX-USDT": null,
+    "XRP-USDT": null
+   },
+   "leaveOneOutMin": null,
+   "hoursPositivePct": null,
+   "hourNet": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "hourTraded": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "volume-follow": {
+   "configs": 840,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0139,
+      1.0054,
+      1.0054
+     ],
+     "n": 6,
+     "netPct": 1.0967,
+     "pf": 1.1015,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0226,
+      1.0142,
+      1.0142
+     ],
+     "n": 15,
+     "netPct": 18.6496,
+     "pf": 1.6907,
+     "winRate": 80.0,
+     "hoursPositive": 2,
+     "hoursTraded": 2
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0721,
+      1.0641,
+      1.0641
+     ],
+     "n": 21,
+     "netPct": -12.7925,
+     "pf": 0.6616,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 6
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0484,
+      1.0484,
+      1.048
+     ],
+     "n": 3,
+     "netPct": -2.8849,
+     "pf": 0.4658,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0404,
+      1.0404,
+      1.0401
+     ],
+     "n": 18,
+     "netPct": -13.2365,
+     "pf": 0.5915,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0185,
+      1.018,
+      1.0175
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30"
+     ],
+     "trainPf": [
+      1.0327,
+      1.0325,
+      1.0316
+     ],
+     "n": 12,
+     "netPct": 0.5928,
+     "pf": 1.0274,
+     "winRate": 58.3,
+     "hoursPositive": 1,
+     "hoursTraded": 1
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0469,
+      1.0469,
+      1.0398
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0531,
+      1.0531,
+      1.0457
+     ],
+     "n": 6,
+     "netPct": -1.0888,
+     "pf": 0.8992,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.057,
+      1.057,
+      1.0494
+     ],
+     "n": 15,
+     "netPct": 1.0481,
+     "pf": 1.0388,
+     "winRate": 40.0,
+     "hoursPositive": 2,
+     "hoursTraded": 4
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0821,
+      1.0821,
+      1.0741
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0848,
+      1.0848,
+      1.0767
+     ],
+     "n": 6,
+     "netPct": -0.5205,
+     "pf": 0.9518,
+     "winRate": 50.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [
+      "tf5|m8.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m8.0z3.0|tp2.0|r1.5|h30",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h30"
+     ],
+     "trainPf": [
+      1.1004,
+      1.1004,
+      1.0921
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [
+      "tf5|m8.0z2.0|tp0.8|r1.0|h30"
+     ],
+     "trainPf": [
+      1.0004
+     ],
+     "n": 4,
+     "netPct": 1.335,
+     "pf": 1.1854,
+     "winRate": 75.0,
+     "hoursPositive": 1,
+     "hoursTraded": 2
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r1.0|h30",
+      "tf5|m8.0z2.0|tp0.8|r1.0|h30",
+      "tf5|m8.0z2.0|tp0.8|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0193,
+      1.0139,
+      1.0135
+     ],
+     "n": 12,
+     "netPct": -2.6857,
+     "pf": 0.8757,
+     "winRate": 25.0,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r1.0|h30",
+      "tf5|m8.0z2.0|tp1.2|r1.5|h30",
+      "tf5|m8.0z2.0|tp0.8|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0224,
+      1.0158,
+      1.0152
+     ],
+     "n": 30,
+     "netPct": -15.8904,
+     "pf": 0.7057,
+     "winRate": 30.0,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [
+      "tf5|m8.0z3.0|tp1.2|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0083,
+      1.0036
+     ],
+     "n": 12,
+     "netPct": -3.2616,
+     "pf": 0.849,
+     "winRate": 16.7,
+     "hoursPositive": 0,
+     "hoursTraded": 2
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0007
+     ],
+     "n": 7,
+     "netPct": 0.6159,
+     "pf": 1.0489,
+     "winRate": 42.9,
+     "hoursPositive": 2,
+     "hoursTraded": 6
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r0.6|h30"
+     ],
+     "trainPf": [
+      1.0073
+     ],
+     "n": 6,
+     "netPct": -3.9403,
+     "pf": 0.6352,
+     "winRate": 16.7,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h5",
+      "tf5|m8.0z2.0|tp1.2|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0788,
+      1.068,
+      1.0647
+     ],
+     "n": 28,
+     "netPct": -8.9909,
+     "pf": 0.8216,
+     "winRate": 7.1,
+     "hoursPositive": 1,
+     "hoursTraded": 5
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h5",
+      "tf5|m8.0z2.0|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0537,
+      1.0451,
+      1.0397
+     ],
+     "n": 11,
+     "netPct": -3.6771,
+     "pf": 0.8143,
+     "winRate": 9.1,
+     "hoursPositive": 0,
+     "hoursTraded": 4
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r0.6|h15",
+      "tf15|m4.0z2.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z2.0|tp1.2|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0166,
+      1.0109,
+      1.008
+     ],
+     "n": 12,
+     "netPct": -2.5163,
+     "pf": 0.8835,
+     "winRate": 8.3,
+     "hoursPositive": 0,
+     "hoursTraded": 4
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r0.6|h15",
+      "tf5|m8.0z3.0|tp2.0|r0.6|h5",
+      "tf5|m8.0z2.0|tp1.2|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0112,
+      1.0074,
+      1.0029
+     ],
+     "n": 2,
+     "netPct": -0.5645,
+     "pf": 0.8432,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf15|m4.0z2.0|tp2.0|r0.6|h5",
+      "tf15|m4.0z2.0|tp2.0|r2.0|h5",
+      "tf15|m4.0z2.0|tp2.0|r1.0|h5"
+     ],
+     "trainPf": [
+      1.003,
+      1.0022,
+      1.0022
+     ],
+     "n": 15,
+     "netPct": -1.5319,
+     "pf": 0.9433,
+     "winRate": 20.0,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r0.6|h15",
+      "tf15|m4.0z2.0|tp2.0|r0.6|h5",
+      "tf5|m8.0z2.0|tp2.0|r0.6|h15"
+     ],
+     "trainPf": [
+      1.0132,
+      1.0026,
+      1.0019
+     ],
+     "n": 5,
+     "netPct": -0.3986,
+     "pf": 0.9557,
+     "winRate": 40.0,
+     "hoursPositive": 1,
+     "hoursTraded": 3
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r2.0|h15",
+      "tf5|m8.0z2.0|tp2.0|r1.5|h15",
+      "tf5|m8.0z2.0|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0298,
+      1.0298,
+      1.0298
+     ],
+     "n": 24,
+     "netPct": -5.8622,
+     "pf": 0.8643,
+     "winRate": 12.5,
+     "hoursPositive": 1,
+     "hoursTraded": 4
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r1.5|h15",
+      "tf5|m8.0z2.0|tp2.0|r2.0|h15",
+      "tf5|m8.0z2.0|tp2.0|r1.0|h15"
+     ],
+     "trainPf": [
+      1.0273,
+      1.0273,
+      1.0273
+     ],
+     "n": 9,
+     "netPct": -2.5688,
+     "pf": 0.8414,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r1.5|h30",
+      "tf5|m8.0z2.0|tp2.0|r1.0|h15",
+      "tf5|m8.0z2.0|tp2.0|r2.0|h15"
+     ],
+     "trainPf": [
+      1.0243,
+      1.0215,
+      1.0215
+     ],
+     "n": 18,
+     "netPct": -9.9002,
+     "pf": 0.6944,
+     "winRate": 11.1,
+     "hoursPositive": 0,
+     "hoursTraded": 3
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [
+      "tf5|m8.0z2.0|tp1.2|r0.6|h30",
+      "tf5|m8.0z2.0|tp2.0|r1.5|h5",
+      "tf5|m8.0z2.0|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.0006,
+      1.0003,
+      1.0003
+     ],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [
+      "tf5|m8.0z2.0|tp2.0|r1.0|h5",
+      "tf5|m8.0z2.0|tp2.0|r1.5|h5",
+      "tf5|m8.0z2.0|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.0036,
+      1.0036,
+      1.0036
+     ],
+     "n": 15,
+     "netPct": -3.7526,
+     "pf": 0.861,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 5
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 312,
+   "tradesPerDay": 6.8,
+   "oosNetPct": -72.726,
+   "oosPf": 0.8705,
+   "positiveDays": 6,
+   "thirdsNetPct": [
+    -9.136,
+    -20.503,
+    -43.087
+   ],
+   "clusters": 87,
+   "clusterPf": 0.8915,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.877,
+    "AVAX-USDT": 0.864,
+    "BNB-USDT": 0.8662,
+    "BTC-USDT": 0.8711,
+    "DOGE-USDT": 0.8652,
+    "ETH-USDT": 0.862,
+    "LINK-USDT": 0.861,
+    "LTC-USDT": 0.8733,
+    "SOL-USDT": 0.8736,
+    "SUI-USDT": 0.8897,
+    "TRX-USDT": 0.8692,
+    "XRP-USDT": 0.8735
+   },
+   "leaveOneOutMin": 0.861,
+   "hoursPositivePct": 21.2,
+   "hourNet": [
+    -0.519,
+    0.0,
+    -2.376,
+    2.287,
+    -1.665,
+    12.891,
+    -2.096,
+    -8.984,
+    -6.239,
+    -3.437,
+    -0.443,
+    -1.829,
+    -1.574,
+    -16.533,
+    -4.469,
+    -1.66,
+    2.11,
+    -0.959,
+    -27.283,
+    -1.164,
+    -0.103,
+    -5.211,
+    0.401,
+    -3.87
+   ],
+   "hourTraded": [
+    3,
+    0,
+    2,
+    1,
+    2,
+    5,
+    3,
+    4,
+    7,
+    2,
+    2,
+    3,
+    7,
+    8,
+    8,
+    2,
+    3,
+    1,
+    4,
+    2,
+    3,
+    3,
+    2,
+    3
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  },
+  "volume-fade": {
+   "configs": 840,
+   "testDays": [
+    {
+     "day": 14,
+     "date": "2026-08-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 15,
+     "date": "2026-08-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 16,
+     "date": "2026-08-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 17,
+     "date": "2026-08-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 18,
+     "date": "2026-08-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 19,
+     "date": "2026-08-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 20,
+     "date": "2026-08-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 21,
+     "date": "2026-08-28",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 22,
+     "date": "2026-08-29",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 23,
+     "date": "2026-08-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 24,
+     "date": "2026-08-31",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 25,
+     "date": "2026-09-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 26,
+     "date": "2026-09-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 27,
+     "date": "2026-09-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 28,
+     "date": "2026-09-04",
+     "picks": [
+      "tf15|m4.0z2.0|tp2.0|r2.0|h30",
+      "tf15|m4.0z2.0|tp2.0|r2.0|h5"
+     ],
+     "trainPf": [
+      1.0062,
+      1.0015
+     ],
+     "n": 20,
+     "netPct": -7.7536,
+     "pf": 0.7846,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 1
+    },
+    {
+     "day": 29,
+     "date": "2026-09-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 30,
+     "date": "2026-09-06",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 31,
+     "date": "2026-09-07",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 32,
+     "date": "2026-09-08",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 33,
+     "date": "2026-09-09",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 34,
+     "date": "2026-09-10",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 35,
+     "date": "2026-09-11",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 36,
+     "date": "2026-09-12",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 37,
+     "date": "2026-09-13",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 38,
+     "date": "2026-09-14",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 39,
+     "date": "2026-09-15",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 40,
+     "date": "2026-09-16",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 41,
+     "date": "2026-09-17",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 42,
+     "date": "2026-09-18",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 43,
+     "date": "2026-09-19",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 44,
+     "date": "2026-09-20",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 45,
+     "date": "2026-09-21",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 46,
+     "date": "2026-09-22",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 47,
+     "date": "2026-09-23",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 48,
+     "date": "2026-09-24",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 49,
+     "date": "2026-09-25",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 50,
+     "date": "2026-09-26",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 51,
+     "date": "2026-09-27",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 52,
+     "date": "2026-09-28",
+     "picks": [
+      "tf5|m4.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m4.0z3.0|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0091,
+      1.0
+     ],
+     "n": 22,
+     "netPct": 0.953,
+     "pf": 1.0241,
+     "winRate": 45.5,
+     "hoursPositive": 2,
+     "hoursTraded": 3
+    },
+    {
+     "day": 53,
+     "date": "2026-09-29",
+     "picks": [
+      "tf5|m4.0z3.0|tp2.0|r2.0|h30",
+      "tf5|m4.0z3.0|tp2.0|r1.5|h30"
+     ],
+     "trainPf": [
+      1.0137,
+      1.0049
+     ],
+     "n": 8,
+     "netPct": -3.0066,
+     "pf": 0.7912,
+     "winRate": 0.0,
+     "hoursPositive": 0,
+     "hoursTraded": 4
+    },
+    {
+     "day": 54,
+     "date": "2026-09-30",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 55,
+     "date": "2026-10-01",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 56,
+     "date": "2026-10-02",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 57,
+     "date": "2026-10-03",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 58,
+     "date": "2026-10-04",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    },
+    {
+     "day": 59,
+     "date": "2026-10-05",
+     "picks": [],
+     "trainPf": [],
+     "n": 0,
+     "netPct": 0.0,
+     "pf": null,
+     "winRate": null,
+     "hoursPositive": 0,
+     "hoursTraded": 0
+    }
+   ],
+   "oosTrades": 50,
+   "tradesPerDay": 1.1,
+   "oosNetPct": -9.807,
+   "oosPf": 0.891,
+   "positiveDays": 1,
+   "thirdsNetPct": [
+    -7.754,
+    0.0,
+    -2.054
+   ],
+   "clusters": 10,
+   "clusterPf": 0.9927,
+   "leaveOneOutPf": {
+    "ADA-USDT": 0.908,
+    "AVAX-USDT": 0.9075,
+    "BNB-USDT": 0.8957,
+    "BTC-USDT": 0.9001,
+    "DOGE-USDT": 0.8925,
+    "ETH-USDT": 0.8639,
+    "LINK-USDT": 0.8487,
+    "LTC-USDT": 0.8719,
+    "SOL-USDT": 0.9065,
+    "SUI-USDT": 0.8926,
+    "TRX-USDT": 0.891,
+    "XRP-USDT": 0.9131
+   },
+   "leaveOneOutMin": 0.8487,
+   "hoursPositivePct": 25.0,
+   "hourNet": [
+    0.0,
+    -0.324,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -6.912,
+    -0.916,
+    -2.18,
+    0.0,
+    -0.508,
+    1.032,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "hourTraded": [
+    0,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    3,
+    1,
+    1,
+    0,
+    1,
+    1,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "checks": {
+    "pf": false,
+    "days": false,
+    "thirds": false,
+    "tradesPerDay": false,
+    "hours": false,
+    "clusters": false,
+    "leaveOneOut": false
+   },
+   "survives": false
+  }
+ }
+}

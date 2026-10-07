@@ -22,9 +22,33 @@ class ConnectionProfileTests(unittest.TestCase):
         self.assertFalse(live['activationPerformed'])
         self.assertEqual(live['changes']['minPf'], {'previous':1.26, 'proposed':EVAL_MIN_PF})
 
+    def test_shipped_overlays_have_no_duplicate_keys_and_match_the_profile(self):
+        # Duplicate JSON keys silently keep the LAST value (an 18h DDT edit
+        # was once shadowed by a stale 4h entry). The engine reads the
+        # overlays at runtime, so they must carry the profile the sims assume.
+        import json
+        profile = processing_profile()
+        universe = {"symbolsAll", "symbolsDynamic"}  # per-lane symbol universe stays an operator choice
+        for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json"):
+            dups = []
+
+            def hook(pairs, dups=dups):
+                out = {}
+                for key, value in pairs:
+                    if key in out:
+                        dups.append(key)
+                    out[key] = value
+                return out
+
+            ov = json.loads((ROOT / "server" / "pulse" / name).read_text(), object_pairs_hook=hook)
+            self.assertEqual(dups, [], name)
+            drift = {k: (ov.get(k), v) for k, v in profile.items() if k not in universe and ov.get(k) != v}
+            self.assertEqual(drift, {}, name)
+
     def test_eval_min_pf_is_selective_and_inside_the_slider_range(self):
-        self.assertEqual(EVAL_MIN_PF, 1.20)
-        self.assertGreater(EVAL_MIN_PF, 1.15)  # above the code default POSITIVE_PF
+        # Operator default 1.10 (Base 50 / Main 30 / Real 30).
+        self.assertEqual(EVAL_MIN_PF, 1.10)
+        self.assertGreater(EVAL_MIN_PF, 1.05)  # above the Micro floor
         self.assertLessEqual(EVAL_MIN_PF, 1.35)  # desk slider maximum (PF_MAX)
 
     def test_desk_default_matches_the_engine_profile(self):
@@ -39,8 +63,10 @@ class ConnectionProfileTests(unittest.TestCase):
         for key in ('maxPerGroup','setMaxActive','entryPolicyMaxCandidates'):
             self.assertEqual(p[key],0)
         self.assertEqual(p['maxOpen'],100)
-        self.assertEqual(p['histLookbackBars'],2880)
-        self.assertEqual(p['baseEvalPosCount'],30)
+        self.assertEqual(p['histLookbackBars'],720)
+        self.assertEqual(p['baseEvalPosCount'],50)
+        self.assertEqual(p['setPfWindow'],50)
+        self.assertEqual((p['mainEvalPosCount'],p['realEvalPosCount']),(30,30))
         self.assertEqual(p['symbolCap'],50)
         self.assertTrue(p['controlOrdersOverall'])
         self.assertTrue(p['symbolsAll'])

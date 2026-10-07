@@ -2,8 +2,7 @@ import type { ReactNode } from "react";
 import { lastNCostPf, formatDuration } from "@/lib/analytics";
 import { kindGateOpen, type KindStat, type LiveClosed, type LiveStats, type SideStat, type StrategyStat } from "@/lib/live-stats";
 import { pfClass } from "@/lib/status-tone";
-
-const INDICATION_KINDS = ["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const;
+import { INDICATION_KINDS, KIND_HINT, mergeKindTypes } from "@/lib/indication-kinds";
 const STRATEGY_KEYS = ["indications", "general", "block", "block:signals", "trailing", "dca", "exits"] as const;
 
 const KIND_SET = new Set<string>(INDICATION_KINDS);
@@ -14,9 +13,17 @@ function kindOf(c: LiveClosed): string {
   const reason = String(c.reason || "");
   if (reason.startsWith("ind:") || reason.startsWith("block:")) {
     const cand = (reason.split(":")[1] || "").toLowerCase();
-    return KIND_SET.has(cand) ? cand : reason.startsWith("ind:") ? "signals" : "";
+    // Unknown kinds are skipped (server stats_report._kind_of), never lumped into signals.
+    return KIND_SET.has(cand) ? cand : "";
   }
   return "";
+}
+
+function isOverlay(c: LiveClosed): boolean {
+  const pack = String(c.pack || "").toLowerCase();
+  const tagged = String(c.strategy || "").toLowerCase();
+  const head = String(c.reason || "").toLowerCase().split(":")[0].split(" ")[0] || "";
+  return tagged === "block" || tagged === "dca" || head.startsWith("block") || head.startsWith("dca") || pack === "block" || pack === "dca";
 }
 
 function stratsOf(c: LiveClosed): string[] {
@@ -60,7 +67,9 @@ function tapeStats(rows: LiveClosed[]): { n: number; pf: number; wr: number; byS
       sub.map((r) => ({ pnl: r.pnl, t: r.t, pnl_pct: r.pnl_pct })),
       Math.max(1, sub.length),
     );
-    return { n: sub.length, pf: s.ratio, wr: sub.filter((r) => r.pnl > 0).length };
+    const subDecided = sub.filter((r) => r.pnl !== 0).length;
+    // Percent, as the server's bySide wr.
+    return { n: sub.length, pf: s.ratio, wr: subDecided ? (100 * sub.filter((r) => r.pnl > 0).length) / subDecided : 0 };
   };
   return {
     n: rows.length,
@@ -69,17 +78,6 @@ function tapeStats(rows: LiveClosed[]): { n: number; pf: number; wr: number; byS
     bySide: { LONG: side("LONG"), SHORT: side("SHORT") },
   };
 }
-
-const KIND_HINT: Record<string, string> = {
-  state: "RSI / MACD / EMA pack + consensus",
-  signals: "1m / 5m / 15m source lanes",
-  active: "Outbreak ranges 3 / 5 / 10",
-  direction: "Two-window reversal",
-  move: "Same-window displacement",
-  common: "RSI + MACD + EMA + Bollinger",
-  trend: "Multi-window trend slope",
-  break: "Breakout / range escape",
-};
 
 const STRAT_HINT: Record<string, string> = {
   indications: "Indication pack entries",
@@ -96,12 +94,13 @@ function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
   const fromGate = stats?.sets?.indGate || stats?.coverage?.indicationGate || {};
   const live = stats?.indications?.kindStats || {};
   const hits = stats?.coverage?.indicationHits || stats?.indications?.typeHits || {};
-  const types = stats?.coverage?.indicationTypes || stats?.indications?.types || {};
+  const types = mergeKindTypes(stats?.indications?.types, stats?.coverage?.indicationTypes);
   const closed = stats?.closed ?? [];
   const byKind: Record<string, LiveClosed[]> = {};
   for (const c of closed) {
     const k = kindOf(c);
-    if (k) (byKind[k] ||= []).push(c);
+    // Block/DCA closes are strategy rows, not indication-kind rows (same as the server).
+    if (k && !isOverlay(c)) (byKind[k] ||= []).push(c);
   }
   const out: Record<string, KindStat> = {};
   for (const k of INDICATION_KINDS) {
@@ -109,13 +108,13 @@ function resolveKindStats(stats: LiveStats | null): Record<string, KindStat> {
     const g = fromGate[k] || {};
     const l = live[k] || {};
     const tape = byKind[k] ? tapeStats(byKind[k]) : null;
-    const n = Number(a.n || g.n || tape?.n || 0);
+    const n = Number(a.n ?? g.n ?? tape?.n ?? 0);
     const pf = Number(a.pf ?? g.pf ?? tape?.pf ?? 0);
     out[k] = {
       kind: k,
       n,
       pf,
-      wr: Number(a.wr ?? tape?.wr ?? 0),
+      wr: a.wr === null ? Number.NaN : Number(a.wr ?? tape?.wr ?? 0),
       maxDdS: Number(a.maxDdS ?? g.maxDdS ?? 0),
       avgDdS: Number(a.avgDdS ?? g.avgDdS ?? 0),
       netAvg: Number(a.netAvg ?? g.netAvg ?? 0),
@@ -150,9 +149,9 @@ function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyS
     const tape = buckets[k] ? tapeStats(buckets[k]) : null;
     out[k] = {
       strategy: k,
-      n: Number(a.n || tape?.n || 0),
-      pf: Number(a.pf || tape?.pf || 0),
-      wr: Number(a.wr || tape?.wr || 0),
+      n: Number(a.n ?? tape?.n ?? 0),
+      pf: Number(a.pf ?? tape?.pf ?? 0),
+      wr: Number(a.wr ?? tape?.wr ?? 0),
       maxDdS: Number(a.maxDdS || 0),
       avgDdS: Number(a.avgDdS || 0),
       netAvg: Number(a.netAvg || 0),
@@ -162,9 +161,8 @@ function resolveStrategyStats(stats: LiveStats | null): Record<string, StrategyS
       bySide: a.bySide || tape?.bySide,
     };
   }
-  if (!out.block?.n && stats?.block?.lanes?.length) {
-    out.block = { ...out.block, n: stats.block.lanes.length, enabled: stats.block.enabled !== false };
-  }
+  // Block n is closed Block trades (0 when none), never the lane / count-ladder size.
+  if (stats?.block) out.block = { ...out.block, enabled: stats.block.enabled !== false };
   if (!out.dca?.pf && stats?.dca?.last15Ratio != null) {
     out.dca = { ...out.dca, pf: Number(stats.dca.last15Ratio), enabled: Boolean(stats.dca.enabled) };
   }
@@ -229,7 +227,7 @@ export function IndicationKindsPanel({ stats }: { stats: LiveStats | null }) {
                   <td className="py-1.5 text-right text-muted">
                     {ln || sn ? `${lpf.toFixed(2)} / ${spf.toFixed(2)}` : "—"}
                   </td>
-                  <td className="py-1.5 text-right">{r.n ? `${Number(r.wr ?? 0).toFixed(0)}%` : "—"}</td>
+                  <td className="py-1.5 text-right">{r.n && Number.isFinite(Number(r.wr)) ? `${Number(r.wr).toFixed(0)}%` : "—"}</td>
                   <td className="py-1.5 text-right">{r.maxDdS ? formatDuration(Number(r.maxDdS) * 1000) : "—"}</td>
                   <td className={`py-1.5 ${r.ok === false ? "text-warn" : r.validated && r.profitable ? "text-primary" : "text-muted"}`}>
                     {r.ok === false ? "block" : r.validated ? (r.profitable ? "pass" : "fail") : "cold"}

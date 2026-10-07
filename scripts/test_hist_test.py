@@ -1046,7 +1046,9 @@ class HistTestContract(unittest.TestCase):
         self.assertEqual(view["phase"], "ready")
         self.assertIn("signals", view.get("byIndication") or {})
         self.assertIn("state", view.get("byIndication") or {})
-        self.assertEqual(len(view.get("positive") or []), 50)
+        # positive = what the run validated; the 50-major intern pool is internSymbols.
+        self.assertEqual(view.get("positive"), ["XRP-USDT", "SOL-USDT"])
+        self.assertEqual(len(view.get("internSymbols") or []), 50)
         self.assertNotIn("BONER-USDT", view.get("positive") or [])
 
     def test_indication_calc_view_covers_all_kinds_and_proven_floor(self):
@@ -1303,8 +1305,11 @@ class HistTestAuditRegressions(unittest.TestCase):
         self.assertEqual((ov["setMinStep"], ov["setStepMax"], ov["stratTrailing"]), (5, 20, False))
         for key in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "minPf"):
             self.assertEqual(ov[key], 1.3, key)
-        self.assertEqual(ov["setMaxDdTimeS"], 57600)
-        self.assertEqual(ov["setPfWindow"], 30)
+        self.assertEqual(ov["setMaxDdTimeS"], 64800)
+        # Stage windows follow the desk: the live book re-checks the replayed
+        # Base/Main/Real evidence on its own windows.
+        self.assertEqual(ov["setPfWindow"], 5)
+        self.assertIn("setPfWindow", job["options"]["deskKeys"])
         self.assertEqual(ov["histLookbackBars"], ht.lookback_bars(4))
         self.assertNotIn("leverage", ov)
         self.assertNotIn("symbols", ov)

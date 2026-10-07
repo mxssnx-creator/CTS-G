@@ -49,6 +49,7 @@ from set_engine import (
     synth_trend,
 )
 from validation_policy import control_min_trades
+from contracts import INDICATION_KINDS
 from storage_paths import atomic_write as storage_atomic_write, path_for
 from forced_configs import FORCED_SYMBOLS, mandatory_symbols, evaluate_symbol as evaluate_forced_symbol, summary as forced_summary
 
@@ -569,6 +570,14 @@ def public_presets() -> List[Dict[str, Any]]:
     return out
 
 
+def ind_type_key(kind: str) -> str:
+    """Historic calc toggle name for one indication kind (``indTypeState``)."""
+    return "indType" + str(kind)[:1].upper() + str(kind)[1:]
+
+
+IND_TYPE_KEYS = tuple(ind_type_key(kind) for kind in INDICATION_KINDS)
+
+
 def default_options() -> Dict[str, Any]:
     return {
         "hours": HOURS_DEFAULT,
@@ -581,14 +590,8 @@ def default_options() -> Dict[str, Any]:
         "stratGeneral": True,
         "allConfigs": True,
         "allSymbols": True,
-        "indTypeSignals": True,
-        "indTypeState": True,
-        "indTypeDirection": True,
-        "indTypeMove": True,
-        "indTypeActive": True,
-        "indTypeCommon": True,
-        "indTypeTrend": True,
-        "indTypeBreak": True,
+        # One toggle per indication kind, generated from the contract list.
+        **{ind_type_key(kind): True for kind in INDICATION_KINDS},
         # These live-selection coordination layers are opt-in. A historic
         # matrix still evaluates every catalog row regardless of these flags.
         "preferMinimalRange": False,
@@ -623,8 +626,7 @@ def parse_options(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if opt["stepMax"] < opt["minStep"]:
         opt["stepMax"] = opt["minStep"]
     for k in ("trailing", "stratBlock", "stratDca", "stratIndications", "stratGeneral", "allConfigs", "allSymbols",
-              "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon",
-              "indTypeTrend", "indTypeBreak", "preferMinimalRange", "additionalCoordination",
+              *IND_TYPE_KEYS, "preferMinimalRange", "additionalCoordination",
               "preferMinimalPositive", "minimalPositiveCoordination"):
         if k in body:
             opt[k] = bool(body[k])
@@ -894,7 +896,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "setMinSamples": int(opt.get("setMinSamples") or opt.get("baseEvalPosCount") or opt.get("setPfWindow") or 30),
         "setMinPf": POSITIVE_PF,
         "controlMinTrades": control_min_trades(opt.get("controlMinTrades")),
-        "setMaxDdTimeS": 57600,
+        "setMaxDdTimeS": 64800,
         "setLiveNegativeDeact": False,
         "setMinStep": int(opt.get("minStep") or 1),
         "setStepMax": int(opt.get("stepMax") or 30),
@@ -909,14 +911,7 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
         "histSimulateDca": True,
         "blockVolumeRatio": 0.25,
         "blockMaxStack": 6,
-        "indTypeState": bool(opt.get("indTypeState", True)),
-        "indTypeSignals": bool(opt.get("indTypeSignals", True)),
-        "indTypeDirection": bool(opt.get("indTypeDirection", True)),
-        "indTypeMove": bool(opt.get("indTypeMove", True)),
-        "indTypeActive": bool(opt.get("indTypeActive", True)),
-        "indTypeCommon": bool(opt.get("indTypeCommon", True)),
-        "indTypeTrend": bool(opt.get("indTypeTrend", True)),
-        "indTypeBreak": bool(opt.get("indTypeBreak", True)),
+        **{key: bool(opt.get(key, True)) for key in IND_TYPE_KEYS},
         "trailArmMin": 0.3,
         "trailArmMax": 1.5,
         "trailGiveMin": 0.1,
@@ -953,6 +948,15 @@ def overlay_from_options(opt: Dict[str, Any], extra: Optional[Dict[str, Any]] = 
     ov["setMinStep"] = int(opt.get("minStep") or 1)
     ov["setStepMax"] = max(ov["setMinStep"], int(opt.get("stepMax") or 30))
     ov["stratTrailing"] = bool(opt.get("trailing", True))
+    # The Calc panel's own pack / strategy / kind toggles win over the desk
+    # overlay merged above (only keys the panel actually sent).
+    for key in [k for k in opt if k.startswith("indType")] + ["stratIndications", "stratGeneral", "stratBlock", "stratDca"]:
+        if key in opt and opt.get(key) is not None:
+            ov[key] = bool(opt.get(key))
+    if opt.get("stratBlock") is not None:
+        ov["blockEnabled"] = bool(opt.get("stratBlock"))
+    if opt.get("stratDca") is not None:
+        ov["dcaEnabled"] = bool(opt.get("stratDca"))
     return ov
 
 
@@ -1457,7 +1461,7 @@ def strategy_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]
             dir_n = int((group_dir_n.get(key) or {}).get(d) or 0)
             if not sub and not dir_n:
                 continue
-            stail = last_n_chrono(sub, win_n, ordered=True)
+            stail = last_n_chrono(sub, win_n)
             spf = last_n_cost_pf(stail, book.pf_n, book.cost_pct, ordered=True, simple=True)
             by_dir[d] = {
                 "n": dir_n or len(sub),
@@ -1592,6 +1596,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
     by_decided: Dict[str, int] = {}
     by_dd: Dict[str, List[Dict[str, float]]] = {}
     by_dir_n: Dict[str, Dict[str, int]] = {}
+    by_side_tape: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     parts = hist.values() if hist else (st.hist for st in book.by_idx)
     cost = book.cost_pct
     for tape in parts:
@@ -1615,6 +1620,11 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             buf.append(r)
             if len(buf) > trim_at:
                 by_tape[s] = last_n_chrono(buf, cap)
+            if dkey:
+                sbuf = by_side_tape.setdefault(s, {}).setdefault(dkey, [])
+                sbuf.append(r)
+                if len(sbuf) > trim_at:
+                    by_side_tape[s][dkey] = last_n_chrono(sbuf, cap)
             per_set.setdefault(s, []).append(r)
         for s, rows in per_set.items():
             by_dd.setdefault(s, []).append(drawdown_time(rows, ordered=True))
@@ -1634,16 +1644,18 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
         wins = int(by_wins.get(s) or 0)
         by_dir: Dict[str, Any] = {}
         for d in DIRECTIONS:
-            sub = filter_side(tail, d)
+            # Each direction from its own rows: a busy side must not push the
+            # other out of a pooled last-N window.
+            sub = (by_side_tape.get(s) or {}).get(d) or []
             if not sub:
                 continue
-            stail = last_n_chrono(sub, win_n, ordered=True)
+            stail = last_n_chrono(sub, win_n)
             spf = last_n_cost_pf(stail, book.pf_n, cost, ordered=True, simple=True)
             by_dir[d] = {
                 "n": int((by_dir_n.get(s) or {}).get(d) or len(sub)),
                 "pf": round(float(spf["ratio"]), 4),
                 "netAvg": round(float(spf.get("netAvg") or 0), 6),
-                "validated": int(spf["count"]) > 0 and is_positive_pf(spf["ratio"]),
+                "validated": int(spf["count"]) >= need and is_positive_pf(spf["ratio"]),
                 "evaluationWindows": evaluation_windows(
                     stail, cost, required_samples=need, ordered=True, simple=True
                 ),
@@ -1658,7 +1670,7 @@ def symbol_rollup(book: SetBook, hist: Optional[Dict[str, List[Dict[str, Any]]]]
             "maxDdS": round(float(dd.get("maxS") or 0), 1),
             "avgDdS": round(float(dd.get("avgS") or 0), 1),
             "wr": round(100.0 * wins / decided, 1) if decided else 0.0,
-            "validated": int(pf["count"]) > 0 and is_positive_pf(pf["ratio"]),
+            "validated": int(pf["count"]) >= need and is_positive_pf(pf["ratio"]),
             "costSubtracted": True,
             "evaluationWindows": evaluation_windows(
                 tail, cost, required_samples=need, ordered=True, simple=True
@@ -2638,7 +2650,9 @@ def run_calc(body: Optional[Dict[str, Any]] = None, persist: bool = True) -> Dic
                 by_sym = sym_fut.result()
                 by_dir = dir_fut.result()
                 by_strat = strat_fut.result()
-        combo = combo_evaluate(book, min_pf=float(getattr(book, "min_pf", 1.1) or 1.1), cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1), pf_n=int(getattr(book, "pf_n", 30) or 30))
+        need = book.eval_need() if callable(getattr(book, "eval_need", None)) else 8
+        combo = combo_evaluate(book, min_pf=float(getattr(book, "min_pf", 1.1) or 1.1), cost_pct=float(getattr(book, "cost_pct", 0.1) or 0.1),
+                               pf_n=int(getattr(book, "pf_n", 30) or 30), min_n=int(need))
         by_step = step_rollup(book)
         rows = [set_row(st, side) for _key, st, side, _v, _l in ranked[:120]]
         listings = catalog_listings(book, ranked, symbols)
@@ -2999,10 +3013,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
     capped = resolve_symbols({"symbols": [f"S{i}-USDT" for i in range(40)], "allSymbols": False, "symbolCap": 25})
     rec("resolve-respects-cap", capped[:25] == [f"S{i}-USDT" for i in range(25)] and capped[25:] == list(FORCED_SYMBOLS), str(capped))
     rec("opt-steps-full-default", parse_options({})["minStep"] == 1 and parse_options({})["stepMax"] == 30, str(parse_options({})))
-    rec("opt-ind-types-on", all(parse_options({})[k] is True for k in (
-        "indTypeSignals", "indTypeState", "indTypeDirection", "indTypeMove",
-        "indTypeActive", "indTypeCommon", "indTypeTrend", "indTypeBreak",
-    )))
+    rec("opt-ind-types-on", all(parse_options({})[k] is True for k in IND_TYPE_KEYS)
+        and len(IND_TYPE_KEYS) == len(INDICATION_KINDS))
+    rec("opt-ind-types-whitelist", all(parse_options({k: False})[k] is False for k in IND_TYPE_KEYS))
+    rec("opt-coord-n-default-50", parse_options({})["coordOptimizationN"] == 50)
     rec("opt-hours-default-48", parse_options({})["hours"] == 48)
     rec("opt-hours-nested-options", parse_options({"options": {"hours": 7}})["hours"] == 7, str(parse_options({"options": {"hours": 7}})))
     rec("opt-force-pack", parse_options({"stratIndications": False, "stratGeneral": False})["stratIndications"] is True)

@@ -8,6 +8,7 @@ import {
   ShieldAlert,
   Wallet,
 } from "lucide-react";
+import { kindShort } from "@/lib/indication-kinds";
 import { fetchLiveStats, pickView, deskPollMs, statsUnchanged, formatPosOrders, formatEffectiveSets, costPfWindow, type LiveStats } from "@/lib/live-stats";
 import { startPolling } from "@/lib/polling";
 import { SystemHealthFooter } from "@/components/system-health";
@@ -292,6 +293,18 @@ function DeskPage() {
           )}
         </Panel>
       </section>
+
+      {stats?.htf?.enabled || stats?.liveEdge || stats?.sizing ? (
+        <section className="grid gap-3 lg:grid-cols-2">
+          <Panel title="1h lane" icon={<Layers className="size-4" />}>
+            <HtfPanel htf={stats?.htf} />
+          </Panel>
+          <Panel title="Live edge" icon={<ShieldAlert className="size-4" />}>
+            <LiveEdgePanel edge={stats?.liveEdge} />
+            <SizingLine sizing={stats?.sizing} />
+          </Panel>
+        </section>
+      ) : null}
 
       <section className="rounded-radius border border-border bg-surface p-4">
         <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">
@@ -948,7 +961,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px]">
-        {(["state", "signals", "active", "direction", "move", "common", "trend", "break"] as const).map((k) => {
+        {(["state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse"] as const).map((k) => {
           const row = kinds[k];
           const on = ind?.types?.[k] !== false;
           return (
@@ -968,7 +981,7 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
               <span className="text-fg">{s.symbol.replace("-USDT", "")}</span>
               <span className="ml-2 text-muted">
                 {Object.entries(s.kinds || {})
-                  .map(([k, v]) => `${k[0]}${v.dir === "short" ? "−" : "+"}`)
+                  .map(([k, v]) => `${kindShort(k)}${v.dir === "short" ? "−" : "+"}`)
                   .join(" ")}
               </span>
             </div>
@@ -999,6 +1012,75 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
         </div>
       )}
     </div>
+  );
+}
+
+function HtfPanel({ htf }: { htf?: LiveStats["htf"] }) {
+  if (!htf?.enabled) return <p className="text-sm text-muted">1h lane off on this desk</p>;
+  if (htf.error) return <p className="text-sm text-danger">{htf.error}</p>;
+  const kinds = Object.entries(htf.kinds ?? {});
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-muted">
+        {htf.symbols ?? 0} symbols · {(htf.open ?? []).length} open · {htf.queued ?? 0} queued
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-xs tabular-nums">
+          <thead className="text-muted">
+            <tr><th className="text-left">kind</th><th className="text-left">exit</th><th>PF (n)</th><th>source</th><th>live</th><th>L</th><th>S</th></tr>
+          </thead>
+          <tbody>
+            {kinds.map(([k, v]) => (
+              <tr key={k} className="border-t border-border">
+                <td className="py-0.5 text-left">{k}</td>
+                <td className="text-left text-muted">{v.exit}</td>
+                <td className="text-center">{v.pf == null ? "–" : v.pf.toFixed(2)} ({v.n})</td>
+                <td className="text-center text-muted">{v.source}</td>
+                <td className="text-center">{v.liveN ? `${v.livePf?.toFixed(2) ?? "–"} (${v.liveN})` : "–"}</td>
+                <td className={`text-center ${v.long.ok ? "text-primary" : "text-danger"}`} title={v.long.why}>{v.long.ok ? "on" : "off"}</td>
+                <td className={`text-center ${v.short.ok ? "text-primary" : "text-danger"}`} title={v.short.why}>{v.short.ok ? "on" : "off"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function LiveEdgePanel({ edge }: { edge?: LiveStats["liveEdge"] }) {
+  if (!edge) return <p className="text-sm text-muted">Waiting</p>;
+  if (edge.oneMinuteLanes === "off") return <p className="text-sm text-muted">1m lanes off on this desk</p>;
+  if (edge.oneMinuteLanes === "probe") return <p className="text-sm text-warn">1m lanes on probe: minimum lots only, no Block/DCA</p>;
+  if (!edge.enabled) return <p className="text-sm text-muted">Live edge guard off</p>;
+  return (
+    <dl className="grid grid-cols-2 gap-2 text-sm">
+      {(["LONG", "SHORT"] as const).map((side) => {
+        const s = edge[side];
+        return (
+          <div key={side} className="rounded border border-border p-2">
+            <dt className="text-muted">{side}</dt>
+            <dd className={s?.state === "probe" ? "text-danger" : s?.state === "edge" ? "text-primary" : "text-fg"}>
+              {s?.state ?? "–"} · PF {s?.pf == null ? "–" : s.pf.toFixed(2)} · {s?.n ?? 0}/{s?.need ?? edge.n}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
+
+function SizingLine({ sizing }: { sizing?: LiveStats["sizing"] }) {
+  if (!sizing) return null;
+  const minLot = sizing.orderSizing === "minQty";
+  const b = sizing.block;
+  return (
+    <p className="mt-3 text-xs text-muted">
+      {minLot ? "Minimum lot per order" : "Volume factor sizing"} ·{" "}
+      {sizing.leverageMode === "max" ? "max leverage" : "auto leverage"}
+      {sizing.pairs != null ? ` (${sizing.pairsAtMax ?? 0}/${sizing.pairs} pairs at max)` : ""}
+      {b ? ` · Block ${minLot ? "+1 lot" : `+${(b.effectiveRatio * 100).toFixed(0)}%`} per count, up to ${b.maxCounts}` : ""}
+    </p>
   );
 }
 

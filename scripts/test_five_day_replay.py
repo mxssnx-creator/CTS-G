@@ -61,7 +61,9 @@ class HistoricTests(unittest.TestCase):
     def test_full_catalog_cardinality_and_unique_parameters(self):
         from replay_complete import grids
         g=grids()
-        self.assertEqual(len(g['catalog']),30*22*26*2)
+        from risk_variants import TRAIL_ARM_MAX, TRAIL_ARM_MIN_DEFAULT, TRAIL_GIVE_MAX, TRAIL_GIVE_MIN_DEFAULT, trail_grid
+        trails=len(trail_grid(TRAIL_ARM_MIN_DEFAULT,TRAIL_ARM_MAX,TRAIL_GIVE_MIN_DEFAULT,TRAIL_GIVE_MAX))
+        self.assertEqual(len(g['catalog']),30*22*(1+trails)*2)
         self.assertEqual(len(g['adjustments']),55*81)
         for rows in g.values():
             self.assertEqual(len({tuple(r.items()) for r in rows}),len(rows))

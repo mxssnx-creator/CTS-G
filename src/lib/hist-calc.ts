@@ -1,3 +1,5 @@
+import { IND_TYPE_KEYS, type IndicationKind } from "./indication-kinds.ts";
+
 export type HistCalcKind = {
   kind: string;
   n?: number;
@@ -107,14 +109,6 @@ export type HistCalcOptions = {
   allConfigs: boolean;
   allSymbols: boolean;
   symbolCap?: number;
-  indTypeSignals: boolean;
-  indTypeState: boolean;
-  indTypeDirection: boolean;
-  indTypeMove: boolean;
-  indTypeActive: boolean;
-  indTypeCommon: boolean;
-  indTypeTrend: boolean;
-  indTypeBreak: boolean;
   /** Prefer the smallest stable ranges after PF/DD/sample gates. */
   preferMinimalRange: boolean;
   /** Evaluate the independent 50+ close coordination window. */
@@ -123,7 +117,10 @@ export type HistCalcOptions = {
   preferMinimalPositive?: boolean;
   minimalPositiveCoordination?: boolean;
   coordOptimizationN: number;
-};
+} & IndTypeFlags;
+
+/** One historic calc toggle per indication kind (`indTypeState`, ...). */
+export type IndTypeFlags = { [K in IndicationKind as `indType${Capitalize<K>}`]: boolean };
 
 export type ForcedConfigRow = {
   id: string; symbol: string; indication: string; direction: string;
@@ -317,17 +314,11 @@ export const DEFAULT_CALC_OPTIONS: HistCalcOptions = {
   allConfigs: true,
   allSymbols: true,
   symbolCap: 50,
-  indTypeSignals: true,
-  indTypeState: true,
-  indTypeDirection: true,
-  indTypeMove: true,
-  indTypeActive: true,
-  indTypeCommon: true,
-  indTypeTrend: true,
-  indTypeBreak: true,
+  ...(Object.fromEntries(IND_TYPE_KEYS.map((key) => [key, true])) as IndTypeFlags),
   preferMinimalRange: false,
   additionalCoordination: false,
-  coordOptimizationN: 150,
+  // Same default as the engine (hist_calc.default_options).
+  coordOptimizationN: 50,
 };
 
 export const CALC_RUNNING_PHASES = [

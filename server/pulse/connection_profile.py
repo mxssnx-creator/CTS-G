@@ -24,12 +24,13 @@ def connection_endpoint(connection, configured_url="", is_testnet="", *, vst_onl
     return ENDPOINTS[connection]
 
 
-# Shared evaluation minimum PF (Base, Main, Real, DCA, exits). Walk-forward over
-# two consecutive 12h windows (scripts/min_pf_sweep.py, reports/min-pf-sweep.md)
-# admitted 40% of entry candidates at 1.02 and ~15-20% at 1.20. The effect on PF
-# is not stable (one window improved with the floor, the other got worse), so this
-# is a selectivity setting, not a guarantee of profitable Sets. Slider range 1.02-1.35.
-EVAL_MIN_PF = 1.20
+# Shared evaluation minimum PF (Base, Main, Real, DCA, exits). Operator default
+# 1.10 with the Base 50 / Main 30 / Real 30 windows below (chosen from the
+# 12-symbol 6h sweeps, reports/sim-6h-12sym-*). Earlier walk-forwards admitted
+# 40% of entry candidates at 1.02 and ~15-20% at 1.20, and the effect on PF was
+# not stable across windows: this is a selectivity setting, not a guarantee of
+# profitable Sets. Slider range 1.02-1.35; Micro (1.05) stays below it.
+EVAL_MIN_PF = 1.10
 
 # Order requests per second per lane. BingX allows 10 placements per second per IP
 # (since 2025-10-16); Mainnet and VST can share one IP, so two lanes at 4.0 leave
@@ -41,7 +42,7 @@ BATCH_RPS = 2.0  # batchOrders has its own 5 / s venue quota; two lanes at 2.0 l
 
 def processing_profile():
     """One explicit profile for both lanes; no account/state/credential copy."""
-    result = dict(histLookbackBars=2880, baseEvalPosCount=30, setPfWindow=30, setMinSamples=30, setDeactN=25, controlMinTrades=0,
+    result = dict(histLookbackBars=720, volumeFactor=0.1, orderSizing="minQty", slAutoLeverage=False, marginCapPct=0.1, setHistTimeBars=30, shortMaxHoldS=1800, scratchS=7200, microEnabled=True, microMinPf=1.05, microMaxShare=0.05, liveEdgeGuard=True, liveEdgeN=50, liveEdgeProbeShare=0.25, venueSlTicks=3, baseEvalPosCount=50, mainEvalPosCount=30, realEvalPosCount=30, setPfWindow=50, setMinSamples=30, setMaxDdTimeS=64800, setDeactN=25, controlMinTrades=0,
                   maxOpen=100, maxPerGroup=0, setMaxActive=0, entryPolicyMaxCandidates=0, entryPolicyMinLiveSamples=0,
                   # Ranked 50-symbol book. maxOpen=100 is the effective-position
                   # cap (symbol × LONG/SHORT). Independent intern, Block, DCA
@@ -51,10 +52,16 @@ def processing_profile():
                   symbolsAll=True, symbolsDynamic=True, symbolCap=50,
                   maxRealSets=0, strategyLiveSetsCeiling=0,
                   strategyRealSetsSafetyCeiling=0,
-                  axisPrevEnabled=False, axisLastEnabled=False,
-                  axisContEnabled=False, axisPauseEnabled=False, normalExecutionEnabled=True,
+                  axisPrevEnabled=True, axisLastEnabled=True,
+                  axisContEnabled=True, axisPauseEnabled=True, normalExecutionEnabled=True,
                   stratTrailing=True, setUseHistoricGate=True, setStrictGate=True,
-                  controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True)
+                  controlOrdersPerConfig=True, controlOrdersOverall=True, controlOrders=True,
+                  # PositionCost 0.18 % (TP = step x cost); wider SL floor and
+                  # trailing minimums. All remain desk settings.
+                  positionCostPct=0.18, positionCostFallbackPct=0.18,
+                  slMinPct=0.6, trailArmMin=0.6, trailGiveMin=0.2,
+                  # TP = step x 0.10 %: the target grid does not stretch with the cost.
+                  tpStepPct=0.1)
     for key in ("minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"):
         result[key] = EVAL_MIN_PF
     # Order lane: the same ceiling on both lanes (BingX allows 10 placements/s per

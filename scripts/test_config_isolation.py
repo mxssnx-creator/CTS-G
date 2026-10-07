@@ -26,6 +26,8 @@ def tape(pf=1.2, n=75, **kw):
 def book(*states):
     b = SetBook(); b.by_idx=list(states); b.sets={s.id:s for s in states}
     b.progress.ready=True
+    # Regular-tier isolation contract; the Micro tier has its own tests.
+    b.micro_enabled = False
     return b
 
 
@@ -87,16 +89,17 @@ class ConfigIsolationTests(unittest.TestCase):
     def test_stages_count_their_own_samples_and_have_unique_records(self):
         st=state(hist=tape(1.2,n=30));b=book(st);b._score_pair((st,None))
         records=[b.stage_record(st,name) for name in ('base','main','real')]
-        self.assertEqual([r.sample_count for r in records],[30,5,3])
-        self.assertEqual([r.required_samples for r in records],[30,5,3])
+        want=[30,b.main_eval,b.real_eval]  # Base window 30; Main/Real follow the configured windows
+        self.assertEqual([r.sample_count for r in records],want)
+        self.assertEqual([r.required_samples for r in records],want)
         self.assertEqual(len({r.dedupe_key for r in records}),3)
         self.assertTrue(all(r.confidence==1 and not r.insufficient_sample for r in records))
         flow=b.stage_flow()['stages']
-        self.assertEqual([flow[n]['sampleCount'] for n in ('Base','Main','Real')],[30,5,3])
+        self.assertEqual([flow[n]['sampleCount'] for n in ('Base','Main','Real')],want)
 
     def test_live_source_change_invalidates_equal_combined_tape(self):
         st=state(hist=tape(n=30));b=book(st)
-        b._score_pair((st,None));st.live=[st.hist.pop()]
+        b._score_pair((st,None));st.live=[dict(st.hist.pop(),exchange_confirmed=True)]
         b._score_pair((st,None))
         self.assertEqual(b.score_completed,2)
         self.assertEqual(st.live_eval['n'],1)
@@ -105,7 +108,7 @@ class ConfigIsolationTests(unittest.TestCase):
         parent=state(0,hist=tape());child=state(1,kind='trail',trail_key='0.3:0.1',parent_set_id=parent.id)
         b=book(parent,child);b._score_pair((parent,None))
         rec=dict(tape(n=1)[0],set_id=parent.id,trail_set_id=child.id,
-                 client_id='own',close_fill_id='fill',strategy='core')
+                 client_id='own',close_fill_id='fill',strategy='core',exchange_confirmed=True)
         b.on_live_close(rec);b.on_live_close(rec)
         self.assertEqual(len(parent.live),0)
         self.assertEqual(len(child.live),1)

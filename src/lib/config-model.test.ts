@@ -17,6 +17,8 @@ import {
   HIST_TEST_REFRESH_DEFAULT,
   overlayEdits,
   SCRATCH_S_MAX,
+  AXIS_SPECS,
+  clampAxisWindow,
   type PulseOverlay,
 } from "./config-model.ts";
 import { CONFIG_PRESETS, applyPresetPatch } from "./config-presets.ts";
@@ -69,8 +71,10 @@ test("SQLite RAM defaults and disk selection survive the complete settings round
 });
 
 test("the shared eval floor is selective and still inside the slider range", () => {
-  assert.equal(EVAL_MIN_PF, 1.2);
-  assert.ok(EVAL_MIN_PF > POSITIVE_PF && EVAL_MIN_PF <= PF_MAX && EVAL_MIN_PF >= PF_MIN);
+  // Operator default 1.10 (Base 50 / Main 30 / Real 30): above the Micro floor
+  // (1.05), inside the slider range.
+  assert.equal(EVAL_MIN_PF, 1.1);
+  assert.ok(EVAL_MIN_PF > 1.05 && EVAL_MIN_PF <= PF_MAX && EVAL_MIN_PF >= PF_MIN);
   // The Python profile seeds the same value into both lane overlays.
   for (const id of ["bingx-x01", "bingx-x02"]) {
     const seed = laneFile(id);
@@ -83,9 +87,10 @@ test("PF, DD and dynamic cost defaults share the requested policy", () => {
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     for (const key of ["minPf", "baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf"] as const)
       assert.equal(value[key], EVAL_MIN_PF, key);
-    assert.equal(value.maxDdTimeS, 57600);
-    assert.equal(value.setMaxDdTimeS, 57600);
-    assert.equal(value.positionCostFallbackPct, 0.1);
+    assert.equal(value.maxDdTimeS, 64800);
+    assert.equal(value.setMaxDdTimeS, 64800);
+    assert.equal(value.positionCostFallbackPct, 0.18);
+    assert.equal(value.positionCostPct, 0.18);
     assert.equal(value.useLivePositionCosts, true);
   }
 });
@@ -94,7 +99,10 @@ test("risk and step limits preserve unlimited TP and the 0.4 percent SL floor", 
   for (const value of [DEFAULT_OVERLAY, overlayFromCts({})]) {
     assert.equal(value.tpMinPct, .3);
     assert.equal(value.tpMaxPct, 0);
-    assert.equal(value.slMinPct, .4);
+    // Default SL min 0.6 %; 0.4 % stays the hard floor (below).
+    assert.equal(value.slMinPct, .6);
+    assert.equal(value.trailArmMin, .6);
+    assert.equal(value.trailGiveMin, .2);
     assert.equal(value.indStopMinPct, .4);
     assert.equal(value.slMaxPct, 3);
     assert.equal(value.setMinStep, 7);
@@ -121,8 +129,8 @@ test("saving a measured cost never overwrites the explicit fallback", () => {
   }));
   assert.equal(value.positionCostPct, 0.087);
   assert.equal(value.positionCostFallbackPct, 0.1);
-  assert.equal(value.maxDdTimeS, 57600);
-  assert.equal(value.setMaxDdTimeS, 57600);
+  assert.equal(value.maxDdTimeS, 86400);
+  assert.equal(value.setMaxDdTimeS, 86400);
 });
 
 test("new and legacy settings default to ranked 50, 100 opens, independent lanes", () => {
@@ -152,11 +160,11 @@ test("new and legacy settings default to ranked 50, 100 opens, independent lanes
     assert.equal(rankedSymbolCap(value), DEFAULT_SYMBOL_COUNT);
     assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.baseMinPf, EVAL_MIN_PF);
-    assert.equal(value.histLookbackBars, 2880);
+    assert.equal(value.histLookbackBars, 720);
     assert.equal(value.histTestHours, 20);
     assert.equal(value.histTestMinPf, 1.15);
     assert.equal(value.histTestEnabled, true);
-    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.baseEvalPosCount, 50);
     assert.equal(value.setMinStep, 7);
   }
 });
@@ -210,7 +218,7 @@ test("historic test hours stay 4–64 default 20 and min PF 1.15", () => {
   assert.equal(low.histTestHours, 4);
   const mid = syncOverlayFlags(overlayFromCts({}, { histTestHours: 20, histTestMinPf: 1.15 }));
   assert.equal(mid.histTestHours, 20);
-  assert.equal(mid.histLookbackBars, 2880);
+  assert.equal(mid.histLookbackBars, 720);
   const shifted = syncOverlayFlags(overlayFromCts({}, { histTestHours: 48, histLookbackBars: 2880, histTestMinPf: 1.15 }));
   assert.equal(shifted.histTestHours, 48);
   assert.equal(shifted.histLookbackBars, 2880);
@@ -223,7 +231,7 @@ test("Control holdout defaults off and preserves zero independently of PF and la
   for (const controlMinTrades of [0, 5, 25, 100]) {
     const value = syncOverlayFlags(overlayFromCts({controlMinTrades:8}, {controlMinTrades}));
     assert.equal(value.controlMinTrades, controlMinTrades);
-    assert.equal(value.baseEvalPosCount, 30);
+    assert.equal(value.baseEvalPosCount, 50);
     assert.equal(value.minPf, EVAL_MIN_PF);
     assert.equal(value.controlOrdersPerConfig, true);
   }
@@ -264,7 +272,7 @@ test("forced symbol winners survive overlay roundtrip", () => {
   assert.equal(saved.forcedBest?.["BCH-USDT"]?.slPct, 0.25);
   assert.equal(saved.forcedBest?.["SOL-USDT"]?.indication, "trend");
   assert.equal(saved.tpPct, 0.6);
-  assert.equal(saved.slPct, 0.4);
+  assert.equal(saved.slPct, 0.6);
 });
 
 test("historic test refresh interval is 1–8 hours default 2", () => {
@@ -293,7 +301,9 @@ test("an Overall save applies only its edits on top of the target lane", () => {
   }
   assert.deepEqual(overlayEdits(baseline, { ...baseline }), {});
   // A preset value equal to the loaded default is still an explicit edit.
-  const vst = overlayFromCts({}, laneFile("bingx-x02"));
+  // A lane with its gates explicitly off (the shipped overlays now carry the
+  // profile's strict + historic gate): the preset still switches them on.
+  const vst = overlayFromCts({}, { ...laneFile("bingx-x02"), setUseHistoricGate: false, setStrictGate: false });
   const preset = applyPresetPatch(baseline, "tight-guard");
   const touched = Object.keys(CONFIG_PRESETS.find((p) => p.id === "tight-guard")?.patch ?? {});
   const saved = syncOverlayFlags({ ...vst, ...overlayEdits(baseline, preset, touched) });
@@ -335,13 +345,19 @@ test("saved trail ranges equal the reloaded full grid, so the catalog cannot fli
     for (const key of ["trailArmMin", "trailArmMax", "trailGiveMin", "trailGiveMax"] as const) {
       assert.equal(saved[key], reloaded[key], `${preset.id} ${key}`);
     }
-    assert.equal(saved.trailArmMin, 0.3);
-    assert.equal(saved.trailArmMax, 1.5);
+    assert.ok(saved.trailArmMin >= 0.3 && saved.trailArmMin <= saved.trailArmMax && saved.trailArmMax <= 1.5, preset.id);
+    assert.ok(saved.trailGiveMin >= 0.1 && saved.trailGiveMin <= saved.trailGiveMax && saved.trailGiveMax <= 0.5, preset.id);
   }
+  const plain = overlayFromCts({}, {});
+  assert.deepEqual([plain.trailArmMin, plain.trailArmMax, plain.trailGiveMin, plain.trailGiveMax], [0.6, 1.5, 0.2, 0.5]);
+  // Operator values are kept (snapped to the engine grid), not forced back.
+  const custom = overlayFromCts({}, { trailArmMin: 0.9, trailGiveMin: 0.33 });
+  assert.equal(custom.trailArmMin, 0.9);
+  assert.equal(custom.trailGiveMin, 0.3);
 });
 
 test("the Scratch s control range covers the engine default and saved overlays", () => {
-  assert.equal(DEFAULT_OVERLAY.scratchS, 600);
+  assert.equal(DEFAULT_OVERLAY.scratchS, 7200);
   assert.ok(SCRATCH_S_MAX >= DEFAULT_OVERLAY.scratchS);
   for (const id of ["bingx-x01", "bingx-x02"]) {
     assert.ok(Number(laneFile(id).scratchS) <= SCRATCH_S_MAX, id);
@@ -362,4 +378,62 @@ test("batch entry orders are off by default, seeded on for VST only, and keep a 
   assert.equal(on.entryBatchOrders, true);
   assert.equal(on.entryBatchSize, 5);
   assert.equal(syncOverlayFlags(overlayFromCts({}, { entryBatchSize: 0 })).entryBatchSize, 2);
+});
+
+test("every engine setting added to the desk round-trips a saved value and ships the engine default", () => {
+  const engineDefaults: Record<string, unknown> = {
+    mainEvalPosCount: 30, realEvalPosCount: 30, setDdtWindow: 0, setHistTimeBars: 30, shortMaxHoldS: 1800, setHonorTp: true,
+    setCooldownBars: 2, setScratchMin: 0.0016, histSimulateBlock: true, histSimulateDca: true, histExactWindow: false,
+    marginCapPct: 0.1, manualCloseLaneHoldS: 21600, exitMinSamples: 0, exitTacticMinGainPct: 0.15,
+    blockActiveLiveEnabled: true, blockActiveRealEnabled: true, variantBlockEnabled: true,
+    indDirRange: 10, indMoveRange: 10, indDirMinChange: 0.001, indMoveMinChange: 0.001, indActiveThreshold: 1,
+    indActiveMovePct: 0.5, indMsiMinGap: 5, indVwapDevZ: 2, indVwapVolMult: 1.8, indRetestTol: 0.12,
+    indRetestMinBreak: 0.08, indSqueezePctl: 0.2, indSweepWickAtr: 0.25, indRsi2Low: 10, indRsi2High: 90,
+    indKeltnerMult: 2, indImpulseSigma: 3, indImpulseVolMult: 2, actSweepMin: 0.04, actRsi2Min: 0.03,
+    actKeltnerMin: 0.04, actImpulseMin: 0.03, microEnabled: true, microMinPf: 1.05, microMaxShare: 0.05,
+    venueSlTicks: 3, setMaxDdTimeS: 64800, setStrictGate: true, setUseHistoricGate: true,
+  };
+  const fresh = overlayFromCts({}) as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(engineDefaults)) assert.deepEqual(fresh[key], value, `default ${key}`);
+  const saved: Record<string, unknown> = {
+    mainEvalPosCount: 0, realEvalPosCount: 25, setDdtWindow: 96, setHistTimeBars: 60, shortMaxHoldS: 900, setHonorTp: false,
+    setCooldownBars: 5, setScratchMin: 0.003, histSimulateBlock: false, histSimulateDca: false, histExactWindow: true,
+    marginCapPct: 0.25, manualCloseLaneHoldS: 3600, exitMinSamples: 20, exitTacticMinGainPct: 0.3,
+    blockActiveLiveEnabled: false, indRsi2Low: 5, indImpulseSigma: 4, actSweepMin: 0, microEnabled: false,
+    microMaxShare: 0.2, venueSlTicks: 7, indMoveRanges: [10, 25],
+  };
+  const reloaded = overlayFromCts({}, saved as never) as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(saved)) assert.deepEqual(reloaded[key], value, `saved ${key}`);
+});
+
+test("the desk axis specs mirror coord_engine.AXIS_SPECS and clamp like clamp_window", () => {
+  const py = readFileSync(new URL("../../server/pulse/coord_engine.py", import.meta.url), "utf8");
+  for (const [axis, spec] of Object.entries(AXIS_SPECS)) {
+    const m = py.match(new RegExp(`"${axis}": \\{"min": (\\d+), "max": (\\d+), "step": (\\d+), "default": (\\d+)\\}`));
+    assert.ok(m, axis);
+    assert.deepEqual([spec.min, spec.max, spec.step, spec.default], m!.slice(1).map(Number), axis);
+  }
+  assert.equal(clampAxisWindow("prev", 11), 11);
+  assert.equal(clampAxisWindow("prev", 2), 4);
+  assert.equal(clampAxisWindow("prev", 99), 12);
+  assert.equal(clampAxisWindow("last", "x"), AXIS_SPECS.last.default);
+  const saved = overlayFromCts({}, { axisPrevMaxWindow: 3, axisLastMaxWindow: 9, axisContMaxWindow: 5, axisPauseMaxWindow: 0 });
+  assert.deepEqual([saved.axisPrevMaxWindow, saved.axisLastMaxWindow, saved.axisContMaxWindow, saved.axisPauseMaxWindow], [4, 4, 5, 1]);
+  assert.equal(DEFAULT_OVERLAY.axisPrevMaxWindow, 12);
+});
+
+test("desk ranges and TP grid unit match both lane overlays", () => {
+  const keys = ["indMsiRanges", "indVwapRanges", "indRetestRanges", "indSqueezeRanges", "indSweepRanges",
+    "indRsi2Ranges", "indKeltnerRanges", "indImpulseRanges", "tpStepPct", "tpMinPct",
+    "setMinStep", "trailingMinStep"] as const;
+  for (const id of ["bingx-x01", "bingx-x02"]) {
+    const lane = laneFile(id) as Record<string, unknown>;
+    for (const key of keys) {
+      if (lane[key] === undefined) continue;
+      assert.deepEqual((DEFAULT_OVERLAY as unknown as Record<string, unknown>)[key], lane[key], `${id} ${key}`);
+    }
+  }
+  assert.equal(DEFAULT_OVERLAY.tpStepPct, 0.1);
+  // Top step stays below the TP cap, so no steps collapse onto tpMaxPct.
+  assert.ok(DEFAULT_OVERLAY.setStepMax * DEFAULT_OVERLAY.tpStepPct <= (DEFAULT_OVERLAY.tpMaxPct || Infinity));
 });

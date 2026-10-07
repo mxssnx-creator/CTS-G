@@ -84,7 +84,7 @@ def variants(parent,admission='strict'):
                 admission=admission,
                 mode='Axis + Block' if axis and blocks else ('Axis' if axis else ('Block' if blocks else 'Baseline')))
             rows.append(cfg)
-    assert len(rows)==806
+    assert len(rows)==(1+len(AXES))*(1+6*len(BLOCK_RATIOS))
     return rows
 
 def parent_observations(bars,signals,side,cfg,start_ms):

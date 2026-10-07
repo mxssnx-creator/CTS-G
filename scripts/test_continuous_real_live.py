@@ -111,7 +111,7 @@ class ContinuousTests(AllValidEntries):
 
     def test_deactivation_uses_exact_window(self):
         b=self.book(1);b.deact_n=5;st=b.by_idx[0]
-        st.live=[dict(row,pnl=-1.,pnl_pct=-.009) for row in self.tape(4)]
+        st.live=[dict(row,pnl=-1.,pnl_pct=-.009,exchange_confirmed=True) for row in self.tape(4)]
         self.assertTrue(b._live_entry_allowed(st,'LONG'))
         st.live.append(dict(st.live[-1],t=5000))
         self.assertFalse(b._live_entry_allowed(st,'LONG'))
@@ -175,6 +175,7 @@ class ContinuousTests(AllValidEntries):
             "setMinPf": 1.1,
             "minPf": 1.1,
             "slToTpRatios": [0.6],
+            "slMinPct": 0.4,
             "setMinStep": 8,
             "setStepMax": 8,
             "stratTrailing": False,

@@ -127,12 +127,12 @@ def overlay_test() -> None:
         rec(f"{name}-indication-types", all(ov.get(k, True) is True for k in ("indTypeState", "indTypeDirection", "indTypeMove", "indTypeActive", "indTypeCommon", "indTypeSignals", "indTypeTrend", "indTypeBreak")))
         rec(f"{name}-tf", all(ov.get(k, True) for k in ("tf1m", "tf5m", "tf15m")))
         rec(f"{name}-min-step", int(ov.get("minStep") or 0) == 7 and int(ov.get("trailingMinStep") or 0) == 7)
-        rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.4) < 1e-9, str(ov.get("slMinPct")))
+        rec(f"{name}-sl-min", abs(float(ov.get("slMinPct") or 0) - 0.6) < 1e-9, str(ov.get("slMinPct")))
         rec(f"{name}-ind-sl-min", abs(float(ov.get("indStopMinPct") or 0) - 0.4) < 1e-9, str(ov.get("indStopMinPct")))
         # Seed lanes carry the deployed evaluation minimum PF, shared by all seven stage keys.
         rec(f"{name}-min-pf", abs(float(ov.get("minPf") or 0) - EVAL_MIN_PF) < 1e-9, str(ov.get("minPf")))
         rec(f"{name}-min-pf-shared", all(abs(float(ov.get(k) or 0) - EVAL_MIN_PF) < 1e-9 for k in ("baseMinPf", "mainMinPf", "realMinPf", "setMinPf", "dcaMinPf", "exitMinPf")))
-        rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 2880)
+        rec(f"{name}-lookback", int(ov.get("histLookbackBars") or 0) == 720)
         rec(f"{name}-hist-test-hours", int(ov.get("histTestHours") or 0) == 20, str(ov.get("histTestHours")))
         rec(f"{name}-hist-test-min-pf", abs(float(ov.get("histTestMinPf") or 0) - 1.15) < 1e-9, str(ov.get("histTestMinPf")))
         rec(f"{name}-full-risk-grid", ov.get("slToTpMin") == 0.1 and ov.get("slToTpMax") == 3.0 and ov.get("slToTpStep") == 0.1 and len(ov.get("slToTpRatios") or []) == 30)
@@ -180,7 +180,7 @@ def overlay_test() -> None:
     )
     x01 = json.load(open(os.path.join(DIR, "overlay-bingx-x01.json")))
     x02 = json.load(open(os.path.join(DIR, "overlay-bingx-x02.json")))
-    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 2880 and int(x01.get("histTestHours") or 0) == 20)
+    rec("hist-test-lookback-independent", int(x01.get("histLookbackBars") or 0) == 720 and int(x01.get("histTestHours") or 0) == 20)
     rec("isolation-lanes", True, "Gx01 vs Gx02 CID")
     rec("x01-max-book", bool(x01.get("symbolsAll")) and int(x01.get("symbolCap") or 0) == 50, f"all={x01.get('symbolsAll')} cap={x01.get('symbolCap')}")
     rec("x01-open-unlimited", int(x01.get("maxOpen") or 0) == 100, f"maxOpen={x01.get('maxOpen')} perGroup={x01.get('maxPerGroup')}")
@@ -593,6 +593,7 @@ def stage_engine_calc_test() -> None:
         "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
         "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
         "trailArmMin": 0.3, "trailArmMax": 0.3,
+        "microEnabled": False,  # Base-tier contract; Micro is checked below
     })
     rec("set-eval-overlay", book.main_eval == 7 and book.real_eval == 4, f"{book.main_eval}/{book.real_eval}")
     st = next(x for x in book.by_idx if x.kind == "base")
@@ -614,6 +615,37 @@ def stage_engine_calc_test() -> None:
         st.main_pf == 0.0 and st.real_pf == 0.0 and not st.stage_qualified
         and not bool((st.strategy_adjustments or {}).get("main", {}).get("evaluated")),
         f"stage={st.stage} windows={len(st.evaluation_windows or {})}")
+    # Same tape with the Micro tier on: PF 1.11 is below the 1.20 floor but
+    # above 1.05, so it is Micro with its own Main/Real evaluated at 1.05 and
+    # never reported as Base/Main/Real.
+    mbook = SetBook()
+    mbook.load({
+        "histEnabled": True, "setPfWindow": 15, "setMinSamples": 8,
+        "baseMinPf": 1.20, "mainMinPf": 1.20, "realMinPf": 1.20,
+        "mainEvalPosCount": 7, "realEvalPosCount": 4,
+        "setMinStep": 3, "setStepMax": 3, "slToTpRatios": [0.6],
+        "stratGeneral": True, "stratIndications": False, "stratTrailing": False,
+        "trailArmMin": 0.3, "trailArmMax": 0.3, "microEnabled": True, "microMinPf": 1.05,
+    })
+    mst = next(x for x in mbook.by_idx if x.kind == "base")
+    mst.hist = list(st.hist)
+    mbook._score_one(mst)
+    rec("set-micro-tier-below-base",
+        mst.stage == "Micro" and mst.micro and not (mst.stage_ledger or {}).get("base")
+        and mst.main_pf > 0.0 and mbook.qualified_stage_ids("base") == [],
+        f"stage={mst.stage} b={mst.base_pf} m={mst.main_pf} r={mst.real_pf}")
+    # Exchange-accepted SL floor: intern replay of a symbol binds the Set's
+    # SL to that symbol's venue floor; outside a replay the desk floor holds.
+    from position_cost import venue_sl_floor
+    fbook = SetBook()
+    fbook.sl_min, fbook.sl_max = 0.004, 0.03
+    fbook.set_symbol_sl_floors({"COARSE-USDT": venue_sl_floor(0.5, 0.001, 0.004, leverage=50)})
+    with fbook.sl_scope("COARSE-USDT"):
+        c_sl, c_tp = fbook.pair_sl_tp(0.005, 0.6)
+    d_sl, _ = fbook.pair_sl_tp(0.005, 0.6)
+    rec("set-venue-sl-floor-replay", abs(c_sl - 0.006) < 1e-12 and abs(d_sl - 0.004) < 1e-12 and c_tp * 0.6 >= c_sl - 1e-12,
+        f"coarse={c_sl} desk={d_sl} tp={c_tp}")
+    rec("venue-sl-floor-inside-liq", abs(venue_sl_floor(0.1, 0.001, 0.004, leverage=100) - 0.009) < 1e-12)
     rec_m = book.stage_record(st, "main")
     rec("set-stage-record-scale", abs(rec_m.net_pf - st.main_pf) < 1e-9 and rec_m.net_pf < 20,
         f"net={rec_m.net_pf} main={st.main_pf} classicNet={st.net_pf}")
@@ -1484,8 +1516,8 @@ def phantom_recon_test() -> None:
     p3.open["CTL-USDT"] = pos("CTL-USDT", age=3600, sl_oid="sl-1")
     for _ in range(8):
         p3.adopt_exchange_positions()
-    rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and p3.cooldown.get("CTL-USDT", 0) > time.time(),
-        f"book={list(p3.open)} cool={bool(p3.cooldown.get('CTL-USDT'))}")
+    rec("phantom-controlled-dropped", "CTL-USDT" not in p3.open and max((v for k, v in p3.cooldown.items() if str(k).startswith("CTL-USDT")), default=0) > time.time(),
+        f"book={list(p3.open)} cool={p3.cooldown}")
 
     # 6) negative control: position still live on the exchange is kept
     rows = [{"symbol": "REAL-USDT", "positionSide": "LONG", "positionAmt": "1.0",
@@ -1804,7 +1836,7 @@ def block_calc_test() -> None:
         p.lev_max = {"TST-USDT": 100}
         p.dca = SimpleNamespace(enabled=False, max_steps=0)
         p.notional_cap = lambda: 10**9
-        p.max_book_notional = lambda: 10**9
+        p.max_book_notional = lambda *a, **k: 10**9
         p.cap_order_qty = lambda c, px, qty, cap=None: float(qty)
         p.min_order_qty = lambda c, px: float(c.min_qty)
         p.leverage_for = lambda c: 100
@@ -1823,7 +1855,8 @@ def block_calc_test() -> None:
             pnl_pct = (avg_r + 1.0) * frac
             p.closed = [
                 SimpleNamespace(symbol="TST-USDT", side="LONG", pnl=pnl_pct, pnl_pct=pnl_pct,
-                                t=time.time() - i, ours=True, member_count=1)
+                                t=time.time() - i, ours=True, member_count=1,
+                                exchange_confirmed=True, client_id=f"tst{i}", qty=1.0, entry=100.0)
                 for i in range(int(set_n))
             ]
         p.open = {"TST-USDT": pt.Position(
@@ -1897,7 +1930,8 @@ def block_calc_test() -> None:
     pS.px["TST-USDT"] = 99.70
     pS.closed = [
         SimpleNamespace(symbol="TST-USDT", side="SHORT", pnl=c.pnl, pnl_pct=c.pnl_pct,
-                        t=c.t, ours=True, member_count=1)
+                        t=c.t, ours=True, member_count=1, exchange_confirmed=True,
+                        client_id=c.client_id, qty=1.0, entry=100.0)
         for c in pS.closed
     ]
     pS.block.lanes.clear()
@@ -1984,6 +2018,7 @@ def block_calc_test() -> None:
     pI = mk_trader(1.2, 1.5, 12)
     pI.sets.strict_gate = True
     pI.sets.min_samples = 8
+    pI.sets.main_eval, pI.sets.real_eval = 12, 3  # 12-close fixture windows
     st_split = SimpleNamespace(
         last15_ratio=1.0, last15_n=12,
         by_side={
@@ -2271,7 +2306,7 @@ def set_orders_test() -> None:
         p.position_cost_pct = 0.15
         p.tp_cost_ratio = 1.5
         p.size_qty = lambda c, px: 0.05
-        p.max_book_notional = lambda: 1e9
+        p.max_book_notional = lambda *a, **k: 1e9
         p.ensure_max_leverage = lambda s, force=False: 100
         p.leverage_for = lambda c: 100
         p.control_orders = True
@@ -2346,7 +2381,9 @@ def set_orders_test() -> None:
                 sl_px[b["symbol"]] = float(b.get("stopPrice") or 0)
             else:
                 tp_px[b["symbol"]] = float(b.get("stopPrice") or 0)
-    want_sl = {"AAA-USDT": 99.73, "BBB-USDT": 199.01, "CCC-USDT": 49.55}
+    # Each Set trades its own range (TP x SL ratio) up to slMaxPct: CCC is
+    # 0.65% x 1.5 = 0.975% (no longer clipped to the 0.9% exit band).
+    want_sl = {"AAA-USDT": 99.73, "BBB-USDT": 199.01, "CCC-USDT": 49.51}
     want_tp = {"AAA-USDT": 100.45, "BBB-USDT": 201.1, "CCC-USDT": 50.32}
     rec("setord-per-set-sl-distances",
         all(abs(sl_px[s] - want_sl[s]) < 1e-6 and abs(tp_px[s] - want_tp[s]) < 1e-6 for s in syms)
@@ -2648,7 +2685,9 @@ def strict_gate_test() -> None:
 
     def mk_book(winner: bool = True, strong: bool = False):
         b = se.SetBook()
+        # 12-15 close fixtures: pin the short Main/Real windows they were built for.
         b.load({"histEnabled": True, "setMinPf": 1.10, "setMinSamples": 8,
+                "mainEvalPosCount": 12, "realEvalPosCount": 3,
                 "stratIndications": True, "stratGeneral": True,
                 "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3,
                 "trailArmMin": 0.3, "trailArmMax": 0.3})
@@ -2792,7 +2831,7 @@ def strict_gate_test() -> None:
         p.skip_log = {}
         p.contracts = {"AAA-USDT": Contract("AAA-USDT", 0.001, 0.001, 3, 2, 1.0, 150)}
         p.size_qty = lambda c, px: 0.05
-        p.max_book_notional = lambda: 1000.0
+        p.max_book_notional = lambda *a, **k: 1000.0
         p.notional_cap = lambda: 250.0
         p.ensure_max_leverage = lambda s, force=False: None
         p.leverage_for = lambda c: 150
@@ -2948,7 +2987,7 @@ def dd_time_test() -> None:
     # 7) config model + desk expose the field
     cm = open(os.path.join(DIR, "..", "..", "src", "lib", "config-model.ts")).read()
     st = open(os.path.join(DIR, "..", "..", "src", "routes", "settings.tsx")).read()
-    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 57600," in cm)
+    rec("dd-time-config-model", "maxDdTimeS: number;" in cm and "maxDdTimeS: 64800," in cm)
     rec("dd-time-settings-ui", 'Max DD time min' in st and 'patch("maxDdTimeS", Math.max(10' in st)
 
 

@@ -14,6 +14,7 @@ import { IndicationKindsPanel, StrategyStatsPanel } from "@/components/kind-stra
 import { ActivityPanel } from "@/components/activity-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 import type { EvaluationWindow } from "@/lib/hist-calc";
+import { evaluationWindowKeys } from "@/lib/stage-windows";
 import { ForcedConfigsPanel } from "@/components/forced-configs";
 import { ComboEvalPanel } from "@/components/combo-eval-panel";
 import { SetGroups } from "@/components/set-groups";
@@ -270,7 +271,6 @@ function HtmlReportPanel({ conn }: { conn: string }) {
   );
 }
 
-const EVALUATION_WINDOW_KEYS = ["last5", "last10", "last15", "last25", "last50", "last75"] as const;
 
 function EvaluationWindowsStrip({ stats }: { stats: LiveStats | null }) {
   const windows = (stats?.pfCost?.evaluationWindows ?? stats?.sets?.liveOverview?.evaluationWindows ?? {}) as Record<
@@ -278,6 +278,7 @@ function EvaluationWindowsStrip({ stats }: { stats: LiveStats | null }) {
     EvaluationWindow
   >;
   const sets = stats?.sets;
+  const windowKeys = evaluationWindowKeys(windows);
   return (
     <section className="rounded-radius border border-border bg-surface p-4" data-testid="evaluation-windows">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
@@ -290,7 +291,7 @@ function EvaluationWindowsStrip({ stats }: { stats: LiveStats | null }) {
         </span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-        {EVALUATION_WINDOW_KEYS.map((key) => {
+        {windowKeys.map((key) => {
           const metric = windows[key] ?? {};
           const requested = Number(metric.requestedN ?? Number(key.replace("last", "")));
           const n = Number(metric.n ?? 0);
@@ -646,8 +647,8 @@ function ExitResults({ stats }: { stats: LiveStats | null }) {
               <th className="pb-2 font-medium">Lane</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last 15 PF</th>
-              <th className="pb-2 text-right font-medium">Last 25 R</th>
+              <th className="pb-2 text-right font-medium">Last {stats?.exits?.pfWindow ?? 15} PF</th>
+              <th className="pb-2 text-right font-medium">Last {stats?.exits?.deactN ?? 25} R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
             </tr>
           </thead>

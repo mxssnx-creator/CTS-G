@@ -222,7 +222,7 @@ test("indication Gate column follows the engine gate, not the profitability flag
 test("cost PF labels use the configured evaluation window", () => {
   assert.equal(costPfWindow({ pfCost: { n: 30 }, sets: { pfWindow: 20 } }), 30);
   assert.equal(costPfWindow({ sets: { pfWindow: 20 } }), 20);
-  assert.equal(costPfWindow(null), 15);
+  assert.equal(costPfWindow(null), 50); // Base window (50), not a stale 15
 });
 
 test("an idle intern book does not freeze catalog overviews", () => {
