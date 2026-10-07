@@ -283,12 +283,20 @@ class DrawdownTracker:
 # Engine setup
 # --------------------------------------------------------------------------
 
+# The live engine reads the desk overlay; connection_profile.processing_profile
+# is only a prepared patch (scripts/prepare_connection_profile.py). So the
+# overlay wins and the profile fills keys the overlay does not set. Sweeps that
+# inject their values through processing_profile set PROFILE_WINS.
+PROFILE_WINS = False
+
+
 def deployed_settings(overlay_path: str) -> Dict[str, Any]:
     _engine_path()
     from connection_profile import processing_profile
-    ov = json.load(open(overlay_path))
-    ov.update(processing_profile())
-    return ov
+    overlay = json.load(open(overlay_path))
+    if PROFILE_WINS:
+        return {**overlay, **processing_profile()}
+    return {**processing_profile(), **overlay}
 
 
 def make_book(overlay_path: str):
@@ -2022,9 +2030,12 @@ def main(argv=None) -> int:
     ap.add_argument("--fee-pct", type=float, default=None,
                     help="round-trip fee the account pays in percent (default: the PositionCost). Gates, PF and the "
                          "TP grid keep using the PositionCost hurdle.")
+    ap.add_argument("--profile-wins", action="store_true",
+                    help="apply connection_profile.processing_profile over the overlay (old behaviour)")
     args = ap.parse_args(argv)
-    global FEE_PCT
+    global FEE_PCT, PROFILE_WINS
     FEE_PCT = args.fee_pct
+    PROFILE_WINS = bool(args.profile_wins)
     _engine_path()
     cache = args.cache or os.path.join(os.environ["CTS_DATA_DIR"], "sim12h-cache")
     os.makedirs(cache, exist_ok=True)

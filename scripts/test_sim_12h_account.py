@@ -352,3 +352,20 @@ class StageParityWithEngineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeployedSettingsPrecedenceTest(unittest.TestCase):
+    def test_overlay_wins_over_the_profile_like_the_live_engine(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ov.json")
+            with open(path, "w") as fh:
+                json.dump({"setHistTimeBars": 120, "slMinPct": 0.4}, fh)
+            ov = sim.deployed_settings(path)
+            self.assertEqual((ov["setHistTimeBars"], ov["slMinPct"]), (120, 0.4))
+            self.assertIn("baseEvalPosCount", ov, "profile fills keys the overlay leaves out")
+            sim.PROFILE_WINS = True
+            try:
+                self.assertEqual(sim.deployed_settings(path)["setHistTimeBars"], 30)
+            finally:
+                sim.PROFILE_WINS = False

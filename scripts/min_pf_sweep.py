@@ -56,6 +56,7 @@ def main() -> int:
     import sim_12h_account as sim
 
     sim._engine_path()
+    sim.PROFILE_WINS = True  # the sweep injects its floors through processing_profile
     symbols = sorted(os.path.basename(f)[:-5] for f in glob.glob(os.path.join(args.data_dir, "*.json")))
     n_all = len(sim.load_symbol(args.data_dir, symbols[0])[0])
     original = cp.processing_profile
