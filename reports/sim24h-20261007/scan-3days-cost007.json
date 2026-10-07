@@ -1,0 +1,194 @@
+{
+ "costPct": 0.07,
+ "days": [
+  "10-04 20:00",
+  "10-05 20:00",
+  "10-06 20:00"
+ ],
+ "configs": 18000,
+ "positiveDay1": 66,
+ "positiveDay1and2": 4,
+ "day3OfSurvivors": {
+  "n": 4,
+  "positive": 0,
+  "sumNetPct": -33.21,
+  "trades": 205
+ },
+ "survivors": [
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.15|r2.0|h10",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.015,
+    0.015,
+    -4.882
+   ],
+   "netPerTrade": [
+    0.0003,
+    0.0002,
+    -0.1085
+   ],
+   "grossPerTrade": [
+    0.0703,
+    0.0702,
+    -0.0385
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.5|r0.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.03,
+    0.419,
+    -5.203
+   ],
+   "netPerTrade": [
+    0.0006,
+    0.0056,
+    -0.1156
+   ],
+   "grossPerTrade": [
+    0.0706,
+    0.0756,
+    -0.0456
+   ]
+  },
+  {
+   "family": "reversion",
+   "config": "tf15|L60z1.5|tp0.8|r0.5|h5",
+   "trades": [
+    46,
+    75,
+    45
+   ],
+   "netPctSum": [
+    0.525,
+    0.346,
+    -6.301
+   ],
+   "netPerTrade": [
+    0.0114,
+    0.0046,
+    -0.14
+   ],
+   "grossPerTrade": [
+    0.0814,
+    0.0746,
+    -0.07
+   ]
+  },
+  {
+   "family": "volume-fade",
+   "config": "tf1|m4.0z2.0|tp0.8|r1.5|h30",
+   "trades": [
+    86,
+    81,
+    70
+   ],
+   "netPctSum": [
+    0.914,
+    0.05,
+    -16.819
+   ],
+   "netPerTrade": [
+    0.0106,
+    0.0006,
+    -0.2403
+   ],
+   "grossPerTrade": [
+    0.0806,
+    0.0706,
+    -0.1703
+   ]
+  }
+ ],
+ "byFamily": {
+  "breakout": {
+   "configs": 1080,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "fade-breakout": {
+   "configs": 1080,
+   "day1": 17,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "momentum": {
+   "configs": 2520,
+   "day1": 4,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion": {
+   "configs": 2520,
+   "day1": 18,
+   "day1and2": 3,
+   "day3Positive": 0,
+   "day3SumNet": -16.39
+  },
+  "reversion-btc-calm": {
+   "configs": 2280,
+   "day1": 6,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion-confirm": {
+   "configs": 2520,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "reversion-with-trend": {
+   "configs": 1200,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "squeeze-breakout": {
+   "configs": 1200,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "trend-pullback": {
+   "configs": 720,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  },
+  "volume-fade": {
+   "configs": 1440,
+   "day1": 21,
+   "day1and2": 1,
+   "day3Positive": 0,
+   "day3SumNet": -16.82
+  },
+  "volume-follow": {
+   "configs": 1440,
+   "day1": 0,
+   "day1and2": 0,
+   "day3Positive": 0,
+   "day3SumNet": 0.0
+  }
+ }
+}

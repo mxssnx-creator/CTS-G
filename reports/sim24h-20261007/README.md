@@ -37,3 +37,17 @@
    - VST x02 stays on, so live evidence keeps accumulating.
    - The 1h lane is separate and unchanged.
 4. **Maker execution** (post-only entries, limit TP) cuts cost to about 0.04–0.07%, but that is still several times the measured gross edge. It is worth building only together with a signal whose gross clears about 0.07%.
+
+## Signal search on three 24h days (`scripts/scan_24h_days.py`)
+**Setup**
+- Days are the three 24h blocks ending Oct 7 20:00 UTC, on the 12 desk symbols.
+- 11 signal families on 1m, 5m and 15m bars; TP 0.1–0.8%; SL:TP 0.5–2; hold 3–30 min.
+- 18,000 configurations in total.
+- Rule: discover on day 1 (at least 40 trades and net positive), keep only what is still positive on day 2, judge on day 3.
+
+| Cost (round trip) | Positive on day 1 | Still positive on day 2 | Positive on day 3 |
+|---|---:|---:|---:|
+| 0.07% (maker entry and TP, taker SL) | 66 | 4 | **0 of 4** (Σ −33%) |
+| 0.04% (all maker) | 338 | 72 | **0 of 72** |
+
+No configuration that survived two days stayed positive on the third. The day-1 and day-2 "winners" are noise: about 1–2% of 18,000 configurations clear any bar by chance, and they do not repeat. Nothing ships from this search.
