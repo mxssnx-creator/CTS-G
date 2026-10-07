@@ -168,6 +168,7 @@
   "liveEdgeGuard": true,
   "liveEdgeN": 50,
   "liveEdgeProbeShare": 0.25,
+  "oneMinuteLanes": "probe",
   "microMinPf": 1.05,
   "setDeactN": 25,
   "setLiveNegativeDeact": true,

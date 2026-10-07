@@ -2027,6 +2027,19 @@ function SettingsPage() {
                   <Num label="Probe share" value={Math.round(overlay.liveEdgeProbeShare * 100)} min={0} max={100} step={1} unit="%"
                     hint="of maxOpen positions while guarded · 0 = no entries" onChange={(v) => patch("liveEdgeProbeShare", Math.max(0, Math.min(100, v)) / 100)} />
                 </Grid>
+                <label className="mt-3 block rounded-lg border border-border bg-bg2 px-3 py-3">
+                  <div className="font-mono text-xs text-muted">1m lanes</div>
+                  <select
+                    className="mt-2 min-h-11 w-full rounded-lg border border-border bg-surface px-2 font-mono text-sm"
+                    value={overlay.oneMinuteLanes || "on"}
+                    onChange={(e) => patch("oneMinuteLanes", e.target.value as "on" | "probe" | "off")}
+                  >
+                    <option value="on">on · full size</option>
+                    <option value="probe">probe · minimum lots, no Block/DCA</option>
+                    <option value="off">off · no new 1m entries</option>
+                  </select>
+                  <div className="mt-1 font-mono text-xs text-faint">The 1h lane has its own switch. Live x01 ships on probe until a change passes the 24h checks.</div>
+                </label>
               </Card>
               <Card title="1h lane (HTF)" hint="CTS-A-O robust core on 1h bars: RSI-momentum + 1h/4h-agreement kinds, volatility regime, wide exits (TP 3–10%, 24–48h), validated on 2 years of BingX 1h data (reports/htf-validation-20261007). Own SL/TP pair per lot; no Block/DCA adds">
                 <Grid>

@@ -494,6 +494,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   liveEdgeGuard: boolean;
   liveEdgeN: number;
   liveEdgeProbeShare: number;
+  /** 1m lanes: "on" full size, "probe" minimum lots only, "off" no new entries (1h lane separate). */
+  oneMinuteLanes: "on" | "probe" | "off";
   setLiveNegativeDeact: boolean;
   setUseHistoricGate: boolean;
   setStrictGate: boolean;
@@ -787,6 +789,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   liveEdgeGuard: true,
   liveEdgeN: 50,
   liveEdgeProbeShare: 0.25,
+  oneMinuteLanes: "on",
   // Live negative-result deactivation is an explicit safety policy, not an
   // implicit default for a newly created settings profile.
   setLiveNegativeDeact: false,
@@ -991,6 +994,7 @@ export type CtsSettings = {
   liveEdgeGuard?: boolean;
   liveEdgeN?: number;
   liveEdgeProbeShare?: number;
+  oneMinuteLanes?: string;
   setUseHistoricGate?: boolean;
   setStrictGate?: boolean;
   baseEvalPosCount?: number;
@@ -1310,6 +1314,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     liveEdgeGuard: bool(cts.liveEdgeGuard, true),
     liveEdgeN: Math.max(10, Math.min(500, Math.round(num(cts.liveEdgeN, 50)))),
     liveEdgeProbeShare: Math.max(0, Math.min(1, num(cts.liveEdgeProbeShare, 0.25))),
+    oneMinuteLanes: ((v) => (v === "probe" || v === "off" ? v : "on"))(String(live?.oneMinuteLanes ?? cts.oneMinuteLanes ?? "on")),
     setLiveNegativeDeact: bool(cts.setLiveNegativeDeact ?? cts.liveNegativeSetDeactivation, false),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setStrictGate: bool(cts.setStrictGate, true),

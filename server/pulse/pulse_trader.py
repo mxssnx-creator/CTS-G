@@ -1510,6 +1510,7 @@ class Pulse:
         self.live_edge_guard = True
         self.live_edge_n = LIVE_EDGE_N_DEFAULT
         self.live_edge_probe_share = LIVE_EDGE_PROBE_SHARE_DEFAULT
+        self.one_minute_lanes = "on"   # on | probe | off (the 1h lane is separate)
         self._live_edge_guarded: Dict[str, bool] = {}
         self._live_edge_cache: Optional[Tuple[Any, Dict[str, Dict[str, Any]]]] = None
         self._block_reference_anchors = ContinuationBook()
@@ -6898,6 +6899,8 @@ class Pulse:
         if self.entries_blocked():
             return
         htf_row = isinstance(forced_row, dict) and forced_row.get("lane") == "htf"
+        if not htf_row and getattr(self, "one_minute_lanes", "on") == "off":
+            return  # desk switch: no new 1m-lane entries (open lots keep their controls)
         if not htf_row and self.sets.enabled and self.sets.use_historic_gate and not getattr(
                 getattr(self.sets, "progress", None), "ready", False) and not (
                     selected_set is not None and self.partial_set_entries_allowed()
@@ -9469,6 +9472,8 @@ class Pulse:
         except (TypeError, ValueError):
             self.live_edge_probe_share = LIVE_EDGE_PROBE_SHARE_DEFAULT
         self._live_edge_cache = None
+        lanes = str(ov.get("oneMinuteLanes", cts.get("oneMinuteLanes", "on")) or "on").lower()
+        self.one_minute_lanes = lanes if lanes in ("on", "probe", "off") else "on"
         self.strat_general = True
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
@@ -11420,6 +11425,10 @@ class Pulse:
         ``edge``: full size."""
         want = str(side or "").upper()
         n = int(getattr(self, "live_edge_n", LIVE_EDGE_N_DEFAULT) or LIVE_EDGE_N_DEFAULT)
+        if getattr(self, "one_minute_lanes", "on") == "probe":
+            # Desk switch: 1m lanes trade probe lots until a change passes the
+            # 24h checks; live evidence keeps accumulating.
+            return {"state": "probe", "side": want, "n": 0, "need": n, "pf": None, "forced": True}
         if not getattr(self, "live_edge_guard", True):
             return {"state": "off", "side": want, "n": 0, "need": n, "pf": None}
         closed = getattr(self, "closed", None) or []
@@ -11496,7 +11505,8 @@ class Pulse:
     def _live_edge_snapshot(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"enabled": bool(getattr(self, "live_edge_guard", True)),
                                "n": int(getattr(self, "live_edge_n", LIVE_EDGE_N_DEFAULT) or 0),
-                               "probeShare": float(getattr(self, "live_edge_probe_share", LIVE_EDGE_PROBE_SHARE_DEFAULT) or 0)}
+                               "probeShare": float(getattr(self, "live_edge_probe_share", LIVE_EDGE_PROBE_SHARE_DEFAULT) or 0),
+                               "oneMinuteLanes": str(getattr(self, "one_minute_lanes", "on") or "on")}
         for d in ("LONG", "SHORT"):
             try:
                 out[d] = self.live_edge_state(d)

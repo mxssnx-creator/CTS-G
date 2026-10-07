@@ -273,7 +273,7 @@ export type SizingStats = {
 export type LiveStats = {
   system?: import("./system-settings").SystemStatus;
   htf?: HtfStats;
-  liveEdge?: { enabled: boolean; n: number; probeShare: number; LONG?: LiveEdgeSide; SHORT?: LiveEdgeSide };
+  liveEdge?: { enabled: boolean; n: number; probeShare: number; oneMinuteLanes?: string; LONG?: LiveEdgeSide; SHORT?: LiveEdgeSide };
   sizing?: SizingStats;
   positionCost?: {
     manualPct?: number;

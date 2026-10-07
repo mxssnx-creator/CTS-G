@@ -109,5 +109,35 @@ class LiveEdgeGuardTests(unittest.TestCase):
             self.assertAlmostEqual(ov["liveEdgeProbeShare"], 0.25)
 
 
+class OneMinuteLanesSwitchTests(unittest.TestCase):
+    def test_probe_forces_minimum_lots_on_both_sides_even_with_a_good_tape(self):
+        p = pulse()
+        p.closed = [close(2.0) for _ in range(50)]
+        self.assertEqual(p.live_edge_state("LONG")["state"], "edge")
+        p.one_minute_lanes = "probe"
+        for side in ("LONG", "SHORT"):
+            st = p.live_edge_state(side)
+            self.assertEqual((st["state"], st.get("forced")), ("probe", True))
+        self.assertEqual(p._live_edge_snapshot()["oneMinuteLanes"], "probe")
+
+    def test_off_blocks_new_1m_entries_but_not_the_1h_lane(self):
+        p = object.__new__(pt.Pulse)
+        p.one_minute_lanes = "off"
+        p._entry_mode_flags = lambda *a: (True, True, True)
+        p.entries_blocked = lambda: False
+        steps = p._place_steps("X-USDT", 1, "ind:x", 0.9, None, None, "normal")
+        self.assertEqual(list(steps), [])
+        # the 1h row passes the switch and reaches the next check (sets readiness)
+        p.sets = NS(enabled=True, use_historic_gate=True, progress=NS(ready=False))
+        with self.assertRaises(AttributeError):
+            list(p._place_steps("X-USDT", 1, "htf:k", 0.9, {"lane": "htf", "id": "htf:k:x"}, None, "normal"))
+
+    def test_live_ships_on_probe_vst_on(self):
+        import json
+        root = pathlib.Path(__file__).resolve().parents[1] / "server/pulse"
+        self.assertEqual(json.loads((root / "overlay-bingx-x01.json").read_text())["oneMinuteLanes"], "probe")
+        self.assertEqual(json.loads((root / "overlay-bingx-x02.json").read_text())["oneMinuteLanes"], "on")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1050,6 +1050,8 @@ function HtfPanel({ htf }: { htf?: LiveStats["htf"] }) {
 
 function LiveEdgePanel({ edge }: { edge?: LiveStats["liveEdge"] }) {
   if (!edge) return <p className="text-sm text-muted">Waiting</p>;
+  if (edge.oneMinuteLanes === "off") return <p className="text-sm text-muted">1m lanes off on this desk</p>;
+  if (edge.oneMinuteLanes === "probe") return <p className="text-sm text-warn">1m lanes on probe: minimum lots only, no Block/DCA</p>;
   if (!edge.enabled) return <p className="text-sm text-muted">Live edge guard off</p>;
   return (
     <dl className="grid grid-cols-2 gap-2 text-sm">
