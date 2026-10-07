@@ -2012,6 +2012,15 @@ function SettingsPage() {
                     hint="of maxOpen positions · 0 blocks Micro entries" onChange={(v) => patch("microMaxShare", Math.max(0, Math.min(100, v)) / 100)} />
                 </Grid>
               </Card>
+              <Card title="Live edge guard" hint="Per direction: when this desk's own last N confirmed exchange round trips are net negative (cost-PF < 1.00), entries trade one venue-minimum probe lot and Block/DCA adds stop, until the last N clear the Real floor again">
+                <Grid>
+                  <EnableSlider label="Live edge guard" on={overlay.liveEdgeGuard !== false} onChange={(v) => patch("liveEdgeGuard", v)} />
+                  <Num label="Live window" value={overlay.liveEdgeN} min={10} max={500} step={5} unit="closes"
+                    hint="confirmed round trips per direction" onChange={(v) => patch("liveEdgeN", Math.max(10, Math.min(500, Math.round(v))))} />
+                  <Num label="Probe share" value={Math.round(overlay.liveEdgeProbeShare * 100)} min={0} max={100} step={1} unit="%"
+                    hint="of maxOpen positions while guarded · 0 = no entries" onChange={(v) => patch("liveEdgeProbeShare", Math.max(0, Math.min(100, v)) / 100)} />
+                </Grid>
+              </Card>
               <Card title="Risk, sizing and stops" hint="Volume is always raised to the venue minimum lot; stops never tighter than the venue accepts">
                 <Grid>
                   <Num label="Margin cap" value={Math.round(overlay.marginCapPct * 100)} min={0} max={100} step={1} unit="% equity"

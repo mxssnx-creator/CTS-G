@@ -144,6 +144,8 @@ def effective_indication_timeframes(
     return tuple(tf for tf in TIMEFRAMES if tf in allowed)
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
+LIVE_EDGE_N_DEFAULT = 50
+LIVE_EDGE_PROBE_SHARE_DEFAULT = 0.25
 SYSTEM_ID = system_id()
 TRACKING_SCOPE = tracking_scope(CONN_SHORT, SYSTEM_ID)
 SCOPE_METADATA = scope_metadata(CONN_SHORT, SYSTEM_ID)
@@ -1472,6 +1474,13 @@ class Pulse:
         self.block_active = True
         self.block_overall = True
         self.dca_overall = True
+        # Desk live edge guard: a direction whose own last-N confirmed
+        # exchange round trips are net negative trades probe lots only.
+        self.live_edge_guard = True
+        self.live_edge_n = LIVE_EDGE_N_DEFAULT
+        self.live_edge_probe_share = LIVE_EDGE_PROBE_SHARE_DEFAULT
+        self._live_edge_guarded: Dict[str, bool] = {}
+        self._live_edge_cache: Optional[Tuple[Any, Dict[str, Dict[str, Any]]]] = None
         self._block_reference_anchors = ContinuationBook()
         self._execution_decision = {}
         self.strat_general = True
@@ -6726,12 +6735,23 @@ class Pulse:
                 micro = bool(micro_fn(chosen, side)) if callable(micro_fn) else False
             except Exception:
                 micro = False
+        edge_probe = False
+        if forced_row is None and not micro:
+            try:
+                edge_probe = self.live_edge_state(side).get("state") == "probe"
+            except Exception:
+                edge_probe = False
+            micro = edge_probe
         if micro and c is not None and floor > 0:
             qty = self.round_qty_up(c, floor)
         if micro:
             # Micro is capped to a share of the position book so the
             # below-floor band can never crowd out Base-validated Sets.
+            # Live-edge probes use their own (larger) share: they keep
+            # gathering live evidence at minimum size until the edge returns.
             share = float(getattr(self.sets, "micro_max_share", 0.05) or 0.0)
+            if edge_probe:
+                share = float(getattr(self, "live_edge_probe_share", LIVE_EDGE_PROBE_SHARE_DEFAULT) or 0.0)
             book_cap = MAX_OPEN if MAX_OPEN > 0 else 100
             micro_cap = max(1, int(book_cap * share)) if share > 0 else 0
             micro_open = sum(1 for p in list(self.open.values()) if getattr(p, "micro", False))
@@ -8975,6 +8995,16 @@ class Pulse:
         self.block_active_min_level = int(ov.get("blockActiveMinLevel", 0))
         self.block_overall = ov.get("blockOverall", cts.get("blockOverall", True)) is not False
         self.dca_overall = ov.get("dcaOverall", cts.get("dcaOverall", True)) is not False
+        self.live_edge_guard = ov.get("liveEdgeGuard", cts.get("liveEdgeGuard", True)) is not False
+        try:
+            self.live_edge_n = max(10, min(500, int(ov.get("liveEdgeN", cts.get("liveEdgeN", LIVE_EDGE_N_DEFAULT)) or LIVE_EDGE_N_DEFAULT)))
+        except (TypeError, ValueError):
+            self.live_edge_n = LIVE_EDGE_N_DEFAULT
+        try:
+            self.live_edge_probe_share = max(0.0, min(1.0, float(ov.get("liveEdgeProbeShare", cts.get("liveEdgeProbeShare", LIVE_EDGE_PROBE_SHARE_DEFAULT)))))
+        except (TypeError, ValueError):
+            self.live_edge_probe_share = LIVE_EDGE_PROBE_SHARE_DEFAULT
+        self._live_edge_cache = None
         self.strat_general = True
         self.strat_dca = bool(ov.get("stratDca", ov.get("dcaEnabled", True)))
         self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
@@ -10900,6 +10930,62 @@ class Pulse:
             return completed_roundtrips(self.strategy_closes())
         except Exception:
             return []
+
+    def live_edge_state(self, side: str) -> Dict[str, Any]:
+        """Desk live edge for one direction, from this connection's own
+        confirmed exchange round trips only.
+
+        ``learning``: fewer than N live round trips, Sets decide alone.
+        ``probe``: last-N cost-PF < 1.00 (net negative); entries trade one
+        venue-minimum lot, no Block/DCA/Block-Active adds. Stays ``probe``
+        until the last N clear the Real floor again (hysteresis).
+        ``edge``: full size."""
+        want = str(side or "").upper()
+        n = int(getattr(self, "live_edge_n", LIVE_EDGE_N_DEFAULT) or LIVE_EDGE_N_DEFAULT)
+        if not getattr(self, "live_edge_guard", True):
+            return {"state": "off", "side": want, "n": 0, "need": n, "pf": None}
+        closed = getattr(self, "closed", None) or []
+        token = (id(closed), len(closed), id(closed[-1]) if closed else 0, n, float(getattr(self, "position_cost_pct", 0) or 0))
+        cache = getattr(self, "_live_edge_cache", None)
+        if cache is None or cache[0] != token:
+            per: Dict[str, Dict[str, Any]] = {}
+            rows = self.live_evidence_rows()
+            for d in ("LONG", "SHORT"):
+                tape = [r for r in rows if str(r.get("side") or "").upper() == d]
+                if len(tape) < n:
+                    per[d] = {"n": len(tape), "pf": None}
+                    continue
+                pf = float(last_n_cost_pf(tape, n, self.position_cost_pct, ordered=True).get("ratio") or 0.0)
+                per[d] = {"n": n, "pf": pf}
+            cache = self._live_edge_cache = (token, per)
+        blob = cache[1].get(want) or {"n": 0, "pf": None}
+        guarded = getattr(self, "_live_edge_guarded", None)
+        if guarded is None:
+            guarded = self._live_edge_guarded = {}
+        pf = blob["pf"]
+        if pf is None:
+            guarded[want] = False
+            state = "learning"
+        else:
+            floor = float(getattr(self.sets, "real_min_pf", None) or POSITIVE_PF) if getattr(self, "sets", None) is not None else POSITIVE_PF
+            if pf + 1e-12 < 1.0:
+                guarded[want] = True
+            elif guarded.get(want) and pf + 1e-12 >= floor:
+                guarded[want] = False
+            state = "probe" if guarded.get(want) else "edge"
+        return {"state": state, "side": want, "n": int(blob["n"]), "need": n,
+                "pf": None if pf is None else round(pf, 4)}
+
+    def _live_edge_snapshot(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"enabled": bool(getattr(self, "live_edge_guard", True)),
+                               "n": int(getattr(self, "live_edge_n", LIVE_EDGE_N_DEFAULT) or 0),
+                               "probeShare": float(getattr(self, "live_edge_probe_share", LIVE_EDGE_PROBE_SHARE_DEFAULT) or 0)}
+        for d in ("LONG", "SHORT"):
+            try:
+                out[d] = self.live_edge_state(d)
+            except Exception:
+                out[d] = {"state": "unknown"}
+        return out
 
     def live_closes(self) -> List[Any]:
         return [SimpleNamespace(**row) for row in self.live_evidence_rows()]
@@ -13662,6 +13748,7 @@ class Pulse:
                 "withCid": with_cid,
                 "closedOurs": len(self.strategy_closes()),
             },
+            "liveEdge": self._live_edge_snapshot(),
             "controls": {
                 "open": len(self.open),
                 "logicalOpen": len(self.open),
