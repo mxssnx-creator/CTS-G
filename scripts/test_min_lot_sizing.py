@@ -187,7 +187,7 @@ class RemainderTests(unittest.TestCase):
         p.open = {"a": a}
         q, whole = p.control_qty(a)
         self.assertTrue(whole)
-        self.assertAlmostEqual(q, 0.02)
+        self.assertAlmostEqual(q, 0.05, msg="legal quantity next to closePosition")
 
     def test_remainder_is_never_raised_over_a_sibling(self):
         p = trader()

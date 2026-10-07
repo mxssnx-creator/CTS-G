@@ -328,19 +328,23 @@ class HtfEvidenceSeparationTests(unittest.TestCase):
         p.closed = [_rt("a", "general", 1.0, 1.0), _rt("b", "htf", -5.0, 2.0)]
         self.assertEqual([r.client_id for r in p.overall_side_closes("X-USDT", "LONG")], ["a"])
 
-    def test_live_replaces_replay_from_the_first_live_entry_on(self):
+    def test_live_replaces_only_its_own_replay_twin(self):
         b = he.HtfBook(he.HtfSettings(enabled=True))
         k = "z-50-2.5@x4"
-        b.hist = {"X-USDT": {k: [{"t": 3600.0 * (i + 3), "entry_t": 3600.0 * i, "r": 0.01, "kind": k, "side": "LONG",
-                                  "symbol": "X-USDT", "source": "replay"} for i in range(10)]},
-                  "Y-USDT": {k: [{"t": 3600.0 * (i + 3), "entry_t": 3600.0 * i, "r": 0.01, "kind": k, "side": "LONG",
-                                  "symbol": "Y-USDT", "source": "replay"} for i in range(10)]}}
+
+        def rows(sym):
+            return [{"t": 3600.0 * (i * 4 + 3), "entry_t": 3600.0 * i * 4, "r": 0.01, "kind": k, "side": "LONG",
+                     "symbol": sym, "source": "replay"} for i in range(10)]
+        b.hist = {"X-USDT": {k: rows("X-USDT")}, "Y-USDT": {k: rows("Y-USDT")}}
         self.assertEqual(len(b.hist_rows(k)), 20)
-        self.assertTrue(b.on_live_close(_rt("l1", "htf", 2.0, 3600.0 * 10)))   # entered 5h
-        rows = b.hist_rows(k)
-        self.assertEqual(len([r for r in rows if r["symbol"] == "X-USDT"]), 5, "X replay from 5h on dropped")
-        self.assertEqual(len([r for r in rows if r["symbol"] == "Y-USDT"]), 10, "other symbols untouched")
-        self.assertEqual(b.live[k][0]["entry_t"], 3600.0 * 5)
+        # live lot entered at 20h (+1h fill delay of the replay's 20h entry), closed at 25h
+        self.assertTrue(b.on_live_close(_rt("l1", "htf", 2.0, 3600.0 * 26, hold_s=3600.0 * 5)))
+        got = b.hist_rows(k)
+        self.assertEqual(len([r for r in got if r["symbol"] == "X-USDT"]), 9, "only the twin is dropped")
+        self.assertNotIn(3600.0 * 20, [r["entry_t"] for r in got if r["symbol"] == "X-USDT"])
+        self.assertEqual(len([r for r in got if r["symbol"] == "Y-USDT"]), 10, "other symbols untouched")
+        self.assertTrue(b.on_live_close(_rt("l2", "htf", 2.0, 3600.0 * 30, side="SHORT", hold_s=3600.0 * 10)))
+        self.assertEqual(len(b.hist_rows(k)), 19, "other side never removes a LONG replay row")
 
     def test_seed_from_retained_trades_is_idempotent_and_skips_manual(self):
         with tempfile.TemporaryDirectory() as d:

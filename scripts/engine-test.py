@@ -2381,7 +2381,9 @@ def set_orders_test() -> None:
                 sl_px[b["symbol"]] = float(b.get("stopPrice") or 0)
             else:
                 tp_px[b["symbol"]] = float(b.get("stopPrice") or 0)
-    want_sl = {"AAA-USDT": 99.73, "BBB-USDT": 199.01, "CCC-USDT": 49.55}
+    # Each Set trades its own range (TP x SL ratio) up to slMaxPct: CCC is
+    # 0.65% x 1.5 = 0.975% (no longer clipped to the 0.9% exit band).
+    want_sl = {"AAA-USDT": 99.73, "BBB-USDT": 199.01, "CCC-USDT": 49.51}
     want_tp = {"AAA-USDT": 100.45, "BBB-USDT": 201.1, "CCC-USDT": 50.32}
     rec("setord-per-set-sl-distances",
         all(abs(sl_px[s] - want_sl[s]) < 1e-6 and abs(tp_px[s] - want_tp[s]) < 1e-6 for s in syms)

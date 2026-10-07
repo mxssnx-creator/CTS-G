@@ -44,19 +44,24 @@ This lane ports CTS-A-O's robust core to CTS-G:
 
 | Window | Variant | Closed | PF | Net Σ % | Trades/day | Positive days* |
 |---|---|---:|---:|---:|---:|---|
-| 365 d | default gates (window 50) | 877 | **1.10** | +158 | 2.4 | 87/216 |
+| 365 d | default gates (window 50), rerun after the dedup fix | 846 | **1.03** | +47 | 2.3 | 83/199 |
+| 365 d | default gates, first run (live lots also counted as replay) | 877 | 1.10 | +158 | 2.4 | 87/216 |
 | 365 d | no gates | 1,958 | 1.10 | +304 | 5.4 | 137/341 |
-| 365 d | last-N 12 | 404 | 1.23 | +150 | 1.1 | 51/107 |
-| 365 d | window 100 | 1,154 | 1.03 | +53 | 3.2 | 99/260 |
-| last 30 d | default | 120 | **0.47** | −153 | 4.0 | 9/24 |
+| 365 d | last-N 12, after the dedup fix | 379 | 1.11 | +74 | 1.0 | 48/107 |
+| 365 d | window 100, after the dedup fix | 1,127 | 0.95 | −102 | 3.1 | 93/250 |
+| last 30 d | default, after the dedup fix | 136 | **0.42** | −200 | 4.5 | 9/25 |
+| last 30 d | no gates | 175 | 0.82 | −67 | 5.8 | 8/28 |
 
 \* Days with at least one close.
 
-**Per family (default gates, 365 d):** robust PF 1.20, rsi-mom PF 0.96.
+**Per family (default gates, 365 d, after the dedup fix):** robust PF 0.99, rsi-mom PF 1.08.
+
+**Correction (dedup fix):** The first run counted every lot twice in the gate evidence: once as its live result and once as its replay twin. The book now drops only the replay trade that matches a live lot (same symbol, side and entry within two bars). With honest evidence, the gated lane on the desk symbols is about break-even over the year (PF 1.03). The "no gates" row does not use the evidence and is unchanged. All gated rows above were rerun after the fix.
 
 ## Verdict
 
-- The lane earns over a year after cost: about PF 1.1–1.2 on the desk symbols, more on the wider universe.
+- Taking every preset signal, the lane earns over a year after cost: PF 1.10 on the desk symbols (no gates), and 1.17–1.36 per family out of sample on the wider universe.
+- With honest (deduplicated) evidence, the gates do not improve on taking every signal: window 50 gives PF 1.03, window 100 gives 0.95, and last-N 12 gives 1.11 with a fifth of the trades. In the last 30 days the gated lane lost more than the ungated one (PF 0.42 vs 0.82).
 - Its edge comes from wide winners. Only about 40–50% of days and hours with closes are positive.
 - It is regime-dependent. The last 30 days would have lost.
 

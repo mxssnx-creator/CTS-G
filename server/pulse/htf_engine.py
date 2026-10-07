@@ -802,17 +802,25 @@ class HtfBook:
         self._ver += 1
         return n
 
+    DEDUP_TOL_S = 2 * 3600.0   # a live lot and its replay twin enter within one or two bars
+
     def hist_rows(self, kind: str) -> List[Dict]:
-        """Replay rows of one kind. Once a symbol has live round trips of this
-        kind, its replay rows entered at or after the first live entry are
-        dropped: those periods are covered by the live result itself."""
-        cut: Dict[str, float] = {}
+        """Replay rows of one kind. A replay trade that the desk actually took
+        live (same symbol, side and entry within two bars) is dropped: the
+        live result counts for it. Signals the desk did not take (gated, cap
+        reached) keep their replay row, so the evidence stays current."""
+        taken: Dict[Tuple[str, str], List[float]] = {}
         for r in list(self.live.get(kind, ())):
-            sym, et = r.get("symbol", ""), float(r.get("entry_t") or r["t"])
-            if et < cut.get(sym, float("inf")):
-                cut[sym] = et
-        rows = [r for sym, by in list(self.hist.items()) for r in by.get(kind, ())
-                if float(r.get("entry_t", r["t"])) < cut.get(sym, float("inf"))]
+            if r.get("entry_t") is not None:
+                taken.setdefault((r.get("symbol", ""), r.get("side", "")), []).append(float(r["entry_t"]))
+
+        def dup(sym: str, r: Dict) -> bool:
+            ets = taken.get((sym, r.get("side", "")))
+            if not ets:
+                return False
+            et = float(r.get("entry_t", r["t"]))
+            return any(abs(et - x) <= self.DEDUP_TOL_S for x in ets)
+        rows = [r for sym, by in list(self.hist.items()) for r in by.get(kind, ()) if not dup(sym, r)]
         rows.sort(key=_row_t)
         return rows
 

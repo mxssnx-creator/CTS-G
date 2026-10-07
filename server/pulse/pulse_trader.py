@@ -2221,7 +2221,9 @@ class Pulse:
         if floor <= 0 or raw + 1e-12 >= floor:
             return self.raise_to_min_qty(c, px, raw), False
         if self.sole_own_lot(pos):
-            return raw, True
+            # The API still wants a legal quantity next to closePosition; the
+            # closePosition form closes exactly this (sole) lot.
+            return self.raise_to_min_qty(c, px, raw), True
         log(f"CTRL REMAINDER {pos.symbol} {pos.side} qty={raw} < venue min {floor}: not raised over siblings",
             every=120.0, key=f"ctrl-rem:{pos.symbol}:{pos.side}")
         return raw, False
@@ -6199,10 +6201,16 @@ class Pulse:
             _sf(getattr(pos, "foreign_qty", 0.0)),
             _sf((getattr(self, "exchange_foreign_qty", None) or {}).get(f"{pos.symbol}:{pos.side}", 0.0)),
         )
-        if (not grouped or self.sole_own_lot(pos)) and foreign_here <= 1e-12:
-            # A per-config lot that is the only exposure on its side may use
-            # the whole-position form (it closes exactly this lot); this is the
-            # only way to close a remainder below the venue minimum.
+        below_min = False
+        if grouped:
+            c_min = (getattr(self, "contracts", None) or {}).get(pos.symbol)
+            px_min = max(self.px.get(pos.symbol) or 0, pos.entry or 0)
+            floor = self.min_order_qty(c_min, px_min) if c_min is not None and px_min > 0 else 0.0
+            below_min = floor > 0 and requested_qty + 1e-12 < floor
+        if (not grouped or (below_min and self.sole_own_lot(pos))) and foreign_here <= 1e-12:
+            # A per-config lot below the venue minimum that is the only
+            # exposure on its side may use the whole-position form (it closes
+            # exactly this lot); the quantity form cannot close it at all.
             forms.append({"closePosition": "true", "clientOrderID": close_cid})
             pid = str(getattr(pos, "position_id", "") or "")
             if pid:
