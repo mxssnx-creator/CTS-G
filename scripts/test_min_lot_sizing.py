@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from types import SimpleNamespace as NS
 
 os.environ.setdefault("CTS_DATA_DIR", tempfile.mkdtemp(prefix="cts-minlot-"))
@@ -127,18 +128,99 @@ class AutoLeverageTests(unittest.TestCase):
         self.assertEqual([x for x in p.api.posts if x[0].endswith("/leverage")], [])
 
 
+class MaxLeverageDefaultTests(unittest.TestCase):
+    def test_default_runs_every_pair_at_its_venue_max(self):
+        p = trader()
+        p.sl_auto_leverage = False
+        self.assertEqual(p.leverage_target(150), 150)
+        self.assertEqual(p.leverage_target(20), 20)
+
+    def test_lane_sl_caps_do_not_follow_leverage_in_max_mode(self):
+        p = trader()
+        p.sl_auto_leverage = False
+        p.htf_sl_max = 0.15
+        c = contract()
+        p.lev_map["X-USDT"] = 150
+        self.assertAlmostEqual(p.sl_allowed_max(c), 0.03, msg="1m lanes keep slMaxPct")
+        self.assertAlmostEqual(p.sl_allowed_max(c, "htf"), 0.15, msg="1h lane keeps its preset cap")
+
+    def test_htf_cap_never_widens_the_1m_lanes(self):
+        p = trader()
+        p.htf_sl_max = 0.15
+        self.assertAlmostEqual(p.sl_cap_pct("1m"), 0.03)
+        self.assertAlmostEqual(p.sl_cap_pct("htf"), 0.15)
+
+    def test_refused_leverage_change_backs_off_and_keeps_venue_truth(self):
+        p = trader()
+        p.sl_auto_leverage = True
+        c = contract()
+        p.contracts["X-USDT"] = c
+        p.lev_max["X-USDT"] = 150
+        p.lev_map["X-USDT"] = 150
+        p.fetch_symbol_leverage = lambda s: (0, 0, 0)
+        p.api.post = lambda path, body: {"code": 101400, "msg": "insufficient margin"}
+        p.ensure_max_leverage("X-USDT")
+        self.assertEqual(p.lev_map["X-USDT"], 150, "lev_map stays the applied leverage")
+        self.assertGreater(p._lev_retry.get("X-USDT", 0), 0, "backed off")
+
+    def test_seed_from_contracts_never_overwrites_applied_leverage(self):
+        p = trader()
+        c = contract(max_lev=125)
+        p.contracts = {"X-USDT": c}
+        p.lev_map["X-USDT"] = 20
+        p.seed_lev_from_contracts()
+        self.assertEqual(p.lev_map["X-USDT"], 20)
+        self.assertEqual(p.lev_max["X-USDT"], 125)
+
+
+class RemainderTests(unittest.TestCase):
+    def pos(self, qty, **kw):
+        base = dict(symbol="X-USDT", side="LONG", qty=qty, entry=100.0, opened_at=0.0, sl=99.0, tp=101.0, peak=100.0)
+        base.update(kw)
+        return pt.Position(**base)
+
+    def test_sole_lot_remainder_below_minimum_uses_the_whole_position_form(self):
+        p = trader()
+        p.px = {"X-USDT": 100.0}
+        p.contracts = {"X-USDT": contract(min_qty=0.05, min_usdt=0.0)}
+        a = self.pos(0.02)
+        p.open = {"a": a}
+        q, whole = p.control_qty(a)
+        self.assertTrue(whole)
+        self.assertAlmostEqual(q, 0.02)
+
+    def test_remainder_is_never_raised_over_a_sibling(self):
+        p = trader()
+        p.px = {"X-USDT": 100.0}
+        p.contracts = {"X-USDT": contract(min_qty=0.05, min_usdt=0.0)}
+        a, b = self.pos(0.02), self.pos(0.05)
+        p.open = {"a": a, "b": b}
+        with unittest.mock.patch.object(pt, "log"):
+            q, whole = p.control_qty(a)
+        self.assertFalse(whole)
+        self.assertAlmostEqual(q, 0.02, msg="not raised to 0.05: that would close the sibling's lot")
+
+    def test_full_lot_keeps_the_quantity_form(self):
+        p = trader()
+        p.px = {"X-USDT": 100.0}
+        p.contracts = {"X-USDT": contract(min_qty=0.05, min_usdt=0.0)}
+        a = self.pos(0.05)
+        p.open = {"a": a}
+        self.assertEqual(p.control_qty(a), (0.05, False))
+
+
 class ProfileTests(unittest.TestCase):
     def test_both_desks_ship_min_lot_and_auto_leverage(self):
         import json
         import connection_profile as cp
         prof = cp.processing_profile()
         self.assertEqual(prof["orderSizing"], "minQty")
-        self.assertIs(prof["slAutoLeverage"], True)
+        self.assertIs(prof["slAutoLeverage"], False, "always max leverage by default")
         root = pathlib.Path(__file__).resolve().parents[1] / "server/pulse"
         for lane in ("bingx-x01", "bingx-x02"):
             ov = json.loads((root / f"overlay-{lane}.json").read_text())
             self.assertEqual(ov["orderSizing"], "minQty")
-            self.assertIs(ov["slAutoLeverage"], True)
+            self.assertIs(ov["slAutoLeverage"], False)
 
 
 if __name__ == "__main__":

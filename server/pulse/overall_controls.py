@@ -88,7 +88,8 @@ def closed_member(pulse,pos,filled_oid=''):
     """
     shared = enabled(pulse,pos) or bool(getattr(pos,'overall_controls',False))
     rows = [p for p in pulse.open.values() if p is not pos and p.symbol == pos.symbol
-            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0] if shared else []
+            and p.side == pos.side and pulse.position_is_ours(p) and p.qty > 0
+            and getattr(p,'pack','') != 'htf'] if shared else []
     ids = ({getattr(pos,f,'') for f in FIELDS} | set(pos.retired_control_ids))-{''}
     if not shared:
         ids.discard(str(filled_oid or ''))

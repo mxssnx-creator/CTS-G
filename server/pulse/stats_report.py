@@ -246,7 +246,13 @@ def by_pack(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
 
 
 IND_KIND_SET = set(IND_KINDS)
-STRAT_KEYS = ("indications", "general", "block", "trailing", "dca", "exits")
+STRAT_KEYS = ("indications", "general", "block", "trailing", "dca", "exits", "htf")
+
+
+def _is_htf(r: Dict[str, Any]) -> bool:
+    """1h lane close: its own strategy bucket, never a 1m indication/trail."""
+    return (str(r.get("pack") or "").lower() == "htf" or str(r.get("set_id") or r.get("setId") or "").startswith("htf:")
+            or str(r.get("execution_lane") or "") == "htf")
 
 
 def _side_of(r: Dict[str, Any]) -> str:
@@ -281,6 +287,8 @@ def _is_overlay(r: Dict[str, Any]) -> bool:
 
 
 def _strats_of(r: Dict[str, Any]) -> List[str]:
+    if _is_htf(r):
+        return ["htf"]
     keys: List[str] = []
     pack = str(r.get("pack") or "").lower()
     tagged = str(r.get("strategy") or "").lower()
@@ -352,6 +360,15 @@ def by_indication(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, 
         blob["kind"] = k
         out[k] = blob
     return out
+
+
+def by_htf_kind(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
+    """1h-lane closes per kind (rsi-mom-*, *@x4)."""
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        if _is_htf(r):
+            buckets.setdefault(str(r.get("ind_kind") or r.get("indKind") or "unknown"), []).append(r)
+    return {k: {**_bucket_stats(v, cost_pct), "kind": k} for k, v in sorted(buckets.items())}
 
 
 def by_direction(rows: Sequence[Dict[str, Any]], cost_pct: float) -> Dict[str, Any]:
@@ -682,6 +699,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             kind_live=(st.get("indications") or {}).get("kindStats") or {},
         ),
         "byDirection": by_direction(closed, cost_pct),
+        "byHtfKind": by_htf_kind(closed, cost_pct),
         "byStrategy": merge_strategy_stats(
             closed,
             cost_pct,

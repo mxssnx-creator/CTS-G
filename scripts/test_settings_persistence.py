@@ -34,6 +34,19 @@ class SettingsPersistence(unittest.TestCase):
             self.assertTrue(value['blockEnabled'])
             ph.write_overlay('vst',{'normalExecutionEnabled':True})
             self.assertTrue(ph.load_overlay('bingx-x02')['normalExecutionEnabled'])
+    def test_sizing_live_edge_and_1h_lane_settings_roundtrip_per_lane(self):
+        import htf_engine
+        with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
+            vals={'orderSizing':'factor','slAutoLeverage':True,'liveEdgeGuard':False,'liveEdgeN':40,'liveEdgeProbeShare':.5,
+                  'htfEnabled':True,'htfKinds':['bb-walk@x4','rsi-mom-14-25'],'htfMinPf':1.1,'htfWindow':60,'htfMinN':25,
+                  'htfLastN':12,'htfSideHours':48,'htfSideMinTrades':20,'htfSideMinPf':1.08,'htfMaxOpen':6,'htfHistoryBars':800}
+            ph.write_overlay('vst',vals)
+            ph.write_overlay('vst',{'htfMaxOpen':8})
+            value=ph.load_overlay('bingx-x02')
+            self.assertEqual({k:value[k] for k in vals},{**vals,'htfMaxOpen':8})
+            self.assertNotEqual(ph.load_overlay('bingx-x01').get('htfKinds'),vals['htfKinds'])
+            s=htf_engine.HtfSettings.from_overlay(value)
+            self.assertEqual((s.enabled,s.kinds,s.last_n,s.max_open,s.history_bars),(True,('bb-walk@x4','rsi-mom-14-25'),12,8,800))
     def test_invalid_lane_cannot_write_a_file(self):
         with tempfile.TemporaryDirectory() as d,patch.object(ph,'DIR',d):
             with self.assertRaises(ValueError):ph.write_overlay('../../foreign',{'x':1})

@@ -351,6 +351,8 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   realEvalPosCount: number;
   setDdtWindow: number;
   setHistTimeBars: number;
+  /** Max hold of a 1m-lane lot (s); the Set replay hold is capped to it. */
+  shortMaxHoldS: number;
   setHonorTp: boolean;
   setCooldownBars: number;
   setScratchMin: number;
@@ -553,7 +555,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   htfSideMinPf: 1.05,
   htfMaxOpen: 12,
   htfHistoryBars: 1000,
-  slAutoLeverage: true,
+  slAutoLeverage: false,
   leverage: 150,
   useMaxLeverage: true,
   maxOpen: 100,
@@ -647,7 +649,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   mainEvalPosCount: 30,
   realEvalPosCount: 30,
   setDdtWindow: 0,
-  setHistTimeBars: 120,
+  setHistTimeBars: 30,
+  shortMaxHoldS: 1800,
   setHonorTp: true,
   setCooldownBars: 2,
   setScratchMin: 0.0016,
@@ -1136,7 +1139,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     htfSideMinPf: Math.max(0.5, Math.min(3, num(cts.htfSideMinPf, 1.05))),
     htfMaxOpen: Math.max(0, Math.min(200, Math.round(num(cts.htfMaxOpen, 12)))),
     htfHistoryBars: Math.max(400, Math.min(1440, Math.round(num(cts.htfHistoryBars, 1000)))),
-    slAutoLeverage: bool(cts.slAutoLeverage, true),
+    slAutoLeverage: bool(cts.slAutoLeverage, false),
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),
     axisLastEnabled: bool(cts.axisLastEnabled ?? nestedAxis(coord, "last", "enabled"), true),
@@ -1179,7 +1182,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     mainEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.mainEvalPosCount ?? cts.mainEvalPosCount, 30)))),
     realEvalPosCount: Math.max(0, Math.min(75, Math.round(num(live?.realEvalPosCount ?? cts.realEvalPosCount, 30)))),
     setDdtWindow: Math.max(0, Math.min(200, Math.round(num(live?.setDdtWindow, 0)))),
-    setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 120)))),
+    setHistTimeBars: Math.max(8, Math.min(120, Math.round(num(live?.setHistTimeBars, 30)))),
+    shortMaxHoldS: Math.max(300, Math.min(21600, Math.round(num(live?.shortMaxHoldS, 1800)))),
     setHonorTp: bool(live?.setHonorTp, true),
     setCooldownBars: Math.max(1, Math.min(12, Math.round(num(live?.setCooldownBars, 2)))),
     setScratchMin: Math.max(0, Math.min(0.05, num(live?.setScratchMin, 0.0016))),

@@ -382,7 +382,7 @@ test("batch entry orders are off by default, seeded on for VST only, and keep a 
 
 test("every engine setting added to the desk round-trips a saved value and ships the engine default", () => {
   const engineDefaults: Record<string, unknown> = {
-    mainEvalPosCount: 30, realEvalPosCount: 30, setDdtWindow: 0, setHistTimeBars: 120, setHonorTp: true,
+    mainEvalPosCount: 30, realEvalPosCount: 30, setDdtWindow: 0, setHistTimeBars: 30, shortMaxHoldS: 1800, setHonorTp: true,
     setCooldownBars: 2, setScratchMin: 0.0016, histSimulateBlock: true, histSimulateDca: true, histExactWindow: false,
     marginCapPct: 0.1, manualCloseLaneHoldS: 21600, exitMinSamples: 0, exitTacticMinGainPct: 0.15,
     blockActiveLiveEnabled: true, blockActiveRealEnabled: true, variantBlockEnabled: true,
@@ -396,7 +396,7 @@ test("every engine setting added to the desk round-trips a saved value and ships
   const fresh = overlayFromCts({}) as unknown as Record<string, unknown>;
   for (const [key, value] of Object.entries(engineDefaults)) assert.deepEqual(fresh[key], value, `default ${key}`);
   const saved: Record<string, unknown> = {
-    mainEvalPosCount: 0, realEvalPosCount: 25, setDdtWindow: 96, setHistTimeBars: 60, setHonorTp: false,
+    mainEvalPosCount: 0, realEvalPosCount: 25, setDdtWindow: 96, setHistTimeBars: 60, shortMaxHoldS: 900, setHonorTp: false,
     setCooldownBars: 5, setScratchMin: 0.003, histSimulateBlock: false, histSimulateDca: false, histExactWindow: true,
     marginCapPct: 0.25, manualCloseLaneHoldS: 3600, exitMinSamples: 20, exitTacticMinGainPct: 0.3,
     blockActiveLiveEnabled: false, indRsi2Low: 5, indImpulseSigma: 4, actSweepMin: 0, microEnabled: false,

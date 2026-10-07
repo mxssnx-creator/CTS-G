@@ -860,8 +860,8 @@ function SettingsPage() {
                       : "each pair's minimum lot (min qty / min USDT)"} />
                     <EnableSlider label="Minimum lot sizing" on={overlay.orderSizing !== "factor"}
                       hint="On: every order is the venue minimum lot · off: volume-factor notional" onChange={(v) => patch("orderSizing", v ? "minQty" : "factor")} />
-                    <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage !== false}
-                      hint="Leverage per pair lowered so liquidation lies beyond the widest allowed SL (slMaxPct) · the SL is never moved for liquidation" onChange={(v) => patch("slAutoLeverage", v)} />
+                    <EnableSlider label="Auto leverage for SL" on={overlay.slAutoLeverage === true}
+                      hint="Off (default): every pair at its venue max leverage, minimum-lot sizing, stops clamped inside the exchange-reported liquidation (cross margin) · on: leverage lowered so the per-lot liquidation lies beyond the widest lane SL" onChange={(v) => patch("slAutoLeverage", v)} />
                   </Grid>
                 </div>
               </div>
@@ -2763,6 +2763,9 @@ function SettingsPage() {
                   onChange={(v) => patch("entryBatchOrders", v)}
                 />
                 <Num label="Entries per batch" value={overlay.entryBatchSize} min={2} max={5} step={1} onChange={(v) => patch("entryBatchSize", v)} />
+                <Num label="Short-trade hold min" value={Math.round(overlay.shortMaxHoldS / 60)} min={5} max={360} step={5}
+                  hint="5–360 min · default 30 · 1m lanes close at this age; the Set replay uses the same hold (1h lane keeps its own 24–48h)"
+                  onChange={(v) => patch("shortMaxHoldS", Math.max(5, Math.min(360, Math.round(v / 5) * 5)) * 60)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
                 <Num label="Max DD time min" value={Math.round(overlay.maxDdTimeS / 60)} min={10} max={1440} step={10} hint="10–1440 min · default 1080 (18h) · force-close a position stuck underwater this long" onChange={(v) => patch("maxDdTimeS", Math.max(10, Math.min(1440, Math.round(v / 10) * 10)) * 60)} />
                 <Num label="Scratch s" value={overlay.scratchS} min={20} max={SCRATCH_S_MAX} step={5} onChange={(v) => patch("scratchS", v)} />

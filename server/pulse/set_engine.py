@@ -1681,6 +1681,10 @@ class SetBook:
         self.cost_source = str(ov.get("positionCostSource") or "manual-fallback")
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
+        short_hold = finite(ov.get("shortMaxHoldS"), 0.0) or 0.0
+        if short_hold > 0:
+            # Replay never holds a 1m Set longer than the live short hold.
+            self.hist_time_bars = max(5, min(self.hist_time_bars, int(short_hold // 60)))
         self.scratch_s = float(ov.get("scratchS") or 90)
         tp = float(ov.get("tpPct") or 0.75)
         self.tp_pct = tp / 100.0 if tp > 0.05 else tp

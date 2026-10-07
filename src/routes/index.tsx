@@ -294,13 +294,14 @@ function DeskPage() {
         </Panel>
       </section>
 
-      {stats?.htf?.enabled || stats?.liveEdge ? (
+      {stats?.htf?.enabled || stats?.liveEdge || stats?.sizing ? (
         <section className="grid gap-3 lg:grid-cols-2">
           <Panel title="1h lane" icon={<Layers className="size-4" />}>
             <HtfPanel htf={stats?.htf} />
           </Panel>
           <Panel title="Live edge" icon={<ShieldAlert className="size-4" />}>
             <LiveEdgePanel edge={stats?.liveEdge} />
+            <SizingLine sizing={stats?.sizing} />
           </Panel>
         </section>
       ) : null}
@@ -1064,6 +1065,20 @@ function LiveEdgePanel({ edge }: { edge?: LiveStats["liveEdge"] }) {
         );
       })}
     </dl>
+  );
+}
+
+function SizingLine({ sizing }: { sizing?: LiveStats["sizing"] }) {
+  if (!sizing) return null;
+  const minLot = sizing.orderSizing === "minQty";
+  const b = sizing.block;
+  return (
+    <p className="mt-3 text-xs text-muted">
+      {minLot ? "Minimum lot per order" : "Volume factor sizing"} ·{" "}
+      {sizing.leverageMode === "max" ? "max leverage" : "auto leverage"}
+      {sizing.pairs != null ? ` (${sizing.pairsAtMax ?? 0}/${sizing.pairs} pairs at max)` : ""}
+      {b ? ` · Block ${minLot ? "+1 lot" : `+${(b.effectiveRatio * 100).toFixed(0)}%`} per count, up to ${b.maxCounts}` : ""}
+    </p>
   );
 }
 

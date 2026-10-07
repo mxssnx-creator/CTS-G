@@ -261,10 +261,20 @@ export type HtfStats = {
 
 export type LiveEdgeSide = { state: string; n: number; need: number; pf: number | null };
 
+export type SizingStats = {
+  orderSizing: "minQty" | "factor" | string;
+  leverageMode: "max" | "auto" | string;
+  pairs?: number;
+  pairsAtMax?: number;
+  pairsBelowMax?: string[];
+  block?: { specifiedRatio: number; effectiveRatio: number; extraCap: number; maxCounts: number };
+};
+
 export type LiveStats = {
   system?: import("./system-settings").SystemStatus;
   htf?: HtfStats;
   liveEdge?: { enabled: boolean; n: number; probeShare: number; LONG?: LiveEdgeSide; SHORT?: LiveEdgeSide };
+  sizing?: SizingStats;
   positionCost?: {
     manualPct?: number;
     effectivePct?: number;

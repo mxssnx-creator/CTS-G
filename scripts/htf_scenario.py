@@ -78,7 +78,8 @@ def main():
                 closed.append(lot)
                 book.on_live_close({"exchange_confirmed": True, "ind_kind": lot["kind"], "client_id": lot["id"],
                                     "close_fill_id": lot["id"] + ":x", "t": lot["exit_t"] / 1000, "side": lot["side"],
-                                    "symbol": lot["symbol"], "entry": 100.0, "qty": 1.0, "pnl": lot["r"] * 100.0})
+                                    "symbol": lot["symbol"], "entry": 100.0, "qty": 1.0, "pnl": lot["r"] * 100.0,
+                                    "hold_s": (lot["exit_t"] - lot["entry_t"]) / 1000})
         # entries decided at the close of the bar that opened at t - 1h
         for s, b in tapes.items():
             i = idx[s].get(t - H)

@@ -9,7 +9,7 @@ STAGES = ("Base", "Main", "Real", "Live", "Exchange")
 STAGE_ORDER = {name.lower(): index for index, name in enumerate(STAGES)}
 AXES = ("prev", "last", "cont", "pause")
 INDICATION_KINDS = ("state", "signals", "active", "direction", "move", "common", "trend", "break", "msi", "vwap", "retest", "squeeze", "sweep", "rsi2", "keltner", "impulse")
-STRATEGIES = ("indications", "general", "block", "trailing", "dca", "exits")
+STRATEGIES = ("indications", "general", "block", "trailing", "dca", "exits", "htf")
 DIRECTIONS = ("LONG", "SHORT")
 
 from position_cost import PF_MIN, PF_MAX, PF_STEP

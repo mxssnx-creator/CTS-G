@@ -20,6 +20,7 @@ trader run exactly this code.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -733,6 +734,13 @@ class HtfBook:
         self.live: Dict[str, List[Dict]] = {}              # kind -> rows
         self.last_signal_t: Dict[str, float] = {}          # symbol -> last processed bar open (ms)
         self._seen_live: set = set()
+        # Readers (stats, gates) run on other threads than the bar refresh:
+        # bars/hist are replaced whole (copy-on-write) and every reader
+        # iterates over a copy; live appends are serialized.
+        self._lock = threading.Lock()
+        self._sig_cache: Dict[str, Tuple[float, Dict[str, np.ndarray]]] = {}
+        self._snap_cache: Optional[Tuple[Tuple, Dict]] = None
+        self._ver = 0                                      # bumps on bars / replay changes
 
     # bars ------------------------------------------------------------
     def set_bars(self, sym: str, rows: Sequence, now_ms: Optional[float] = None) -> int:
@@ -755,7 +763,22 @@ class HtfBook:
         ts = sorted(book)[-self.s.history_bars:]
         arr = np.array([[t, *book[t]] for t in ts], dtype=float)
         self.bars[sym] = Bars(arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4], arr[:, 5], 60, sym)
+        self._ver += 1
         return len(ts)
+
+    def signals(self, sym: str) -> Dict[str, np.ndarray]:
+        """Entry signals of every enabled kind on this symbol's bars, computed
+        once per new bar and shared by replay and new_signals."""
+        b = self.bars.get(sym)
+        if b is None or b.n == 0:
+            return {}
+        last_t = float(b.t[-1])
+        hit = self._sig_cache.get(sym)
+        if hit is not None and hit[0] == last_t and all(k in hit[1] for k in self.s.kinds):
+            return hit[1]
+        out = {k: entry_signals(b, [k], vol_regime=preset(k)[1])[k] for k in self.s.kinds}
+        self._sig_cache[sym] = (last_t, out)
+        return out
 
     # replay evidence -------------------------------------------------
     def replay(self, sym: str) -> int:
@@ -766,19 +789,30 @@ class HtfBook:
             return 0
         out: Dict[str, List[Dict]] = {}
         n = 0
+        sigs = self.signals(sym)
         for kind in self.s.kinds:
-            cfg, vr = preset(kind)
-            sig = entry_signals(b, [kind], vol_regime=vr)[kind]
+            cfg, _ = preset(kind)
+            sig = sigs[kind]
             trades = simulate_kind(b, kind, sig, [cfg], self.s.cost)[cfg.key]
             rows = [{"t": t.exit_t / 1000.0, "entry_t": t.entry_t / 1000.0, "r": t.r, "kind": kind,
                      "side": "LONG" if t.side > 0 else "SHORT", "symbol": sym, "source": "replay"} for t in trades]
             out[kind] = rows
             n += len(rows)
         self.hist[sym] = out
+        self._ver += 1
         return n
 
     def hist_rows(self, kind: str) -> List[Dict]:
-        rows = [r for by in self.hist.values() for r in by.get(kind, ())]
+        """Replay rows of one kind. Once a symbol has live round trips of this
+        kind, its replay rows entered at or after the first live entry are
+        dropped: those periods are covered by the live result itself."""
+        cut: Dict[str, float] = {}
+        for r in list(self.live.get(kind, ())):
+            sym, et = r.get("symbol", ""), float(r.get("entry_t") or r["t"])
+            if et < cut.get(sym, float("inf")):
+                cut[sym] = et
+        rows = [r for sym, by in list(self.hist.items()) for r in by.get(kind, ())
+                if float(r.get("entry_t", r["t"])) < cut.get(sym, float("inf"))]
         rows.sort(key=_row_t)
         return rows
 
@@ -792,20 +826,29 @@ class HtfBook:
         if kind not in KINDS:
             return False
         ident = (row.get("close_fill_id") or row.get("client_id"), kind)
-        if ident in self._seen_live:
-            return False
-        self._seen_live.add(ident)
+        with self._lock:
+            if ident in self._seen_live:
+                return False
+            self._seen_live.add(ident)
         entry, qty = float(row.get("entry") or 0), float(row.get("qty") or 0)
         notional = entry * qty
         if notional > 0:
             r = float(row.get("pnl") or 0.0) / notional  # net of fees as booked
         else:
             r = float(row.get("pnl_pct") or 0.0) - self.s.cost
-        self.live.setdefault(kind, []).append({
-            "t": float(row.get("t") or 0.0), "r": r, "kind": kind, "side": str(row.get("side") or "").upper(),
-            "symbol": str(row.get("symbol") or ""), "source": "live"})
-        del self.live[kind][:-500]
+        t = float(row.get("t") or 0.0)
+        hold = float(row.get("hold_s") or row.get("holdS") or 0.0)
+        new = {"t": t, "entry_t": t - max(0.0, hold), "r": r, "kind": kind, "side": str(row.get("side") or "").upper(),
+               "symbol": str(row.get("symbol") or ""), "source": "live"}
+        with self._lock:
+            rows = list(self.live.get(kind, ())) + [new]
+            rows.sort(key=_row_t)
+            self.live[kind] = rows[-500:]
         return True
+
+    def seed_live(self, rows: Iterable) -> int:
+        """Startup: credit retained confirmed HTF round trips (idempotent)."""
+        return sum(1 for r in rows if self.on_live_close(r))
 
     # gates -----------------------------------------------------------
     def evidence(self, kind: str) -> Tuple[List[Dict], str]:
@@ -815,7 +858,7 @@ class HtfBook:
     def side_accept(self, family: str, side: str, now_s: float) -> Tuple[bool, Dict]:
         """CTS-A-O acceptOnWindow on the family x side closes before now."""
         rows = [r for k in self.s.kinds if KINDS[k].family == family
-                for r in (self.hist_rows(k) + self.live.get(k, [])) if r["side"] == side and r["t"] <= now_s]
+                for r in (self.hist_rows(k) + list(self.live.get(k, ()))) if r["side"] == side and r["t"] <= now_s]
 
         def stats(hours):
             rs = [r["r"] for r in rows if now_s - r["t"] <= hours * 3600]
@@ -859,10 +902,10 @@ class HtfBook:
             return []
         self.last_signal_t[sym] = last_t
         out = []
+        sigs = self.signals(sym)
         for kind in self.s.kinds:
-            cfg, vr = preset(kind)
-            sig = entry_signals(b, [kind], vol_regime=vr)[kind]
-            s = int(sig[-1])
+            cfg, _ = preset(kind)
+            s = int(sigs[kind][-1])
             if s:
                 out.append({"symbol": sym, "kind": kind, "side": "LONG" if s > 0 else "SHORT",
                             "direction": s, "exit": cfg, "barT": last_t, "close": float(b.c[-1])})
@@ -871,19 +914,27 @@ class HtfBook:
     def snapshot(self, now_s: Optional[float] = None) -> Dict:
         import time as _t
         now_s = now_s if now_s is not None else _t.time()
+        # Gates only change with a new bar, a new live close or new replay.
+        token = (id(self.s), int(now_s // 3600), tuple(sorted((k, len(v)) for k, v in list(self.live.items()))),
+                 self._ver)
+        cached = self._snap_cache
+        if cached is not None and cached[0] == token:
+            return cached[1]
         kinds = {}
         for k in self.s.kinds:
             tape, src = self.evidence(k)
             rs = [r["r"] for r in tape]
-            live_rs = [r["r"] for r in self.live.get(k, [])]
+            live_rs = [r["r"] for r in list(self.live.get(k, ()))]
             ok_l, why_l, _ = self.gate(k, "LONG", now_s)
             ok_s, why_s, _ = self.gate(k, "SHORT", now_s)
             kinds[k] = {"family": KINDS[k].family, "exit": HTF_PRESETS[k][0], "volRegime": HTF_PRESETS[k][1],
                         "n": len(rs), "pf": round(pf_classic(rs), 3) if rs else None, "source": src,
                         "liveN": len(live_rs), "livePf": round(pf_classic(live_rs), 3) if live_rs else None,
                         "long": {"ok": ok_l, "why": why_l}, "short": {"ok": ok_s, "why": why_s}}
-        return {"enabled": self.s.enabled, "symbols": len(self.bars),
-                "bars": {s: int(b.n) for s, b in self.bars.items()}, "kinds": kinds,
+        snap = {"enabled": self.s.enabled, "symbols": len(self.bars),
+                "bars": {s: int(b.n) for s, b in list(self.bars.items())}, "kinds": kinds,
                 "settings": {"minPf": self.s.min_pf, "window": self.s.window, "minN": self.s.min_n, "lastN": self.s.last_n,
                              "sideHours": self.s.side_hours, "sideMinTrades": self.s.side_min_trades,
                              "sideMinPf": self.s.side_min_pf, "maxOpen": self.s.max_open}}
+        self._snap_cache = (token, snap)
+        return snap

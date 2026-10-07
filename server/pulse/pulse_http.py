@@ -2473,6 +2473,14 @@ def merge_overall() -> dict:
         )
     except Exception:
         pass
+    # Per-desk lanes that never mix: the 1h lane and the live edge guard
+    # (each judged on its own connection's exchange results).
+    out["htfByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("htf") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("htf")}
+    out["liveEdgeByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("liveEdge") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("liveEdge")}
+    out["sizingByDesk"] = {l["id"]: (stats_by_id.get(l["id"]) or {}).get("sizing") for l in LANES if (stats_by_id.get(l["id"]) or {}).get("sizing")}
+    for k in ("htf", "liveEdge", "sizing"):
+        if detail_st.get(k) is not None:
+            out[k] = detail_st.get(k)
     for k in DETAIL_KEYS:
         if k in ("tests", "activity", "events"):
             continue
