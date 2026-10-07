@@ -108,12 +108,14 @@ def closed_member(pulse,pos,filled_oid=''):
 
 
 def enabled(pulse, pos=None):
-    return bool(getattr(pulse, 'control_orders_overall', False)) and not bool(getattr(pos, '_overall_proxy', False))
+    # 1h-lane lots keep their own quantity-matched pair (own SL/TP/hold).
+    return (bool(getattr(pulse, 'control_orders_overall', False)) and not bool(getattr(pos, '_overall_proxy', False))
+            and getattr(pos, 'pack', '') != 'htf')
 
 
 def members(pulse, pos):
     rows = [p for p in list(pulse.open.values()) if p.symbol == pos.symbol and p.side == pos.side
-            and pulse.position_is_ours(p) and p.qty > 0]
+            and pulse.position_is_ours(p) and p.qty > 0 and getattr(p, 'pack', '') != 'htf']
     if not any(p is pos for p in rows) and pos.qty > 0 and pulse.position_is_ours(pos):
         rows.append(pos)
     return rows

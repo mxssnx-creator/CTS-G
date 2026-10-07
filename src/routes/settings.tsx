@@ -5,6 +5,7 @@ import {
   blockTable,
   bool,
   DEFAULT_OVERLAY,
+  HTF_KINDS,
   DEFAULT_SYMBOL_COUNT,
   MAIN_EVAL_DEFAULT,
   REAL_EVAL_DEFAULT,
@@ -2026,6 +2027,35 @@ function SettingsPage() {
                   <Num label="Probe share" value={Math.round(overlay.liveEdgeProbeShare * 100)} min={0} max={100} step={1} unit="%"
                     hint="of maxOpen positions while guarded · 0 = no entries" onChange={(v) => patch("liveEdgeProbeShare", Math.max(0, Math.min(100, v)) / 100)} />
                 </Grid>
+              </Card>
+              <Card title="1h lane (HTF)" hint="CTS-A-O robust core on 1h bars: RSI-momentum + 1h/4h-agreement kinds, volatility regime, wide exits (TP 3–10%, 24–48h), validated on 2 years of BingX 1h data (reports/htf-validation-20261007). Own SL/TP pair per lot; no Block/DCA adds">
+                <Grid>
+                  <EnableSlider label="1h lane" on={overlay.htfEnabled === true} hint="Live x01 ships off · VST x02 on" onChange={(v) => patch("htfEnabled", v)} />
+                  <Num label="Evidence PF floor" value={overlay.htfMinPf} min={0.8} max={2} step={0.01}
+                    hint="PF over the live-first window (gross win / gross loss after cost)" onChange={(v) => patch("htfMinPf", Math.round(v * 100) / 100)} />
+                  <Num label="Evidence window" value={overlay.htfWindow} min={5} max={500} step={5} unit="closes"
+                    hint="live exchange closes decide once they fill it" onChange={(v) => patch("htfWindow", Math.round(v))} />
+                  <Num label="Min evidence" value={overlay.htfMinN} min={1} max={500} step={1} unit="closes"
+                    hint="fewer closes: the validated preset decides" onChange={(v) => patch("htfMinN", Math.round(v))} />
+                  <Num label="Last-N gate" value={overlay.htfLastN} min={0} max={100} step={1} unit="closes"
+                    hint="CTS-A-O last-N PF ≥ 1 · 0 = off (it lowered PF on our data)" onChange={(v) => patch("htfLastN", Math.round(v))} />
+                  <Num label="Direction acceptance" value={overlay.htfSideHours} min={1} max={168} step={1} unit="h"
+                    hint={`family × side PF ≥ ${overlay.htfSideMinPf} once ≥ ${overlay.htfSideMinTrades} closes`} onChange={(v) => patch("htfSideHours", Math.round(v))} />
+                  <Num label="Max open" value={overlay.htfMaxOpen} min={0} max={200} step={1} unit="lots"
+                    hint="0 = unlimited" onChange={(v) => patch("htfMaxOpen", Math.round(v))} />
+                </Grid>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {HTF_KINDS.map((k) => {
+                    const on = (overlay.htfKinds ?? []).includes(k);
+                    return (
+                      <button key={k} type="button"
+                        className={`rounded border px-2 py-0.5 text-xs ${on ? "border-emerald-500/60 bg-emerald-500/10" : "border-border opacity-60"}`}
+                        onClick={() => patch("htfKinds", on ? (overlay.htfKinds ?? []).filter((x) => x !== k) : [...(overlay.htfKinds ?? []), k])}>
+                        {k}
+                      </button>
+                    );
+                  })}
+                </div>
               </Card>
               <Card title="Risk, sizing and stops" hint="Volume is always raised to the venue minimum lot; stops never tighter than the venue accepts">
                 <Grid>

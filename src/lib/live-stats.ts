@@ -237,8 +237,34 @@ export type ActivitySummary = {
   source?: string;
 };
 
+export type HtfKindStat = {
+  family: string;
+  exit: string;
+  volRegime: boolean;
+  n: number;
+  pf: number | null;
+  source: string;
+  liveN: number;
+  livePf: number | null;
+  long: { ok: boolean; why: string };
+  short: { ok: boolean; why: string };
+};
+
+export type HtfStats = {
+  enabled: boolean;
+  symbols?: number;
+  kinds?: Record<string, HtfKindStat>;
+  open?: { symbol: string; side: string; kind: string; exit: string; openedAt: number; holdS: number }[];
+  queued?: number;
+  error?: string;
+};
+
+export type LiveEdgeSide = { state: string; n: number; need: number; pf: number | null };
+
 export type LiveStats = {
   system?: import("./system-settings").SystemStatus;
+  htf?: HtfStats;
+  liveEdge?: { enabled: boolean; n: number; probeShare: number; LONG?: LiveEdgeSide; SHORT?: LiveEdgeSide };
   positionCost?: {
     manualPct?: number;
     effectivePct?: number;

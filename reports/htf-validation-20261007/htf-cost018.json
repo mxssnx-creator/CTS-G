@@ -1,0 +1,741 @@
+{
+ "kinds": {
+  "rsi-mom-10-25": {
+   "plain": {
+    "volRegime": false,
+    "exit": "tp10|sl15|h48",
+    "pfA": 1.293,
+    "nA": 1695,
+    "pfB": 0.983,
+    "nB": 1654,
+    "pfPrior": 1.112,
+    "nPrior": 3481,
+    "meanB": -0.034,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp8|sl8|h48|tr4",
+    "pfA": 1.574,
+    "nA": 792,
+    "pfB": 1.119,
+    "nB": 600,
+    "pfPrior": 1.117,
+    "nPrior": 1656,
+    "meanB": 0.204,
+    "selected": true
+   }
+  },
+  "rsi-mom-14-15": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp6|sl6|h24|tr3",
+    "pfA": 2.098,
+    "nA": 140,
+    "pfB": 1.464,
+    "nB": 110,
+    "pfPrior": 1.54,
+    "nPrior": 183,
+    "meanB": 0.59,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp6|sl6|h24|tr3",
+    "pfA": 1.996,
+    "nA": 80,
+    "pfB": 1.065,
+    "nB": 49,
+    "pfPrior": 1.509,
+    "nPrior": 113,
+    "meanB": 0.101,
+    "selected": true
+   }
+  },
+  "rsi-mom-14-20": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h24",
+    "pfA": 1.518,
+    "nA": 401,
+    "pfB": 1.543,
+    "nB": 313,
+    "pfPrior": 1.299,
+    "nPrior": 629,
+    "meanB": 0.883,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp8|sl12|h24",
+    "pfA": 2.964,
+    "nA": 163,
+    "pfB": 1.537,
+    "nB": 160,
+    "pfPrior": 1.037,
+    "nPrior": 279,
+    "meanB": 1.009,
+    "selected": true
+   }
+  },
+  "rsi-mom-14-25": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.207,
+    "nA": 676,
+    "pfB": 1.201,
+    "nB": 657,
+    "pfPrior": 1.184,
+    "nPrior": 1286,
+    "meanB": 0.405,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp8|sl24|h24",
+    "pfA": 2.629,
+    "nA": 254,
+    "pfB": 1.683,
+    "nB": 315,
+    "pfPrior": 0.983,
+    "nPrior": 599,
+    "meanB": 1.005,
+    "selected": true
+   }
+  },
+  "rsi-mom-21-15": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp6|sl12|h24|tr3",
+    "pfA": 1.937,
+    "nA": 41,
+    "pfB": 1.784,
+    "nB": 32,
+    "pfPrior": 1.022,
+    "nPrior": 37,
+    "meanB": 1.347,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp8|sl16|h24|tr4",
+    "pfA": 3.687,
+    "nA": 30,
+    "pfB": 1.566,
+    "nB": 17,
+    "pfPrior": 0.528,
+    "nPrior": 20,
+    "meanB": 1.289,
+    "selected": true
+   }
+  },
+  "rsi-mom-21-20": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp6|sl6|h48|tr3",
+    "pfA": 1.989,
+    "nA": 136,
+    "pfB": 2.021,
+    "nB": 122,
+    "pfPrior": 1.317,
+    "nPrior": 198,
+    "meanB": 1.293,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp5|sl2.5|h48",
+    "pfA": 2.321,
+    "nA": 90,
+    "pfB": 0.606,
+    "nB": 57,
+    "pfPrior": 0.915,
+    "nPrior": 88,
+    "meanB": -0.755,
+    "selected": true
+   }
+  },
+  "rsi-mom-21-25": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp8|sl4|h24",
+    "pfA": 1.535,
+    "nA": 355,
+    "pfB": 1.565,
+    "nB": 307,
+    "pfPrior": 1.29,
+    "nPrior": 625,
+    "meanB": 0.87,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h24",
+    "pfA": 3.475,
+    "nA": 141,
+    "pfB": 1.457,
+    "nB": 191,
+    "pfPrior": 1.185,
+    "nPrior": 270,
+    "meanB": 0.799,
+    "selected": true
+   }
+  },
+  "bb-walk@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp6|sl12|h24|tr3",
+    "pfA": 2.238,
+    "nA": 186,
+    "pfB": 2.424,
+    "nB": 233,
+    "pfPrior": 1.496,
+    "nPrior": 395,
+    "meanB": 1.047,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp6|sl6|h24|tr3",
+    "pfA": 3.825,
+    "nA": 71,
+    "pfB": 2.672,
+    "nB": 183,
+    "pfPrior": 1.756,
+    "nPrior": 211,
+    "meanB": 1.181,
+    "selected": true
+   }
+  },
+  "break-vol@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.447,
+    "nA": 556,
+    "pfB": 1.337,
+    "nB": 348,
+    "pfPrior": 1.316,
+    "nPrior": 938,
+    "meanB": 0.639,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp8|sl16|h48|tr4",
+    "pfA": 1.676,
+    "nA": 305,
+    "pfB": 1.154,
+    "nB": 201,
+    "pfPrior": 0.776,
+    "nPrior": 597,
+    "meanB": 0.286,
+    "selected": true
+   }
+  },
+  "break-vol-2@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.557,
+    "nA": 401,
+    "pfB": 1.953,
+    "nB": 211,
+    "pfPrior": 1.42,
+    "nPrior": 603,
+    "meanB": 1.474,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp5|sl5|h48|tr2.5",
+    "pfA": 1.957,
+    "nA": 187,
+    "pfB": 1.601,
+    "nB": 127,
+    "pfPrior": 0.885,
+    "nPrior": 308,
+    "meanB": 0.616,
+    "selected": true
+   }
+  },
+  "break-atr-2@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp6|sl6|h48|tr3",
+    "pfA": 1.628,
+    "nA": 381,
+    "pfB": 0.983,
+    "nB": 341,
+    "pfPrior": 1.15,
+    "nPrior": 659,
+    "meanB": -0.028,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp8|sl16|h24|tr4",
+    "pfA": 2.085,
+    "nA": 236,
+    "pfB": 1.781,
+    "nB": 167,
+    "pfPrior": 0.661,
+    "nPrior": 373,
+    "meanB": 0.693,
+    "selected": true
+   }
+  },
+  "act-burst-2.5@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.594,
+    "nA": 555,
+    "pfB": 1.159,
+    "nB": 516,
+    "pfPrior": 1.344,
+    "nPrior": 883,
+    "meanB": 0.312,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp8|sl8|h24|tr4",
+    "pfA": 1.938,
+    "nA": 337,
+    "pfB": 1.035,
+    "nB": 224,
+    "pfPrior": 0.719,
+    "nPrior": 490,
+    "meanB": 0.049,
+    "selected": true
+   }
+  },
+  "act-chop@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp3|sl6|h48|tr1.5",
+    "pfA": 1.597,
+    "nA": 37,
+    "pfB": 4.374,
+    "nB": 19,
+    "pfPrior": 1.163,
+    "nPrior": 30,
+    "meanB": 0.986,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp3|sl6|h48|tr1.5",
+    "pfA": 1.578,
+    "nA": 38,
+    "pfB": 3.526,
+    "nB": 41,
+    "pfPrior": 0.601,
+    "nPrior": 59,
+    "meanB": 0.666,
+    "selected": true
+   }
+  },
+  "cci-14-200@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp5|sl5|h24|tr2.5",
+    "pfA": 2.8,
+    "nA": 204,
+    "pfB": 0.981,
+    "nB": 212,
+    "pfPrior": 1.2,
+    "nPrior": 277,
+    "meanB": -0.024,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp6|sl6|h24|tr3",
+    "pfA": 2.753,
+    "nA": 231,
+    "pfB": 0.57,
+    "nB": 109,
+    "pfPrior": 1.183,
+    "nPrior": 248,
+    "meanB": -0.713,
+    "selected": true
+   }
+  },
+  "cci-40-200@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.327,
+    "nA": 345,
+    "pfB": 1.325,
+    "nB": 364,
+    "pfPrior": 1.622,
+    "nPrior": 548,
+    "meanB": 0.649,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h24",
+    "pfA": 1.609,
+    "nA": 158,
+    "pfB": 1.246,
+    "nB": 160,
+    "pfPrior": 1.973,
+    "nPrior": 306,
+    "meanB": 0.424,
+    "selected": true
+   }
+  },
+  "z-50-2.5@x4": {
+   "plain": {
+    "volRegime": true,
+    "exit": "tp10|sl5|h48",
+    "pfA": 1.91,
+    "nA": 284,
+    "pfB": 1.622,
+    "nB": 375,
+    "pfPrior": 1.305,
+    "nPrior": 599,
+    "meanB": 1.124,
+    "selected": true
+   },
+   "lastN": {
+    "volRegime": false,
+    "exit": "tp10|sl15|h48",
+    "pfA": 3.362,
+    "nA": 150,
+    "pfB": 1.121,
+    "nB": 203,
+    "pfPrior": 0.991,
+    "nPrior": 297,
+    "meanB": 0.312,
+    "selected": true
+   }
+  }
+ },
+ "families": {
+  "rsi-mom|plain": {
+   "family": "rsi-mom",
+   "variant": "plain",
+   "kinds": [
+    "rsi-mom-10-25",
+    "rsi-mom-14-15",
+    "rsi-mom-14-20",
+    "rsi-mom-14-25",
+    "rsi-mom-21-15",
+    "rsi-mom-21-20",
+    "rsi-mom-21-25"
+   ],
+   "pfA": 1.365,
+   "nA": 3444,
+   "pfB": 1.17,
+   "nB": 3195,
+   "pfPrior": 1.167,
+   "nPrior": 6439,
+   "costPfB": 1.1772,
+   "meanB": 0.319,
+   "netB": 1019.07,
+   "netPrior": 2546.68,
+   "tradesPerDayB": 17.51,
+   "closeHoursPositivePct": 43.4,
+   "leaveOneOutMin": 1.129,
+   "leaveOneOut": {
+    "AAVE-USDT": 1.182,
+    "ADA-USDT": 1.156,
+    "APT-USDT": 1.179,
+    "ARB-USDT": 1.129,
+    "ATOM-USDT": 1.18,
+    "AVAX-USDT": 1.173,
+    "BCH-USDT": 1.152,
+    "BNB-USDT": 1.172,
+    "BTC-USDT": 1.162,
+    "DOGE-USDT": 1.19,
+    "DOT-USDT": 1.179,
+    "ETC-USDT": 1.168,
+    "ETH-USDT": 1.178,
+    "FIL-USDT": 1.195,
+    "HBAR-USDT": 1.18,
+    "INJ-USDT": 1.147,
+    "LINK-USDT": 1.188,
+    "LTC-USDT": 1.172,
+    "NEAR-USDT": 1.141,
+    "OP-USDT": 1.161,
+    "SEI-USDT": 1.172,
+    "SOL-USDT": 1.171,
+    "SUI-USDT": 1.16,
+    "TIA-USDT": 1.163,
+    "TRX-USDT": 1.176,
+    "UNI-USDT": 1.179,
+    "WIF-USDT": 1.179,
+    "XRP-USDT": 1.182
+   },
+   "checks": {
+    "pfB": true,
+    "pfPrior": true,
+    "tradesB": true,
+    "tradesPrior": true,
+    "leaveOneOut": true
+   },
+   "passes": true
+  },
+  "robust|plain": {
+   "family": "robust",
+   "variant": "plain",
+   "kinds": [
+    "bb-walk@x4",
+    "break-vol@x4",
+    "break-vol-2@x4",
+    "break-atr-2@x4",
+    "act-burst-2.5@x4",
+    "act-chop@x4",
+    "cci-14-200@x4",
+    "cci-40-200@x4",
+    "z-50-2.5@x4"
+   ],
+   "pfA": 1.606,
+   "nA": 2949,
+   "pfB": 1.363,
+   "nB": 2619,
+   "pfPrior": 1.356,
+   "nPrior": 4932,
+   "costPfB": 1.3394,
+   "meanB": 0.611,
+   "netB": 1599.93,
+   "netPrior": 3609.89,
+   "tradesPerDayB": 14.35,
+   "closeHoursPositivePct": 50.3,
+   "leaveOneOutMin": 1.315,
+   "leaveOneOut": {
+    "AAVE-USDT": 1.363,
+    "ADA-USDT": 1.358,
+    "APT-USDT": 1.375,
+    "ARB-USDT": 1.326,
+    "ATOM-USDT": 1.365,
+    "AVAX-USDT": 1.386,
+    "BCH-USDT": 1.332,
+    "BNB-USDT": 1.377,
+    "BTC-USDT": 1.363,
+    "DOGE-USDT": 1.365,
+    "DOT-USDT": 1.368,
+    "ETC-USDT": 1.369,
+    "ETH-USDT": 1.369,
+    "FIL-USDT": 1.407,
+    "HBAR-USDT": 1.356,
+    "INJ-USDT": 1.375,
+    "LINK-USDT": 1.378,
+    "LTC-USDT": 1.357,
+    "NEAR-USDT": 1.315,
+    "OP-USDT": 1.371,
+    "SEI-USDT": 1.361,
+    "SOL-USDT": 1.359,
+    "SUI-USDT": 1.359,
+    "TIA-USDT": 1.326,
+    "TRX-USDT": 1.371,
+    "UNI-USDT": 1.342,
+    "WIF-USDT": 1.38,
+    "XRP-USDT": 1.388
+   },
+   "checks": {
+    "pfB": true,
+    "pfPrior": true,
+    "tradesB": true,
+    "tradesPrior": true,
+    "leaveOneOut": true
+   },
+   "passes": true
+  },
+  "rsi-mom|lastN": {
+   "family": "rsi-mom",
+   "variant": "lastN",
+   "kinds": [
+    "rsi-mom-10-25",
+    "rsi-mom-14-15",
+    "rsi-mom-14-20",
+    "rsi-mom-14-25",
+    "rsi-mom-21-15",
+    "rsi-mom-21-20",
+    "rsi-mom-21-25"
+   ],
+   "pfA": 2.148,
+   "nA": 1550,
+   "pfB": 1.313,
+   "nB": 1389,
+   "pfPrior": 1.078,
+   "nPrior": 3025,
+   "costPfB": 1.2947,
+   "meanB": 0.53,
+   "netB": 736.77,
+   "netPrior": 534.65,
+   "tradesPerDayB": 7.61,
+   "closeHoursPositivePct": 47.8,
+   "leaveOneOutMin": 1.269,
+   "leaveOneOut": {
+    "AAVE-USDT": 1.328,
+    "ADA-USDT": 1.298,
+    "APT-USDT": 1.338,
+    "ARB-USDT": 1.33,
+    "ATOM-USDT": 1.326,
+    "AVAX-USDT": 1.299,
+    "BCH-USDT": 1.287,
+    "BNB-USDT": 1.314,
+    "BTC-USDT": 1.304,
+    "DOGE-USDT": 1.311,
+    "DOT-USDT": 1.318,
+    "ETC-USDT": 1.283,
+    "ETH-USDT": 1.315,
+    "FIL-USDT": 1.345,
+    "HBAR-USDT": 1.324,
+    "INJ-USDT": 1.269,
+    "LINK-USDT": 1.341,
+    "LTC-USDT": 1.333,
+    "NEAR-USDT": 1.298,
+    "OP-USDT": 1.307,
+    "SEI-USDT": 1.291,
+    "SOL-USDT": 1.318,
+    "SUI-USDT": 1.311,
+    "TIA-USDT": 1.31,
+    "TRX-USDT": 1.324,
+    "UNI-USDT": 1.346,
+    "WIF-USDT": 1.313,
+    "XRP-USDT": 1.297
+   },
+   "checks": {
+    "pfB": true,
+    "pfPrior": true,
+    "tradesB": true,
+    "tradesPrior": true,
+    "leaveOneOut": true
+   },
+   "passes": true
+  },
+  "robust|lastN": {
+   "family": "robust",
+   "variant": "lastN",
+   "kinds": [
+    "bb-walk@x4",
+    "break-vol@x4",
+    "break-vol-2@x4",
+    "break-atr-2@x4",
+    "act-burst-2.5@x4",
+    "act-chop@x4",
+    "cci-14-200@x4",
+    "cci-40-200@x4",
+    "z-50-2.5@x4"
+   ],
+   "pfA": 2.11,
+   "nA": 1713,
+   "pfB": 1.269,
+   "nB": 1415,
+   "pfPrior": 0.953,
+   "nPrior": 2889,
+   "costPfB": 1.2196,
+   "meanB": 0.395,
+   "netB": 559.28,
+   "netPrior": -308.0,
+   "tradesPerDayB": 7.75,
+   "closeHoursPositivePct": 57.6,
+   "leaveOneOutMin": 1.225,
+   "leaveOneOut": {
+    "AAVE-USDT": 1.266,
+    "ADA-USDT": 1.28,
+    "APT-USDT": 1.285,
+    "ARB-USDT": 1.252,
+    "ATOM-USDT": 1.273,
+    "AVAX-USDT": 1.262,
+    "BCH-USDT": 1.226,
+    "BNB-USDT": 1.287,
+    "BTC-USDT": 1.268,
+    "DOGE-USDT": 1.264,
+    "DOT-USDT": 1.279,
+    "ETC-USDT": 1.274,
+    "ETH-USDT": 1.281,
+    "FIL-USDT": 1.289,
+    "HBAR-USDT": 1.272,
+    "INJ-USDT": 1.272,
+    "LINK-USDT": 1.273,
+    "LTC-USDT": 1.274,
+    "NEAR-USDT": 1.225,
+    "OP-USDT": 1.266,
+    "SEI-USDT": 1.249,
+    "SOL-USDT": 1.28,
+    "SUI-USDT": 1.259,
+    "TIA-USDT": 1.246,
+    "TRX-USDT": 1.271,
+    "UNI-USDT": 1.24,
+    "WIF-USDT": 1.292,
+    "XRP-USDT": 1.32
+   },
+   "checks": {
+    "pfB": true,
+    "pfPrior": false,
+    "tradesB": true,
+    "tradesPrior": true,
+    "leaveOneOut": true
+   },
+   "passes": false
+  }
+ },
+ "periods": {
+  "prior": [
+   1728262800000,
+   1759798800000
+  ],
+  "A": [
+   1759798800000,
+   1775566800000
+  ],
+  "B": [
+   1775566800000,
+   1791334800000
+  ]
+ },
+ "generatedAt": "2026-10-07 02:13 UTC",
+ "symbols": [
+  "AAVE-USDT",
+  "ADA-USDT",
+  "APT-USDT",
+  "ARB-USDT",
+  "ATOM-USDT",
+  "AVAX-USDT",
+  "BCH-USDT",
+  "BNB-USDT",
+  "BTC-USDT",
+  "DOGE-USDT",
+  "DOT-USDT",
+  "ETC-USDT",
+  "ETH-USDT",
+  "FIL-USDT",
+  "HBAR-USDT",
+  "INJ-USDT",
+  "LINK-USDT",
+  "LTC-USDT",
+  "NEAR-USDT",
+  "OP-USDT",
+  "SEI-USDT",
+  "SOL-USDT",
+  "SUI-USDT",
+  "TIA-USDT",
+  "TRX-USDT",
+  "UNI-USDT",
+  "WIF-USDT",
+  "XRP-USDT"
+ ],
+ "args": {
+  "data_dir": "/tmp/claude-0/htf1h",
+  "cost": 0.0018,
+  "select_pf": 1.1,
+  "min_select_trades": 30,
+  "min_pf_b": 1.05,
+  "min_pf_prior": 1.0,
+  "min_trades": 100,
+  "last_n": 12,
+  "last_n_floor": 5,
+  "workers": 4,
+  "out": "/tmp/claude-0/-home-user-CTS-G/15c5d59f-6494-5ef4-9638-b5fe8fd46792/scratchpad/htf018.json",
+  "html": "/tmp/claude-0/-home-user-CTS-G/15c5d59f-6494-5ef4-9638-b5fe8fd46792/scratchpad/htf018.html"
+ }
+}

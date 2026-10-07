@@ -1,5 +1,8 @@
 import { requestJson } from "./request-json.ts";
 
+/** 1h lane kinds (server/pulse/htf_engine.py HTF_KINDS), validated in reports/htf-validation-20261007. */
+export const HTF_KINDS = ["rsi-mom-10-25", "rsi-mom-14-15", "rsi-mom-14-20", "rsi-mom-14-25", "rsi-mom-21-15", "rsi-mom-21-20", "rsi-mom-21-25", "bb-walk@x4", "break-vol@x4", "break-vol-2@x4", "break-atr-2@x4", "act-burst-2.5@x4", "act-chop@x4", "cci-14-200@x4", "cci-40-200@x4", "z-50-2.5@x4"] as const;
+
 export const PULSE_SYMBOLS = [
   "SOL-USDT",
   "XRP-USDT",
@@ -246,6 +249,17 @@ export type PulseOverlay = import("./system-settings").SystemSettings & {
   targetNotional: number;
   volumeFactor: number;
   orderSizing: "minQty" | "factor";
+  htfEnabled: boolean;
+  htfKinds: string[];
+  htfMinPf: number;
+  htfWindow: number;
+  htfMinN: number;
+  htfLastN: number;
+  htfSideHours: number;
+  htfSideMinTrades: number;
+  htfSideMinPf: number;
+  htfMaxOpen: number;
+  htfHistoryBars: number;
   slAutoLeverage: boolean;
   leverage: number;
   useMaxLeverage: boolean;
@@ -528,6 +542,17 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   targetNotional: 2.15,
   volumeFactor: 0.1,
   orderSizing: "minQty",
+  htfEnabled: false,
+  htfKinds: [...HTF_KINDS],
+  htfMinPf: 1.05,
+  htfWindow: 50,
+  htfMinN: 20,
+  htfLastN: 0,
+  htfSideHours: 24,
+  htfSideMinTrades: 30,
+  htfSideMinPf: 1.05,
+  htfMaxOpen: 12,
+  htfHistoryBars: 1000,
   slAutoLeverage: true,
   leverage: 150,
   useMaxLeverage: true,
@@ -850,6 +875,17 @@ export type CtsSettings = {
   dcaDeactN?: number;
   volumeFactor?: number;
   orderSizing?: string;
+  htfEnabled?: boolean;
+  htfKinds?: string[];
+  htfMinPf?: number;
+  htfWindow?: number;
+  htfMinN?: number;
+  htfLastN?: number;
+  htfSideHours?: number;
+  htfSideMinTrades?: number;
+  htfSideMinPf?: number;
+  htfMaxOpen?: number;
+  htfHistoryBars?: number;
   slAutoLeverage?: boolean;
   axisPrevEnabled?: boolean;
   axisPrevMaxWindow?: number;
@@ -1089,6 +1125,17 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 0.1),
     orderSizing: cts.orderSizing === "factor" ? "factor" : "minQty",
+    htfEnabled: bool(cts.htfEnabled, false),
+    htfKinds: Array.isArray(cts.htfKinds) ? cts.htfKinds.filter((k) => (HTF_KINDS as readonly string[]).includes(k)) : [...HTF_KINDS],
+    htfMinPf: Math.max(0.5, Math.min(3, num(cts.htfMinPf, 1.05))),
+    htfWindow: Math.max(5, Math.min(500, Math.round(num(cts.htfWindow, 50)))),
+    htfMinN: Math.max(1, Math.min(500, Math.round(num(cts.htfMinN, 20)))),
+    htfLastN: Math.max(0, Math.min(100, Math.round(num(cts.htfLastN, 0)))),
+    htfSideHours: Math.max(1, Math.min(168, num(cts.htfSideHours, 24))),
+    htfSideMinTrades: Math.max(1, Math.min(500, Math.round(num(cts.htfSideMinTrades, 30)))),
+    htfSideMinPf: Math.max(0.5, Math.min(3, num(cts.htfSideMinPf, 1.05))),
+    htfMaxOpen: Math.max(0, Math.min(200, Math.round(num(cts.htfMaxOpen, 12)))),
+    htfHistoryBars: Math.max(400, Math.min(1440, Math.round(num(cts.htfHistoryBars, 1000)))),
     slAutoLeverage: bool(cts.slAutoLeverage, true),
     axisPrevEnabled: bool(cts.axisPrevEnabled ?? nestedAxis(coord, "prev", "enabled"), true),
     axisPrevMaxWindow: num(cts.axisPrevMaxWindow ?? nestedAxis(coord, "prev", "maxWindow"), 12),

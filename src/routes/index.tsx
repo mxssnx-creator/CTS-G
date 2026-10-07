@@ -294,6 +294,17 @@ function DeskPage() {
         </Panel>
       </section>
 
+      {stats?.htf?.enabled || stats?.liveEdge ? (
+        <section className="grid gap-3 lg:grid-cols-2">
+          <Panel title="1h lane" icon={<Layers className="size-4" />}>
+            <HtfPanel htf={stats?.htf} />
+          </Panel>
+          <Panel title="Live edge" icon={<ShieldAlert className="size-4" />}>
+            <LiveEdgePanel edge={stats?.liveEdge} />
+          </Panel>
+        </section>
+      ) : null}
+
       <section className="rounded-radius border border-border bg-surface p-4">
         <h2 className="mb-3 text-sm font-medium tracking-wide text-muted uppercase">
           Universe · {stats?.symbolCount ?? stats?.symbols?.length ?? 0}/{stats?.symbolCap || stats?.symbolMax || "unlimited"}
@@ -1000,6 +1011,59 @@ function IndicationStrip({ stats }: { stats: LiveStats | null }) {
         </div>
       )}
     </div>
+  );
+}
+
+function HtfPanel({ htf }: { htf?: LiveStats["htf"] }) {
+  if (!htf?.enabled) return <p className="text-sm text-muted">1h lane off on this desk</p>;
+  if (htf.error) return <p className="text-sm text-danger">{htf.error}</p>;
+  const kinds = Object.entries(htf.kinds ?? {});
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-muted">
+        {htf.symbols ?? 0} symbols · {(htf.open ?? []).length} open · {htf.queued ?? 0} queued
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-xs tabular-nums">
+          <thead className="text-muted">
+            <tr><th className="text-left">kind</th><th className="text-left">exit</th><th>PF (n)</th><th>source</th><th>live</th><th>L</th><th>S</th></tr>
+          </thead>
+          <tbody>
+            {kinds.map(([k, v]) => (
+              <tr key={k} className="border-t border-border">
+                <td className="py-0.5 text-left">{k}</td>
+                <td className="text-left text-muted">{v.exit}</td>
+                <td className="text-center">{v.pf == null ? "–" : v.pf.toFixed(2)} ({v.n})</td>
+                <td className="text-center text-muted">{v.source}</td>
+                <td className="text-center">{v.liveN ? `${v.livePf?.toFixed(2) ?? "–"} (${v.liveN})` : "–"}</td>
+                <td className={`text-center ${v.long.ok ? "text-primary" : "text-danger"}`} title={v.long.why}>{v.long.ok ? "on" : "off"}</td>
+                <td className={`text-center ${v.short.ok ? "text-primary" : "text-danger"}`} title={v.short.why}>{v.short.ok ? "on" : "off"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function LiveEdgePanel({ edge }: { edge?: LiveStats["liveEdge"] }) {
+  if (!edge) return <p className="text-sm text-muted">Waiting</p>;
+  if (!edge.enabled) return <p className="text-sm text-muted">Live edge guard off</p>;
+  return (
+    <dl className="grid grid-cols-2 gap-2 text-sm">
+      {(["LONG", "SHORT"] as const).map((side) => {
+        const s = edge[side];
+        return (
+          <div key={side} className="rounded border border-border p-2">
+            <dt className="text-muted">{side}</dt>
+            <dd className={s?.state === "probe" ? "text-danger" : s?.state === "edge" ? "text-primary" : "text-fg"}>
+              {s?.state ?? "–"} · PF {s?.pf == null ? "–" : s.pf.toFixed(2)} · {s?.n ?? 0}/{s?.need ?? edge.n}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 
