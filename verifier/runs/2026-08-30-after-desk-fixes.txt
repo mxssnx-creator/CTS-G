@@ -1,5 +1,5 @@
 === run 2026-08-30T15:26:05Z after-desk-fixes ===
-engine-zest exit=0 -> 85/85 passed  fail=0
+engine-test exit=0 -> 85/85 passed  fail=0
 npm test exit=0 -> # pass 191 # fail 0 # skipped 4 
 typecheck exit=0
-overall-zest exit=0 -> 45/45 ok  fail=0
+overall-test exit=0 -> 45/45 ok  fail=0

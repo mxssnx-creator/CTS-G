@@ -2,7 +2,7 @@
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
 
-const BASE = process.env.ZEST_BASE || "http://127.0.0.1:8080";
+const BASE = process.env.TEST_BASE || "http://127.0.0.1:8080";
 const out = [];
 const ok = (m) => out.push("OK " + m);
 const fail = (m) => out.push("FAIL " + m);
@@ -10,7 +10,7 @@ const fail = (m) => out.push("FAIL " + m);
 const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-dev-shm-usage"] });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 // The platform's deferred extensions.js hangs whole page loads where grok.com
-// is unreachable (CI, offline dev). The zest checks the desk, not the platform
+// is unreachable (CI, offline dev). The test checks the desk, not the platform
 // script, so abort it instead of letting it block DOMContentLoaded.
 await page.route("**/grok-app-builder/extensions.js", (route) => route.abort());
 page.setDefaultTimeout(14000);
@@ -69,7 +69,7 @@ try {
   const identO = await page.locator("[data-testid=desk-identity]").innerText().catch(() => "");
   if (/overall/i.test(identO)) ok("overall identity " + identO.replace(/\s+/g, " ").slice(0, 80));
   else fail("overall identity " + identO);
-  await page.screenshot({ path: "/workspace/screenshots/zest-overall.png", timeout: 5000 }).catch(() => {});
+  await page.screenshot({ path: "/workspace/screenshots/test-overall.png", timeout: 5000 }).catch(() => {});
 
   await clickConn("vst");
   await page.waitForTimeout(900);
@@ -89,7 +89,7 @@ try {
   else fail("live identity " + identL);
   if (/vst/i.test(identL) && !/live/i.test(identL)) fail("live showing vst identity");
   else ok("live isolation identity");
-  await page.screenshot({ path: "/workspace/screenshots/zest-live.png", timeout: 5000 }).catch(() => {});
+  await page.screenshot({ path: "/workspace/screenshots/test-live.png", timeout: 5000 }).catch(() => {});
 
   await page.goto(BASE + "/results", { waitUntil: "domcontentloaded" });
   await page.waitForSelector("[data-testid=desk-root]", { timeout: 10000 });
@@ -154,7 +154,7 @@ try {
   if (/1H vol/i.test(symTxt) && /Max lev/i.test(symTxt) && /exchange max leverage/i.test(symTxt)) {
     ok("rank columns + hint");
   } else fail("rank table missing");
-  await page.screenshot({ path: "/workspace/screenshots/zest-symbols.png", timeout: 5000 }).catch(() => {});
+  await page.screenshot({ path: "/workspace/screenshots/test-symbols.png", timeout: 5000 }).catch(() => {});
 
   await page.getByTestId("section-risk").click();
   await page.waitForSelector("[data-ratio='0.6']", { timeout: 6000 }).catch(() => null);
@@ -184,7 +184,7 @@ try {
   else fail("mobile empty");
   if (!overflow) ok("mobile no overflow");
   else fail("mobile overflow");
-  await page2.screenshot({ path: "/workspace/screenshots/zest-mobile.png", timeout: 5000 }).catch(() => {});
+  await page2.screenshot({ path: "/workspace/screenshots/test-mobile.png", timeout: 5000 }).catch(() => {});
   await page2.close();
 
   const crashes = errors.filter((e) => !/502|Failed to load resource|Hydration failed/i.test(e));
@@ -197,6 +197,6 @@ try {
   const fails = out.filter((l) => l.startsWith("FAIL"));
   console.log(out.join("\n"));
   console.log(`\n${out.filter((l) => l.startsWith("OK")).length}/${out.length} ok  fail=${fails.length}`);
-  writeFileSync("/tmp/overall-zest.log", out.join("\n"));
+  writeFileSync("/tmp/overall-test.log", out.join("\n"));
   process.exit(fails.length ? 1 : 0);
 }

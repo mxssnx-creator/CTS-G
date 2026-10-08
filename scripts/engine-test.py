@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Overall engine functionality zest: units, rank, overlay, isolation, sizing."""
+"""Overall engine functionality test: units, rank, overlay, isolation, sizing."""
 from __future__ import annotations
 
 import json
@@ -70,7 +70,7 @@ def run_units() -> None:
             rec(f"unit-{tag}", False, traceback.format_exc()[-180:])
 
 
-def rank_zest() -> None:
+def rank_test() -> None:
     ok, d = rank_self_test()
     rec("rank-lev-then-vol1h", ok, d)
     rec("sort-default", coerce_symbol_sort(None) == "vol1h", coerce_symbol_sort(None))
@@ -89,7 +89,7 @@ def rank_zest() -> None:
     rec("metric-abs", abs(symbol_metric({"changePct": -3.5}, "changeAbs") - 3.5) < 1e-9)
 
 
-def overlay_zest() -> None:
+def overlay_test() -> None:
     for name in ("overlay-bingx-x01.json", "overlay-bingx-x02.json"):
         p = os.path.join(DIR, name)
         with open(p) as f:
@@ -114,7 +114,7 @@ def overlay_zest() -> None:
     rec("x01-not-x02-lane", True, "Gx01 vs Gx02 CID isolation")
 
 
-def cost_zest() -> None:
+def cost_test() -> None:
     rec("pf-1R", abs(ratio_from_r(1.0) - 1.10) < 1e-9, str(ratio_from_r(1.0)))
     sl, tp, src = resolve_sl_tp(base_sl=0.0048, base_tp=0.0075, sl_min=0.002, sl_max=0.02, tp_min=0.0035, tp_max=0.024, sl_to_tp=0.6)
     rec("sltp-0.6", tp > 0 and abs(sl / tp - 0.6) < 1e-6, f"{src} sl={sl:.4f} tp={tp:.4f}")
@@ -123,13 +123,13 @@ def cost_zest() -> None:
     rec("net-pnl-long", abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-9, str(net_pnl_pct(0.003, 0.15)))
 
 
-def contract_zest() -> None:
+def contract_test() -> None:
     c = Contract("SOL-USDT", 0.01, 0.01, 2, 3, 2.0, 300)
     rec("contract-max-lev", int(c.max_lev) == 300, str(c.max_lev))
     rec("contract-min-usdt", float(c.min_usdt) == 2.0)
 
 
-def controls_zest() -> None:
+def controls_test() -> None:
     rec("oid-reject-exists", real_oid("exists") == "")
     rec("oid-keep", real_oid("1234567890") == "1234567890")
     rec("oid-extract", extract_oid({"code": 0, "data": {"order": {"orderId": "99"}}}) == "99")
@@ -175,15 +175,15 @@ def controls_zest() -> None:
     rec("zero-means-unlimited-overlay", int(json.load(open(os.path.join(DIR, "overlay-bingx-x01.json"))).get("maxOpen") or 0) == 0)
 
 
-def unlimited_zest() -> None:
-    b = BlockBook("/tmp/block-unlim-zest.json", {"variantBlockEnabled": True, "blockMaxStack": 0})
+def unlimited_test() -> None:
+    b = BlockBook("/tmp/block-unlim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 0})
     rec("block-unlim-stack", b.max_stack <= 0 and b.unlimited(), str(b.max_stack))
     lane = BlockLane(symbol="SOL-USDT", side="LONG", base_qty=1.0, base_entry=100.0)
     rows = b.evaluate_counts(lane, live_n=1, intern_pf=1.2)
     rec("block-unlim-eval-bounded", 1 <= len(rows) <= 24, f"n={len(rows)}")
     rec("block-parse-21", parse_block_count("sol-usdt:long#block:21") == 21, str(parse_block_count("sol-usdt:long#block:21")))
     rec("block-parse-1", parse_block_count("sol-usdt:long#block:1") == 1)
-    finite = BlockBook("/tmp/block-lim-zest.json", {"variantBlockEnabled": True, "blockMaxStack": 3})
+    finite = BlockBook("/tmp/block-lim-test.json", {"variantBlockEnabled": True, "blockMaxStack": 3})
     rec("block-finite-stack", finite.max_stack == 3, str(finite.max_stack))
     frows = finite.evaluate_counts(BlockLane(symbol="XRP-USDT", side="SHORT", base_qty=1.0, base_entry=1.0), live_n=1, intern_pf=1.2)
     rec("block-finite-eval", 3 <= len(frows) <= 6, f"n={len(frows)}")
@@ -194,14 +194,14 @@ def unlimited_zest() -> None:
     rec("coord-unlim-already", True)
 
 
-def coord_zest() -> None:
+def coord_test() -> None:
     from coord_engine import Coordinator
     c = Coordinator()
     rec("coord-unlimited-slot", c.slot_cap(0, 1.2) >= 10**8, str(c.slot_cap(0, 1.2)))
     rec("coord-limited-slot", 0 < c.slot_cap(6, 1.2) <= 6, str(c.slot_cap(6, 1.2)))
 
 
-def always_start_zest() -> None:
+def always_start_test() -> None:
     """In-process proof: a start/stop cycle can never leave the desk stuck.
 
     Exercises the real always-start chain without systemd or the exchange:
@@ -215,7 +215,7 @@ def always_start_zest() -> None:
     import pulse_trader as pt
     import pulse_http as ph
 
-    tmp = tempfile.mkdtemp(prefix="astart-zest-")
+    tmp = tempfile.mkdtemp(prefix="astart-test-")
     for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
         setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
 
@@ -351,7 +351,7 @@ def always_start_zest() -> None:
         and any(c and c[0] == "stop" for c in ctl.calls), msgs[:140])
 
 
-def control_coord_zest() -> None:
+def control_coord_test() -> None:
     """Event-based control coordination: watcher snapshots, resume-after-start
     guard in _one_cycle, and full sidecar serialization under concurrent
     stress (no interleaved systemctl, no inconsistent control files)."""
@@ -361,7 +361,7 @@ def control_coord_zest() -> None:
     import pulse_trader as pt
     import pulse_http as ph
 
-    tmp = tempfile.mkdtemp(prefix="ctrlcoord-zest-")
+    tmp = tempfile.mkdtemp(prefix="ctrlcoord-test-")
     for name in ("STOP_PATH", "PAUSE_PATH", "STOP_ALL", "RESET_EQ_PATH", "START_EQ_PATH", "LOG_PATH"):
         setattr(pt, name, os.path.join(tmp, os.path.basename(getattr(pt, name))))
 
@@ -529,15 +529,15 @@ def control_coord_zest() -> None:
 
 def main() -> int:
     run_units()
-    rank_zest()
-    overlay_zest()
-    cost_zest()
-    contract_zest()
-    controls_zest()
-    coord_zest()
-    unlimited_zest()
-    always_start_zest()
-    control_coord_zest()
+    rank_test()
+    overlay_test()
+    cost_test()
+    contract_test()
+    controls_test()
+    coord_test()
+    unlimited_test()
+    always_start_test()
+    control_coord_test()
     fails = [r for r in out if not r[1]]
     print(f"\n{len(out) - len(fails)}/{len(out)} passed  fail={len(fails)}")
     for name, _, d in fails:

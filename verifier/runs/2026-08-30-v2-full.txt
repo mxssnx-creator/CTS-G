@@ -1,5 +1,5 @@
 === run 2026-08-30T15:57:02Z v2-full ===
-engine-zest exit=0 -> 85/85 passed  fail=0
+engine-test exit=0 -> 85/85 passed  fail=0
 stress-vst exit=1 -> stress vst done rss=47.8MB fail=1/11
 max-symbols exit=0 -> 12/12 passed  fail=0
 npm-test exit=0 -> # pass 191 # fail 0 

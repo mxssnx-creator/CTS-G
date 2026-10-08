@@ -25,7 +25,7 @@ This is the current CTS-G product. Previous CTS trees (keys, SSH dumps, old sett
 | `deploy/install-linux.sh` | First-time Linux install (packages, systemd, Redis, desk + engines) |
 | `deploy/update-linux.sh` | In-place Linux update (keeps overlays and open positions) |
 | `deploy/grok-pulse@.service` | systemd unit for a connection slot |
-| `scripts/` | zest / smoke / PWA / preview helpers |
+| `scripts/` | test / smoke / PWA / preview helpers |
 
 Exchange API keys stay in Redis (`api_key` / `api_secret` per connection). They are never stored in this repo.
 
@@ -89,8 +89,8 @@ Keys and connection id come from Redis (`connection:x01` / `connection:x02`). Ru
 ## Tests
 
 ```bash
-python3 scripts/engine-zest.py   # sets, indications, rank, overlays, SL:TP
-node scripts/overall-zest.mjs    # desk / results / system / settings
+python3 scripts/engine-test.py   # sets, indications, rank, overlays, SL:TP
+node scripts/overall-test.mjs    # desk / results / system / settings
 npm run typecheck
 npm test
 ```
