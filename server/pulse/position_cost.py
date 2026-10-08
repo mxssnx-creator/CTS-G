@@ -21,6 +21,20 @@ SL_TP_MIN = 0.3
 SL_TP_MAX = 1.5
 SL_TP_STEP = 0.3
 SL_TP_RATIOS = (0.3, 0.6, 0.9, 1.2, 1.5)
+# Set grid (base Sets): SL = TP x ratio, ratio 0.5..3.5 step 0.25 (13 values). The legacy SL_TP_* above
+# still drive the live VariantBook recalculation in risk_variants, which the pinned engine imports.
+SL_RATIO_MIN = 0.5
+SL_RATIO_MAX = 3.5
+SL_RATIO_STEP = 0.25
+SL_RATIOS = tuple(round(SL_RATIO_MIN + i * SL_RATIO_STEP, 2) for i in range(int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP)) + 1))
+# TP grid (base Sets): TP = k x PositionCost, k = 2..30. The net at the TP is (k - 1) x PositionCost.
+TP_STEP_MIN = 2
+TP_STEP_MAX = 30
+# Trailing grid (trail Sets): arm = k x PositionCost and give = j x PositionCost, trailMinStep <= j <= k <= TRAIL_STEP_MAX.
+TRAIL_STEP_SETTING_MIN = 2
+TRAIL_STEP_SETTING_MAX = 8
+TRAIL_STEP_DEFAULT = 3
+TRAIL_STEP_MAX = 22
 
 
 def finite(v: Any, fallback: float = 0.0) -> float:
@@ -40,6 +54,18 @@ def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: f
     nmax = int((hi - lo) / step + 0.5)
     n = max(0, min(nmax, n))
     return round(lo + n * step, 1)
+
+
+def snap_sl_ratio(value: Any) -> float:
+    """Snap an SL-to-TP ratio onto the Set grid (SL_RATIOS, 0.5..3.5 step 0.25)."""
+    x = finite(value, 0.6)
+    if x <= 0:
+        x = 0.6
+    x = max(SL_RATIO_MIN, min(SL_RATIO_MAX, x))
+    n = int((x - SL_RATIO_MIN) / SL_RATIO_STEP + 0.5 + 1e-12)
+    nmax = int(round((SL_RATIO_MAX - SL_RATIO_MIN) / SL_RATIO_STEP))
+    n = max(0, min(nmax, n))
+    return round(SL_RATIO_MIN + n * SL_RATIO_STEP, 2)
 
 
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:

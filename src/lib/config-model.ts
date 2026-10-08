@@ -81,6 +81,8 @@ export function capSymbols(list: string[]): string[] {
   return list.slice(0, MAX_SYMBOLS);
 }
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
+/** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
+export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
 export const TRAIL_VARIANTS = ["0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5"] as const;
 
 export function snapSlToTp(v: number, lo = 0.3, hi = 1.5, step = 0.3): number {
@@ -214,6 +216,7 @@ export type PulseOverlay = {
   setMinStep: number;
   setStepMax: number;
   setStepAdapt: boolean;
+  trailMinStep: number;
   exitEnabled: boolean;
   exitIgnoreTp: boolean;
   exitBestOf: boolean;
@@ -352,9 +355,10 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setMinSamples: 12,
   setReactivate: true,
   setMaxActive: 0,
-  setMinStep: 8,
-  setStepMax: 22,
+  setMinStep: 2,
+  setStepMax: 30,
   setStepAdapt: true,
+  trailMinStep: 3,
   exitEnabled: true,
   exitIgnoreTp: true,
   exitBestOf: true,

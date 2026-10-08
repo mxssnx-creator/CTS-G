@@ -7,6 +7,9 @@ merge into the same book. Last 25 average Result-R < 0 deactivates that Set.
 """
 from __future__ import annotations
 
+import bisect
+import json
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -16,10 +19,15 @@ from position_cost import (
     POSITION_COST_PCT_DEFAULT,
     last_n_cost_pf,
     signed_result_r,
-    snap_ratio,
-    SL_TP_RATIOS,
+    SL_RATIOS,
+    TP_STEP_MAX,
+    TP_STEP_MIN,
+    TRAIL_STEP_DEFAULT,
+    TRAIL_STEP_SETTING_MAX,
+    TRAIL_STEP_SETTING_MIN,
     cost_as_frac,
     net_pnl_pct,
+    snap_sl_ratio,
 )
 from indication_engine import (
     aggregate_bars,
@@ -32,7 +40,7 @@ from indication_engine import (
     rsi,
     timeframe_evals,
 )
-from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
+from risk_variants import parse_trail, trail_grid, trail_key
 
 PACKS = ("indications", "general")
 GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
@@ -46,8 +54,8 @@ GATE_MIN_PF_DEFAULT = 1.10      # base gate: net PF must stay above this
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
-STEP_MIN = 3
-STEP_MAX = 22
+STEP_MIN = TP_STEP_MIN
+STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 
 
@@ -243,21 +251,52 @@ def pack_signals(
     base_ts: float,
     warmup: int,
     on_step: Optional[Callable[[], None]] = None,
+    cache: Optional[Dict[int, Dict[str, Tuple[int, float, str]]]] = None,
+    salt: int = 0,
 ) -> Dict[str, List[Tuple[int, float, str]]]:
     """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
-    replay and the streaming simulator both call it, so a bar gets the same signal in both places."""
+    replay and the streaming simulator both call it, so a bar gets the same signal in both places.
+
+    cache: memo keyed by the content of the bar's signal window (plus salt, the indication settings).
+    A signal is a pure function of those bars: candle timestamps are labels only. Identical windows
+    therefore give identical signals in every refresh and replay. Entries this call did not use are dropped.
+    """
     n = len(bars)
     signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
+    hs = [hash(tuple(b)) for b in bars] if cache is not None else None
+    used: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
     for i in range(warmup, n):
+        key = None
+        if cache is not None:
+            lo_w = max(0, i + 1 - IND_WINDOW_BARS)
+            key = hash((salt, tuple(hs[lo_w : i + 1])))
+            hit = used.get(key)
+            if hit is None:
+                hit = cache.get(key)
+            if hit is not None:
+                used[key] = hit
+                for p in packs:
+                    signals[p][i] = hit[p]
+                if on_step and i % 50 == 0:
+                    on_step()
+                continue
         ts = base_ts + i * BAR_S
+        row: Dict[str, Tuple[int, float, str]] = {}
         if "general" in packs:
             lo = i + 1 - GENERAL_WINDOW_BARS
-            signals["general"][i] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
+            row["general"] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
         if "indications" in packs:
             lo = i + 1 - IND_WINDOW_BARS
-            signals["indications"][i] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+            row["indications"] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+        for p in packs:
+            signals[p][i] = row.get(p, (0, 0.0, ""))
+        if key is not None:
+            used[key] = row
         if on_step and i % 50 == 0:
             on_step()
+    if cache is not None:
+        cache.clear()
+        cache.update(used)
     return signals
 
 def hit_exit(
@@ -294,10 +333,10 @@ def hit_exit(
 
 def make_set_id(pack: str, sl_ratio: float, trail: str = "", step: int = 0) -> str:
     if step:
-        return f"{pack}:1m:sl{sl_ratio:.1f}:st{int(step)}"
+        return f"{pack}:1m:sl{sl_ratio:.2f}:st{int(step)}"
     if trail:
         return f"{pack}:1m:tr{trail}"
-    return f"{pack}:1m:sl{sl_ratio:.1f}"
+    return f"{pack}:1m:sl{sl_ratio:.2f}"
 
 
 def make_trail_id(pack: str, trail: str) -> str:
@@ -351,6 +390,7 @@ class SetState:
     max_dd_s: float = 0.0
     avg_dd_s: float = 0.0
     dd_episodes: int = 0
+    last_error: str = ""            # last replay/score failure for this Set; cleared on the next clean pass
     n: int = 0
     wins: int = 0
     gp: float = 0.0
@@ -387,6 +427,7 @@ class Progress:
     detail: str = ""
     ready: bool = False
     error: str = ""
+    errors: int = 0                  # symbols + Sets that failed in the last pass; the others still ran
 
 
 class SetLane:
@@ -401,8 +442,9 @@ class SetLane:
         self.open: Optional[Dict[str, Any]] = None
         self.cool = 0
         self.use_trail = st.kind == "trail"
-        self.arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if self.use_trail else 0.0
-        self.give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if self.use_trail else 0.0
+        # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
+        self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
+        self.give = st.trail_give / 100.0 if self.use_trail else 0.0
         self.sl_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
         self.tp_frac = max(0.0020, st.tp_pct)
 
@@ -458,6 +500,133 @@ class SetLane:
         self.open = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
         return None
 
+    def scan(
+        self,
+        i0: int,
+        i1: int,
+        bars: Sequence[Sequence[float]],
+        dirs: Sequence[int],
+        confs: Sequence[float],
+        allowed: bool,
+        cfg: Dict[str, Any],
+        cand: Optional[Sequence[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Advance over bars[i0:i1]. Same rules as step(), applied to the whole range in one loop.
+
+        cand: sorted bar indices where an entry is possible (dir != 0 and conf >= entry_conf). A flat lane
+        jumps between them; the bars in between can only spend cooldown, which is applied in one step.
+        While a position is open its state is held in locals and written back when it closes or the
+        range ends. Returns the closed trades in exit order; open position and cooldown carry across calls.
+        """
+        thr = cfg["entry_conf"]
+        if cand is None:
+            cand = [i for i in range(i0, i1) if dirs[i] != 0 and confs[i] >= thr]
+        time_bars = cfg["time_bars"]
+        scratch_bars = cfg["scratch_bars"]
+        scratch_min = cfg["scratch_min"]
+        cooldown = cfg["cooldown"]
+        cost_pct = cfg["cost_pct"]
+        honor_tp = bool(cfg["honor_tp"])
+        use_trail = self.use_trail
+        arm = self.arm
+        give = self.give
+        sl_base = self.sl_base
+        tp_frac = self.tp_frac
+        sid = self.sid
+        symbol = self.symbol
+        o = self.open
+        cool = self.cool
+        out: List[Dict[str, Any]] = []
+        i = i0
+        while i < i1:
+            if o is not None:
+                side = o["side"]
+                entry = o["entry"]
+                sl = o["sl"]
+                tp = o["tp"]
+                peak = o["peak"]
+                oi = o["i"]
+                trail = o.get("trail")
+                while i < i1:
+                    bar = bars[i]
+                    high = float(bar[1])
+                    low = float(bar[2])
+                    close = float(bar[3])
+                    if use_trail:
+                        if side > 0:
+                            peak = max(peak, high)
+                            if (peak - entry) / entry >= arm:
+                                trail = max(trail or 0.0, peak * (1 - give))
+                        else:
+                            peak = min(peak, low)
+                            if (entry - peak) / entry >= arm:
+                                t = peak * (1 + give)
+                                trail = t if trail is None else min(trail, t)
+                    elif side > 0:
+                        peak = max(peak, high)
+                    else:
+                        peak = min(peak, low)
+                    # hit_exit: the stop (or trail) wins a same-bar tie with the target
+                    held = i - oi
+                    why: Optional[str] = None
+                    px = close
+                    if side > 0:
+                        stop = max(sl, trail) if trail is not None else sl
+                        if low <= stop:
+                            why, px = "sl", stop
+                        elif honor_tp and high >= tp:
+                            why, px = "tp", tp
+                    else:
+                        stop = min(sl, trail) if trail is not None else sl
+                        if high >= stop:
+                            why, px = "sl", stop
+                        elif honor_tp and low <= tp:
+                            why, px = "tp", tp
+                    if why is None and held >= time_bars:
+                        why, px = "time", close
+                    if why is None and held >= scratch_bars and (close - entry) / entry * side >= scratch_min:
+                        why, px = "scratch+", close
+                    if why:
+                        raw = (px - entry) / entry * side
+                        out.append({
+                            "set_id": sid, "symbol": symbol, "side": "LONG" if side > 0 else "SHORT",
+                            "dir": side, "entry_i": int(oi), "exit_i": i, "entry_px": entry, "exit_px": float(px),
+                            "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cost_pct),
+                            "hold_s": held * BAR_S, "hold_bars": held,
+                        })
+                        o = None
+                        cool = cooldown
+                        i += 1
+                        break
+                    i += 1
+                if o is not None:
+                    o["peak"] = peak
+                    o["trail"] = trail
+                continue
+            # flat: the next candidate bar; the bars before it can only spend cooldown
+            k = bisect.bisect_left(cand, i)
+            if k >= len(cand) or cand[k] >= i1:
+                cool = max(0, cool - (i1 - i))
+                i = i1
+                break
+            j = cand[k]
+            if j > i:
+                cool = max(0, cool - (j - i))
+            if cool > 0:
+                cool -= 1
+            elif allowed:
+                d = int(dirs[j])
+                close = float(bars[j][3])
+                sl_frac = max(0.0015, sl_base)
+                if d > 0:
+                    sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
+                else:
+                    sl, tp = close * (1 + sl_frac), close * (1 - tp_frac)
+                o = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": j, "trail": None}
+            i = j + 1
+        self.open = o
+        self.cool = cool
+        return out
 
 class SetBook:
     def __init__(self) -> None:
@@ -494,10 +663,15 @@ class SetBook:
         self.step_adapt = True
         self.steps: List[int] = list(range(STEP_MIN, STEP_MAX + 1))
         self.packs: List[str] = list(PACKS)
-        self.sl_ratios: List[float] = list(SL_TP_RATIOS)
+        self.sl_ratios: List[float] = list(SL_RATIOS)
         self.trails: List[Tuple[str, float, float]] = []
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
+        self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
+        # shared Set state is touched by the replay thread and the trading thread: one re-entrant lock
+        self._lock = threading.RLock()
+        # replayed trade rows per symbol: a refresh replaces only the symbols it replayed
+        self._hist_rows: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self.bars: Dict[str, List[List[float]]] = {}
         self.progress = Progress()
         self.last_run = 0.0
@@ -554,23 +728,25 @@ class SetBook:
         if bool(ov.get("stratGeneral", True)):
             packs.append("general")
         self.packs = packs or ["indications"]
-        raw_ratios = ov.get("slToTpRatios") or list(SL_TP_RATIOS)
+        # Set grid: every SL ratio in setSlRatios (default 0.5..3.5 step 0.25) x every TP step x every pack.
+        raw_ratios = ov.get("setSlRatios") or list(SL_RATIOS)
         ratios: List[float] = []
         for x in raw_ratios:
             try:
-                ratios.append(snap_ratio(float(x)))
+                ratios.append(snap_sl_ratio(float(x)))
             except Exception:
                 continue
-        self.sl_ratios = sorted(set(ratios)) or list(SL_TP_RATIOS)
-        self.trails = trail_candidates(
-            float(ov.get("trailArmMin") or 0.3),
-            float(ov.get("trailArmMax") or 1.5),
-            float(ov.get("trailGiveMin") or 0.1),
-            float(ov.get("trailGiveMax") or 0.5),
-            float(ov.get("trailGiveFactor") or 1.0 / 3.0),
-            bool(ov.get("trailRecalcGive", True)),
-            ov.get("trailVariants") or list(TRAIL_VARIANTS),
-        )
+        self.sl_ratios = sorted(set(ratios)) or list(SL_RATIOS)
+        # Trailing grid: every (arm, give) from trailMinStep up, in PositionCost units (trail_grid).
+        # An explicit trailVariants list ("arm:give" in percent) still overrides the grid.
+        self.trail_min_step = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(float(ov.get("trailMinStep") or TRAIL_STEP_DEFAULT))))
+        raw_tr = ov.get("trailVariants")
+        if raw_tr:
+            if isinstance(raw_tr, str):
+                raw_tr = [p.strip() for p in raw_tr.split(",") if p.strip()]
+            self.trails = [(trail_key(a, g), a, g) for a, g in (parse_trail(x) for x in raw_tr)]
+        else:
+            self.trails = trail_grid(self.trail_min_step, self.cost_pct)
         try:
             self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
         except Exception:
@@ -672,6 +848,10 @@ class SetBook:
         self.progress.sets_total = len(self.sets)
 
     def adapt_from_live(self, closed: Sequence[Any]) -> None:
+        with self._lock:
+            self._adapt_from_live(closed)
+
+    def _adapt_from_live(self, closed: Sequence[Any]) -> None:
         """If live average is a loss, raise min step to # of positive/successful fills."""
         floor = self.min_step_cfg
         if not self.step_adapt:
@@ -745,6 +925,10 @@ class SetBook:
         return f"{sid}|{row['symbol']}|{row['side']}|{row['t']:.3f}|{row['pnl_pct']:.10f}"
 
     def on_live_close(self, rec: Any) -> None:
+        with self._lock:
+            self._on_live_close(rec)
+
+    def _on_live_close(self, rec: Any) -> None:
         """Record one live close into the Set tapes, on the same unit as replay rows.
 
         Replay rows carry pnl as a NET FRACTION (gross move minus one PositionCost). Live rows carry
@@ -776,7 +960,7 @@ class SetBook:
         row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
-            sl = snap_ratio(get("sl_ratio") or 0.6)
+            sl = snap_sl_ratio(get("sl_ratio") or 0.6)
             tkey = str(get("trail_key") or "")
             if not tkey:
                 tkey = self.trails[0][0] if self.trails else "0.3:0.1"
@@ -827,11 +1011,18 @@ class SetBook:
         symbols: Optional[Sequence[str]] = None,
         abort: Optional[Callable[[], bool]] = None,
     ) -> None:
+        """Replay the given symbols, then score every Set over the rows of all symbols replayed so far.
+
+        Isolation: a symbol that fails is recorded and skipped; a Set that fails to score is recorded on
+        the Set (last_error) and the others are still scored. A chunked refresh (symbols=...) replaces only
+        its own symbols' rows, so the other symbols keep their rows and no Set is scored on a partial tape.
+        """
         if not self.enabled or self._running:
             return
         self._running = True
         t0 = time.time()
-        now = now or t0
+        # one origin per minute: every chunk replayed in the same minute shares it, so the rows agree
+        now = now or float((int(t0 // BAR_S) + 1) * BAR_S)
         try:
             if symbols is None:
                 names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
@@ -846,7 +1037,8 @@ class SetBook:
                 cycle=self.progress.cycle + 1,
                 detail=f"{len(names)} symbols · {len(self.sets)} sets",
             )
-            hist: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+            errors: List[str] = []
+            sym_failed = 0
             aborted = False
             for i, symbol in enumerate(names):
                 if abort and abort():
@@ -857,27 +1049,58 @@ class SetBook:
                 self.progress.symbols_done = i
                 self.progress.pct = 5.0 + (i / max(1, len(names))) * 80.0
                 self.progress.elapsed_ms = (time.time() - t0) * 1000
-                self._replay_symbol(symbol, hist, now, on_step=on_step)
+                per_set: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in self.sets}
+                try:
+                    self._replay_symbol(symbol, per_set, now, on_step=on_step)
+                except Exception as exc:  # one symbol never stops the others
+                    sym_failed += 1
+                    errors.append(f"{symbol}: {type(exc).__name__}: {exc}"[:160])
+                    continue
+                with self._lock:
+                    self._hist_rows[symbol] = per_set
                 self.progress.bars_done += len(self.bars[symbol])
                 if on_step:
                     on_step()
             self.progress.phase = "score"
             self.progress.pct = 90.0
-            for st in self.by_idx:
-                full = sorted(hist.get(st.id, []), key=lambda r: finite(r.get("t")))
-                st.hist = full[-max(40, self.gate_window):]
-                self._score_one(st, now=now)
-                st.n = len(full)
-            self._cap_active()
-            self.progress.phase = "ready"
-            self.progress.pct = 100.0
-            self.progress.ready = True
+            cutoff = now - self.lookback * BAR_S
+            with self._lock:
+                live = {s for s, b in self.bars.items() if len(b) >= self.min_bars}
+                for s in [s for s in self._hist_rows if s not in live]:
+                    del self._hist_rows[s]          # symbols that left the universe drop their rows
+                for st in self.by_idx:
+                    try:
+                        rows = [
+                            r
+                            for s, per_set in self._hist_rows.items()
+                            for r in per_set.get(st.id, [])
+                            if finite(r.get("t")) >= cutoff
+                        ]
+                        full = sorted(rows, key=lambda r: finite(r.get("t")))
+                        st.hist = full[-max(40, self.gate_window):]
+                        self._score_one(st, now=now)
+                        st.n = len(full)
+                        st.last_error = ""
+                    except Exception as exc:  # one Set never stops the others
+                        st.last_error = f"{type(exc).__name__}: {exc}"[:160]
+                        errors.append(f"set {st.id}: {st.last_error}")
+                self._cap_active()
+            ok_syms = len(names) - sym_failed
+            self.progress.errors = len(errors)
+            self.progress.error = "; ".join(errors[:3])[:220]
             self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
             self.progress.sets_done = len(self.sets)
+            if names and ok_syms == 0:
+                self.progress.phase = "error"
+            else:
+                self.progress.phase = "ready"
+                self.progress.pct = 100.0
+                self.progress.ready = True
             self.progress.detail = (
                 f"{sum(1 for s in self.sets.values() if s.active)}/{len(self.sets)} active · "
                 f"{sum(s.n for s in self.sets.values())} hist fills"
                 + (" · partial" if aborted else "")
+                + (f" · {len(errors)} errors" if errors else "")
             )
         except Exception as exc:
             self.progress.phase = "error"
@@ -893,7 +1116,9 @@ class SetBook:
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
         base_ts = now - (n - 1) * BAR_S
-        signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step)
+        salt = hash(json.dumps(self.ind_settings, sort_keys=True, default=str))
+        cache = self._sig_cache.setdefault(symbol, {})
+        signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step, cache=cache, salt=salt)
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
@@ -903,16 +1128,23 @@ class SetBook:
             "cost_pct": self.cost_pct,
             "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
         }
+        # per pack: directions, confidences and the bars where an entry is possible (shared by all its Sets)
+        dirs: Dict[str, List[int]] = {}
+        confs: Dict[str, List[float]] = {}
+        cand: Dict[str, List[int]] = {}
+        for p in self.packs:
+            sig = signals[p]
+            dirs[p] = [x[0] for x in sig]
+            confs[p] = [x[1] for x in sig]
+            cand[p] = [i for i in range(warmup, n) if dirs[p][i] != 0 and confs[p][i] >= cfg["entry_conf"]]
         for st in self.by_idx:
-            pack_sig = signals.get(st.pack) or [(0, 0.0, "")] * n
+            if st.pack not in self.packs:
+                continue
             lane = SetLane(st, symbol)
-            for i in range(warmup, n):
-                d, conf, _why = pack_sig[i]
-                done = lane.step(i, bars[i], d, conf, True, cfg)
-                if done is not None:
-                    hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
-                                        "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
-                                        "reason": done["reason"], "set_id": st.id})
+            for done in lane.scan(warmup, n, bars, dirs[st.pack], confs[st.pack], True, cfg, cand[st.pack]):
+                hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
+                                    "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
+                                    "reason": done["reason"], "set_id": st.id})
             self.progress.set_id = st.id
 
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
@@ -1101,6 +1333,10 @@ class SetBook:
         return max(40, self.gate_window)
 
     def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
+        with self._lock:
+            return self._pick(pack, kind)
+
+    def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
         gated = bool(self.use_historic_gate)
         if gated and not self.progress.ready:
             return None  # fail closed: no calibration pass has completed yet
@@ -1306,11 +1542,10 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setStepAdapt": True,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
+            "trailVariants": ["0.3:0.1"],
             "trailGiveMin": 0.1,
             "trailGiveMax": 0.1,
-            "slToTpRatios": [0.6],
+            "setSlRatios": [0.5],
         }
     )
     book.gate_window, book.gate_min = 15, 12  # these fixtures carry 15 trades
@@ -1372,9 +1607,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setStepMax": 8,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
-            "slToTpRatios": [0.6, 0.9],
+            "trailVariants": ["0.3:0.1"],
+            "setSlRatios": [0.5, 1.0],
             "tpPct": 0.75,
             "timeStopS": 240,
         }
@@ -1422,9 +1656,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setStepMax": 12,
             "stratIndications": False,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 0.3,
-            "slToTpRatios": [0.3, 1.5],
+            "trailVariants": ["0.3:0.1"],
+            "setSlRatios": [0.5, 1.5],
             "tpPct": 0.75,
             "timeStopS": 21600,
             "exitIgnoreTp": True,
@@ -1435,7 +1668,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book3.ingest_bars("CCC-USDT", synth_trend(240, 80.0, 0.22, 0.05))
     book3.ingest_bars("DDD-USDT", synth_trend(240, 40.0, -0.16, 0.05))
     book3.replay_all(now=1_700_000_100)
-    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.3) < 1e-9]
+    tight = [s for s in book3.sets.values() if abs(s.sl_ratio - 0.5) < 1e-9]
     wide = [s for s in book3.sets.values() if abs(s.sl_ratio - 1.5) < 1e-9]
     lo_step = [s for s in book3.sets.values() if s.step == 3]
     hi_step = [s for s in book3.sets.values() if s.step == 12]
@@ -1446,7 +1679,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     lo_sig = sig(lo_step[0]) if lo_step else (0, 0.0, 0.0, 0.0)
     hi_sig = sig(hi_step[0]) if hi_step else (0, 0.0, 0.0, 0.0)
     intern_ok = (t_sig != w_sig) or (lo_sig != hi_sig)
-    out.append(("set-intern-independent", intern_ok and (tight[0].n + wide[0].n) > 0, f"sl0.3={t_sig} sl1.5={w_sig} st3={lo_sig} st12={hi_sig} fills={sum(s.n for s in book3.sets.values())}"))
+    out.append(("set-intern-independent", intern_ok and (tight[0].n + wide[0].n) > 0, f"sl0.5={t_sig} sl1.5={w_sig} st3={lo_sig} st12={hi_sig} fills={sum(s.n for s in book3.sets.values())}"))
     # full config grid: every pack × sl × trail × step indexed
     book4 = SetBook()
     book4.load(
@@ -1456,11 +1689,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setStepMax": 12,
             "stratIndications": True,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 1.5,
-            "trailGiveMin": 0.1,
-            "trailGiveMax": 0.5,
-            "slToTpRatios": [0.3, 0.6, 0.9, 1.2, 1.5],
+            "trailMinStep": 3,
         }
     )
     book4.gate_window, book4.gate_min = 15, 12  # these fixtures carry 15 trades
@@ -1503,9 +1732,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setStepMax": 8,
             "stratIndications": False,
             "stratGeneral": True,
-            "trailArmMin": 0.3,
-            "trailArmMax": 1.5,
-            "slToTpRatios": [0.6],
+            "trailMinStep": 3,
+            "setSlRatios": [0.5],
             "setHonorTp": True,
             "setHistTimeBars": 45,
         }
@@ -1526,7 +1754,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     clamped = book2.clamp_bars(80)
     out.append(("set-clamp-bars", clamped >= 1 and len(book2.bars["AAA-USDT"]) <= 80, f"n={len(book2.bars['AAA-USDT'])} c={clamped}"))
     book6 = SetBook()
-    book6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "trailArmMin": 0.3, "trailArmMax": 0.3})
+    book6.load({"histEnabled": True, "histLookbackBars": 240, "histMinBars": 80, "histWarmup": 20, "setMinStep": 8, "setStepMax": 8, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "trailVariants": ["0.3:0.1"]})
     book6.ingest_bars("FFF-USDT", synth_trend(240, 55.0, 0.16, 0.04))
     book6.ingest_bars("GGG-USDT", synth_trend(240, 33.0, -0.12, 0.04))
     book6.replay_all(now=1_700_000_300, symbols=["FFF-USDT"])
@@ -1537,8 +1765,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
             "setMinSamples": 5, "setAutoDeact": False, "setMinStep": 3, "setStepMax": 3,
-            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6],
-            "trailArmMin": 0.3, "trailArmMax": 0.3,
+            "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
+            "trailVariants": ["0.3:0.1"],
         }
     )
     wst = next(x for x in w.sets.values() if x.kind == "base")
@@ -1564,8 +1792,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
             "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
-            "stratIndications": False, "stratGeneral": True, "slToTpRatios": [0.6, 0.9],
-            "trailArmMin": 0.3, "trailArmMax": 0.3,
+            "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
+            "trailVariants": ["0.3:0.1"],
         }
     )
     g2.gate_window, g2.gate_min = 15, 12  # these fixtures carry 15 trades
@@ -1606,7 +1834,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
     # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
-    g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
+    g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})
     pk3 = g3.pick("general")
     out.append(("set-pick-cold", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
     # error state: due() retries on the backoff, not on every pass
@@ -1615,7 +1843,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g3.last_run = time.time() - g3.retry_s - 1
     out.append(("set-due-retry", g3.due() is True, "after backoff"))
     # time-ordered tape: the last-40 window must be the most recent trades
-    g4 = SetBook(); g4.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3})
+    g4 = SetBook(); g4.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3})
     st4 = next(iter(g4.by_idx))
     rows4 = [{"t": 1000 + k, "pnl": -0.001, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl", "set_id": st4.id} for k in range(60)]
     st4.hist = sorted(reversed(rows4), key=lambda r: r["t"])[-40:]
@@ -1635,7 +1863,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
                 rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
         return rows
     gb = SetBook()
-    gb.load({"setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    gb.load({"setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sg = next(iter(gb.by_idx))
     sg.active = True
     def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:
@@ -1654,7 +1882,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     # R1: a live close is stored on the replay unit (net fraction), not USDT
-    lv = SetBook(); lv.load({"positionCostPct": 0.15, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    lv = SetBook(); lv.load({"positionCostPct": 0.15, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
     sl1 = next(iter(lv.by_idx))
     lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
     stored = sl1.live[-1] if sl1.live else {}
@@ -1686,6 +1914,130 @@ def self_test() -> List[Tuple[str, bool, str]]:
     from indication_engine import DEFAULT_SETTINGS as IND_DEFAULTS
     from position_cost import POSITION_COST_PCT_DEFAULT as PCD
     out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD == 0.15, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
+    # perf: scan() is the lane loop used by the replay and the simulator; step() is its reference.
+    import random as _random
+    _rnd = _random.Random(11)
+    _bars: List[List[float]] = []
+    _px = 100.0
+    for _ in range(700):
+        _o = _px
+        _hi = _o * (1 + abs(_rnd.gauss(0, 0.002)))
+        _lo = _o * (1 - abs(_rnd.gauss(0, 0.002)))
+        _c = _lo + (_hi - _lo) * _rnd.random()
+        _px = _c
+        _bars.append([_o, _hi, _lo, _c, 1.0])
+    _dirs = [_rnd.choice([0, 0, 1, -1]) for _ in _bars]
+    _confs = [_rnd.random() for _ in _bars]
+    _book = SetBook()
+    _book.load({"histEnabled": True, "stratGeneral": True, "stratIndications": True, "setMinStep": 2, "setStepMax": 30})
+    _sample = _book.by_idx[::max(1, len(_book.by_idx) // 40)]
+    _scan_ok = True
+    _checked = 0
+    for _st in _sample:
+        for _honor in (True, False):
+            _cfg = {"entry_conf": 0.5, "time_bars": 40, "scratch_bars": 12, "scratch_min": 0.001,
+                    "cooldown": 2, "cost_pct": 0.15, "honor_tp": _honor}
+            _cuts = [30]
+            while _cuts[-1] < len(_bars):
+                _cuts.append(min(len(_bars), _cuts[-1] + _rnd.randint(1, 60)))
+            _flags = [_rnd.random() < 0.8 for _ in range(len(_cuts) - 1)]
+            _allow = [True] * len(_bars)
+            for _c0, _c1, _f in zip(_cuts, _cuts[1:], _flags):
+                for _k in range(_c0, _c1):
+                    _allow[_k] = _f
+            _ref = SetLane(_st, "X")
+            _ref_recs = []
+            for _k in range(30, len(_bars)):
+                _rec = _ref.step(_k, _bars[_k], _dirs[_k], _confs[_k], _allow[_k], _cfg)
+                if _rec is not None:
+                    _ref_recs.append(_rec)
+            _lane = SetLane(_st, "X")
+            _cand = [_k for _k in range(30, len(_bars)) if _dirs[_k] != 0 and _confs[_k] >= _cfg["entry_conf"]]
+            _got = []
+            for _c0, _c1, _f in zip(_cuts, _cuts[1:], _flags):
+                _got.extend(_lane.scan(_c0, _c1, _bars, _dirs, _confs, _f, _cfg, _cand))
+            _same = _got == _ref_recs and _lane.open == _ref.open and _lane.cool == _ref.cool
+            _scan_ok = _scan_ok and _same
+            _checked += len(_ref_recs)
+    out.append(("scan-equals-step", _scan_ok and _checked > 0, f"sets={len(_sample)} trades={_checked}"))
+    # perf: the signal cache must give exactly the uncached signals, including after the window slides
+    _sb_bars = [[b[0], b[1], b[2], b[3], b[4]] for b in _bars[:420]]
+    _packs = ("indications", "general")
+    _cache: Dict[int, Dict[str, Tuple[int, float, str]]] = {}
+    _salt = hash(json.dumps(_book.ind_settings, sort_keys=True, default=str))
+    _cold = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30)
+    _warm1 = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30, cache=_cache, salt=_salt)
+    _warm2 = pack_signals(_sb_bars, _packs, _book.ind_settings, 1_700_000_000.0, 30, cache=_cache, salt=_salt)
+    _slide = _sb_bars[5:] + [[_bars[k][0], _bars[k][1], _bars[k][2], _bars[k][3], _bars[k][4]] for k in range(420, 425)]
+    _cold_s = pack_signals(_slide, _packs, _book.ind_settings, 1_700_000_300.0, 30)
+    _warm_s = pack_signals(_slide, _packs, _book.ind_settings, 1_700_000_300.0, 30, cache=_cache, salt=_salt)
+    _cache_ok = _cold == _warm1 == _warm2 and _cold_s == _warm_s
+    out.append(("signal-cache-exact", _cache_ok, f"bars={len(_sb_bars)} cached_windows={len(_cache)}"))
+    # isolation: chunked refreshes agree with one full refresh; a failing symbol or Set stops nothing else
+    def _rw(seed: int, count: int) -> List[List[float]]:
+        r = _random.Random(seed)
+        px = 50.0
+        rows: List[List[float]] = []
+        for _ in range(count):
+            o = px
+            hi = o * (1 + abs(r.gauss(0, 0.002)))
+            lo = o * (1 - abs(r.gauss(0, 0.002)))
+            c = lo + (hi - lo) * r.random()
+            px = c
+            rows.append([o, hi, lo, c, 1.0])
+        return rows
+    _sym_bars = {"AAA-USDT": _rw(1, 900), "BBB-USDT": _rw(2, 900), "CCC-USDT": _rw(3, 900)}
+    _iso_ov = {"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setMinStep": 2, "setStepMax": 6,
+               "trailVariants": ["0.3:0.1"], "setSlRatios": [0.5, 1.0]}
+    _now = float((int(1_700_000_000 // BAR_S)) * BAR_S)
+
+    def _fresh_book() -> SetBook:
+        b = SetBook()
+        b.load(_iso_ov)
+        for sym, rows in _sym_bars.items():
+            b.bars[sym] = [r[:] for r in rows]
+        return b
+
+    _full = _fresh_book()
+    _full.replay_all(now=_now)
+    _chunked = _fresh_book()
+    _chunked.replay_all(now=_now, symbols=["AAA-USDT"])
+    _chunked.replay_all(now=_now, symbols=["BBB-USDT", "CCC-USDT"])
+    _chunk_ok = all(
+        _full.sets[st.id].n == _chunked.sets[st.id].n
+        and round(_full.sets[st.id].gate_pf, 9) == round(_chunked.sets[st.id].gate_pf, 9)
+        and _full.sets[st.id].hist == _chunked.sets[st.id].hist
+        for st in _full.by_idx
+    ) and sum(st.n for st in _full.by_idx) > 0
+    out.append(("chunk-equals-full", _chunk_ok, f"sets={len(_full.by_idx)} fills={sum(st.n for st in _full.by_idx)}"))
+    _bad = _fresh_book()
+    _bad.bars["BBB-USDT"] = [["x", "x", "x", "x", "x"]] * 900
+    _bad.replay_all(now=_now)
+    _sym_ok = (
+        _bad.progress.phase == "ready"
+        and "BBB-USDT" in _bad.progress.error
+        and "AAA-USDT" in _bad._hist_rows and "CCC-USDT" in _bad._hist_rows and "BBB-USDT" not in _bad._hist_rows
+        and sum(st.n for st in _bad.by_idx) > 0
+    )
+    out.append(("symbol-isolation", _sym_ok, f"phase={_bad.progress.phase} errors={_bad.progress.errors} err={_bad.progress.error[:60]}"))
+    _iso = _fresh_book()
+    _victim = _iso.by_idx[3].id
+    _orig_score = _iso._score_one
+
+    def _flaky_score(st: SetState, now: Optional[float] = None) -> None:
+        if st.id == _victim:
+            raise RuntimeError("injected scoring fault")
+        return _orig_score(st, now=now)
+
+    _iso._score_one = _flaky_score
+    _iso.replay_all(now=_now)
+    _set_ok = (
+        _iso.sets[_victim].last_error != ""
+        and all(st.last_error == "" and st.n >= 0 for st in _iso.by_idx if st.id != _victim)
+        and _iso.progress.phase == "ready"
+        and _iso.progress.errors >= 1
+    )
+    out.append(("set-isolation", _set_ok, f"victim={_victim} err={_iso.sets[_victim].last_error[:40]} errors={_iso.progress.errors}"))
     return out
 
 

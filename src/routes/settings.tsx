@@ -10,6 +10,7 @@ import {
   overlayFromCts,
   saveOverlay,
   snapSlToTp,
+  SL_SET_RATIOS,
   SL_TP_RATIOS,
   TRAIL_VARIANTS,
   trailGiveFromArm,
@@ -289,7 +290,21 @@ function SettingsPage() {
           )}
 
           {section === "risk" && (
-            <Card title="Stop loss ratios vs take profit" hint="SL = TP × ratio · grid 0.3–1.5 step 0.3 · independent of trailing">
+            <Card title="Set grid · SL = TP × ratio" hint="Every ratio below runs as its own Set, for every TP step and pack. Read-only.">
+              <div className="flex flex-wrap gap-2 font-mono text-xs">
+                {SL_SET_RATIOS.map((r) => (
+                  <span key={r} className="rounded-md border border-border px-2 py-1 text-muted">
+                    {r.toFixed(2)}
+                  </span>
+                ))}
+              </div>
+              <p className="font-mono text-xs text-muted">
+                TP = k × PositionCost for k = {overlay.setMinStep}–{overlay.setStepMax}; the net at TP is (k − 1) × PositionCost.
+              </p>
+            </Card>
+          )}
+          {section === "risk" && (
+            <Card title="Live SL:TP pick" hint="Live variant pick (auto-recalc) · grid 0.3–1.5 step 0.3 · separate from the Set grid below">
               <div className="flex flex-wrap gap-2">
                 {SL_TP_RATIOS.map((r) => {
                   const active = Math.abs(overlay.slToTpRatio - r) < 1e-9;
@@ -463,22 +478,22 @@ function SettingsPage() {
                   onChange={(v) => patch("setDeactN", v)}
                 />
                 <Slider
-                  label="Minimal Step Range"
+                  label="Min TP step"
                   value={overlay.setMinStep}
-                  min={3}
-                  max={22}
+                  min={2}
+                  max={30}
                   step={1}
-                  hint={`Default 8 (VST-validated). TP = step × position cost (${overlay.positionCostPct}%) → step ${overlay.setMinStep} = ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Losing live fills raise min step. Sets below min are not calculated.`}
-                  onChange={(v) => patch("setMinStep", Math.max(3, Math.min(22, Math.round(v))))}
+                  hint={`TP = k × PositionCost (${overlay.positionCostPct}%). Default 2 (grid start). k = ${overlay.setMinStep} → TP ${(overlay.setMinStep * overlay.positionCostPct).toFixed(2)}%. Losing live fills raise min step.`}
+                  onChange={(v) => patch("setMinStep", Math.max(2, Math.min(30, Math.round(v))))}
                 />
                 <Slider
                   label="Step max"
                   value={overlay.setStepMax}
-                  min={3}
-                  max={22}
+                  min={2}
+                  max={30}
                   step={1}
-                  hint="Upper TP step. Default 12 (validated). Range 3–22."
-                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 3, Math.min(22, Math.round(v))))}
+                  hint="Upper TP step k. Default 30. Range 2–30."
+                  onChange={(v) => patch("setStepMax", Math.max(overlay.setMinStep || 2, Math.min(30, Math.round(v))))}
                 />
                 <Toggle
                   label="Adapt min step from live"
@@ -632,7 +647,7 @@ function SettingsPage() {
                 <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
                 <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
                 <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 5))} />
-                <KV k="Trailing min step" v={String(num(cts?.trailingMinStep, 5))} />
+                <KV k="Trailing min step" v={String(num(cts?.trailingMinStep ?? cts?.trailMinStep, 3))} />
               </Grid>
             </Card>
           )}
@@ -740,7 +755,16 @@ function SettingsPage() {
                   }}
                 />
               </Grid>
-              <p className="font-mono text-xs text-muted">CTS variants · arm:give · filtered by optimal range</p>
+              <Slider
+                label="Min trailing step"
+                value={overlay.trailMinStep}
+                min={2}
+                max={8}
+                step={1}
+                hint="Smallest arm and give of a trail Set, in PositionCost units. Default 3, range 2–8. Every arm k and give j from this step up to 22 runs as a Set, with j ≤ k."
+                onChange={(v) => patch("trailMinStep", Math.max(2, Math.min(8, Math.round(v))))}
+              />
+              <p className="font-mono text-xs text-muted">Live CTS variants · arm:give · filtered by optimal range</p>
               <div className="flex flex-wrap gap-2">
                 {(Array.isArray(cts?.strategyBaseTrailingVariants) ? cts!.strategyBaseTrailingVariants : [...TRAIL_VARIANTS]).map((t) => {
                   const raw = String(t);

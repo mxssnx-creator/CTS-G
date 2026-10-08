@@ -13,6 +13,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
     POSITION_COST_PCT_DEFAULT,
+    TRAIL_STEP_MAX,
+    TRAIL_STEP_SETTING_MAX,
+    TRAIL_STEP_SETTING_MIN,
     last_n_cost_pf,
     net_pnl_pct,
     snap_ratio,
@@ -108,6 +111,24 @@ class LaneScore:
     avg_hold: float = 0.0
     selected: bool = False
     in_range: bool = True
+
+
+def trail_grid(min_step: int, cost_pct: float, max_step: int = TRAIL_STEP_MAX) -> List[Tuple[str, float, float]]:
+    """Every trailing config for the Set grid, in PositionCost units.
+
+    arm = k x cost and give = j x cost with min_step <= j <= k <= max_step. The give never exceeds the
+    arm, so an activated stop never sits below entry. min_step (trailMinStep) is clamped to 2..8.
+    Returns (key, arm %, give %), the same units as trail_candidates.
+    """
+    m = max(TRAIL_STEP_SETTING_MIN, min(TRAIL_STEP_SETTING_MAX, int(min_step)))
+    c = max(1e-9, float(cost_pct))
+    out: List[Tuple[str, float, float]] = []
+    for k in range(m, int(max_step) + 1):
+        for j in range(m, k + 1):
+            arm = round(k * c, 4)
+            give = round(j * c, 4)
+            out.append((f"{arm:.2f}:{give:.2f}", arm, give))
+    return out
 
 
 @dataclass
