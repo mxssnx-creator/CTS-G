@@ -799,6 +799,42 @@ def combine_timeframes(
     return direction, winners, risk
 
 
+def aggregate_bars(rows: Sequence[Sequence[float]], minutes: int) -> List[List[float]]:
+    """Causal N-minute bars from 1m rows [o,h,l,c,v]. Blocks are aligned to the newest row, so the newest
+    candle ends on the newest row and no row after it is used. Incomplete leading rows are dropped."""
+    m = max(1, int(minutes))
+    k = len(rows) // m
+    out: List[List[float]] = []
+    for j in range(k):
+        hi = len(rows) - (k - 1 - j) * m
+        blk = rows[hi - m : hi]
+        out.append([
+            float(blk[0][0]),
+            max(float(b[1]) for b in blk),
+            min(float(b[2]) for b in blk),
+            float(blk[-1][3]),
+            sum(float(b[4]) for b in blk),
+        ])
+    return out
+
+
+def timeframe_evals(tf_rows: Dict[str, Sequence[Sequence[float]]], settings: Dict[str, Any], now: float) -> List[SignalEval]:
+    """Every enabled timeframe lane through one evaluator. IndicationBook.process and the set signal both
+    call this, so a timeframe is judged by the same code wherever it is used."""
+    out: List[SignalEval] = []
+    for tf in TIMEFRAMES:
+        if not settings.get(f"tf{tf}", True):
+            continue
+        rows = tf_rows.get(tf) or []
+        if len(rows) < 20:
+            continue
+        candles = bars_to_candles(list(rows), now=now, period_s=TF_SECONDS[tf])
+        ev = evaluate_signal_candles(f"bingx-{tf}", f"BingX {tf}", candles, settings, weight=TF_WEIGHT[tf])
+        if ev:
+            out.append(ev)
+    return out
+
+
 class ExtraBook:
     """Public 1m klines from Binance / Bybit — independent Signal lanes."""
 
@@ -987,37 +1023,22 @@ class IndicationBook:
         tf_map: Dict[str, List[List[float]]] = dict(bars_by_tf or {})
         if bars and "1m" not in tf_map:
             tf_map["1m"] = bars
-        evals: List[SignalEval] = []
-        tf_evals: List[SignalEval] = []
-        for tf in TIMEFRAMES:
-            flag = f"tf{tf}"
-            if not self.settings.get(flag, True):
-                continue
-            rows = tf_map.get(tf) or []
-            if len(rows) < 20:
-                continue
-            candles = bars_to_candles(rows, period_s=TF_SECONDS[tf])
-            ev = evaluate_signal_candles(
-                f"bingx-{tf}",
-                f"BingX {tf}",
-                candles,
+        now_ts = time.time()
+        tf_evals: List[SignalEval] = timeframe_evals(tf_map, self.settings, now_ts)
+        evals: List[SignalEval] = list(tf_evals)
+        one_m = tf_map.get("1m") or []
+        if self.settings.get("tf1m", True) and len(one_m) >= 20:
+            c1 = bars_to_candles(one_m, now=now_ts, period_s=TF_SECONDS["1m"])
+            loc = evaluate_pulse_local(
+                pulse_dir,
+                pulse_conf,
+                px or (c1[-1].close if c1 else 0),
                 self.settings,
-                weight=TF_WEIGHT[tf],
+                sl_pct,
+                tp_pct,
             )
-            if ev:
-                evals.append(ev)
-                tf_evals.append(ev)
-            if tf == "1m":
-                loc = evaluate_pulse_local(
-                    pulse_dir,
-                    pulse_conf,
-                    px or (candles[-1].close if candles else 0),
-                    self.settings,
-                    sl_pct,
-                    tp_pct,
-                )
-                if loc:
-                    evals.append(loc)
+            if loc:
+                evals.append(loc)
         if self.settings.get("extraSources") and want_extra:
             for src, name in (("binance-usdm", "Binance USD-M"), ("bybit-linear", "Bybit Linear")):
                 extra = EXTRA.get(src, symbol)
@@ -1398,6 +1419,13 @@ def self_test() -> List[Tuple[str, bool, str]]:
     EXTRA.cache["binance-usdm:PICK-USDT"] = (time.time(), [])
     pruned = EXTRA.prune({"PICK-USDT"}, max_n=8)
     t18 = (pruned >= 1 and "binance-usdm:PICK-USDT" in EXTRA.cache, f"pruned={pruned} n={len(EXTRA.cache)}")
+    # R3: causal N-minute bars from 1m rows; blocks end on the newest row
+    rows10 = [[100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 1.0] for k in range(10)]
+    agg = aggregate_bars(rows10, 5)
+    want = [[100.0, 105.0, 99.0, 104.5, 5.0], [105.0, 110.0, 104.0, 109.5, 5.0]]
+    rows13 = [[100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 1.0] for k in range(13)]
+    agg13 = aggregate_bars(rows13, 5)
+    agg_newest = len(agg13) == 2 and agg13[-1][3] == rows13[-1][3] and agg13[0][0] == rows13[3][0]
     return [
         ("ind-eval-long", t1[0], t1[1]),
         ("ind-eval-short", t2[0], t2[1]),
@@ -1417,6 +1445,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("ind-pick-entry", t16[0], t16[1]),
         ("ind-keep-trim", t17[0], t17[1]),
         ("ind-extra-prune", t18[0], t18[1]),
+        ("agg-ohlc", agg == want, f"{agg}"),
+        ("agg-newest-aligned", agg_newest, f"n={len(agg13)} last_close={agg13[-1][3] if agg13 else None}"),
     ]
 
 

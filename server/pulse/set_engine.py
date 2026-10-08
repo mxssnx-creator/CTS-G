@@ -21,10 +21,22 @@ from position_cost import (
     cost_as_frac,
     net_pnl_pct,
 )
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, ema, rsi
+from indication_engine import (
+    aggregate_bars,
+    bars_to_candles,
+    combine_timeframes,
+    evaluate_direction,
+    evaluate_move,
+    evaluate_ta_pack,
+    ema,
+    rsi,
+    timeframe_evals,
+)
 from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
 
 PACKS = ("indications", "general")
+GENERAL_WINDOW_BARS = 60     # general pack reads the newest 60 one-minute bars
+IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 one-minute bars
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
@@ -182,13 +194,23 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
 
 
 def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
-    candles = bars_to_candles(list(bars)[-60:], now=now, period_s=BAR_S)
-    ev = evaluate_signal_candles("hist-1m", "Historic 1m", candles, settings, weight=0.85)
-    ta = evaluate_ta_pack(candles, settings)
-    closes = [float(b[3]) for b in bars[-60:]] if bars else []
+    """Set-level indication pack, causal, 1m rows [o,h,l,c,v] (newest last).
+    Timeframe lanes 1m, 5m and 15m go through indication_engine.timeframe_evals and combine_timeframes,
+    the code IndicationBook uses. The combined timeframe vote needs tfMinAgree agreeing lanes (tfCombined
+    on). The TA, direction and move evaluators vote on their own."""
+    rows = list(bars)
+    one_m = rows[-60:]
+    candles = bars_to_candles(one_m, now=now, period_s=BAR_S)
+    tf_rows = {"1m": one_m, "5m": aggregate_bars(rows, 5), "15m": aggregate_bars(rows, 15)}
+    tf_evs = timeframe_evals(tf_rows, settings, now)
+    closes = [float(b[3]) for b in one_m] if one_m else []
     votes: List[Tuple[int, float, str]] = []
-    if ev:
-        votes.append((1 if ev.direction == "long" else -1, ev.confidence, "sig"))
+    if settings.get("tfCombined", True):
+        comb = combine_timeframes(tf_evs, int(settings.get("tfMinAgree") or 2), settings)
+        if comb:
+            direction, _contrib, risk = comb
+            votes.append((1 if direction == "long" else -1, float(risk["confidence"]), "tf"))
+    ta = evaluate_ta_pack(candles, settings)
     if ta:
         votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
     try:
@@ -213,6 +235,30 @@ def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any],
         return -1, min(1.0, short_w / max(1, len(votes))), "+".join(w for d, _, w in votes if d < 0)
     return 0, max(long_w, short_w), "split"
 
+
+def pack_signals(
+    bars: Sequence[Sequence[float]],
+    packs: Sequence[str],
+    ind_settings: Dict[str, Any],
+    base_ts: float,
+    warmup: int,
+    on_step: Optional[Callable[[], None]] = None,
+) -> Dict[str, List[Tuple[int, float, str]]]:
+    """Causal signal per bar and pack: (direction, confidence, why). The only signal loop: the engine
+    replay and the streaming simulator both call it, so a bar gets the same signal in both places."""
+    n = len(bars)
+    signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in packs}
+    for i in range(warmup, n):
+        ts = base_ts + i * BAR_S
+        if "general" in packs:
+            lo = i + 1 - GENERAL_WINDOW_BARS
+            signals["general"][i] = general_signal(bars[lo if lo > 0 else 0 : i + 1])
+        if "indications" in packs:
+            lo = i + 1 - IND_WINDOW_BARS
+            signals["indications"][i] = indication_signal(bars[lo if lo > 0 else 0 : i + 1], ind_settings, ts)
+        if on_step and i % 50 == 0:
+            on_step()
+    return signals
 
 def hit_exit(
     side: int,
@@ -846,18 +892,8 @@ class SetBook:
         bars = self.bars[symbol]
         n = len(bars)
         warmup = min(self.warmup, max(16, n // 5))
-        signals: Dict[str, List[Tuple[int, float, str]]] = {p: [(0, 0.0, "")] * n for p in self.packs}
         base_ts = now - (n - 1) * BAR_S
-        for i in range(warmup, n):
-            lo = i + 1 - 60
-            window = bars[lo if lo > 0 else 0 : i + 1]
-            ts = base_ts + i * BAR_S
-            if "general" in self.packs:
-                signals["general"][i] = general_signal(window)
-            if "indications" in self.packs:
-                signals["indications"][i] = indication_signal(window, self.ind_settings, ts)
-            if on_step and i % 50 == 0:
-                on_step()
+        signals = pack_signals(bars, self.packs, self.ind_settings, base_ts, warmup, on_step)
         cfg = {
             "entry_conf": self.entry_conf,
             "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
