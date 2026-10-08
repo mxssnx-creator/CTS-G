@@ -414,7 +414,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className={allow ? "text-primary" : "text-danger"}>{allow ? "coord open" : "coord pause"}</span>
         <span className="text-muted">
-          last15 {fmt(pc?.ratio ?? gate?.metrics?.last15Ratio, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
+          last15 PF {fmt(pc?.pf ?? gate?.metrics?.last15Pf, 2)} · R {fmt(pc?.avgR ?? gate?.metrics?.last15R, 2)} · min {fmt(minPf, 2)} · cost {fmt(cost, 2)}%
         </span>
       </div>
       <div className="mt-1 flex flex-wrap gap-2 text-muted">

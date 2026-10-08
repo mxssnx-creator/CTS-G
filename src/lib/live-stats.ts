@@ -393,6 +393,7 @@ export type LiveStats = {
     count?: number;
     avgR?: number;
     ratio?: number;
+    pf?: number;
     classicPf?: number;
     costPct?: number;
     netPct?: number;

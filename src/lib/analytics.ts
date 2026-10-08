@@ -33,6 +33,7 @@ export type CostPfMetric = {
   count: number;
   avgR: number;
   ratio: number;
+  pf: number;
   classicPf: number;
   costPct: number;
   netPct: number;
@@ -166,31 +167,35 @@ export function lastNCostPf(
   costPct = POSITION_COST_PCT_DEFAULT,
   minPf = 1.1,
 ): CostPfMetric {
-  const window = rows.slice(0, Math.max(1, n));
+  // The newest n closes by time, the same window as position_cost.last_n_cost_pf on the engine tape.
+  const newest = [...rows].sort((x, y) => finite(y.t) - finite(x.t)).slice(0, Math.max(1, n));
   const rs: number[] = [];
   let gp = 0;
   let gl = 0;
-  for (const row of window) {
+  for (const row of newest) {
     rs.push(signedResultR(finite(row.pnl_pct), costPct));
-    const pnl = finite(row.pnl);
-    if (pnl > 0) gp += pnl;
-    else if (pnl < 0) gl += Math.abs(pnl);
+    // Net PF from the gross fraction less one PositionCost. Never the USDT pnl field.
+    const net = finite(row.pnl_pct) - Math.max(0, finite(costPct)) / 100;
+    if (net > 0) gp += net;
+    else if (net < 0) gl += Math.abs(net);
   }
   const count = rs.length;
   const avgR = count ? rs.reduce((a, b) => a + b, 0) / count : 0;
   const ratio = count ? ratioFromR(avgR) : 1;
-  const classic = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
+  // pf is the decision metric; ratio = 1 + 0.10 x avgR is display only
+  const pf = gl > 0 ? gp / gl : gp > 0 ? 99 : 0;
   return {
     n,
     count,
     avgR: round(avgR),
     ratio: round(ratio),
-    classicPf: round(classic),
+    pf: round(pf),
+    classicPf: round(pf),
     costPct,
     netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
     grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),
     minPf,
-    pass: count < 8 || ratio + 1e-9 >= minPf,
+    pass: count < 8 || pf + 1e-9 >= minPf,
   };
 }
 

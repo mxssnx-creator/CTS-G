@@ -179,6 +179,7 @@ class Coordinator:
             "prevPf": round(float(prev_cost["pf"]), 3),
             "consecLoss": float(consec),
             "last15Ratio": cost["ratio"],
+            "last15Pf": cost["pf"],
             "last15R": cost["avgR"],
             "last15N": cost["count"],
             "classicPf15": cost["classicPf"],

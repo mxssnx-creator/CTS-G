@@ -77,7 +77,7 @@ export function derive(stats: LiveStats | null): Derived {
       .sort((a, b) => b.n - a.n),
     gp,
     gl,
-    pf: stats?.pfCost?.ratio ?? (gl > 0 ? gp / gl : gp > 0 ? 99 : 0),
+    pf: stats?.pfCost?.pf ?? (gl > 0 ? gp / gl : gp > 0 ? 99 : 0),
     avgWin: wins.length ? gp / wins.length : 0,
     avgLoss: losses.length ? gl / losses.length : 0,
     avgHold: closed.length ? holdSum / closed.length : 0,

@@ -24,6 +24,7 @@ export function StatsOverview({
           count: live.pfCost.count ?? data.costPf.count,
           avgR: live.pfCost.avgR ?? data.costPf.avgR,
           ratio: live.pfCost.ratio ?? data.costPf.ratio,
+          pf: live.pfCost.pf ?? data.costPf.pf,
           classicPf: live.pfCost.classicPf ?? data.costPf.classicPf,
           costPct: live.pfCost.costPct ?? data.costPf.costPct,
           netPct: live.pfCost.netPct ?? data.costPf.netPct,
@@ -37,7 +38,7 @@ export function StatsOverview({
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Hero
           k="Last 15 PF"
-          v={cost.count ? cost.ratio.toFixed(2) : "—"}
+          v={cost.count ? cost.pf.toFixed(2) : "—"}
           s={`1.00=neutral · 1.10=+1×cost · R ${cost.avgR.toFixed(2)} · n ${cost.count} · ${cost.pass ? "pass" : "block"}`}
           tone={cost.count < 8 ? "ok" : cost.pass ? "good" : "bad"}
         />
@@ -110,14 +111,14 @@ export function StatsOverview({
 }
 
 function PfRow({ label, m }: { label: string; m: CostPfMetric }) {
-  const tone = m.count < 1 ? "ok" : m.ratio >= 1.1 ? "good" : m.ratio < 1 ? "bad" : "ok";
+  const tone = m.count < 1 ? "ok" : m.pf >= 1.1 ? "good" : m.pf < 1 ? "bad" : "ok";
   return (
     <tr className="border-t border-border">
       <td className="py-2">{label}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.count}</td>
       <td className="py-2 text-right font-mono tabular-nums">{m.avgR.toFixed(2)}</td>
       <td className={`py-2 text-right font-mono tabular-nums ${tone === "good" ? "text-primary" : tone === "bad" ? "text-danger" : ""}`}>
-        {m.count ? m.ratio.toFixed(2) : "—"}
+        {m.count ? m.pf.toFixed(2) : "—"}
       </td>
       <td className={`py-2 text-right font-mono tabular-nums ${m.netPct >= 0 ? "text-primary" : "text-danger"}`}>
         {m.netPct >= 0 ? "+" : ""}

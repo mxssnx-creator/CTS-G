@@ -255,7 +255,7 @@ function SettingsPage() {
                   onChange={(v) => patch("positionCostPct", v)}
                 />
                 <Slider
-                  label="Min PF ratio"
+                  label="Min PF"
                   value={overlay.minPf}
                   min={1}
                   max={2.3}
@@ -1379,9 +1379,9 @@ function pfHint(ratio: number, cost: number) {
 }
 
 function pfLive(stats: LiveStats | null, overlay: PulseOverlay) {
-  const p = (stats as LiveStats & { pfCost?: { ratio?: number; avgR?: number; count?: number; pass?: boolean } })?.pfCost;
+  const p = (stats as LiveStats & { pfCost?: { pf?: number; avgR?: number; count?: number; pass?: boolean } })?.pfCost;
   if (!p) return "waiting";
-  return `${(p.ratio ?? 0).toFixed(2)} · R ${(p.avgR ?? 0).toFixed(2)} · n ${p.count ?? 0} · ${p.pass ? "pass" : "block"}`;
+  return `PF ${(p.pf ?? 0).toFixed(2)} · R ${(p.avgR ?? 0).toFixed(2)} · n ${p.count ?? 0} · ${p.pass ? "pass" : "block"}`;
 }
 
 function Num({

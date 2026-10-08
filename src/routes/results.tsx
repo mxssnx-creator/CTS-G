@@ -78,7 +78,7 @@ function ResultsPage() {
         <Hero k="Gross loss" v={d.gl ? `-${d.gl.toFixed(4)}` : "0"} s={`avg loss ${d.avgLoss.toFixed(4)}`} bad={d.gl > 0} />
         <Hero
           k="PF after cost"
-          v={(stats?.pfCost?.ratio ?? stats?.profitFactor ?? 1).toFixed(2)}
+          v={(stats?.pfCost?.pf ?? stats?.profitFactor ?? 1).toFixed(2)}
           s={`1.00=neutral · 1.10=+1×cost · min ${stats?.pfCost?.minPf ?? 1.1} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
         />
       </section>
