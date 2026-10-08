@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from position_cost import LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import GATE_MIN_PF_DEFAULT, LAST_N_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 
 AXIS_SPECS = {
     "prev": {"min": 4, "max": 12, "step": 2, "default": 12},
@@ -96,9 +96,9 @@ class Coordinator:
         }
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
+            self.min_pf = float(ov.get("minPf") or st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
         except Exception:
-            self.min_pf = float(ov.get("minPf") or 1.2)
+            self.min_pf = float(ov.get("minPf") or GATE_MIN_PF_DEFAULT)
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)

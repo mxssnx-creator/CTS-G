@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # whatever the overlay, the UI, or the restored engine says. Flip only when DCA is re-approved.
 DCA_HARD_OFF = True
 
-from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf, normalize_cost_pct, signed_result_r
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
 DEFAULT_MULT = [1.5, 2.0, 2.3, 2.5]
@@ -31,9 +31,7 @@ def _pct_list(raw: Any, fallback: List[float]) -> List[float]:
                 n = float(x)
             except Exception:
                 continue
-            if n > 0.08:
-                n = n / 100.0
-            out.append(max(0.0005, min(0.08, n)))
+            out.append(max(0.0005, min(0.08, n / 100.0)))   # distances are percent, always
     return out or list(fallback)
 
 
@@ -94,7 +92,7 @@ class DcaBook:
         self.cooldown_s = 30.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.20
+        self.min_pf = GATE_MIN_PF_DEFAULT
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.active = True
@@ -138,18 +136,14 @@ class DcaBook:
         self.tp_mode = str(ov.get("dcaTakeProfitMode") or coord.get("dcaTakeProfitMode") or cts.get("dcaTakeProfitMode") or "average")
         be_raw = ov.get("dcaBreakevenProfitPct", coord.get("dcaBreakevenProfitPct", cts.get("dcaBreakevenProfitPct", 0.2)))
         be = float(be_raw if be_raw is not None else 0.2)
-        self.be_pct = be / 100.0 if be > 0.05 else be
+        self.be_pct = be / 100.0   # dcaBreakevenProfitPct is percent
         cd_raw = ov.get("dcaCooldownSeconds", coord.get("dcaCooldownSeconds", cts.get("dcaCooldownSeconds", 30)))
         self.cooldown_s = float(cd_raw if cd_raw is not None else 30)
         self.pf_n = max(5, int(ov.get("dcaPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("dcaDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or 1.20)
+        self.min_pf = float(ov.get("dcaMinPf") or ov.get("minPf") or GATE_MIN_PF_DEFAULT)
         self.auto_deact = bool(ov.get("dcaAutoDeact", True))
-        self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
     def unlimited(self) -> bool:
         return int(self.max_steps or 0) <= 0

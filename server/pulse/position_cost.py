@@ -68,6 +68,16 @@ def snap_sl_ratio(value: Any) -> float:
     return round(SL_RATIO_MIN + n * SL_RATIO_STEP, 2)
 
 
+GATE_MIN_PF_DEFAULT = 1.10   # base gate: net PF must stay above this (every module reads this one constant)
+
+
+def normalize_cost_pct(value: Any, default: float = POSITION_COST_PCT_DEFAULT) -> float:
+    """PositionCost in PERCENT (0.15 = 0.15%). A non-positive or non-finite value falls back to the default.
+    There is no magnitude guessing: 3 means 3%, never 0.03%."""
+    x = finite(value, default)
+    return x if x > 0 else default
+
+
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
     """PositionCost as a fraction. Input is always PERCENT: 0.15 → 0.0015, 0.04 → 0.0004.
     (The old rule read any value <= 0.05 as a fraction, so 0.04% was charged as 4%.)"""

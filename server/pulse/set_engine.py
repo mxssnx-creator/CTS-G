@@ -15,8 +15,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import (
+    GATE_MIN_PF_DEFAULT,
     LAST_N_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
+    normalize_cost_pct,
     last_n_cost_pf,
     signed_result_r,
     SL_RATIOS,
@@ -50,13 +52,14 @@ PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
 GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
 GATE_MIN_DEFAULT = 30           # fewer orders than this: not judged, not eligible
-GATE_MIN_PF_DEFAULT = 1.10      # base gate: net PF must stay above this
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
 STEP_MIN = TP_STEP_MIN
 STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
+# trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
+TRAIL_SL_RATIO = 0.6
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -445,8 +448,8 @@ class SetLane:
         # trail values are percent of price on every path (trail_grid, parse_trail): no magnitude guessing
         self.arm = st.trail_arm / 100.0 if self.use_trail else 0.0
         self.give = st.trail_give / 100.0 if self.use_trail else 0.0
-        self.sl_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
-        self.tp_frac = max(0.0020, st.tp_pct)
+        self.sl_base = st.tp_pct * (st.sl_ratio if st.kind == "base" else TRAIL_SL_RATIO)
+        self.tp_frac = st.tp_pct
 
     def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Advance one bar. Returns the closed trade (a dict) or None.
@@ -492,11 +495,13 @@ class SetLane:
         if not allowed or d == 0 or conf < cfg["entry_conf"]:
             return None
         close = float(bar[3])
-        sl_frac = max(0.0015, self.sl_base)
+        cost_frac = cost_as_frac(cfg["cost_pct"])
+        sl_frac = max(cost_frac, self.sl_base)           # a stop is never tighter than one PositionCost
+        tp_frac = max(2 * cost_frac, self.tp_frac)       # TP grid starts at 2 x PositionCost
         if d > 0:
-            sl, tp = close * (1 - sl_frac), close * (1 + self.tp_frac)
+            sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
         else:
-            sl, tp = close * (1 + sl_frac), close * (1 - self.tp_frac)
+            sl, tp = close * (1 + sl_frac), close * (1 - tp_frac)
         self.open = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
         return None
 
@@ -526,6 +531,7 @@ class SetLane:
         scratch_min = cfg["scratch_min"]
         cooldown = cfg["cooldown"]
         cost_pct = cfg["cost_pct"]
+        cost_frac = cost_as_frac(cost_pct)
         honor_tp = bool(cfg["honor_tp"])
         use_trail = self.use_trail
         arm = self.arm
@@ -617,11 +623,12 @@ class SetLane:
             elif allowed:
                 d = int(dirs[j])
                 close = float(bars[j][3])
-                sl_frac = max(0.0015, sl_base)
+                sl_frac = max(cost_frac, sl_base)
+                tp_use = max(2 * cost_frac, tp_frac)
                 if d > 0:
-                    sl, tp = close * (1 - sl_frac), close * (1 + tp_frac)
+                    sl, tp = close * (1 - sl_frac), close * (1 + tp_use)
                 else:
-                    sl, tp = close * (1 + sl_frac), close * (1 - tp_frac)
+                    sl, tp = close * (1 + sl_frac), close * (1 - tp_use)
                 o = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": j, "trail": None}
             i = j + 1
         self.open = o
@@ -703,20 +710,16 @@ class SetBook:
         except Exception:
             raw_active = 0
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
-        self.cost_pct = float(ov.get("positionCostPct") or ov.get("setCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
         self.scratch_s = float(ov.get("scratchS") or 90)
         tp = float(ov.get("tpPct") or 0.75)
-        self.tp_pct = tp / 100.0 if tp > 0.05 else tp
+        self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         self.hist_honor_tp = bool(ov.get("setHonorTp", True))
         opt = float(ov.get("exitOptSlPct") or 0.30)
-        self.opt_sl = opt / 100.0 if opt > 0.02 else opt
+        self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
         self.step_adapt = bool(ov.get("setStepAdapt", True))
@@ -831,14 +834,14 @@ class SetBook:
                     st.trail_key = tkey
                     st.trail_arm = arm
                     st.trail_give = give
-                    st.sl_ratio = 0.6
+                    st.sl_ratio = TRAIL_SL_RATIO
                     st.step = 0
                     st.tp_pct = tp
                     st.kind = "trail"
                     st.locked = bool(self.locks.get(sid))
                 else:
                     st = SetState(
-                        id=sid, pack=pack, tf="1m", sl_ratio=0.6,
+                        id=sid, pack=pack, tf="1m", sl_ratio=TRAIL_SL_RATIO,
                         trail_key=tkey, trail_arm=arm, trail_give=give,
                         step=0, tp_pct=tp, kind="trail",
                         locked=bool(self.locks.get(sid)),

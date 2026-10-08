@@ -17,7 +17,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, net_pnl_pct, signed_result_r, POSITION_COST_PCT_DEFAULT
+from position_cost import (
+    GATE_MIN_PF_DEFAULT,
+    POSITION_COST_PCT_DEFAULT,
+    cost_as_frac,
+    last_n_cost_pf,
+    net_pnl_pct,
+    normalize_cost_pct,
+    signed_result_r,
+)
 from set_engine import drawdown_time
 
 LANES = ("hard", "lock", "peak", "rev", "time")
@@ -32,8 +40,8 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def pct_to_frac(v: float) -> float:
-    x = finite(v)
-    return x / 100.0 if x > 0.02 else x
+    """Exit settings are percent (0.15 = 0.15%). No magnitude guessing."""
+    return finite(v) / 100.0
 
 
 def lane_of(reason: str) -> str:
@@ -98,7 +106,7 @@ class ExitBook:
         self.trail_min_step = 6.0
         self.pf_n = 15
         self.deact_n = 25
-        self.min_pf = 1.20
+        self.min_pf = GATE_MIN_PF_DEFAULT
         self.min_samples = 8
         self.auto_deact = True
         self.cost_pct = POSITION_COST_PCT_DEFAULT
@@ -127,14 +135,10 @@ class ExitBook:
         self.trail_min_step = float(ov.get("trailingMinStep") or 6)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
-        self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or 1.20)
+        self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or GATE_MIN_PF_DEFAULT)
         self.min_samples = max(5, int(ov.get("exitMinSamples") or 8))
         self.auto_deact = bool(ov.get("exitAutoDeact", True))
-        self.cost_pct = float(ov.get("positionCostPct") or POSITION_COST_PCT_DEFAULT)
-        if self.cost_pct > 2:
-            self.cost_pct = self.cost_pct / 100.0
-        if self.cost_pct > 1:
-            self.cost_pct = POSITION_COST_PCT_DEFAULT
+        self.cost_pct = normalize_cost_pct(ov.get("positionCostPct"))
 
     def optimal_sl(self, side: str, entry: float, peak: float, hard_sl: float) -> float:
         """SL that takes profit from peak — independent of TP."""
@@ -229,8 +233,8 @@ class ExitBook:
                 closes.append(ExitDecision("close", "exit:rev", self.mark_sl(side, px), "rev", 0.8))
 
         if self.time_on and self._lane_ok("time"):
-            # Never scratch a trade that has not paid 1× position-cost.
-            paid = max(0.0025, self.cost_pct / 100.0 * 1.1)
+            # Never scratch a trade that has not paid 1× position-cost (gross move >= one PositionCost).
+            paid = cost_as_frac(self.cost_pct)
             if age >= self.time_stop_s and pnl_pct >= paid:
                 closes.append(ExitDecision("close", "exit:time", self.mark_sl(side, px), "time", 0.6))
             elif age >= max(600.0, self.scratch_s) and pnl_pct >= max(self.scratch_min, paid):
