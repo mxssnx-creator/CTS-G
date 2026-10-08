@@ -46,7 +46,7 @@ export const MODULES: SysModule[] = [
   { id: "strategy.sets", layer: "strategy", name: "Independent Sets", summary: "Pack × SL:TP × trail × step books with 1m historic", status: "live", toggle: "histEnabled", defaultOn: true },
   { id: "strategy.trailing", layer: "strategy", name: "Trailing recals", summary: "Independent arm/give range · auto pick on last-N", status: "live", toggle: "stratTrailing", defaultOn: true },
   { id: "strategy.trailRecalc", layer: "strategy", name: "Trail auto-recalc", summary: "Pick arm:give from last-N independent of SL:TP", status: "live", toggle: "trailAuto", defaultOn: true },
-  { id: "strategy.dca", layer: "strategy", name: "DCA", summary: "Independent CTS steps on adverse move · own PF book", status: "live", toggle: "dcaEnabled", defaultOn: true },
+  { id: "strategy.dca", layer: "strategy", name: "DCA", summary: "Independent CTS steps on adverse move · own PF book", status: "live", toggle: "dcaEnabled", defaultOn: false },
   { id: "strategy.exits", layer: "strategy", name: "Exit SL coord", summary: "Best close via optimal SL · independent of TP", status: "live", toggle: "exitEnabled", defaultOn: true },
   { id: "strategy.rearrange", layer: "strategy", name: "Rearrange", summary: "Free a weak slot for a stronger signal", status: "live", toggle: "rearrange", defaultOn: true },
   { id: "risk.slTpRatios", layer: "risk", name: "SL:TP ratios", summary: "0.3–1.5 step 0.3 · SL bound to TP · independent recals", status: "live", defaultOn: true },

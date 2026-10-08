@@ -199,7 +199,7 @@ function SettingsPage() {
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block" on={overlay.stratBlock && overlay.blockEnabled} onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={overlay.dcaEnabled !== false && overlay.stratDca !== false} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
                 <EnableSlider label="Control orders" on={overlay.controlOrders} onChange={(v) => patch("controlOrders", v)} />
                 <EnableSlider label="Historic sets" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <EnableSlider label="Exit coordinator" on={overlay.exitEnabled} onChange={(v) => patch("exitEnabled", v)} />
@@ -391,7 +391,7 @@ function SettingsPage() {
                 <EnableSlider label="General pulse" on={overlay.stratGeneral} hint="score() pack" onChange={(v) => patch("stratGeneral", v)} />
                 <EnableSlider label="Block strategy" on={overlay.stratBlock && overlay.blockEnabled} hint="all counts, 0 = unlimited" onChange={(v) => { patch("stratBlock", v); patch("blockEnabled", v); }} />
                 <EnableSlider label="Trailing" on={overlay.stratTrailing} hint="independent trail Sets" onChange={(v) => patch("stratTrailing", v)} />
-                <EnableSlider label="DCA" on={overlay.dcaEnabled !== false && overlay.stratDca !== false} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
+                <EnableSlider label="DCA" on={overlay.dcaEnabled === true && overlay.stratDca === true} hint="independent steps" onChange={(v) => { patch("dcaEnabled", v); patch("stratDca", v); }} />
               </Grid>
               <p className="text-sm text-muted">
                 Indications and general run in parallel for entries. Block adds on a live parent for every count (max stack {overlay.blockMaxStack || "unlimited"}).
@@ -860,7 +860,7 @@ function SettingsPage() {
             <Card title="DCA" hint="Independent of Block · fires on adverse % from average entry · own last-15 PF / last-25 deact">
               <Toggle
                 label="DCA enabled"
-                on={overlay.dcaEnabled !== false}
+                on={overlay.dcaEnabled === true}
                 onChange={(v) => patch("dcaEnabled", v)}
               />
               <Toggle

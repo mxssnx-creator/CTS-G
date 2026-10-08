@@ -11,6 +11,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+# DCA is disabled for now. While True, load() never enables the book and due() never returns an add,
+# whatever the overlay, the UI, or the restored engine says. Flip only when DCA is re-approved.
+DCA_HARD_OFF = True
+
 from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf, signed_result_r
 
 DEFAULT_DIST = [0.5, 1.0, 1.5, 2.0]
@@ -107,7 +111,7 @@ class DcaBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         coord = cts.get("coordination_settings") or cts.get("coordinationSettings") or {}
-        self.enabled = bool(ov.get("dcaEnabled", False))
+        self.enabled = bool(ov.get("dcaEnabled", False)) and not DCA_HARD_OFF
         try:
             raw_steps = ov.get("dcaMaxSteps")
             if raw_steps is None:
@@ -207,7 +211,7 @@ class DcaBook:
         return pc
 
     def due(self, symbol: str, side: str, qty: float, entry: float, px: float, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        if not self.enabled:
+        if DCA_HARD_OFF or not self.enabled:
             return None
         self.score()
         if not self.active:
@@ -313,7 +317,7 @@ class DcaBook:
         }
 
 
-def self_test() -> List[Tuple[str, bool, str]]:
+def _math_self_test() -> List[Tuple[str, bool, str]]:
     b = DcaBook()
     b.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
     t0 = time.time()
@@ -373,6 +377,24 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ("dca-unlim-seed", t12[0], t12[1]),
         ("dca-unlim-grow", t13[0], t13[1]),
     ]
+
+
+
+
+def self_test() -> List[Tuple[str, bool, str]]:
+    # The step math is tested with the switch lifted; the hard-off check is tested with it in force.
+    global DCA_HARD_OFF
+    saved = DCA_HARD_OFF
+    DCA_HARD_OFF = False
+    try:
+        out = _math_self_test()
+    finally:
+        DCA_HARD_OFF = saved
+    b = DcaBook()
+    b.load({"dcaEnabled": True, "dcaMaxSteps": 4, "dcaStepDistancesPct": [0.5, 1, 1.5, 2], "dcaStepVolumeMultipliers": [1.5, 2, 2.3, 2.5], "dcaCooldownSeconds": 0})
+    r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=time.time())
+    out.append(("dca-hard-off", DCA_HARD_OFF and r is None and not b.enabled, f"hard_off={DCA_HARD_OFF} enabled={b.enabled} due={r}"))
+    return out
 
 
 if __name__ == "__main__":

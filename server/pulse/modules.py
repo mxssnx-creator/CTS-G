@@ -41,8 +41,8 @@ def resolve(overlay: Dict[str, Any]) -> Dict[str, bool]:
         flags[str(k)] = bool(v)
     if "blockEnabled" in overlay:
         flags["strategy.block"] = bool(overlay["blockEnabled"])
-    if "dcaEnabled" in overlay:
-        flags["strategy.dca"] = bool(overlay["dcaEnabled"])
+    # DCA is disabled for now (dca_engine.DCA_HARD_OFF); the overlay cannot re-enable it.
+    flags["strategy.dca"] = False
     if "controlOrders" in overlay:
         flags["exec.controls"] = bool(overlay["controlOrders"])
     if "rearrange" in overlay:

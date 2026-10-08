@@ -116,7 +116,7 @@
   "setStepMax": 12,
   "setStepAdapt": true,
   "setMaxActive": 0,
-  "histLookbackBars": 960,
+  "histLookbackBars": 1920,
   "histRefreshS": 120,
   "exitRevOn": false,
   "exitMinHoldS": 45,
@@ -149,7 +149,9 @@
   "indTypeCommon": true,
   "indTypeSignals": true,
   "setUseHistoricGate": true,
-  "setMinPf": 1.2,
+  "setMinPf": 1.1,
+  "setGateWindow": 50,
+  "setGateMinTrades": 30,
   "loadPartial": true,
   "exitMinPf": 1.2
 }

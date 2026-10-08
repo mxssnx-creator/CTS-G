@@ -339,13 +339,13 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   indRewardRisk: 1.8,
   indExtraSources: true,
   histEnabled: true,
-  histLookbackBars: 960,
+  histLookbackBars: 1920,
   histMinBars: 120,
   histWarmup: 30,
   histRefreshS: 90,
   setPfWindow: 15,
   setDeactN: 25,
-  setMinPf: 1.2,
+  setMinPf: 1.1,
   setMaxDdTimeS: 1800,
   setAutoDeact: true,
   setUseHistoricGate: true,
@@ -378,7 +378,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
     "strategy.sets": true,
     "core.historic": true,
     "strategy.block": true,
-    "strategy.dca": true,
+    "strategy.dca": false,
     "strategy.coord": true,
     "strategy.indications": true,
     "strategy.rearrange": true,
@@ -644,7 +644,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     indRewardRisk: num(cts.indRewardRisk, 1.8),
     indExtraSources: bool(cts.indExtraSources, true),
     histEnabled: bool(cts.histEnabled, true),
-    histLookbackBars: num(cts.histLookbackBars, 960),
+    histLookbackBars: num(cts.histLookbackBars, 1920),
     histMinBars: num(cts.histMinBars, 120),
     histWarmup: num(cts.histWarmup, 30),
     histRefreshS: num(cts.histRefreshS, 90),
@@ -781,7 +781,7 @@ export function syncOverlayFlags(overlay: PulseOverlay): PulseOverlay {
   next.dcaStepVolumeMultipliers = steps > 0 ? mult.slice(0, steps) : mult;
   const m: Record<string, boolean> = { ...(next.modules ?? {}) };
   m["strategy.block"] = Boolean(next.blockEnabled && next.stratBlock);
-  m["strategy.dca"] = next.dcaEnabled !== false && next.stratDca !== false;
+  m["strategy.dca"] = next.dcaEnabled === true && next.stratDca === true;
   m["exec.controls"] = Boolean(next.controlOrders);
   m["strategy.rearrange"] = Boolean(next.rearrange);
   m["strategy.indications"] = Boolean(next.indEnabled && next.stratIndications);

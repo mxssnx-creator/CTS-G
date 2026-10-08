@@ -43,9 +43,10 @@ def snap_ratio(value: Any, lo: float = SL_TP_MIN, hi: float = SL_TP_MAX, step: f
 
 
 def cost_as_frac(cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
-    """PositionCost as a fraction. 0.15 (percent) → 0.0015; 0.0015 already a fraction."""
+    """PositionCost as a fraction. Input is always PERCENT: 0.15 → 0.0015, 0.04 → 0.0004.
+    (The old rule read any value <= 0.05 as a fraction, so 0.04% was charged as 4%.)"""
     c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))
-    return c / 100.0 if c > 0.05 else c
+    return c / 100.0
 
 
 def net_pnl_pct(pnl_pct: float, cost_pct: float = POSITION_COST_PCT_DEFAULT) -> float:
@@ -175,7 +176,8 @@ if __name__ == "__main__":
     assert abs(ratio_from_r(1.0) - 1.10) < 1e-9
     assert abs(ratio_from_r(0.0) - 1.00) < 1e-9
     assert abs(cost_as_frac(0.15) - 0.0015) < 1e-12
-    assert abs(cost_as_frac(0.0015) - 0.0015) < 1e-12
+    assert abs(cost_as_frac(0.04) - 0.0004) < 1e-12
+    assert abs(cost_as_frac(0.0015) - 0.000015) < 1e-12
     assert abs(net_pnl_pct(0.003, 0.15) - 0.0015) < 1e-12
     assert abs(net_pnl_usdt(0.003, 1.0, 100.0, 0.15) - 0.15) < 1e-9
     rows = [{"pnl_pct": 0.003, "pnl": 1.0}] * 15

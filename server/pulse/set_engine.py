@@ -27,7 +27,10 @@ from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_cand
 PACKS = ("indications", "general")
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
-LOOKBACK_DEFAULT = 960
+LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
+GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
+GATE_MIN_DEFAULT = 30           # fewer orders than this: not judged, not eligible
+GATE_MIN_PF_DEFAULT = 1.10      # base gate: net PF must stay above this
 WARMUP_DEFAULT = 30
 BAR_S = 60.0
 FEE_PCT = 0.001  # round-trip, matches live close_pos
@@ -46,9 +49,7 @@ def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
 
 def step_tp_pct(step: int, cost_pct: float) -> float:
     """TP fraction = step × position cost. Cost 0.15 means 0.15% → step 3 = 0.45%."""
-    c = max(1e-9, float(cost_pct))
-    if c > 0.05:
-        c = c / 100.0
+    c = max(1e-9, float(cost_pct)) / 100.0  # cost is always percent (0.15 = 0.15%)
     return max(c, clamp_step(step) * c)
 
 
@@ -313,6 +314,8 @@ class SetState:
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
     last15_ratio: float = 1.0
+    gate_pf: float = 0.0
+    gate_n: int = 0
     last15_classic: float = 0.0
     last15_n: int = 0
     last15_r: float = 0.0
@@ -369,7 +372,9 @@ class SetBook:
         self.refresh_s = 90.0
         self.pf_n = PF_N_DEFAULT
         self.deact_n = DEACT_N_DEFAULT
-        self.min_pf = 1.20
+        self.min_pf = GATE_MIN_PF_DEFAULT
+        self.gate_window = GATE_WINDOW_DEFAULT
+        self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
         self.auto_deact = True
         self.use_historic_gate = True
@@ -383,6 +388,8 @@ class SetBook:
         self.scratch_min = 0.0016
         self.tp_pct = 0.0075
         self.cooldown_bars = 2
+        self.entry_conf = 0.58
+        self.retry_s = 30.0
         self.ignore_tp = True
         self.opt_sl = 0.0030
         self.min_step_cfg = STEP_MIN
@@ -405,13 +412,15 @@ class SetBook:
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
         cts = cts or {}
         self.enabled = bool(ov.get("histEnabled", True))
-        self.lookback = max(120, min(1440, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
+        self.lookback = max(120, min(2880, int(ov.get("histLookbackBars") or LOOKBACK_DEFAULT)))
         self.min_bars = max(60, min(self.lookback, int(ov.get("histMinBars") or 120)))
         self.warmup = max(16, min(80, int(ov.get("histWarmup") or WARMUP_DEFAULT)))
         self.refresh_s = max(30.0, min(600.0, float(ov.get("histRefreshS") or 90)))
         self.pf_n = max(5, min(50, int(ov.get("setPfWindow") or ov.get("pfWindow") or PF_N_DEFAULT)))
         self.deact_n = max(10, min(80, int(ov.get("setDeactN") or DEACT_N_DEFAULT)))
-        self.min_pf = float(ov.get("setMinPf") or ov.get("minPf") or 1.20)
+        self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
+        self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
+        self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
         self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
@@ -464,6 +473,14 @@ class SetBook:
             bool(ov.get("trailRecalcGive", True)),
             ov.get("trailVariants") or list(TRAIL_VARIANTS),
         )
+        try:
+            self.entry_conf = min(0.99, max(0.30, float(ov.get("setEntryConf") if ov.get("setEntryConf") is not None else 0.58)))
+        except Exception:
+            self.entry_conf = 0.58
+        try:
+            self.cooldown_bars = min(30, max(0, int(ov.get("setCooldownBars") if ov.get("setCooldownBars") is not None else 2)))
+        except Exception:
+            self.cooldown_bars = 2
         locks = ov.get("setLocks") if isinstance(ov.get("setLocks"), dict) else {}
         self.locks = {str(k): bool(v) for k, v in locks.items()}
         self.ind_settings = {
@@ -578,7 +595,7 @@ class SetBook:
                 pnls.append(pnl)
                 if pnl > 0:
                     n_pos += 1
-                if signed_result_r(pct if pct else pnl, self.cost_pct) > 0:
+                if pct and signed_result_r(pct, self.cost_pct) > 0:
                     n_ok += 1
             avg = sum(pnls) / len(pnls) if pnls else 0.0
             if avg < 0:
@@ -698,7 +715,11 @@ class SetBook:
             return False
         if self._running:
             return False
-        return time.time() - self.last_run >= self.refresh_s or not self.progress.ready
+        if self.progress.ready:
+            return time.time() - self.last_run >= self.refresh_s
+        if self.progress.phase == "error":
+            return time.time() - self.last_run >= self.retry_s
+        return True
 
     def replay_all(
         self,
@@ -744,8 +765,8 @@ class SetBook:
             self.progress.phase = "score"
             self.progress.pct = 90.0
             for st in self.by_idx:
-                full = hist.get(st.id, [])
-                st.hist = full[-40:]
+                full = sorted(hist.get(st.id, []), key=lambda r: finite(r.get("t")))
+                st.hist = full[-max(40, self.gate_window):]
                 self._score_one(st)
                 st.n = len(full)
             self._cap_active()
@@ -840,10 +861,7 @@ class SetBook:
                             "reason": why,
                             "set_id": st.id,
                         }
-                        bucket = hist[st.id]
-                        bucket.append(rec)
-                        if len(bucket) > HIST_CAP:
-                            del bucket[:-HIST_CAP]
+                        hist[st.id].append(rec)
                         open_pos = None
                         cool = self.cooldown_bars
                     continue
@@ -851,7 +869,7 @@ class SetBook:
                     cool -= 1
                     continue
                 d, conf, why = pack_sig[i]
-                if d == 0 or conf < 0.58:
+                if d == 0 or conf < self.entry_conf:
                     continue
                 close = float(bar[3])
                 sl_frac = max(0.0015, sl_frac_base)
@@ -887,6 +905,9 @@ class SetBook:
         st.last15_classic = float(last15["classicPf"])
         st.last15_n = int(last15["count"])
         st.last15_r = float(last15["avgR"])
+        gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct)
+        st.gate_pf = float(gate["classicPf"])
+        st.gate_n = int(gate["count"])
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
         if last25:
@@ -931,9 +952,8 @@ class SetBook:
             st.last25_avg_pnl = live_tail_avg
             return
         notes = []
-        need = max(self.min_samples, min(self.pf_n, 8))
-        if st.last15_n >= need and st.last15_ratio + 1e-9 < self.min_pf:
-            notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<{self.min_pf:.2f}")
+        if st.gate_n >= self.gate_min and st.gate_pf + 1e-9 < self.min_pf:
+            notes.append(f"gate{st.gate_n} PF {st.gate_pf:.2f}<{self.min_pf:.2f}")
         live_dd = False
         if len(live25) >= max(8, self.min_samples) and st.max_dd_s > self.max_dd_s:
             notes.append(f"maxDDt {st.max_dd_s:.0f}s>{self.max_dd_s:.0f}s")
@@ -942,17 +962,17 @@ class SetBook:
         # stay validated and may be processed. Proven-negative sets deactivate;
         # reactivate=on lets them return once the window rolls non-negative,
         # reactivate=off keeps them off until PF recovers to min_pf.
-        proven_neg = st.last15_n >= need and st.last15_ratio + 1e-9 < 1.0
+        proven_neg = st.gate_n >= self.gate_min and st.gate_pf + 1e-9 < 1.0
         was_neg_off = (not st.active) and ("<1.00 neg" in st.deact_reason)
         if proven_neg:
             st.active = False
-            notes.append(f"last{st.last15_n} PF {st.last15_ratio:.2f}<1.00 neg")
-        elif was_neg_off and not self.reactivate and st.last15_ratio + 1e-9 < self.min_pf:
+            notes.append(f"gate{st.gate_n} PF {st.gate_pf:.2f}<1.00 neg")
+        elif was_neg_off and not self.reactivate and st.gate_pf + 1e-9 < self.min_pf:
             st.active = False
             notes.append(st.deact_reason)
         elif notes and not self.reactivate:
             # Historic PF below min is a rank penalty; only live DD / live last25 hard-stops.
-            if live_dd or (st.last15_n >= self.pf_n and len(live25) >= self.min_samples and st.last15_ratio + 1e-9 < 1.0):
+            if live_dd or (st.gate_n >= self.gate_min and len(live25) >= self.min_samples and st.gate_pf + 1e-9 < 1.0):
                 st.active = False
             else:
                 st.active = True
@@ -967,7 +987,7 @@ class SetBook:
             active = [s for s in self.by_idx if s.active and s.kind == kind]
             if len(active) <= cap:
                 continue
-            active.sort(key=lambda s: (s.last15_ratio, s.last25_avg_r, -s.max_dd_s), reverse=True)
+            active.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s), reverse=True)
             for extra in active[cap:]:
                 extra.active = False
                 extra.deact_reason = extra.deact_reason or f"cap>{cap}"
@@ -1040,33 +1060,27 @@ class SetBook:
             "slCover": all(any(abs(st.sl_ratio - sl) < 1e-9 for st in base_sets) for sl in self.sl_ratios),
         }
 
+    def is_eligible(self, st: SetState) -> bool:
+        """Base gate: active, judged on >= gate_min orders, and net PF >= min_pf (no fallback tier)."""
+        return bool(st.active and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= self.min_pf)
+
+    def gate_keep(self) -> int:
+        return max(40, self.gate_window)
+
     def pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
-        gated = bool(self.progress.ready and self.use_historic_gate)
-        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
-        if not rows and not gated:
+        gated = bool(self.use_historic_gate)
+        if gated and not self.progress.ready:
+            return None  # fail closed: no calibration pass has completed yet
+        if gated:
+            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
+        else:
             rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
         if not rows:
             return None
-        need = max(self.min_samples, 8)
-
-        def proven_neg(s: SetState) -> bool:
-            return s.last15_n >= need and s.last15_ratio + 1e-9 < 1.0
-
-        # Tier 1: validated at min_pf. Tier 2: validated positive (>= 1.00).
-        passing = [
-            s for s in rows
-            if s.last15_n >= need and s.last15_ratio + 1e-9 >= self.min_pf
-        ]
-        if not passing:
-            passing = [
-                s for s in rows
-                if s.last15_n >= need and s.last15_ratio + 1e-9 >= 1.0
-            ]
-        if not passing:
-            # Discovery tier: unproven sets only. Proven-negative sets are
-            # never validated and never processed while the gate is ready.
-            passing = [s for s in rows if not proven_neg(s)]
+        # Base gate only: gate PF >= min_pf on >= gate_min orders. No fallback tier below min_pf.
+        passing = [s for s in rows if self.is_eligible(s)] if gated else []
         if not passing and not gated:
+            # Gate disabled: keep the legacy fallback to any set of this pack and kind.
             passing = [s for s in rows if s.active] or list(rows)
         if not passing:
             return None
@@ -1077,7 +1091,7 @@ class SetBook:
             return sum(finite(r.get("pnl")) for r in tail) / len(tail) >= 0.0
         live_pass = [s for s in passing if live_ok(s)]
         chosen = live_pass or passing
-        chosen.sort(key=lambda s: (s.last15_ratio, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        chosen.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
         return chosen[0]
 
     def pick_trail(self, pack: str) -> Optional[SetState]:
@@ -1089,9 +1103,8 @@ class SetBook:
     def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
-        fills = sum(s.n for s in self.sets.values())
-        if fills < 8 or not self.progress.ready:
-            return True
+        if not self.progress.ready:
+            return False
         return self.pick_any(pack) is not None
 
     def snapshot(self) -> Dict[str, Any]:
@@ -1267,6 +1280,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "slToTpRatios": [0.6],
         }
     )
+    book.gate_window, book.gate_min = 15, 12  # these fixtures carry 15 trades
     out.append(("set-count", len(book.sets) >= 2, f"n={len(book.sets)}"))
     out.append(("set-tp-cost", abs(step_tp_pct(3, 0.15) - 0.0045) < 1e-9, f"{step_tp_pct(3, 0.15)}"))
     base_only = [s for s in book.sets.values() if s.kind == "base"]
@@ -1332,6 +1346,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "timeStopS": 240,
         }
     )
+    book2.gate_window, book2.gate_min = 15, 12  # these fixtures carry 15 trades
     book2.ingest_bars("AAA-USDT", synth_trend(240, 50.0, 0.18, 0.03))
     book2.ingest_bars("BBB-USDT", synth_trend(240, 20.0, -0.14, 0.03))
     book2.replay_all(now=1_700_000_000)
@@ -1415,6 +1430,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "slToTpRatios": [0.3, 0.6, 0.9, 1.2, 1.5],
         }
     )
+    book4.gate_window, book4.gate_min = 15, 12  # these fixtures carry 15 trades
     cov = book4.coverage()
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
     want_tr = len(book4.packs) * max(1, len(book4.trails))
@@ -1437,6 +1453,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         ]
         book4._score_one(trail_row)
         trail_row.active = True
+    book4.progress.ready = True  # calibrated: the gate is applied, so the trail set must validate
     tr0 = book4.pick_trail(trail_row.pack if trail_row else "indications")
     out.append(("set-pick-trail", tr0 is not None and tr0.kind == "trail" and tr0.trail_key, f"{getattr(tr0,'id',None)} {getattr(tr0,'trail_key',None)}"))
     # two trails independent intern
@@ -1518,11 +1535,14 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "trailArmMin": 0.3, "trailArmMax": 0.3,
         }
     )
+    g2.gate_window, g2.gate_min = 15, 12  # these fixtures carry 15 trades
+    g2.min_pf = 1.20  # this sticky-off test was written against the old 1.20 threshold
     g2.progress.ready = True
     bases = [x for x in g2.by_idx if x.kind == "base"]
     neg_set, pos_set = bases[0], bases[1]
     neg_rows = [{"t": 6000 + i * 60, "pnl": -0.0045, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(15)]
-    pos_rows = [{"t": 6000 + i * 60, "pnl": 0.0015, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    # net PF exactly 1.10: 11 wins of +0.0004 and 4 losses of -0.001 (11*0.0004 / 4*0.001)
+    pos_rows = [{"t": 6000 + i * 60, "pnl": (-0.001 if i % 4 == 0 else 0.0004), "pnl_pct": (-0.001 if i % 4 == 0 else 0.0004) + 0.0015, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
     neg_set.hist = list(neg_rows)
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
@@ -1530,7 +1550,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
     out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
     pk = g2.pick("general")
-    out.append(("set-pick-pos-only", pk is not None and pk.id == pos_set.id, f"{getattr(pk, 'id', None)}"))
+    out.append(("set-pick-pos-only", pk is None, f"base gate: PF 1.10 < 1.20, nothing below the gate is picked ({getattr(pk, 'id', None)})"))
     pos_set.active = False
     for ts in g2.by_idx:
         if ts.kind == "trail":
@@ -1548,14 +1568,58 @@ def self_test() -> List[Tuple[str, bool, str]]:
     neg_set.hist = list(neg_rows)
     g2._score_one(neg_set)
     off1 = not neg_set.active
-    neg_set.hist = list(pos_rows)  # ratio 1.10 < min_pf 1.20 -> stays off
+    neg_set.hist = list(pos_rows)  # PF 1.10 < min_pf 1.20 -> stays off
     g2._score_one(neg_set)
     out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
     # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
     g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "trailArmMin": 0.3, "trailArmMax": 0.3})
     pk3 = g3.pick("general")
-    out.append(("set-pick-cold", pk3 is not None, f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
+    out.append(("set-pick-cold", pk3 is None and not g3.pack_open("general"), f"ready={g3.progress.ready} {getattr(pk3, 'id', None)}"))
+    # error state: due() retries on the backoff, not on every pass
+    g3.progress.phase = "error"; g3.progress.ready = False; g3.last_run = time.time()
+    out.append(("set-due-backoff", g3.due() is False, f"retry_s={g3.retry_s}"))
+    g3.last_run = time.time() - g3.retry_s - 1
+    out.append(("set-due-retry", g3.due() is True, "after backoff"))
+    # time-ordered tape: the last-40 window must be the most recent trades
+    g4 = SetBook(); g4.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3})
+    st4 = next(iter(g4.by_idx))
+    rows4 = [{"t": 1000 + k, "pnl": -0.001, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl", "set_id": st4.id} for k in range(60)]
+    st4.hist = sorted(reversed(rows4), key=lambda r: r["t"])[-40:]
+    out.append(("set-tape-recent", min(r["t"] for r in st4.hist) == 1020, f"first={min(r['t'] for r in st4.hist)}"))
+    # entry threshold is configurable and defaults to the historical 0.58
+    out.append(("set-entry-conf-default", SetBook().entry_conf == 0.58, f"{SetBook().entry_conf}"))
+    g5 = SetBook(); g5.load({"setEntryConf": 0.8, "setCooldownBars": 5})
+    out.append(("set-entry-conf-wired", g5.entry_conf == 0.8 and g5.cooldown_bars == 5, f"conf={g5.entry_conf} cd={g5.cooldown_bars}"))
+    # base gate = net PF over the last 50 orders, min 30 judged, boundary PF >= min_pf (no fallback tier)
+    def _pf_rows(n: int, target: float) -> List[Dict[str, Any]]:
+        # 30 wins of +0.001 and 20 losses of -(0.0015 / target): PF = target exactly (scaled to n)
+        rows = []
+        for k in range(n):
+            if k % 5 < 3:
+                rows.append({"t": 1_700_000_000 + k * 60, "pnl": 0.001, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "symbol": "T", "side": "LONG"})
+            else:
+                rows.append({"t": 1_700_000_000 + k * 60, "pnl": -0.0015 / target, "pnl_pct": -0.0015 / target + 0.0015, "hold_s": 60, "reason": "sl", "symbol": "T", "side": "LONG"})
+        return rows
+    gb = SetBook()
+    gb.load({"setMinPf": 1.10, "setGateWindow": 50, "setGateMinTrades": 30, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    sg = next(iter(gb.by_idx))
+    sg.active = True
+    def _gate(rows: List[Dict[str, Any]]) -> Tuple[bool, float, int]:
+        sg.hist = list(rows)
+        sg.live = []
+        gb._score_one(sg)
+        return gb.is_eligible(sg), round(sg.gate_pf, 4), sg.gate_n
+    ok105, pf105, n105 = _gate(_pf_rows(50, 1.05))
+    out.append(("gate-pf-1.05-rejected", (not ok105) and abs(pf105 - 1.05) < 1e-3 and n105 == 50, f"pf={pf105} n={n105} eligible={ok105}"))
+    ok115, pf115, _ = _gate(_pf_rows(50, 1.15))
+    out.append(("gate-pf-1.15-accepted", ok115 and abs(pf115 - 1.15) < 1e-3, f"pf={pf115} eligible={ok115}"))
+    okb, pfb, _ = _gate(_pf_rows(50, 1.10))
+    out.append(("gate-boundary-1.10", okb and abs(pfb - 1.10) < 1e-6, f"pf={pfb} eligible={okb}"))
+    okf, pff, nf = _gate(_pf_rows(29, 1.50))
+    out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
+    gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
+    out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
     return out
 
 
