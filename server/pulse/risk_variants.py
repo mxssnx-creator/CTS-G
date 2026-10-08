@@ -11,7 +11,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, snap_ratio, SL_TP_RATIOS, SL_TP_STEP, SL_TP_MIN, SL_TP_MAX
+from position_cost import (
+    POSITION_COST_PCT_DEFAULT,
+    last_n_cost_pf,
+    net_pnl_pct,
+    snap_ratio,
+    SL_TP_RATIOS,
+    SL_TP_STEP,
+    SL_TP_MIN,
+    SL_TP_MAX,
+)
 
 TRAIL_VARIANTS = ("0.3:0.1", "0.6:0.2", "0.9:0.3", "1.2:0.4", "1.5:0.5")
 TRAIL_ARM_MIN = 0.3
@@ -105,6 +114,8 @@ class LaneScore:
 class VariantBook:
     """Two independent recals: SL:TP ratios and trailing arm/give."""
 
+    cost_pct: float = POSITION_COST_PCT_DEFAULT
+    skipped: int = 0            # closes without pnl_pct: cannot be normalised, not counted in any tape
     sl_ratio: float = 0.6
     sl_auto: bool = True
     sl_recalc_n: int = 6
@@ -193,17 +204,23 @@ class VariantBook:
         if isinstance(rec, dict):
             pnl = float(rec.get("pnl") or 0)
             pnl_pct = float(rec.get("pnl_pct") or 0)
+            has_pct = rec.get("pnl_pct") is not None
             hold = float(rec.get("hold_s") or 0)
             sl_r = float(rec.get("sl_ratio") or rec.get("slRatio") or self.sl_ratio)
             t_key = str(rec.get("trail_key") or rec.get("trailKey") or self.trail_key)
         else:
             pnl = float(getattr(rec, "pnl", 0) or 0)
             pnl_pct = float(getattr(rec, "pnl_pct", 0) or 0)
+            has_pct = getattr(rec, "pnl_pct", None) is not None
             hold = float(getattr(rec, "hold_s", 0) or 0)
             sl_r = float(getattr(rec, "sl_ratio", 0) or self.sl_ratio)
             t_key = str(getattr(rec, "trail_key", "") or self.trail_key)
+        if not has_pct:
+            self.skipped += 1
+            return
         sl_key = f"{snap_ratio(sl_r):.1f}"
-        row = {"pnl": pnl, "pnl_pct": pnl_pct, "hold_s": hold}
+        # tape pnl is the NET FRACTION, the same unit as set_engine replay rows; pnl_usdt is display-only
+        row = {"pnl": net_pnl_pct(pnl_pct, self.cost_pct), "pnl_usdt": pnl, "pnl_pct": pnl_pct, "hold_s": hold}
         self.sl_rows.setdefault(sl_key, []).append(row)
         self.sl_rows[sl_key] = self.sl_rows[sl_key][-40:]
         self.trail_rows.setdefault(t_key, []).append(row)
@@ -234,19 +251,18 @@ class VariantBook:
         self.maybe_recalc(force=True)
 
     def _score_rows(self, rows: Sequence[Dict[str, Any]], cost_pct: float = 0.15) -> LaneScore:
-        gp = sum(r["pnl"] for r in rows if r["pnl"] > 0)
-        gl = abs(sum(r["pnl"] for r in rows if r["pnl"] < 0))
-        pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
         wins = sum(1 for r in rows if r["pnl"] > 0)
         exp = (sum(r["pnl"] for r in rows) / len(rows)) if rows else 0.0
         hold = (sum(r.get("hold_s", 0) for r in rows) / len(rows)) if rows else 0.0
-        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct) if rows else {"ratio": 1.0}
+        # one PF for the lane: net, from pnl_pct, by last_n_cost_pf (no second PF formula here)
+        cost = last_n_cost_pf(list(rows), max(len(rows), 1), cost_pct) if rows else {"ratio": 1.0, "pf": 0.0}
+        pf = float(cost["pf"])
         return LaneScore(
             key="",
             n=len(rows),
             wins=wins,
             pf=round(pf, 3),
-            ratio=float(cost.get("ratio") or 1.0),
+            ratio=float(cost["pf"]) if rows else 1.0,
             expectancy=round(exp, 5),
             avg_hold=round(hold, 1),
         )
@@ -406,6 +422,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("var-trail-range", arms == [0.3, 0.6, 0.9], f"{cands}"))
     # ratio 1.5 allowed (SL > TP)
     out.append(("var-ratio-wide", 1.5 in SL_TP_RATIOS, "1.5"))
+
+    # R14: a lane that loses every close reads PF 0.0, not the neutral 1.0; the lane PF is one function
+    zb = VariantBook()
+    losers = [{"pnl": -0.002, "pnl_pct": -0.0005, "hold_s": 20}] * 4
+    zs = zb._score_rows(losers, 0.15)
+    out.append(("var-zero-pf", zs.pf == 0.0 and zs.ratio == 0.0 and zs.pf == last_n_cost_pf(losers, 4, 0.15)["pf"], f"pf={zs.pf} ratio={zs.ratio}"))
+    # R13: a close is stored as a net fraction, never the USDT field; a close without pnl_pct is skipped
+    zb.on_close({"pnl": 5.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.6, "trail_key": "0.3:0.1"})
+    stored = [r for rows in zb.sl_rows.values() for r in rows]
+    zb.on_close({"pnl": 5.0, "hold_s": 20})
+    out.append(("var-net-unit", len(stored) == 1 and abs(stored[0]["pnl"] - 0.0025) < 1e-12 and zb.skipped == 1, f"stored={stored} skipped={zb.skipped}"))
     return out
 
 

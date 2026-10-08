@@ -95,25 +95,27 @@ def last_n_cost_pf(
     for row in window:
         if isinstance(row, dict):
             pnl_pct = finite(row.get("pnl_pct"))
-            pnl = finite(row.get("pnl"))
         else:
             pnl_pct = finite(getattr(row, "pnl_pct", 0))
-            pnl = finite(getattr(row, "pnl", 0))
         rs.append(signed_result_r(pnl_pct, cost_pct))
-        if pnl > 0:
-            gp += pnl
-        elif pnl < 0:
-            gl += abs(pnl)
+        # net PF from the gross fraction less one PositionCost: unit-safe, never the USDT pnl field
+        net = net_pnl_pct(pnl_pct, cost_pct)
+        if net > 0:
+            gp += net
+        elif net < 0:
+            gl += abs(net)
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
     classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    # pf = net profit factor (the decision metric); ratio = 1 + 0.10 x avgR (display only)
     return {
         "n": float(n),
         "count": float(count),
         "avgR": round(avg_r, 4),
         "ratio": round(ratio, 4),
         "classicPf": round(classic, 4),
+        "pf": round(classic, 4),
         "costPct": float(cost_pct),
         "netPct": round(net_move_pct(ratio, cost_pct), 4),
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),

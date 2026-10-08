@@ -65,6 +65,7 @@ class Coordinator:
         self.prev_min_count = 5
         self.prev_window = 25
         self.main_eval = 5
+        self.min_samples = 12
         self.real_eval = 3
         self.min_step = 8
         self.max_sl_ratio = 2.5
@@ -99,10 +100,10 @@ class Coordinator:
         except Exception:
             self.min_pf = float(ov.get("minPf") or 1.2)
         self.pf_window = int(ov.get("pfWindow") or 15)
+        self.min_samples = int(ov.get("setMinSamples") or 12)
         self.position_cost_pct = float(ov.get("positionCostPct") or cts.get("exchangePositionCost") or cts.get("positionCost") or POSITION_COST_PCT_DEFAULT)
-        if self.position_cost_pct > 2:
-            self.position_cost_pct = self.position_cost_pct / 100.0
-        if self.position_cost_pct > 1:
+        # percent everywhere (0.15 = 0.15%), the same unit as position_cost.cost_as_frac; no magnitude guessing
+        if not self.position_cost_pct > 0:  # zero, negative or NaN is a config error: default, nothing else is guessed
             self.position_cost_pct = POSITION_COST_PCT_DEFAULT
         self.noise = float(ov.get("noise") or cts.get("activeNoiseFilter") or 0.05)
         self.vol_weight = float(ov.get("volWeight") or cts.get("activeVolatilityWeight") or 0.3)
@@ -170,11 +171,12 @@ class Coordinator:
         main_cost = last_n_cost_pf(closed_rows, max(3, self.main_eval), self.position_cost_pct)
         real_cost = last_n_cost_pf(closed_rows, max(3, self.real_eval), self.position_cost_pct)
         intern = intern or {}
-        intern_pf = float(intern.get("pf") or intern.get("indications") or intern.get("general") or 0)
+        # first key PRESENT wins: a real PF of 0.0 must not fall through to the next key
+        intern_pf = next((float(intern[k]) for k in ("pf", "indications", "general") if intern.get(k) is not None), 0.0)
         intern_n = float(intern.get("n") or 0)
         metrics: Dict[str, float] = {
-            "lastPf": round(float(last_cost["ratio"]), 3),
-            "prevPf": round(float(prev_cost["ratio"]), 3),
+            "lastPf": round(float(last_cost["pf"]), 3),
+            "prevPf": round(float(prev_cost["pf"]), 3),
             "consecLoss": float(consec),
             "last15Ratio": cost["ratio"],
             "last15R": cost["avgR"],
@@ -186,44 +188,44 @@ class Coordinator:
             "pfPlus1x": 1.1,
             "internPf": round(intern_pf, 4) if intern_pf else 0.0,
             "internN": intern_n,
-            "mainPf": round(float(main_cost["ratio"]), 4),
+            "mainPf": round(float(main_cost["pf"]), 4),
             "mainN": float(main_cost["count"]),
-            "realPf": round(float(real_cost["ratio"]), 4),
+            "realPf": round(float(real_cost["pf"]), 4),
             "realN": float(real_cost["count"]),
         }
         allow = True
         sample_ok = cost["count"] >= min(8, self.pf_window)
-        intern_ok = intern_n >= max(5, self.min_samples if hasattr(self, "min_samples") else 5) and intern_pf + 1e-9 >= 1.0
+        intern_ok = intern_n >= max(5, self.min_samples) and intern_pf + 1e-9 >= 1.0
         if intern_ok:
             metrics["internOpen"] = 1.0
         last_n_ok = int(last_cost["count"]) >= min(3, last_w)
         if self.axes["last"].enabled and last_n_ok:
-            if last_cost["ratio"] + 1e-9 < self.min_pf:
+            if last_cost["pf"] + 1e-9 < self.min_pf:
                 allow = False
                 reasons.append(
-                    f"last {int(last_cost['count'])} PF {last_cost['ratio']:.2f}<{self.min_pf:.2f} (1.00=neutral 1.10=+1×cost)"
+                    f"last {int(last_cost['count'])} PF {last_cost['pf']:.2f}<{self.min_pf:.2f}"
                 )
         if self.axes["prev"].enabled and sample_ok and int(prev_cost["count"]) >= self.prev_min_count:
             floor = self.min_pf * 0.85
-            if prev_cost["ratio"] + 1e-9 < floor and cost["ratio"] + 1e-9 < floor:
+            if prev_cost["pf"] + 1e-9 < floor and cost["pf"] + 1e-9 < floor:
                 allow = False
-                reasons.append(f"prev PF {prev_cost['ratio']:.2f}<{floor:.2f} (cost-scale)")
+                reasons.append(f"prev PF {prev_cost['pf']:.2f}<{floor:.2f}")
         if self.axes["pause"].enabled:
             pause_n = self.axes["pause"].max_window
             if consec >= pause_n or consec_loss(pnls[-pause_n:]) >= pause_n:
                 allow = False
                 reasons.append(f"pause {consec}/{pause_n}")
         # Main / real stages are advisory intern: they do not freeze the book.
-        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["ratio"]) + 1e-9 < 1.0:
-            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['ratio']:.2f}<1.00")
-        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["ratio"]) + 1e-9 < 1.0:
-            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['ratio']:.2f}<1.00")
+        if sample_ok and float(main_cost["count"]) >= max(3, self.main_eval) and float(main_cost["pf"]) + 1e-9 < 1.0:
+            reasons.append(f"main {int(main_cost['count'])} PF {main_cost['pf']:.2f}<1.00")
+        if sample_ok and float(real_cost["count"]) >= max(3, self.real_eval) and float(real_cost["pf"]) + 1e-9 < 1.0:
+            reasons.append(f"real {int(real_cost['count'])} PF {real_cost['pf']:.2f}<1.00")
         stages = {
             "intern": {"pf": intern_pf, "n": intern_n, "open": bool(intern_ok)},
-            "main": {"pf": float(main_cost["ratio"]), "n": float(main_cost["count"])},
-            "real": {"pf": float(real_cost["ratio"]), "n": float(real_cost["count"])},
-            "last": {"pf": float(last_cost["ratio"]), "n": float(last_cost["count"])},
-            "prev": {"pf": float(prev_cost["ratio"]), "n": float(prev_cost["count"])},
+            "main": {"pf": float(main_cost["pf"]), "n": float(main_cost["count"])},
+            "real": {"pf": float(real_cost["pf"]), "n": float(real_cost["count"])},
+            "last": {"pf": float(last_cost["pf"]), "n": float(last_cost["count"])},
+            "prev": {"pf": float(prev_cost["pf"]), "n": float(prev_cost["count"])},
         }
         self.last = {"allow": allow, "reasons": reasons, "metrics": metrics, "stages": stages}
         return allow, reasons, metrics
@@ -295,3 +297,30 @@ class Coordinator:
             "stages": (self.last or {}).get("stages") or {},
             "gate": self.last,
         }
+
+
+def self_test() -> List[Tuple[str, bool, str]]:
+    out: List[Tuple[str, bool, str]] = []
+    c = Coordinator()
+    c.load({}, {"setMinSamples": 7})
+    out.append(("coord-min-samples", c.min_samples == 7, f"min_samples={c.min_samples}"))
+    d = Coordinator()
+    d.load({}, {})
+    out.append(("coord-min-default", d.min_samples == 12, f"min_samples={d.min_samples}"))
+    e = Coordinator()
+    e.load({}, {"positionCostPct": 0.15})
+    out.append(("coord-cost-percent", abs(e.position_cost_pct - 0.15) < 1e-9, f"pct={e.position_cost_pct}"))
+    f = Coordinator()
+    f.load({}, {"positionCostPct": 3.0})
+    out.append(("coord-cost-no-guess", abs(f.position_cost_pct - 3.0) < 1e-9, f"pct={f.position_cost_pct}"))
+    return out
+
+
+if __name__ == "__main__":
+    failed = 0
+    for name, ok, detail in self_test():
+        print(("PASS" if ok else "FAIL"), name, detail)
+        failed += int(not ok)
+    if failed:
+        raise SystemExit(1)
+    print("coord_engine ok")

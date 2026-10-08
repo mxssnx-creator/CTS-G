@@ -111,12 +111,12 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "gp": round(gp, 6),
         "gl": round(gl, 6),
         "net": round(gp - gl, 6),
-        "pf": round(float(cost.get("ratio") or 1.0), 4),
+        "pf": round(float(cost["pf"]) if cost.get("count") else 1.0, 4),   # 0.0 is a real PF; 1.0 only when no closes
         "classicPf": round(classic, 4),
         "gpNetCost": round(gp_net, 6),
         "glNetCost": round(gl_net, 6),
         "netAfterCost": round(gp_net - gl_net, 6),
-        "pfAfterCost": round(float(cost.get("ratio") or 1.0), 4),
+        "pfAfterCost": round(float(cost["pf"]) if cost.get("count") else 1.0, 4),
         "avgHoldS": round(sum(holds) / len(holds), 1) if holds else 0.0,
         "costRatio": cost.get("ratio"),
         "avgR": cost.get("avgR"),
@@ -126,13 +126,13 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
     }
 
 
-def by_symbol(rows: Sequence[Dict[str, Any]], cost_pct: float) -> List[Dict[str, Any]]:
+def by_symbol(rows: Sequence[Dict[str, Any]], cost_pct: float, now: Optional[float] = None) -> List[Dict[str, Any]]:
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         buckets.setdefault(r["symbol"] or "?", []).append(r)
     out = []
     for s, items in buckets.items():
-        d = drawdown_time([{"t": x["t"], "pnl": x.get("netPnl", x["pnl"])} for x in items])
+        d = drawdown_time([{"t": x["t"], "pnl": x.get("netPnl", x["pnl"])} for x in items], now=now)
         w = pf_window(items, None, cost_pct)
         out.append({
             "symbol": s,
@@ -203,14 +203,15 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
     }
 
 
-def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, conn: str = "") -> Dict[str, Any]:
+def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, conn: str = "", now: Optional[float] = None) -> Dict[str, Any]:
     cost_pct = float(cost_pct or POSITION_COST_PCT_DEFAULT)
+    now = time.time() if now is None else float(now)  # report clock: the only wall-clock read, injectable
     closed = [enrich(_row(c), cost_pct) for c in (st.get("closed") or [])]
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
     pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
-    ddt = drawdown_time([{"t": r["t"], "pnl": r.get("netPnl", r["pnl"])} for r in closed])
-    ddt_gross = drawdown_time([{"t": r["t"], "pnl": r["pnl"]} for r in closed])
+    ddt = drawdown_time([{"t": r["t"], "pnl": r.get("netPnl", r["pnl"])} for r in closed], now=now)
+    ddt_gross = drawdown_time([{"t": r["t"], "pnl": r["pnl"]} for r in closed], now=now)
     occ = occupancy(st.get("open") or [])
     rows = []
     for r in sets.get("rows") or []:
@@ -277,7 +278,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "costFrac": cost_as_frac(cost_pct),
             "rule": "1.00 PF = net 0 after 1× PositionCost; 1.10 = +1× PositionCost. All intern PF/R/E deduct cost once from gross price-move.",
             "last15": pc,
-            "pass": bool(pc.get("count", 0) < 8 or float(pc.get("ratio") or 1) + 1e-9 >= float((st.get("pfCost") or {}).get("minPf") or 1.1)),
+            "pass": bool(pc.get("count", 0) < 8 or float(pc.get("pf") or 0.0) + 1e-9 >= float((st.get("pfCost") or {}).get("minPf") or 1.1)),
             "minPf": (st.get("pfCost") or {}).get("minPf"),
         },
         "profitFactor": {
@@ -290,7 +291,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "afterCost": {"maxDdS": ddt.get("maxS"), "avgDdS": ddt.get("avgS"), "episodes": ddt.get("episodes"), "maxDepth": ddt.get("maxDepth"), "currentS": ddt.get("currentS")},
             "gross": {"maxDdS": ddt_gross.get("maxS"), "avgDdS": ddt_gross.get("avgS"), "episodes": ddt_gross.get("episodes")},
         },
-        "bySymbol": by_symbol(closed, cost_pct),
+        "bySymbol": by_symbol(closed, cost_pct, now=now),
         "byPack": by_pack(closed, cost_pct),
         "byIndication": by_indication(closed, cost_pct),
         "byReason": by_reason(closed),

@@ -420,7 +420,7 @@ def lane_summary(lane: dict) -> dict:
         "progressError": prog.get("error") or "",
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
-        "pfCost": pc.get("ratio"),
+        "pfCost": pc.get("pf"),
         "controlsOk": cov.get("ok") or 0,
         "controlsMissing": cov.get("missing") or 0,
         "controlsSecurity": cov.get("security") or 0,
@@ -478,7 +478,7 @@ def merge_overall() -> dict:
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
     pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
     pc["minPf"] = 1.1
-    pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= 1.1)
+    pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= 1.1)
     detail_lane, detail_st = _pick_detail(LANES)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     sets = dict(detail_st.get("sets") or {})
@@ -517,8 +517,8 @@ def merge_overall() -> dict:
         "symbols": [],
         "now": __import__("time").time(),
         "pfCost": pc,
-        "profitFactor": pc.get("ratio"),
-        "pf": pc.get("ratio"),
+        "profitFactor": pc.get("pf"),
+        "pf": pc.get("pf"),
         "pfNeutral": 1.0,
         "pfPlus1xCost": 1.1,
         "pfScale": "1.00=neutral · 1.10=+1×PositionCost",

@@ -12,6 +12,11 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from position_cost import POSITION_COST_PCT_DEFAULT
+
+# Stop-loss margin added on top of the round-trip cost (percent). Named so it is not a hidden literal.
+STOP_COST_MARGIN_PCT = 0.08
+
 try:
     import httpx
 except Exception:
@@ -82,7 +87,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "takeProfitRewardRisk": 1.8,
     "takeProfitMaxPct": 5.0,
     "extraSources": True,
-    "positionCostPct": 0.1,
+    "positionCostPct": POSITION_COST_PCT_DEFAULT,
     "tf1m": True,
     "tf5m": True,
     "tf15m": True,
@@ -230,7 +235,7 @@ def evaluate_signal_candles(
     strength = abs(raw)
     if not (strength >= float(settings.get("minimumStrength", 0.2))):
         return None
-    cost = max(0.0, float(settings.get("positionCostPct", 0.1))) + 0.08
+    cost = max(0.0, float(settings.get("positionCostPct", POSITION_COST_PCT_DEFAULT))) + STOP_COST_MARGIN_PCT
     raw_sl = atr_pct * float(settings.get("stopLossAtrMultiplier", 0.85)) + cost
     sl_max = float(settings.get("stopLossMaxPct", 1.5))
     if raw_sl > sl_max * 1.25:
@@ -628,7 +633,7 @@ def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: 
     if mae > max(noise, price_chg * 1.0):
         return None
     vol_w = clamp(float(settings.get("activeVolatilityWeight") or 0.3), 0.0, 1.0)
-    cost = max(0.02, float(settings.get("positionCostPct") or 0.1))
+    cost = max(0.02, float(settings.get("positionCostPct") or POSITION_COST_PCT_DEFAULT))
     vol_risk = max(cost * 2.0, cur_act * (0.75 + vol_w * 0.75))
     sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.2)), float(settings.get("stopLossMaxPct", 1.5)))
     tp = clamp(max(cost * 3.0, price_chg * 1.25, sl * 1.1), sl * 1.1, float(settings.get("takeProfitMaxPct", 5.0)))

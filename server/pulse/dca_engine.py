@@ -198,11 +198,11 @@ class DcaBook:
         if self.auto_deact and len(last25) >= self.deact_n and avg_r < 0:
             self.active = False
             self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
-        elif pc["count"] >= min(8, self.pf_n) and pc["ratio"] + 1e-9 < self.min_pf:
+        elif pc["count"] >= min(8, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
             self.active = False
             self.deact_reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
         else:
-            if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["ratio"] >= self.min_pf):
+            if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["pf"] >= self.min_pf):
                 self.active = True
                 self.deact_reason = ""
         pc["last25AvgR"] = round(avg_r, 4)
@@ -217,7 +217,7 @@ class DcaBook:
         if not self.active:
             self.skips += 1
             return None
-        now = now or time.time()
+        now = time.time() if now is None else float(now)
         lane = self.attach(symbol, side, qty, entry)
         if self.cooldown_s > 0 and now - lane.last_add < self.cooldown_s:
             return None
@@ -250,17 +250,19 @@ class DcaBook:
             "step": nxt,
         }
 
-    def record_fill(self, lane: DcaLane, step: DcaStep, qty: float, px: float, cid: str) -> None:
+    def record_fill(self, lane: DcaLane, step: DcaStep, qty: float, px: float, cid: str, now: Optional[float] = None) -> None:
+        """Stamp a fill on the clock due() compares against: the caller's bar or trade time, else the live clock."""
+        t = time.time() if now is None else float(now)
         step.filled = True
         step.qty = qty
         step.px = px
-        step.t = time.time()
+        step.t = t
         step.cid = cid
         prev_q = lane.parent_qty + sum(s.qty for s in lane.steps if s.filled and s is not step)
         tot = prev_q + qty
         if tot > 0:
             lane.avg_entry = ((lane.avg_entry * prev_q) + px * qty) / tot
-        lane.last_add = time.time()
+        lane.last_add = t
         lane.filled_n += 1
         self.emits += 1
 
@@ -331,10 +333,10 @@ def _math_self_test() -> List[Tuple[str, bool, str]]:
     r = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
     t3 = (r is not None and r["n"] == 1 and abs(r["qty"] - 1.5) < 1e-9, f"{r}")
     assert r is not None
-    b.record_fill(r["lane"], r["step"], r["qty"], 99.4, "Gx02dtest1")
+    b.record_fill(r["lane"], r["step"], r["qty"], 99.4, "Gx02dtest1", now=t0)
     # cooldown 0, step2 needs 1%
     r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 99.4, now=t0)
-    t4 = (r2 is None, "need 1pct")
+    t4 = (r2 is None and r["step"].t == t0 and r["lane"].last_add == t0, "need 1pct; fill stamped at the injected clock")
     r2 = b.due("AAA-USDT", "LONG", 1.0, 100.0, 98.6, now=t0)
     t5 = (r2 is not None and r2["n"] == 2 and abs(r2["qty"] - 2.0) < 1e-9, f"{r2}")
     # short side

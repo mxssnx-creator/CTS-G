@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from position_cost import last_n_cost_pf, signed_result_r, POSITION_COST_PCT_DEFAULT
+from position_cost import last_n_cost_pf, net_pnl_pct, signed_result_r, POSITION_COST_PCT_DEFAULT
 from set_engine import drawdown_time
 
 LANES = ("hard", "lock", "peak", "rev", "time")
@@ -59,6 +59,7 @@ class LaneScore:
     n: int = 0
     wins: int = 0
     last15_ratio: float = 1.0
+    last15_pf: float = 1.0
     last25_avg_r: float = 0.0
     max_dd_s: float = 0.0
     active: bool = True
@@ -176,7 +177,7 @@ class ExitBook:
             return candidates[0]
         def score(d: ExitDecision) -> Tuple[float, float]:
             ln = self.lanes.get(d.lane)
-            ratio = ln.last15_ratio if ln and ln.n >= self.min_samples else 1.0
+            ratio = ln.last15_pf if ln and ln.n >= self.min_samples else 1.0
             return (ratio, d.conf)
         return max(candidates, key=score)
 
@@ -250,38 +251,41 @@ class ExitBook:
             reason = str(rec.get("reason") or "")
             row = {
                 "t": finite(rec.get("t")),
-                "pnl": finite(rec.get("pnl")),
+                "pnl_usdt": finite(rec.get("pnl")),
                 "pnl_pct": finite(rec.get("pnl_pct")),
             }
         else:
             reason = str(getattr(rec, "reason", "") or "")
             row = {
                 "t": finite(getattr(rec, "t", 0)),
-                "pnl": finite(getattr(rec, "pnl", 0)),
+                "pnl_usdt": finite(getattr(rec, "pnl", 0)),
                 "pnl_pct": finite(getattr(rec, "pnl_pct", 0)),
             }
+        # tape pnl is a NET FRACTION (as in set_engine replay rows); the USDT figure is display-only
+        row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
         key = lane_of(reason)
         ln = self.lanes.setdefault(key, LaneScore(key=key))
         ln.rows.append(row)
         ln.rows = ln.rows[-80:]
-        self._score(ln)
+        self._score(ln, now=row["t"] or None)
 
     def seed(self, closed: Sequence[Any]) -> None:
         for rec in closed:
             self.on_close(rec)
 
-    def _score(self, ln: LaneScore) -> None:
+    def _score(self, ln: LaneScore, now: Optional[float] = None) -> None:
         tape = ln.rows
         ln.n = len(tape)
         ln.wins = sum(1 for r in tape if finite(r.get("pnl")) > 0)
         pf = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
         ln.last15_ratio = float(pf["ratio"])
+        ln.last15_pf = float(pf["pf"])
         last25 = tape[-self.deact_n :]
         if last25:
             ln.last25_avg_r = sum(signed_result_r(finite(r.get("pnl_pct")), self.cost_pct) for r in last25) / len(last25)
         else:
             ln.last25_avg_r = 0.0
-        ln.max_dd_s = float(drawdown_time(tape)["maxS"])
+        ln.max_dd_s = float(drawdown_time(tape, now=now)["maxS"])
         if ln.key == "hard":
             ln.active = True
             ln.deact_reason = ""
@@ -293,8 +297,8 @@ class ExitBook:
         reasons = []
         if len(last25) >= self.deact_n and ln.last25_avg_r < 0:
             reasons.append(f"last{len(last25)} avgR {ln.last25_avg_r:.2f}<0")
-        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and ln.last15_ratio + 1e-9 < self.min_pf:
-            reasons.append(f"last15 PF {ln.last15_ratio:.2f}<{self.min_pf:.2f}")
+        if int(pf["count"]) >= min(self.pf_n, self.min_samples) and ln.last15_pf + 1e-9 < self.min_pf:
+            reasons.append(f"last15 PF {ln.last15_pf:.2f}<{self.min_pf:.2f}")
         ln.active = not reasons
         ln.deact_reason = "; ".join(reasons)
 
@@ -308,6 +312,7 @@ class ExitBook:
                     "n": ln.n,
                     "wins": ln.wins,
                     "last15Ratio": round(ln.last15_ratio, 4),
+                    "last15Pf": round(ln.last15_pf, 4),
                     "last25AvgR": round(ln.last25_avg_r, 4),
                     "maxDdS": ln.max_dd_s,
                     "active": ln.active,

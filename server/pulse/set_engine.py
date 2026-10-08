@@ -21,7 +21,7 @@ from position_cost import (
     cost_as_frac,
     net_pnl_pct,
 )
-from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move
+from indication_engine import bars_to_candles, evaluate_signal_candles, evaluate_ta_pack, evaluate_direction, evaluate_move, ema, rsi
 from risk_variants import TRAIL_VARIANTS, give_from_arm, parse_trail, trail_candidates, trail_key
 
 PACKS = ("indications", "general")
@@ -62,10 +62,13 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
-    """CTS drawdown-time: episodes from peak through recovery, in seconds."""
-    now = now or time.time()
+    """CTS drawdown-time: episodes from peak through recovery, in seconds.
+    `now` is the clock an open episode is measured to: the caller's bar, trade or report time.
+    With no clock it is the last trade time, so the result never depends on when the code runs.
+    A tape more than an hour older than `now` is measured to its last trade (idle time is not drawdown)."""
     ordered = sorted(rows, key=lambda r: finite(r.get("t")))
     last_t = finite(ordered[-1].get("t")) if ordered else 0.0
+    now = last_t if now is None else float(now)
     if last_t > 0 and now - last_t > 3600:
         now = last_t
     equity = 0.0
@@ -119,32 +122,9 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
     if last <= 0:
         return 0, 0.0, "flat"
 
-    def ema(values: List[float], n: int) -> float:
-        k = 2.0 / (n + 1)
-        e = values[0]
-        for x in values[1:]:
-            e = x * k + e * (1 - k)
-        return e
-
-    def rsi(values: List[float], n: int = 7) -> float:
-        if len(values) < n + 1:
-            return 50.0
-        gains = losses = 0.0
-        window = values[-(n + 1) :]
-        for i in range(1, len(window)):
-            d = window[i] - window[i - 1]
-            if d >= 0:
-                gains += d
-            else:
-                losses -= d
-        if losses == 0:
-            return 100.0
-        rs = (gains / n) / (losses / n)
-        return 100 - (100 / (1 + rs))
-
     e8 = ema(closes, 8)
     e21 = ema(closes, 21)
-    r = rsi(closes, 7)
+    r = rsi(closes, 7)  # shared with indication_engine (flat window -> 50, not 100)
     prev = closes[-2]
     rng = max(highs[-8:]) - min(lows[-8:]) or last * 0.002
     body = last - prev
@@ -363,6 +343,76 @@ class Progress:
     error: str = ""
 
 
+class SetLane:
+    """One (Set, symbol) trade state machine. The only implementation of the bar loop: the engine
+    replay (SetBook._replay_symbol) and the streaming simulator both call step()."""
+    __slots__ = ("st", "symbol", "sid", "open", "cool", "use_trail", "arm", "give", "sl_base", "tp_frac")
+
+    def __init__(self, st: "SetState", symbol: str) -> None:
+        self.st = st
+        self.symbol = symbol
+        self.sid = st.id
+        self.open: Optional[Dict[str, Any]] = None
+        self.cool = 0
+        self.use_trail = st.kind == "trail"
+        self.arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if self.use_trail else 0.0
+        self.give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if self.use_trail else 0.0
+        self.sl_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
+        self.tp_frac = max(0.0020, st.tp_pct)
+
+    def step(self, i: int, bar: Sequence[float], d: int, conf: float, allowed: bool, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Advance one bar. Returns the closed trade (a dict) or None.
+        cfg keys: entry_conf, time_bars, scratch_bars, scratch_min, cooldown, cost_pct, honor_tp."""
+        o = self.open
+        if o is not None:
+            side = int(o["side"])
+            entry = float(o["entry"])
+            held = i - int(o["i"])
+            if self.use_trail:
+                if side > 0:
+                    o["peak"] = max(o["peak"], float(bar[1]))
+                    if (o["peak"] - entry) / entry >= self.arm:
+                        o["trail"] = max(o.get("trail") or 0.0, o["peak"] * (1 - self.give))
+                else:
+                    o["peak"] = min(o["peak"], float(bar[2]))
+                    if (entry - o["peak"]) / entry >= self.arm:
+                        t = o["peak"] * (1 + self.give)
+                        cur = o.get("trail")
+                        o["trail"] = t if cur is None else min(cur, t)
+            elif side > 0:
+                o["peak"] = max(o["peak"], float(bar[1]))
+            else:
+                o["peak"] = min(o["peak"], float(bar[2]))
+            why, px = hit_exit(side, entry, o["sl"], o["tp"], o.get("trail"), bar, ignore_tp=not cfg["honor_tp"])
+            if why is None and held >= cfg["time_bars"]:
+                why, px = "time", float(bar[3])
+            if why is None and held >= cfg["scratch_bars"]:
+                if (float(bar[3]) - entry) / entry * side >= cfg["scratch_min"]:
+                    why, px = "scratch+", float(bar[3])
+            if why:
+                raw = (px - entry) / entry * side
+                self.open = None
+                self.cool = cfg["cooldown"]
+                return {"set_id": self.sid, "symbol": self.symbol, "side": "LONG" if side > 0 else "SHORT",
+                        "dir": side, "entry_i": int(o["i"]), "exit_i": i, "entry_px": entry, "exit_px": float(px),
+                        "reason": why, "pnl_pct": raw, "pnl": net_pnl_pct(raw, cfg["cost_pct"]),
+                        "hold_s": held * BAR_S, "hold_bars": held}
+            return None
+        if self.cool > 0:
+            self.cool -= 1
+            return None
+        if not allowed or d == 0 or conf < cfg["entry_conf"]:
+            return None
+        close = float(bar[3])
+        sl_frac = max(0.0015, self.sl_base)
+        if d > 0:
+            sl, tp = close * (1 - sl_frac), close * (1 + self.tp_frac)
+        else:
+            sl, tp = close * (1 + sl_frac), close * (1 - self.tp_frac)
+        self.open = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
+        return None
+
+
 class SetBook:
     def __init__(self) -> None:
         self.enabled = True
@@ -407,6 +457,8 @@ class SetBook:
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
         self.locks: Dict[str, bool] = {}
+        self._live_seen: set = set()
+        self.live_skipped = 0
         self._running = False
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
@@ -639,54 +691,54 @@ class SetBook:
                 n += 1
         return n
 
+    def _live_key(self, sid: str, row: Dict[str, Any]) -> str:
+        """One key per live close per Set. Client id when present, else symbol, side, time and gross move."""
+        cid = row.get("client_id") or ""
+        if cid:
+            return f"{sid}|{cid}"
+        return f"{sid}|{row['symbol']}|{row['side']}|{row['t']:.3f}|{row['pnl_pct']:.10f}"
+
     def on_live_close(self, rec: Any) -> None:
-        if isinstance(rec, dict):
-            if rec.get("ours") is False:
-                return
-            sid = str(rec.get("set_id") or rec.get("setId") or "")
-            row = {
-                "t": finite(rec.get("t")),
-                "symbol": str(rec.get("symbol") or ""),
-                "side": str(rec.get("side") or ""),
-                "pnl": finite(rec.get("pnl")),
-                "pnl_pct": finite(rec.get("pnl_pct")),
-                "hold_s": finite(rec.get("hold_s")),
-                "reason": str(rec.get("reason") or ""),
-                "client_id": str(rec.get("client_id") or rec.get("clientId") or ""),
-            }
-        else:
-            if getattr(rec, "ours", True) is False:
-                return
-            sid = str(getattr(rec, "set_id", "") or "")
-            row = {
-                "t": finite(getattr(rec, "t", 0)),
-                "symbol": str(getattr(rec, "symbol", "")),
-                "side": str(getattr(rec, "side", "")),
-                "pnl": finite(getattr(rec, "pnl", 0)),
-                "pnl_pct": finite(getattr(rec, "pnl_pct", 0)),
-                "hold_s": finite(getattr(rec, "hold_s", 0)),
-                "reason": str(getattr(rec, "reason", "")),
-                "client_id": str(getattr(rec, "client_id", "") or ""),
-            }
+        """Record one live close into the Set tapes, on the same unit as replay rows.
+
+        Replay rows carry pnl as a NET FRACTION (gross move minus one PositionCost). Live rows carry
+        pnl in USDT, so the tape pnl is recomputed from pnl_pct; the USDT figure is kept as pnl_usdt
+        for display only. A close without pnl_pct cannot be normalised and is skipped (counted).
+        A close already seen for a Set is counted once, so repeated delivery or repeated seeding
+        adds nothing.
+        """
+        is_dict = isinstance(rec, dict)
+        def get(key: str, default: Any = None) -> Any:
+            return rec.get(key, default) if is_dict else getattr(rec, key, default)
+        if get("ours") is False:
+            return
+        sid = str(get("set_id") or get("setId") or "")
+        pct_raw = get("pnl_pct")
+        if pct_raw is None:
+            self.live_skipped += 1
+            return
+        row = {
+            "t": finite(get("t")),
+            "symbol": str(get("symbol") or ""),
+            "side": str(get("side") or ""),
+            "pnl_pct": finite(pct_raw),
+            "pnl_usdt": finite(get("pnl")),
+            "hold_s": finite(get("hold_s")),
+            "reason": str(get("reason") or ""),
+            "client_id": str(get("client_id") or get("clientId") or ""),
+        }
+        row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
         if not sid:
             pack = "indications" if "ind:" in row["reason"] else "general"
-            sl = snap_ratio(getattr(rec, "sl_ratio", 0.6) if not isinstance(rec, dict) else rec.get("sl_ratio") or 0.6)
-            tkey = str(getattr(rec, "trail_key", "") if not isinstance(rec, dict) else rec.get("trail_key") or "")
+            sl = snap_ratio(get("sl_ratio") or 0.6)
+            tkey = str(get("trail_key") or "")
             if not tkey:
                 tkey = self.trails[0][0] if self.trails else "0.3:0.1"
-            step = 0
-            if isinstance(rec, dict):
-                step = int(rec.get("step") or 0)
-            else:
-                step = int(getattr(rec, "step", 0) or 0)
+            step = int(get("step") or 0)
             if not step:
                 step = self.min_step
             sid = make_set_id(pack, sl, "", step)
-        extra = ""
-        if isinstance(rec, dict):
-            extra = str(rec.get("trail_set_id") or rec.get("trailSetId") or "")
-        else:
-            extra = str(getattr(rec, "trail_set_id", "") or "")
+        extra = str(get("trail_set_id") or get("trailSetId") or "")
         targets: List[SetState] = []
         for x in (sid, extra):
             if not x:
@@ -698,13 +750,14 @@ class SetBook:
                 targets.append(st)
         if not targets:
             return
-        cid = row.get("client_id") or ""
         for st in targets:
-            if cid and any(r.get("client_id") == cid for r in st.live):
+            key = self._live_key(st.id, row)
+            if key in self._live_seen:
                 continue
+            self._live_seen.add(key)
             st.live.append(row)
             st.live = st.live[-80:]
-            self._score_one(st)
+            self._score_one(st, now=row["t"] or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
         for rec in closed:
@@ -767,7 +820,7 @@ class SetBook:
             for st in self.by_idx:
                 full = sorted(hist.get(st.id, []), key=lambda r: finite(r.get("t")))
                 st.hist = full[-max(40, self.gate_window):]
-                self._score_one(st)
+                self._score_one(st, now=now)
                 st.n = len(full)
             self._cap_active()
             self.progress.phase = "ready"
@@ -805,84 +858,28 @@ class SetBook:
                 signals["indications"][i] = indication_signal(window, self.ind_settings, ts)
             if on_step and i % 50 == 0:
                 on_step()
-        time_bars = max(8, min(self.hist_time_bars, max(8, n - warmup - 1)))
-        scratch_bars = max(8, int(self.scratch_s / BAR_S))
-        honor_tp = bool(getattr(self, "hist_honor_tp", True))
+        cfg = {
+            "entry_conf": self.entry_conf,
+            "time_bars": max(8, min(self.hist_time_bars, max(8, n - warmup - 1))),
+            "scratch_bars": max(8, int(self.scratch_s / BAR_S)),
+            "scratch_min": self.scratch_min,
+            "cooldown": self.cooldown_bars,
+            "cost_pct": self.cost_pct,
+            "honor_tp": bool(getattr(self, "hist_honor_tp", True)),
+        }
         for st in self.by_idx:
             pack_sig = signals.get(st.pack) or [(0, 0.0, "")] * n
-            open_pos: Optional[Dict[str, Any]] = None
-            cool = 0
-            sl_frac_base = max(0.0015, st.tp_pct * (st.sl_ratio if st.kind == "base" else 0.6))
-            use_trail = st.kind == "trail"
-            arm = (st.trail_arm / 100.0 if st.trail_arm > 0.05 else st.trail_arm) if use_trail else 0.0
-            give = (st.trail_give / 100.0 if st.trail_give > 0.05 else st.trail_give) if use_trail else 0.0
-            tp_frac = max(0.0020, st.tp_pct)
+            lane = SetLane(st, symbol)
             for i in range(warmup, n):
-                bar = bars[i]
-                ts = base_ts + i * BAR_S
-                if open_pos is not None:
-                    side = int(open_pos["side"])
-                    entry = float(open_pos["entry"])
-                    held = i - int(open_pos["i"])
-                    if use_trail:
-                        if side > 0:
-                            open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
-                            fav = (open_pos["peak"] - entry) / entry
-                            if fav >= arm:
-                                trail = open_pos["peak"] * (1 - give)
-                                open_pos["trail"] = max(open_pos.get("trail") or 0.0, trail)
-                        else:
-                            open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                            fav = (entry - open_pos["peak"]) / entry
-                            if fav >= arm:
-                                trail = open_pos["peak"] * (1 + give)
-                                cur = open_pos.get("trail")
-                                open_pos["trail"] = trail if cur is None else min(cur, trail)
-                    elif side > 0:
-                        open_pos["peak"] = max(open_pos["peak"], float(bar[1]))
-                    else:
-                        open_pos["peak"] = min(open_pos["peak"], float(bar[2]))
-                    why, px = hit_exit(side, entry, open_pos["sl"], open_pos["tp"], open_pos.get("trail"), bar, ignore_tp=not honor_tp)
-                    if why is None and held >= time_bars:
-                        why, px = "time", float(bar[3])
-                    if why is None and held >= scratch_bars:
-                        move = (float(bar[3]) - entry) / entry * side
-                        if move >= self.scratch_min:
-                            why, px = "scratch+", float(bar[3])
-                    if why:
-                        raw = (px - entry) / entry * side
-                        rec = {
-                            "t": ts,
-                            "symbol": symbol,
-                            "side": "LONG" if side > 0 else "SHORT",
-                            "pnl": net_pnl_pct(raw, self.cost_pct),
-                            "pnl_pct": raw,
-                            "hold_s": held * BAR_S,
-                            "reason": why,
-                            "set_id": st.id,
-                        }
-                        hist[st.id].append(rec)
-                        open_pos = None
-                        cool = self.cooldown_bars
-                    continue
-                if cool > 0:
-                    cool -= 1
-                    continue
-                d, conf, why = pack_sig[i]
-                if d == 0 or conf < self.entry_conf:
-                    continue
-                close = float(bar[3])
-                sl_frac = max(0.0015, sl_frac_base)
-                if d > 0:
-                    sl = close * (1 - sl_frac)
-                    tp = close * (1 + tp_frac)
-                else:
-                    sl = close * (1 + sl_frac)
-                    tp = close * (1 - tp_frac)
-                open_pos = {"side": d, "entry": close, "sl": sl, "tp": tp, "peak": close, "i": i, "trail": None}
+                d, conf, _why = pack_sig[i]
+                done = lane.step(i, bars[i], d, conf, True, cfg)
+                if done is not None:
+                    hist[st.id].append({"t": base_ts + done["exit_i"] * BAR_S, "symbol": symbol, "side": done["side"],
+                                        "pnl": done["pnl"], "pnl_pct": done["pnl_pct"], "hold_s": done["hold_s"],
+                                        "reason": done["reason"], "set_id": st.id})
             self.progress.set_id = st.id
 
-    def _score_one(self, st: SetState) -> None:
+    def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
         tape = st.tape()
         st.n = len(st.hist)
         pnls = [finite(r.get("pnl")) for r in tape]
@@ -926,7 +923,7 @@ class SetBook:
         live_tail_avg = 0.0
         if live_tail:
             live_tail_avg = sum(finite(r.get("pnl")) for r in live_tail) / len(live_tail)
-        dd = drawdown_time(tape)
+        dd = drawdown_time(tape, now=now)
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
@@ -1028,16 +1025,16 @@ class SetBook:
             b = by_tr.setdefault(st.trail_key, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
             b["n"] += 1
             b["active"] += int(st.active)
-            if st.last15_ratio >= b["bestPf"]:
-                b["bestPf"] = st.last15_ratio
+            if st.gate_pf >= b["bestPf"]:
+                b["bestPf"] = st.gate_pf
                 b["bestIdx"] = st.idx
         for st in base_sets:
             skey = f"{st.sl_ratio:.1f}"
             s = by_sl.setdefault(skey, {"n": 0, "active": 0, "bestPf": 0.0, "bestIdx": -1})
             s["n"] += 1
             s["active"] += int(st.active)
-            if st.last15_ratio >= s["bestPf"]:
-                s["bestPf"] = st.last15_ratio
+            if st.gate_pf >= s["bestPf"]:
+                s["bestPf"] = st.gate_pf
                 s["bestIdx"] = st.idx
         return {
             "packs": list(self.packs),
@@ -1109,7 +1106,7 @@ class SetBook:
 
     def snapshot(self) -> Dict[str, Any]:
         rows = []
-        for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.last15_ratio, s.max_dd_s)):
+        for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.gate_pf, s.max_dd_s)):
             rows.append(
                 {
                     "kind": st.kind,
@@ -1148,7 +1145,7 @@ class SetBook:
                     "gl": st.gl,
                     "exits": st.exits,
                     "intern": {
-                        "pf15": round(st.last15_ratio, 4),
+                        "pf15": round(st.gate_pf, 4),
                         "classic15": round(st.last15_classic, 4),
                         "avgR15": round(st.last15_r, 4),
                         "avgR25": round(st.last25_avg_r, 4),
@@ -1178,7 +1175,7 @@ class SetBook:
                 "tr": st.trail_key,
                 "st": st.step,
                 "on": int(st.active),
-                "pf": round(st.last15_ratio, 4),
+                "pf": round(st.gate_pf, 4),
                 "dd": st.max_dd_s,
             }
             for st in self.by_idx
@@ -1407,7 +1404,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     lo_step = [s for s in book3.sets.values() if s.step == 3]
     hi_step = [s for s in book3.sets.values() if s.step == 12]
     def sig(st: SetState) -> Tuple[int, float, float, float]:
-        return (st.n, round(st.last15_ratio, 4), round(st.avg_hold_s, 1), round(st.expectancy, 6))
+        return (st.n, round(st.gate_pf, 4), round(st.avg_hold_s, 1), round(st.expectancy, 6))
     t_sig = sig(tight[0]) if tight else (0, 0.0, 0.0, 0.0)
     w_sig = sig(wide[0]) if wide else (0, 0.0, 0.0, 0.0)
     lo_sig = sig(lo_step[0]) if lo_step else (0, 0.0, 0.0, 0.0)
@@ -1620,6 +1617,39 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("gate-min-30-orders", (not okf) and nf == 29, f"pf={pff} n={nf} eligible={okf}"))
     gb.lookback_default_ok = (LOOKBACK_DEFAULT == 1920 and SetBook().lookback == 1920)
     out.append(("lookback-32h-default", gb.lookback_default_ok, f"lookback={SetBook().lookback}"))
+    # R1: a live close is stored on the replay unit (net fraction), not USDT
+    lv = SetBook(); lv.load({"positionCostPct": 0.15, "slToTpRatios": [0.6], "setMinStep": 3, "setStepMax": 3, "stratGeneral": True, "stratIndications": False})
+    sl1 = next(iter(lv.by_idx))
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
+    stored = sl1.live[-1] if sl1.live else {}
+    out.append(("live-unit-net-fraction", abs(stored.get("pnl", -9) - net_pnl_pct(0.0025, 0.15)) < 1e-12 and abs(stored.get("pnl_usdt", 0) - 0.25) < 1e-12, f"pnl={stored.get('pnl')} usdt={stored.get('pnl_usdt')}"))
+    # R2: a repeated close (same client id, or none) and a repeated seed add nothing
+    n_before = len(sl1.live)
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_000_000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25, "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "c1"})
+    row_nocid = {"set_id": sl1.id, "t": 1_700_000_500, "symbol": "M-USDT", "side": "SHORT", "pnl": -0.1, "pnl_pct": -0.001, "hold_s": 60, "reason": "sl"}
+    lv.on_live_close(row_nocid); lv.on_live_close(row_nocid)
+    seeded = [{"set_id": sl1.id, "t": 1_700_000_900, "symbol": "N-USDT", "side": "LONG", "pnl": 0.1, "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "c9"}]
+    lv.seed_live(seeded); n_mid = len(sl1.live); lv.seed_live(seeded)
+    out.append(("live-dedupe", len(sl1.live) == n_before + 2 and len(sl1.live) == n_mid, f"before={n_before} after={len(sl1.live)} seeded_twice={n_mid==len(sl1.live)}"))
+    # a close without pnl_pct cannot be normalised and is skipped, not guessed
+    skip0 = lv.live_skipped
+    lv.on_live_close({"set_id": sl1.id, "t": 1_700_001_000, "symbol": "P-USDT", "side": "LONG", "pnl": 5.0, "reason": "tp"})
+    out.append(("live-skip-no-pct", lv.live_skipped == skip0 + 1 and len(sl1.live) == n_before + 2, f"skipped={lv.live_skipped}"))
+
+    # R10: drawdown is measured to the caller's clock; with no clock it is the last trade, never wall time
+    dd_rows = [{"t": 100, "pnl": 1.0}, {"t": 160, "pnl": -0.4}]
+    dd_def = drawdown_time(dd_rows)["currentS"]
+    dd_inj = drawdown_time(dd_rows, now=460)["currentS"]
+    dd_stale = drawdown_time(dd_rows, now=160 + 7200)["currentS"]
+    out.append(("dd-clock-injected", dd_def == 0.0 and dd_inj == 300.0 and dd_stale == 0.0, f"default={dd_def} injected={dd_inj} stale={dd_stale}"))
+    # R4: a flat window is neutral (RSI 50, no signal), not a short bias from RSI 100
+    flat = [[1.0, 1.0, 1.0, 1.0, 1.0]] * 80
+    flat_sig = general_signal(flat)
+    out.append(("set-flat-neutral", flat_sig == (0, 0.0, "flat") and abs(rsi([1.0] * 20, 7) - 50.0) < 1e-9, f"{flat_sig} rsi={rsi([1.0] * 20, 7)}"))
+    # R6: one cost default, shared by indication settings and position cost
+    from indication_engine import DEFAULT_SETTINGS as IND_DEFAULTS
+    from position_cost import POSITION_COST_PCT_DEFAULT as PCD
+    out.append(("cost-one-default", IND_DEFAULTS["positionCostPct"] == PCD == 0.15, f"ind={IND_DEFAULTS['positionCostPct']} pos={PCD}"))
     return out
 
 
