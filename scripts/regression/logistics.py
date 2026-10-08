@@ -73,7 +73,9 @@ def restore_patch_reproduces_pin():
 
 
 def no_leftover_zest_names():
-    hits = git("grep", "-l", "-i", "zest", no_match_ok=True).strip().splitlines()
+    # this file names the pattern itself, so it is excluded from the search
+    hits = git("grep", "-l", "-i", "zest", "--", ".", ":!scripts/regression/logistics.py",
+               no_match_ok=True).strip().splitlines()
     return not hits, f"files={hits}" if hits else "no 'zest' in tracked files"
 
 

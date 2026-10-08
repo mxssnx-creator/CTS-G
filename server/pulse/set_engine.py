@@ -767,6 +767,11 @@ class SetBook:
             "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
             "takeProfitMaxPct": 5.0,
             "positionCostPct": self.cost_pct,
+            # timeframe lanes and the combined vote: the set signal must see the same keys IndicationBook reads
+            "tf5m": bool(ov.get("tf5m", True)),
+            "tf15m": bool(ov.get("tf15m", True)),
+            "tfCombined": bool(ov.get("tfCombined", True)),
+            "tfMinAgree": int(ov.get("tfMinAgree") or 2),
         }
         self._rebuild_sets()
 

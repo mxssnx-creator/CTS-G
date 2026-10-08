@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import Skip  # noqa: E402
 
-SUITES = ["grid_and_units", "exits_and_gate", "processing", "logistics", "golden"]
+SUITES = ["grid_and_units", "exits_and_gate", "indication", "processing", "logistics", "golden"]
 
 
 def selftests():
