@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-from position_cost import POSITION_COST_PCT_DEFAULT, last_n_cost_pf
+from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n_cost_pf
 
 DIR = "/opt/grok-x01-pulse"
 STOP_ALL_PATH = os.path.join(DIR, "STOP")
@@ -362,7 +362,10 @@ def lane_summary(lane: dict) -> dict:
     st = load_stats(lane["id"])
     gp = sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) > 0)
     gl = abs(sum(c.get("pnl") or 0 for c in (st.get("closed") or []) if (c.get("pnl") or 0) < 0))
-    pf = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)
+    pf_usdt = (gp / gl) if gl > 0 else (99 if gp > 0 else 0)   # gross, on the USDT pnl field: display only
+    # the decision PF is cost-based and needs pnl_pct; rows without it are not guessed (None, not 0)
+    cost_rows = [c for c in (st.get("closed") or []) if c.get("pnl_pct") is not None]
+    pf = last_n_cost_pf(cost_rows, len(cost_rows) or 1, POSITION_COST_PCT_DEFAULT)["pf"] if cost_rows else None
     sets = st.get("sets") or {}
     prog = sets.get("progress") or {}
     eng = st.get("engine") or {}
@@ -396,7 +399,8 @@ def lane_summary(lane: dict) -> dict:
         "wins": st.get("wins") or 0,
         "losses": st.get("losses") or 0,
         "sessionPnl": st.get("sessionPnl") or 0,
-        "pf": round(pf, 3),
+        "pf": round(pf, 3) if pf is not None else None,
+        "pfUsdt": round(pf_usdt, 3),
         "scanMs": st.get("scanMs"),
         "rssMb": st.get("rssMb"),
         "errors": st.get("errors") or 0,
@@ -418,6 +422,7 @@ def lane_summary(lane: dict) -> dict:
         "progressLastRunMs": prog.get("lastRunMs"),
         "progressCycle": prog.get("cycle"),
         "progressError": prog.get("error") or "",
+        "progressErrors": prog.get("errors") or 0,
         "klinesReady": st.get("klinesReady"),
         "hotMs": eng.get("hotMs") if eng.get("hotMs") is not None else st.get("scanMs"),
         "pfCost": pc.get("pf"),
@@ -477,8 +482,8 @@ def merge_overall() -> dict:
     vst = next((x for x in lanes if x["type"] == "vst"), {})
     wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
     pc = last_n_cost_pf(list(reversed(closed)), 15, POSITION_COST_PCT_DEFAULT)
-    pc["minPf"] = 1.1
-    pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= 1.1)
+    pc["minPf"] = GATE_MIN_PF_DEFAULT
+    pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= GATE_MIN_PF_DEFAULT)
     detail_lane, detail_st = _pick_detail(LANES)
     sets_lanes = [_sets_lane(l, stats_by_id.get(l["id"]) or {}) for l in LANES]
     sets = dict(detail_st.get("sets") or {})

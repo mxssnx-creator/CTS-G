@@ -25,7 +25,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
 from coord_engine import Coordinator
 from bingx_fast import FastBingX, ErrorLog
 from modules import resolve as resolve_modules
-from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
+from position_cost import last_n_cost_pf, resolve_sl_tp, POSITION_COST_PCT_DEFAULT, GATE_MIN_PF_DEFAULT, cost_as_frac, net_pnl_pct, net_pnl_usdt
 from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
 from risk_variants import VariantBook, self_test as variants_self_test
 from set_engine import SetBook, self_test as sets_self_test
@@ -3144,10 +3144,10 @@ class Pulse:
         b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
         b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
         b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
-        real_pf = 1.2
+        real_pf = GATE_MIN_PF_DEFAULT
         try:
             st = ((cts.get("strategies") or {}).get("main") or {}).get("real") or {}
-            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or 1.2)
+            real_pf = float(st.get("min_profit_factor") or cts.get("realProfitFactor") or GATE_MIN_PF_DEFAULT)
         except Exception:
             pass
         self.block.enabled = bool(b_en) if b_en is not None else True
@@ -3435,9 +3435,8 @@ class Pulse:
                 if st is None:
                     st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
                 if st is not None:
-                    intern_pf = float(getattr(st, "last15_ratio", 1.2) or 1.2)
-                    if int(getattr(st, "last15_n", 0) or 0) < 8:
-                        intern_pf = max(intern_pf, 1.2)
+                    # the real PF; a Set with few closes is already excluded by the coordinator sample rule (no fabricated pass)
+                    intern_pf = float(getattr(st, "last15_pf", 0.0) or 0.0)
             except Exception:
                 intern_pf = 1.2
             d, why, conf = self.score(pos.symbol)
@@ -3840,7 +3839,7 @@ class Pulse:
                     best_st = st
             if best_st:
                 intern_metrics = {
-                    "pf": float(best_st.last15_ratio),
+                    "pf": float(best_st.last15_pf),
                     "n": float(best_st.last15_n),
                     "pack": best_st.pack,
                 }
@@ -3850,7 +3849,7 @@ class Pulse:
         if self.entries_blocked():
             self.priority_controls()
             return
-        slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Ratio", metrics.get("lastPf", 1.0)))
+        slot_cap = self.coord.slot_cap(MAX_OPEN, metrics.get("last15Pf", metrics.get("lastPf", 1.0)))
         ranked: List[Tuple[float, str, int, str]] = []
         best: Dict[str, Tuple[float, str, int, str]] = {}
         if self.strat_ind and bool(self.indications.settings.get("enabled")):
@@ -4351,7 +4350,7 @@ class Pulse:
         snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
         pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
         pc["minPf"] = self.coord.min_pf
-        pc["pass"] = bool(pc["count"] < 8 or pc["ratio"] + 1e-9 >= self.coord.min_pf)
+        pc["pass"] = bool(pc["count"] < 8 or pc["pf"] + 1e-9 >= self.coord.min_pf)
         pc["neutral"] = 1.0
         pc["plus1x"] = 1.1
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
@@ -4405,8 +4404,8 @@ class Pulse:
             "pulse": self.pulse_snapshot(),
             "coord": self.coord.snapshot(),
             "pfCost": pc,
-            "profitFactor": pc["ratio"],
-            "pf": pc["ratio"],
+            "profitFactor": pc["pf"],
+            "pf": pc["pf"],
             "pfNeutral": 1.0,
             "pfPlus1xCost": 1.1,
             "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
@@ -4644,8 +4643,8 @@ class Pulse:
                 "gp": round(gp, 6),
                 "gl": round(gl, 6),
                 "net": round(gp - gl, 6),
-                "pf": round(float(cost["ratio"]), 4),
-                "classicPf": round(float(cost["classicPf"]), 4),
+                "pf": round(float(cost["pf"]), 4),
+                "ratio": round(float(cost["ratio"]), 4),
                 "avgR": cost["avgR"],
                 "wr": round(100.0 * wins / max(1, wins + losses), 1),
                 "scale": "1.00=neutral 1.10=+1×cost",
@@ -4857,7 +4856,7 @@ class Pulse:
             except Exception:
                 stg = None
             if stg:
-                intern_m = {"pf": float(stg.last15_ratio), "n": float(stg.last15_n), "pack": stg.pack}
+                intern_m = {"pf": float(stg.last15_pf), "n": float(stg.last15_n), "pack": stg.pack}
             self.coord.gate(rows_g, consec_g, intern=intern_m)
         except Exception:
             pass

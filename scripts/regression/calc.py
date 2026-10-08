@@ -223,8 +223,9 @@ def same_pf_in_every_module():
     want = last_n_cost_pf(rows, 15, COST)["pf"]
     stats_pf = pf_window(rows, 15, COST)["pf"]
     vs = VariantBook()._score_rows(rows[-15:], COST)
-    risk_pf = vs.pf            # display value: rounded to 3 dp inside LaneScore
-    risk_ratio = vs.ratio      # decision value: the unrounded engine PF (4 dp)
+    risk_pf = vs.pf            # the decision PF (engine 4 dp: the number the gate uses)
+    risk_ratio = vs.ratio      # display only: 1 + 0.10 x avgR
+    want_ratio = last_n_cost_pf(rows, 15, COST)["ratio"]
     eb = ExitBook()
     ln = LaneScore(key="peak")
     ln.rows = list(rows)
@@ -232,8 +233,32 @@ def same_pf_in_every_module():
     eb._score(ln)
     exit_pf = ln.last15_pf
     ok = (abs(stats_pf - want) < 1e-9 and abs(exit_pf - want) < 1e-9
-          and abs(risk_ratio - want) < 1e-9 and abs(risk_pf - want) < 5e-4)
-    return ok, f"engine={want} stats={stats_pf} variants.decision={risk_ratio} variants.display={risk_pf} exit={exit_pf}"
+          and abs(risk_pf - want) < 1e-9 and abs(risk_ratio - want_ratio) < 1e-9)
+    return ok, f"engine={want} stats={stats_pf} variants.pf={risk_pf} exit={exit_pf} variants.ratio={risk_ratio}"
+
+
+def payload_pf_fields_are_pf_not_ratio():
+    """Every PF a Set row carries is the cost-based PF over that Set's own tape; the ratio is a separate field."""
+    from processing import _book
+    b = _book(grid_extra=SMALL, n_syms=3, bars=1200)
+    b.replay_all(now=T0)
+    rows = b.snapshot().get("rows") or []
+    checked, bad, differs = 0, [], 0
+    for r in rows:
+        st = b.sets.get(r["id"])
+        tape = st.tape() if st is not None else []
+        if not tape:
+            continue
+        gate = last_n_cost_pf(tape, b.gate_window, b.cost_pct)
+        last15 = last_n_cost_pf(tape, b.pf_n, b.cost_pct)
+        if abs(r["pf"] - round(gate["pf"], 4)) > 5e-5 or abs(r["pf15"] - round(last15["pf"], 4)) > 5e-5 \
+                or abs(r["ratio"] - round(last15["ratio"], 4)) > 5e-5:
+            bad.append(r["id"])
+            continue
+        checked += 1
+        differs += int(abs(last15["ratio"] - last15["pf"]) > 1e-6)
+    ok = checked > 0 and not bad and differs > 0
+    return ok, f"rows={len(rows)} checked={checked} mismatched={len(bad)} pf_differs_from_ratio_in={differs}"
 
 
 CHECKS = [
@@ -251,4 +276,5 @@ CHECKS = [
     ("calc.trail-stop-named-constant", trail_sets_use_the_named_stop_ratio),
     ("calc.lane-records-from-prices", lane_records_recomputed_from_prices),
     ("calc.same-pf-in-every-module", same_pf_in_every_module),
+    ("calc.payload-pf-fields-are-pf-not-ratio", payload_pf_fields_are_pf_not_ratio),
 ]

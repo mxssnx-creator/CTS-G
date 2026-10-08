@@ -34,7 +34,6 @@ export type CostPfMetric = {
   avgR: number;
   ratio: number;
   pf: number;
-  classicPf: number;
   costPct: number;
   netPct: number;
   grossPct: number;
@@ -190,7 +189,6 @@ export function lastNCostPf(
     avgR: round(avgR),
     ratio: round(ratio),
     pf: round(pf),
-    classicPf: round(pf),
     costPct,
     netPct: round(costPct * ((ratio - 1) / COST_RATIO_SCALE)),
     grossPct: round(costPct + costPct * ((ratio - 1) / COST_RATIO_SCALE)),

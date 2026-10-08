@@ -315,7 +315,7 @@ class ExitBook:
                     "key": ln.key,
                     "n": ln.n,
                     "wins": ln.wins,
-                    "last15Ratio": round(ln.last15_ratio, 4),
+                    "ratio": round(ln.last15_ratio, 4),
                     "last15Pf": round(ln.last15_pf, 4),
                     "last25AvgR": round(ln.last25_avg_r, 4),
                     "maxDdS": ln.max_dd_s,
@@ -371,7 +371,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         b2.on_close({"t": 2000 + i, "pnl": 0.02, "pnl_pct": 0.003, "reason": "exit:peak"})
         b2.on_close({"t": 3000 + i, "pnl": -0.01, "pnl_pct": -0.002, "reason": "exit:time"})
     d4 = b2.decide(side="LONG", entry=100, px=100.4, peak=100.8, sl=100.2, opened_at=0, trail_arm=0.001, signal_dir=1, now=400)
-    out.append(("ex-best-peak", d4.lane in ("peak", "lock", "time") and b2.lanes["peak"].last15_ratio > b2.lanes["time"].last15_ratio, f"{d4.lane} {b2.lanes['peak'].last15_ratio:.2f}>{b2.lanes['time'].last15_ratio:.2f}"))
+    out.append(("ex-best-peak", d4.lane in ("peak", "lock", "time") and b2.lanes["peak"].last15_pf > b2.lanes["time"].last15_pf, f"{d4.lane} {b2.lanes['peak'].last15_pf:.2f}>{b2.lanes['time'].last15_pf:.2f}"))
     out.append(("ex-lane-of", lane_of("exit:peak") == "peak" and lane_of("trail") == "peak", lane_of("tp")))
     b3 = ExitBook()
     b3.load({"exitPeakOn": True, "exitMinHoldS": 0, "trailingMinStep": 0, "exitRevOn": False, "exitTimeOn": False})

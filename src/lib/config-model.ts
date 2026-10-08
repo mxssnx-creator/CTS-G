@@ -80,6 +80,8 @@ export function capSymbols(list: string[]): string[] {
   if (!MAX_SYMBOLS || MAX_SYMBOLS <= 0) return list;
   return list.slice(0, MAX_SYMBOLS);
 }
+// Desk fallback for the PF gate. Mirrors server/pulse/position_cost.py GATE_MIN_PF_DEFAULT (1.10).
+export const GATE_MIN_PF_DEFAULT = 1.1;
 export const SL_TP_RATIOS = [0.3, 0.6, 0.9, 1.2, 1.5] as const;
 /** Set grid: SL = TP x ratio, 0.5..3.5 step 0.25 (13 ratios, each one a Set). Matches position_cost.SL_RATIOS. */
 export const SL_SET_RATIOS: readonly number[] = Array.from({ length: 13 }, (_, i) => Number((0.5 + i * 0.25).toFixed(2)));
@@ -274,7 +276,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   dcaStepDistancesPct: [0.5, 1, 1.5, 2],
   dcaStepVolumeMultipliers: [1.5, 2, 2.3, 2.5],
   dcaAutoDeact: true,
-  dcaMinPf: 1.2,
+  dcaMinPf: GATE_MIN_PF_DEFAULT,
   dcaPfWindow: 15,
   dcaDeactN: 25,
   symbols: ["*"],
@@ -286,7 +288,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   axisContMaxWindow: 8,
   axisPauseEnabled: true,
   axisPauseMaxWindow: 8,
-  minPf: 1.2,
+  minPf: GATE_MIN_PF_DEFAULT,
   positionCostPct: 0.15,
   pfWindow: 15,
   slMinPct: 0.2,
@@ -348,7 +350,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   histRefreshS: 90,
   setPfWindow: 15,
   setDeactN: 25,
-  setMinPf: 1.1,
+  setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdTimeS: 1800,
   setAutoDeact: true,
   setUseHistoricGate: true,
@@ -374,7 +376,7 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   exitMinHoldS: 45,
   exitPfWindow: 15,
   exitDeactN: 25,
-  exitMinPf: 1.1,
+  exitMinPf: GATE_MIN_PF_DEFAULT,
   exitAutoDeact: true,
   modules: {
     "exchange.bingx": true,
@@ -590,7 +592,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     dcaStepDistancesPct: arr<number>(cts.dcaStepDistancesPct ?? coord.dcaStepDistancesPct, [0.5, 1, 1.5, 2]),
     dcaStepVolumeMultipliers: arr<number>(cts.dcaStepVolumeMultipliers ?? coord.dcaStepVolumeMultipliers, [1.5, 2, 2.3, 2.5]),
     dcaAutoDeact: bool(cts.dcaAutoDeact, true),
-    dcaMinPf: num(cts.dcaMinPf, 1.2),
+    dcaMinPf: num(cts.dcaMinPf, GATE_MIN_PF_DEFAULT),
     dcaPfWindow: num(cts.dcaPfWindow ?? cts.pfWindow, 15),
     dcaDeactN: num(cts.dcaDeactN, 25),
     volumeFactor: num(cts.volumeFactor, 1),
@@ -602,7 +604,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     axisContMaxWindow: num(cts.axisContMaxWindow ?? nestedAxis(coord, "cont", "maxWindow"), 8),
     axisPauseEnabled: bool(cts.axisPauseEnabled ?? nestedAxis(coord, "pause", "enabled"), true),
     axisPauseMaxWindow: num(cts.axisPauseMaxWindow ?? nestedAxis(coord, "pause", "maxWindow"), 8),
-    minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, 1.2),
+    minPf: num((cts.strategies as { main?: { real?: { min_profit_factor?: number } } } | undefined)?.main?.real?.min_profit_factor ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     positionCostPct: num(cts.exchangePositionCost ?? cts.positionCost, 0.15),
     pfWindow: num(cts.pfWindow, 15),
     slMinPct: num(cts.slMinPct, 0.2),
@@ -654,7 +656,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     histRefreshS: num(cts.histRefreshS, 90),
     setPfWindow: num(cts.setPfWindow ?? cts.pfWindow, 15),
     setDeactN: num(cts.setDeactN, 25),
-    setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, 1.2),
+    setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     setMaxDdTimeS: num(cts.setMaxDdTimeS, 1800),
     setAutoDeact: bool(cts.setAutoDeact, true),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
@@ -679,7 +681,7 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     exitMinHoldS: num(cts.exitMinHoldS, 45),
     exitPfWindow: num(cts.exitPfWindow, 15),
     exitDeactN: num(cts.exitDeactN, 25),
-    exitMinPf: num(cts.exitMinPf, 1.1),
+    exitMinPf: num(cts.exitMinPf, GATE_MIN_PF_DEFAULT),
     exitAutoDeact: bool(cts.exitAutoDeact, true),
     rearrange: bool(cts.rearrange, true),
     rearrangeGap: num(cts.rearrangeGap, 0.22),

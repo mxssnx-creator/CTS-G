@@ -381,10 +381,10 @@ class SetState:
     kind: str = "base"
     hist: List[Dict[str, Any]] = field(default_factory=list)
     live: List[Dict[str, Any]] = field(default_factory=list)
-    last15_ratio: float = 1.0
-    gate_pf: float = 0.0
+    last15_ratio: float = 1.0       # 1 + 0.10 x avgR: display only, never compared with a PF threshold
+    gate_pf: float = 0.0            # net PF over the last setGateWindow orders: the eligibility metric
     gate_n: int = 0
-    last15_classic: float = 0.0
+    last15_pf: float = 0.0          # net PF over the last pf_n orders (display, PF15 column)
     last15_n: int = 0
     last15_r: float = 0.0
     last25_avg_r: float = 0.0
@@ -401,7 +401,7 @@ class SetState:
     wr: float = 0.0
     expectancy: float = 0.0
     avg_hold_s: float = 0.0
-    classic_all: float = 0.0
+    pf_all: float = 0.0             # net PF over every closed row in the tape (display)
     exits: Dict[str, int] = field(default_factory=dict)
     active: bool = True
     deact_reason: str = ""
@@ -1167,7 +1167,7 @@ class SetBook:
         st.expectancy = round(sum(pnls) / len(pnls), 6) if pnls else 0.0
         holds = [finite(r.get("hold_s")) for r in tape]
         st.avg_hold_s = round(sum(holds) / len(holds), 1) if holds else 0.0
-        st.classic_all = round(st.gp / st.gl, 4) if st.gl > 0 else (99.0 if st.gp > 0 else 0.0)
+        st.pf_all = round(st.gp / st.gl, 4) if st.gl > 0 else (99.0 if st.gp > 0 else 0.0)
         counts: Dict[str, int] = {}
         for r in tape:
             k = str(r.get("reason") or "x").split(":")[0]
@@ -1175,11 +1175,11 @@ class SetBook:
         st.exits = counts
         last15 = last_n_cost_pf(tape, self.pf_n, self.cost_pct)
         st.last15_ratio = float(last15["ratio"])
-        st.last15_classic = float(last15["classicPf"])
+        st.last15_pf = float(last15["pf"])
         st.last15_n = int(last15["count"])
         st.last15_r = float(last15["avgR"])
         gate = last_n_cost_pf(tape, self.gate_window, self.cost_pct)
-        st.gate_pf = float(gate["classicPf"])
+        st.gate_pf = float(gate["pf"])
         st.gate_n = int(gate["count"])
         last25 = tape[-self.deact_n :]
         st.last25_n = len(last25)
@@ -1287,7 +1287,10 @@ class SetBook:
             "stepI": st.step_i,
             "tpPct": round(st.tp_pct * 100, 4),
             "active": st.active,
-            "last15Ratio": round(st.last15_ratio, 4),
+            "pf": round(st.gate_pf, 4),
+            "gateN": st.gate_n,
+            "pf15": round(st.last15_pf, 4),
+            "ratio": round(st.last15_ratio, 4),
             "maxDdS": st.max_dd_s,
         }
 
@@ -1407,8 +1410,10 @@ class SetBook:
                     "n": st.n,
                     "liveN": len(st.live),
                     "wins": st.wins,
-                    "last15Ratio": round(st.last15_ratio, 4),
-                    "last15Classic": round(st.last15_classic, 3),
+                    "pf": round(st.gate_pf, 4),
+                    "gateN": st.gate_n,
+                    "pf15": round(st.last15_pf, 4),
+                    "ratio": round(st.last15_ratio, 4),
                     "last15N": st.last15_n,
                     "last15R": round(st.last15_r, 4),
                     "last25AvgR": round(st.last25_avg_r, 4),
@@ -1420,13 +1425,13 @@ class SetBook:
                     "wr": st.wr,
                     "expectancy": st.expectancy,
                     "avgHoldS": st.avg_hold_s,
-                    "classicPf": st.classic_all,
+                    "pfAll": st.pf_all,
                     "gp": st.gp,
                     "gl": st.gl,
                     "exits": st.exits,
                     "intern": {
-                        "pf15": round(st.gate_pf, 4),
-                        "classic15": round(st.last15_classic, 4),
+                        "pf": round(st.gate_pf, 4),
+                        "pf15": round(st.last15_pf, 4),
                         "avgR15": round(st.last15_r, 4),
                         "avgR25": round(st.last25_avg_r, 4),
                         "maxDdS": st.max_dd_s,
@@ -1500,6 +1505,7 @@ class SetBook:
                 "detail": p.detail,
                 "ready": p.ready,
                 "error": p.error,
+                "errors": p.errors,
             },
             "rows": rows,
         }
@@ -1596,7 +1602,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st2.live = []
     book.min_pf = 1.08
     book._score_one(st2)
-    out.append(("set-pf15-pass", st2.last15_ratio >= 1.09 and st2.active, f"ratio={st2.last15_ratio} {st2.deact_reason}"))
+    out.append(("set-pf15-pass", st2.last15_pf >= 1.09 and st2.active, f"pf={st2.last15_pf} ratio={st2.last15_ratio} {st2.deact_reason}"))
     # historic replay produces fills and scores
     book2 = SetBook()
     book2.load(
@@ -1640,7 +1646,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
         if s.id != winner.id:
             s.active = False
     picked = book2.pick(winner.pack)
-    out.append(("set-pick", picked is not None and picked.id == winner.id and winner.active and winner.step >= book2.min_step, f"{getattr(picked, 'id', None)} active={winner.active} pf={winner.last15_ratio} st={winner.step}"))
+    out.append(("set-pick", picked is not None and picked.id == winner.id and winner.active and winner.step >= book2.min_step, f"{getattr(picked, 'id', None)} active={winner.active} pf={winner.last15_pf} st={winner.step}"))
     # same-bar SL pessimism
     why, px = hit_exit(1, 100.0, 99.5, 100.8, None, [100.0, 101.0, 99.4, 100.2, 1])
     out.append(("set-sl-first", why == "sl" and abs(px - 99.5) < 1e-9, f"{why} {px}"))
@@ -1816,8 +1822,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     g2._score_one(pos_set)
-    out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
-    out.append(("set-pos-on", pos_set.active and pos_set.last15_ratio >= 1.0, f"{pos_set.active} pf={pos_set.last15_ratio}"))
+    out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
+    out.append(("set-pos-on", pos_set.active and pos_set.last15_pf >= 1.0, f"{pos_set.active} pf={pos_set.last15_pf}"))
     pk = g2.pick("general")
     out.append(("set-pick-pos-only", pk is None, f"base gate: PF 1.10 < 1.20, nothing below the gate is picked ({getattr(pk, 'id', None)})"))
     pos_set.active = False
@@ -1831,7 +1837,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     # reactivation: negative set returns once the last-N window rolls positive
     neg_set.hist = list(pos_rows)
     g2._score_one(neg_set)
-    out.append(("set-neg-recover", neg_set.active and neg_set.last15_ratio >= 1.0, f"{neg_set.active} pf={neg_set.last15_ratio}"))
+    out.append(("set-neg-recover", neg_set.active and neg_set.last15_pf >= 1.0, f"{neg_set.active} pf={neg_set.last15_pf}"))
     # sticky off when reactivate is disabled (until PF recovers to min_pf)
     g2.reactivate = False
     neg_set.hist = list(neg_rows)
@@ -1839,7 +1845,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     off1 = not neg_set.active
     neg_set.hist = list(pos_rows)  # PF 1.10 < min_pf 1.20 -> stays off
     g2._score_one(neg_set)
-    out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_ratio}"))
+    out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
     # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
     g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})

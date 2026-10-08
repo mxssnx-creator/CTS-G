@@ -143,15 +143,14 @@ def last_n_cost_pf(
     count = len(rs)
     avg_r = sum(rs) / count if count else 0.0
     ratio = ratio_from_r(avg_r) if count else RATIO_BASE
-    classic = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
-    # pf = net profit factor (the decision metric); ratio = 1 + 0.10 x avgR (display only)
+    pf = (gp / gl) if gl > 0 else (99.0 if gp > 0 else 0.0)
+    # pf = net profit factor (the one decision and display PF); ratio = 1 + 0.10 x avgR (display only, never a PF)
     return {
         "n": float(n),
         "count": float(count),
         "avgR": round(avg_r, 4),
         "ratio": round(ratio, 4),
-        "classicPf": round(classic, 4),
-        "pf": round(classic, 4),
+        "pf": round(pf, 4),
         "costPct": float(cost_pct),
         "netPct": round(net_move_pct(ratio, cost_pct), 4),
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),

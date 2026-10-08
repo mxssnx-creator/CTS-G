@@ -7,6 +7,7 @@ import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
+import { GATE_MIN_PF_DEFAULT } from "@/lib/config-model";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 
@@ -224,7 +225,7 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
 function InternResults({ stats }: { stats: LiveStats | null }) {
   const gate = (stats?.coord as { gate?: { allow?: boolean; reasons?: string[] } } | undefined)?.gate;
   const sets = stats?.sets;
-  const rows = [...(sets?.rows ?? [])].sort((a, b) => (b.last15Ratio || 0) - (a.last15Ratio || 0)).slice(0, 8);
+  const rows = [...(sets?.rows ?? [])].sort((a, b) => (b.pf15 || 0) - (a.pf15 || 0)).slice(0, 8);
   return (
     <Card title="Intern coordination · positive-PF Sets">
       <p className="mb-3 text-sm text-muted">
@@ -250,7 +251,7 @@ function InternResults({ stats }: { stats: LiveStats | null }) {
               <tr key={r.id} className="border-t border-border font-mono text-xs">
                 <td className="py-1.5">{r.id}</td>
                 <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
-                <td className={`py-1.5 text-right ${r.last15Ratio >= 1.1 ? "text-primary" : "text-danger"}`}>{r.last15Ratio.toFixed(2)}</td>
+                <td className={`py-1.5 text-right ${r.pf15 >= GATE_MIN_PF_DEFAULT ? "text-primary" : "text-danger"}`}>{r.pf15.toFixed(2)}</td>
                 <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                 <td className="py-1.5 text-right">
                   {r.n}
@@ -304,7 +305,7 @@ function SetResults({ stats }: { stats: LiveStats | null }) {
                     {r.n}
                     {r.liveN ? `+${r.liveN}` : ""}
                   </td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
+                  <td className="py-1.5 text-right">{r.pf15.toFixed(2)}</td>
                   <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{Number(r.wr ?? 0).toFixed(0)}%</td>
                   <td className={`py-1.5 text-right ${(r.expectancy ?? 0) < 0 ? "text-danger" : "text-primary"}`}>{Number(r.expectancy ?? 0).toFixed(4)}</td>
@@ -353,7 +354,7 @@ function ExitResults({ stats }: { stats: LiveStats | null }) {
                   <td className={`py-1.5 ${r.selected ? "text-primary" : ""}`}>{r.key}</td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">{r.n}</td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
+                  <td className="py-1.5 text-right">{r.last15Pf.toFixed(2)}</td>
                   <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                 </tr>
@@ -428,7 +429,7 @@ function DcaResults({ stats }: { stats: LiveStats | null }) {
   return (
     <Card title="DCA · independent CTS steps">
       <p className="mb-3 text-sm text-muted">
-        {dca?.enabled ? "on" : "off"} · {dca?.active ? "active" : dca?.deactReason || "idle"} · steps {dca?.maxSteps ?? "—"} · PF15 {Number(dca?.last15Ratio ?? 1).toFixed(2)} · last25 R {Number(dca?.last25AvgR ?? 0).toFixed(2)} · dist {(dca?.distancesPct ?? []).join("/")}
+        {dca?.enabled ? "on" : "off"} · {dca?.active ? "active" : dca?.deactReason || "idle"} · steps {dca?.maxSteps ?? "—"} · PF15 {Number(dca?.pf15 ?? 1).toFixed(2)} · last25 R {Number(dca?.last25AvgR ?? 0).toFixed(2)} · dist {(dca?.distancesPct ?? []).join("/")}
       </p>
       {lanes.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted">Lanes attach when a parent is open</p>

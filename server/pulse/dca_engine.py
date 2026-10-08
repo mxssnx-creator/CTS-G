@@ -194,7 +194,7 @@ class DcaBook:
             self.deact_reason = f"last{len(last25)} avgR {avg_r:.2f}<0"
         elif pc["count"] >= min(8, self.pf_n) and pc["pf"] + 1e-9 < self.min_pf:
             self.active = False
-            self.deact_reason = f"last15 PF {pc['ratio']:.2f}<{self.min_pf:.2f}"
+            self.deact_reason = f"last15 PF {pc['pf']:.2f}<{self.min_pf:.2f}"
         else:
             if not self.active and avg_r >= 0 and (pc["count"] < 8 or pc["pf"] >= self.min_pf):
                 self.active = True
@@ -306,7 +306,8 @@ class DcaBook:
             "lastPick": self.last_pick,
             "emits": self.emits,
             "skips": self.skips,
-            "last15Ratio": pc.get("ratio"),
+            "pf15": pc.get("pf"),
+            "ratio": pc.get("ratio"),
             "last25AvgR": pc.get("last25AvgR"),
             "last15N": pc.get("count"),
             "lanes": lanes,

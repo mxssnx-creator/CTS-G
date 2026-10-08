@@ -23,7 +23,7 @@ import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
 import { CoveragePanel } from "@/components/coverage-overview";
-import { MAX_SYMBOLS } from "@/lib/config-model";
+import { GATE_MIN_PF_DEFAULT, MAX_SYMBOLS } from "@/lib/config-model";
 
 export const Route = createFileRoute("/settings")({ component: SettingsPage });
 
@@ -114,7 +114,7 @@ function SettingsPage() {
     main?: Record<string, { enabled?: boolean; min_profit_factor?: number; max_drawdown_time?: number; max_positions?: number }>;
     mainTradePfRatioSemantics?: string;
   };
-  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, 1.2);
+  const defaultMinPf = num(strategies.main?.real?.min_profit_factor ?? cts?.realProfitFactor, GATE_MIN_PF_DEFAULT);
   const table = useMemo(
     () => blockTable(overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf, 1),
     [overlay.blockVolumeRatio, overlay.blockProfitFactorRatio, defaultMinPf],
@@ -1578,7 +1578,7 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
               <th className="pb-2 font-medium">Set</th>
               <th className="pb-2 font-medium">On</th>
               <th className="pb-2 text-right font-medium">n</th>
-              <th className="pb-2 text-right font-medium">Last {overlay.setPfWindow} PF</th>
+              <th className="pb-2 text-right font-medium">Gate PF</th>
               <th className="pb-2 text-right font-medium">Last {overlay.setDeactN} R</th>
               <th className="pb-2 text-right font-medium">Max DDt</th>
               <th className="pb-2 font-medium">Why</th>
@@ -1602,8 +1602,8 @@ function SetsLiveTable({ stats, overlay }: { stats: LiveStats | null; overlay: P
                     {r.n}
                     {r.liveN ? `+${r.liveN}` : ""}
                   </td>
-                  <td className={`py-1.5 text-right ${r.last15Ratio + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
-                    {r.last15Ratio.toFixed(2)}
+                  <td className={`py-1.5 text-right ${r.pf + 1e-9 >= overlay.setMinPf ? "text-primary" : "text-danger"}`}>
+                    {r.pf.toFixed(2)}
                   </td>
                   <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>
                     {r.last25AvgR.toFixed(2)}
@@ -1656,7 +1656,7 @@ function ExitLanesTable({ stats }: { stats: LiveStats | null }) {
                   <td className={`py-1.5 ${r.selected ? "text-primary" : ""}`}>{r.key}</td>
                   <td className={r.active ? "py-1.5 text-primary" : "py-1.5 text-danger"}>{r.active ? "on" : "off"}</td>
                   <td className="py-1.5 text-right">{r.n}</td>
-                  <td className="py-1.5 text-right">{r.last15Ratio.toFixed(2)}</td>
+                  <td className="py-1.5 text-right">{r.last15Pf.toFixed(2)}</td>
                   <td className={`py-1.5 text-right ${r.last25AvgR < 0 ? "text-danger" : "text-primary"}`}>{r.last25AvgR.toFixed(2)}</td>
                   <td className="py-1.5 text-right">{formatDuration(r.maxDdS * 1000)}</td>
                   <td className="py-1.5 text-muted">{r.deactReason || "—"}</td>

@@ -25,7 +25,6 @@ export function StatsOverview({
           avgR: live.pfCost.avgR ?? data.costPf.avgR,
           ratio: live.pfCost.ratio ?? data.costPf.ratio,
           pf: live.pfCost.pf ?? data.costPf.pf,
-          classicPf: live.pfCost.classicPf ?? data.costPf.classicPf,
           costPct: live.pfCost.costPct ?? data.costPf.costPct,
           netPct: live.pfCost.netPct ?? data.costPf.netPct,
           grossPct: live.pfCost.grossPct ?? data.costPf.grossPct,

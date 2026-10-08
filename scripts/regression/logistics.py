@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "817f822b5d80d983e63b2dec87b1d634ad22d051"
+PIN_WANT = "99e02c6c2b53f595c7b624b8ba31aff8acca819f"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -32,10 +32,15 @@ def overlays_share_grid_contract():
 
 def desk_defaults_match_engine():
     src = open(CONFIG_MODEL, encoding="utf-8").read()
-    need = [r"setMinStep: 2,", r"setStepMax: 30,", r"trailMinStep: 3,", r"histLookbackBars: 1920", r"setMinPf: 1\.1,",
-            r"export const SL_SET_RATIOS"]
+    need = [r"setMinStep: 2,", r"setStepMax: 30,", r"trailMinStep: 3,", r"histLookbackBars: 1920",
+            r"setMinPf: GATE_MIN_PF_DEFAULT,", r"export const SL_SET_RATIOS"]
     missing = [p for p in need if not re.search(p, src)]
-    return not missing, f"missing={missing}" if missing else f"{len(need)} defaults present"
+    # the desk fallback and the engine gate default are one number kept in two files
+    desk = re.search(r"export const GATE_MIN_PF_DEFAULT = ([0-9.]+);", src)
+    eng = re.search(r"GATE_MIN_PF_DEFAULT\s*=\s*([0-9.]+)", open(os.path.join(PULSE, "position_cost.py"), encoding="utf-8").read())
+    if not (desk and eng and float(desk.group(1)) == float(eng.group(1))):
+        missing.append(f"GATE_MIN_PF_DEFAULT desk={desk and desk.group(1)} engine={eng and eng.group(1)}")
+    return not missing, f"missing={missing}" if missing else f"{len(need)} defaults present; gate default equal in desk and engine"
 
 
 def dca_is_off_everywhere():
@@ -114,9 +119,31 @@ def engine_modules_compile():
     return not bad, f"bad={bad}" if bad else f"{len(names)} engine modules parse"
 
 
+# A ratio is 1 + 0.10 x avgR (display only). It must never be compared with a PF threshold or stored under a PF key.
+RATIO_PF_PATTERNS = [
+    r"ratio[^\n]{0,30}(?:>=|<=|<|>)[^\n]{0,30}(?:min_pf|setMinPf|minPf|\b1\.[012]\b)",
+    r'"pf"\s*:[^\n]*ratio',
+    r"last15Classic|classicPf|classic_all|last15_classic",
+]
+
+
+def no_ratio_as_pf():
+    paths = [os.path.join(PULSE, f) for f in os.listdir(PULSE) if f.endswith(".py")]
+    for dirpath, _dirs, files in os.walk(os.path.join(ROOT, "src")):
+        paths += [os.path.join(dirpath, f) for f in files if f.endswith((".ts", ".tsx"))]
+    hits = []
+    for path in paths:
+        text = open(path, encoding="utf-8").read()
+        for pat in RATIO_PF_PATTERNS:
+            for m in re.finditer(pat, text):
+                hits.append(f"{os.path.relpath(path, ROOT)}:{text.count(chr(10), 0, m.start()) + 1}")
+    return not hits, f"hits={hits[:8]}" if hits else "no ratio is compared with a PF threshold; no PF key holds a ratio"
+
+
 CHECKS = [
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
+    ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.dca-off-everywhere", dca_is_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),

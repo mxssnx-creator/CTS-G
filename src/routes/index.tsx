@@ -143,7 +143,7 @@ function DeskPage() {
           <p className="mb-3 font-mono text-xs tracking-wide text-muted uppercase">Hit rate</p>
           <WinRing wins={stats?.wins ?? 0} losses={stats?.losses ?? 0} />
           <div className="mt-4 grid grid-cols-2 gap-2 font-mono text-xs text-muted">
-            <span>PF {d.pf >= 99 ? "∞" : d.pf.toFixed(2)}</span>
+            <span>PF {d.pf == null ? "—" : d.pf >= 99 ? "∞" : d.pf.toFixed(2)}</span>
             <span className="text-right">hold {d.avgHold.toFixed(0)}s</span>
             <span>
               E {d.expectancy >= 0 ? "+" : ""}
@@ -382,7 +382,7 @@ function LaneBoard({ stats }: { stats: LiveStats }) {
                 {l.wins} / {l.losses}
               </dd>
               <dt>PF</dt>
-              <dd className="text-right text-fg">{l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
+              <dd className="text-right text-fg">{l.pf == null ? "—" : l.pf >= 99 ? "∞" : l.pf.toFixed(2)}</dd>
               <dt>Scan</dt>
               <dd className="text-right text-fg">{fmt(l.hotMs ?? l.scanMs, 0)}ms</dd>
               <dt>SL+TP</dt>
@@ -562,7 +562,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
                 {r.pack?.slice(0, 3) || r.id.slice(0, 8)} sl{Number(r.slRatio || 0).toFixed(1)} st{r.step ?? "—"}
               </span>
               <span className={r.active ? "text-primary" : "text-danger"}>
-                {r.last15Ratio.toFixed(2)} · {formatDuration(r.maxDdS * 1000)} · R{r.last25AvgR.toFixed(1)}
+                {r.pf15.toFixed(2)} · {formatDuration(r.maxDdS * 1000)} · R{r.last25AvgR.toFixed(1)}
               </span>
             </div>
           ))}
@@ -590,7 +590,7 @@ function ExitStrip({ stats }: { stats: LiveStats | null }) {
           const on = k === "hard" ? true : k === "lock" ? ex?.lockOn !== false : k === "peak" ? ex?.peakOn !== false : k === "rev" ? ex?.revOn !== false : ex?.timeOn !== false;
           return (
             <span key={k} className={ln?.active === false || !on ? "text-faint" : ln?.selected ? "text-primary" : "text-fg"}>
-              {k} {ln && ln.n > 0 ? ln.last15Ratio.toFixed(2) : on ? "on" : "off"}
+              {k} {ln && ln.n > 0 ? ln.last15Pf.toFixed(2) : on ? "on" : "off"}
             </span>
           );
         })}

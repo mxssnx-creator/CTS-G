@@ -196,7 +196,8 @@ export type LiveStats = {
     tpMode?: string;
     lastPick?: string;
     emits?: number;
-    last15Ratio?: number;
+    pf15?: number;
+    ratio?: number;
     last25AvgR?: number;
     last15N?: number;
     lanes?: Array<{
@@ -298,7 +299,7 @@ export type LiveStats = {
     wins: number;
     losses: number;
     sessionPnl: number;
-    pf: number;
+    pf: number | null;
     scanMs?: number;
     rssMb?: number;
     errors: number;
@@ -394,7 +395,6 @@ export type LiveStats = {
     avgR?: number;
     ratio?: number;
     pf?: number;
-    classicPf?: number;
     costPct?: number;
     netPct?: number;
     grossPct?: number;
@@ -488,8 +488,10 @@ export type LiveStats = {
       n: number;
       liveN: number;
       wins: number;
-      last15Ratio: number;
-      last15Classic: number;
+      pf: number;
+      gateN: number;
+      pf15: number;
+      ratio: number;
       last15N: number;
       last15R: number;
       last25AvgR: number;
@@ -501,7 +503,7 @@ export type LiveStats = {
       wr?: number;
       expectancy?: number;
       avgHoldS?: number;
-      classicPf?: number;
+      pfAll?: number;
       intern?: {
         pf15?: number;
         classic15?: number;
@@ -535,7 +537,8 @@ export type LiveStats = {
       key: string;
       n: number;
       wins: number;
-      last15Ratio: number;
+      ratio: number;
+      last15Pf: number;
       last25AvgR: number;
       maxDdS: number;
       active: boolean;
@@ -615,7 +618,7 @@ export function viewFromSnapshot(s: LiveStats, conn: string): LiveStats | null {
     symbolCount: lane.symbolCount ?? s.symbolCount,
     scanMs: lane.scanMs ?? s.scanMs,
     lastError: lane.lastError ?? s.lastError,
-    pf: lane.pf,
+    pf: lane.pf ?? undefined,
     progressPct: lane.progressPct ?? s.progressPct,
     progressPhase: lane.progressPhase ?? s.progressPhase,
     progressDetail: lane.progressDetail ?? s.progressDetail,

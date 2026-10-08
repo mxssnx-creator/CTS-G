@@ -112,7 +112,7 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "gl": round(gl, 6),
         "net": round(gp - gl, 6),
         "pf": round(float(cost["pf"]) if cost.get("count") else 1.0, 4),   # 0.0 is a real PF; 1.0 only when no closes
-        "classicPf": round(classic, 4),
+        "pfUsdt": round(classic, 4),          # gross PF on the row pnl (USDT field): display only, not the decision PF
         "gpNetCost": round(gp_net, 6),
         "glNetCost": round(gl_net, 6),
         "netAfterCost": round(gp_net - gl_net, 6),
@@ -120,7 +120,6 @@ def pf_window(rows: Sequence[Dict[str, Any]], n: Optional[int], cost_pct: float)
         "avgHoldS": round(sum(holds) / len(holds), 1) if holds else 0.0,
         "costRatio": cost.get("ratio"),
         "avgR": cost.get("avgR"),
-        "classicPfCost": cost.get("classicPf"),
         "costPct": cost_pct,
         "scale": "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost",
     }
@@ -229,9 +228,10 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             "wr": r.get("wr"),
             "expectancyNetCost": r.get("expectancy"),
             "avgHoldS": r.get("avgHoldS"),
-            "classicPf": r.get("classicPf"),
-            "last15Ratio": r.get("last15Ratio"),
-            "last15Classic": r.get("last15Classic"),
+            "pf": r.get("pf"),
+            "gateN": r.get("gateN"),
+            "pf15": r.get("pf15"),
+            "ratio": r.get("ratio"),
             "last15R": r.get("last15R"),
             "last25AvgR": r.get("last25AvgR"),
             "last25AvgPnl": r.get("last25AvgPnl"),
@@ -309,7 +309,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
             {
                 "id": r.get("id"),
                 "pack": r.get("pack"),
-                "last15Ratio": r.get("last15Ratio"),
+                "pf15": r.get("pf15"),
                 "last25AvgR": r.get("last25AvgR"),
                 "maxDdS": r.get("maxDdS"),
                 "n": r.get("n"),
@@ -317,7 +317,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
                 "active": r.get("active"),
                 "deactReason": r.get("deactReason"),
             }
-            for r in sorted(rows, key=lambda x: (-float(x.get("last15Ratio") or 0), float(x.get("maxDdS") or 0)))[:12]
+            for r in sorted(rows, key=lambda x: (-float(x.get("pf15") or 0), float(x.get("maxDdS") or 0)))[:12]
         ],
         "exits": exits.get("lanes"),
         "exitRevOn": exits.get("revOn"),
@@ -382,7 +382,7 @@ def render_md(blob: Dict[str, Any]) -> str:
         "",
         "## PositionCost accounting",
         f"- Cost **{(blob.get('costAccounting') or {}).get('positionCostPct')}%** (frac {(blob.get('costAccounting') or {}).get('costFrac')})",
-        f"- Last15 cost-PF **{pc.get('ratio')}** avgR {pc.get('avgR')} classic {pc.get('classicPf')} pass={(blob.get('costAccounting') or {}).get('pass')} min={(blob.get('costAccounting') or {}).get('minPf')}",
+        f"- Last15 cost-PF **{pc.get('pf')}** avgR {pc.get('avgR')} ratio {pc.get('ratio')} pass={(blob.get('costAccounting') or {}).get('pass')} min={(blob.get('costAccounting') or {}).get('minPf')}",
         f"- Rule: {(blob.get('costAccounting') or {}).get('rule')}",
         "",
         "## Profit factor (USDT, PositionCost deducted)",
@@ -411,9 +411,9 @@ def render_md(blob: Dict[str, Any]) -> str:
         )
     lines += ["", "## Independent Sets (intern, cost deducted)", ""]
     lines.append(f"active {blob.get('setActive')}/{blob.get('setCount')} · hist fills {blob.get('histFills')} · minStep {blob.get('setMinStep')}-{blob.get('setStepMax')}")
-    for r in sorted(sets, key=lambda x: (-float(x.get("last15Ratio") or 0), float(x.get("maxDdS") or 0)))[:20]:
+    for r in sorted(sets, key=lambda x: (-float(x.get("pf15") or 0), float(x.get("maxDdS") or 0)))[:20]:
         lines.append(
-            f"- `{r.get('id')}` PF15={r.get('last15Ratio')} R25={r.get('last25AvgR')} WR={r.get('wr')} E={r.get('expectancyNetCost')} hold={r.get('avgHoldS')}s maxDDt={r.get('maxDdS')}s n={r.get('n')}+{r.get('liveN')} on={r.get('active')} {r.get('deactReason') or ''}"
+            f"- `{r.get('id')}` PF15={r.get('pf15')} R25={r.get('last25AvgR')} WR={r.get('wr')} E={r.get('expectancyNetCost')} hold={r.get('avgHoldS')}s maxDDt={r.get('maxDdS')}s n={r.get('n')}+{r.get('liveN')} on={r.get('active')} {r.get('deactReason') or ''}"
         )
     lines += ["", "## Coverage", ""]
     cov = blob.get("coverage") or {}
@@ -439,10 +439,10 @@ def render_md(blob: Dict[str, Any]) -> str:
             lines.append(f"  count {c.get('n')} inc={c.get('inc')} minPF={c.get('minPF')} obsPF={c.get('obsPF')} pass={c.get('pass')} paused={c.get('paused')}")
     lines += ["", "## DCA", ""]
     dca = blob.get("dca") or {}
-    lines.append(f"enabled={dca.get('enabled')} steps={dca.get('maxSteps')} dist={dca.get('distances')} last15={dca.get('last15Ratio')} active={dca.get('active')}")
+    lines.append(f"enabled={dca.get('enabled')} steps={dca.get('maxSteps')} dist={dca.get('distances')} last15={dca.get('pf15')} active={dca.get('active')}")
     lines += ["", "## Exits", ""]
     for ln in blob.get("exits") or []:
-        lines.append(f"- {ln.get('key')} n={ln.get('n')} wins={ln.get('wins')} PF15={ln.get('last15Ratio')} active={ln.get('active')}")
+        lines.append(f"- {ln.get('key')} n={ln.get('n')} wins={ln.get('wins')} PF15={ln.get('last15Pf')} active={ln.get('active')}")
     lines += ["", "## Coverage / QA", ""]
     cov = blob.get("coverage") or {}
     lines.append(f"wsOk={cov.get('wsOk')} px={cov.get('px')} QA {cov.get('qaPass')}P/{cov.get('qaFail')}F controlsMissing={cov.get('controlsMissing')}")

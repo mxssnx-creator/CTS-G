@@ -282,8 +282,8 @@ class VariantBook:
             key="",
             n=len(rows),
             wins=wins,
-            pf=round(pf, 3),
-            ratio=float(cost["pf"]) if rows else 1.0,
+            pf=round(pf, 4),                 # the decision PF: the engine's 4 dp, not a second rounding
+            ratio=float(cost["ratio"]) if rows else 1.0,   # display only; selection below sorts by pf
             expectancy=round(exp, 5),
             avg_hold=round(hold, 1),
         )
@@ -292,7 +292,7 @@ class VariantBook:
         ready = [s for s in scores if s.in_range and s.n >= min_n]
         if not ready:
             return current, "cold"
-        ready.sort(key=lambda s: (s.ratio, s.expectancy, s.n), reverse=True)
+        ready.sort(key=lambda s: (s.pf, s.expectancy, s.n), reverse=True)   # the decision metric is the PF
         best = ready[0]
         if best.key == current:
             return current, "hold"
@@ -448,7 +448,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     zb = VariantBook()
     losers = [{"pnl": -0.002, "pnl_pct": -0.0005, "hold_s": 20}] * 4
     zs = zb._score_rows(losers, 0.15)
-    out.append(("var-zero-pf", zs.pf == 0.0 and zs.ratio == 0.0 and zs.pf == last_n_cost_pf(losers, 4, 0.15)["pf"], f"pf={zs.pf} ratio={zs.ratio}"))
+    want = last_n_cost_pf(losers, 4, 0.15)
+    out.append(("var-zero-pf", zs.pf == 0.0 and zs.pf == want["pf"] and zs.ratio == want["ratio"], f"pf={zs.pf} ratio={zs.ratio} want_ratio={want['ratio']}"))
     # R13: a close is stored as a net fraction, never the USDT field; a close without pnl_pct is skipped
     zb.on_close({"pnl": 5.0, "pnl_pct": 0.004, "hold_s": 20, "sl_ratio": 0.6, "trail_key": "0.3:0.1"})
     stored = [r for rows in zb.sl_rows.values() for r in rows]
