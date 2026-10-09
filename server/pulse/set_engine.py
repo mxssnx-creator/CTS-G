@@ -715,7 +715,11 @@ class SetBook:
         self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
-        self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
+        if ov.get("timeStopS") is not None:
+            # the live time stop, in bars: replay and simulator hold for the same time (6 h = 360 bars)
+            self.hist_time_bars = max(8, min(720, int(round(self.time_stop_s / BAR_S))))
+        else:
+            self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
         self.scratch_s = float(ov.get("scratchS") or 90)
         tp = float(ov.get("tpPct") or 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent

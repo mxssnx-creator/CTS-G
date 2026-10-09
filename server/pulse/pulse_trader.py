@@ -5006,7 +5006,10 @@ class Pulse:
                 self._pre_pause_halt = self.halt_reason
             self.halted = True
             self.halt_reason = "stopped"
+            self.refresh_tickers()
+            self.seed_px_bars()
             self.priority_controls()
+            self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
             self.write_stats(force=True)
             self.wake_ev.clear()
             self.wake_ev.wait(timeout=0.4)

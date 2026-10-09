@@ -295,10 +295,11 @@ def _apply_control_locked(conn: str, action: str) -> tuple:
             notes.append(f"{cid} start rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
         elif action == "stop":
             _unlink(pause)
+            # stop only halts new entries (the STOP file). The process keeps managing open positions, so its local
+            # SL, TP, trail and time exits keep running. Killing the service left them unmanaged.
             _touch(stop)
-            rc, out = _sysctl("stop", unit)
             st = unit_state(cid, fresh=True)
-            notes.append(f"{cid} stop rc={rc} state={st}" + ("" if rc == 0 else f" {out[:80]}"))
+            notes.append(f"{cid} stop (entries halted, exits still managed) state={st}")
     return True, "; ".join(notes)
 
 

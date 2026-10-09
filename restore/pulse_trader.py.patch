@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..75cc01c 100644
+index b3a9ff3..f1aa260 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -405,9 +405,14 @@ index b3a9ff3..75cc01c 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4904,7 +5008,8 @@ class Pulse:
+@@ -4902,9 +5006,13 @@ class Pulse:
+                 self._pre_pause_halt = self.halt_reason
+             self.halted = True
              self.halt_reason = "stopped"
++            self.refresh_tickers()
++            self.seed_px_bars()
              self.priority_controls()
++            self.manage()   # open positions keep their local SL, TP, trail and time exits while stopped
              self.write_stats(force=True)
 -            time.sleep(0.4)
 +            self.wake_ev.clear()
@@ -415,7 +420,7 @@ index b3a9ff3..75cc01c 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5021,17 @@ class Pulse:
+@@ -4916,11 +5024,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -434,7 +439,7 @@ index b3a9ff3..75cc01c 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5112,8 @@ class Pulse:
+@@ -5001,6 +5115,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -443,7 +448,7 @@ index b3a9ff3..75cc01c 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5086,6 +5199,13 @@ def seed_overlay() -> None:
+@@ -5086,6 +5202,13 @@ def seed_overlay() -> None:
              pass
  
  
@@ -457,7 +462,7 @@ index b3a9ff3..75cc01c 100644
  def main() -> None:
      global BASE
      os.makedirs(DIR, exist_ok=True)
-@@ -5094,11 +5214,11 @@ def main() -> None:
+@@ -5094,11 +5217,11 @@ def main() -> None:
      secret = redis_hget("api_secret")
      if not key or not secret:
          raise SystemExit(f"missing {CONN_SHORT} credentials")
