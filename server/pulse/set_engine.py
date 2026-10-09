@@ -428,6 +428,7 @@ class SetState:
     dd_episodes: int = 0
     last_error: str = ""            # last replay/score failure for this Set; cleared on the next clean pass
     n: int = 0
+    live_n: int = 0                  # live closes accepted for this Set; n = replayed fills + live_n
     wins: int = 0
     gp: float = 0.0
     gl: float = 0.0
@@ -1047,6 +1048,7 @@ class SetBook:
             st.live.append(row)
             st.live = st.live[-80:]
             st.n += 1
+            st.live_n += 1
             self._score_one(st, now=row["t"] or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
@@ -1138,7 +1140,7 @@ class SetBook:
                         st.hist = full[-max(40, self.gate_window):]
                         st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
-                        st.n = len(full)
+                        st.n = len(full) + st.live_n   # a replay pass recounts history; live closes stay counted
                     except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
                         st.last_error = f"{type(exc).__name__}: {exc}"[:160]
                         st.deact_reason = "error"

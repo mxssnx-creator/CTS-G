@@ -290,7 +290,24 @@ def live_dedupe_and_history_rows_stay_bounded():
                 f"history rows {rows_before} -> {rows_after} after a second replay")
 
 
+def live_close_stays_counted_through_a_replay():
+    """A replay pass recounts the history it replays. A live close accepted before the pass must still be in the
+    Set's fill count afterwards: n is replayed fills plus live closes."""
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    st = b.by_idx[0]
+    before = st.n
+    b.on_live_close({"set_id": st.id, "t": T0 + 5000, "symbol": "L-USDT", "side": "LONG", "pnl": 0.25,
+                     "pnl_pct": 0.0025, "hold_s": 60, "reason": "tp", "client_id": "cid-count-1"})
+    after_live = st.n
+    b.replay_all(now=T0)
+    after_replay = st.n
+    ok = after_live == before + 1 and after_replay == before + 1 and st.live_n == 1
+    return ok, f"n before={before} after live close={after_live} after replay={after_replay} live_n={st.live_n}"
+
+
 CHECKS = [
+    ("processing.live-close-stays-counted-through-replay", live_close_stays_counted_through_a_replay),
     ("processing.live-dedupe-and-history-bounded", live_dedupe_and_history_rows_stay_bounded),
     ("processing.all-sets-processed-full-grid", memo.memoized(every_set_processed_full_grid)),
     ("processing.ingest-keeps-history-on-live-refresh", ingest_keeps_history_on_live_refresh),

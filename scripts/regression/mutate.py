@@ -115,6 +115,8 @@ MUTATIONS = [
      '                        nbar[0] += 1\n                        sd_notify("WATCHDOG=1")\n                        time.sleep(0)'),
     ("bounds: the live dedupe keeps every key",
      "set_engine.py", "            while len(self._live_seen) > LIVE_SEEN_MAX:", "            while False:"),
+    ("counts: a replay pass drops the live closes from the Set's count",
+     "set_engine.py", "                        st.n = len(full) + st.live_n", "                        st.n = len(full)"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]
