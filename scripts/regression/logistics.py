@@ -337,7 +337,21 @@ def zero_is_a_value_not_a_default():
     return ok, f"zero_kept={[k for k, v in zero.items() if v]} failed={[k for k, v in zero.items() if not v]} default_ok={missing_default}"
 
 
+def node_floor_covers_vite_and_nitro():
+    """The Vercel build runs on whatever Node the project selects. Vite and nitro need ^20.19 or >=22.12, so the
+    package declares a floor that satisfies both, and the floor is not lower than 22.12."""
+    pkg = json.load(open(os.path.join(ROOT, "package.json"), encoding="utf-8"))
+    floor = str((pkg.get("engines") or {}).get("node") or "")
+    m = re.fullmatch(r">=\s*(\d+)\.(\d+)", floor.strip())
+    if not m:
+        return False, f"engines.node is {floor!r}, expected a >= floor"
+    major, minor = int(m.group(1)), int(m.group(2))
+    ok = (major, minor) >= (22, 12)
+    return ok, f"engines.node={floor!r}"
+
+
 CHECKS = [
+    ("logistics.node-floor-covers-vite-and-nitro", node_floor_covers_vite_and_nitro),
     ("logistics.zero-is-a-value-not-a-default", zero_is_a_value_not_a_default),
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
