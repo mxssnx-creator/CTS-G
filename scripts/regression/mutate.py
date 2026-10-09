@@ -113,6 +113,8 @@ MUTATIONS = [
     ("trader: a background thread pings the watchdog",
      "pulse_trader.py", '                        nbar[0] += 1\n                        time.sleep(0)',
      '                        nbar[0] += 1\n                        sd_notify("WATCHDOG=1")\n                        time.sleep(0)'),
+    ("bounds: the live dedupe keeps every key",
+     "set_engine.py", "            while len(self._live_seen) > LIVE_SEEN_MAX:", "            while False:"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

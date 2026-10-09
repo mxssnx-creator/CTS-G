@@ -54,6 +54,8 @@ IND_WINDOW_BARS = 300        # indication pack: 15m lane needs 20 candles = 300 
 DEACT_N_DEFAULT = 25
 PF_N_DEFAULT = 15
 LOOKBACK_DEFAULT = 1920          # 32 h of 1m bars (systemwide default; was 960 = 16 h)
+# dedupe keys kept for live closes: a close re-delivered after this many newer closes is counted again
+LIVE_SEEN_MAX = 20000
 GATE_WINDOW_DEFAULT = 50        # gate PF over each Set's last N closed orders
 GATE_MIN_DEFAULT = 30           # fewer orders than this: not judged, not eligible
 WARMUP_DEFAULT = 30
@@ -714,7 +716,7 @@ class SetBook:
         self.last_run = 0.0
         self.ind_settings: Dict[str, Any] = {}
         self.locks: Dict[str, bool] = {}
-        self._live_seen: set = set()
+        self._live_seen: Dict[str, None] = {}   # insertion-ordered: the oldest keys are evicted past LIVE_SEEN_MAX
         self.live_skipped = 0
         self.live_unmatched = 0            # live closes whose Set is neither on the grid nor retired
         self.retired: Dict[str, SetState] = {}   # Sets that left the grid (step-adapt): tape kept, never picked
@@ -1039,7 +1041,9 @@ class SetBook:
             key = self._live_key(st.id, row)
             if key in self._live_seen:
                 continue
-            self._live_seen.add(key)
+            self._live_seen[key] = None
+            while len(self._live_seen) > LIVE_SEEN_MAX:
+                self._live_seen.pop(next(iter(self._live_seen)))
             st.live.append(row)
             st.live = st.live[-80:]
             st.n += 1

@@ -260,7 +260,38 @@ def ingest_keeps_history_on_live_refresh():
     return repeat_ok and joined, f"len={len(b.bars[sym])} repeat_ok={repeat_ok} joined={joined} lookback={b.lookback}"
 
 
+def live_dedupe_and_history_rows_stay_bounded():
+    """The live close dedupe keeps a fixed window of keys (the oldest are evicted), and the history rows do not grow
+    when the same bars are replayed again: a refresh replaces them, it does not add to them."""
+    import set_engine as se
+    b = _book(n_syms=2, bars=600, **SMALL)
+    b.replay_all(now=T0)
+    rows_before = sum(len(v) for per in b._hist_rows.values() for v in per.values())
+    b.replay_all(now=T0)
+    rows_after = sum(len(v) for per in b._hist_rows.values() for v in per.values())
+    saved = se.LIVE_SEEN_MAX
+    try:
+        se.LIVE_SEEN_MAX = 50
+        st = b.by_idx[0]
+        base = st.n                              # counts accepted closes; st.live itself is trimmed to 80
+        for k in range(200):
+            b.on_live_close({"set_id": st.id, "t": T0 + 9000 + k, "symbol": "M-USDT", "side": "LONG",
+                             "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": f"bound-{k}"})
+        keys = len(b._live_seen)
+        added = st.n - base
+        last = {"set_id": st.id, "t": T0 + 9000 + 199, "symbol": "M-USDT", "side": "LONG",
+                "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "bound-199"}
+        b.on_live_close(dict(last))              # a recent duplicate is still refused
+        dup_added = st.n - base - added
+    finally:
+        se.LIVE_SEEN_MAX = saved
+    ok = keys <= 50 and added == 200 and dup_added == 0 and rows_after == rows_before and rows_before > 0
+    return ok, (f"dedupe keys={keys} (max 50) closes added={added}/200 recent duplicate added={dup_added}; "
+                f"history rows {rows_before} -> {rows_after} after a second replay")
+
+
 CHECKS = [
+    ("processing.live-dedupe-and-history-bounded", live_dedupe_and_history_rows_stay_bounded),
     ("processing.all-sets-processed-full-grid", memo.memoized(every_set_processed_full_grid)),
     ("processing.ingest-keeps-history-on-live-refresh", ingest_keeps_history_on_live_refresh),
     ("processing.trades-produced", memo.memoized(trades_produced_and_positive_signal)),
