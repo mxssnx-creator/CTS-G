@@ -132,7 +132,7 @@ class ExitBook:
         self.min_hold_s = num(ov, "exitMinHoldS", 45)
         self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))   # one clamp, desk minimum 30 s
         self.scratch_s = num(ov, "scratchS", 600)
-        self.scratch_min = pct_to_frac(num(ov, ("scratchMin", "scratchMinPct"), 0.25))
+        self.scratch_min = pct_to_frac(num(ov, ("scratchMin", "scratchMinPct"), 0.16))
         self.trail_min_step = num(ov, "trailingMinStep", 6)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))

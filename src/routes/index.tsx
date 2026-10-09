@@ -25,6 +25,7 @@ import {
 import { CoverageBar } from "@/components/coverage-overview";
 import type { ConnType } from "@/lib/connections";
 import { createPoller } from "@/lib/poll";
+import { DEFAULT_OVERLAY } from "@/lib/config-model";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
@@ -398,7 +399,7 @@ function CoordStrip({ stats }: { stats: LiveStats | null }) {
   const gate = c?.gate;
   const allow = gate?.allow !== false;
   const pc = stats?.pfCost;
-  const minPf = pc?.minPf ?? c?.minPf ?? 1.1;
+  const minPf = pc?.minPf ?? c?.minPf ?? DEFAULT_OVERLAY.minPf;
   const cost = pc?.costPct ?? 0.15;
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg2 px-3 py-2 font-mono text-xs">
@@ -512,7 +513,7 @@ function SetsStrip({ stats }: { stats: LiveStats | null }) {
           {stats?.detailType ? ` · from ${stats.detailType}` : ""}
         </span>
         <span className="text-muted">
-          last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? 480}
+          last15 PF · max DDt · last{s?.deactN ?? 25} R · 1m×{s?.lookback ?? DEFAULT_OVERLAY.histLookbackBars}
         </span>
       </div>
       {lanes.length > 1 ? (

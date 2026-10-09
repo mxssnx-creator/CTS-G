@@ -76,6 +76,10 @@ MUTATIONS = [
     ("sidecar: mutating POST accepted without the token",
      "pulse_http.py", "            if not _token_ok(self.headers.get(\"X-Pulse-Token\", \"\")):",
      "            if False:"),
+    ("defaults: exit book scratchMin absent default drifts from the trader",
+     "exit_engine.py", "(\"scratchMin\", \"scratchMinPct\"), 0.16))", "(\"scratchMin\", \"scratchMinPct\"), 0.25))"),
+    ("defaults: coordinator minStep constructor differs from its loaded default",
+     "coord_engine.py", "        self.min_step = 6\n", "        self.min_step = 8\n"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

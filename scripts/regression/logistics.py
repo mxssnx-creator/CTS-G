@@ -70,6 +70,123 @@ def desk_defaults_equal_shipped_overlay():
     return ok, f"checked={len(checked)} drift={drift}" if drift else f"{len(checked)} shared numeric defaults equal the shipped overlay"
 
 
+def _ts_default(raw):
+    """A single-line TypeScript default: bool, number, numeric list, string, or GATE_MIN_PF_DEFAULT. None if unparsed."""
+    raw = raw.strip().rstrip(",").strip()
+    if raw in ("true", "false"):
+        return raw == "true"
+    if raw == "GATE_MIN_PF_DEFAULT":
+        return 1.1
+    if raw.startswith("["):
+        inner = raw.strip("[]").strip()
+        try:
+            return [float(x) for x in inner.split(",")] if inner else []
+        except ValueError:
+            return None
+    if raw.startswith('"'):
+        return raw.strip('"')
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+# A desk default that differs from the shipped overlay on purpose. Each one names its decision.
+DESK_DEFAULT_EXCEPTIONS = {
+    "symbolsAll": "decision H (answered): the desk pre-load matches the engine absent default (non-wild); the shipped files set true",
+}
+
+
+def desk_default_overlay_equals_shipped_x01():
+    """Every single-line DEFAULT_OVERLAY key that the shipped x01 overlay defines has the same value there.
+
+    The desk shows these as the value before a config loads. A difference here is a number the operator reads that the
+    live config does not run (decision D1: the engine and the shipped overlay are the reference).
+    """
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    block = src[start:src.index("\n};", start)]
+    shipped = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))
+    drift, checked, excepted = [], 0, []
+    for m in re.finditer(r"^  ([A-Za-z0-9]+): (.+?),?$", block, re.M):
+        key, raw = m.group(1), m.group(2)
+        if key not in shipped or raw.strip().endswith("["):   # a multi-line value is compared by its own test
+            continue
+        want = _ts_default(raw)
+        if want is None:
+            continue
+        checked += 1
+        have = shipped[key]
+        if isinstance(want, bool) or isinstance(have, bool) or isinstance(want, str) or isinstance(have, str):
+            same = want == have
+        elif isinstance(want, list) or isinstance(have, list):
+            same = isinstance(want, list) and isinstance(have, list) and len(want) == len(have) and all(
+                abs(float(a) - float(b)) <= 1e-9 for a, b in zip(want, have))
+        else:
+            same = abs(float(want) - float(have)) <= 1e-9
+        if not same and key in DESK_DEFAULT_EXCEPTIONS:
+            excepted.append(key)
+            continue
+        if not same:
+            drift.append(f"{key}: desk={raw.strip()} shipped={have}")
+    ok = not drift and checked >= 20
+    note = f" ({len(excepted)} documented exception: {', '.join(excepted)})" if excepted else ""
+    return ok, f"checked={checked} drift={drift}" if drift else f"{checked} single-line DEFAULT_OVERLAY keys equal the shipped x01 overlay{note}"
+
+
+def desk_symbols_equal_engine_fixed_list():
+    """The desk's default symbol list is the engine's fixed SYMBOLS list (the value when symbolsAll is off)."""
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    desk = re.search(r"^  symbols: \[(.*?)\],", src[start:], re.M | re.S)
+    engine = re.search(r"^SYMBOLS = \[(.*?)\]", open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read(), re.M | re.S)
+    if not (desk and engine):
+        return False, "symbols list not found on one side"
+    want = re.findall(r'"([A-Z0-9-]+)"', engine.group(1))
+    have = re.findall(r'"([A-Z0-9-]+)"', desk.group(1))
+    return want == have, f"desk={len(have)} engine={len(want)} equal={want == have}"
+
+
+def desk_cards_read_effective_overlay():
+    """No desk card reads an overlay key from runtime cts data: the card must show the value the config runs."""
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    keys = set(re.findall(r"^  ([A-Za-z0-9]+): ", src[start:src.index("\n};", start)], re.M))
+    root = os.path.join(ROOT, "src", "routes")
+    hits = []
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".tsx"):
+            continue
+        text = open(os.path.join(root, name), encoding="utf-8").read()
+        for m in re.finditer(r"\bcts\??\.([A-Za-z0-9_]+)", text):
+            if m.group(1) in keys:
+                line = text.count("\n", 0, m.start()) + 1
+                hits.append(f"{name}:{line} cts.{m.group(1)}")
+    return not hits, f"runtime cts reads of overlay keys: {hits}" if hits else f"no card reads an overlay key from cts ({len(keys)} keys checked)"
+
+
+def engine_absent_defaults_agree():
+    """Engines that read the same key agree on its absent default: scratchMin (exit book and trader) and minStep
+    (coordinator constructor and its loaded default)."""
+    exit_src = open(os.path.join(PULSE, "exit_engine.py"), encoding="utf-8").read()
+    trader = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    coord = open(os.path.join(PULSE, "coord_engine.py"), encoding="utf-8").read()
+    exit_scratch = re.search(r'"scratchMin", "scratchMinPct"\), ([0-9.]+)\)', exit_src)
+    trader_scratch = re.search(r"^SCRATCH_MIN = ([0-9.]+)", trader, re.M)
+    coord_init = re.search(r"^        self\.min_step = ([0-9]+)$", coord, re.M)
+    coord_load = re.search(r'int\(ov\.get\("minStep"\) or coord\.get\("minStep"\) or ([0-9]+)\)', coord)
+    problems = []
+    exit_scratch_s = re.search(r'"scratchS", ([0-9.]+)\)', exit_src)
+    set_scratch_s = re.search(r'self\.scratch_s = num\(ov, "scratchS", ([0-9.]+)\)', open(os.path.join(PULSE, "set_engine.py"), encoding="utf-8").read())
+    if not (exit_scratch_s and set_scratch_s and exit_scratch_s.group(1) == set_scratch_s.group(1)):
+        problems.append(f"scratchS exit={exit_scratch_s and exit_scratch_s.group(1)} set={set_scratch_s and set_scratch_s.group(1)}")
+    if not (exit_scratch and trader_scratch and abs(float(exit_scratch.group(1)) - float(trader_scratch.group(1)) * 100) < 1e-9):
+        problems.append(f"scratchMin exit={exit_scratch and exit_scratch.group(1)} trader={trader_scratch and trader_scratch.group(1)}")
+    if not (coord_init and coord_load and coord_init.group(1) == coord_load.group(1)):
+        problems.append(f"minStep init={coord_init and coord_init.group(1)} load={coord_load and coord_load.group(1)}")
+    return not problems, f"problems={problems}" if problems else "absent defaults agree: scratchMin 0.16%, minStep 6"
+
+
 def dca_is_off_everywhere():
     dca_src = open(os.path.join(PULSE, "dca_engine.py"), encoding="utf-8").read()
     mod_src = open(os.path.join(PULSE, "modules.py"), encoding="utf-8").read()
@@ -225,6 +342,10 @@ CHECKS = [
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
     ("logistics.desk-defaults-equal-shipped-overlay", desk_defaults_equal_shipped_overlay),
+    ("logistics.desk-default-overlay-equals-shipped-x01", desk_default_overlay_equals_shipped_x01),
+    ("logistics.desk-symbols-equal-engine-fixed-list", desk_symbols_equal_engine_fixed_list),
+    ("logistics.desk-cards-read-effective-overlay", desk_cards_read_effective_overlay),
+    ("logistics.engine-absent-defaults-agree", engine_absent_defaults_agree),
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),

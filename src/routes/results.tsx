@@ -7,7 +7,7 @@ import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import { derive } from "@/lib/derive-stats";
 import { buildOverview, formatDuration } from "@/lib/analytics";
 import { StatsOverview } from "@/components/stats-overview";
-import { GATE_MIN_PF_DEFAULT } from "@/lib/config-model";
+import { DEFAULT_OVERLAY, GATE_MIN_PF_DEFAULT } from "@/lib/config-model";
 import { CoveragePanel } from "@/components/coverage-overview";
 import { EquityArea, SymbolBars, TradeBars } from "@/components/visual-stats";
 
@@ -80,7 +80,7 @@ function ResultsPage() {
         <Hero
           k="PF after cost"
           v={(stats?.pfCost?.pf ?? stats?.profitFactor ?? 1).toFixed(2)}
-          s={`1.00=neutral · 1.10=+1×cost · min ${stats?.pfCost?.minPf ?? 1.1} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
+          s={`1.00=neutral · 1.10=+1×cost · min ${stats?.pfCost?.minPf ?? DEFAULT_OVERLAY.minPf} · ${stats?.pfCost?.pass ? "pass" : "gate"}`}
         />
       </section>
 

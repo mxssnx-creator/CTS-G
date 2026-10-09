@@ -740,7 +740,7 @@ class SetBook:
             self.hist_time_bars = max(8, min(720, int(round(self.time_stop_s / BAR_S))))
         else:
             self.hist_time_bars = max(8, min(120, num(ov, "setHistTimeBars", 45, int)))
-        self.scratch_s = num(ov, "scratchS", 90)
+        self.scratch_s = num(ov, "scratchS", 600)
         tp = num(ov, "tpPct", 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))

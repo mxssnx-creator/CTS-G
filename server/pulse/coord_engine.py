@@ -67,7 +67,7 @@ class Coordinator:
         self.main_eval = 5
         self.min_samples = 12
         self.real_eval = 3
-        self.min_step = 8
+        self.min_step = 6
         self.max_sl_ratio = 2.5
         self.trailing_min_step = 6
         self.pos_count_vol_ratio = 0.05

@@ -423,7 +423,7 @@ function SettingsPage() {
           {section === "sets" && (
             <Card
               title="Independent Sets · 1m historic"
-              hint="Each pack × SL:TP × TP-step (3–22 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
+              hint="Each pack × SL:TP × TP-step (2–30 × position cost) is its own book. Sets below Minimal Step Range are not calculated. Live losses raise min step to the count of positive/successful fills."
             >
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
@@ -640,8 +640,8 @@ function SettingsPage() {
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
                 <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
                 <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
-                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 6))} />
-                <KV k="Trailing min step" v={String(num(cts?.trailingMinStep ?? cts?.trailMinStep, 3))} />
+                <KV k="Min step" v={String(overlay.minStep)} />
+                <KV k="Trailing min step" v={String(overlay.trailingMinStep)} />
               </Grid>
             </Card>
           )}
@@ -953,7 +953,7 @@ function SettingsPage() {
               </div>
               <p className="mt-3 font-mono text-xs text-muted">Step distances % from average entry</p>
               <Grid>
-                {(overlay.dcaStepDistancesPct || [0.5, 1, 1.5, 2]).slice(0, overlay.dcaMaxSteps || 4).map((d, i) => (
+                {(overlay.dcaStepDistancesPct || [0.5, 1, 1.5, 2]).slice(0, overlay.dcaMaxSteps || undefined).map((d, i) => (
                   <Num
                     key={`dist-${i}`}
                     label={`Distance #${i + 1}`}
@@ -972,7 +972,7 @@ function SettingsPage() {
               </Grid>
               <p className="mt-3 font-mono text-xs text-muted">Volume multipliers vs parent</p>
               <Grid>
-                {(overlay.dcaStepVolumeMultipliers || [1.5, 2, 2.3, 2.5]).slice(0, overlay.dcaMaxSteps || 4).map((m, i) => (
+                {(overlay.dcaStepVolumeMultipliers || [1.5, 2, 2.3, 2.5]).slice(0, overlay.dcaMaxSteps || undefined).map((m, i) => (
                   <Num
                     key={`mult-${i}`}
                     label={`Vol × #${i + 1}`}
@@ -1080,8 +1080,8 @@ function SettingsPage() {
                 <KV k="Preset volume factor" v={String(num(cts?.volume_factor_preset, 1))} />
                 <KV k="Signal volume factor" v={String(num(cts?.volume_factor_signal, 1))} />
                 <KV k="Volume step ratio" v={String(num(cts?.volume_step_ratio, 0.6))} />
-                <KV k="Pos-count volume ratio" v={String(num(cts?.posCountsVolumeRatio, 0.05))} />
-                <KV k="Exchange position cost" v={String(num(cts?.exchangePositionCost ?? cts?.positionCost, 0.1))} />
+                <KV k="Pos-count volume ratio" v={String(overlay.posCountsVolumeRatio)} />
+                <KV k="Exchange position cost" v={String(overlay.positionCostPct)} />
                 <Slider
                   label="Volume factor"
                   value={overlay.volumeFactor ?? 1}
@@ -1180,9 +1180,9 @@ function SettingsPage() {
                 <Num label="Max per group" value={overlay.maxPerGroup} min={0} max={10000} step={1} hint="0 = unlimited" onChange={(v) => patch("maxPerGroup", v)} />
                 <Num label="Cycle s" value={overlay.scanS} min={0.2} max={8} step={0.05} onChange={(v) => patch("scanS", v)} />
                 <Num label="Cooldown s" value={overlay.cooldownS} min={0} max={60} step={1} onChange={(v) => patch("cooldownS", v)} />
-                <Num label="Stagger s" value={overlay.staggerS} min={0.2} max={5} step={0.1} onChange={(v) => patch("staggerS", v)} />
+                <Num label="Stagger s" value={overlay.staggerS} min={0.05} max={5} step={0.01} onChange={(v) => patch("staggerS", v)} />
                 <Num label="Max hold s" value={overlay.timeStopS} min={60} max={21600} step={60} hint="hard cap 6h" onChange={(v) => patch("timeStopS", v)} />
-                <Num label="Scratch s" value={overlay.scratchS} min={20} max={300} step={5} onChange={(v) => patch("scratchS", v)} />
+                <Num label="Scratch s" value={overlay.scratchS} min={20} max={1800} step={5} onChange={(v) => patch("scratchS", v)} />
                 <Num label="Scratch min %" value={overlay.scratchMinPct} min={0.05} max={1} step={0.01} onChange={(v) => patch("scratchMinPct", v)} />
               </Grid>
             </Card>
