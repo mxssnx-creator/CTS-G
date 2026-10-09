@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..ffc2c27 100644
+index b3a9ff3..b9f054d 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -273,7 +273,16 @@ index b3a9ff3..ffc2c27 100644
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3116,7 +3193,7 @@ class Pulse:
+@@ -3088,6 +3165,8 @@ class Pulse:
+         self.coord.load(cts, ov)
+         self.indications.load(ov)
+         self.sets.load(ov, cts)
++        # live: a Set is valid only while its evaluation is at most two refresh intervals old (no sticky state)
++        self.sets.fresh_s = 2.0 * self.sets.refresh_s
+         self.exits.load(ov, cts)
+         self.dca.load(ov, cts)
+         if initial:
+@@ -3116,7 +3195,7 @@ class Pulse:
          else:
              self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
              self.strat_ind = True
@@ -282,16 +291,22 @@ index b3a9ff3..ffc2c27 100644
          if not self.mods.get("strategy.coord", True):
              for ax in self.coord.axes.values():
                  ax.enabled = False
-@@ -3249,7 +3326,7 @@ class Pulse:
+@@ -3249,12 +3328,9 @@ class Pulse:
              "setPfWindow": self.sets.pf_n,
              "setDeactN": self.sets.deact_n,
              "setMinPf": self.sets.min_pf,
 -            "setMaxDdTimeS": self.sets.max_dd_s,
+-            "setAutoDeact": self.sets.auto_deact,
 +            "setMaxDdtHours": self.sets.max_ddt_h,
-             "setAutoDeact": self.sets.auto_deact,
              "setUseHistoricGate": self.sets.use_historic_gate,
-             "setMinSamples": self.sets.min_samples,
-@@ -3349,17 +3426,16 @@ class Pulse:
+-            "setMinSamples": self.sets.min_samples,
+-            "setReactivate": self.sets.reactivate,
+-            "setMaxActive": self.sets.max_active,
++            "setMinSamples": self.coord.min_samples,
+             "exitEnabled": self.exits.enabled,
+             "exitIgnoreTp": self.exits.ignore_tp,
+             "exitBestOf": self.exits.best_of,
+@@ -3349,17 +3425,16 @@ class Pulse:
              if not lane or lane.base_qty <= 0:
                  continue
              # Parent still valid only if pulse score agrees with side (continuation).
@@ -313,7 +328,7 @@ index b3a9ff3..ffc2c27 100644
              d, why, conf = self.score(pos.symbol)
              same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
              if not same:
-@@ -3760,7 +3836,7 @@ class Pulse:
+@@ -3760,7 +3835,7 @@ class Pulse:
                      best_st = st
              if best_st:
                  intern_metrics = {
@@ -322,7 +337,7 @@ index b3a9ff3..ffc2c27 100644
                      "n": float(best_st.last15_n),
                      "pack": best_st.pack,
                  }
-@@ -3770,7 +3846,7 @@ class Pulse:
+@@ -3770,7 +3845,7 @@ class Pulse:
          if self.entries_blocked():
              self.priority_controls()
              return
@@ -331,7 +346,7 @@ index b3a9ff3..ffc2c27 100644
          ranked: List[Tuple[float, str, int, str]] = []
          best: Dict[str, Tuple[float, str, int, str]] = {}
          if self.strat_ind and bool(self.indications.settings.get("enabled")):
-@@ -3885,7 +3961,7 @@ class Pulse:
+@@ -3885,7 +3960,7 @@ class Pulse:
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -340,7 +355,7 @@ index b3a9ff3..ffc2c27 100644
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -4236,7 +4312,8 @@ class Pulse:
+@@ -4236,7 +4311,8 @@ class Pulse:
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -350,7 +365,7 @@ index b3a9ff3..ffc2c27 100644
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4270,13 +4347,13 @@ class Pulse:
+@@ -4270,13 +4346,13 @@ class Pulse:
          snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
          pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
          pc["minPf"] = self.coord.min_pf
@@ -366,7 +381,7 @@ index b3a9ff3..ffc2c27 100644
              "connection": CONN_SHORT,
              "connType": "vst" if "x02" in CONN_SHORT else "live",
              "unit": "VST" if "x02" in CONN_SHORT else "USDT",
-@@ -4324,8 +4401,8 @@ class Pulse:
+@@ -4324,8 +4400,8 @@ class Pulse:
              "pulse": self.pulse_snapshot(),
              "coord": self.coord.snapshot(),
              "pfCost": pc,
@@ -377,7 +392,7 @@ index b3a9ff3..ffc2c27 100644
              "pfNeutral": 1.0,
              "pfPlus1xCost": 1.1,
              "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
-@@ -4529,6 +4606,9 @@ class Pulse:
+@@ -4529,6 +4605,9 @@ class Pulse:
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -387,7 +402,7 @@ index b3a9ff3..ffc2c27 100644
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4560,8 +4640,8 @@ class Pulse:
+@@ -4560,8 +4639,8 @@ class Pulse:
                  "gp": round(gp, 6),
                  "gl": round(gl, 6),
                  "net": round(gp - gl, 6),
@@ -398,7 +413,7 @@ index b3a9ff3..ffc2c27 100644
                  "avgR": cost["avgR"],
                  "wr": round(100.0 * wins / max(1, wins + losses), 1),
                  "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4650,6 +4730,9 @@ class Pulse:
+@@ -4650,6 +4729,9 @@ class Pulse:
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -408,7 +423,7 @@ index b3a9ff3..ffc2c27 100644
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4753,7 +4836,8 @@ class Pulse:
+@@ -4753,7 +4835,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -418,7 +433,7 @@ index b3a9ff3..ffc2c27 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4769,7 +4853,7 @@ class Pulse:
+@@ -4769,7 +4852,7 @@ class Pulse:
              except Exception:
                  stg = None
              if stg:
@@ -427,7 +442,7 @@ index b3a9ff3..ffc2c27 100644
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4893,6 +4977,22 @@ class Pulse:
+@@ -4893,6 +4976,22 @@ class Pulse:
              if remain > 0:
                  time.sleep(remain)
  
@@ -450,7 +465,7 @@ index b3a9ff3..ffc2c27 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4902,9 +5002,13 @@ class Pulse:
+@@ -4902,9 +5001,13 @@ class Pulse:
                  self._pre_pause_halt = self.halt_reason
              self.halted = True
              self.halt_reason = "stopped"
@@ -465,7 +480,7 @@ index b3a9ff3..ffc2c27 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5020,17 @@ class Pulse:
+@@ -4916,11 +5019,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -484,7 +499,7 @@ index b3a9ff3..ffc2c27 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5111,8 @@ class Pulse:
+@@ -5001,6 +5110,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -493,7 +508,7 @@ index b3a9ff3..ffc2c27 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
-@@ -5086,6 +5198,13 @@ def seed_overlay() -> None:
+@@ -5086,6 +5197,13 @@ def seed_overlay() -> None:
              pass
  
  
@@ -507,7 +522,7 @@ index b3a9ff3..ffc2c27 100644
  def main() -> None:
      global BASE
      os.makedirs(DIR, exist_ok=True)
-@@ -5094,11 +5213,11 @@ def main() -> None:
+@@ -5094,11 +5212,11 @@ def main() -> None:
      secret = redis_hget("api_secret")
      if not key or not secret:
          raise SystemExit(f"missing {CONN_SHORT} credentials")

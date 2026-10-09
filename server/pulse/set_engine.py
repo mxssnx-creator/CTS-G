@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Independent config Sets: 1m historic replay, last-15 PF, max DD time, last-25 deact.
+"""Independent config Sets: 1m historic replay, base gate, max DD time, per-Set lifecycle.
 
 A Set is one (pack × SL:TP ratio × trail) book. Historic walks 1-minute OHLC,
 simulates entries/exits, then scores each Set on its own tape. Live closes
-merge into the same book. Last 25 average Result-R < 0 deactivates that Set.
+merge into the same book. One rule decides validity (gate_reason): PF over the
+last setGateWindow orders at or above setMinPf, at least setGateMinTrades orders,
+max drawdown time below setMaxDdtHours, and a fresh evaluation. An invalid Set
+keeps being scored and becomes valid again on its own; only a lock is sticky.
 """
 from __future__ import annotations
 
@@ -407,7 +410,8 @@ class SetState:
     pf_all: float = 0.0             # net PF over every closed row in the tape (display)
     exits: Dict[str, int] = field(default_factory=dict)
     active: bool = True
-    deact_reason: str = ""
+    deact_reason: str = ""          # the gate reason of the last evaluation ('' when valid)
+    evaluated_at: float = 0.0       # wall time of the last successful evaluation (freshness, live only)
     locked: bool = False
     source_n: int = 0
 
@@ -651,11 +655,8 @@ class SetBook:
         self.gate_window = GATE_WINDOW_DEFAULT
         self.gate_min = GATE_MIN_DEFAULT
         self.max_dd_s = 420.0
-        self.auto_deact = True
         self.use_historic_gate = True
-        self.min_samples = 12
-        self.reactivate = True
-        self.max_active = 0
+        self.fresh_s = 0.0              # live sets 2 x refresh_s: a Set not evaluated in that time is not valid; sim keeps 0
         self.cost_pct = POSITION_COST_PCT_DEFAULT
         self.time_stop_s = 21600.0
         self.hist_time_bars = 45
@@ -713,15 +714,7 @@ class SetBook:
         hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
         self.max_ddt_h = hrs
         self.max_dd_s = hrs * 3600.0
-        self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
-        self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 12)))
-        self.reactivate = bool(ov.get("setReactivate", True))
-        try:
-            raw_active = int(ov.get("setMaxActive") if ov.get("setMaxActive") is not None else 0)
-        except Exception:
-            raw_active = 0
-        self.max_active = 0 if raw_active <= 0 else max(1, raw_active)
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
         self.time_stop_s = float(ov.get("timeStopS") or 21600)
         if ov.get("timeStopS") is not None:
@@ -1027,15 +1020,11 @@ class SetBook:
             self.on_live_close(rec)
 
     def due(self) -> bool:
-        if not self.enabled:
+        """Interval-driven in every state: refresh_s once a complete pass exists, retry_s until then. Never back to back."""
+        if not self.enabled or self._running:
             return False
-        if self._running:
-            return False
-        if self.progress.ready:
-            return time.time() - self.last_run >= self.refresh_s
-        if self.progress.phase == "error":
-            return time.time() - self.last_run >= self.retry_s
-        return True
+        wait = self.refresh_s if self.progress.ready else self.retry_s
+        return time.time() - self.last_run >= wait
 
     def replay_all(
         self,
@@ -1113,13 +1102,13 @@ class SetBook:
                         ]
                         full = sorted(rows, key=lambda r: finite(r.get("t")))
                         st.hist = full[-max(40, self.gate_window):]
+                        st.last_error = ""          # cleared before scoring: a clean score is the only way back to valid
                         self._score_one(st, now=now)
                         st.n = len(full)
-                        st.last_error = ""
-                    except Exception as exc:  # one Set never stops the others
+                    except Exception as exc:  # one Set never stops the others; it is invalid until it scores again
                         st.last_error = f"{type(exc).__name__}: {exc}"[:160]
+                        st.deact_reason = "error"
                         errors.append(f"set {st.id}: {st.last_error}")
-                self._cap_active()
             ok_syms = len(names) - sym_failed
             self.progress.errors = len(errors)
             self.progress.error = "; ".join(errors[:3])[:220]
@@ -1223,71 +1212,48 @@ class SetBook:
         else:
             st.last25_avg_r = 0.0
             st.last25_avg_pnl = 0.0
-        live25 = st.live[-self.deact_n :]
-        live_avg = 0.0
-        if live25:
-            live_avg = sum(finite(r.get("pnl")) for r in live25) / len(live25)
-        live_n = len(st.live)
         dd = drawdown_time(tape[-self.gate_window:], now=now)   # the last N positions, not the whole tape
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
         st.source_n = len(tape)
-        if st.locked:
-            st.active = False
-            st.deact_reason = "locked"
-            return
-        if not self.auto_deact:
-            st.active = True
-            st.deact_reason = ""
-            return
-        # Hard deactivation: latest 25 LIVE exchange fills, overall average is a loss.
-        if len(live25) >= self.deact_n and live_avg < 0:
-            st.active = False
-            st.deact_reason = f"live last{len(live25)} avg loss {live_avg:.4f}"
-            st.last25_avg_pnl = live_avg
-            st.last25_n = len(live25)
-            return
-        notes = []
-        if st.gate_n >= self.gate_min and st.gate_pf + 1e-9 < self.min_pf:
-            notes.append(f"gate{st.gate_n} PF {st.gate_pf:.2f}<{self.min_pf:.2f}")
-        live_dd = False
-        if len(live25) >= max(8, self.min_samples) and st.max_dd_s > self.max_dd_s:
-            notes.append(f"maxDDt {st.max_dd_s:.0f}s>{self.max_dd_s:.0f}s")
-            live_dd = True
-        # Hard rule: only positive-PF sets (cost-adjusted last-N PF >= 1.00)
-        # stay validated and may be processed. Proven-negative sets deactivate;
-        # reactivate=on lets them return once the window rolls non-negative,
-        # reactivate=off keeps them off until PF recovers to min_pf.
-        proven_neg = st.gate_n >= self.gate_min and st.gate_pf + 1e-9 < 1.0
-        was_neg_off = (not st.active) and ("<1.00 neg" in st.deact_reason)
-        if proven_neg:
-            st.active = False
-            notes.append(f"gate{st.gate_n} PF {st.gate_pf:.2f}<1.00 neg")
-        elif was_neg_off and not self.reactivate and st.gate_pf + 1e-9 < self.min_pf:
-            st.active = False
-            notes.append(st.deact_reason)
-        elif notes and not self.reactivate:
-            # Historic PF below min is a rank penalty; only live DD / live last25 hard-stops.
-            if live_dd or (st.gate_n >= self.gate_min and len(live25) >= self.min_samples and st.gate_pf + 1e-9 < 1.0):
-                st.active = False
-            else:
-                st.active = True
-        else:
-            st.active = True
-        st.deact_reason = "; ".join(dict.fromkeys(notes))
+        # one rule, recomputed on every evaluation: no sticky flags, no live-only deactivation
+        st.active = not st.locked
+        st.evaluated_at = time.time()
+        st.deact_reason = self.gate_reason(st)
 
-    def _cap_active(self) -> None:
-        for kind, cap in (("base", self.max_active), ("trail", max(len(self.trails) * max(1, len(self.packs)), 4))):
-            if kind == "base" and cap <= 0:
-                continue
-            active = [s for s in self.by_idx if s.active and s.kind == kind]
-            if len(active) <= cap:
-                continue
-            active.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s), reverse=True)
-            for extra in active[cap:]:
-                extra.active = False
-                extra.deact_reason = extra.deact_reason or f"cap>{cap}"
+    def gate_reason(self, st: SetState) -> str:
+        """The one eligibility rule. '' when the Set is valid; otherwise the reason it is not.
+
+        A locked Set, a Set whose last evaluation failed, and a Set below the order floor, below the PF gate or at or
+        over the max drawdown time are all invalid on their own tape. Freshness applies only when fresh_s is set (live).
+        """
+        if st.locked:
+            return "lock"
+        if not st.active:
+            return "inactive"
+        if st.last_error:
+            return "error"
+        if st.gate_n < self.gate_min:
+            return "n<min"
+        if st.gate_pf + 1e-9 < self.min_pf:
+            return "pf<min"
+        if st.max_dd_s >= self.max_dd_s:
+            return "ddt"
+        if self.fresh_s > 0 and time.time() - st.evaluated_at > self.fresh_s:
+            return "stale"
+        return ""
+
+    def state_of(self, st: SetState) -> Tuple[str, str]:
+        """(state, reason) for display and counts: valid, invalid, locked or error. Every Set is in exactly one."""
+        reason = self.gate_reason(st)
+        if not reason:
+            return "valid", ""
+        if reason == "lock":
+            return "locked", reason
+        if reason == "error":
+            return "error", reason
+        return "invalid", reason
 
     def get_idx(self, idx: int) -> Optional[SetState]:
         if 0 <= idx < len(self.by_idx):
@@ -1361,10 +1327,8 @@ class SetBook:
         }
 
     def is_eligible(self, st: SetState) -> bool:
-        """Base gate: active, judged on >= gate_min orders, and net PF >= min_pf (no fallback tier)."""
-        # base gate (min PF over setGateWindow orders, judged on gate_min) and the max drawdown-time filter
-        return bool(st.active and not st.locked and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= self.min_pf
-                    and st.max_dd_s < self.max_dd_s)
+        """The base gate: valid only when gate_reason() gives no reason to be invalid."""
+        return self.gate_reason(st) == ""
 
     def gate_keep(self) -> int:
         return max(40, self.gate_window)
@@ -1373,32 +1337,24 @@ class SetBook:
         with self._lock:
             return self._pick(pack, kind)
 
+    def valid_for(self, pack: str, kind: str = "base") -> List[SetState]:
+        """Every valid Set of this pack and kind, best first. No global gate: each Set stands on its own tape."""
+        with self._lock:
+            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and self.is_eligible(s)]
+            rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+            return rows
+
     def _pick(self, pack: str, kind: str = "base") -> Optional[SetState]:
-        gated = bool(self.use_historic_gate)
-        if gated and not self.progress.ready:
-            return None  # fail closed: no calibration pass has completed yet
-        if gated:
-            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind and s.active]
-        else:
-            rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
+        if self.use_historic_gate:
+            ranked = self.valid_for(pack, kind)
+            return ranked[0] if ranked else None
+        # gate disabled (legacy): any active set of this pack and kind, ranked the same way
+        rows = [s for s in self.by_idx if s.pack == pack and s.kind == kind]
         if not rows:
             return None
-        # Base gate only: gate PF >= min_pf on >= gate_min orders. No fallback tier below min_pf.
-        passing = [s for s in rows if self.is_eligible(s)] if gated else []
-        if not passing and not gated:
-            # Gate disabled: keep the legacy fallback to any set of this pack and kind.
-            passing = [s for s in rows if s.active] or list(rows)
-        if not passing:
-            return None
-        def live_ok(s: SetState) -> bool:
-            tail = s.live[-8:]
-            if len(tail) < 8:
-                return True
-            return sum(finite(r.get("pnl")) for r in tail) / len(tail) >= 0.0
-        live_pass = [s for s in passing if live_ok(s)]
-        chosen = live_pass or passing
-        chosen.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
-        return chosen[0]
+        rows = [s for s in rows if s.active] or rows
+        rows.sort(key=lambda s: (s.gate_pf, s.last25_avg_r, -s.max_dd_s, s.n), reverse=True)
+        return rows[0]
 
     def pick_trail(self, pack: str) -> Optional[SetState]:
         return self.pick(pack, kind="trail")
@@ -1409,13 +1365,25 @@ class SetBook:
     def pack_open(self, pack: str) -> bool:
         if not self.enabled or not self.use_historic_gate:
             return True
-        if not self.progress.ready:
-            return False
-        return self.pick_any(pack) is not None
+        return bool(self.valid_for(pack, "base") or self.valid_for(pack, "trail"))
+
+    def counts(self) -> Dict[str, Any]:
+        """Every configured Set is in exactly one of valid, invalid, locked, error. The retired Sets are counted apart."""
+        out: Dict[str, Any] = {"valid": 0, "invalid": 0, "locked": 0, "error": 0, "reasons": {}}
+        for st in self.by_idx:
+            state, reason = self.state_of(st)
+            out[state] += 1
+            if state == "invalid":
+                out["reasons"][reason] = out["reasons"].get(reason, 0) + 1
+        out["configured"] = len(self.by_idx)
+        out["retired"] = len(self.retired)
+        out["total"] = len(self.by_idx) + len(self.retired)
+        out["sum"] = out["valid"] + out["invalid"] + out["locked"] + out["error"]
+        return out
 
     def snapshot(self) -> Dict[str, Any]:
         rows = []
-        for st in sorted(self.sets.values(), key=lambda s: (not s.active, -s.gate_pf, s.max_dd_s)):
+        for st in sorted(self.sets.values(), key=lambda s: (not self.is_eligible(s), -s.gate_pf, s.max_dd_s)):
             rows.append(
                 {
                     "kind": st.kind,
@@ -1469,6 +1437,9 @@ class SetBook:
                         "liveN": len(st.live),
                     },
                     "active": st.active,
+                    "state": self.state_of(st)[0],
+                    "stateReason": self.state_of(st)[1],
+                    "evaluatedAt": round(st.evaluated_at, 1),
                     "deactReason": st.deact_reason,
                     "locked": st.locked,
                 }
@@ -1485,7 +1456,7 @@ class SetBook:
                 "sl": st.sl_ratio,
                 "tr": st.trail_key,
                 "st": st.step,
-                "on": int(st.active),
+                "on": int(self.is_eligible(st)),
                 "pf": round(st.gate_pf, 4),
                 "dd": st.max_dd_s,
             }
@@ -1499,12 +1470,12 @@ class SetBook:
             "deactN": self.deact_n,
             "minPf": self.min_pf,
             "maxDdS": self.max_dd_s,
-            "autoDeact": self.auto_deact,
             "useHistoricGate": self.use_historic_gate,
-            "minSamples": self.min_samples,
+            "freshS": self.fresh_s,
             "costPct": self.cost_pct,
             "setCount": len(self.sets),
-            "activeCount": sum(1 for s in self.sets.values() if s.active),
+            "activeCount": sum(1 for s in self.sets.values() if self.is_eligible(s)),
+            "counts": self.counts(),
             "coverage": cover,
             "index": index,
             "minStep": self.min_step,
@@ -1566,7 +1537,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     dd = drawdown_time(rows, now=520)
     out.append(("set-dd-episodes", dd["episodes"] == 2.0, f"{dd}"))
     out.append(("set-dd-max", dd["maxS"] >= 120, f"{dd['maxS']}"))
-    # last-25 negative deactivates
+    # drawdown and gate state are derived from the tape: a Set with a long losing run is invalid, not deactivated
     book = SetBook()
     book.load(
         {
@@ -1576,7 +1547,6 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setMinPf": 1.10,
             "setMaxDdtHours": 36,
             "setMinSamples": 8,
-            "setAutoDeact": True,
             "setMinStep": 3,
             "setStepMax": 6,
             "setStepAdapt": True,
@@ -1609,10 +1579,11 @@ def self_test() -> List[Tuple[str, bool, str]]:
     st.hist = [{"t": 1000 + i, "pnl": -0.01, "pnl_pct": -0.003, "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "sl"} for i in range(25)]
     st.live = []
     book._score_one(st)
-    out.append(("set-hist-neg-off", (not st.active) and "neg" in st.deact_reason, f"{st.active} {st.deact_reason}"))
+    out.append(("set-hist-neg-off", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min"), f"{st.active} {st.deact_reason}"))
     st.live = [{"t": 2000 + i, "pnl": -0.02, "pnl_pct": -0.004, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "sl"} for i in range(25)]
     book._score_one(st)
-    out.append(("set-deact-live-25", (not st.active) and "live last" in st.deact_reason and "loss" in st.deact_reason, f"{st.active} {st.deact_reason} {st.last25_avg_pnl}"))
+    # live closes are part of the one gate: 25 live losses are judged with the hist rows, not by a live-only rule
+    out.append(("set-live-in-one-gate", (not book.is_eligible(st)) and st.deact_reason in ("pf<min", "n<min") and len(st.tape()) == 50, f"{st.active} {st.deact_reason} tape={len(st.tape())}"))
     st.live = [{"t": 3000 + i, "pnl": 0.02, "pnl_pct": 0.003, "symbol": "T", "side": "LONG", "hold_s": 40, "reason": "peak"} for i in range(25)]
     book._score_one(st)
     out.append(("set-live-win-on", st.active, f"{st.active} {st.deact_reason}"))
@@ -1642,7 +1613,6 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setMinPf": 1.0,
             "setMaxDdtHours": 36,
             "setMinSamples": 5,
-            "setAutoDeact": True,
             "setMinStep": 3,
             "setStepMax": 8,
             "stratIndications": True,
@@ -1691,7 +1661,6 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setMinPf": 0.5,
             "setMaxDdtHours": 36,
             "setMinSamples": 3,
-            "setAutoDeact": False,
             "setMinStep": 3,
             "setStepMax": 12,
             "stratIndications": False,
@@ -1771,7 +1740,6 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "histMinBars": 80,
             "histWarmup": 20,
             "setMinPf": 0.5,
-            "setAutoDeact": False,
             "setMinStep": 8,
             "setStepMax": 8,
             "stratIndications": False,
@@ -1808,7 +1776,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     w.load(
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.0,
-            "setMinSamples": 5, "setAutoDeact": False, "setMinStep": 3, "setStepMax": 3,
+            "setMinSamples": 5, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5],
             "trailVariants": ["0.3:0.1"],
         }
@@ -1835,7 +1803,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     g2.load(
         {
             "histEnabled": True, "setPfWindow": 15, "setDeactN": 25, "setMinPf": 1.20,
-            "setMinSamples": 8, "setAutoDeact": True, "setMinStep": 3, "setStepMax": 3,
+            "setMinSamples": 8, "setMinStep": 3, "setStepMax": 3,
             "stratIndications": False, "stratGeneral": True, "setSlRatios": [0.5, 1.0],
             "trailVariants": ["0.3:0.1"],
         }
@@ -1852,7 +1820,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
     pos_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     g2._score_one(pos_set)
-    out.append(("set-neg-off", (not neg_set.active) and "neg" in neg_set.deact_reason, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
+    out.append(("set-neg-off", (not g2.is_eligible(neg_set)) and neg_set.deact_reason == "pf<min", f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
     out.append(("set-pos-on", pos_set.active and pos_set.last15_pf >= 1.0, f"{pos_set.active} pf={pos_set.last15_pf}"))
     pk = g2.pick("general")
     out.append(("set-pick-pos-only", pk is None, f"base gate: PF 1.10 < 1.20, nothing below the gate is picked ({getattr(pk, 'id', None)})"))
@@ -1868,14 +1836,17 @@ def self_test() -> List[Tuple[str, bool, str]]:
     neg_set.hist = list(pos_rows)
     g2._score_one(neg_set)
     out.append(("set-neg-recover", neg_set.active and neg_set.last15_pf >= 1.0, f"{neg_set.active} pf={neg_set.last15_pf}"))
-    # sticky off when reactivate is disabled (until PF recovers to min_pf)
-    g2.reactivate = False
+    # no sticky off: the one gate decides on every evaluation. PF 1.10 < min_pf 1.20 stays invalid; PF 2.75 returns
     neg_set.hist = list(neg_rows)
     g2._score_one(neg_set)
-    off1 = not neg_set.active
-    neg_set.hist = list(pos_rows)  # PF 1.10 < min_pf 1.20 -> stays off
+    off1 = not g2.is_eligible(neg_set)
+    neg_set.hist = list(pos_rows)  # PF 1.10 < min_pf 1.20 -> still invalid
     g2._score_one(neg_set)
-    out.append(("set-neg-sticky", off1 and not neg_set.active, f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
+    still_off = not g2.is_eligible(neg_set)
+    rec_rows = [{"t": 9000 + i * 60, "pnl": (-0.001 if i % 4 == 0 else 0.001), "pnl_pct": (0.0005 if i % 4 == 0 else 0.0025), "symbol": "T", "side": "LONG", "hold_s": 60, "reason": "tp"} for i in range(15)]
+    neg_set.hist = rec_rows  # PF 2.75 -> valid again on the next evaluation
+    g2._score_one(neg_set)
+    out.append(("set-no-sticky-off", off1 and still_off and g2.is_eligible(neg_set), f"{neg_set.active} {neg_set.deact_reason} pf={neg_set.last15_pf}"))
     # cold start (no replay yet): ungated pick still returns a set
     g3 = SetBook()
     g3.load({"histEnabled": True, "stratGeneral": True, "stratIndications": False, "setSlRatios": [0.5], "setMinStep": 3, "setStepMax": 3, "trailVariants": ["0.3:0.1"]})

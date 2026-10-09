@@ -3165,6 +3165,8 @@ class Pulse:
         self.coord.load(cts, ov)
         self.indications.load(ov)
         self.sets.load(ov, cts)
+        # live: a Set is valid only while its evaluation is at most two refresh intervals old (no sticky state)
+        self.sets.fresh_s = 2.0 * self.sets.refresh_s
         self.exits.load(ov, cts)
         self.dca.load(ov, cts)
         if initial:
@@ -3327,11 +3329,8 @@ class Pulse:
             "setDeactN": self.sets.deact_n,
             "setMinPf": self.sets.min_pf,
             "setMaxDdtHours": self.sets.max_ddt_h,
-            "setAutoDeact": self.sets.auto_deact,
             "setUseHistoricGate": self.sets.use_historic_gate,
-            "setMinSamples": self.sets.min_samples,
-            "setReactivate": self.sets.reactivate,
-            "setMaxActive": self.sets.max_active,
+            "setMinSamples": self.coord.min_samples,
             "exitEnabled": self.exits.enabled,
             "exitIgnoreTp": self.exits.ignore_tp,
             "exitBestOf": self.exits.best_of,

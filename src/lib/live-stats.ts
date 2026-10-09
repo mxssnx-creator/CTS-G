@@ -430,7 +430,6 @@ export type LiveStats = {
     deactN?: number;
     minPf?: number;
     maxDdS?: number;
-    autoDeact?: boolean;
     useHistoricGate?: boolean;
     setCount?: number;
     minStep?: number;

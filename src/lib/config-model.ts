@@ -210,11 +210,8 @@ export type PulseOverlay = {
   setDeactN: number;
   setMinPf: number;
   setMaxDdtHours: number;
-  setAutoDeact: boolean;
   setUseHistoricGate: boolean;
   setMinSamples: number;
-  setReactivate: boolean;
-  setMaxActive: number;
   setMinStep: number;
   setStepMax: number;
   setStepAdapt: boolean;
@@ -352,11 +349,8 @@ export const DEFAULT_OVERLAY: PulseOverlay = {
   setDeactN: 25,
   setMinPf: GATE_MIN_PF_DEFAULT,
   setMaxDdtHours: 12,
-  setAutoDeact: true,
   setUseHistoricGate: true,
   setMinSamples: 12,
-  setReactivate: true,
-  setMaxActive: 0,
   setMinStep: 2,
   setStepMax: 30,
   setStepAdapt: true,
@@ -486,11 +480,8 @@ export type CtsSettings = {
   setDeactN?: number;
   setMinPf?: number;
   setMaxDdtHours?: number;
-  setAutoDeact?: boolean;
   setUseHistoricGate?: boolean;
   setMinSamples?: number;
-  setReactivate?: boolean;
-  setMaxActive?: number;
   setMinStep?: number;
   minStepRange?: number;
   setStepMax?: number;
@@ -658,11 +649,8 @@ export function overlayFromCts(cts: CtsSettings, live?: Partial<PulseOverlay>): 
     setDeactN: num(cts.setDeactN, 25),
     setMinPf: num(cts.setMinPf ?? cts.realProfitFactor, GATE_MIN_PF_DEFAULT),
     setMaxDdtHours: num(cts.setMaxDdtHours, 12),
-    setAutoDeact: bool(cts.setAutoDeact, true),
     setUseHistoricGate: bool(cts.setUseHistoricGate, true),
     setMinSamples: num(cts.setMinSamples, 12),
-    setReactivate: bool(cts.setReactivate, true),
-    setMaxActive: num(cts.setMaxActive, 0),
     setMinStep: num(cts.setMinStep ?? cts.minStepRange, 2),
     setStepMax: num(cts.setStepMax, 30),
     setStepAdapt: bool(cts.setStepAdapt, true),

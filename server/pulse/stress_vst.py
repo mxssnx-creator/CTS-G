@@ -39,7 +39,7 @@ def stress_cpu_mem(out: List[Tuple[str, bool, str]]) -> None:
     r0 = rss_mb()
     t0 = time.perf_counter()
     book = SetBook()
-    book.load({"histLookbackBars": 240, "setMinSamples": 5, "setMaxActive": 12, "exitIgnoreTp": True})
+    book.load({"histLookbackBars": 240, "setMinSamples": 5, "exitIgnoreTp": True})
     for i, px in enumerate((40.0, 12.0, 8.0, 3.0, 1.2, 0.4)):
         book.ingest_bars(f"S{i}-USDT", synth_trend(240, px, 0.12 if i % 2 == 0 else -0.1, 0.04))
     times = []

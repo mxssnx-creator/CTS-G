@@ -423,8 +423,6 @@ function SettingsPage() {
               <Grid>
                 <Toggle label="Historic 1m replay" on={overlay.histEnabled} onChange={(v) => patch("histEnabled", v)} />
                 <Toggle label="Gate live on historic" on={overlay.setUseHistoricGate} onChange={(v) => patch("setUseHistoricGate", v)} />
-                <Toggle label="Auto-deactivate" on={overlay.setAutoDeact} onChange={(v) => patch("setAutoDeact", v)} />
-                <Toggle label="Reactivate on recovery" on={overlay.setReactivate} onChange={(v) => patch("setReactivate", v)} />
                 <Slider
                   label="Lookback bars"
                   value={overlay.histLookbackBars}
@@ -526,15 +524,6 @@ function SettingsPage() {
                   max={40}
                   step={1}
                   onChange={(v) => patch("setMinSamples", v)}
-                />
-                <Num
-                  label="Max active Sets"
-                  value={overlay.setMaxActive}
-                  min={0}
-                  max={10000}
-                  step={1}
-                  hint="0 = unlimited"
-                  onChange={(v) => patch("setMaxActive", v)}
                 />
               </Grid>
               <SetsLiveTable stats={stats} overlay={overlay} />
