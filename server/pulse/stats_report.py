@@ -205,7 +205,8 @@ def occupancy(open_pos: Sequence[Any]) -> Dict[str, Any]:
 def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, conn: str = "", now: Optional[float] = None) -> Dict[str, Any]:
     cost_pct = float(cost_pct or POSITION_COST_PCT_DEFAULT)
     now = time.time() if now is None else float(now)  # report clock: the only wall-clock read, injectable
-    closed = [enrich(_row(c), cost_pct) for c in (st.get("closed") or [])]
+    # oldest first: the window functions read the tail, and the export arrives newest-first
+    closed = sorted((enrich(_row(c), cost_pct) for c in (st.get("closed") or [])), key=lambda r: float(r.get("t") or 0.0))
     sets = st.get("sets") or {}
     exits = st.get("exits") or {}
     pc = last_n_cost_pf(closed, int((st.get("pfCost") or {}).get("n") or 15), cost_pct) if closed else last_n_cost_pf([], 15, cost_pct)
@@ -323,7 +324,7 @@ def build(st: Dict[str, Any], *, cost_pct: float = POSITION_COST_PCT_DEFAULT, co
         "exitRevOn": exits.get("revOn"),
         "dca": st.get("dca"),
         "indications": st.get("indications"),
-        "closed": closed[-80:],
+        "closed": closed[-80:][::-1],
         "closedN": len(closed),
         "tests": st.get("tests") or [],
         "engine": st.get("engine"),

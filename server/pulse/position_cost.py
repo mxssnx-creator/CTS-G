@@ -8,7 +8,8 @@ required net % = cost% × ((ratio − 1) / 0.10)
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Sequence
+import math
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 POSITION_COST_PCT_DEFAULT = 0.15
 RATIO_BASE = 1.0
@@ -120,19 +121,28 @@ def gross_move_pct(ratio: float, cost_pct: float) -> float:
     return cost + net_move_pct(ratio, cost)
 
 
+def _pnl_pct_of(row: Any) -> Optional[float]:
+    """The row's pnl_pct as a finite float, or None when it is missing or not a number."""
+    raw = row.get("pnl_pct") if isinstance(row, dict) else getattr(row, "pnl_pct", None)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
 def last_n_cost_pf(
     rows: Sequence[Any],
     n: int = LAST_N_DEFAULT,
     cost_pct: float = POSITION_COST_PCT_DEFAULT,
 ) -> Dict[str, float]:
-    window = list(rows)[-max(1, int(n)) :]
+    # a row without a finite pnl_pct is not a close we can measure: it is skipped and counted, never read as a loss
+    valid = [(r, v) for r, v in ((r, _pnl_pct_of(r)) for r in rows) if v is not None]
+    skipped = len(list(rows)) - len(valid)
+    window = valid[-max(1, int(n)) :]
     rs: List[float] = []
     gp = gl = 0.0
-    for row in window:
-        if isinstance(row, dict):
-            pnl_pct = finite(row.get("pnl_pct"))
-        else:
-            pnl_pct = finite(getattr(row, "pnl_pct", 0))
+    for _row, pnl_pct in window:
         rs.append(signed_result_r(pnl_pct, cost_pct))
         # net PF from the gross fraction less one PositionCost: unit-safe, never the USDT pnl field
         net = net_pnl_pct(pnl_pct, cost_pct)
@@ -154,6 +164,7 @@ def last_n_cost_pf(
         "costPct": float(cost_pct),
         "netPct": round(net_move_pct(ratio, cost_pct), 4),
         "grossPct": round(gross_move_pct(ratio, cost_pct), 4),
+        "skipped": float(skipped),
     }
 
 

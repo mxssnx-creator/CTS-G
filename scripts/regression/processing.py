@@ -203,6 +203,47 @@ def concurrent_replay_and_live_closes():
     return ok, f"errors={errors[:2]} alive={alive} all_scored={all_scored}"
 
 
+def ready_carried_across_refresh():
+    """A refresh keeps the last complete pass valid: entries stay open while the next pass replays."""
+    b = _book(n_syms=3, bars=1200)
+    b.replay_all(now=T0)
+    during = []
+    b.replay_all(now=T0, on_step=lambda: during.append(bool(b.progress.ready)))
+    ok = b.progress.ready and bool(during) and all(during)
+    return ok, f"ready_after={b.progress.ready} during_replay={sorted(set(during))} steps={len(during)}"
+
+
+def out_of_grid_sets_retired_and_closes_counted():
+    """A Set that leaves the grid (step-adapt) keeps its tape as retired, late closes still attribute to it,
+    and a close with no matching Set is counted instead of dropped silently."""
+    b = _book(n_syms=3, bars=1200)
+    b.replay_all(now=T0)
+    victim = next(st for st in b.by_idx if st.kind == "base" and st.step == b.min_step)
+    b.min_step = b.min_step + 1
+    b._rebuild_sets()
+    retired_ok = victim.id in b.retired and victim.id not in b.sets and victim.active is False
+    base = len(victim.live)
+    b.on_live_close({"set_id": victim.id, "t": T0 + 5000, "symbol": "Z-USDT", "side": "LONG",
+                     "pnl_pct": 0.002, "hold_s": 60, "reason": "tp", "client_id": "retired-close-1"})
+    attributed = len(victim.live) == base + 1
+    before = b.live_unmatched
+    b.on_live_close({"set_id": "indications:1m:sl9.99:st99", "t": T0 + 5100, "symbol": "Z-USDT", "side": "LONG",
+                     "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": "orphan-1"})
+    counted = b.live_unmatched == before + 1
+    ok = retired_ok and attributed and counted
+    return ok, f"retired={retired_ok} attributed={attributed} unmatched_counted={counted} retired_total={len(b.retired)}"
+
+
+def unmatched_pnl_pct_is_skipped_not_a_loss():
+    """A close without a finite pnl_pct is not a -1R loss: it is skipped and counted in the PF output."""
+    from position_cost import last_n_cost_pf
+    rows = [{"pnl_pct": 0.002, "t": 1.0}, {"t": 2.0}, {"pnl_pct": None, "t": 3.0}, {"pnl_pct": float("nan"), "t": 4.0}]
+    out = last_n_cost_pf(rows, 15, 0.15)
+    clean = last_n_cost_pf([rows[0]], 15, 0.15)
+    ok = out["count"] == 1 and out["skipped"] == 3 and abs(out["pf"] - clean["pf"]) < 1e-12
+    return ok, f"count={out['count']} skipped={out['skipped']} pf={out['pf']} clean_pf={clean['pf']}"
+
+
 CHECKS = [
     ("processing.all-sets-processed-full-grid", every_set_processed_full_grid),
     ("processing.trades-produced", trades_produced_and_positive_signal),
@@ -215,4 +256,7 @@ CHECKS = [
     ("processing.chunked-refresh-equals-full", chunked_refresh_equals_full),
     ("processing.live-close-once-and-gate", live_close_counted_once_and_gate_updates),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
+    ("processing.ready-carried-across-refresh", ready_carried_across_refresh),
+    ("processing.out-of-grid-sets-retired-and-closes-counted", out_of_grid_sets_retired_and_closes_counted),
+    ("processing.unmatched-pnl-pct-skipped-not-a-loss", unmatched_pnl_pct_is_skipped_not_a_loss),
 ]

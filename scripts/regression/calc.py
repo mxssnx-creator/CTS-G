@@ -261,6 +261,23 @@ def payload_pf_fields_are_pf_not_ratio():
     return ok, f"rows={len(rows)} checked={checked} mismatched={len(bad)} pf_differs_from_ratio_in={differs}"
 
 
+def report_window_is_chronological():
+    """The report's last-15 PF is the 15 newest closes, whatever order the export arrives in."""
+    from stats_report import build
+    rnd = random.Random(21)
+    rows = []
+    for i in range(40):
+        g = rnd.uniform(-0.01, 0.012) if i < 25 else rnd.uniform(-0.002, 0.006)
+        rows.append({"pnl_pct": g, "pnl": g * 1000.0, "t": 1000.0 + i, "symbol": "X", "hold_s": 60, "reason": "tp"})
+    newest_first = list(reversed(rows))
+    blob = build({"closed": newest_first, "sets": {"rows": [], "setCount": 0, "activeCount": 0}, "open": [],
+                  "pfCost": {"n": 15}}, cost_pct=COST, conn="x02", now=2000.0)
+    want = last_n_cost_pf(rows, 15, COST)["pf"]
+    got = blob["profitFactor"]["last15"]["pf"]
+    ok = abs(got - want) < 1e-9 and blob["closed"][0]["t"] == max(r["t"] for r in rows)
+    return ok, f"report last15={got} newest15={want} export_newest_first={blob['closed'][0]['t'] == max(r['t'] for r in rows)}"
+
+
 CHECKS = [
     ("calc.net-is-gross-minus-one-cost", net_is_gross_minus_one_cost),
     ("calc.cost-deducted-exactly-once", cost_deducted_exactly_once),
@@ -277,4 +294,5 @@ CHECKS = [
     ("calc.lane-records-from-prices", lane_records_recomputed_from_prices),
     ("calc.same-pf-in-every-module", same_pf_in_every_module),
     ("calc.payload-pf-fields-are-pf-not-ratio", payload_pf_fields_are_pf_not_ratio),
+    ("calc.report-window-is-chronological", report_window_is_chronological),
 ]

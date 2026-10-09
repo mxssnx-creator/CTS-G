@@ -2493,7 +2493,7 @@ class Pulse:
 
     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
-        if conf < 0.50:
+        if conf < self.sets.entry_conf:   # the same setEntryConf the replay uses
             return "low-conf"
         if (self.px.get(sym) or 0) <= 0:
             return "no-px"
@@ -2727,7 +2727,7 @@ class Pulse:
             src = f"step{chosen.step}xcost"
         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
-        if self.exits.enabled and self.exits.ignore_tp:
+        if self.exits.enabled and self.exits.ignore_tp and not (chosen and getattr(chosen, "step", 0)):
             tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
         pos = Position(
@@ -3076,9 +3076,9 @@ class Pulse:
         self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
         self.pf_window = int(ov.get("pfWindow") or 15)
         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
-        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
+        self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
-        self.tp_max = float(ov.get("tpMaxPct") or 2.40) / 100.0
+        self.tp_max = float(ov.get("tpMaxPct") or 4.5) / 100.0     # covers the grid: TP up to 4.5%
         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
         self.variants.load(ov, cts)
         self.sl_to_tp = self.variants.current_sl()
@@ -3430,16 +3430,16 @@ class Pulse:
             if not lane or lane.base_qty <= 0:
                 continue
             # Parent still valid only if pulse score agrees with side (continuation).
-            intern_pf = 1.2
+            intern_pf = 0.0   # no resolvable Set: no pass (was a fabricated 1.2)
             try:
                 st = self.sets.sets.get(pos.set_id) if pos.set_id else None
                 if st is None:
                     st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
                 if st is not None:
                     # the real PF; a Set with few closes is already excluded by the coordinator sample rule (no fabricated pass)
-                    intern_pf = float(getattr(st, "last15_pf", 0.0) or 0.0)
+                    intern_pf = float(getattr(st, "gate_pf", 0.0) or 0.0)   # the same PF the entry gate uses
             except Exception:
-                intern_pf = 1.2
+                intern_pf = 0.0   # an error is never a pass
             d, why, conf = self.score(pos.symbol)
             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
             if not same:

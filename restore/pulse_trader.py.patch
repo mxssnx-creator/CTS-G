@@ -1,5 +1,5 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..a3252b4 100644
+index b3a9ff3..75cc01c 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
 @@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
@@ -157,6 +157,15 @@ index b3a9ff3..a3252b4 100644
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
+@@ -2415,7 +2493,7 @@ class Pulse:
+ 
+     def entry_sense(self, sym: str, direction: int, reason: str, conf: float, pack: str) -> Optional[str]:
+         """Skip entries that do not make sense (weak, duplicate slot, dead Set)."""
+-        if conf < 0.50:
++        if conf < self.sets.entry_conf:   # the same setEntryConf the replay uses
+             return "low-conf"
+         if (self.px.get(sym) or 0) <= 0:
+             return "no-px"
 @@ -2450,7 +2528,8 @@ class Pulse:
              return None
          elif self.sets.enabled and self.sets.use_historic_gate:
@@ -167,6 +176,15 @@ index b3a9ff3..a3252b4 100644
          return None
  
      def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
+@@ -2648,7 +2727,7 @@ class Pulse:
+             src = f"step{chosen.step}xcost"
+         reason = f"{reason} {src} sltp={sl_ratio:.1f} tr={trail_key} st={getattr(chosen, 'step', 0) if chosen else 0} set={set_id or 'def'}"
+         sl = avg * (1 - sl_pct) if direction > 0 else avg * (1 + sl_pct)
+-        if self.exits.enabled and self.exits.ignore_tp:
++        if self.exits.enabled and self.exits.ignore_tp and not (chosen and getattr(chosen, "step", 0)):
+             tp_pct = max(tp_pct, sl_pct * 3.0, self.tp_max)
+         tp = avg * (1 + tp_pct) if direction > 0 else avg * (1 - tp_pct)
+         pos = Position(
 @@ -2956,7 +3035,9 @@ class Pulse:
          except Exception:
              self.overlay_mtime = 0.0
@@ -178,6 +196,18 @@ index b3a9ff3..a3252b4 100644
          try:
              self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
          except Exception:
+@@ -2995,9 +3076,9 @@ class Pulse:
+         self.position_cost_pct = float(ov.get("positionCostPct") or 0.15)
+         self.pf_window = int(ov.get("pfWindow") or 15)
+         self.sl_min = float(ov.get("slMinPct") or 0.20) / 100.0
+-        self.sl_max = float(ov.get("slMaxPct") or 1.20) / 100.0
++        self.sl_max = float(ov.get("slMaxPct") or 15.75) / 100.0   # covers the grid: SL up to 15.75%
+         self.tp_min = float(ov.get("tpMinPct") or 0.35) / 100.0
+-        self.tp_max = float(ov.get("tpMaxPct") or 2.40) / 100.0
++        self.tp_max = float(ov.get("tpMaxPct") or 4.5) / 100.0     # covers the grid: TP up to 4.5%
+         self.tp_cost_ratio = float(ov.get("tpCostRatio") or 5)
+         self.variants.load(ov, cts)
+         self.sl_to_tp = self.variants.current_sl()
 @@ -3011,7 +3092,7 @@ class Pulse:
          self.strat_block = bool(ov.get("stratBlock", True))
          self.strat_trail = bool(ov.get("stratTrailing", True))
@@ -216,7 +246,14 @@ index b3a9ff3..a3252b4 100644
          if not self.mods.get("strategy.coord", True):
              for ax in self.coord.axes.values():
                  ax.enabled = False
-@@ -3355,9 +3436,8 @@ class Pulse:
+@@ -3349,17 +3430,16 @@ class Pulse:
+             if not lane or lane.base_qty <= 0:
+                 continue
+             # Parent still valid only if pulse score agrees with side (continuation).
+-            intern_pf = 1.2
++            intern_pf = 0.0   # no resolvable Set: no pass (was a fabricated 1.2)
+             try:
+                 st = self.sets.sets.get(pos.set_id) if pos.set_id else None
                  if st is None:
                      st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
                  if st is not None:
@@ -224,10 +261,13 @@ index b3a9ff3..a3252b4 100644
 -                    if int(getattr(st, "last15_n", 0) or 0) < 8:
 -                        intern_pf = max(intern_pf, 1.2)
 +                    # the real PF; a Set with few closes is already excluded by the coordinator sample rule (no fabricated pass)
-+                    intern_pf = float(getattr(st, "last15_pf", 0.0) or 0.0)
++                    intern_pf = float(getattr(st, "gate_pf", 0.0) or 0.0)   # the same PF the entry gate uses
              except Exception:
-                 intern_pf = 1.2
+-                intern_pf = 1.2
++                intern_pf = 0.0   # an error is never a pass
              d, why, conf = self.score(pos.symbol)
+             same = (pos.side == "LONG" and d > 0) or (pos.side == "SHORT" and d < 0)
+             if not same:
 @@ -3760,7 +3840,7 @@ class Pulse:
                      best_st = st
              if best_st:

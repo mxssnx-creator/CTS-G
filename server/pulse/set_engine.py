@@ -672,6 +672,7 @@ class SetBook:
         self.packs: List[str] = list(PACKS)
         self.sl_ratios: List[float] = list(SL_RATIOS)
         self.trails: List[Tuple[str, float, float]] = []
+        self.trails_built: List[Tuple[str, float, float]] = []
         self.sets: Dict[str, SetState] = {}
         self.by_idx: List[SetState] = []
         self._sig_cache: Dict[str, Dict[int, Dict[str, Tuple[int, float, str]]]] = {}
@@ -686,6 +687,8 @@ class SetBook:
         self.locks: Dict[str, bool] = {}
         self._live_seen: set = set()
         self.live_skipped = 0
+        self.live_unmatched = 0            # live closes whose Set is neither on the grid nor retired
+        self.retired: Dict[str, SetState] = {}   # Sets that left the grid (step-adapt): tape kept, never picked
         self._running = False
 
     def load(self, ov: Dict[str, Any], cts: Optional[Dict[str, Any]] = None) -> None:
@@ -717,7 +720,11 @@ class SetBook:
         tp = float(ov.get("tpPct") or 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
-        self.hist_honor_tp = bool(ov.get("setHonorTp", True))
+        # one TP rule for replay and live: exitIgnoreTp, the key live reads. setHonorTp is only the fallback.
+        if "exitIgnoreTp" in ov:
+            self.hist_honor_tp = not bool(ov["exitIgnoreTp"])
+        else:
+            self.hist_honor_tp = bool(ov.get("setHonorTp", True))
         opt = float(ov.get("exitOptSlPct") or 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
@@ -784,11 +791,17 @@ class SetBook:
         return list(range(lo, hi + 1))
 
     def _rebuild_sets(self) -> None:
-        keep = {sid: st for sid, st in self.sets.items()}
+        keep = {**self.retired, **self.sets}
         next_sets: Dict[str, SetState] = {}
         by_idx: List[SetState] = []
         self.steps = self._step_grid()
         trails = list(self.trails) or [("0.3:0.1", 0.3, 0.1)]
+        # a trail arm at or above the mid-step TP can never trail when TP is honoured: TP exits first. Such Sets are
+        # not built in honour-TP mode (119 of 210 per pack on the default grid). Ignore-TP keeps every trail Set.
+        mid_tp_pct = (self.steps[len(self.steps) // 2] if self.steps else 8) * self.cost_pct
+        if self.hist_honor_tp:
+            trails = [t for t in trails if t[1] < mid_tp_pct - 1e-9]
+        self.trails_built = list(trails)   # the trail keys this grid actually builds (coverage checks this list)
         idx = 0
         def _put(st: SetState) -> None:
             nonlocal idx
@@ -851,6 +864,11 @@ class SetBook:
                 st.tr_i = tr_i
                 st.step_i = -1
                 _put(st)
+        gone = {sid: st for sid, st in keep.items() if sid not in next_sets}
+        for st in gone.values():
+            st.active = False
+            st.deact_reason = "out of grid (step-adapt)"
+        self.retired = gone
         self.sets = next_sets
         self.by_idx = by_idx
         self.progress.sets_total = len(self.sets)
@@ -981,12 +999,11 @@ class SetBook:
         for x in (sid, extra):
             if not x:
                 continue
-            st = self.sets.get(x)
-            if not st:
-                st = self.sets.get(f"{x}:st{self.min_step}")
+            st = self.sets.get(x) or self.retired.get(x)
             if st and st not in targets:
                 targets.append(st)
         if not targets:
+            self.live_unmatched += 1
             return
         for st in targets:
             key = self._live_key(st.id, row)
@@ -995,6 +1012,7 @@ class SetBook:
             self._live_seen.add(key)
             st.live.append(row)
             st.live = st.live[-80:]
+            st.n += 1
             self._score_one(st, now=row["t"] or None)
 
     def seed_live(self, closed: Sequence[Any]) -> None:
@@ -1036,8 +1054,10 @@ class SetBook:
                 names = [s for s, b in self.bars.items() if len(b) >= self.min_bars]
             else:
                 names = [s for s in symbols if len(self.bars.get(s) or []) >= self.min_bars]
+            was_ready = self.progress.ready
             self.progress = Progress(
                 phase="replay",
+                ready=was_ready,
                 pct=1.0,
                 sets_total=len(self.sets),
                 symbols_total=len(names),
@@ -1098,8 +1118,14 @@ class SetBook:
             self.progress.error = "; ".join(errors[:3])[:220]
             self.progress.symbols_done = len(names) if not aborted else self.progress.symbols_done
             self.progress.sets_done = len(self.sets)
-            if names and ok_syms == 0:
+            if not names:
+                self.progress.phase = "waiting"
+                self.progress.ready = False
+            elif ok_syms == 0:
                 self.progress.phase = "error"
+                self.progress.ready = False
+            elif aborted:
+                self.progress.phase = "partial"
             else:
                 self.progress.phase = "ready"
                 self.progress.pct = 100.0
@@ -1112,6 +1138,7 @@ class SetBook:
             )
         except Exception as exc:
             self.progress.phase = "error"
+            self.progress.ready = False
             self.progress.error = str(exc)[:220]
         finally:
             self.progress.last_run_ms = (time.time() - t0) * 1000
@@ -1156,8 +1183,7 @@ class SetBook:
             self.progress.set_id = st.id
 
     def _score_one(self, st: SetState, now: Optional[float] = None) -> None:
-        tape = st.tape()
-        st.n = len(st.hist)
+        tape = sorted(st.tape(), key=lambda r: finite(r.get("t")))   # last-N and drawdown read one time order
         pnls = [finite(r.get("pnl")) for r in tape]
         st.wins = sum(1 for x in pnls if x > 0)
         st.gp = round(sum(x for x in pnls if x > 0), 6)
@@ -1295,7 +1321,7 @@ class SetBook:
         }
 
     def coverage(self) -> Dict[str, Any]:
-        trails = [t[0] for t in (self.trails or [])]
+        trails = [t[0] for t in (self.trails_built or self.trails or [])]
         trail_sets = [st for st in self.by_idx if st.kind == "trail"]
         base_sets = [st for st in self.by_idx if st.kind == "base"]
         by_tr: Dict[str, Dict[str, Any]] = {}
@@ -1709,7 +1735,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     book4.gate_window, book4.gate_min = 15, 12  # these fixtures carry 15 trades
     cov = book4.coverage()
     want_base = len(book4.packs) * len(book4.sl_ratios) * len(book4.steps)
-    want_tr = len(book4.packs) * max(1, len(book4.trails))
+    built_keys = sorted({s.trail_key for s in book4.by_idx if s.kind == "trail"})
+    want_tr = len(book4.packs) * max(1, len(built_keys))
     want = want_base + want_tr
     idxs = [s.idx for s in book4.by_idx]
     trails_in = {s.trail_key for s in book4.by_idx if s.kind == "trail"}
@@ -1717,6 +1744,9 @@ def self_test() -> List[Tuple[str, bool, str]]:
     out.append(("set-grid-product", len(book4.by_idx) == want and want_base >= 50 and want_tr >= 10, f"n={len(book4.by_idx)} base={want_base} trail={want_tr} dims={cov.get('dims')} fam={cov.get('families')}"))
     out.append(("set-idx-unique", idxs == list(range(len(idxs))), f"n={len(idxs)} last={idxs[-1] if idxs else None}"))
     out.append(("set-trail-cover", cov.get("trailCover") and len(trails_in) >= 5 and "trail" in kinds, f"trails={sorted(trails_in)} cover={cov.get('trailCover')}"))
+    mid_tp = (book4.steps[len(book4.steps) // 2]) * book4.cost_pct
+    honour_ok = (not book4.hist_honor_tp) or all(st.trail_arm < mid_tp - 1e-9 for st in book4.by_idx if st.kind == "trail")
+    out.append(("set-trail-honour-rule", honour_ok and len(book4.trails) >= len(built_keys), f"honour={book4.hist_honor_tp} mid_tp={mid_tp:.2f} built={len(built_keys)} grid={len(book4.trails)}"))
     out.append(("set-sl-cover", cov.get("slCover") and len(book4.sl_ratios) >= 5, f"sl={book4.sl_ratios}"))
     out.append(("set-get-idx", book4.get_idx(0) is book4.by_idx[0] and book4.get_idx(want - 1) is book4.by_idx[-1], f"0={book4.get_idx(0).id if book4.get_idx(0) else None}"))
     v = book4.coord_vars(book4.by_idx[0])

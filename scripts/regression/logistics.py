@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "a3252b46b5240371beff5d1e696f7d4d164c7e0b"
+PIN_WANT = "75cc01c9b90f7b023472baf54fdadf25d6212f7d"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -156,11 +156,24 @@ def conn_pinned_per_connection():
     return ok, f"guard checks={len(results)} failed={bad} mainnet_fallback={mainnet_fallback} wired={wired}"
 
 
+def no_fabricated_pass_and_one_entry_conf():
+    """The block intern PF has no fabricated 1.2 pass, live entries read the one setEntryConf key (no 0.50 literal),
+    and the live TP override does not touch Set fills."""
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    fabricated = "intern_pf = 1.2" in src
+    literal_conf = re.search(r"if conf < 0\.50:", src) is not None
+    one_key = "if conf < self.sets.entry_conf" in src
+    set_fill_override = "not (chosen and getattr(chosen, \"step\", 0))" in src
+    ok = (not fabricated) and (not literal_conf) and one_key and set_fill_override
+    return ok, f"fabricated_pass={fabricated} literal_0.50={literal_conf} one_key={one_key} set_fill_tp_kept={set_fill_override}"
+
+
 CHECKS = [
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
+    ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),
     ("logistics.dca-off-everywhere", dca_is_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),
