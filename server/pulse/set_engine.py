@@ -230,32 +230,39 @@ def general_signal(bars: Sequence[Sequence[float]]) -> Tuple[int, float, str]:
 
 def indication_signal(bars: Sequence[Sequence[float]], settings: Dict[str, Any], now: float) -> Tuple[int, float, str]:
     """Set-level indication pack, causal, 1m rows [o,h,l,c,v] (newest last).
-    Timeframe lanes 1m, 5m and 15m go through indication_engine.timeframe_evals and combine_timeframes,
-    the code IndicationBook uses. The combined timeframe vote needs tfMinAgree agreeing lanes (tfCombined
-    on). The TA, direction and move evaluators vote on their own."""
+    The switches are the ones IndicationBook reads, with the same meaning:
+      tf1m / tf5m / tf15m   timeframe lanes that take part (timeframe_evals skips a lane that is off);
+      typeSignals           the timeframe lanes as signals, so the combined "tf" vote is off with it;
+      tfCombined            the combined vote, which needs tfMinAgree agreeing lanes;
+      typeState             the TA pack ("ta" vote);
+      typeDirection         the direction evaluator ("dir" vote);
+      typeMove              the move evaluator ("move" vote).
+    typeActive and typeCommon have no evaluator in this pack, so they do not apply here.
+    A switch that is off removes its vote; with every switch on (the shipped overlays) the votes are unchanged."""
     rows = list(bars)
     one_m = rows[-60:]
     candles = bars_to_candles(one_m, now=now, period_s=BAR_S)
     tf_rows = {"1m": one_m, "5m": aggregate_bars(rows, 5), "15m": aggregate_bars(rows, 15)}
-    tf_evs = timeframe_evals(tf_rows, settings, now)
+    use_signals = bool(settings.get("typeSignals", True))
+    tf_evs = timeframe_evals(tf_rows, settings, now) if use_signals else []
     closes = [float(b[3]) for b in one_m] if one_m else []
     votes: List[Tuple[int, float, str]] = []
-    if settings.get("tfCombined", True):
+    if use_signals and settings.get("tfCombined", True):
         comb = combine_timeframes(tf_evs, int(settings.get("tfMinAgree") or 2), settings)
         if comb:
             direction, _contrib, risk = comb
             votes.append((1 if direction == "long" else -1, float(risk["confidence"]), "tf"))
-    ta = evaluate_ta_pack(candles, settings)
+    ta = evaluate_ta_pack(candles, settings) if settings.get("typeState", True) else None
     if ta:
         votes.append((1 if ta.direction == "long" else -1, ta.confidence, "ta"))
     try:
-        drow = evaluate_direction("hist", closes, settings) if closes else None
+        drow = evaluate_direction("hist", closes, settings) if closes and settings.get("typeDirection", True) else None
         if drow:
             votes.append((1 if drow.direction == "long" else -1, drow.confidence, "dir"))
     except Exception:
         pass
     try:
-        mrow = evaluate_move("hist", closes, settings) if closes else None
+        mrow = evaluate_move("hist", closes, settings) if closes and settings.get("typeMove", True) else None
         if mrow:
             votes.append((1 if mrow.direction == "long" else -1, mrow.confidence, "move"))
     except Exception:
@@ -801,11 +808,16 @@ class SetBook:
             "takeProfitRewardRisk": num(ov, "indRewardRisk", 1.8),
             "takeProfitMaxPct": 5.0,
             "positionCostPct": self.cost_pct,
-            # timeframe lanes and the combined vote: the set signal must see the same keys IndicationBook reads
+            # the switches IndicationBook reads (same keys, same defaults): the set signal honours them too
+            "tf1m": bool(ov.get("tf1m", True)),
             "tf5m": bool(ov.get("tf5m", True)),
             "tf15m": bool(ov.get("tf15m", True)),
             "tfCombined": bool(ov.get("tfCombined", True)),
             "tfMinAgree": max(1, num(ov, "tfMinAgree", 2, int)),
+            "typeState": bool(ov.get("indTypeState", True)),
+            "typeDirection": bool(ov.get("indTypeDirection", True)),
+            "typeMove": bool(ov.get("indTypeMove", True)),
+            "typeSignals": bool(ov.get("indTypeSignals", True)),
         }
         self._rebuild_sets()
 

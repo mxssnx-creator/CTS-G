@@ -90,6 +90,10 @@ MUTATIONS = [
     ("indications: snapshot iterates the live dicts",
      "indication_engine.py", "        last = dict(self.last)\n        evals = dict(self.evals)",
      "        last = self.last\n        evals = self.evals"),
+    ("indications: the Set pack ignores the direction switch",
+     "set_engine.py", 'if closes and settings.get("typeDirection", True) else None', "if closes else None"),
+    ("indications: the Set pack forces the 1m lane on",
+     "set_engine.py", '"tf1m": bool(ov.get("tf1m", True)),', '"tf1m": True,'),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]

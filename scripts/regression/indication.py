@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from common import T0, overlay, synth_bars  # noqa: F401
 from indication_engine import DEFAULT_SETTINGS, aggregate_bars, combine_timeframes, timeframe_evals
-from set_engine import SetBook, pack_signals
+from set_engine import SetBook, indication_signal, pack_signals
 
 
 def causal_signals_ignore_the_future():
@@ -121,6 +121,68 @@ def signal_is_deterministic():
     return a == c, "two runs identical" if a == c else "differs between runs"
 
 
+# A window where the Set pack gives all four votes with every switch on (found by search, fixed here).
+SWITCH_BARS = (48, 0.0003)
+SWITCH_TOKEN = {"indTypeSignals": "tf", "indTypeState": "ta", "indTypeDirection": "dir", "indTypeMove": "move"}
+
+
+def set_switches_reach_the_set_signal():
+    """The timeframe and type switches IndicationBook reads are forwarded to the Set pack's settings, unchanged."""
+    off = {"tf1m": False, "indTypeState": False, "indTypeDirection": False, "indTypeMove": False,
+           "indTypeSignals": False}
+    b = SetBook()
+    b.load(overlay(**off))
+    got = {k: b.ind_settings.get(k) for k in ("tf1m", "typeState", "typeDirection", "typeMove", "typeSignals")}
+    want = {"tf1m": False, "typeState": False, "typeDirection": False, "typeMove": False, "typeSignals": False}
+    return got == want, f"set signal sees {got}"
+
+
+def switched_off_vote_is_absent():
+    """Each type switch removes its own vote from the Set pack, and the other votes stay."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)[-420:]
+    on = SetBook()
+    on.load(overlay())
+    _, _, why_on = indication_signal(bars, on.ind_settings, T0)
+    all_votes = set(why_on.split("+"))
+    if all_votes != {"tf", "ta", "dir", "move"}:
+        return False, f"precondition: the window must give all four votes, got {why_on!r}"
+    problems = []
+    for switch, token in SWITCH_TOKEN.items():
+        book = SetBook()
+        book.load(overlay(**{switch: False}))
+        _, _, why = indication_signal(bars, book.ind_settings, T0)
+        got = set(why.split("+")) - {""}
+        if token in got or not got <= all_votes:
+            problems.append(f"{switch}=off gave {why!r}")
+    return not problems, "; ".join(problems) or "each switch removes exactly its own vote"
+
+
+def all_switches_off_is_flat():
+    """With every vote switched off the Set pack has no vote, so the signal is flat."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)[-420:]
+    book = SetBook()
+    book.load(overlay(indTypeState=False, indTypeDirection=False, indTypeMove=False, indTypeSignals=False))
+    direction, _conf, why = indication_signal(bars, book.ind_settings, T0)
+    return direction == 0 and why == "flat", f"direction={direction} why={why!r}"
+
+
+def timeframe_1m_switch_removes_the_lane_from_the_set_pack():
+    """tf1m off removes the 1m lane from the timeframe evaluations the Set pack uses."""
+    seed, drift = SWITCH_BARS
+    bars = synth_bars(seed, 400, drift=drift)
+    rows = {"1m": bars[-60:], "5m": aggregate_bars(bars, 5), "15m": aggregate_bars(bars, 15)}
+    book = SetBook()
+    book.load(overlay(tf1m=False))
+    seen = {ev.source_id for ev in timeframe_evals(rows, book.ind_settings, T0)}
+    on = SetBook()
+    on.load(overlay())
+    seen_on = {ev.source_id for ev in timeframe_evals(rows, on.ind_settings, T0)}
+    ok = "bingx-1m" in seen_on and "bingx-1m" not in seen and "bingx-5m" in seen
+    return ok, f"lanes on={sorted(seen_on)} with tf1m off={sorted(seen)}"
+
+
 CHECKS = [
     ("indication.causal-signals-ignore-future", causal_signals_ignore_the_future),
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
@@ -129,4 +191,8 @@ CHECKS = [
     ("indication.match-names-kind-and-mode", match_names_kind_and_mode),
     ("indication.snapshot-survives-concurrent-writes", snapshot_survives_concurrent_writes),
     ("indication.signal-deterministic", signal_is_deterministic),
+    ("indication.set-switches-reach-the-set-signal", set_switches_reach_the_set_signal),
+    ("indication.switched-off-vote-is-absent", switched_off_vote_is_absent),
+    ("indication.all-switches-off-is-flat", all_switches_off_is_flat),
+    ("indication.tf1m-switch-removes-the-set-lane", timeframe_1m_switch_removes_the_lane_from_the_set_pack),
 ]
