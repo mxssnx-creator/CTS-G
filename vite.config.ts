@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { Plugin, ProxyOptions } from "vite";
@@ -347,17 +347,33 @@ function configFallback(conn: string): unknown {
   return { cts: null, overlay, conn };
 }
 
-async function tryPulse(method: string, path: string, raw?: string, ms = 1600): Promise<{ status: number; json: unknown } | null> {
+type PulseReply = { status: number; json: unknown; timedOut?: boolean };
+
+/**
+ * One call to the pulse sidecar. Returns null only when the sidecar is not reachable at all (connection refused).
+ * A timeout is a reply, not a null: the sidecar may already have acted, so the caller must not repeat the action.
+ * Mutating calls carry PULSE_HTTP_TOKEN in X-Pulse-Token; the sidecar refuses them without it.
+ */
+async function tryPulse(method: string, path: string, raw?: string, ms = 1600): Promise<PulseReply | null> {
+  const token = process.env.PULSE_HTTP_TOKEN || "";
+  const auth = method !== "GET" && token ? { "X-Pulse-Token": token } : {};
   try {
     const r = await fetch(`${PULSE}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...auth },
       body: method === "GET" ? undefined : raw,
       signal: AbortSignal.timeout(ms),
     });
     const text = await r.text();
     return { status: r.status, json: JSON.parse(text) };
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return {
+        status: 504,
+        json: { ok: false, detail: "the sidecar did not confirm within the time limit; check the lane before retrying" },
+        timedOut: true,
+      };
+    }
     return null;
   }
 }
@@ -408,9 +424,11 @@ function pulseControlPlugin(): Plugin {
             // start/stop and report bogus state. Control calls get 30s.
             const pulse = await tryPulse("POST", `/control.json?conn=${encodeURIComponent(conn)}`, raw || JSON.stringify({ action }), 30000);
             if (pulse) {
+              // a timeout is returned as is: the CTS side must not repeat an action the sidecar may already have taken
               jsonRes(res as ServerResponse, pulse.status, pulse.json);
               return;
             }
+            // the sidecar is not running at all, so the CTS side is the only writer
             const out = await applyCtsControl(conn, action);
             jsonRes(res as ServerResponse, out.ok ? 200 : 400, {
               ok: out.ok,
@@ -465,7 +483,10 @@ function pulseControlPlugin(): Plugin {
             const dest = overlayFile(conn);
             const cur = existsSync(dest) ? (JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown>) : {};
             const next = { ...cur, ...overlay };
-            writeFileSync(dest, JSON.stringify(next, null, 2));
+            // written beside the target and renamed into place, so a reader never sees a half-written file
+            const tmp = `${dest}.${process.pid}.tmp`;
+            writeFileSync(tmp, JSON.stringify(next, null, 2));
+            renameSync(tmp, dest);
             jsonRes(res as ServerResponse, 200, { ok: true, overlay: next, conn, via: "local" });
             return;
           }

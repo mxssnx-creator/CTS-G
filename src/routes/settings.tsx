@@ -19,6 +19,7 @@ import {
 } from "@/lib/config-model";
 import { fetchLiveStats, pickView, type LiveStats } from "@/lib/live-stats";
 import { formatDuration } from "@/lib/analytics";
+import { createSaveGate } from "@/lib/poll";
 import { DeskShell } from "@/components/desk-shell";
 import { useConnection } from "@/components/connection-provider";
 import { SymbolPicker } from "@/components/symbol-picker";
@@ -60,6 +61,8 @@ function SettingsPage() {
   const [ready, setReady] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
+  // a poll started before a save must not overwrite the saved values when it returns (see lib/poll.ts)
+  const saveGate = useRef(createSaveGate());
 
   useEffect(() => {
     let alive = true;
@@ -72,6 +75,7 @@ function SettingsPage() {
     const local = loadLocalOverlay(conn);
     setOverlay(overlayFromCts({}, local || {}));
     const pull = async () => {
+      const snap = saveGate.current.snapshot();
       const sP = fetchLiveStats(conn);
       const cP = fetchCtsBundle(conn);
       const s = await sP;
@@ -80,7 +84,7 @@ function SettingsPage() {
       const c = await cP;
       if (!alive) return;
       setCts(c.cts);
-      if (!dirtyRef.current) {
+      if (!dirtyRef.current && saveGate.current.fresh(snap)) {
         const stored = loadLocalOverlay(conn);
         setOverlay(overlayFromCts(c.cts ?? {}, { ...(stored || {}), ...(c.overlay || {}) }));
       }
@@ -130,6 +134,7 @@ function SettingsPage() {
       return;
     }
     setSaving(true);
+    saveGate.current.mark();   // polls that started before this save are now stale
     const r = await saveOverlay(overlay, target);
     setSaving(false);
     setSaveMsg(r.detail);
@@ -635,7 +640,7 @@ function SettingsPage() {
                 <KV k="Prev min count" v={String(num(cts?.prevPosMinCount ?? cts?.prev_pos_min_count, 5))} />
                 <KV k="Main eval pos count" v={String(num(cts?.mainEvalPosCount, 5))} />
                 <KV k="Real eval pos count" v={String(num(cts?.realEvalPosCount, 3))} />
-                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 5))} />
+                <KV k="Min step" v={String(num(cts?.minStep ?? cts?.min_step, 6))} />
                 <KV k="Trailing min step" v={String(num(cts?.trailingMinStep ?? cts?.trailMinStep, 3))} />
               </Grid>
             </Card>

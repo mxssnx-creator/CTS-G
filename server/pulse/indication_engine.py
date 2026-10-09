@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from position_cost import POSITION_COST_PCT_DEFAULT
+from config_num import num
 
 # Stop-loss margin added on top of the round-trip cost (percent). Named so it is not a hidden literal.
 STOP_COST_MARGIN_PCT = 0.08
@@ -602,7 +603,7 @@ def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: 
     newest = current[-1]
     signed = _pct(current[0], newest)
     price_chg = abs(signed)
-    threshold = max(0.01, float(settings.get("activeMovePct") or 0.5))
+    threshold = max(0.01, num(settings, "activeMovePct", 0.5))
     if price_chg + 1e-12 < threshold:
         return None
     direction = "long" if signed >= 0 else "short"
@@ -613,13 +614,13 @@ def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: 
     prev_act = _avg_abs_move_pct(previous)
     cur_act = _avg_abs_move_pct(current)
     activity_ratio = cur_act / max(prev_act, 1e-6)
-    min_act = max(0.0, float(settings.get("activeThreshold") or 1.0))
+    min_act = max(0.0, num(settings, "activeThreshold", 1.0))
     if activity_ratio + 1e-12 < min_act:
         return None
     ref = sample[:-1]
     ref_hi, ref_lo = max(ref), min(ref)
     breakout = max(0.0, _pct(ref_hi, newest)) if direction == "long" else max(0.0, -_pct(ref_lo, newest))
-    noise = max(0.0, float(settings.get("activeNoise") or 0.05))
+    noise = max(0.0, num(settings, "activeNoise", 0.05))
     if noise <= 0.02:
         noise *= 100.0
     if breakout + 1e-12 < noise:
@@ -632,7 +633,7 @@ def evaluate_active_range(symbol: str, closes: List[float], rng: int, settings: 
     mae = _mae_pct(current, direction)
     if mae > max(noise, price_chg * 1.0):
         return None
-    vol_w = clamp(float(settings.get("activeVolatilityWeight") or 0.3), 0.0, 1.0)
+    vol_w = clamp(num(settings, "activeVolatilityWeight", 0.3), 0.0, 1.0)
     cost = max(0.02, float(settings.get("positionCostPct") or POSITION_COST_PCT_DEFAULT))
     vol_risk = max(cost * 2.0, cur_act * (0.75 + vol_w * 0.75))
     sl = clamp(max(cost * 2.0, vol_risk), float(settings.get("stopLossMinPct", 0.2)), float(settings.get("stopLossMaxPct", 1.5)))
@@ -1200,12 +1201,27 @@ class IndicationBook:
         return rows[0]
 
     def match(self, symbol: str, reason: str) -> Optional[Indication]:
+        """The row an entry reason names. The trader writes the reason as ind:<kind>:<mode>:<agreement>:...
+
+        Exact kind and mode first; then the mode alone, because the mode carries the direction; then the kind alone;
+        then the best row. Substring matching is not used: a row of the right kind but the wrong mode is not a match.
+        """
         rows = self.last.get(symbol) or []
-        low = (reason or "").lower()
-        for i in rows:
-            token = f"ind:{i.kind}"
-            if token in low or i.kind in low.split(":") or i.mode in low:
-                return i
+        parts = (reason or "").split(":")
+        named = parts[0] == "ind" and len(parts) > 2
+        kind = parts[1] if named else ""
+        mode = parts[2] if named else ""
+        rules = (
+            bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),
+            bool(mode) and (lambda i: i.mode == mode),
+            bool(kind) and (lambda i: i.kind == kind),
+        )
+        for rule in rules:
+            if not rule:
+                continue
+            for i in rows:
+                if rule(i):
+                    return i
         return self.best(symbol)
 
     def kinds_for(self, symbol: str) -> Dict[str, "Indication"]:

@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "b9f054d4ac7e0a1eedcf060279c196a50eb97d64"
+PIN_WANT = "cb6522a36ee4dab8166b45647e50eeeb9279da86"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -41,6 +41,33 @@ def desk_defaults_match_engine():
     if not (desk and eng and float(desk.group(1)) == float(eng.group(1))):
         missing.append(f"GATE_MIN_PF_DEFAULT desk={desk and desk.group(1)} engine={eng and eng.group(1)}")
     return not missing, f"missing={missing}" if missing else f"{len(need)} defaults present; gate default equal in desk and engine"
+
+
+DESK_SHARED_NUMERIC = ("cooldownS", "staggerS", "minStep", "trailingMinStep", "setMinStep", "setStepMax",
+                       "scanS", "timeStopS", "scratchS", "tpPct", "slPct")
+
+
+def desk_defaults_equal_shipped_overlay():
+    """The desk's DEFAULT_OVERLAY and the shipped x01 overlay agree on each shared numeric key.
+
+    The engine and the shipped overlays are the reference (decision D1): a desk default that differs from the value
+    the live config runs is a number the operator sees and the engine never uses.
+    """
+    src = open(CONFIG_MODEL, encoding="utf-8").read()
+    start = src.index("export const DEFAULT_OVERLAY")
+    block = src[start:src.index("};", start)]
+    shipped = json.load(open(os.path.join(PULSE, "overlay-bingx-x01.json"), encoding="utf-8"))
+    drift = []
+    checked = []
+    for key in DESK_SHARED_NUMERIC:
+        m = re.search(r"\b" + key + r":\s*(-?[0-9.]+)", block)
+        if not m or key not in shipped:
+            continue
+        checked.append(key)
+        if abs(float(m.group(1)) - float(shipped[key])) > 1e-9:
+            drift.append(f"{key}: desk={m.group(1)} shipped={shipped[key]}")
+    ok = not drift and len(checked) >= 6
+    return ok, f"checked={len(checked)} drift={drift}" if drift else f"{len(checked)} shared numeric defaults equal the shipped overlay"
 
 
 def dca_is_off_everywhere():
@@ -168,9 +195,36 @@ def no_fabricated_pass_and_one_entry_conf():
     return ok, f"fabricated_pass={fabricated} literal_0.50={literal_conf} one_key={one_key} set_fill_tp_kept={set_fill_override}"
 
 
+def zero_is_a_value_not_a_default():
+    """An explicit 0 in a config read is used. Only a missing key takes the default."""
+    from config_num import num
+    from exit_engine import ExitBook
+    from set_engine import SetBook
+    e = ExitBook()
+    e.load({"exitMinHoldS": 0, "exitLockPct": 0, "trailingMinStep": 0, "scratchMin": 0})
+    s = SetBook()
+    s.load(overlay(scratchS=0, indMinConfidence=0, tfMinAgree=0))
+    zero = {
+        "exitMinHoldS": e.min_hold_s == 0,
+        "exitLockPct": e.lock_pct == 0,
+        "trailingMinStep": e.trail_min_step == 0,
+        "scratchMin": e.scratch_min == 0,
+        "scratchS": s.scratch_s == 0,
+        "indMinConfidence": s.ind_settings["minimumConfidence"] == 0,
+        "tfMinAgree clamped to 1": s.ind_settings["tfMinAgree"] == 1,
+    }
+    d = ExitBook()
+    d.load({})
+    missing_default = num({}, "k", 45) == 45 and d.min_hold_s == 45 and d.lock_pct == 0.0015
+    ok = all(zero.values()) and missing_default
+    return ok, f"zero_kept={[k for k, v in zero.items() if v]} failed={[k for k, v in zero.items() if not v]} default_ok={missing_default}"
+
+
 CHECKS = [
+    ("logistics.zero-is-a-value-not-a-default", zero_is_a_value_not_a_default),
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
+    ("logistics.desk-defaults-equal-shipped-overlay", desk_defaults_equal_shipped_overlay),
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
     ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.no-fabricated-pass-and-one-entry-conf", no_fabricated_pass_and_one_entry_conf),

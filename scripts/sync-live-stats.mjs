@@ -80,7 +80,15 @@ async function fromCts() {
     s.cycle = liveLane.cycle;
   }
   s.now = Date.now();
-  await fs.writeFile(DEST, JSON.stringify(s));
+  await writeDest(JSON.stringify(s));
+}
+
+/** Write the desk snapshot beside its target and rename it into place: a reader never sees a partial file. */
+async function writeDest(text) {
+  const fs = await import("node:fs/promises");
+  const tmp = `${DEST}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, text);
+  await fs.rename(tmp, DEST);
 }
 
 async function markOffline(reason) {
@@ -106,19 +114,20 @@ async function markOffline(reason) {
       l.progressPhase = "offline";
       l.progressReady = false;
     }
-    await fs.writeFile(DEST, JSON.stringify(s));
+    await writeDest(JSON.stringify(s));
   } catch {
     /* keep last snapshot if we cannot rewrite it */
   }
 }
 
 async function once() {
-  const r = await fetch(PULSE, { cache: "no-store" });
+  // a sidecar that accepts the connection and never answers must not hang the loop
+  const r = await fetch(PULSE, { cache: "no-store", signal: AbortSignal.timeout(8000) });
   if (!r.ok) throw new Error("status " + r.status);
   const text = await r.text();
   JSON.parse(text);
   const fs = await import("node:fs/promises");
-  await fs.writeFile(DEST, text);
+  await writeDest(text);
 }
 
 async function loop() {

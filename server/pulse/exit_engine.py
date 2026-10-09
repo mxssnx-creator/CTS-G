@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from config_num import num
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
     POSITION_COST_PCT_DEFAULT,
@@ -122,17 +123,17 @@ class ExitBook:
         self.peak_on = bool(ov.get("exitPeakOn", True))
         self.rev_on = bool(ov.get("exitRevOn", False))
         self.time_on = bool(ov.get("exitTimeOn", False))
-        self.lock_pct = pct_to_frac(float(ov.get("exitLockPct") or 0.15))
-        self.be_buffer = pct_to_frac(float(ov.get("exitBeBuffer") or 0.04))
-        self.opt_sl = pct_to_frac(float(ov.get("exitOptSlPct") or 0.30))
-        self.opt_sl_min = pct_to_frac(float(ov.get("exitOptSlMin") or 0.10))
-        self.opt_sl_max = pct_to_frac(float(ov.get("exitOptSlMax") or 0.90))
+        self.lock_pct = pct_to_frac(num(ov, "exitLockPct", 0.15))
+        self.be_buffer = pct_to_frac(num(ov, "exitBeBuffer", 0.04))
+        self.opt_sl = pct_to_frac(num(ov, "exitOptSlPct", 0.30))
+        self.opt_sl_min = pct_to_frac(num(ov, "exitOptSlMin", 0.10))
+        self.opt_sl_max = pct_to_frac(num(ov, "exitOptSlMax", 0.90))
         self.opt_sl = max(self.opt_sl_min, min(self.opt_sl_max, self.opt_sl))
-        self.min_hold_s = float(ov.get("exitMinHoldS") or 45)
-        self.time_stop_s = float(ov.get("timeStopS") or 21600)
-        self.scratch_s = float(ov.get("scratchS") or 600)
-        self.scratch_min = pct_to_frac(float(ov.get("scratchMin") or ov.get("scratchMinPct") or 0.25))
-        self.trail_min_step = float(ov.get("trailingMinStep") or 6)
+        self.min_hold_s = num(ov, "exitMinHoldS", 45)
+        self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))   # one clamp, desk minimum 30 s
+        self.scratch_s = num(ov, "scratchS", 600)
+        self.scratch_min = pct_to_frac(num(ov, ("scratchMin", "scratchMinPct"), 0.25))
+        self.trail_min_step = num(ov, "trailingMinStep", 6)
         self.pf_n = max(5, int(ov.get("exitPfWindow") or ov.get("setPfWindow") or 15))
         self.deact_n = max(10, int(ov.get("exitDeactN") or ov.get("setDeactN") or 25))
         self.min_pf = float(ov.get("exitMinPf") or ov.get("setMinPf") or GATE_MIN_PF_DEFAULT)

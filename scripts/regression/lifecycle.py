@@ -95,7 +95,10 @@ def failing_set_isolated_others_score():
         return orig(st, now=now)
 
     b._score_one = flaky
-    b.replay_all(now=T0)
+    try:
+        b.replay_all(now=T0)
+    finally:
+        b.__dict__.pop("_score_one", None)   # the closure refers back to the book: drop it so the book is freed
     st_bad = b.sets[bad]
     others = [s for s in b.by_idx if s.id != bad]
     scored = sum(1 for s in others if s.evaluated_at > 0)

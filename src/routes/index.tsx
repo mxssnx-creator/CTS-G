@@ -24,6 +24,7 @@ import {
 } from "@/components/visual-stats";
 import { CoverageBar } from "@/components/coverage-overview";
 import type { ConnType } from "@/lib/connections";
+import { createPoller } from "@/lib/poll";
 
 export const Route = createFileRoute("/")({ component: DeskPage });
 
@@ -31,30 +32,20 @@ function DeskPage() {
   const { conn } = useConnection();
   const [raw, setRaw] = useState<LiveStats | null>(null);
   useEffect(() => {
-    let alive = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    // One poll chain per connection (see lib/poll.ts). Control actions kick an immediate pull through the
+    // pulse:control event, and a failed pull keeps the last good snapshot on screen.
     setRaw(null);
-    // Non-overlapping poll: the next pull is scheduled only after the
-    // current one finished, so slow fetches can never stack up. Control
-    // actions (start/stop/pause) trigger an immediate extra pull via the
-    // pulse:control event instead of waiting out the cadence.
-    const pull = async () => {
-      const s = await fetchLiveStats(conn);
-      if (!alive) return;
-      setRaw(s);
-      timer = setTimeout(pull, 2000);
-    };
-    const kick = () => {
-      if (!alive) return;
-      if (timer) clearTimeout(timer);
-      void pull();
-    };
+    const poller = createPoller<LiveStats>({
+      fetch: () => fetchLiveStats(conn),
+      onData: (s) => setRaw(s),
+      intervalMs: 2000,
+    });
+    const kick = () => poller.kick();
     window.addEventListener("pulse:control", kick);
-    void pull();
+    poller.start();
     return () => {
-      alive = false;
       window.removeEventListener("pulse:control", kick);
-      if (timer) clearTimeout(timer);
+      poller.stop();
     };
   }, [conn]);
   const stats = pickView(raw, conn);

@@ -1463,7 +1463,8 @@ class Pulse:
                 if s not in set(chosen):
                     chosen.append(s)
         elif wild or cap <= 0:
-            chosen = names
+            # every ranked name, plus any symbol that still has an open position: a position must keep being managed
+            chosen = list(names) + [s for s in open_syms if s not in set(names)]
         else:
             chosen = []
             seen = set()
@@ -1666,7 +1667,8 @@ class Pulse:
             else:
                 losses -= d
         if losses == 0:
-            return 100.0
+            # a flat window reads neutral, as the indication and Set RSI do; 100 made every flat market look overbought
+            return 50.0 if gains == 0 else 100.0
         rs = (gains / n) / (losses / n)
         return 100 - (100 / (1 + rs))
 
@@ -2397,10 +2399,12 @@ class Pulse:
             with_qty=False,
         )
 
-    def replace_sl(self, pos: Position, new_sl: float) -> None:
+    def replace_sl(self, pos: Position, new_sl: float) -> bool:
+        """Move the exchange stop to new_sl. True when the protection sits at that level (already there, or placed);
+        False when it was throttled or the replacement failed. The caller commits its trail state only on True."""
         now = time.time()
         if now < self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
-            return
+            return False
         c = self.contracts.get(pos.symbol)
         if c:
             new_sl = self.round_px(c, new_sl)
@@ -2408,7 +2412,7 @@ class Pulse:
         if not self.sl_legal(pos, new_sl):
             new_sl = self.desired_sl_tp(pos)[0]
         if pos.sl_oid and abs(float(pos.sl or 0) - new_sl) / max(pos.entry, 1e-9) < 0.00035 and self.sl_legal(pos, pos.sl):
-            return
+            return True
         old_oid = real_oid(pos.sl_oid) or real_oid(getattr(pos, "sec_sl_oid", ""))
         replaced = False
         if old_oid and hasattr(self.api, "cancel_replace"):
@@ -2440,6 +2444,7 @@ class Pulse:
             pos.tp = want_tp
         pos.controls_ok = bool(real_oid(pos.sl_oid) and real_oid(pos.tp_oid))
         self.ctrl_skip[f"sync:{pos.symbol}"] = now + 12.0
+        return bool(real_oid(pos.sl_oid))
 
     def market_close(self, pos: Position) -> Tuple[bool, float]:
         close_side = "SELL" if pos.side == "LONG" else "BUY"
@@ -2941,8 +2946,10 @@ class Pulse:
                     moved = abs(dec.sl - pos.sl) / max(pos.entry, 1e-9)
                     if moved >= 0.004 and time.time() >= self.ctrl_skip.get(f"sync:{pos.symbol}", 0):
                         pos.trail_armed = True
-                        pos.trail = dec.sl
-                        self.replace_sl(pos, dec.sl)
+                        prev = pos.trail
+                        pos.trail = dec.sl   # committed only when the exchange stop moved
+                        if not self.replace_sl(pos, dec.sl):
+                            pos.trail = prev
                     continue
             if self.strat_trail and pnl_pct >= (pos.trail_arm or TRAIL_ARM) and (now - pos.opened_at) >= self.coord.trailing_min_step:
                 pos.trail_armed = True
@@ -2950,13 +2957,17 @@ class Pulse:
                 if pos.side == "LONG":
                     trail = max(pos.peak * (1 - give), pos.entry * (1 + 0.0004))
                     if pos.trail is None or trail > pos.trail + 1e-12:
-                        pos.trail = trail
-                        self.replace_sl(pos, trail)
+                        prev = pos.trail
+                        pos.trail = trail    # committed only when the exchange stop moved
+                        if not self.replace_sl(pos, trail):
+                            pos.trail = prev
                 else:
                     trail = min(pos.peak * (1 + give), pos.entry * (1 - 0.0004))
                     if pos.trail is None or trail < pos.trail - 1e-12:
-                        pos.trail = trail
-                        self.replace_sl(pos, trail)
+                        prev = pos.trail
+                        pos.trail = trail    # committed only when the exchange stop moved
+                        if not self.replace_sl(pos, trail):
+                            pos.trail = prev
             if not self.exits.enabled:
                 age = now - pos.opened_at
                 if age >= TIME_STOP_S and (pnl_pct >= 0.0012 or pnl_pct <= -0.0025):
@@ -3853,14 +3864,16 @@ class Pulse:
                 if s in self.open:
                     continue
                 picked = None
+                # the same setEntryConf the replay and entry_sense use: one threshold, not a literal
+                thr = float(self.sets.entry_conf)
                 try:
-                    picked = self.indications.pick_entry(s, min_conf=0.52)
+                    picked = self.indications.pick_entry(s, min_conf=thr)
                 except Exception:
                     picked = None
                 if not picked:
                     try:
                         one = self.indications.best(s) or self.indications.primary(s)
-                        if one and one.confidence >= 0.52:
+                        if one and one.confidence >= thr:
                             picked = (one, float(one.confidence), 1)
                     except Exception:
                         picked = None

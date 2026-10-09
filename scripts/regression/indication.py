@@ -53,6 +53,25 @@ def combined_vote_needs_min_agree():
     return ok, f"lanes={len(evs)} min_agree={len(evs) + 1} -> {too_many}"
 
 
+def match_names_kind_and_mode():
+    """An entry reason ind:<kind>:<mode>:... names one row. A row with the right kind but the other mode is not it,
+    and the mode decides the direction."""
+    from indication_engine import Indication, IndicationBook
+
+    def row(kind, mode, direction):
+        return Indication(symbol="S", direction=direction, mode=mode, confidence=0.7, strength=0.5, agreement=0.6,
+                          stop_loss_pct=0.01, take_profit_pct=0.02, reward_risk=2.0, last_price=1.0, sources=["a"],
+                          votes_long=1, votes_short=0, primary=False, t=T0, timeframe="1m", kind=kind)
+
+    book = IndicationBook()
+    book.last = {"S": [row("state", "tf_combined", "long"), row("state", "multi_source_consensus", "short")]}
+    short_row = book.match("S", "ind:state:multi_source_consensus:0.60:a2:src")
+    long_row = book.match("S", "ind:state:tf_combined:0.60:a2:src")
+    ok = (short_row is not None and short_row.mode == "multi_source_consensus" and short_row.direction == "short"
+          and long_row is not None and long_row.mode == "tf_combined" and long_row.direction == "long")
+    return ok, f"named_short={getattr(short_row, 'direction', None)} named_long={getattr(long_row, 'direction', None)}"
+
+
 def signal_is_deterministic():
     b = SetBook()
     b.load(overlay())
@@ -67,5 +86,6 @@ CHECKS = [
     ("indication.timeframe-keys-reach-set-signal", timeframe_keys_reach_the_set_signal),
     ("indication.timeframe-flag-removes-lane", timeframe_flag_removes_the_lane),
     ("indication.combined-vote-needs-min-agree", combined_vote_needs_min_agree),
+    ("indication.match-names-kind-and-mode", match_names_kind_and_mode),
     ("indication.signal-deterministic", signal_is_deterministic),
 ]

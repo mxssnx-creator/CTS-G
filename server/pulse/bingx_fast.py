@@ -72,7 +72,9 @@ class TokenBucket:
         self.ts = time.monotonic()
         self.lock = threading.Lock()
 
-    def take(self) -> float:
+    def reserve(self) -> float:
+        """Take one token without sleeping: the seconds the caller must wait before using it (0.0 when free).
+        Used by the event loop, which must never block."""
         with self.lock:
             now = time.monotonic()
             self.tokens = min(self.burst, self.tokens + (now - self.ts) * self.rate)
@@ -83,6 +85,10 @@ class TokenBucket:
             wait = (1.0 - self.tokens) / self.rate
             self.tokens = 0.0
             self.ts = now + wait
+            return wait
+
+    def take(self) -> float:
+        wait = self.reserve()
         if wait > 0:
             time.sleep(wait)
         return wait
@@ -286,7 +292,7 @@ class FastBingX:
         self.hub = PriceHub(self._on_px, err, ws_url=ws_url)
         self.on_event = None
         self.stats = {"rest": 0, "ws": 0, "wait": 0.0, "rl": 0, "err": 0, "asyncN": 0, "asyncP50": 0.0}
-        self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err)
+        self.bridge = AsyncBridge(self.base, {"User-Agent": UA}, err, gate=self)
         self._ts_lock = threading.Lock()
         self._last_ts = 0
 
@@ -415,8 +421,19 @@ class FastBingX:
     def delete(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self._req("DELETE", path, extra)
 
+    def reserve_public(self, path: str) -> Optional[float]:
+        """A public-GET slot: None while the path is cooling (no request may be sent), else the wait in seconds."""
+        if time.time() < self.path_cd.get(path, 0.0):
+            return None
+        return self.buckets["public"].reserve()
+
     def public(self, path: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        self._take("public", path)
+        wait = self.reserve_public(path)
+        if wait is None:
+            return {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
+        if wait > 0:
+            self.stats["wait"] += wait
+            time.sleep(wait)
         qs = urllib.parse.urlencode(extra or {})
         url = path + (f"?{qs}" if qs else "")
         self.stats["rest"] += 1
@@ -426,6 +443,8 @@ class FastBingX:
             self.stats["err"] += 1
             self.err.write("public", path=path, msg=str(e)[:220])
             return {"code": -1, "msg": str(e)[:400], "error": True}
+        if isinstance(body, dict) and body.get("code") not in (0, None):
+            self._trip(path, body)
         return body if isinstance(body, dict) else {"code": -1, "msg": "bad-json", "error": True}
 
     def batch_place(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -465,10 +484,12 @@ class FastBingX:
 class AsyncBridge:
     """Dedicated asyncio loop for parallel public GETs. Orders stay on the sync client."""
 
-    def __init__(self, base: str, headers: Dict[str, str], err: ErrorLog) -> None:
+    def __init__(self, base: str, headers: Dict[str, str], err: ErrorLog, gate: Any = None) -> None:
         self.base = base.rstrip("/")
         self.headers = headers
         self.err = err
+        # the owning FastBingX: its reserve_public (cooldown and token bucket) and trip gate every request
+        self.gate = gate
         self.lat: Deque[float] = deque(maxlen=48)
         self.ok = False
         self.loop = None
@@ -518,6 +539,12 @@ class AsyncBridge:
 
         async def one(path: str, extra: Dict[str, Any]):
             async with sem:
+                if self.gate is not None:
+                    wait = self.gate.reserve_public(path)
+                    if wait is None:   # the path is cooling: no request is sent
+                        return path, extra, {"code": 101209, "msg": "cooling", "error": True, "cooled": True}
+                    if wait > 0:
+                        await asyncio.sleep(wait)   # wait on the loop; never block it
                 qs = urllib.parse.urlencode(extra or {})
                 url = path + (("?" + qs) if qs else "")
                 t0 = time.perf_counter()
@@ -527,6 +554,10 @@ class AsyncBridge:
                 except Exception as e:
                     return path, extra, {"error": True, "msg": str(e)[:180]}
                 self.lat.append((time.perf_counter() - t0) * 1000)
-                return path, extra, body if isinstance(body, dict) else {"error": True, "msg": "bad-json"}
+                if not isinstance(body, dict):
+                    return path, extra, {"error": True, "msg": "bad-json"}
+                if self.gate is not None and body.get("code") not in (0, None):
+                    self.gate._trip(path, body)   # a rate-limit reply starts the path cooldown, as on the sync path
+                return path, extra, body
 
         return await asyncio.gather(*[one(p, e) for p, e in reqs])

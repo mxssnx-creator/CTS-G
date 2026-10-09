@@ -6,6 +6,7 @@ against that copy, and reports the checks that failed. A mutation that leaves th
 """
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import shutil
 import subprocess
@@ -58,48 +59,81 @@ MUTATIONS = [
     ("lifecycle: trader reads a removed Set attribute",
      "pulse_trader.py", "            \"setUseHistoricGate\": self.sets.use_historic_gate,",
      "            \"setUseHistoricGate\": self.sets.use_historic_gate,\n            \"setReactivate\": self.sets.reactivate,"),
+    ("exchange: public GET ignores the path cooldown",
+     "bingx_fast.py", "        if time.time() < self.path_cd.get(path, 0.0):\n            return None",
+     "        if False:\n            return None"),
+    ("exchange: async path bypasses the cooldown",
+     "bingx_fast.py", "                    wait = self.gate.reserve_public(path)",
+     "                    wait = self.gate.buckets[\"public\"].reserve()"),
+    ("bars: a live refresh replaces the stored history",
+     "set_engine.py", "self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned)[-self.lookback :]",
+     "self.bars[symbol] = cleaned[-self.lookback :]"),
+    ("indications: reason matched by kind only, mode ignored",
+     "indication_engine.py", "            bool(kind and mode) and (lambda i: i.kind == kind and i.mode == mode),",
+     "            bool(kind) and (lambda i: i.kind == kind),"),
+    ("config: an explicit zero falls back to the default",
+     "exit_engine.py", "self.min_hold_s = num(ov, \"exitMinHoldS\", 45)", "self.min_hold_s = num(ov, \"exitMinHoldS\", 45) or 45"),
+    ("sidecar: mutating POST accepted without the token",
+     "pulse_http.py", "            if not _token_ok(self.headers.get(\"X-Pulse-Token\", \"\")):",
+     "            if False:"),
     ("pinned engine edited without re-pinning",
      "pulse_trader.py", None, "\n# edited\n"),
 ]
 
 
-def run_once(pulse_dir: str) -> subprocess.CompletedProcess:
-    env = dict(os.environ, CTSG_PULSE_DIR=pulse_dir)
-    return subprocess.run([sys.executable, "-B", os.path.join(HERE, "run.py")], env=env,
-                          capture_output=True, text=True, timeout=1500)
+def run_once(pulse_dir: str, fail_fast: bool = True) -> subprocess.CompletedProcess:
+    """One suite run against a pulse copy. A mutant run is serial and stops at its first FAIL: a caught mutant
+    needs only one failing check, and a survivor never fails, so it runs to the end either way."""
+    env = dict(os.environ, CTSG_PULSE_DIR=pulse_dir, CTSG_JOBS="1" if fail_fast else (os.environ.get("CTSG_JOBS") or ""))
+    args = [sys.executable, "-B", os.path.join(HERE, "run.py")] + (["--fail-fast"] if fail_fast else [])
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=1500)
+
+
+def _mutant(item):
+    """Apply one fault to a private copy of server/pulse and run the suite against it. Returns (name, verdict, info).
+    verdict is caught, survived, or anchor. An anchor that no longer matches is a verdict of its own, never a pass."""
+    name, fname, old, new = item
+    with tempfile.TemporaryDirectory() as td:
+        copy = os.path.join(td, "pulse")
+        shutil.copytree(PULSE, copy, ignore=shutil.ignore_patterns("*.jsonl", "*.log", "__pycache__"))
+        path = os.path.join(copy, fname)
+        text = open(path, encoding="utf-8").read()
+        if old is None:
+            text = text + new
+        else:
+            count = text.count(old)
+            if count != 1:
+                return name, "anchor", f"anchor found {count} times, mutation not applied"
+            text = text.replace(old, new)
+        open(path, "w", encoding="utf-8").write(text)
+        out = run_once(copy, fail_fast=True)
+    fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
+    if out.returncode == 0:
+        return name, "survived", ""
+    return name, "caught", f"{len(fails)} failing check(s), e.g. {fails[:2]}"
 
 
 def main() -> int:
-    base = run_once(PULSE)
+    base = run_once(PULSE, fail_fast=False)
     if base.returncode != 0:
         print("baseline suite is not green; fix it before injecting faults", flush=True)
         print("\n".join(l for l in base.stdout.splitlines() if l.startswith("FAIL")), flush=True)
         return 1
-    survivors = []
-    for name, fname, old, new in MUTATIONS:
-        with tempfile.TemporaryDirectory() as td:
-            copy = os.path.join(td, "pulse")
-            shutil.copytree(PULSE, copy, ignore=shutil.ignore_patterns("*.jsonl", "*.log", "__pycache__"))
-            path = os.path.join(copy, fname)
-            text = open(path, encoding="utf-8").read()
-            if old is None:
-                text = text + new
+    jobs = int(os.environ.get("CTSG_MUT_JOBS") or 4)
+    survivors, anchors = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        for name, verdict, info in pool.map(_mutant, MUTATIONS):
+            if verdict == "survived":
+                survivors.append(name)
+                print(f"SURVIVED  {name}", flush=True)
+            elif verdict == "anchor":
+                anchors.append(name)
+                print(f"ANCHOR    {name}: {info}", flush=True)
             else:
-                count = text.count(old)
-                if count != 1:
-                    print(f"SKIP  {name}: anchor found {count} times, mutation not applied", flush=True)
-                    continue
-                text = text.replace(old, new)
-            open(path, "w", encoding="utf-8").write(text)
-            out = run_once(copy)
-            fails = [l.split()[1] for l in out.stdout.splitlines() if l.startswith("FAIL ")]
-        if out.returncode == 0:
-            survivors.append(name)
-            print(f"SURVIVED  {name}", flush=True)
-        else:
-            print(f"caught    {name}: {len(fails)} failing check(s), e.g. {fails[:2]}", flush=True)
-    print(f"\nmutations: {len(MUTATIONS)}  survived: {len(survivors)}", flush=True)
-    return 1 if survivors else 0
+                print(f"caught    {name}: {info}", flush=True)
+    print(f"\nmutations: {len(MUTATIONS)}  survived: {len(survivors)}  anchor-missing: {len(anchors)}  "
+          f"workers: {jobs}", flush=True)
+    return 1 if (survivors or anchors) else 0
 
 
 if __name__ == "__main__":

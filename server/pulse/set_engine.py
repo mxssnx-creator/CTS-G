@@ -17,6 +17,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from config_num import num
 from position_cost import (
     GATE_MIN_PF_DEFAULT,
     LAST_N_DEFAULT,
@@ -63,6 +64,23 @@ STEP_MAX = TP_STEP_MAX
 HIST_CAP = 80
 # trail Sets carry no SL grid: their stop is TRAIL_SL_RATIO x their mid-step TP (documented family constant)
 TRAIL_SL_RATIO = 0.6
+
+
+def _join_bars(old: Sequence[Sequence[float]], new: Sequence[Sequence[float]]) -> List[List[float]]:
+    """Join a newer 1-minute window onto a stored series. Rows carry no timestamps, so the join finds where the new
+    window's first row sits in the stored series and checks the overlap row by row. The stored history before that
+    point is kept, and the new rows (including a still-forming last bar) replace the overlapped tail. With no overlap
+    the new window stands, because a gap cannot be filled from rows that do not line up."""
+    if not old:
+        return [list(r) for r in new]
+    head = list(new[0])
+    for p in range(len(old) - 1, -1, -1):
+        if list(old[p]) == head:
+            span = min(len(new), len(old) - p)
+            if all(list(old[p + i]) == list(new[i]) for i in range(span - 1)):
+                return [list(r) for r in old[:p]] + [list(r) for r in new]
+            break
+    return [list(r) for r in new]
 
 
 def clamp_step(v: Any, lo: int = STEP_MIN, hi: int = STEP_MAX) -> int:
@@ -716,14 +734,14 @@ class SetBook:
         self.max_dd_s = hrs * 3600.0
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.cost_pct = normalize_cost_pct(ov.get("positionCostPct") or ov.get("setCostPct"))
-        self.time_stop_s = float(ov.get("timeStopS") or 21600)
+        self.time_stop_s = max(30.0, min(21600.0, num(ov, "timeStopS", 21600)))
         if ov.get("timeStopS") is not None:
             # the live time stop, in bars: replay and simulator hold for the same time (6 h = 360 bars)
             self.hist_time_bars = max(8, min(720, int(round(self.time_stop_s / BAR_S))))
         else:
-            self.hist_time_bars = max(8, min(120, int(ov.get("setHistTimeBars") or 45)))
-        self.scratch_s = float(ov.get("scratchS") or 90)
-        tp = float(ov.get("tpPct") or 0.75)
+            self.hist_time_bars = max(8, min(120, num(ov, "setHistTimeBars", 45, int)))
+        self.scratch_s = num(ov, "scratchS", 90)
+        tp = num(ov, "tpPct", 0.75)
         self.tp_pct = tp / 100.0   # tpPct is percent
         self.ignore_tp = bool(ov.get("exitIgnoreTp", True))
         # one TP rule for replay and live: exitIgnoreTp, the key live reads. setHonorTp is only the fallback.
@@ -731,7 +749,7 @@ class SetBook:
             self.hist_honor_tp = not bool(ov["exitIgnoreTp"])
         else:
             self.hist_honor_tp = bool(ov.get("setHonorTp", True))
-        opt = float(ov.get("exitOptSlPct") or 0.30)
+        opt = num(ov, "exitOptSlPct", 0.30)
         self.opt_sl = opt / 100.0   # exitOptSlPct is percent
         self.min_step_cfg = clamp_step(ov.get("setMinStep") or ov.get("minStepRange") or STEP_MIN)
         self.step_max = clamp_step(ov.get("setStepMax") or STEP_MAX, self.min_step_cfg, STEP_MAX)
@@ -775,19 +793,19 @@ class SetBook:
         self.locks = {str(k): bool(v) for k, v in locks.items()}
         self.ind_settings = {
             "candleLimit": 60,
-            "minimumStrength": float(ov.get("indMinStrength") or 0.2),
-            "minimumConfidence": float(ov.get("indMinConfidence") or 0.6),
-            "stopLossMinPct": float(ov.get("indStopMinPct") or 0.2),
-            "stopLossMaxPct": float(ov.get("indStopMaxPct") or 1.5),
-            "stopLossAtrMultiplier": float(ov.get("indAtrMult") or 0.85),
-            "takeProfitRewardRisk": float(ov.get("indRewardRisk") or 1.8),
+            "minimumStrength": num(ov, "indMinStrength", 0.2),
+            "minimumConfidence": num(ov, "indMinConfidence", 0.6),
+            "stopLossMinPct": num(ov, "indStopMinPct", 0.2),
+            "stopLossMaxPct": num(ov, "indStopMaxPct", 1.5),
+            "stopLossAtrMultiplier": num(ov, "indAtrMult", 0.85),
+            "takeProfitRewardRisk": num(ov, "indRewardRisk", 1.8),
             "takeProfitMaxPct": 5.0,
             "positionCostPct": self.cost_pct,
             # timeframe lanes and the combined vote: the set signal must see the same keys IndicationBook reads
             "tf5m": bool(ov.get("tf5m", True)),
             "tf15m": bool(ov.get("tf15m", True)),
             "tfCombined": bool(ov.get("tfCombined", True)),
-            "tfMinAgree": int(ov.get("tfMinAgree") or 2),
+            "tfMinAgree": max(1, num(ov, "tfMinAgree", 2, int)),
         }
         self._rebuild_sets()
 
@@ -929,7 +947,7 @@ class SetBook:
                 continue
             cleaned.append([o, h, l, c, v])
         if len(cleaned) >= 16:
-            self.bars[symbol] = cleaned[-self.lookback :]
+            self.bars[symbol] = _join_bars(self.bars.get(symbol) or [], cleaned)[-self.lookback :]
 
     def trim_bars(self, keep: Sequence[str]) -> int:
         want = set(keep)

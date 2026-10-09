@@ -13,6 +13,7 @@ import time
 
 from common import COST, SMALL, T0, Skip, overlay, synth_bars  # noqa: F401
 from set_engine import BAR_S, SetBook
+import memo  # the replay memo: harness only; determinism and concurrency checks stay unwrapped
 
 VALID_REASONS = {"sl", "tp", "time", "scratch+"}
 
@@ -130,7 +131,10 @@ def set_failure_isolated():
         return orig(st, now=now)
 
     b._score_one = flaky
-    b.replay_all(now=T0)
+    try:
+        b.replay_all(now=T0)
+    finally:
+        b.__dict__.pop("_score_one", None)   # the closure refers back to the book: drop it so the book is freed
     others_clean = all(st.last_error == "" for st in b.by_idx if st.id != victim)
     victim_marked = b.sets[victim].last_error != ""
     ok = others_clean and victim_marked and b.progress.phase == "ready" and b.progress.errors >= 1
@@ -170,7 +174,6 @@ def concurrent_replay_and_live_closes():
     b = _book(n_syms=3, bars=900, **SMALL)
     b.replay_all(now=T0)
     errors = []
-    stop = threading.Event()
 
     def replays():
         try:
@@ -178,18 +181,15 @@ def concurrent_replay_and_live_closes():
                 b.replay_all(now=T0 + (k + 1) * 60)
         except Exception as exc:  # noqa: BLE001
             errors.append(("replay", repr(exc)))
-        finally:
-            stop.set()
 
     def closes():
+        # a fixed number of closes interleaved with the replays: no busy wait competing with them for the GIL
         try:
-            k = 0
-            while not stop.is_set():
+            for k in range(300):
                 st = b.by_idx[k % len(b.by_idx)]
                 b.on_live_close({"set_id": st.id, "t": T0 + 9000 + k, "symbol": "C-USDT", "side": "LONG",
                                  "pnl": 0.1, "pnl_pct": 0.001, "hold_s": 60, "reason": "tp", "client_id": f"c{k}"})
                 b.pick("general")
-                k += 1
         except Exception as exc:  # noqa: BLE001
             errors.append(("closes", repr(exc)))
 
@@ -244,19 +244,36 @@ def unmatched_pnl_pct_is_skipped_not_a_loss():
     return ok, f"count={out['count']} skipped={out['skipped']} pf={out['pf']} clean_pf={clean['pf']}"
 
 
+# deterministic, concurrent and per-bar-callback replays run unmemoized: they must observe a real replay
+def ingest_keeps_history_on_live_refresh():
+    """A live refresh joins the stored history: repeating the newest rows changes nothing, and a window with 30 new
+    minutes appends them. The 1920-bar history is not replaced by the short live store."""
+    b = _book(n_syms=1, bars=1920)
+    sym = "S0-USDT"
+    full = [list(r) for r in b.bars[sym]]
+    b.ingest_bars(sym, full[-60:])
+    repeat_ok = b.bars[sym] == full
+    newer = synth_bars(55, 30, start=full[-1][3])
+    b.ingest_bars(sym, full[-60:] + newer)
+    expected = (full + newer)[-b.lookback:]
+    joined = b.bars[sym] == expected
+    return repeat_ok and joined, f"len={len(b.bars[sym])} repeat_ok={repeat_ok} joined={joined} lookback={b.lookback}"
+
+
 CHECKS = [
-    ("processing.all-sets-processed-full-grid", every_set_processed_full_grid),
-    ("processing.trades-produced", trades_produced_and_positive_signal),
-    ("processing.trade-invariants", trade_invariants_hold),
+    ("processing.all-sets-processed-full-grid", memo.memoized(every_set_processed_full_grid)),
+    ("processing.ingest-keeps-history-on-live-refresh", ingest_keeps_history_on_live_refresh),
+    ("processing.trades-produced", memo.memoized(trades_produced_and_positive_signal)),
+    ("processing.trade-invariants", memo.memoized(trade_invariants_hold)),
     ("processing.deterministic-replay", deterministic_replay),
-    ("processing.continuous-across-refreshes", continuous_across_refreshes),
-    ("processing.due-cadence", due_cadence),
-    ("processing.symbol-failure-isolated-and-recovers", symbol_failure_isolated_and_recovers),
-    ("processing.set-failure-isolated", set_failure_isolated),
-    ("processing.chunked-refresh-equals-full", chunked_refresh_equals_full),
-    ("processing.live-close-once-and-gate", live_close_counted_once_and_gate_updates),
+    ("processing.continuous-across-refreshes", memo.memoized(continuous_across_refreshes)),
+    ("processing.due-cadence", memo.memoized(due_cadence)),
+    ("processing.symbol-failure-isolated-and-recovers", memo.memoized(symbol_failure_isolated_and_recovers)),
+    ("processing.set-failure-isolated", memo.memoized(set_failure_isolated)),
+    ("processing.chunked-refresh-equals-full", memo.memoized(chunked_refresh_equals_full)),
+    ("processing.live-close-once-and-gate", memo.memoized(live_close_counted_once_and_gate_updates)),
     ("processing.concurrent-replay-and-live-closes", concurrent_replay_and_live_closes),
-    ("processing.ready-carried-across-refresh", ready_carried_across_refresh),
-    ("processing.out-of-grid-sets-retired-and-closes-counted", out_of_grid_sets_retired_and_closes_counted),
-    ("processing.unmatched-pnl-pct-skipped-not-a-loss", unmatched_pnl_pct_is_skipped_not_a_loss),
+    ("processing.ready-carried-across-refresh", ready_carried_across_refresh),  # needs per-bar callbacks: unmemoized
+    ("processing.out-of-grid-sets-retired-and-closes-counted", memo.memoized(out_of_grid_sets_retired_and_closes_counted)),
+    ("processing.unmatched-pnl-pct-skipped-not-a-loss", memo.memoized(unmatched_pnl_pct_is_skipped_not_a_loss)),
 ]

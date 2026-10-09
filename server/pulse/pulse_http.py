@@ -2,9 +2,11 @@
 """Serve per-connection stats/config. Lanes run independently; overall aggregates."""
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
+import tempfile
 import subprocess
 import threading
 import time
@@ -14,6 +16,15 @@ from position_cost import GATE_MIN_PF_DEFAULT, POSITION_COST_PCT_DEFAULT, last_n
 
 DIR = "/opt/grok-x01-pulse"
 STOP_ALL_PATH = os.path.join(DIR, "STOP")
+# The sidecar listens on loopback by default. The mutating routes need PULSE_HTTP_TOKEN in X-Pulse-Token: the desk's
+# Vite proxy adds it server-side, and a web page cannot read it. Without the token a page could still send a
+# text/plain POST to loopback, so the token, not the bind address, is what stops that.
+HTTP_HOST = os.environ.get("PULSE_HTTP_HOST", "127.0.0.1")
+HTTP_PORT = int(os.environ.get("PULSE_HTTP_PORT", "3015"))
+HTTP_TOKEN = os.environ.get("PULSE_HTTP_TOKEN", "")
+CORS_ORIGINS = {o.strip() for o in os.environ.get("PULSE_HTTP_CORS_ORIGINS", "").split(",") if o.strip()}
+MUTATING_PATHS = ("/control.json", "/control", "/config.json", "/config")
+CONFIG_LOCK = threading.Lock()   # one config save at a time: load, merge and write as one step
 
 # Display type → redis connection id. Independent processes write stats-{id}.json.
 LANES = [
@@ -319,8 +330,11 @@ def load_cts(conn: str) -> dict:
         if data:
             return data
     key = f"settings:connection_settings:{conn}"
-    p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True)
-    lines = (p.stdout or "").splitlines()
+    try:
+        p = subprocess.run(["redis-cli", "HGETALL", key], capture_output=True, text=True, timeout=5)
+        lines = (p.stdout or "").splitlines()
+    except Exception:   # a hung or missing redis must not hold the request handler
+        lines = []
     out = {}
     for i in range(0, len(lines) - 1, 2):
         out[lines[i]] = parse_val(lines[i + 1])
@@ -603,9 +617,13 @@ class Handler(SimpleHTTPRequestHandler):
             pass
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # no wildcard: only the origins named in PULSE_HTTP_CORS_ORIGINS are echoed back
+        origin = (self.headers.get("Origin") or "") if getattr(self, "headers", None) else ""
+        if origin and origin in CORS_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Pulse-Token")
         self.send_header("Cache-Control", "no-store")
 
     def _json(self, obj, code=200):
@@ -731,6 +749,15 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path in MUTATING_PATHS:
+            if not HTTP_TOKEN:
+                self.close_connection = True
+                self._json({"ok": False, "detail": "PULSE_HTTP_TOKEN is not set on the sidecar"}, 403)
+                return
+            if not _token_ok(self.headers.get("X-Pulse-Token", "")):
+                self.close_connection = True
+                self._json({"ok": False, "detail": "missing or wrong X-Pulse-Token"}, 403)
+                return
         conn = resolve_conn(qs(self.path).get("conn", ""))
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n) if n else b"{}"
@@ -754,13 +781,20 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(overlay, dict):
             overlay = body if isinstance(body, dict) else {}
         dest = os.path.join(DIR, f"overlay-{conn}.json")
-        cur = load_overlay(conn)
-        cur.update(overlay)
-        tmp = dest + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cur, f)
-        os.replace(tmp, dest)
+        with CONFIG_LOCK:
+            cur = load_overlay(conn)
+            cur.update(overlay)
+            fd, tmp = tempfile.mkstemp(dir=DIR, prefix=f".overlay-{conn}.", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                json.dump(cur, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dest)
         self._json({"ok": True, "overlay": cur, "conn": conn})
+
+
+def _token_ok(sent: str) -> bool:
+    return bool(HTTP_TOKEN) and hmac.compare_digest(str(sent or "").encode(), HTTP_TOKEN.encode())
 
 
 def heal_loop() -> None:
@@ -806,4 +840,4 @@ def heal_loop() -> None:
 if __name__ == "__main__":
     os.chdir(DIR)
     threading.Thread(target=heal_loop, name="heal", daemon=True).start()
-    ThreadingHTTPServer(("0.0.0.0", 3015), Handler).serve_forever()
+    ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), Handler).serve_forever()
