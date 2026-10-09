@@ -1,8 +1,8 @@
 diff --git a/server/pulse/pulse_trader.py b/server/pulse/pulse_trader.py
-index b3a9ff3..99e02c6 100644
+index b3a9ff3..a3252b4 100644
 --- a/server/pulse/pulse_trader.py
 +++ b/server/pulse/pulse_trader.py
-@@ -25,7 +25,7 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
+@@ -25,13 +25,14 @@ from block_engine import BlockBook, calculate_block_volume_increment_ratio, calc
  from coord_engine import Coordinator
  from bingx_fast import FastBingX, ErrorLog
  from modules import resolve as resolve_modules
@@ -11,7 +11,14 @@ index b3a9ff3..99e02c6 100644
  from indication_engine import IndicationBook, self_test as indication_self_test, TIMEFRAMES
  from risk_variants import VariantBook, self_test as variants_self_test
  from set_engine import SetBook, self_test as sets_self_test
-@@ -50,6 +50,7 @@ CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
+ from exit_engine import ExitBook, self_test as exit_self_test
+ from dca_engine import DcaBook, self_test as dca_self_test
+ from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
++from conn_guard import ConnGuardError, mode_of, resolve_base
+ 
+ CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
+ REDIS_CONN = f"connection:{CONN_SHORT}"
+@@ -50,6 +51,7 @@ CTS_PATH = os.path.join(DIR, f"cts-settings-{CONN_SHORT}.json")
  ERR_PATH = os.path.join(DIR, f"errors-{CONN_SHORT}.jsonl")
  LEV_PATH = os.path.join(DIR, f"lev-set-{CONN_SHORT}.json")
  START_EQ_PATH = os.path.join(DIR, f"start-eq-{CONN_SHORT}.json")
@@ -19,7 +26,7 @@ index b3a9ff3..99e02c6 100644
  
  UNIVERSE_PATH = os.path.join(DIR, "universe.json")
  MAX_SYMBOLS = 0  # 0 = unlimited
-@@ -347,6 +348,18 @@ _LOG_BUF: List[str] = []
+@@ -347,6 +349,18 @@ _LOG_BUF: List[str] = []
  _LOG_FLUSH = 0.0
  
  
@@ -38,7 +45,7 @@ index b3a9ff3..99e02c6 100644
  def log(msg: str, every: float = 0.0, key: str = "", quiet: bool = False) -> None:
      global _LOG_N, _LOG_FLUSH
      if every > 0:
-@@ -875,9 +888,24 @@ class Pulse:
+@@ -875,9 +889,24 @@ class Pulse:
          return max(0.0, float(self.available or 0)) * lev * 0.90
  
      def max_book_notional(self) -> float:
@@ -65,7 +72,7 @@ index b3a9ff3..99e02c6 100644
          dca_extra = 0.0
          if dca_n > 0:
              try:
-@@ -934,6 +962,10 @@ class Pulse:
+@@ -934,6 +963,10 @@ class Pulse:
              return 0.0
          if q * px > room * 1.02:
              return 0.0
@@ -76,7 +83,7 @@ index b3a9ff3..99e02c6 100644
          return q
  
      def ban_sym(self, sym: str, sec: float = 1800.0) -> None:
-@@ -1142,6 +1174,49 @@ class Pulse:
+@@ -1142,6 +1175,49 @@ class Pulse:
              except Exception:
                  pass
          self.last_bal = time.time()
@@ -126,7 +133,7 @@ index b3a9ff3..99e02c6 100644
          if os.path.exists(STOP_PATH) or os.path.exists(STOP_ALL):
              if self.halt_reason and self.halt_reason not in ("paused", "stopped"):
                  self._pre_pause_halt = self.halt_reason
-@@ -1153,10 +1228,14 @@ class Pulse:
+@@ -1153,10 +1229,14 @@ class Pulse:
              self.halted = True
              self.halt_reason = "paused"
          elif self.start_eq > 0 and self.equity > 0 and (self.start_eq - self.equity) / self.start_eq >= DD_HALT:
@@ -141,7 +148,7 @@ index b3a9ff3..99e02c6 100644
              self.halted = True
              self.halt_reason = f"equity {self.equity:.4f} below min"
              self._pre_pause_halt = None
-@@ -2055,8 +2134,6 @@ class Pulse:
+@@ -2055,8 +2135,6 @@ class Pulse:
              return True
          if time.time() - float(getattr(self, "boot_ts", 0) or 0) < 25.0:
              return True
@@ -150,7 +157,7 @@ index b3a9ff3..99e02c6 100644
          if getattr(self, "control_orders", True) and any(self.missing_controls(p) for p in self.open.values()):
              return True
          return False
-@@ -2450,7 +2527,8 @@ class Pulse:
+@@ -2450,7 +2528,8 @@ class Pulse:
              return None
          elif self.sets.enabled and self.sets.use_historic_gate:
              if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
@@ -160,7 +167,7 @@ index b3a9ff3..99e02c6 100644
          return None
  
      def place(self, sym: str, direction: int, reason: str, conf: float) -> None:
-@@ -2956,7 +3034,9 @@ class Pulse:
+@@ -2956,7 +3035,9 @@ class Pulse:
          except Exception:
              self.overlay_mtime = 0.0
          if ov.get("targetNotional"):
@@ -171,7 +178,7 @@ index b3a9ff3..99e02c6 100644
          try:
              self.volume_factor = max(0.05, min(10.0, float(ov.get("volumeFactor") or 1.0)))
          except Exception:
-@@ -3011,7 +3091,7 @@ class Pulse:
+@@ -3011,7 +3092,7 @@ class Pulse:
          self.strat_block = bool(ov.get("stratBlock", True))
          self.strat_trail = bool(ov.get("stratTrailing", True))
          self.strat_general = bool(ov.get("stratGeneral", True))
@@ -180,7 +187,7 @@ index b3a9ff3..99e02c6 100644
          self.symbol_sort = coerce_symbol_sort(ov.get("symbolSort") or ov.get("symbolsSort") or "vol1h")
          self.symbols_dynamic = bool(ov.get("symbolsDynamic", True))
          try:
-@@ -3064,16 +3144,16 @@ class Pulse:
+@@ -3064,16 +3145,16 @@ class Pulse:
          b_ratio = float(ov.get("blockVolumeRatio") or cts.get("blockVolumeRatio") or 1)
          b_pfr = float(ov.get("blockProfitFactorRatio") or cts.get("blockProfitFactorRatio") or 0.8)
          b_pause = int(ov.get("blockPauseCountRatio") or cts.get("blockPauseCountRatio") or 1)
@@ -200,7 +207,7 @@ index b3a9ff3..99e02c6 100644
          try:
              self.load.configure(ov)
          except Exception:
-@@ -3116,7 +3196,7 @@ class Pulse:
+@@ -3116,7 +3197,7 @@ class Pulse:
          else:
              self.indications.settings["enabled"] = bool(ov.get("indEnabled", True))
              self.strat_ind = True
@@ -209,7 +216,7 @@ index b3a9ff3..99e02c6 100644
          if not self.mods.get("strategy.coord", True):
              for ax in self.coord.axes.values():
                  ax.enabled = False
-@@ -3355,9 +3435,8 @@ class Pulse:
+@@ -3355,9 +3436,8 @@ class Pulse:
                  if st is None:
                      st = self.sets.pick_any(pos.pack or "indications") or self.sets.pick_any("general")
                  if st is not None:
@@ -221,7 +228,7 @@ index b3a9ff3..99e02c6 100644
              except Exception:
                  intern_pf = 1.2
              d, why, conf = self.score(pos.symbol)
-@@ -3760,7 +3839,7 @@ class Pulse:
+@@ -3760,7 +3840,7 @@ class Pulse:
                      best_st = st
              if best_st:
                  intern_metrics = {
@@ -230,7 +237,7 @@ index b3a9ff3..99e02c6 100644
                      "n": float(best_st.last15_n),
                      "pack": best_st.pack,
                  }
-@@ -3770,7 +3849,7 @@ class Pulse:
+@@ -3770,7 +3850,7 @@ class Pulse:
          if self.entries_blocked():
              self.priority_controls()
              return
@@ -239,7 +246,7 @@ index b3a9ff3..99e02c6 100644
          ranked: List[Tuple[float, str, int, str]] = []
          best: Dict[str, Tuple[float, str, int, str]] = {}
          if self.strat_ind and bool(self.indications.settings.get("enabled")):
-@@ -3885,7 +3964,7 @@ class Pulse:
+@@ -3885,7 +3965,7 @@ class Pulse:
              else:
                  skipped += 1
              room = self.avail_notional()
@@ -248,7 +255,7 @@ index b3a9ff3..99e02c6 100644
              if room < 8:
                  burst = 1
              if placed >= burst or (slot_cap > 0 and len(self.open) >= slot_cap):
-@@ -4236,7 +4315,8 @@ class Pulse:
+@@ -4236,7 +4316,8 @@ class Pulse:
              self.record_test(name, ok, detail)
          dca_ms = (time.perf_counter() - t_dca) * 1000
          self.record_test("ind-enabled", bool(self.indications.settings.get("enabled")) and self.strat_ind, f"en={self.indications.settings.get('enabled')} strat={self.strat_ind}")
@@ -258,7 +265,7 @@ index b3a9ff3..99e02c6 100644
          self.record_test("bench-ind-dca", ind_ms < 250 and dca_ms < 80, f"ind={ind_ms:.1f}ms dca={dca_ms:.1f}ms")
          sl, tp, src = resolve_sl_tp(
              base_sl=0.0048, base_tp=0.0075,
-@@ -4270,7 +4350,7 @@ class Pulse:
+@@ -4270,13 +4351,13 @@ class Pulse:
          snap = self.api.snapshot() if hasattr(self.api, "snapshot") else {}
          pc = last_n_cost_pf(self.strategy_closes(), self.pf_window, self.position_cost_pct)
          pc["minPf"] = self.coord.min_pf
@@ -267,7 +274,14 @@ index b3a9ff3..99e02c6 100644
          pc["neutral"] = 1.0
          pc["plus1x"] = 1.1
          pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
-@@ -4324,8 +4404,8 @@ class Pulse:
+         return {
+             "running": not self.halted,
+-            "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
++            "mode": _mode_label(),
+             "connection": CONN_SHORT,
+             "connType": "vst" if "x02" in CONN_SHORT else "live",
+             "unit": "VST" if "x02" in CONN_SHORT else "USDT",
+@@ -4324,8 +4405,8 @@ class Pulse:
              "pulse": self.pulse_snapshot(),
              "coord": self.coord.snapshot(),
              "pfCost": pc,
@@ -278,7 +292,7 @@ index b3a9ff3..99e02c6 100644
              "pfNeutral": 1.0,
              "pfPlus1xCost": 1.1,
              "pfScale": "1.00=neutral · 1.10=+1×PositionCost",
-@@ -4529,6 +4609,9 @@ class Pulse:
+@@ -4529,6 +4610,9 @@ class Pulse:
          self._stats_ts = now
          self._stats_force = False
          blob = json.dumps(self.stats(), separators=(",", ":"))
@@ -288,7 +302,7 @@ index b3a9ff3..99e02c6 100644
          tmp = STATS_PATH + ".tmp"
          with open(tmp, "w") as f:
              f.write(blob)
-@@ -4560,8 +4643,8 @@ class Pulse:
+@@ -4560,8 +4644,8 @@ class Pulse:
                  "gp": round(gp, 6),
                  "gl": round(gl, 6),
                  "net": round(gp - gl, 6),
@@ -299,7 +313,7 @@ index b3a9ff3..99e02c6 100644
                  "avgR": cost["avgR"],
                  "wr": round(100.0 * wins / max(1, wins + losses), 1),
                  "scale": "1.00=neutral 1.10=+1×cost",
-@@ -4650,6 +4733,9 @@ class Pulse:
+@@ -4650,6 +4734,9 @@ class Pulse:
              f"level={getattr(getattr(self, 'load', None), 'level', None)} chunk={getattr(getattr(self, 'load', None), 'last_budget', None) and self.load.last_budget.scan_chunk}",
          )
          self.record_test("qa-unlimited", MAX_OPEN <= 0 and int(getattr(self, "symbol_cap", 0) or 0) == 0 and int(getattr(self.block, "max_stack", 0) or 0) == 0 and int(getattr(self.dca, "max_steps", 0) or 0) == 0, f"maxOpen={MAX_OPEN} cap={getattr(self, 'symbol_cap', 0)} stack={getattr(self.block, 'max_stack', None)} dca={getattr(self.dca, 'max_steps', None)}")
@@ -309,7 +323,7 @@ index b3a9ff3..99e02c6 100644
          missing = sum(1 for p in self.open.values() if self.missing_controls(p) and (time.time() - p.opened_at) > 90.0)
          cooling = self.api.path_cd.get("/openApi/swap/v2/trade/order", 0) > time.time() or time.time() < self.ctrl_skip.get("__order_cap__", 0)
          self.record_test("qa-controls", missing == 0 or cooling, f"missing={missing} open={len(self.open)} cool={int(cooling)}")
-@@ -4753,7 +4839,8 @@ class Pulse:
+@@ -4753,7 +4840,8 @@ class Pulse:
              self.record_test("qa-ind-self", not fails, f"fail={fails[:4]}")
          except Exception as e:
              self.record_test("qa-ind-self", False, str(e)[:80])
@@ -319,7 +333,7 @@ index b3a9ff3..99e02c6 100644
          try:
              rows_g = self.strategy_closes()
              consec_g = 0
-@@ -4769,7 +4856,7 @@ class Pulse:
+@@ -4769,7 +4857,7 @@ class Pulse:
              except Exception:
                  stg = None
              if stg:
@@ -328,7 +342,7 @@ index b3a9ff3..99e02c6 100644
              self.coord.gate(rows_g, consec_g, intern=intern_m)
          except Exception:
              pass
-@@ -4893,6 +4980,22 @@ class Pulse:
+@@ -4893,6 +4981,22 @@ class Pulse:
              if remain > 0:
                  time.sleep(remain)
  
@@ -351,7 +365,7 @@ index b3a9ff3..99e02c6 100644
      def _one_cycle(self) -> None:
          sd_notify("WATCHDOG=1")
          paused = os.path.exists(PAUSE_PATH)
-@@ -4904,7 +5007,8 @@ class Pulse:
+@@ -4904,7 +5008,8 @@ class Pulse:
              self.halt_reason = "stopped"
              self.priority_controls()
              self.write_stats(force=True)
@@ -361,7 +375,7 @@ index b3a9ff3..99e02c6 100644
              return
          if paused:
              self.halted = True
-@@ -4916,11 +5020,17 @@ class Pulse:
+@@ -4916,11 +5021,17 @@ class Pulse:
              self.priority_controls()
              self.manage()
              self.write_stats(force=True)
@@ -380,7 +394,7 @@ index b3a9ff3..99e02c6 100644
              if pre:
                  self.halted = True
                  self.halt_reason = pre
-@@ -5001,6 +5111,8 @@ class Pulse:
+@@ -5001,6 +5112,8 @@ class Pulse:
          warm.start()
          hist = threading.Thread(target=self._hist_loop, name="hist-1m", daemon=True)
          hist.start()
@@ -389,3 +403,34 @@ index b3a9ff3..99e02c6 100644
          self.cycle_busy = False
          self.cycle_wait_ms = 0.0
          self.cycle_overrun = False
+@@ -5086,6 +5199,13 @@ def seed_overlay() -> None:
+             pass
+ 
+ 
++def _mode_label() -> str:
++    try:
++        return mode_of(BASE)
++    except ConnGuardError:
++        return "UNPINNED"
++
++
+ def main() -> None:
+     global BASE
+     os.makedirs(DIR, exist_ok=True)
+@@ -5094,11 +5214,11 @@ def main() -> None:
+     secret = redis_hget("api_secret")
+     if not key or not secret:
+         raise SystemExit(f"missing {CONN_SHORT} credentials")
+-    test = (redis_hget("is_testnet") or "").strip().lower()
+-    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
+-        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
+-    else:
+-        BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
++    try:  # the environment is pinned per connection; a stored or env setting that contradicts it refuses to start
++        BASE, _mode = resolve_base(CONN_SHORT, redis_hget("base_url") or "", redis_hget("is_testnet") or "",
++                                   os.environ.get("PULSE_BASE", ""))
++    except ConnGuardError as exc:
++        raise SystemExit(f"refusing to start: {exc}")
+     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
+     Pulse(api, load_contracts()).run()
+ 

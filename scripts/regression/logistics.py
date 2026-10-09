@@ -12,7 +12,7 @@ from common import PULSE, ROOT, Skip, git, overlay
 X01 = os.path.join(PULSE, "overlay-bingx-x01.json")
 X02 = os.path.join(PULSE, "overlay-bingx-x02.json")
 CONFIG_MODEL = os.path.join(ROOT, "src", "lib", "config-model.ts")
-PIN_WANT = "99e02c6c2b53f595c7b624b8ba31aff8acca819f"
+PIN_WANT = "a3252b46b5240371beff5d1e696f7d4d164c7e0b"
 PIN_BASE = "b3a9ff3c60c72864ac5558f488d7e6991bb31d76"
 RESTORE_PATCH = os.path.join(ROOT, "restore", "pulse_trader.py.patch")
 
@@ -140,10 +140,27 @@ def no_ratio_as_pf():
     return not hits, f"hits={hits[:8]}" if hits else "no ratio is compared with a PF threshold; no PF key holds a ratio"
 
 
+def conn_pinned_per_connection():
+    """Each connection is pinned to one BingX environment. The trader refuses to start on a contradiction, and no
+    stored base URL falls back to mainnet (x02 shares x01's key, so the URL is the only switch)."""
+    import sys
+    if PULSE not in sys.path:
+        sys.path.insert(0, PULSE)
+    import conn_guard
+    results = conn_guard.self_test()
+    bad = [name for name, ok, _ in results if not ok]
+    src = open(os.path.join(PULSE, "pulse_trader.py"), encoding="utf-8").read()
+    mainnet_fallback = re.search(r'redis_hget\("base_url"\) or "https://open-api', src) is not None
+    wired = "resolve_base(CONN_SHORT" in src and "from conn_guard import" in src
+    ok = not bad and not mainnet_fallback and wired
+    return ok, f"guard checks={len(results)} failed={bad} mainnet_fallback={mainnet_fallback} wired={wired}"
+
+
 CHECKS = [
     ("logistics.overlays-share-grid-contract", overlays_share_grid_contract),
     ("logistics.desk-defaults-match-engine", desk_defaults_match_engine),
     ("logistics.no-ratio-as-pf", no_ratio_as_pf),
+    ("logistics.conn-pinned-per-connection", conn_pinned_per_connection),
     ("logistics.dca-off-everywhere", dca_is_off_everywhere),
     ("logistics.deploy-pin-matches-engine", deploy_pin_matches_engine),
     ("logistics.restore-patch-reproduces-pin", restore_patch_reproduces_pin),

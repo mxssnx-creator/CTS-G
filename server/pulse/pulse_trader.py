@@ -32,6 +32,7 @@ from set_engine import SetBook, self_test as sets_self_test
 from exit_engine import ExitBook, self_test as exit_self_test
 from dca_engine import DcaBook, self_test as dca_self_test
 from load_engine import LoadGovernor, BoundedSet, trim_map, cap_map, prune_ttl, cap_list
+from conn_guard import ConnGuardError, mode_of, resolve_base
 
 CONN_SHORT = os.environ.get("PULSE_CONN", "bingx-x02").replace("connection:", "")
 REDIS_CONN = f"connection:{CONN_SHORT}"
@@ -4356,7 +4357,7 @@ class Pulse:
         pc["scale"] = "1.00=neutral (0 after 1×PositionCost) · 1.10=+1×PositionCost"
         return {
             "running": not self.halted,
-            "mode": "VST_DEMO" if "x02" in CONN_SHORT else "LIVE_MAINNET",
+            "mode": _mode_label(),
             "connection": CONN_SHORT,
             "connType": "vst" if "x02" in CONN_SHORT else "live",
             "unit": "VST" if "x02" in CONN_SHORT else "USDT",
@@ -5198,6 +5199,13 @@ def seed_overlay() -> None:
             pass
 
 
+def _mode_label() -> str:
+    try:
+        return mode_of(BASE)
+    except ConnGuardError:
+        return "UNPINNED"
+
+
 def main() -> None:
     global BASE
     os.makedirs(DIR, exist_ok=True)
@@ -5206,11 +5214,11 @@ def main() -> None:
     secret = redis_hget("api_secret")
     if not key or not secret:
         raise SystemExit(f"missing {CONN_SHORT} credentials")
-    test = (redis_hget("is_testnet") or "").strip().lower()
-    if test in ("1", "true", "yes") or "vst" in (redis_hget("base_url") or "").lower():
-        BASE = (redis_hget("base_url") or "https://open-api-vst.bingx.com").rstrip("/")
-    else:
-        BASE = (redis_hget("base_url") or "https://open-api.bingx.com").rstrip("/")
+    try:  # the environment is pinned per connection; a stored or env setting that contradicts it refuses to start
+        BASE, _mode = resolve_base(CONN_SHORT, redis_hget("base_url") or "", redis_hget("is_testnet") or "",
+                                   os.environ.get("PULSE_BASE", ""))
+    except ConnGuardError as exc:
+        raise SystemExit(f"refusing to start: {exc}")
     api = FastBingX(key, secret, ErrorLog(ERR_PATH), base=BASE)
     Pulse(api, load_contracts()).run()
 
