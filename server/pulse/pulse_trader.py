@@ -1847,7 +1847,9 @@ class Pulse:
                     self.cancel_order(symbol, oid, self.order_cid(o))
 
     def opt_fracs(self, pos: Optional[Position] = None) -> Tuple[float, float, float, float]:
-        """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges."""
+        """(sl, tp, sl_lo, sl_hi) fractions clamped to optimal security ranges. A Set fill keeps its grid SL and TP."""
+        if pos and pos.set_id:
+            return float(pos.sl_pct), float(pos.tp_pct), float(self.sl_min), float(self.sl_max)
         sl_lo = max(float(self.sl_min), float(getattr(self.exits, "opt_sl_min", 0.001) or 0.001))
         sl_hi = min(float(self.sl_max), float(getattr(self.exits, "opt_sl_max", 0.009) or 0.009))
         if sl_lo > sl_hi:
@@ -2515,16 +2517,12 @@ class Pulse:
                 return "ind-mismatch"
         chosen = None
         try:
-            chosen = self.sets.pick_any(pack) if self.sets.enabled else None
-            if not chosen and self.sets.enabled:
-                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+            chosen = self.sets.pick_any(pack) if self.sets.enabled else None   # a signal binds to its own pack only
         except Exception:
             chosen = None
         if chosen:
             if self.occupying(sym, side, pack, chosen.id):
                 return "set-slot"
-            # Intern-soft: always bind a Set. Never skip on historic PF / inactive —
-            # pick() already falls back to the best available book.
             return None
         elif self.sets.enabled and self.sets.use_historic_gate:
             if not (self.sets.pack_open(pack) or self.sets.pack_open("general") or self.sets.pack_open("indications")):
@@ -2577,9 +2575,7 @@ class Pulse:
         order_side = "BUY" if direction > 0 else "SELL"
         chosen = None
         try:
-            chosen = self.sets.pick_any(pack)
-            if not chosen:
-                chosen = self.sets.pick_any("general") or self.sets.pick_any("indications")
+            chosen = self.sets.pick_any(pack)   # a signal binds to its own pack only: no cross-pack fallback
         except Exception:
             chosen = None
         set_idx = -1
@@ -3330,7 +3326,7 @@ class Pulse:
             "setPfWindow": self.sets.pf_n,
             "setDeactN": self.sets.deact_n,
             "setMinPf": self.sets.min_pf,
-            "setMaxDdTimeS": self.sets.max_dd_s,
+            "setMaxDdtHours": self.sets.max_ddt_h,
             "setAutoDeact": self.sets.auto_deact,
             "setUseHistoricGate": self.sets.use_historic_gate,
             "setMinSamples": self.sets.min_samples,

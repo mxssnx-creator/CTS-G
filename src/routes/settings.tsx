@@ -510,14 +510,14 @@ function SettingsPage() {
                   onChange={(v) => patch("setMinPf", v)}
                 />
                 <Slider
-                  label="Max DD time"
-                  value={overlay.setMaxDdTimeS}
-                  min={60}
-                  max={3600}
-                  step={30}
-                  unit="s"
-                  hint="Reported per Set and used to rank — last-25 negative is the kill"
-                  onChange={(v) => patch("setMaxDdTimeS", v)}
+                  label="Max DD time (h)"
+                  value={overlay.setMaxDdtHours}
+                  min={2}
+                  max={36}
+                  step={2}
+                  unit="h"
+                  hint="A Set is eligible when the longest drawdown over its last gate-window positions is lower than this (default 12 h)."
+                  onChange={(v) => patch("setMaxDdtHours", Math.max(2, Math.min(36, Math.round(v / 2) * 2)))}
                 />
                 <Slider
                   label="Min samples"

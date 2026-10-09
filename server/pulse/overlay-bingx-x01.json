@@ -121,7 +121,7 @@
   "setEntryConf": 0.58,
   "setGateWindow": 50,
   "setGateMinTrades": 30,
-  "setMaxDdTimeS": 1800,
+  "setMaxDdtHours": 12,
   "setAutoDeact": true,
   "setUseHistoricGate": true,
   "setMinSamples": 12,

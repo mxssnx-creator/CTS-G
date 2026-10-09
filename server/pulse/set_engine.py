@@ -85,41 +85,44 @@ def finite(v: Any, fallback: float = 0.0) -> float:
 
 
 def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -> Dict[str, float]:
-    """CTS drawdown-time: episodes from peak through recovery, in seconds.
-    `now` is the clock an open episode is measured to: the caller's bar, trade or report time.
-    With no clock it is the last trade time, so the result never depends on when the code runs.
-    A tape more than an hour older than `now` is measured to its last trade (idle time is not drawdown)."""
-    ordered = sorted(rows, key=lambda r: finite(r.get("t")))
-    last_t = finite(ordered[-1].get("t")) if ordered else 0.0
+    """Drawdown time of a Set's last positions, in seconds.
+
+    A drawdown starts at the last equity high (the time of that high, not the first losing close) and ends when
+    net is back at or above that high. An open drawdown is measured to `now` (the caller's bar, trade or report
+    clock); it is never cut short by idle time. With no clock it is the last trade time, so the result never
+    depends on when the code runs. Rows are net fractions in `pnl`; `t` is seconds.
+    """
+    ordered = sorted((r for r in rows if finite(r.get("t")) > 0), key=lambda r: finite(r.get("t")))
+    if not ordered:
+        return {"episodes": 0.0, "maxS": 0.0, "avgS": 0.0, "currentS": 0.0, "maxDepth": 0.0, "inDd": 0.0, "n": 0.0}
+    last_t = finite(ordered[-1].get("t"))
     now = last_t if now is None else float(now)
-    if last_t > 0 and now - last_t > 3600:
-        now = last_t
     equity = 0.0
     peak = 0.0
-    started: Optional[float] = None
+    peak_t = finite(ordered[0].get("t"))
+    in_dd = False
     max_s = 0.0
     total_s = 0.0
     episodes = 0
     max_depth = 0.0
     for row in ordered:
         t = finite(row.get("t"))
-        if t <= 0:
-            continue
         equity += finite(row.get("pnl"))
-        if equity >= peak - 1e-12:
-            if started is not None:
-                dur = max(0.0, t - started)
+        if equity >= peak - 1e-12:  # a new (or equal) high: any open drawdown recovers here
+            if in_dd:
+                dur = max(0.0, t - peak_t)
                 max_s = max(max_s, dur)
                 total_s += dur
-                started = None
+                in_dd = False
             peak = max(peak, equity)
+            peak_t = t
             continue
-        if started is None:
-            started = t
+        if not in_dd:
+            in_dd = True
             episodes += 1
         max_depth = max(max_depth, peak - equity)
-    current = 0.0 if started is None else max(0.0, now - started)
-    if started is not None:
+    current = max(0.0, now - peak_t) if in_dd else 0.0
+    if in_dd:
         max_s = max(max_s, current)
         total_s += current
     return {
@@ -128,7 +131,7 @@ def drawdown_time(rows: Sequence[Dict[str, Any]], now: Optional[float] = None) -
         "avgS": round(total_s / episodes, 1) if episodes else 0.0,
         "currentS": round(current, 1),
         "maxDepth": round(max_depth, 6),
-        "inDd": 1.0 if started is not None else 0.0,
+        "inDd": 1.0 if in_dd else 0.0,
         "n": float(len(ordered)),
     }
 
@@ -703,7 +706,13 @@ class SetBook:
         self.gate_window = max(10, min(200, int(ov.get("setGateWindow") or GATE_WINDOW_DEFAULT)))
         self.gate_min = max(5, min(self.gate_window, int(ov.get("setGateMinTrades") or GATE_MIN_DEFAULT)))
         self.min_pf = float(ov.get("setMinPf") if ov.get("setMinPf") is not None else GATE_MIN_PF_DEFAULT)
-        self.max_dd_s = max(30.0, float(ov.get("setMaxDdTimeS") or 1800))
+        # max drawdown time: the longest drawdown over the last setGateWindow positions must be LOWER than this many
+        # hours. setMaxDdtHours is 2..36 in steps of 2, default 12. max_dd_s holds the threshold in seconds.
+        hrs = ov.get("setMaxDdtHours")
+        hrs = 12.0 if hrs is None else float(hrs)
+        hrs = max(2.0, min(36.0, round(hrs / 2.0) * 2.0))
+        self.max_ddt_h = hrs
+        self.max_dd_s = hrs * 3600.0
         self.auto_deact = bool(ov.get("setAutoDeact", True))
         self.use_historic_gate = bool(ov.get("setUseHistoricGate", True))
         self.min_samples = max(5, min(40, int(ov.get("setMinSamples") or 12)))
@@ -988,16 +997,10 @@ class SetBook:
             "client_id": str(get("client_id") or get("clientId") or ""),
         }
         row["pnl"] = net_pnl_pct(row["pnl_pct"], self.cost_pct)
-        if not sid:
-            pack = "indications" if "ind:" in row["reason"] else "general"
-            sl = snap_sl_ratio(get("sl_ratio") or 0.6)
-            tkey = str(get("trail_key") or "")
-            if not tkey:
-                tkey = self.trails[0][0] if self.trails else "0.3:0.1"
-            step = int(get("step") or 0)
-            if not step:
-                step = self.min_step
-            sid = make_set_id(pack, sl, "", step)
+        if not sid and not str(get("trail_set_id") or get("trailSetId") or ""):
+            # no Set id: the close cannot be attributed. It is counted, never guessed onto a Set.
+            self.live_unmatched += 1
+            return
         extra = str(get("trail_set_id") or get("trailSetId") or "")
         targets: List[SetState] = []
         for x in (sid, extra):
@@ -1225,11 +1228,7 @@ class SetBook:
         if live25:
             live_avg = sum(finite(r.get("pnl")) for r in live25) / len(live25)
         live_n = len(st.live)
-        live_tail = st.live[-max(8, min(self.deact_n, 15)) :]
-        live_tail_avg = 0.0
-        if live_tail:
-            live_tail_avg = sum(finite(r.get("pnl")) for r in live_tail) / len(live_tail)
-        dd = drawdown_time(tape, now=now)
+        dd = drawdown_time(tape[-self.gate_window:], now=now)   # the last N positions, not the whole tape
         st.max_dd_s = float(dd["maxS"])
         st.avg_dd_s = float(dd["avgS"])
         st.dd_episodes = int(dd["episodes"])
@@ -1248,11 +1247,6 @@ class SetBook:
             st.deact_reason = f"live last{len(live25)} avg loss {live_avg:.4f}"
             st.last25_avg_pnl = live_avg
             st.last25_n = len(live25)
-            return
-        if live_n >= 8 and live_tail_avg < 0:
-            st.active = False
-            st.deact_reason = f"live last{len(live_tail)} avg loss {live_tail_avg:.4f}"
-            st.last25_avg_pnl = live_tail_avg
             return
         notes = []
         if st.gate_n >= self.gate_min and st.gate_pf + 1e-9 < self.min_pf:
@@ -1368,7 +1362,9 @@ class SetBook:
 
     def is_eligible(self, st: SetState) -> bool:
         """Base gate: active, judged on >= gate_min orders, and net PF >= min_pf (no fallback tier)."""
-        return bool(st.active and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= self.min_pf)
+        # base gate (min PF over setGateWindow orders, judged on gate_min) and the max drawdown-time filter
+        return bool(st.active and not st.locked and st.gate_n >= self.gate_min and st.gate_pf + 1e-9 >= self.min_pf
+                    and st.max_dd_s < self.max_dd_s)
 
     def gate_keep(self) -> int:
         return max(40, self.gate_window)
@@ -1578,7 +1574,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setDeactN": 25,
             "setPfWindow": 15,
             "setMinPf": 1.10,
-            "setMaxDdTimeS": 10_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 8,
             "setAutoDeact": True,
             "setMinStep": 3,
@@ -1644,7 +1640,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setDeactN": 25,
             "setPfWindow": 15,
             "setMinPf": 1.0,
-            "setMaxDdTimeS": 50_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 5,
             "setAutoDeact": True,
             "setMinStep": 3,
@@ -1693,7 +1689,7 @@ def self_test() -> List[Tuple[str, bool, str]]:
             "setDeactN": 25,
             "setPfWindow": 15,
             "setMinPf": 0.5,
-            "setMaxDdTimeS": 50_000,
+            "setMaxDdtHours": 36,
             "setMinSamples": 3,
             "setAutoDeact": False,
             "setMinStep": 3,
@@ -1953,7 +1949,8 @@ def self_test() -> List[Tuple[str, bool, str]]:
     dd_def = drawdown_time(dd_rows)["currentS"]
     dd_inj = drawdown_time(dd_rows, now=460)["currentS"]
     dd_stale = drawdown_time(dd_rows, now=160 + 7200)["currentS"]
-    out.append(("dd-clock-injected", dd_def == 0.0 and dd_inj == 300.0 and dd_stale == 0.0, f"default={dd_def} injected={dd_inj} stale={dd_stale}"))
+    # the drawdown starts at the last high (t=100): open time is clock - 100, idle time never cuts it short
+    out.append(("dd-clock-injected", dd_def == 60.0 and dd_inj == 360.0 and dd_stale == 7260.0, f"default={dd_def} injected={dd_inj} stale={dd_stale}"))
     # R4: a flat window is neutral (RSI 50, no signal), not a short bias from RSI 100
     flat = [[1.0, 1.0, 1.0, 1.0, 1.0]] * 80
     flat_sig = general_signal(flat)
