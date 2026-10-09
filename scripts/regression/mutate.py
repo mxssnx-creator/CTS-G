@@ -22,7 +22,7 @@ MUTATIONS = [
     ("scan: time exit one bar late",
      "set_engine.py", "if why is None and held >= time_bars:", "if why is None and held > time_bars:"),
     ("gate: boundary moved below 1.10",
-     "set_engine.py", "st.gate_pf + 1e-9 >= self.min_pf", "st.gate_pf - 1e-9 > self.min_pf"),
+     "set_engine.py", "if st.gate_pf + 1e-9 < self.min_pf:", "if st.gate_pf - 1e-9 <= self.min_pf:"),
     ("cost: percent read as tenths",
      "position_cost.py", "    c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))\n    return c / 100.0",
      "    c = max(0.0, finite(cost_pct, POSITION_COST_PCT_DEFAULT))\n    return c / 10.0"),
